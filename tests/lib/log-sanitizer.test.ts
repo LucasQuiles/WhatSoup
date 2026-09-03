@@ -1297,11 +1297,13 @@ describe('the value-side guard admits a label-initial credential value', () => {
       'authorization failed',
     ],
     [
-      'KNOWN NARROWING against main: a bare label word is retained here, masked on main',
-      // This row pins a NARROWING, not neutral intended behaviour. Main masks
-      // this cell — `token=secret at gate` reads back as `token==*** at gate`
-      // there — and this branch retains it, because the guard refuses on its
-      // follow set whether or not a credential really follows.
+      'KNOWN NARROWING against df7ab647: retained here with its terminator, masked there',
+      // This row pins a NARROWING, not neutral intended behaviour. df7ab647
+      // masks this cell — `token=secret at gate` reads back as
+      // `token==*** at gate` there — and this branch retains it, because the
+      // guard refuses on its follow set whether or not a credential really
+      // follows. The terminator is load-bearing: bare `token=secret` is masked
+      // here too.
       //
       // It is pinned so the narrowing is visible and reversible, NOT because
       // retaining is the desired contract. Reversing it is the owner's WS-A06
@@ -1394,20 +1396,24 @@ describe('the value-side guard refuses a nested label that opens its own assignm
 
 // ─── How far the known narrowing reaches ────────────────────────────────────
 //
-// The row above pins one cell that main masks and this branch retains. This
+// The row above pins one cell that df7ab647 masks and this branch retains. This
 // block bounds that narrowing, so the disclosure is measured rather than
 // asserted.
 //
 // The bound was originally written as "the bare label word, with nothing after
-// it". That was FALSE: a CHAIN of label words joined by `=` or `:` is retained
-// too (`password=token=secret`), because the guard refuses at every link. The
-// source comment carries the corrected statement and the measured counts. The
-// rows below are unchanged in behaviour; only the claim they are said to prove
-// is narrowed to what they actually show — that credential material after a
-// label word is still masked here.
+// it". That was FALSE, but so was the first correction of it. A chain of label
+// words is retained only WITH A TERMINATOR: `password=token=secret at gate` is
+// retained, while bare `password=token=secret` is MASKED. And the mechanism is
+// not "the guard refuses at every link" — the last label is followed by the
+// terminator, not a joiner, and is refused only when that terminator is itself
+// in the follow set. The source comment carries the corrected statement, the
+// per-terminator counts and the `bearer` scheme exception.
+//
+// The rows below are unchanged in behaviour. They are two-label chains carrying
+// ` at gate`, and that is what they pin.
 
-describe('the bare-label-word narrowing: bare label words are retained', () => {
-  // Cells main masks and this branch retains. Named, not ranged, so the extent
+describe('the narrowing: label chains carrying a terminator are retained', () => {
+  // Cells df7ab647 masks and this branch retains. Named, not ranged, so the extent
   // of the narrowing is visible in the test rather than implied.
   const RETAINED_BARE_LABEL_WORDS: readonly string[] = [
     'upstream call failed token=secret at gate',
@@ -1433,7 +1439,7 @@ describe('the bare-label-word narrowing: bare label words are retained', () => {
   });
 
   for (const message of RETAINED_BARE_LABEL_WORDS) {
-    it(`retains the bare label word, which main masks: ${message}`, async () => {
+    it(`retains the terminated chain, which df7ab647 masks: ${message}`, async () => {
       expect(await sanitizedErrorMessage(message)).toBe(message);
     });
   }

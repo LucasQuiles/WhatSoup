@@ -180,14 +180,16 @@ const PHONE_RE = /\+?\d{7,}/g;
 // whitespace, so the guard refuses, and the separator-less branch masks the
 // credential at the second label instead.
 //
-// RESIDUAL, AND IT IS A NARROWING AGAINST MAIN, stated with its direction. The
-// guard refuses on its follow set whether or not a credential actually follows,
-// so `token=secret at gate` is RETAINED here. Main MASKS that cell
-// (`token==*** at gate`), as it does the whole bare-label-word class:
-// `api_key=token`, `bearer=password` and their siblings. This branch does not
-// mask them. That is a live narrowing of what main removes, not neutral
-// intended behaviour, and it is the owner's WS-A06 decision to accept or
-// reverse — not a thing to close here.
+// RESIDUAL, AND IT IS A NARROWING AGAINST df7ab647, stated with its direction.
+// The guard refuses on its follow set whether or not a credential actually
+// follows, so `token=secret at gate` is RETAINED here while df7ab647 MASKS it
+// (`token==*** at gate`). The same holds across the class, and every example
+// must carry its terminator or it demonstrates the opposite: `api_key=token at
+// gate` and `bearer=password at gate` are retained here and masked at
+// df7ab647, whereas bare `api_key=token` and `bearer=password` are MASKED here
+// too (`api_key ***`, `bearer ***`). That is a live narrowing of what df7ab647
+// removes, not neutral intended behaviour, and it is the owner's WS-A06
+// decision to accept or reverse — not a thing to close here.
 //
 // THE RETAINED TEXT IS A LABEL WORD **OR A CHAIN OF LABEL WORDS** joined by `=`
 // or `:`. An earlier version of this comment said the residual was "the label
@@ -195,9 +197,13 @@ const PHONE_RE = /\+?\d{7,}/g;
 // matters, because the acceptance decision rests on how wide the residual is.
 // `password=token=secret at gate`, `token=secret=password at gate` and
 // `api_key=token=secret at gate` are all retained here VERBATIM, while
-// df7ab647 masks the first label's value in each: `password=token==*** at
-// gate` and `token==***=password at gate`. (Comparisons in this block name
-// df7ab647 rather than "main", which moves.)
+// df7ab647 masks ONE label's value in each — not always the first, so the
+// examples are given in full: `password=token=secret at gate` becomes
+// `password=token==*** at gate` (the SECOND label's value), while
+// `token=secret=password at gate` becomes `token==***=password at gate` and
+// `api_key=token=secret at gate` becomes `api_key==***=secret at gate` (the
+// first). (Comparisons in this block name df7ab647 rather than "main", which
+// moves.)
 //
 // THE TERMINATOR IS PART OF THE SHAPE, and leaving it out inverts the result.
 // The examples above carry a trailing ` at gate` because a BARE chain is
@@ -206,6 +212,10 @@ const PHONE_RE = /\+?\d{7,}/g;
 // cells, the retained count depends entirely on what follows the last label:
 //
 //   ` at gate`  112 of 128 retained      (a space, then a word under the floor)
+//               the 16 that mask are exactly the chains whose SECOND label is
+//               `bearer`: AUTH_SCHEMES consumes `bearer ` as a scheme before
+//               the guard is reached, so the value class takes the rest. That
+//               scheme exception is why the number is 112 and not 128.
 //   ` `         128 of 128 retained      (trailing space, nothing after it)
 //   `` (bare)     0 of 128 retained      every chain MASKED
 //   `.` `,` `;`   0 of 128 retained      every chain MASKED
@@ -237,18 +247,26 @@ const PHONE_RE = /\+?\d{7,}/g;
 // separator is governed by the eight-character floor, so a short one IS
 // retained. `token=pairing 123456` keeps the code, and `token=secret Ab12345`
 // keeps the value at seven characters. This is a DISCLOSURE, not a regression:
-// df7ab647 retains the same short values, and measured over 180 cells (six
-// labels x three middles x lengths one to ten, predicate "does the value
-// survive") the value survives here and not at df7ab647 in ZERO cells, at
-// df7ab647 and not here in 36, and at both in 84.
+// df7ab647 retains the same short values. Measured over 180 cells, with the
+// axes named so the number is checkable: outer label in {token, api_key,
+// bearer, password, secret, authorization} x middle in {`secret `, `token `,
+// none} x value length one to ten, predicate "does the value survive". All
+// four outcomes, which sum to 180:
+//
+//   survives here only        0
+//   survives at df7ab647 only 36
+//   survives at both         84
+//   masked at both           60
+//
 //
 // Stated precisely, because the loose version is wrong: the CODE survives at
 // both, not the whole string. `token=pairing 123456` reads back unchanged here
 // and as `token==*** 123456` at df7ab647 — df7ab647 masks the label word and
 // keeps the code, this pattern keeps both. The two outputs are NOT
 // byte-identical; what is identical is that `123456` reaches the sink either
-// way. Lowering the floor is a contract decision about over-masking prose, not
-// a defect of this pattern.
+// way. Whether the floor should be lowered is a contract question about
+// over-masking prose, and it is the owner's to rule on rather than this
+// comment's to settle.
 //
 // The trailing-separator forms `token=secret:` and `token=secret=` are retained
 // on the same rule and carry nothing either.
