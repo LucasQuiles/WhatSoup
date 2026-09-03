@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathIsInsideRoot } from '../lib/home-confinement.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
+import { DEFAULT_FRESH_INVALID_GRACE_MS, hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { errorMessage } from '../lib/error-message.ts';
@@ -252,6 +252,36 @@ const TREE_STALE_RISK_MULTIPLE = 4;
 /** Backoff ceiling for walks that keep failing: 2^4 = 16 refresh floors. */
 const MAX_REFRESH_BACKOFF_STEPS = 4;
 /**
+ * Floor under the failure-retry wait, independent of treeRefreshMinIntervalMs.
+ *
+ * Every non-publishing walk now schedules its own successor, so the retry
+ * cadence must not be able to collapse to zero. treeRefreshMinIntervalMs is
+ * caller-supplied and tests set it to 0, where `0 * 2 ** n` is still 0 and the
+ * retry chain degenerates into a 0 ms timer loop. This clamp applies ONLY to
+ * the failure-retry wait; the reader admission floor stays exactly what the
+ * caller configured, so a test asking for an unthrottled reader still gets one.
+ */
+const MIN_REFRESH_RETRY_INTERVAL_MS = 50;
+/**
+ * Ceiling on a credential file this reader will take bytes from.
+ *
+ * O_NONBLOCK bounds the OPEN. It does not bound the READ: POSIX gives it no
+ * effect on read(2) for a regular file, so a large object that passes the kind
+ * check is still read synchronously, on the main thread, on an unauthenticated
+ * GET /health. The held-descriptor swap check is detection and not a boundary
+ * (Node exposes no openat(2)), so an ABA swap can still put an attacker-chosen
+ * regular file behind this descriptor. This bounds the consequence.
+ *
+ * A real creds.json is a few kilobytes: the fixtures in this repo write ~150
+ * bytes, and a live Baileys credential holds a handful of base64 keys plus one
+ * signalIdentities array. 1 MiB is two to three orders of magnitude above that
+ * — far above the "at least 10x the largest real file" bar, deliberately. The
+ * cost of a cap that is too TIGHT is not a false alarm: a refused credential
+ * makes status non-'present', and restoreLatestIfNeeded treats any non-present
+ * status at connect time as grounds for a destructive quarantine-and-restore.
+ */
+export const MAX_CREDS_BYTES = 1_048_576;
+/**
  * Floor between the STARTS of two tree walks.
  *
  * Needed because the key-store seam fires far more often than once per send.
@@ -268,9 +298,19 @@ const MAX_REFRESH_BACKOFF_STEPS = 4;
  * what it replaced, and is normally far better because a quiet instance
  * refreshes only on the 30 s max age.
  *
- * A rate-limited refresh is not a lost one: the observation stays served and
- * marked stale, and the next read past the floor starts the walk. The stale
- * risk bound is 24 floors wide, so the limiter cannot hold a digest past it.
+ * A rate-limited refresh is not a lost one, and no caller has to come back for
+ * it. Convergence belongs to the successor timer: a mutation queues exactly one
+ * through scheduleTreeRefreshSuccessor, and so does every walk that fails or
+ * completes without publishing. A READER queues nothing — it has nothing to
+ * converge on — and starts a walk only when the floor has elapsed AND no
+ * successor is already armed. The last observation stays served, marked stale,
+ * throughout.
+ *
+ * The stale risk bound is 24 floors wide, so the floor limiter on its own
+ * cannot hold a digest past it. The repeated-failure back-off is a separate,
+ * clamped widening and CAN reach past the bound; its schedule, and what the
+ * bound does and does not promise, are stated where it is computed, in
+ * scheduleTreeRefreshSuccessor.
  */
 const DEFAULT_TREE_REFRESH_MIN_INTERVAL_MS = 5_000;
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -401,8 +441,13 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
     error,
   });
 
-  const refused = (kindIssue: string): CredsRead => ({
-    snapshot: { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: null },
+  // `credsExists` defaults to FALSE because most refusals happen on the ROOT,
+  // before the child is looked at at all, and a snapshot that claims
+  // creds.json exists while carrying null mode, size, mtime and hash is
+  // internally inconsistent telemetry. Only a refusal that actually observed
+  // the child passes true.
+  const refused = (kindIssue: string, credsExists = false): CredsRead => ({
+    snapshot: { path, exists: credsExists, mode: null, size: null, mtime: null, sha256: null, error: null },
     bytes: null,
     kindIssue,
   });
@@ -416,7 +461,8 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
   //
   // Node exposes no openat(2), so the child is still opened by path. This is
   // therefore swap DETECTION anchored on a held descriptor, not true openat
-  // semantics; the window is one open wide and a swap inside it is refused.
+  // semantics: a root that is still swapped when the check runs is refused,
+  // and a swap-and-restore inside the window is not.
   let rootFd: number;
   try {
     rootFd = openSync(authDir, fsConstants.O_RDONLY | O_DIRECTORY_FLAG | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
@@ -425,11 +471,22 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
     const code = errnoCode(err);
     if (code === 'ELOOP') return refused('auth_dir_symlink');
     if (code === 'ENOTDIR') return refused('auth_dir_not_directory');
+    if (isTransientOpenErrno(code)) return refused(`auth_dir_read_transient:${code}`);
     return absent(code);
   }
 
   try {
-    const rootStat = fstatSync(rootFd);
+    let rootStat: ReturnType<typeof fstatSync>;
+    try {
+      rootStat = fstatSync(rootFd);
+    } catch (err) {
+      // Every other filesystem call in this function turns a throw into an
+      // issue. This one sat inside a try that has only a finally, so a throw
+      // escaped readCredsThroughNoFollow, buildSnapshot and inspectCached into
+      // the /health handler. Reported against the auth DIRECTORY, because that
+      // is the descriptor that failed; the credential was never looked at.
+      return refused(`auth_dir_stat_failed:${errnoCode(err)}`);
+    }
 
     let fd: number;
     try {
@@ -446,7 +503,11 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       // O_NOFOLLOW reports a symlinked target as ELOOP on Linux and macOS. That
       // is a refusal to follow, which is a finding about the tree, not an
       // unreadable file — the operator's next move differs.
-      if (code === 'ELOOP') return refused('creds_json_symlink');
+      if (code === 'ELOOP') return refused('creds_json_symlink', true);
+      // A nonblocking open that reports "not now" says nothing about the file's
+      // contents. Reported apart from `creds_json_unreadable:` so an operator —
+      // and any future classifier — can tell "retry" from "corrupt".
+      if (isTransientOpenErrno(code)) return refused(`creds_json_read_transient:${code}`);
       return absent(code);
     }
 
@@ -456,6 +517,16 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       // kind rather than by name, before any byte is taken from it.
       if (!st.isFile()) {
         return { snapshot: present(st, null, null), bytes: null, kindIssue: 'creds_json_not_regular_file' };
+      }
+      // Bound the READ, which O_NONBLOCK does not. Checked on the DESCRIPTOR,
+      // so it describes the object actually opened rather than whatever the
+      // pathname resolves to now. See MAX_CREDS_BYTES.
+      if (st.size > MAX_CREDS_BYTES) {
+        return {
+          snapshot: present(st, null, null),
+          bytes: null,
+          kindIssue: `creds_json_too_large:${st.size}`,
+        };
       }
       // The root that resolved this child must still be the root we validated.
       const rootNow = lstatSync(authDir);
@@ -550,6 +621,18 @@ function isVanishedEntry(err: unknown): boolean {
  * carries no code — an unlabelled failure is still a failure, and returning
  * null there would make it indistinguishable from success.
  */
+/**
+ * Errnos that mean "not right now", never "this object is broken".
+ *
+ * EAGAIN and EWOULDBLOCK share a value on Linux and macOS, so Node reports one
+ * of them; both names are matched because the platform contract does not
+ * promise which.
+ */
+function isTransientOpenErrno(code: string): boolean {
+  return code === 'EAGAIN' || code === 'EWOULDBLOCK';
+}
+
+
 function errnoCode(err: unknown): string {
   return (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
 }
@@ -937,6 +1020,14 @@ export class AuthBondGuard {
   /** At most one pending successor walk. */
   private treeSuccessorTimer: ReturnType<typeof setTimeout> | null = null;
   /**
+   * Which armed successor a fired callback belongs to.
+   *
+   * clearTimeout cannot recall a callback that has already been handed to the
+   * event loop, so cancellation alone does not establish "an obsolete timer
+   * never forces a walk". Comparing this token does.
+   */
+  private treeSuccessorEpoch = 0;
+  /**
    * Monotonic clock for digest age.
    *
    * Age must never come from wall time: a clock adjustment backwards would make
@@ -1000,11 +1091,18 @@ export class AuthBondGuard {
   /**
    * Observability read: never walks the tree on the calling thread.
    *
-   * The cheap half of a snapshot (two lstats and one small creds.json read)
+   * The cheap half of a snapshot (two lstats and one bounded creds.json read)
    * still runs live, so a deleted or corrupted creds.json is reported at once.
    * Only the two full-tree walks come from cache, because those are the ones
    * that cost ~400 ms on an instance carrying 17,680 key files, and they were
    * being paid on every single GET /health.
+   *
+   * A read here is not what drives convergence, and has not been since the
+   * successor timer landed. It may START a walk — when nothing has ever been
+   * observed, or the observation is stale and neither the refresh floor, the
+   * failure back-off, nor an already-armed successor is holding it back — but a
+   * digest converges on its own whether or not anybody reads. Treat a read as
+   * an opportunity to refresh, never as the mechanism.
    */
   inspectCached(): AuthBondSnapshot {
     const observation = this.treeObservation;
@@ -1077,16 +1175,26 @@ export class AuthBondGuard {
   /**
    * Record that a walk ended without publishing and a retry is owed.
    *
-   * Only an outstanding invalidation earns a retry. A reader-driven walk that
-   * fails over an unchanged tree has nothing to converge on, and retrying it
-   * would spin at the floor cadence for as long as the fault lasts.
+   * EVERY non-publishing walk earns a retry, not only one an invalidation
+   * started. The earlier rule — retry only while `treeInvalidated` — left the
+   * two cases that reach here without a mutation, a cold walk and an age-driven
+   * one, with no scheduled successor at all, so convergence fell back to
+   * "someone reads again". That contradicts the contract stated on
+   * invalidateTreeCache: convergence does not depend on anyone reading.
+   *
+   * What made the old rule necessary was the fear of spinning at the floor
+   * cadence for as long as the fault lasts. The back-off is what answers that
+   * now: the retry interval doubles per consecutive failure to a ceiling of 16
+   * intervals, so a permanently broken tree settles to one walk per ceiling
+   * rather than one per floor. On the default 5 s floor that is one walk per
+   * 80 s, against the one walk per 5 s a live fleet poller used to drive.
    */
   private noteRefreshNeedsRetry(): void {
     this.consecutiveRefreshFailures = Math.min(
       this.consecutiveRefreshFailures + 1,
       MAX_REFRESH_BACKOFF_STEPS,
     );
-    if (this.treeInvalidated) this.treeRefreshRequested = true;
+    this.treeRefreshRequested = true;
   }
 
   /**
@@ -1099,9 +1207,86 @@ export class AuthBondGuard {
    * tree that existed for milliseconds.
    */
   private markTreeStale(reason: string): void {
+    // A NEW episode starts a new failure streak. The streak exists to slow
+    // retries of a fault that is still happening; it is not a fact about the
+    // instance, and a mutation announced now is new information that has not
+    // failed at anything yet. Without this, demand-driven failures accumulate
+    // silently while nothing is invalidated and the next unrelated mutation
+    // inherits the ceiling — an 80 s wait for its first look at a tree that
+    // just changed. Retries WITHIN an episode keep the streak, which is what
+    // makes the back-off a back-off.
+    //
+    // The armed successor goes with it: it was scheduled against the old
+    // streak, and scheduleTreeRefreshSuccessor will not re-time a timer that
+    // already exists, so leaving it armed would hand the new episode exactly
+    // the wait this reset exists to remove.
+    if (!this.treeInvalidated) {
+      this.consecutiveRefreshFailures = 0;
+      this.cancelTreeRefreshSuccessor();
+    }
     this.treeInvalidated = true;
     this.treeGeneration += 1;
     this.lastTreeInvalidationReason = reason;
+  }
+
+  /**
+   * Minimum gap between walk STARTS, widened while walks keep failing.
+   *
+   * The flat floor bounds reader-driven cost at one walk per floor, which on a
+   * persistently failing tree is one walk every 5 s for as long as the fault
+   * lasts — the fleet polls /health at exactly the floor cadence, so the quiet
+   * instance the floor was sized against never arrives. The successor back-off
+   * did not cover that: it gates scheduleTreeRefreshSuccessor, and a reader
+   * does not go through it. Widening the floor by the same factor puts
+   * reader-driven and mutation-driven walks on one budget.
+   *
+   * It stays a FLOOR, not a lock. Once the interval has elapsed the next read
+   * starts a walk in the ordinary way, whether or not a successor is queued, so
+   * a reader can still be the thing that observes a recovered tree.
+   *
+   * The price is detection latency on the recovery edge: after four
+   * consecutive failures a reader re-observes a tree that has come back up to
+   * 80 s later, where the flat floor re-observed it within 5 s. Bounded by the
+   * 120 s stale risk bound, and fail-closed past it — the digest reads
+   * `unknown`, never a stale green. The counter it reads is shared with
+   * mutation-driven walks, so an unrelated earlier failure widens this floor
+   * too; also bounded by the same ceiling.
+   */
+  private refreshFloorMs(): number {
+    return this.treeRefreshMinIntervalMs * 2 ** this.consecutiveRefreshFailures;
+  }
+
+  /**
+   * How long a failure retry waits, which is NOT the reader admission floor.
+   *
+   * Same doubling, but over a base clamped at MIN_REFRESH_RETRY_INTERVAL_MS.
+   * Every non-publishing walk now schedules a successor, so this base is what
+   * stops the retry chain from becoming a 0 ms timer loop when a caller
+   * configures a zero floor. The reader floor deliberately does NOT share the
+   * clamp: a caller that asks for an unthrottled reader still gets one.
+   */
+  private refreshRetryWaitMs(): number {
+    return Math.max(this.treeRefreshMinIntervalMs, MIN_REFRESH_RETRY_INTERVAL_MS)
+      * 2 ** this.consecutiveRefreshFailures;
+  }
+
+  /**
+   * Drop a queued successor that has been made pointless.
+   *
+   * Two callers, both of which have just made the queued walk wrong rather
+   * than merely early: a publication (the successor would re-walk a tree that
+   * has just been observed, and would leave `digest_refresh_scheduled` true
+   * over a settled digest), and the start of a new invalidation episode (the
+   * successor carries the previous episode's back-off).
+   */
+  private cancelTreeRefreshSuccessor(): void {
+    if (this.treeSuccessorTimer === null) return;
+    clearTimeout(this.treeSuccessorTimer);
+    this.treeSuccessorTimer = null;
+    this.successorDueAtMs = null;
+    // Retire the token as well: a callback already queued behind clearTimeout
+    // must not walk when it runs.
+    this.treeSuccessorEpoch += 1;
   }
 
   /**
@@ -1121,17 +1306,35 @@ export class AuthBondGuard {
       ? Math.max(0, this.treeRefreshMinIntervalMs - sinceLastStartMs)
       : 0;
     // Back off after repeated non-publishing walks so a persistent I/O fault
-    // does not walk the tree at the floor cadence forever. Capped at 2^4 = 16
-    // floors, which at the 5 s default is 80 s — still inside the 120 s stale
-    // risk bound, so a recovering tree is re-observed before the digest is
-    // declared unknown.
-    const backoffMs = this.treeRefreshMinIntervalMs * 2 ** this.consecutiveRefreshFailures;
+    // does not walk the tree at the floor cadence forever. The wait doubles per
+    // consecutive failure and is capped at 2^4 = 16 intervals, which at the 5 s
+    // default is 80 s.
+    //
+    // THE 120 s STALE RISK BOUND BOUNDS CLASSIFICATION, NOT CONVERGENCE. It
+    // guarantees only this: on the first read at or after 120 s from the last
+    // successful observation, the digest reports `unknown` instead of a stale
+    // `present`. It does NOT guarantee that a refresh lands inside 120 s, and
+    // this schedule is why. The failure counter is raised before this runs, so
+    // measured from the last publication the attempts land at roughly 10, 30,
+    // 70 and 150 s and then every 80 s, plus the walk's own duration. The last
+    // attempt inside the bound is the one at 70 s; a tree that recovers after
+    // it is not re-observed until about 150 s, and reads `unknown` until then.
+    //
+    // Deliberate on both counts. `unknown` is the fail-closed reading, never a
+    // stale green, and four consecutive failed walks is exactly the case where
+    // continuing at the floor cadence buys nothing.
+    const backoffMs = this.refreshRetryWaitMs();
     const waitMs = Math.max(floorWaitMs, this.consecutiveRefreshFailures > 0 ? backoffMs : 0);
+    const epoch = (this.treeSuccessorEpoch += 1);
     this.successorDueAtMs = this.monotonicNow() + waitMs;
     this.treeSuccessorTimer = setTimeout(() => {
+      // An obsolete timer must never force a walk. clearTimeout is the primary
+      // mechanism; this token is what makes the property hold for a callback
+      // that was already queued when the timer was cancelled.
+      if (epoch !== this.treeSuccessorEpoch) return;
       this.treeSuccessorTimer = null;
       this.successorDueAtMs = null;
-      // Forced: the floor was already served by waiting it out here.
+      // Forced: the floor and the back-off were both served by waiting here.
       void this.refreshTreeCache(true);
     }, waitMs);
     this.treeSuccessorTimer.unref?.();
@@ -1166,11 +1369,22 @@ export class AuthBondGuard {
       if (fromInvalidation) this.treeRefreshRequested = true;
       return inFlight;
     }
+    // A successor is already armed, so a walk is coming at successorDueAtMs and
+    // a reader that starts one anyway defeats the back-off that timer is
+    // holding. The two are not redundant: the reader floor is measured from the
+    // last walk's START and the successor's wait from its END, so the floor can
+    // elapse while the timer is still pending, which is the window a 5 s poller
+    // used to walk through. Mutations are deliberately NOT gated here — a
+    // mutation is new information, and markTreeStale has already re-timed the
+    // successor when the episode changed.
+    if (!force && !fromInvalidation && this.treeSuccessorTimer !== null) {
+      return Promise.resolve();
+    }
     const startedAtMs = this.monotonicNow();
     if (
       !force
       && this.lastRefreshStartedAtMs !== null
-      && startedAtMs - this.lastRefreshStartedAtMs < this.treeRefreshMinIntervalMs
+      && startedAtMs - this.lastRefreshStartedAtMs < this.refreshFloorMs()
     ) {
       // Too soon to walk again. Deferred, not dropped: queue one successor so
       // convergence does not depend on a reader arriving after the floor. Only
@@ -1236,6 +1450,14 @@ export class AuthBondGuard {
         this.treeInvalidated = false;
         this.treeRefreshCount += 1;
         this.consecutiveRefreshFailures = 0;
+        // Any successor armed before this walk was queued for work this walk
+        // has now done: an invalidation arriving DURING the walk bumps the
+        // generation and returns 'superseded' above, so reaching this line
+        // means nothing is outstanding. Leaving it armed spends a second full
+        // traversal and publishes `digest_refresh_scheduled: true` over a
+        // digest that is settled. The `finally` below arms a fresh one if a
+        // mutation did land mid-walk.
+        this.cancelTreeRefreshSuccessor();
         this.lastRefreshOutcome = { kind: 'fresh', atMs: this.monotonicNow(), reason: null };
       } catch (err) {
         // Keep the last known observation and let it go on ageing. A failed
@@ -1313,7 +1535,7 @@ export class AuthBondGuard {
     } else if (credsUnreadable) {
       status = 'invalid';
       issues.push(`creds_json_unreadable:${creds.error}`);
-    } else if (!creds.exists) {
+    } else if (!creds.exists && credsRead.kindIssue === null) {
       status = 'missing';
       issues.push('creds_json_missing');
     }
@@ -1513,6 +1735,37 @@ export class AuthBondGuard {
     const before = this.inspect();
     if (before.status === 'present') {
       return { attempted: false, restored: false, source: null, snapshot: before, error: null };
+    }
+    // A transient read is not grounds for a destructive repair.
+    //
+    // Everything below renames the live auth root away and replaces it from a
+    // backup. Its only precondition is a non-'present' status, and an
+    // EAGAIN/EWOULDBLOCK on a nonblocking open produces exactly that while
+    // saying nothing whatever about the credential — it says "not now". Firing
+    // the restore on it destroys a healthy tree because one open returned
+    // early.
+    //
+    // Withheld on ANY transient issue, not only on a snapshot whose transient
+    // issue is the sole reason. A pass that could not establish the credential
+    // has not earned a definite verdict about it, and the correct answer to
+    // "I could not look" is to look again. The cost is at most one poll of
+    // delay before a genuine fault reaches the restore, and delay is the safe
+    // direction for a destructive path.
+    if (hasTransientAuthReadIssue(before.issues)) {
+      // Converge without conflating two faults: arm a successor if none is
+      // armed, so the guard re-observes on its own rather than waiting for a
+      // caller. Deliberately NOT noteRefreshNeedsRetry() — the failure streak
+      // belongs to tree walks, and a credential read fault is not a walk
+      // fault. Raising it here would re-introduce exactly the cross-episode
+      // contamination the streak scoping removes.
+      this.scheduleTreeRefreshSuccessor();
+      return {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: before,
+        error: 'auth bond read was transient; restore withheld pending a definite read',
+      };
     }
     if (!this.autoRestore) {
       return { attempted: false, restored: false, source: null, snapshot: before, error: 'auto-restore disabled' };

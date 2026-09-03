@@ -2556,12 +2556,18 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private scheduleSettledAuthBondSnapshot(reason: string): void {
     // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
     // method's seven call sites are 'outbound-send-settled', which fires per
-    // send and does not change key material. Invalidating here would drop the
-    // digest on every send: the next health request would report a null
-    // tree_hash and an empty issues list, so classifyAuthFailure could not
-    // return auth_bond_at_risk on that request, and the instance would pay a
-    // full tree walk per send. Invalidation belongs at the two events that
-    // actually write key material, below.
+    // send and does not change key material.
+    //
+    // Invalidation no longer REMOVES the digest — it marks the last observation
+    // stale and keeps serving it, so the old reason given here (a null
+    // tree_hash and an empty issue list on the next request) has not been the
+    // consequence since that fail-open was closed. The reason that still holds
+    // is cost and noise: each invalidation bumps the generation, fences off any
+    // walk in flight, and queues a successor, so invalidating per send buys a
+    // full tree walk per send and reports every send as a tree change. That is
+    // the churn the refresh floor exists to absorb, and it should not be
+    // manufactured here in the first place. Invalidation belongs at the two
+    // events that actually write key material, below.
     if (this.authSnapshotSettledTimer !== null) return;
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;

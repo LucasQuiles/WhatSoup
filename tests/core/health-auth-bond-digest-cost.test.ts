@@ -20,6 +20,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSyn
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/config.ts', () => ({
@@ -395,6 +396,56 @@ describe('GET /health — request cost and digest provenance', () => {
       expect(body.whatsapp.auth_bond.tree_hash).toBeTruthy();
       expect(typeof body.event_loop.observer_cost_ms).toBe('number');
       expect(maxGapMs).toBeLessThan(MAX_BLOCK_MS);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
+
+  it('reports the live path as live, with no refresh-scheduler provenance', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const guard = makeGuard();
+    // No getHealthConnectionState, so health.ts falls back to the live getter
+    // and the snapshot it returns carries no treeProvenance at all.
+    const deps = {
+      ...makeDeps(db, guard),
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getConnectionState: () => ({
+          ...emptyConnectionStateSnapshot({
+            connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
+          }),
+          authBond: guard.inspect(),
+        }),
+      } as unknown as ConnectionManager,
+    } as HealthDeps;
+    const { server, port } = await buildTestServer(deps);
+
+    try {
+      const res = await healthReq(port);
+      const body = JSON.parse(res.body) as Record<string, any>;
+      const bond = body.whatsapp.auth_bond;
+
+      // Positive control: this really is the live projection. Without it the
+      // three assertions below would also pass against a cached read that
+      // happened to have nothing scheduled.
+      expect(bond.digest_source).toBe('live');
+      expect(bond.digest_refresh_outcome).toBe('live');
+      expect(bond.tree_hash).toBeTruthy();
+
+      // The documented live-path defaults. These three fields describe the
+      // cached refresh scheduler, which the live path does not have, so an
+      // operator reading false/null here is seeing an absent scheduler and not
+      // an idle one — which is what docs/public-surface.md now says.
+      expect(bond.digest_refresh_scheduled).toBe(false);
+      expect(bond.digest_next_refresh_eligible_ms).toBeNull();
+      expect(bond.digest_refresh_attempts).toBeNull();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();
@@ -800,6 +851,19 @@ describe('r3 MUST-2 — a walk that never inspected a tree is not a fresh observ
     // list, which later reads as a clean tree.
     expect(prov.lastRefreshKind).not.toBe('fresh');
     expect(prov.source).toBe('absent');
+
+    // A read on a null observation can fire `void refreshTreeCache()`, and
+    // afterAll removes this fixture root, so leave nothing walking. Since the
+    // failed-walk retry landed, the read above is usually held by the armed
+    // successor instead and starts nothing — this drain is kept because that
+    // is a scheduling detail, not a guarantee the test should depend on.
+    // warmTreeCache awaits any walk already in flight before it forces
+    // anything, which is the drain this file uses at the end of the cold-cache
+    // test near the top. The seam test's settleDigest cannot be used here: it
+    // polls for `cached`, which an absent root never reaches, and a poll
+    // through inspectCached() on a null observation would restart the very
+    // walk it is waiting for.
+    await guard.warmTreeCache();
   });
 
   it('does not read green after the root reappears under a null-tree observation', async () => {
@@ -825,6 +889,10 @@ describe('r3 MUST-2 — a walk that never inspected a tree is not a fresh observ
     // cached observation must not be allowed to supply a clean tree it never saw.
     expect(snap.treeHash).toBeNull();
     expect(snap.status).not.toBe('present');
+
+    // Same drain, same reason: the read above started a background walk and
+    // afterAll is about to remove the tree underneath it.
+    await guard.warmTreeCache();
   });
 });
 
@@ -961,6 +1029,513 @@ describe('r2 MUST-1 — an invalidated digest converges without a reader', () =>
     expect(after.lastRefreshKind).toBe('fresh');
     expect(after.lastRefreshKind).not.toBe('superseded');
     expect(after.refreshCount).toBeGreaterThan(before.refreshCount);
+  });
+});
+
+describe('r4 SHOULD-2 — a reader that arrives during or under a walk queues nothing', () => {
+  it('does not buy a second walk for a reader that arrives while one is in flight', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-should2-inflight',
+      // Zero floor on purpose: the only thing that can suppress a second walk
+      // here is the in-flight guard, not the rate limiter.
+      treeRefreshMinIntervalMs: 0,
+      monotonicNow: () => clock.value,
+    });
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
+    const before = guard.inspectCached().treeProvenance!;
+
+    // One mutation starts one walk. drainYielding awaits a setImmediate before
+    // its first step, so the walk is still in flight on the next line.
+    guard.invalidateTreeCache('key-store-set-end');
+
+    const during = guard.inspectCached().treeProvenance!;
+    // Coverage assertion. Without it this test could pass vacuously by reading
+    // after the walk had already landed, which exercises no guard at all.
+    expect(during.refreshInFlight).toBe(true);
+
+    await advanceQuietly(clock, 500);
+
+    const after = guard.inspectCached().treeProvenance!;
+    expect(after.lastRefreshKind).toBe('fresh');
+    // The mutation's own walk, and nothing else. A reader that merely arrived
+    // during it is answered by it; queueing a successor for that reader buys a
+    // second full traversal for no new information.
+    expect(after.refreshAttemptCount - before.refreshAttemptCount).toBe(1);
+  });
+
+  it('does not queue a successor for a reader that is only rate-limited', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-should2-floor',
+      // Every read finds the observation stale, so a read reaches the floor
+      // branch instead of being answered from the cache without asking.
+      treeCacheMaxAgeMs: 0,
+      treeRefreshMinIntervalMs: 50,
+      monotonicNow: () => clock.value,
+    });
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
+    const before = guard.inspectCached().treeProvenance!;
+    expect(before.refreshScheduled).toBe(false);
+
+    // A reader inside the floor, with no mutation anywhere in this test: the
+    // digest is merely old, so there is nothing for a successor to converge on.
+    const blocked = guard.inspectCached().treeProvenance!;
+    // Coverage assertions: the read WAS treated as stale (so it did call
+    // refreshTreeCache) and the walk did NOT start (so it took the floor
+    // branch). Without this pair the assertion below could hold for the wrong
+    // reason.
+    expect(blocked.source).toBe('stale');
+    expect(blocked.refreshInFlight).toBe(false);
+
+    // And it queued nothing. Both fields are assigned synchronously inside the
+    // same inspectCached call, so dropping the guard in the floor branch arms a
+    // successor that is visible right here.
+    expect(blocked.refreshScheduled).toBe(false);
+    expect(blocked.nextRefreshEligibleInMs).toBeNull();
+  });
+});
+
+describe('r4 NIT-2 / codex MED-1, SHOULD-1, LOW-2, LOW-3 — the refresh scheduler owns convergence', () => {
+  it('schedules its own retry after a cold failure, and a reader inside that window starts nothing', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    // A root that is not there: every walk returns `incomplete` and publishes
+    // nothing. Nothing is ever invalidated, so under the old rule this walk
+    // earned no retry at all and convergence fell back to "someone reads
+    // again" — which is the case a 5 s fleet poller turns into one walk per
+    // floor, forever.
+    const missingRoot = join(fx.root, 'never-created');
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: missingRoot,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-x5-cold',
+      treeRefreshMinIntervalMs: 100,
+      monotonicNow: () => clock.value,
+    });
+
+    const first = guard.inspectCached().treeProvenance!;
+    expect(first.refreshInFlight).toBe(true);
+    await advanceQuietly(clock, 10);
+
+    const settled = guard.inspectCached().treeProvenance!;
+    // Coverage assertion: the walk really did fail to publish.
+    expect(settled.lastRefreshKind).toBe('incomplete');
+    expect(settled.refreshAttemptCount).toBe(1);
+    // The load-bearing one: the failed walk queued its OWN successor, with no
+    // invalidation anywhere in this test.
+    expect(settled.refreshScheduled).toBe(true);
+    expect(settled.nextRefreshEligibleInMs).toBe(200);
+
+    // A reader arriving after the plain 100 ms floor but before the 200 ms
+    // retry is due starts nothing. Note this assertion is held by the widened
+    // reader floor AND by the armed timer, so it does not attribute to either;
+    // the next test isolates the timer.
+    //
+    // Advanced in lockstep rather than by assigning `clock.value`: the retry
+    // timer is armed on the FAKE clock, so moving only the injected clock here
+    // would leave fake time at 10 ms and the successor below would never fire.
+    await advanceQuietly(clock, 140);
+    const duringBackoff = guard.inspectCached().treeProvenance!;
+    expect(duringBackoff.refreshInFlight).toBe(false);
+    expect(duringBackoff.refreshAttemptCount).toBe(1);
+    expect(duringBackoff.refreshScheduled).toBe(true);
+
+    // The successor, not a reader, is what walks.
+    await advanceQuietly(clock, 100);
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(2);
+  });
+
+  it('does not start a reader walk while a successor is already armed', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-med1-reader',
+      // A HEALTHY tree, so the failure streak stays 0 and the widened reader
+      // floor equals the plain one. The armed timer is then the only thing
+      // that can hold this reader back, which is what makes the assertion
+      // attributable to it.
+      treeCacheMaxAgeMs: 0,
+      treeRefreshMinIntervalMs: 50,
+      monotonicNow: () => clock.value,
+    });
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(1);
+
+    // A mutation inside the floor is deferred onto one successor, due at 50.
+    guard.invalidateTreeCache('key-store-set-end');
+    const armed = guard.inspectCached().treeProvenance!;
+    expect(armed.refreshScheduled).toBe(true);
+    expect(armed.refreshInFlight).toBe(false);
+    expect(armed.refreshAttemptCount).toBe(1);
+
+    // Real time passes the floor while the timer has not yet run: the poller
+    // read codex MED-1 describes. The floor is measured from the last walk's
+    // START and the successor's wait from its END, so this window exists on
+    // every retry. The reader must not walk through it.
+    //
+    // The injected clock is moved WITHOUT advancing fake timers, deliberately,
+    // and this is the one place in the file where that is correct: it is what
+    // holds the armed successor pending while the guard's own notion of time
+    // passes the floor. Replacing it with advanceQuietly fires the timer and
+    // destroys the window under test.
+    clock.value = 60;
+    const reader = guard.inspectCached().treeProvenance!;
+    expect(reader.refreshInFlight).toBe(false);
+    expect(reader.refreshAttemptCount).toBe(1);
+    expect(reader.refreshScheduled).toBe(true);
+
+    await advanceQuietly(clock, 100);
+    const done = guard.inspectCached().treeProvenance!;
+    expect(done.lastRefreshKind).toBe('fresh');
+    expect(done.refreshAttemptCount).toBe(2);
+  });
+
+  it('cancels a successor that a completed walk has made pointless', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-med1-cancel',
+      treeRefreshMinIntervalMs: 50,
+      monotonicNow: () => clock.value,
+    });
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
+
+    // A mutation inside the floor arms a successor.
+    guard.invalidateTreeCache('key-store-set-end');
+    expect(guard.inspectCached().treeProvenance!.refreshScheduled).toBe(true);
+
+    // A forced walk lands first and observes the very tree that successor was
+    // queued to observe — the connect-path warm, or any other forced refresh.
+    const second = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await second;
+
+    const after = guard.inspectCached().treeProvenance!;
+    expect(after.lastRefreshKind).toBe('fresh');
+    // The published surface must not say a walk is queued over a settled
+    // digest: `digest_refresh_scheduled` is what an operator reads to decide
+    // whether to wait.
+    expect(after.refreshScheduled).toBe(false);
+    expect(after.nextRefreshEligibleInMs).toBeNull();
+    const attempts = after.refreshAttemptCount;
+
+    // And the retired timer must not walk when its delay expires.
+    await advanceQuietly(clock, 500);
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(attempts);
+  });
+
+  it('walks the failure back-off ladder and holds at the ceiling', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const missingRoot = join(fx.root, 'never-created');
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: missingRoot,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-low3-ladder',
+      treeRefreshMinIntervalMs: 100,
+      monotonicNow: () => clock.value,
+    });
+
+    // A read is inert once a successor is armed, which is what lets the ladder
+    // be observed without perturbing it.
+    const dueMs: (number | null)[] = [];
+    guard.inspectCached();
+    await advanceQuietly(clock, 10);
+    dueMs.push(guard.inspectCached().treeProvenance!.nextRefreshEligibleInMs);
+    for (const step of [200, 400, 800, 1600]) {
+      await advanceQuietly(clock, step);
+      dueMs.push(guard.inspectCached().treeProvenance!.nextRefreshEligibleInMs);
+    }
+
+    // 100 ms base, doubling per consecutive failure, capped at 2^4 = 16
+    // intervals. The fifth entry repeating the fourth IS the ceiling.
+    expect(dueMs).toEqual([200, 400, 800, 1600, 1600]);
+    // Five attempts, one per rung: the ladder is being climbed, not idled.
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(5);
+  });
+
+  it('does not make a new invalidation episode inherit an earlier failure streak', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const lateRoot = join(fx.root, 'late-auth');
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: lateRoot,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-low2-episode',
+      treeRefreshMinIntervalMs: 100,
+      monotonicNow: () => clock.value,
+    });
+
+    // Three demand-driven failures over a root that has not arrived yet.
+    // Nothing is invalidated throughout, so this streak belongs to no episode.
+    guard.inspectCached();
+    await advanceQuietly(clock, 10);
+    await advanceQuietly(clock, 200);
+    await advanceQuietly(clock, 400);
+    const stale = guard.inspectCached().treeProvenance!;
+    expect(stale.refreshAttemptCount).toBe(3);
+    expect(stale.nextRefreshEligibleInMs).toBe(800);
+
+    // The root arrives and something writes key material to it: a NEW episode,
+    // which has failed at nothing.
+    mkdirSync(lateRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lateRoot, 'creds.json'), JSON.stringify({
+      me: { id: '15550100001:1@s.whatsapp.net', lid: '12345:1@lid' },
+    }), { mode: 0o600 });
+    guard.invalidateTreeCache('creds-file-committed');
+
+    // Its successor is timed against a reset streak. Inheriting the 800 ms the
+    // previous streak had reached would make a tree that just changed wait out
+    // an unrelated fault before anyone looks at it.
+    const episode = guard.inspectCached().treeProvenance!;
+    expect(episode.refreshScheduled).toBe(true);
+    expect(episode.nextRefreshEligibleInMs).toBe(100);
+
+    // And it converges: the reset is not just a smaller number on the surface.
+    await advanceQuietly(clock, 200);
+    expect(guard.inspectCached().treeProvenance!.lastRefreshKind).toBe('fresh');
+  });
+});
+
+describe('codex r4 LOW-1 — a transient credential read degrades, it does not page', () => {
+  /**
+   * The snapshot is hand-built from a real one so its shape cannot drift, and
+   * fed through the production health server, so this exercises the real
+   * classifyAuthFailure rather than a copy of its logic. `creds.mtime` defaults
+   * to the distant past so the fresh-credential-write debounce cannot fire;
+   * the last case below overrides it precisely because it wants that window.
+   */
+  async function classifyWith(
+    issues: string[],
+    guard: AuthBondGuard,
+    db: Database,
+    mtime = '2020-01-01T00:00:00.000Z',
+  ): Promise<string> {
+    const base = guard.inspect();
+    const authBond = {
+      ...base,
+      status: 'invalid' as const,
+      creds: { ...base.creds, mtime },
+      issues,
+    };
+    const deps = {
+      ...makeDeps(db, guard),
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getConnectionState: () => ({
+          ...emptyConnectionStateSnapshot({
+            connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
+          }),
+          authBond,
+        }),
+      } as unknown as ConnectionManager,
+    } as HealthDeps;
+    const { server, port } = await buildTestServer(deps);
+    try {
+      const res = await healthReq(port);
+      return (JSON.parse(res.body) as Record<string, any>).whatsapp.connection.auth_failure_class;
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it('classifies a transient read as at-risk and a definite one as corruption', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const guard = makeGuard();
+    await guard.warmTreeCache();
+
+    try {
+      // Control first. The SAME status, the same everything, with a definite
+      // reason: this must still page. Without it the assertion below could
+      // hold because the classifier stopped classifying.
+      const definite = await classifyWith(['creds_json_unreadable:EIO'], guard, db);
+      expect(definite).toMatch(/^local_corruption_/);
+
+      // The fix: an indefinite read is an absence of evidence, so it degrades
+      // at the same severity `unknown` gets, rather than paging as corruption
+      // on a credential that was never established to be broken.
+      const transient = await classifyWith(['creds_json_read_transient:EAGAIN'], guard, db);
+      expect(transient).toBe('auth_bond_at_risk');
+
+      // Ordering. The transient guard sits with the `unknown` check, ahead of
+      // the fresh-credential-write debounce, so a transient read inside the
+      // write window still degrades instead of reading as healthy. The
+      // debounce needs a fresh mtime AND an empty/invalid-JSON issue, so both
+      // are supplied.
+      const freshMtime = new Date(Date.now() - 1_000).toISOString();
+
+      // Coverage assertion FIRST: without it the next line could pass because
+      // the debounce never applied. This proves the window really is open.
+      const debounced = await classifyWith(['creds_json_empty'], guard, db, freshMtime);
+      expect(debounced).toBe('none');
+
+      // Same window, plus a read that could not look. It must not read clean:
+      // 'none' here is a false clean during exactly the window in which a
+      // restore may act.
+      const transientInWindow = await classifyWith(
+        ['creds_json_empty', 'creds_json_read_transient:EAGAIN'], guard, db, freshMtime,
+      );
+      expect(transientInWindow).toBe('auth_bond_at_risk');
+      expect(transientInWindow).not.toBe('none');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('r4 SHOULD-2 follow-up — the widened reader floor, isolated from the successor', () => {
+  it('holds a reader on the widened floor even when no successor is armed', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const missingRoot = join(fx.root, 'never-created');
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: missingRoot,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r4-floor-alone',
+      treeRefreshMinIntervalMs: 100,
+      monotonicNow: () => clock.value,
+    });
+
+    // White-box, and deliberately so. Every non-publishing walk now arms a
+    // successor and readers defer to an armed successor, so in ordinary
+    // operation the timer is the binding guard and the widened reader floor
+    // behind it is unreachable — which would leave the floor with no
+    // discriminating test at all. Stubbing the scheduler removes the outer
+    // guard so the floor alone decides. This is the ONLY way to hold that
+    // line, and the test says so rather than implying the floor is reachable.
+    (guard as unknown as { scheduleTreeRefreshSuccessor: () => void })
+      .scheduleTreeRefreshSuccessor = () => {};
+
+    guard.inspectCached();
+    await advanceQuietly(clock, 10);
+    const settled = guard.inspectCached().treeProvenance!;
+    expect(settled.lastRefreshKind).toBe('incomplete');
+    expect(settled.refreshAttemptCount).toBe(1);
+    // Coverage assertion: the stub really is in effect, so nothing below can
+    // be attributed to an armed timer.
+    expect(settled.refreshScheduled).toBe(false);
+
+    // Past the plain 100 ms floor, inside the 200 ms one failure widens it to.
+    await advanceQuietly(clock, 140);
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(1);
+
+    // And past the widened floor it walks again: a floor, not a lock.
+    await advanceQuietly(clock, 60);
+    expect(guard.inspectCached().treeProvenance!.refreshAttemptCount).toBe(2);
+
+    await advanceQuietly(clock, 10);
+  });
+});
+
+describe('public-surface contract — the three digest refresh-provenance fields', () => {
+  it('serializes the documented names, units and counter semantics', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const guard = makeGuard();
+    await guard.warmTreeCache();
+    const { server, port } = await buildTestServer(makeDeps(db, guard));
+
+    try {
+      const res = await healthReq(port);
+      const bond = (JSON.parse(res.body) as Record<string, any>).whatsapp.auth_bond;
+
+      // Names, exactly as docs/public-surface.md spells them. A rename is a
+      // breaking change to a `stable` surface and has to fail here.
+      expect(Object.keys(bond)).toEqual(expect.arrayContaining([
+        'digest_refresh_scheduled',
+        'digest_next_refresh_eligible_ms',
+        'digest_refresh_attempts',
+      ]));
+      expect(typeof bond.digest_refresh_scheduled).toBe('boolean');
+      expect(typeof bond.digest_refresh_attempts).toBe('number');
+      expect(
+        bond.digest_next_refresh_eligible_ms === null
+        || typeof bond.digest_next_refresh_eligible_ms === 'number',
+      ).toBe(true);
+
+      // Unit: a DURATION in milliseconds, never a timestamp. An epoch value
+      // would sail past this bound.
+      if (bond.digest_next_refresh_eligible_ms !== null) {
+        expect(bond.digest_next_refresh_eligible_ms).toBeGreaterThanOrEqual(0);
+        expect(bond.digest_next_refresh_eligible_ms).toBeLessThan(1_000_000);
+      }
+
+      // Counter semantics: attempts counts walks STARTED, count counts walks
+      // that PUBLISHED, so attempts can never trail count. Swapping the two
+      // projections in health.ts fails here.
+      expect(bond.digest_refresh_attempts).toBeGreaterThanOrEqual(bond.digest_refresh_count);
+      expect(bond.digest_refresh_attempts).toBeGreaterThanOrEqual(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
+
+  it('has the release record the public-surface publication rules require', () => {
+    // docs/public-surface.md "How to update this file" requires a release-notes
+    // entry under "Public surface additions" for every promotion. The registry
+    // row is covered by the drift check; this pins the half that is not.
+    const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+    const releaseDir = join(repoRoot, 'docs', 'releases');
+    const additions = readdirSync(releaseDir)
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => readFileSync(join(releaseDir, name), 'utf8'))
+      .filter((body) => body.includes('## Public surface additions'));
+
+    // Positive control: the directory really does hold release notes of the
+    // expected shape, so an empty owning-set below means a MISSING record
+    // rather than a mistyped path.
+    expect(additions.length).toBeGreaterThan(1);
+
+    const owning = additions.filter((body) => body.includes('digest_refresh_scheduled'));
+    expect(owning).toHaveLength(1);
+    expect(owning[0]).toContain('digest_next_refresh_eligible_ms');
+    expect(owning[0]).toContain('digest_refresh_attempts');
+    // The two properties an external strict decoder needs and cannot infer
+    // from the field names.
+    expect(owning[0]).toContain('MILLISECONDS');
+    expect(owning[0]).toContain('Additive only');
   });
 });
 

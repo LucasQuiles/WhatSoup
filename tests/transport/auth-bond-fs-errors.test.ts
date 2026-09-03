@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -762,5 +763,325 @@ describe('AuthBondGuard auth-tree races (#2285)', () => {
     }));
 
     expect(() => guardFor(root, authDir, mod).inspect()).toThrow(/EACCES/);
+  });
+});
+
+// ===========================================================================
+// r4 review of fix/health-endpoint-auth-walk-cost — SHOULD-1 and NIT-9.
+//
+// Both are about readCredsThroughNoFollow, the synchronous credential read
+// reachable from an unauthenticated GET /health, and both are unpinned lines:
+// deleting either leaves the rest of the suite green.
+// ===========================================================================
+describe('AuthBondGuard credential open flags and root-descriptor faults', () => {
+  /**
+   * r4 SHOULD-1 — O_NONBLOCK is the load-bearing line of the r3 MUST-1 fix.
+   *
+   * open(2) on a FIFO with O_RDONLY and no writer BLOCKS until a writer
+   * arrives. This open is synchronous, on the main thread, and reachable from
+   * an unauthenticated GET /health, so without the flag a FIFO planted at
+   * creds.json stops the process serving anything, forever, and no watchdog
+   * that waits for exit ever fires.
+   *
+   * The obvious test — plant a FIFO and assert the refusal — is the wrong shape
+   * for exactly that reason: against the UNFIXED code it does not fail, it
+   * hangs the worker, and a hang is not a red. vitest's test timeout cannot
+   * preempt a blocked synchronous syscall. So the flags are asserted directly
+   * through the fs mock this file already uses, which fails cleanly and names
+   * the missing flag. The FIFO case below holds a writer open so that it cannot
+   * block either way; it pins the kind refusal, not the flag.
+   */
+  it('passes O_NONBLOCK and O_NOFOLLOW on both credential opens', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    const opens: { path: string; flags: number }[] = [];
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        if (typeof flags === 'number') opens.push({ path: String(path), flags });
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'open-flags-bot',
+    }).inspect();
+
+    // Read the constants from the REAL fs module, never from the mocked one: a
+    // spread that silently dropped `constants` would make every mask below
+    // compare zero to zero and pass vacuously.
+    const { O_NONBLOCK, O_NOFOLLOW, O_DIRECTORY } = actualFs.constants;
+    expect(O_NONBLOCK).toBeGreaterThan(0);
+    expect(O_NOFOLLOW).toBeGreaterThan(0);
+
+    const credentialOpens = opens.filter((o) => o.path === authDir || o.path === credsPath);
+    // Infrastructure control. An empty or reordered recorder means the mock did
+    // not intercept, and that must read as a broken test rather than as a
+    // finding about the flags. It also pins the ORDER the r3 MUST-1 fix
+    // depends on: the root is opened and held first, and the child is opened
+    // through it afterwards.
+    expect(credentialOpens.map((o) => o.path)).toEqual([authDir, credsPath]);
+
+    // The root open: a directory, not followed, and non-blocking.
+    expect(credentialOpens[0].flags & (O_DIRECTORY ?? 0)).toBe(O_DIRECTORY ?? 0);
+    expect(credentialOpens[0].flags & O_NOFOLLOW).toBe(O_NOFOLLOW);
+    expect(credentialOpens[0].flags & O_NONBLOCK).toBe(O_NONBLOCK);
+    // The child open: this is the one a FIFO would block forever.
+    expect(credentialOpens[1].flags & O_NOFOLLOW).toBe(O_NOFOLLOW);
+    expect(credentialOpens[1].flags & O_NONBLOCK).toBe(O_NONBLOCK);
+  });
+
+  it('refuses a FIFO at creds.json by kind, before any byte is read', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    actualFs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    execFileSync('mkfifo', [credsPath]);
+
+    // A writer held open for the whole test. With a writer present, an
+    // O_RDONLY open of a FIFO returns at once whether or not O_NONBLOCK is
+    // set, so this test cannot hang even against code missing the flag — which
+    // is why it pins the kind refusal and NOT the flag. The flag is pinned by
+    // the assertion above.
+    const writerFd = actualFs.openSync(credsPath, actualFs.constants.O_RDWR);
+    try {
+      const mod = await importGuardWithFsMock(() => ({}));
+      const snapshot = new mod.AuthBondGuard({
+        authDir, stateRoot: join(root, 'state'), instanceName: 'fifo-creds-bot',
+      }).inspect();
+
+      expect(snapshot.issues).toContain('creds_json_not_regular_file');
+      expect(snapshot.status).toBe('invalid');
+      // Nothing was taken from it: no hash, and no identity.
+      expect(snapshot.creds.sha256).toBeNull();
+      expect(snapshot.meHash).toBeNull();
+    } finally {
+      actualFs.closeSync(writerFd);
+    }
+  });
+
+  /**
+   * r4 NIT-9 — fstatSync on the auth-root descriptor sat outside any catch.
+   *
+   * Its `try` carries only a `finally`, so a throw escaped
+   * readCredsThroughNoFollow, buildSnapshot and inspectCached and surfaced in
+   * the /health handler. Every other filesystem call in that function turns a
+   * throw into an issue.
+   */
+  it('turns a failed fstat on the auth-root descriptor into an issue, not a throw', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    writeAuth(authDir);
+    let fstatFailures = 0;
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      fstatSync: vi.fn((fd: number, options?: unknown) => {
+        // The first fstat in an inspect() is the one on the root descriptor:
+        // everything before it uses lstat, stat, chmod or readdir.
+        if (fstatFailures === 0) {
+          fstatFailures += 1;
+          throw Object.assign(new Error('EBADF: bad file descriptor, fstat'), { code: 'EBADF' });
+        }
+        return (actual.fstatSync as (f: number, o?: unknown) => unknown)(fd, options);
+      }) as unknown as FsModule['fstatSync'],
+    }));
+
+    const guard = new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'root-fstat-bot',
+    });
+
+    let snapshot!: ReturnType<typeof guard.inspect>;
+    expect(() => { snapshot = guard.inspect(); }).not.toThrow();
+    // Coverage assertion: the injected failure was actually reached.
+    expect(fstatFailures).toBe(1);
+    expect(snapshot.issues.some((i) => i.startsWith('auth_dir_stat_failed:'))).toBe(true);
+    expect(snapshot.issues).toContain('auth_dir_stat_failed:EBADF');
+    // Fail-closed: an auth root whose descriptor cannot be stat'd is not a
+    // healthy bond, and the credential was never looked at, so nothing claims
+    // it is missing either.
+    expect(snapshot.status).toBe('invalid');
+    expect(snapshot.issues).not.toContain('creds_json_missing');
+
+    // codex r4 LOW-4 — a root-side refusal must not claim the child exists.
+    // creds.json is on disk and readable here; the point is that this snapshot
+    // never looked, so it reports no existence rather than a `true` it did not
+    // establish, alongside the null mode/size/mtime/hash it already reported.
+    expect(snapshot.creds.exists).toBe(false);
+    expect(snapshot.creds.mode).toBeNull();
+    expect(snapshot.creds.size).toBeNull();
+    expect(snapshot.creds.mtime).toBeNull();
+    expect(snapshot.creds.sha256).toBeNull();
+    expect(snapshot.creds.error).toBeNull();
+  });
+
+  /**
+   * codex r4 HIGH-1 residual — O_NONBLOCK bounds the OPEN, not the READ.
+   *
+   * The ABA swap HIGH-1 describes is not closable in Node, which exposes no
+   * openat(2): the child is opened by full pathname, so an actor who can
+   * rename the auth root can put their own regular file behind the descriptor
+   * and restore the root before the dev/ino check. What IS closable is the
+   * consequence — an unbounded synchronous read on an unauthenticated request.
+   */
+  it('refuses an oversized creds.json by descriptor size, before reading it', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    const mod = await importGuardWithFsMock(() => ({}));
+    const readOnce = () => new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'creds-size-bot',
+    }).inspect();
+
+    // Control first: the same fixture, under the cap, is read normally. Without
+    // this the refusal below could hold because the reader stopped working.
+    const under = readOnce();
+    expect(under.status).toBe('present');
+    expect(under.creds.sha256).toMatch(/^[0-9a-f]{64}$/);
+
+    // Sparse, so the fixture costs no real I/O: fstat reports the apparent
+    // size, and the point of the fix is that nothing ever reads these bytes.
+    const oversize = mod.MAX_CREDS_BYTES + 1;
+    actualFs.truncateSync(credsPath, oversize);
+    expect(actualFs.statSync(credsPath).size).toBe(oversize);
+
+    const snapshot = readOnce();
+
+    expect(snapshot.issues).toContain(`creds_json_too_large:${oversize}`);
+    expect(snapshot.status).toBe('invalid');
+    // Refused by kind, so no bytes were hashed and no identity was taken.
+    expect(snapshot.creds.sha256).toBeNull();
+    expect(snapshot.meHash).toBeNull();
+    // The cap is the documented one. A change to the constant that forgets the
+    // release note and the rationale fails here.
+    expect(mod.MAX_CREDS_BYTES).toBe(1_048_576);
+  });
+
+  /**
+   * codex r4 LOW-1 — a nonblocking open that says "not now" is not corruption.
+   *
+   * EAGAIN/EWOULDBLOCK became `creds_json_unreadable:<errno>`, which
+   * src/core/health.ts classifies as local corruption and pages on. The
+   * distinct reason is what lets a classifier tell retry from corrupt.
+   */
+  it('reports a transient nonblocking open as transient, not as unreadable', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+    let transientOpens = 0;
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        if (String(path) === credsPath) {
+          transientOpens += 1;
+          throw Object.assign(new Error('EAGAIN: resource temporarily unavailable, open'), { code: 'EAGAIN' });
+        }
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    const snapshot = new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'creds-eagain-bot',
+    }).inspect();
+
+    // Coverage assertion: the injected failure was actually reached.
+    expect(transientOpens).toBeGreaterThanOrEqual(1);
+    expect(snapshot.issues).toContain('creds_json_read_transient:EAGAIN');
+    // The load-bearing half: it is NOT reported as an unreadable credential,
+    // which is the input health.ts turns into a local-corruption page.
+    expect(snapshot.issues).not.toContain('creds_json_unreadable:EAGAIN');
+    expect(snapshot.issues).not.toContain('creds_json_missing');
+    // Still fail-closed on status. What must NOT follow from it is a
+    // destructive repair or a corruption page — see the two tests below and
+    // the classifier gate in src/core/health.ts.
+    expect(snapshot.status).toBe('invalid');
+    expect(snapshot.creds.exists).toBe(false);
+  });
+
+  /**
+   * codex r4 LOW-1, destructive half — the reason this matters more than a page.
+   *
+   * restoreLatestIfNeeded's only precondition was a non-'present' status, and
+   * it renames the live auth root away and replaces it from a backup. A
+   * transient EAGAIN produces a non-'present' status while saying nothing about
+   * the credential, so the destructive repair could fire on "not now" and
+   * destroy a healthy tree.
+   */
+  it('withholds the destructive restore on a transient read, and arms a retry', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    // Seed a real backup FIRST, with a clean reader. Without one the restore
+    // bails at "no auth-bond backup available" and the destructive path is
+    // never reached, which would leave this test unable to tell the gate from
+    // the absence of a backup.
+    const clean = await importGuardWithFsMock(() => ({}));
+    const seeded = new clean.AuthBondGuard({
+      authDir, stateRoot, instanceName: 'transient-restore-bot',
+      now: () => new Date('2026-09-03T12:00:00Z'),
+    }).capture('seed');
+    expect(seeded).toMatchObject({ ok: true, captured: true });
+
+    const credsBefore = actualFs.readFileSync(credsPath, 'utf8');
+    const treeBefore = actualFs.readdirSync(authDir).sort();
+    const quarantineRoot = join(stateRoot, 'auth-bond-backups', 'transient-restore-bot', 'quarantine');
+    expect(actualFs.existsSync(quarantineRoot)).toBe(false);
+
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        if (String(path) === credsPath) {
+          throw Object.assign(new Error('EAGAIN: resource temporarily unavailable, open'), { code: 'EAGAIN' });
+        }
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    const guard = new mod.AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'transient-restore-bot',
+      // Non-zero so the armed retry below has a measurable wait rather than a
+      // 0 ms timer that has already fired by the time it is asserted.
+      treeRefreshMinIntervalMs: 5_000,
+    });
+    await guard.warmTreeCache();
+
+    const result = guard.restoreLatestIfNeeded();
+
+    // Not merely "did not restore" — never even ATTEMPTED. Without the gate
+    // this reaches the restore proper, which is what renames the root.
+    expect(result.attempted).toBe(false);
+    expect(result.restored).toBe(false);
+    expect(result.error).toContain('transient');
+    // Coverage assertion: the withheld snapshot is the transient one, so the
+    // gate fired for the reason under test and not for some other early exit.
+    expect(result.snapshot.issues).toContain('creds_json_read_transient:EAGAIN');
+
+    // The tree is untouched: same entries, same bytes, no quarantine.
+    expect(actualFs.readdirSync(authDir).sort()).toEqual(treeBefore);
+    expect(actualFs.readFileSync(credsPath, 'utf8')).toBe(credsBefore);
+    expect(actualFs.existsSync(quarantineRoot)).toBe(false);
+
+    // And a retry is armed, so withholding is a deferral and not a dead end.
+    expect(guard.inspectCached().treeProvenance?.refreshScheduled).toBe(true);
   });
 });

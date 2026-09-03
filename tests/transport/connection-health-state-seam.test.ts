@@ -112,6 +112,30 @@ async function settleDigest(read: () => string | undefined, boundMs = 5_000): Pr
 }
 
 /**
+ * Drain a walk a test started, without waiting for it to PUBLISH.
+ *
+ * settleDigest is the right tool when the published digest IS the subject. It
+ * is the wrong tool for teardown: after an invalidation inside the refresh
+ * floor the next walk is a queued successor seconds away, so waiting for
+ * `cached` would turn cleanup into a real sleep. This waits only for the thing
+ * the fixture removal actually races — a walk still traversing the tree — and
+ * returns it so a failure to drain fails the test instead of leaking into the
+ * next one.
+ */
+async function settleWalkInFlight(
+  read: () => boolean | undefined,
+  boundMs = 5_000,
+): Promise<boolean | undefined> {
+  const deadline = Date.now() + boundMs;
+  let inFlight = read();
+  while (inFlight === true && Date.now() < deadline) {
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    inFlight = read();
+  }
+  return inFlight;
+}
+
+/**
  * Build a key store the wrapper can actually wrap; the shared helper returns {}.
  *
  * The original `set` is handed back separately because the wrapper replaces the
@@ -182,7 +206,7 @@ describe('ConnectionManager — live gate vs cached health projection', () => {
     expect(settled).toBe('cached');
   });
 
-  it('keeps the delivery gate live even while the cached projection is unknown', () => {
+  it('keeps the delivery gate live even while the cached projection is unknown', async () => {
     const manager = new ConnectionManager();
 
     // Same instant, same instance, two different questions.
@@ -191,6 +215,13 @@ describe('ConnectionManager — live gate vs cached health projection', () => {
 
     expect(health.authBond?.status).toBe('unknown');
     expect(live.authBond?.status).toBe('present');
+
+    // The cached read above found no observation and started a walk. afterAll
+    // removes fixtureRoot, so drain it rather than leaving it traversing a
+    // tree that is about to be deleted.
+    expect(await settleWalkInFlight(
+      () => manager.getHealthConnectionState().authBond?.treeProvenance?.refreshInFlight,
+    )).toBe(false);
   });
 });
 
@@ -263,6 +294,12 @@ describe('r3 SHOULD-3 — the two production wiring lines are exercised', () => 
     expect(
       manager.getHealthConnectionState().authBond?.treeProvenance?.lastInvalidationReason,
     ).toBe('key-store-set');
+
+    // The invalidation reason is set synchronously, so the assertion above can
+    // pass while the walk it triggered is still running. Drain it.
+    expect(await settleWalkInFlight(
+      () => manager.getHealthConnectionState().authBond?.treeProvenance?.refreshInFlight,
+    )).toBe(false);
   });
 
   it('invalidates the digest when the credential saver commits', async () => {
@@ -283,5 +320,12 @@ describe('r3 SHOULD-3 — the two production wiring lines are exercised', () => 
     }
 
     expect(reason).toBe('creds-file-committed');
+
+    // Same shape as above, plus the emit() handler's own promise, which this
+    // test does not hold: the commit fires the invalidation, and the walk it
+    // starts outlives the assertion unless it is drained here.
+    expect(await settleWalkInFlight(
+      () => manager.getHealthConnectionState().authBond?.treeProvenance?.refreshInFlight,
+    )).toBe(false);
   });
 });

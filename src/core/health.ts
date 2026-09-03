@@ -17,7 +17,7 @@ import { getPendingCount, upsertAccess } from './access-list.ts';
 import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
+import { DEFAULT_FRESH_INVALID_GRACE_MS, hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -1035,6 +1035,12 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   // 'auth_bond_at_risk' degrades (200) rather than paging, which is the right
   // severity for "the walk has not landed yet".
   if (authBond.status === 'unknown') return 'auth_bond_at_risk';
+
+  // A read that could not establish the credential has not earned 'none'. Sits
+  // with the 'unknown' check and BEFORE the fresh-write debounce for the reason
+  // that comment gives: degrading costs nothing inside the write window, while
+  // a false clean there lands in exactly the window a restore may act on.
+  if (hasTransientAuthReadIssue(authBond.issues)) return 'auth_bond_at_risk';
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 
