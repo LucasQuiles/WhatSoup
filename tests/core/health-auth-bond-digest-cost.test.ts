@@ -347,17 +347,25 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
     await guard.warmTreeCache();
 
     const after = guard.inspectCached().treeHash;
+    // Read the live digest while the added file is still present: this test
+    // shares one fixture with the rest of the file, so the cleanup below has to
+    // happen before any assertion can throw, and the comparison has to be
+    // against the tree as it was when the cached digest was taken.
+    const liveAfter = guard.inspect().treeHash;
     rmSync(join(authDir, 'pre-key-added.json'), { force: true });
 
     expect(before).toHaveLength(64);
     expect(after).not.toBe(before);
-    expect(after).toBe(guard.inspect().treeHash);
+    expect(after).toBe(liveAfter);
   });
 });
 
 describe('GET /health — request cost and digest provenance', () => {
   it('serves the auth-bond digest without blocking the loop, and reports its age', async () => {
     const db = new Database(':memory:');
+    // open() applies the pragmas and runs the migrations; startHealthServer
+    // prepares statements against the schema they create.
+    db.open();
     const guard = makeGuard();
     await guard.warmTreeCache();
     const { server, port } = await buildTestServer(makeDeps(db, guard));
