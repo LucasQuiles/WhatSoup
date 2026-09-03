@@ -8,7 +8,7 @@ call site changed.
 
 Two helpers in the directory were both spelled `_write_event` and are NOT the same
 function -- one takes an explicit filename, the other derives a fixed one from the event
-id. They keep distinct names here (`write_outbox_event` / `write_named_outbox_event`)
+id. They keep distinct names here (`write_outbox_event` / `write_socket_down_outbox_event`)
 because the shared spelling was the only reason they read as one helper.
 
 This module lives in `support/` rather than `conftest.py` on purpose. The directory's
@@ -66,8 +66,12 @@ def write_outbox_event(paths: dict[str, Path], filename: str, event: dict[str, A
     return path
 
 
-def write_named_outbox_event(paths: dict[str, Path], event: dict[str, Any]) -> Path:
-    """Write `event` to the outbox under a filename derived from the event id, mode 0600."""
+def write_socket_down_outbox_event(paths: dict[str, Path], event: dict[str, Any]) -> Path:
+    """Write a socket-down alert to the outbox under its canonical filename, mode 0600.
+
+    The filename is fixed to the one scenario both importers exercise: a socket_down alert
+    from a single instance at a pinned timestamp, varying only by event id.
+    """
     event_path = paths["outbox"] / f"20260612000000.ana-bot.socket_down.{event['id']}.json"
     event_path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
     event_path.chmod(0o600)
@@ -103,9 +107,14 @@ def capture_sends(mod) -> list[str]:
 
 
 def load_module_from_path(name: str, path: Path):
-    """Load the script at `path` as a module named `name`."""
+    """Load the script at `path` as a module named `name`.
+
+    Asserts both `spec` and `spec.loader` before building the module, matching the
+    stronger form the folded clones already used -- a missing spec otherwise surfaces as
+    an opaque TypeError from module_from_spec rather than a named assertion.
+    """
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     spec.loader.exec_module(mod)
     return mod

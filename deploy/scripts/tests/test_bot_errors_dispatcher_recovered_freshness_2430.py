@@ -26,7 +26,6 @@ All tests exercise the REAL dispatcher module (importlib load + the pass + on-di
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
 import time

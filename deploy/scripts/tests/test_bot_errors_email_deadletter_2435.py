@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -73,7 +72,7 @@ def _event(event_id: str) -> dict[str, Any]:
     }
 
 
-_write_event = dispatcher_fixtures.write_named_outbox_event
+_write_event = dispatcher_fixtures.write_socket_down_outbox_event
 
 
 _fallback_script = dispatcher_fixtures.fallback_script

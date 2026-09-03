@@ -17,14 +17,12 @@ cannot have a revoked bond.
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:

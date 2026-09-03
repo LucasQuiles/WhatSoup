@@ -19,7 +19,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
