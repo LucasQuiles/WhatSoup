@@ -804,14 +804,20 @@ degraded so the exhausted episode is not hidden.
 The same alert source has a second path, and the two behave differently, so read the body first.
 An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
 bound and no chat identifier; the **crash-exhaustion** path names the chat and the crash count.
-Abandonment means auto-respawn stopped re-arming because provider termination was never proved,
-so on that path nothing is cleaned up at all: the session entry, the ownership record and the
-manager index are all retained deliberately, because a provider child that is not provably gone
-could still be running and detaching it would let the next message start a second incarnation of
-the same conversation. The chat stays wedged until termination is proved, and that is the
-intended state — do not force it by deleting the session. It clears when the chat is rebuilt by
-the user's next message, or on age; health reports it as `per_chat_respawn_abandoned` until then,
-and the alert clears only once no chat is either exhausted or abandoned.
+
+Abandonment means auto-respawn stopped re-arming because provider termination was never proved.
+On that path the runtime deliberately retains the session entry, the ownership record and the
+manager index, and calls no shutdown: a provider child that is not provably gone may still be
+running, and detaching it would let the next message start a second incarnation of the same
+conversation. The chat is therefore wedged until termination is proved. That is the intended
+state — do not force it by deleting the session, the queue or the checkpoint.
+
+It settles when the chat serves again. The next inbound turn finds the retained session and
+respawns it in place, which clears the abandonment and, if no other chat is exhausted or
+abandoned, clears this alert; failing that the record expires on age. Health reports
+`per_chat_respawn_abandoned` until it settles. Note the deferral guarantee quoted above belongs to
+the crash-exhaustion path: abandonment passes no crash context, so there is no destructive cleanup
+to defer.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
