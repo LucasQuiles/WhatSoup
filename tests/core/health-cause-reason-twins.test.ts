@@ -71,6 +71,21 @@ function emittingSource(): string {
   return files.map((file) => readFileSync(file, 'utf8')).join('\n');
 }
 
+/**
+ * The corpus the reason -> cause orphan check reads.
+ *
+ * It used to be one hardcoded path, `src/runtimes/agent/runtime.ts`, while every
+ * sibling check globbed. A `degradedReasons.push` added in any other file
+ * therefore escaped the orphan assertion silently. That was inert only because
+ * all 23 push sites happen to live in that one file today; it opened the moment a
+ * second file emitted one. Reading the same corpus the other checks build keeps
+ * one source of truth for "the emitting corpus" instead of a second assertion
+ * that could drift from it.
+ */
+function orphanCheckCorpus(): string {
+  return emittingSource();
+}
+
 describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross-reference', () => {
   it('is total: exactly one entry per registered degradation cause, no extras', () => {
     expect(Object.keys(HEALTH_DEGRADATION_CAUSE_REASON_TWINS).sort())
@@ -146,11 +161,7 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
     // how `runtime.per_chat_session_without_owner` reached the wire while the
     // `agent_runtime_degraded_unclassified` fall-through it lands in still
     // enumerated only its three siblings.
-    const runtimeSource = readFileSync(
-      resolve(repoRoot, 'src/runtimes/agent/runtime.ts'),
-      'utf8',
-    );
-    const allPushes = pushArguments(runtimeSource);
+    const allPushes = pushArguments(orphanCheckCorpus());
     const literalPushes = allPushes
       .map(quotedReason)
       .filter((reason): reason is string => reason !== undefined);
@@ -192,6 +203,19 @@ describe('HEALTH_DEGRADATION_CAUSE_REASON_TWINS — cause -> status_reason cross
       .filter((reason) => !named.has(`runtime.${reason}`))
       .sort();
     expect(orphans, 'runtime degradedReasons no degradation cause names as a twin').toEqual([]);
+  });
+
+  it('orphan-checks the whole emitting corpus, not one hardcoded file', () => {
+    const corpus = orphanCheckCorpus();
+    // A marker that exists only in src/core/health.ts. A corpus limited to
+    // src/runtimes/agent/runtime.ts cannot contain it, so restoring the
+    // single-file read fails here — which is the point: a degradedReasons.push
+    // added outside runtime.ts must not escape the orphan assertion above.
+    expect(corpus, 'orphan corpus is missing src/core/health.ts')
+      .toContain('addDegradationSilenceProof');
+    // And it still spans src/runtimes, so widening did not lose the original file.
+    expect(corpus, 'orphan corpus is missing the agent runtime')
+      .toContain('deferRespawnForUnprovenTermination');
   });
 
   it('the no_reason_twin annotation is reserved for causes the status_reasons vector genuinely never names', () => {
@@ -247,8 +271,19 @@ describe('AGENT_RUNTIME_CLASSIFIED_CAUSES — derived membership', () => {
     // fallbackWindowActive is true, and the guard's own `&& !fallbackWindowActive`
     // conjunct has already short-circuited the whole condition in exactly that
     // case. Membership is therefore unreachable, not merely unobserved.
+    // The two per-chat ownership causes are likewise additions rather than
+    // members of the pre-refactor chain, and they are listed here rather than
+    // inside PRE_REFACTOR_CHAIN so that list stays an honest record of what the
+    // inline chain held. Both declare a `runtime.`-prefixed twin, so the
+    // derivation admits them; both are deliberately named conditions that used
+    // to fall through to _unclassified.
     expect([...AGENT_RUNTIME_CLASSIFIED_CAUSES].sort())
-      .toEqual([...PRE_REFACTOR_CHAIN, 'provider_fallback_active'].sort());
+      .toEqual([
+        ...PRE_REFACTOR_CHAIN,
+        'provider_fallback_active',
+        'per_chat_session_without_owner',
+        'per_chat_respawn_abandoned',
+      ].sort());
   });
 
   it('every member is a registered cause (no membership for a name that cannot be raised)', () => {

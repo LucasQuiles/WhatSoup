@@ -43,7 +43,6 @@ vi.mock('../../src/logger.ts', async () => {
 
 import { Database } from '../../src/core/database.ts';
 import {
-  ProbeErrorThrottle,
   resetProbeErrorThrottle,
   startHealthServer,
   type HealthDeps,
@@ -51,40 +50,10 @@ import {
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 
-// ---------------------------------------------------------------------------
-// ProbeErrorThrottle — unit (clock-free, isolated instances, no singleton)
-// ---------------------------------------------------------------------------
-
-describe('ProbeErrorThrottle (#1778 Defect B)', () => {
-  it('emits on the 1st failure then only at powers of two — O(log N), not O(N)', () => {
-    const throttle = new ProbeErrorThrottle();
-    const emitted: number[] = [];
-    for (let i = 1; i <= 1000; i += 1) {
-      const n = throttle.onFailure('probe-x');
-      if (n !== null) emitted.push(n);
-    }
-    // {1,2,4,8,16,32,64,128,256,512} — 10 emissions for 1000 failures.
-    expect(emitted).toEqual([1, 2, 4, 8, 16, 32, 64, 128, 256, 512]);
-  });
-
-  it('keeps distinct probe keys independent', () => {
-    const throttle = new ProbeErrorThrottle();
-    expect(throttle.onFailure('a')).toBe(1);
-    expect(throttle.onFailure('b')).toBe(1);
-    expect(throttle.onFailure('a')).toBe(2);
-    expect(throttle.onFailure('b')).toBe(2);
-  });
-
-  it('onSuccess reports and clears the accumulated failure count so the next storm re-alerts from 1', () => {
-    const throttle = new ProbeErrorThrottle();
-    for (let i = 0; i < 5; i += 1) throttle.onFailure('probe-y');
-    expect(throttle.onSuccess('probe-y')).toBe(5);
-    // Clean → nothing to clear.
-    expect(throttle.onSuccess('probe-y')).toBe(0);
-    // Re-alerts from 1 after recovery.
-    expect(throttle.onFailure('probe-y')).toBe(1);
-  });
-});
+// The ProbeErrorThrottle unit cases moved to tests/lib/probe-error-throttle.test.ts,
+// which imports the leaf module directly instead of through this file's
+// re-export. The integration cases below stay here: they are about health's
+// probe storm behaviour, not the throttle in isolation.
 
 // ---------------------------------------------------------------------------
 // Integration — a missing table must degrade + bound the log, not storm it.

@@ -24,6 +24,7 @@ import {
 } from '../../../src/runtimes/agent/turn-admission-errors.ts';
 import { sanitizeLogValue } from '../../../src/lib/log-sanitizer.ts';
 import { RuntimeTurnCoordinator, type RuntimeTurnCoordinatorPort } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-double.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 
@@ -97,22 +98,28 @@ describe('typed admission errors survive the log sanitizer', () => {
 
 describe('beginRuntimeTurnEvidence throws typed admission errors', () => {
   it('durable-recovery block throws ScopeBlockedByDurableRecoveryError', () => {
-    const host = {
+    const host = coordinatorPortDouble({
       instanceName: 'admission-test',
-      durability: { hasOutstandingTurnRecoveryForScope: vi.fn(() => true) },
-      runtimeTurnSupervisor: { canAccept: vi.fn(() => true) },
-    } as unknown as RuntimeTurnCoordinatorPort;
+      durability: {
+        hasOutstandingTurnRecoveryForScope: vi.fn(() => true),
+      } as unknown as RuntimeTurnCoordinatorPort['durability'],
+      runtimeTurnSupervisor: {
+        canAccept: vi.fn(() => true),
+      } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+    });
     const coordinator = new RuntimeTurnCoordinator(host);
     expect(() => coordinator.beginRuntimeTurnEvidence(queueStub(), context()))
       .toThrow(ScopeBlockedByDurableRecoveryError);
   });
 
   it('supervisor canAccept refusal throws ScopeBlockedByFinalizationRecoveryError', () => {
-    const host = {
+    const host = coordinatorPortDouble({
       instanceName: 'admission-test',
-      durability: undefined,
-      runtimeTurnSupervisor: { canAccept: vi.fn(() => false) },
-    } as unknown as RuntimeTurnCoordinatorPort;
+      durability: null,
+      runtimeTurnSupervisor: {
+        canAccept: vi.fn(() => false),
+      } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+    });
     const coordinator = new RuntimeTurnCoordinator(host);
     expect(() => coordinator.beginRuntimeTurnEvidence(queueStub(), context()))
       .toThrow(ScopeBlockedByFinalizationRecoveryError);

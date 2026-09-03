@@ -134,7 +134,9 @@
         "unclassified",
         "chat_runtime_degraded",
         "passive_runtime_degraded",
-        "degradation_silence_unproven"
+        "degradation_silence_unproven",
+        "per_chat_session_without_owner",
+        "per_chat_respawn_abandoned"
       ],
       "owner": "src/core/health.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
@@ -977,6 +979,22 @@
         "notification": "warning",
         "rootOwner": "passive_runtime",
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "requiresCorroborationBeforePaging": false
+      },
+      "per_chat_session_without_owner": {
+        "family": "agent_runtime",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "the dispatch path evicts the unowned entry and rebuilds the session, after which the cause is absent from the next accepted health body degradation vector; the condition is re-probed in full every evaluation, so it never latches",
+        "requiresCorroborationBeforePaging": false
+      },
+      "per_chat_respawn_abandoned": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it settles as soon as the chat serves again by either route \u2014 the next inbound message respawns an inactive session in place, or is served by a session that never went inactive \u2014 or when a new owned session is indexed for it, or when the record ages out; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned, including on the age-out path",
         "requiresCorroborationBeforePaging": false
       }
     }

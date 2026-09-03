@@ -256,6 +256,40 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.provider_fallback_active',
 ]);
 
+/** Status reasons that must never arm the degradation latch because each one
+ * clears itself when its condition is repaired, so no latch is needed to keep a
+ * real problem visible. Membership is NOT "any runtime reason" — it is the
+ * narrow class below, and admitting a reason on a looser reading would open a
+ * genuine silence hole.
+ *
+ * MEMBERSHIP RULE, restated because it is the thing a future candidate is
+ * judged against: a reason belongs here if and only if its condition is
+ * SETTLED by the repair that fixes it, so the reason disappears on its own once
+ * the system is healthy again. Being a runtime reason is not sufficient.
+ *
+ * The two members satisfy it by different mechanisms, and the distinction is
+ * the point:
+ *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
+ *     every poll (the runtime walks its session map), so a still-broken map
+ *     degrades again immediately.
+ *   - `runtime.per_chat_respawn_abandoned` is NOT re-derived from live state.
+ *     It is backed by a retention map emptied when the chat serves again by
+ *     either route — the next inbound message respawns an inactive session in
+ *     place, or is simply served by one that never went inactive — or when a
+ *     new owned session is indexed for it, and it also expires on age.
+ *     Admitted here because it self-clears on repair, not because it is
+ *     re-probed.
+ *
+ * Why either needs it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn
+ * in an unrelated chat proves nothing about a per-chat ownership map — so a
+ * latch carrying one could never be released by the only release channel that
+ * exists, and the instance would report degraded until process restart even
+ * after the runtime had repaired itself and its own snapshot read healthy. */
+export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'runtime.per_chat_session_without_owner',
+  'runtime.per_chat_respawn_abandoned',
+]);
+
 /** The primary route the latch release compares a receipt against: the
  * primary provider (only known while no fallback window is live) and its
  * configured model, null meaning the provider default. */
@@ -454,6 +488,10 @@ export type HealthDegradationCause =
   // and a mismatch never hides behind "unknown").
   | 'credential_identity_mismatch'
   | 'credential_identity_unverifiable'
+  // per-chat dispatch-ownership conditions: named and deliberate, so they do not
+  // belong in the unclassified fall-through below.
+  | 'per_chat_session_without_owner'
+  | 'per_chat_respawn_abandoned'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
@@ -551,6 +589,11 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   // verdict (runtime.agent.accountIdentity.status).
   credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
   credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
+  // per-chat dispatch ownership: both conditions are named, deliberate and
+  // directly re-probed, so each carries its own cause rather than landing in the
+  // fall-through where an operator cannot separate it from a genuine unknown.
+  per_chat_session_without_owner: { reasonTwins: ['runtime.per_chat_session_without_owner'] },
+  per_chat_respawn_abandoned: { reasonTwins: ['runtime.per_chat_respawn_abandoned'] },
   // the fall-through when the agent runtime is degraded for a reason no named
   // cause covers: the degradedReasons without a cause of their own, plus the
   // bare marker used when the runtime reported no reasons at all.
@@ -559,7 +602,6 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
       'runtime.turn_queue_halted',
       'runtime.poll_persistence_failure',
       'runtime.offline_decision_retry_exhausted',
-      'runtime.per_chat_session_without_owner',
       'agent_runtime_degraded',
     ],
   },
@@ -2549,6 +2591,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         : undefined;
       if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
       else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
+      // Registering a cause is not enough to emit one: the derived membership
+      // below only suppresses the fall-through. Both per-chat ownership counts
+      // reach the wire through the runtime details block, so name them here.
+      if (positiveRuntimeCounter('perChatSessionsWithoutOwner')) {
+        addDegradationCause('per_chat_session_without_owner');
+      }
+      if (positiveRuntimeCounter('perChatRespawnAbandoned')) {
+        addDegradationCause('per_chat_respawn_abandoned');
+      }
       // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
       // cause registry: a newly registered runtime-scoped cause classifies
       // itself here without an edit to this guard.
@@ -2609,7 +2660,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //     early-degraded evidence on an unhealthy-verdict evaluation arms
       //     nothing — is exactly base behavior for every unhealthy verdict.
       const realReasons = statusReasons.filter(
-        (reason) => reason !== 'degradation_silence_unproven' && reason !== 'unclassified',
+        (reason) => reason !== 'degradation_silence_unproven'
+          && reason !== 'unclassified'
+          // Directly re-probed reasons never arm and are never latched: no
+          // release channel could ever clear them, so latching one pins the
+          // instance degraded past its own repair. See
+          // DIRECTLY_REPROBED_STATUS_REASONS.
+          && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason),
       );
       if (realReasons.length > 0) {
         const existingLatch = recentlyDegraded.get(deps.instanceName);
