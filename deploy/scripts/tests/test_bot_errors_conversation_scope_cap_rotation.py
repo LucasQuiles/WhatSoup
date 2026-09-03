@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import time
 import sys
 from pathlib import Path
@@ -461,4 +462,79 @@ def test_a_tombstone_survives_the_closed_incident_sweep(tmp_path):
     )
     assert key in (state.get(mod.CONVERSATION_SCOPE_EVICTED_FIELD) or {}), (
         "the eviction tombstone must survive the sweep that drops the subtree"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The retention window, pinned against the value the documentation states.
+# ---------------------------------------------------------------------------
+#
+# The legs above seed a fixed age and so fail if the constant widens past it,
+# but they do not say what the constant SHOULD be. These do: they read the
+# documented default out of docs/configuration.md and assert the behaviour
+# changes on either side of it. Code and documentation drifting apart fails
+# here, in the direction that matters -- an operator reading the retention row
+# is told exactly when a conversation can force a notification again.
+
+
+def _documented_retention_seconds() -> int:
+    """The retention default as docs/configuration.md states it."""
+    doc = (Path(__file__).resolve().parents[3] / "docs" / "configuration.md").read_text()
+    row = next(
+        line for line in doc.splitlines()
+        if "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS" in line and "|" in line
+    )
+    value = re.search(r"\|\s*`(\d+)`\s*\(", row) or re.search(r"\|\s*`(\d+)`\s*\|", row)
+    assert value, f"could not read the documented retention default from: {row!r}"
+    return int(value.group(1))
+
+
+def test_the_retention_window_matches_the_documented_value(tmp_path):
+    """A record one second past the documented window is swept; one second inside is kept."""
+    documented = _documented_retention_seconds()
+    mod = _load(tmp_path / "retention-boundary", 8)
+    assert mod.CONVERSATION_SCOPE_RETENTION_SECONDS == documented, (
+        f"code retention {mod.CONVERSATION_SCOPE_RETENTION_SECONDS}s disagrees with "
+        f"docs/configuration.md {documented}s"
+    )
+
+    now = int(time.time())
+    key = f"{MACHINE}|instance-0000|{SOURCE}"
+
+    def sweep_with_age(age: int) -> bool:
+        state = {
+            "version": 1,
+            "openIncidents": {key: {"status": "open"}},
+            "lastSentAt": {},
+            "conversationScopes": {key: {"cs1_00000000000000aa": {
+                "lastSeenAt": now - age, "eventIds": {}}}},
+        }
+        mod.sweep_conversation_scopes(state, now)
+        return key in (state.get("conversationScopes") or {})
+
+    assert sweep_with_age(documented - 1), (
+        f"a record {documented - 1}s old is inside the documented window and must be kept"
+    )
+    assert not sweep_with_age(documented + 1), (
+        f"a record {documented + 1}s old is past the documented window and must be swept"
+    )
+
+
+def test_the_tombstone_ttl_matches_the_documented_value(tmp_path):
+    """The eviction tombstone expires on the same documented window."""
+    documented = _documented_retention_seconds()
+    mod = _load(tmp_path / "tombstone-boundary", 8)
+
+    now = int(time.time())
+    key = f"{MACHINE}|instance-0000|{SOURCE}"
+
+    def evicted_at(age: int) -> bool:
+        state = {mod.CONVERSATION_SCOPE_EVICTED_FIELD: {key: now - age}}
+        return mod.conversation_scope_key_was_evicted(state, key, now)
+
+    assert evicted_at(documented - 1), (
+        f"a tombstone {documented - 1}s old is inside the documented window and must hold"
+    )
+    assert not evicted_at(documented + 1), (
+        f"a tombstone {documented + 1}s old is past the documented window and must expire"
     )
