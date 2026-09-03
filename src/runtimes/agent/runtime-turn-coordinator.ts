@@ -909,12 +909,22 @@ turnFinalizationBookkeeping(
       { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason },
       'journaled agent turn rejected before dispatch — automatic replay unavailable',
     );
+    // The `scope` above is the turn-scope KIND (per_chat | shared | singleton),
+    // not a conversation, and it is confined to metadata at the emission
+    // boundary regardless. The conversation must ride its own field or the
+    // dispatcher — which keys incidents on machine|instance|source — files
+    // every chat's rejection into whichever chat opened the incident first.
+    // The raw key is never emitted: buildBotErrorsEvent projects it to a
+    // bounded digest.
     emitAlertChecked(
       this.host.instanceName,
       'agent_turn_admission_rejected',
       'Journaled agent turn rejected before dispatch',
       `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`,
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: context.identity.conversationKey },
     );
   }
   // #1775: a turn only reaches here without recorded usage in two cases —
