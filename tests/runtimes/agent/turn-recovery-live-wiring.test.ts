@@ -390,6 +390,10 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
 
     let active = true;
     let turnInFlight = true;
+    // A real SessionManager releases every provider handle before `shutdown()`
+    // resolves, and that release — not a null pid, which managed-loop providers
+    // report for their whole life — is what proves termination. Model it.
+    let providerReleased = false;
     let resolveProvider: () => void = () => {};
     const providerGate = new Promise<void>((resolve) => { resolveProvider = resolve; });
     const session = sessionStub();
@@ -398,10 +402,12 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
       sessionId: active ? 'session-abort' : null,
       pid: active ? 4100 : null,
       turnInFlight,
+      providerTerminated: providerReleased,
     }));
     session.shutdown.mockImplementation(async () => {
       active = false;
       turnInFlight = false;
+      providerReleased = true;
       resolveProvider();
     });
     Object.assign(session, {
@@ -452,6 +458,7 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
       active: false,
       pid: null,
       turnInFlight: false,
+      providerTerminated: true,
     });
     expect(await dispatch).toEqual({ kind: 'retryable_failure' });
   });
