@@ -193,15 +193,34 @@ const PHONE_RE = /\+?\d{7,}/g;
 // or `:`. An earlier version of this comment said the residual was "the label
 // word itself, with nothing after it". That bound is FALSE and the correction
 // matters, because the acceptance decision rests on how wide the residual is.
-// `password=token=secret`, `token=secret=password` and `api_key=token=secret`
-// are all retained here VERBATIM, and main masks the first label's value in
-// each (`password=ToKeN==***`, `token==***=password`). Measured over two-label
-// chains built from the eight label words with both joiners: 112 of 128 are
-// retained verbatim here, and 42 of the 48 that main masks are among them.
+// `password=token=secret at gate`, `token=secret=password at gate` and
+// `api_key=token=secret at gate` are all retained here VERBATIM, and main masks
+// the first label's value in each (`password=ToKeN==*** at gate`,
+// `token==***=password at gate`).
 //
-// The chain is retained because the guard refuses at every link: each label is
-// followed by `=` or `:`, which is in the follow set, so the separator branch
-// never matches, and the separator-less branch needs whitespace it never finds.
+// THE TERMINATOR IS PART OF THE SHAPE, and leaving it out inverts the result.
+// The examples above carry a trailing ` at gate` because a BARE chain is
+// MASKED: `token=secret` on its own reads back as `token ***`. Measured over
+// two-label chains built from the eight label words with both joiners, 128
+// cells, the retained count depends entirely on what follows the last label:
+//
+//   ` at gate`  112 of 128 retained      (a space, then a word under the floor)
+//   ` `         128 of 128 retained      (trailing space, nothing after it)
+//   `` (bare)     0 of 128 retained      every chain MASKED
+//   `.` `,` `;`   0 of 128 retained      every chain MASKED
+//
+// Of the 48 cells main masks under the ` at gate` terminator, 42 are retained
+// here. Any count quoted for this residual without its terminator is not
+// checkable, and a bare-chain count would say the residual does not exist.
+//
+// The chain is retained because the guard refuses at each link: every label
+// EXCEPT THE LAST is followed by `=` or `:`, and the last is followed by the
+// terminator, which is refused only when that terminator is itself in the
+// follow set — a space qualifies, a `.` or end-of-input does not. When the
+// guard does refuse, the separator branch cannot match. The separator-less
+// branch then DOES find the whitespace; what stops it is the eight-character
+// floor recorded below: `token=secret abcdefg` is retained at seven characters
+// and `token=secret abcdefgh` masks at eight.
 //
 // What the residual does NOT extend to is credential material. Once a non-label
 // token appears the chain terminates and the value is masked:
