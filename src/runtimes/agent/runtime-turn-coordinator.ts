@@ -260,6 +260,12 @@ export interface RuntimeTurnCoordinatorPort {
   readonly runtimeTurnAfterTerminal: Map<string, RuntimeTurnAfterTerminalAction>;
   managerIdFor(session: SessionManager): string;
   /**
+   * The event tool scope key the runtime registered for this session. Throws
+   * for a session the runtime never created, which is fail-closed: a dispatch
+   * whose target has no scope cannot have its events admitted anyway.
+   */
+  requireSessionToolScopeKey(session: SessionManager): string;
+  /**
    * Capability-obligation replay: derive the C3 decision for a finalizing
    * turn (undefined = the turn owes nothing / feature inert). Runs BEFORE
    * `finalizeTurnTerminal` so media staging precedes the transaction (D3).
@@ -559,9 +565,19 @@ rebindRuntimeTurnForDispatch(
   if (!owner || owner.managerId !== managerId) {
     throw new Error(`Per-chat runtime turn has no current dispatch owner for "${mapKey}"`);
   }
+  // The tool scope has to move with the manager. Tool scope keys are
+  // incarnation-specific (`createToolScopeKey` appends a monotonic ordinal), so
+  // when the eviction repair replaces a stale mapped session the turn is
+  // dispatched to a session whose scope the inbound context has never seen.
+  // Rebinding manager and generation alone leaves the predecessor's scope in
+  // the context that provider-event admission compares against, and the
+  // replacement's own terminal is then rejected as unowned: the dispatched turn
+  // runs, its completion never settles, and the chat stays pinned behind the
+  // FIFO conflict guard until the wedged-lane sweep's 24h grace releases it.
   return rebindRuntimeTurnOwner(context, {
     managerId: owner.managerId,
     generation: owner.generation,
+    toolScopeKey: this.host.requireSessionToolScopeKey(session),
   });
 }
 
