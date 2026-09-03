@@ -2044,6 +2044,7 @@ def build_configuration_retired_event(
     controller_host: str,
     request_id: str,
     roster: dict,
+    episode_seq: int,
 ) -> dict:
     """One typed configuration-retirement disposition for one retired member.
 
@@ -2051,13 +2052,22 @@ def build_configuration_retired_event(
     not a page. recoveryClaimed False is explicit because the whole point of
     #2429 is that a retirement must never be mistaken for a recovery.
 
-    CONSUMER CONTRACT -- duplicates are collapsed by ``requestId``, never by
-    file path. The path is not an identity: ``action_event_path`` embeds a
-    timestamp, and a cycle that publishes one member then fails on another
-    persists nothing (the raise escapes above run_once's ``finally:
-    save_state``), so the first member is republished next cycle. A consumer
-    that dedupes on the filename will double-count; one that dedupes on
-    ``requestId`` will not.
+    CONSUMER CONTRACT -- duplicates are collapsed by ``requestId`` TOGETHER
+    WITH ``episodeSeq``, never by file path. The path is not an identity:
+    ``action_event_path`` embeds a timestamp, and a cycle that publishes one
+    member then fails on another persists nothing (the raise escapes above
+    run_once's ``finally: save_state``), so the first member is republished
+    next cycle. A consumer that dedupes on the filename will double-count.
+
+    ``requestId`` alone is NOT sufficient, and this is the case that proves it:
+    a member retired, re-added and retired again under an UNCHANGED roster is
+    two genuine retirements whose digests are identical, so they share one
+    ``requestId``. A consumer collapsing on ``requestId`` alone would drop the
+    second retirement -- a real terminal disposition, silently discarded. The
+    two differ in ``episodeSeq``, which is the cycle counter as it stood on
+    disk when the retirement was decided: identical across a retry of one
+    episode (nothing was saved, so the counter did not move) and different
+    across episodes (a saved cycle sat between them). Collapse on the PAIR.
 
     ``reconcile_retirement_intents`` pins the first attempt's clock so that
     retry reproduces byte-identical bytes and reconciles into the SAME file,
@@ -2085,6 +2095,7 @@ def build_configuration_retired_event(
         "kind": "bot-errors-sentinel-configuration-retired",
         "scope": "host",
         "requestId": request_id,
+        "episodeSeq": episode_seq,
         "createdAt": now_iso(now),
         "controllerHost": controller_host,
         "host": host,
@@ -2200,6 +2211,28 @@ def save_retirement_intents(config: SentinelConfig, intents: dict) -> None:
         generation=(observation.version.generation or 0) + 1,
     )
     require_advance(publication)
+
+
+def require_retirement_binding_match(payload: dict, expected: str) -> None:
+    """Refuse to publish a disposition the pin does not bind.
+
+    The pin is computed from a disposition built with a placeholder clock
+    BEFORE the ledger is written; publication rebuilds it with the pinned
+    clock. Everything except the clock must be identical, or the pin binds
+    something other than what is published and the ledger silently stops
+    protecting anything -- a retry would then reconcile onto an artifact whose
+    content it never matched.
+
+    A raise, deliberately not an ``assert``: ``python -O`` strips asserts, and
+    this is the regression net for hoisting the episode value above the binding
+    loop. Reported as opaque digests, never member names.
+    """
+    actual = retirement_content_binding(payload)
+    if actual != expected:
+        raise SentinelError(
+            "retirement content binding diverged between the pin and the publication: "
+            f"pinned {expected}, publishing {actual}"
+        )
 
 
 def retirement_content_binding(payload: dict) -> str:
@@ -2339,33 +2372,45 @@ def retire_unconfigured_hosts(
         "manifestDigest": (roster_inventory_data or {}).get("digest"),
         "manifestEpoch": roster_epoch_value,
     }
+    # The episode discriminator is the cycle counter as it stands on disk RIGHT
+    # NOW, before run_once advances it later in the same cycle. Same value
+    # across a retry (nothing was saved), different across episodes (a saved
+    # cycle sat between them). Without it, content equality alone lets a second
+    # retirement reconcile onto the first one's artifact.
+    #
+    # It is computed HERE, above the binding loop, and not at the reconcile call
+    # below: it now rides in the published payload, and retirement_content_binding
+    # strips only ``createdAt``, so it is part of the binding too. The binding
+    # call and the emit call must receive the SAME value or every attempt mints a
+    # fresh pin and republishes duplicates -- the defect the ledger exists to end.
+    episode_seq = int_or_zero(state.get("cycleSeq"))
     # Durable BEFORE any publication, so a retry can reproduce this cycle's
     # bytes exactly. Only the CLOCK is pinned -- never the requestId, and never
     # across changed content. Each member's disposition is built once with a
     # placeholder clock purely to bind the pin to what will be published.
+    #
+    # The requestId is computed once per member here and reused by the emit loop
+    # below: the two calls took identical arguments, and computing it twice
+    # invited them to drift apart.
     bindings = {}
+    request_ids = {}
     for host in retiring:
         record = host_state.get(host)
+        request_ids[host] = stable_request_id(
+            "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
+        )
         bindings[host] = retirement_content_binding(
             build_configuration_retired_event(
                 host,
                 record if isinstance(record, dict) else {},
                 0.0,
                 controller_host,
-                stable_request_id(
-                    "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
-                ),
+                request_ids[host],
                 roster,
+                episode_seq,
             )
         )
-    # The episode discriminator is the cycle counter as it stands on disk RIGHT
-    # NOW, before run_once advances it later in the same cycle. Same value
-    # across a retry (nothing was saved), different across episodes (a saved
-    # cycle sat between them). Without it, content equality alone lets a second
-    # retirement reconcile onto the first one's artifact.
-    intents = reconcile_retirement_intents(
-        config, bindings, now, int_or_zero(state.get("cycleSeq"))
-    )
+    intents = reconcile_retirement_intents(config, bindings, now, episode_seq)
     emitted = []
     for host in retiring:
         record = host_state.get(host)
@@ -2374,15 +2419,22 @@ def retire_unconfigured_hosts(
         pinned_at = finite_float(intent.get("firstAttemptEpoch")) if isinstance(intent, dict) else None
         if pinned_at is None:
             pinned_at = now
-        request_id = stable_request_id(
-            "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
-        )
+        request_id = request_ids[host]
         path = action_event_path(
             config, pinned_at, "retirement", host, CONFIGURATION_RETIRED_ACTION, request_id
         )
         payload = build_configuration_retired_event(
-            host, record if isinstance(record, dict) else {}, pinned_at, controller_host, request_id, roster
+            host,
+            record if isinstance(record, dict) else {},
+            pinned_at,
+            controller_host,
+            request_id,
+            roster,
+            episode_seq,
         )
+        # Before publication, not after: a divergence must stop the cycle rather
+        # than leave a durable artifact the pin does not bind.
+        require_retirement_binding_match(payload, bindings[host])
         target = _durable_target(path)
         absent = JsonVersion(False, None, None, None)
         publication_operation = operation_id(

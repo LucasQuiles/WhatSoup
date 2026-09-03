@@ -4187,7 +4187,22 @@ def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path
     # unfixed code without exercising the defect at all, so a mismatch is a broken fixture
     # and must fail loudly rather than read as a pass.
     second_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
-    assert second_binding == first_binding, (
+    # The content binding is no longer the instrument for this guard, and that is the
+    # point of the fix rather than a casualty of it: the published payload now carries
+    # episodeSeq, retirement_content_binding strips only createdAt, so two episodes bind
+    # DIFFERENTLY by construction. Assert that mechanism directly...
+    assert second_binding != first_binding, (
+        "the episode discriminator rides in the payload, so two episodes must bind differently"
+    )
+    # ...and assert the property the fixture actually needs -- that the two dispositions
+    # are identical apart from the clock and the episode -- on the published payloads.
+    published = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(published) == 2, "the fixture must produce two episodes before they can be compared"
+    comparable = [
+        {key: value for key, value in event.items() if key not in ("createdAt", "episodeSeq", "_path")}
+        for event in published
+    ]
+    assert comparable[0] == comparable[1], (
         "fixture did not reproduce identical disposition content, so the artifact-count "
         "assertion below would not be testing the collapse"
     )
@@ -4251,3 +4266,112 @@ def test_the_episode_discriminator_holds_across_a_retry_and_moves_across_episode
     _mod.run_once(config, _deps(1300.0, probes))
     advanced = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
     assert advanced > after_success, "a saved cycle must advance the episode boundary"
+
+
+# ---------------------------------------------------------------------------
+# Cross-cut r9 core follow-ups: a per-episode discriminator in the published
+# payload, the execution guard built from the cycle's complete retiring set,
+# and the intent ledger's silent truncation
+# ---------------------------------------------------------------------------
+
+
+def _two_episodes_of_one_member(tmp_path: Path) -> dict:
+    """Retire, re-add and retire one member under an UNCHANGED roster.
+
+    Arranges and acts only; the named tests below assert on what it returns.
+    The roster file's integer mtime is pinned for the same reason the existing
+    repeat-retirement fixture pins it: it rides in the payload as
+    ``roster.manifestEpoch``, so leaving it to wall-clock would make the two
+    episodes differ by accident and prove nothing.
+    """
+    for host in ("host-a", "repeat-member"):
+        _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=995.0)
+    hosts_path = _write_json(tmp_path / "hosts.json", _roster_with(tmp_path, ["host-a", "repeat-member"]))
+    config = _config(tmp_path, hosts_path)
+    roster_mtime = 900.0
+
+    def _cycle(now: float, roster: list[str]):
+        _write_json(config.hosts_path, _roster_with(tmp_path, roster))
+        os.utime(config.hosts_path, (roster_mtime, roster_mtime))
+        for host in roster:
+            _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=now - 5.0)
+        probes = {h: {"reachable": True, "healthy": True, "class": "healthy"} for h in roster}
+        return _mod.run_once(config, _deps(now, probes))
+
+    _cycle(1000.0, ["host-a", "repeat-member"])
+    _cycle(1100.0, ["host-a"])
+    _cycle(1200.0, ["host-a", "repeat-member"])
+    _cycle(1300.0, ["host-a"])
+    return {
+        "config": config,
+        "events": [e for e in _retirement_events(config) if e["host"] == "repeat-member"],
+    }
+
+
+def test_two_episodes_of_one_member_are_distinguishable_in_the_published_payload(tmp_path: Path):
+    """The CONSUMER CONTRACT tells consumers to collapse duplicates on requestId.
+
+    Two genuinely distinct retirements of one member under an unchanged roster
+    share that requestId by design -- the digests cover the member set, which
+    did not change. Without a discriminator IN THE PAYLOAD, a consumer obeying
+    the contract drops a real second retirement, so the artifact exists and the
+    retirement is still lost downstream.
+    """
+    observed = _two_episodes_of_one_member(tmp_path)
+    events = observed["events"]
+
+    assert len(events) == 2, "the fixture must produce two distinct retirement episodes"
+    assert events[0]["episodeSeq"] != events[1]["episodeSeq"], (
+        "two episodes must be distinguishable in the published payload, not only in the ledger"
+    )
+
+
+def test_the_two_episodes_still_share_a_request_id(tmp_path: Path):
+    """Guard the other half: the discriminator must not become an identity change.
+
+    Folding the episode into stable_request_id would move an identity that is
+    embedded in the artifact filename and in the tombstone. The requestId is
+    stable across episodes BY DESIGN; the episode field is what separates them.
+    """
+    observed = _two_episodes_of_one_member(tmp_path)
+    events = observed["events"]
+
+    assert events[0]["requestId"] == events[1]["requestId"], (
+        "the requestId must stay stable across episodes; the episode field carries the difference"
+    )
+
+
+def _emit_call_divergence():
+    """Real builder for both call sites, one differing argument on the EMIT call.
+
+    The binding call passes a placeholder clock of 0.0 and the emit call passes
+    the pinned clock, which is what tells the two apart here.
+    """
+    real = _mod.build_configuration_retired_event
+
+    def _stub(host, record, now, controller_host, *args, **kwargs):
+        if now != 0.0:
+            controller_host = f"{controller_host}-divergent"
+        return real(host, record, now, controller_host, *args, **kwargs)
+
+    return _stub
+
+
+def test_the_binding_and_emit_calls_stay_argument_identical(tmp_path: Path, monkeypatch):
+    """The pin binds what the binding call built; publication uses what the emit call built.
+
+    Nothing enforced that the two stayed argument-identical apart from the
+    clock. If they diverge, the pin stops binding what is actually published
+    and the ledger silently stops protecting anything -- so a divergence must
+    be loud, and must happen BEFORE publication rather than after.
+    """
+    config = _two_member_retirement_fixture(tmp_path)
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+    monkeypatch.setattr(_mod, "build_configuration_retired_event", _emit_call_divergence())
+
+    with pytest.raises(_mod.SentinelError):
+        _mod.run_once(config, _deps(1000.0, probes))
+
+    assert _retirement_events(config) == [], "a divergence must be caught before anything is published"
+
+
