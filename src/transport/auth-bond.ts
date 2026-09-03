@@ -663,6 +663,8 @@ export class AuthBondGuard {
   private treeObservation: AuthBondTreeObservation | null = null;
   private treeRefresh: Promise<void> | null = null;
   private treeRefreshCount = 0;
+  /** Bumped by every invalidation so a walk started before one cannot publish over it. */
+  private treeGeneration = 0;
   private lastTreeInvalidationReason: string | null = null;
   private lastCaptureAt: string | null = null;
   private lastCaptureReason: string | null = null;
@@ -749,17 +751,25 @@ export class AuthBondGuard {
    */
   invalidateTreeCache(reason: string): void {
     this.treeObservation = null;
+    this.treeGeneration += 1;
     this.lastTreeInvalidationReason = reason;
   }
 
   /** Complete a refresh. Callers that need a digest present before proceeding await this. */
-  warmTreeCache(): Promise<void> {
-    return this.refreshTreeCache();
+  async warmTreeCache(): Promise<void> {
+    // A refresh already in flight may be superseded by an invalidation and
+    // discard its result, leaving no observation behind. One retry covers that
+    // without looping forever on a walk that genuinely cannot complete.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.refreshTreeCache();
+      if (this.treeObservation !== null) return;
+    }
   }
 
   private refreshTreeCache(): Promise<void> {
     const inFlight = this.treeRefresh;
     if (inFlight !== null) return inFlight;
+    const generation = this.treeGeneration;
     const run = (async (): Promise<void> => {
       try {
         const hardenIssues = await drainYielding(hardenPrivateTreeSteps(this.authDir));
@@ -770,6 +780,12 @@ export class AuthBondGuard {
         const tree = hardenIssues.some(issue => issue.startsWith('auth_tree_symlink:'))
           ? null
           : await drainYielding(inspectAuthTreeSteps(this.authDir));
+        // A refresh is single-flight, so an invalidation landing mid-walk would
+        // otherwise be erased: this walk would finish and stamp a fresh
+        // observedAtMs over the null, hiding the change until the max age
+        // expired. Discarding a superseded walk keeps the cache absent instead,
+        // which the next read turns into a new refresh.
+        if (generation !== this.treeGeneration) return;
         this.treeObservation = { hardenIssues, tree, observedAtMs: Date.now() };
         this.treeRefreshCount += 1;
       } catch {

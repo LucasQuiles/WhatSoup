@@ -1767,6 +1767,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (this.hasAuthKeyMaterialChurnSignal(events)) {
+        // Baileys wrote pre-keys, sender keys or app-state sync keys, so the
+        // cached tree digest describes a tree that no longer exists.
+        this.authBond.invalidateTreeCache('baileys-key-material-settled');
         this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
@@ -2461,10 +2464,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private scheduleSettledAuthBondSnapshot(reason: string): void {
-    // Invalidate ahead of every early return below: the key material on disk
-    // has already changed by the time this is called, whether or not this
-    // particular call goes on to schedule a snapshot.
-    this.authBond.invalidateTreeCache(`settled:${reason}`);
+    // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
+    // method's seven call sites are 'outbound-send-settled', which fires per
+    // send and does not change key material. Invalidating here would drop the
+    // digest on every send: the next health request would report a null
+    // tree_hash and an empty issues list, so classifyAuthFailure could not
+    // return auth_bond_at_risk on that request, and the instance would pay a
+    // full tree walk per send. Invalidation belongs at the two events that
+    // actually write key material, below.
     if (this.authSnapshotSettledTimer !== null) return;
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;
