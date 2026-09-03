@@ -52,17 +52,63 @@ whatsoup_effective_runtime_path() {
   # empty PATH entry means the CURRENT DIRECTORY — putting CWD ahead of every
   # system binary on every host, which is a worse defect than the one this fixes.
   if [ -n "$path_prepend" ]; then
-    # Arg 4 is config-owned and already validated upstream, so an empty segment
-    # can only come from a hand-set WHATSOUP_PATH_PREPEND. Reject it: refusing
-    # to start beats putting the current directory ahead of every system binary
-    # on a service PATH. Wrapping in colons catches leading, trailing and
-    # embedded empties in one test. FATAL line first, per whatsoup_resolve_node.
-    case ":$path_prepend:" in
-      *::*)
+    # EVERY segment is validated here, and the value is not trusted because it
+    # is "config-owned". Only ONE of the three routes into arg 4 passes the
+    # fleet-config validator:
+    #   the config `service.pathPrepend` block -- validated upstream;
+    #   WHATSOUP_PATH_PREPEND in the process environment, read directly by
+    #     whatsoup_export_runtime_path below -- never seen by that validator;
+    #   on Linux, the same variable set through the unit's optional environment
+    #     files (docs/configuration.md, "Platform scope") -- likewise unseen.
+    # This helper is where all three converge and is sourced by deploy/whatsoup
+    # on both operating systems, so it is the one place the check holds for all
+    # of them.
+    #
+    # What is rejected and why:
+    #   empty       an empty PATH entry means the CURRENT DIRECTORY;
+    #   relative    the same hazard spelled differently -- it resolves against
+    #               the launcher's CWD and still lands ahead of every system
+    #               binary on a service PATH;
+    #   control     a newline would split the exported PATH outright, and no
+    #               control character belongs in a directory name a human meant;
+    #   padded      leading or trailing whitespace is a copy-paste artefact, not
+    #               a path -- an INTERIOR space is legal and is kept.
+    #
+    # Ordered so that no message can echo a value that would corrupt the line it
+    # is written on: control characters are caught before anything interpolates
+    # a segment, and the control-character line names no value at all.
+    # FATAL line first, per whatsoup_resolve_node.
+    local remainder="$path_prepend" segment
+    while : ; do
+      segment="${remainder%%:*}"
+      if [ -z "$segment" ]; then
         echo "FATAL: WHATSOUP_PATH_PREPEND contains an empty PATH segment (an empty entry means the current directory): $path_prepend" >&2
         return 1
-        ;;
-    esac
+      fi
+      case "$segment" in
+        *[[:cntrl:]]*)
+          echo "FATAL: WHATSOUP_PATH_PREPEND contains a control character in one of its segments (value withheld: printing it would corrupt this line)" >&2
+          return 1
+          ;;
+      esac
+      case "$segment" in
+        [[:space:]]*|*[[:space:]])
+          echo "FATAL: WHATSOUP_PATH_PREPEND segment has leading or trailing whitespace: '$segment'" >&2
+          return 1
+          ;;
+      esac
+      case "$segment" in
+        /*) ;;
+        *)
+          echo "FATAL: WHATSOUP_PATH_PREPEND segment is not an absolute path (a relative entry resolves against the launcher's working directory): $segment" >&2
+          return 1
+          ;;
+      esac
+      case "$remainder" in
+        *:*) remainder="${remainder#*:}" ;;
+        *) break ;;
+      esac
+    done
     printf '%s\n' "$path_prepend:$home_dir/.local/bin:$node_dir:$inherited_path"
     return 0
   fi

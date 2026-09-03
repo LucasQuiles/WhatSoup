@@ -133,6 +133,65 @@ for bad_prepend in ":/fixture/pin/bin" "/fixture/pin/bin:" "/fixture/a/bin::/fix
   fi
 done
 
+echo "== every configured prepend segment must be absolute, clean and unpadded =="
+# MED-4. The empty-segment check above was the ONLY validation arg 4 received,
+# and its comment claimed the value was "config-owned and already validated
+# upstream". That is true of the fleet-config route and false of the other two:
+# WHATSOUP_PATH_PREPEND is read straight from the process environment by
+# whatsoup_export_runtime_path, and on Linux it is settable through the unit's
+# optional environment files (docs/configuration.md, "Platform scope"). Neither
+# route passes the config validator, and this helper is where both converge, so
+# it validates rather than trusts.
+#
+# A relative segment is the same hazard as an empty one by another spelling: it
+# resolves against the launcher's CWD and lands ahead of every system binary on
+# a service PATH. Control characters and padding are rejected because a value
+# launchd or a shell will happily carry is not necessarily one the operator
+# meant, and a newline in particular would split the exported PATH.
+#
+# Labels are written out rather than interpolated: several of these values
+# contain a newline or a control character, and echoing them raw would corrupt
+# this suite's own output.
+reject_prepend() {
+  local label="$1" value="$2" err
+  if err="$(run /fixture/user-root /fixture/node/bin/node /loaded/bin "$value" 2>&1 >/dev/null)"; then
+    echo "  FAIL accepted $label"; fail=1
+  elif [[ "$err" == FATAL:* ]]; then
+    echo "  ok   rejects $label with a FATAL line"
+  else
+    echo "  FAIL rejected $label without a FATAL line: $err"; fail=1
+  fi
+}
+
+reject_prepend "a bare relative segment"                 "relative/bin"
+reject_prepend "the current directory '.'"               "."
+reject_prepend "the parent directory '..'"               ".."
+reject_prepend "a dot-relative segment './bin'"          "./bin"
+# Not merely the first segment: every one is checked.
+reject_prepend "a relative segment among absolute ones"  "/fixture/a/bin:.:/fixture/b/bin"
+reject_prepend "a leading space"                         " /fixture/pin/bin"
+reject_prepend "a trailing space"                        "/fixture/pin/bin "
+reject_prepend "a leading tab"                           "$(printf '\t/fixture/pin/bin')"
+reject_prepend "an embedded newline"                     "$(printf '/fixture/pin/bin\n/fixture/other/bin')"
+reject_prepend "a trailing carriage return"              "$(printf '/fixture/pin/bin\r')"
+reject_prepend "an embedded control character"           "$(printf '/fixture/pin\001bin')"
+
+# Positive controls. Without these the block above is satisfied by a validator
+# that rejects everything, which would fail every host that configures a prepend.
+check "a single absolute segment is still accepted" \
+  "/fixture/pin/bin:/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" \
+  "$(run /fixture/user-root /fixture/node/bin/node /loaded/bin /fixture/pin/bin)"
+
+check "several absolute segments are still accepted" \
+  "/fixture/a/bin:/fixture/b/bin:/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" \
+  "$(run /fixture/user-root /fixture/node/bin/node /loaded/bin /fixture/a/bin:/fixture/b/bin)"
+
+# The rule is SURROUNDING whitespace, not any whitespace: a space inside a
+# directory name is a legal path character and a real one on macOS.
+check "an interior space is a path character, not padding" \
+  "/fixture/pin bin:/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin" \
+  "$(run /fixture/user-root /fixture/node/bin/node /loaded/bin '/fixture/pin bin')"
+
 echo "== an empty segment in the inherited PATH is collapsed, not rejected =="
 # The launcher runs under `set -euo pipefail` and calls the wrapper bare, so
 # rejecting arg 3 would fail bot start on any host whose ambient PATH already
