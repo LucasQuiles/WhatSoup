@@ -1110,7 +1110,7 @@ describe('r4 SHOULD-2 — a reader that arrives during or under a walk queues no
   });
 });
 
-describe('r4 NIT-2 / codex MED-1, SHOULD-1, LOW-2, LOW-3 — the refresh scheduler owns convergence', () => {
+describe('r4 NIT-2 / review MED-1, SHOULD-1, LOW-2, LOW-3 — the refresh scheduler owns convergence', () => {
   it('schedules its own retry after a cold failure, and a reader inside that window starts nothing', async () => {
     vi.useFakeTimers();
     const fx = makeOwnFixture();
@@ -1192,7 +1192,7 @@ describe('r4 NIT-2 / codex MED-1, SHOULD-1, LOW-2, LOW-3 — the refresh schedul
     expect(armed.refreshAttemptCount).toBe(1);
 
     // Real time passes the floor while the timer has not yet run: the poller
-    // read codex MED-1 describes. The floor is measured from the last walk's
+    // read review MED-1 describes. The floor is measured from the last walk's
     // START and the successor's wait from its END, so this window exists on
     // every retry. The reader must not walk through it.
     //
@@ -1330,7 +1330,7 @@ describe('r4 NIT-2 / codex MED-1, SHOULD-1, LOW-2, LOW-3 — the refresh schedul
   });
 });
 
-describe('codex r4 LOW-1 — a transient credential read degrades, it does not page', () => {
+describe('review r4 LOW-1 — a transient credential read degrades, it does not page', () => {
   /**
    * The snapshot is hand-built from a real one so its shape cannot drift, and
    * fed through the production health server, so this exercises the real
@@ -1536,6 +1536,122 @@ describe('public-surface contract — the three digest refresh-provenance fields
     // from the field names.
     expect(owning[0]).toContain('MILLISECONDS');
     expect(owning[0]).toContain('Additive only');
+  });
+});
+
+describe('r5 SHOULD-5 follow-up — a permanently transient credential read is bounded in time', () => {
+  /**
+   * Hand-builds a snapshot so the bound is exercised at the classifier, which
+   * is what the fleet outage record actually reads. The guard-side accounting
+   * that flips `transientReadPersistent` is covered separately in
+   * tests/transport/auth-bond-fs-errors.test.ts.
+   */
+  async function classifyWithTransient(
+    guard: AuthBondGuard,
+    db: Database,
+    transientReadPersistent: boolean,
+  ): Promise<string> {
+    const base = guard.inspect();
+    const authBond = {
+      ...base,
+      status: 'invalid' as const,
+      creds: { ...base.creds, mtime: '2020-01-01T00:00:00.000Z' },
+      issues: ['creds_json_read_transient:EAGAIN'],
+      transientReadPersistent,
+    };
+    const deps = {
+      ...makeDeps(db, guard),
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getConnectionState: () => ({
+          ...emptyConnectionStateSnapshot({
+            connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
+          }),
+          authBond,
+        }),
+      } as unknown as ConnectionManager,
+    } as HealthDeps;
+    const { server, port } = await buildTestServer(deps);
+    try {
+      const res = await healthReq(port);
+      return (JSON.parse(res.body) as Record<string, any>).whatsapp.connection.auth_failure_class;
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it('escalates a persistent transient to local_corruption_* and opens an outage', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    const guard = makeGuard();
+    await guard.warmTreeCache();
+
+    try {
+      // A short-lived transient stays at-risk — coverage assertion that the
+      // classifier still recognises the transient shape at all, so the change
+      // below is discriminating rather than the reader having stopped working.
+      const shortLived = await classifyWithTransient(guard, db, false);
+      expect(shortLived).toBe('auth_bond_at_risk');
+
+      // Once the transient has persisted past treeStaleRiskMs the class flips
+      // to a definite one. The classifier's not-'present' branch chooses
+      // between local_corruption_restorable and _unrestorable on whether a
+      // backup exists; the guard fixture writes one, so this fixture takes
+      // the restorable path. Removing the persistence-gate from the classifier
+      // makes this assertion red — it would keep returning 'auth_bond_at_risk'.
+      const persistent = await classifyWithTransient(guard, db, true);
+      expect(persistent).toMatch(/^local_corruption_/);
+      expect(persistent).not.toBe('auth_bond_at_risk');
+      // The escalation is what opens the outage in the bucket contract; a
+      // downstream change that maps local_corruption_* off open_outage would
+      // silently break the S5 property.
+      const { decideAuthLossModeEvent } = await import('../../src/fleet/auth-loss-mode-bucket-contract.ts');
+      const decision = decideAuthLossModeEvent({ authFailureClass: persistent as any });
+      expect(decision).toMatchObject({ action: 'open_outage', bucket: 'local_corruption' });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('r5 NIT-4 follow-up — MIN_REFRESH_RETRY_INTERVAL_MS is exercised, not implied', () => {
+  it('clamps the first retry wait to 100 ms when treeRefreshMinIntervalMs is 0', async () => {
+    vi.useFakeTimers();
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const missingRoot = join(fx.root, 'never-created-nit4');
+    const clock = { value: 0 };
+    const guard = new AuthBondGuard({
+      authDir: missingRoot,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-nit4-clamp',
+      // Zero configured floor: the retry wait would collapse to 0 ms without
+      // MIN_REFRESH_RETRY_INTERVAL_MS, degrading into an unbounded 0 ms timer
+      // loop rather than reporting the load-bearing 100 ms.
+      treeRefreshMinIntervalMs: 0,
+      monotonicNow: () => clock.value,
+    });
+
+    // Cold walk: no root, so it fails and arms a successor via the finally.
+    guard.inspectCached();
+    await advanceQuietly(clock, 10);
+
+    const settled = guard.inspectCached().treeProvenance!;
+    // Coverage: the walk actually failed (not: the walk was never reached).
+    expect(settled.lastRefreshKind).toBe('incomplete');
+    expect(settled.refreshAttemptCount).toBe(1);
+    // Timer is armed at the clamp, not the bare configured interval.
+    // 50 ms clamp × 2^1 (one failure) = 100 ms.
+    expect(settled.refreshScheduled).toBe(true);
+    expect(settled.nextRefreshEligibleInMs).toBe(100);
+
+    await advanceQuietly(clock, 10);
+    vi.useRealTimers();
   });
 });
 

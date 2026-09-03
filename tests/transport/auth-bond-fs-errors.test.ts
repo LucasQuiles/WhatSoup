@@ -908,7 +908,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     expect(snapshot.status).toBe('invalid');
     expect(snapshot.issues).not.toContain('creds_json_missing');
 
-    // codex r4 LOW-4 — a root-side refusal must not claim the child exists.
+    // review r4 LOW-4 — a root-side refusal must not claim the child exists.
     // creds.json is on disk and readable here; the point is that this snapshot
     // never looked, so it reports no existence rather than a `true` it did not
     // establish, alongside the null mode/size/mtime/hash it already reported.
@@ -921,7 +921,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
   });
 
   /**
-   * codex r4 HIGH-1 residual — O_NONBLOCK bounds the OPEN, not the READ.
+   * review r4 HIGH-1 residual — O_NONBLOCK bounds the OPEN, not the READ.
    *
    * The ABA swap HIGH-1 describes is not closable in Node, which exposes no
    * openat(2): the child is opened by full pathname, so an actor who can
@@ -965,7 +965,132 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
   });
 
   /**
-   * codex r4 LOW-1 — a nonblocking open that says "not now" is not corruption.
+   * SHOULD-4 — the cap is enforced against the descriptor, not the fstat.
+   *
+   * readFileSync(fd) took its own internal stat, so the fstat-based check was
+   * informative rather than load-bearing: an actor who could extend the object
+   * between the fstat and the read got an unbounded synchronous read on the
+   * unauthenticated health path. The bounded readSync loop refuses when the
+   * descriptor still has bytes after the buffer is full.
+   */
+  it('refuses an oversized creds.json against the descriptor when fstat under-reports', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    // A real 2 MiB regular file behind creds.json. Sparse so no bytes hit disk.
+    const CAP = 1_048_576;
+    const oversize = CAP * 2;
+    actualFs.truncateSync(credsPath, oversize);
+    expect(actualFs.statSync(credsPath).size).toBe(oversize);
+
+    let fstatUnderreports = 0;
+    const mod = await importGuardWithFsMock((actual) => ({
+      fstatSync: vi.fn((fd: number) => {
+        const stat = actual.fstatSync(fd);
+        // Under-report only on a file descriptor pointing at the oversize
+        // regular file. The directory descriptor is untouched, so no other
+        // early check is disturbed.
+        if (stat.isFile() && stat.size > CAP) {
+          fstatUnderreports += 1;
+          // Preserve isFile() and the rest of the Stats API; only size lies.
+          return new Proxy(stat, {
+            get(target, prop, receiver) {
+              if (prop === 'size') return 100;
+              return Reflect.get(target, prop, receiver);
+            },
+          });
+        }
+        return stat;
+      }) as unknown as FsModule['fstatSync'],
+    }));
+
+    const snapshot = new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'creds-descriptor-cap-bot',
+    }).inspect();
+
+    // Coverage assertion: the fstat mock really under-reported this read, so
+    // the descriptor-side check is what caught it and not the fstat path.
+    expect(fstatUnderreports).toBeGreaterThanOrEqual(1);
+    // Reported size is what the descriptor yielded past the buffer, not what
+    // fstat said, so a comparison against st.size would sail through here.
+    expect(snapshot.issues).toContain(`creds_json_too_large:${CAP + 1}`);
+    expect(snapshot.status).toBe('invalid');
+    expect(snapshot.creds.sha256).toBeNull();
+    expect(snapshot.meHash).toBeNull();
+  });
+
+  /**
+   * NIT-3 — the root-open transient branch is untested and its issue string
+   * is not bound to the shared prefix constant. One injected-EAGAIN test on
+   * the ROOT open pins both halves: the reason is produced, and the restore
+   * gate withholds because hasTransientAuthReadIssue recognises the prefix.
+   */
+  it('reports a transient nonblocking open on the ROOT as transient, and the restore gate withholds', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    writeAuth(authDir);
+
+    // A real backup so the withheld path is discriminating: without one the
+    // restore bails at "no auth-bond backup available" and the gate is not
+    // what refused. Same idiom as the sibling restore-withhold test.
+    const clean = await importGuardWithFsMock(() => ({}));
+    const seeded = new clean.AuthBondGuard({
+      authDir, stateRoot, instanceName: 'root-eagain-bot',
+      now: () => new Date('2026-09-03T12:00:00Z'),
+    }).capture('seed');
+    expect(seeded).toMatchObject({ ok: true, captured: true });
+
+    let rootTransientOpens = 0;
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        // Only intercept the ROOT open at readCredsThroughNoFollow, which is
+        // an O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK on the authDir path.
+        // Everything else — hardening, seeding, other opens — falls through.
+        const isRoot = String(path) === authDir
+          && typeof flags === 'number'
+          && (flags & actual.constants.O_DIRECTORY) !== 0
+          && (flags & actual.constants.O_NONBLOCK) !== 0;
+        if (isRoot) {
+          rootTransientOpens += 1;
+          throw Object.assign(
+            new Error('EAGAIN: resource temporarily unavailable, open'),
+            { code: 'EAGAIN' },
+          );
+        }
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    const guard = new mod.AuthBondGuard({
+      authDir, stateRoot, instanceName: 'root-eagain-bot',
+    });
+    const snapshot = guard.inspect();
+
+    // Coverage: the injected failure was actually reached on the ROOT open.
+    expect(rootTransientOpens).toBeGreaterThanOrEqual(1);
+    // Names the ROOT reason, not the child one — the two are distinct issues.
+    expect(snapshot.issues).toContain('auth_dir_read_transient:EAGAIN');
+    expect(snapshot.issues).not.toContain('auth_dir_unreadable:EAGAIN');
+    expect(snapshot.status).toBe('invalid');
+
+    // The load-bearing half: hasTransientAuthReadIssue recognises the shared
+    // prefix, so the destructive restore is withheld on this reason too.
+    // A rename of TRANSIENT_AUTH_READ_ISSUE_PREFIXES that forgets the root
+    // producer's literal string breaks this assertion.
+    const result = guard.restoreLatestIfNeeded();
+    expect(result.attempted).toBe(false);
+    expect(result.error).toContain('transient');
+  });
+
+  /**
+   * review r4 LOW-1 — a nonblocking open that says "not now" is not corruption.
    *
    * EAGAIN/EWOULDBLOCK became `creds_json_unreadable:<errno>`, which
    * src/core/health.ts classifies as local corruption and pages on. The
@@ -1011,7 +1136,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
   });
 
   /**
-   * codex r4 LOW-1, destructive half — the reason this matters more than a page.
+   * review r4 LOW-1, destructive half — the reason this matters more than a page.
    *
    * restoreLatestIfNeeded's only precondition was a non-'present' status, and
    * it renames the live auth root away and replaces it from a backup. A
@@ -1019,7 +1144,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
    * the credential, so the destructive repair could fire on "not now" and
    * destroy a healthy tree.
    */
-  it('withholds the destructive restore on a transient read, and arms a retry', async () => {
+  it('withholds the destructive restore on a transient read; the next definite read decides', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -1081,7 +1206,172 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     expect(actualFs.readFileSync(credsPath, 'utf8')).toBe(credsBefore);
     expect(actualFs.existsSync(quarantineRoot)).toBe(false);
 
-    // And a retry is armed, so withholding is a deferral and not a dead end.
-    expect(guard.inspectCached().treeProvenance?.refreshScheduled).toBe(true);
+    // No tree walk is armed here. A tree walk cannot re-establish a
+    // credential, and arming one would only defer reader-driven walks in the
+    // meantime. Convergence lives on the live path: the credential is re-read
+    // on every inspect() and on every connect attempt, so the definite read
+    // that unblocks the restore arrives whenever the transient stops.
+    expect(guard.inspectCached().treeProvenance?.refreshScheduled).toBe(false);
+  });
+
+  /**
+   * SHOULD-3 — a failed restore re-enters the convergence path.
+   *
+   * markTreeStale('auth-restore-started') cancels the successor that a cold
+   * or age-driven walk armed. If the restore then throws, the catch used to
+   * roll back the quarantine and return, leaving treeInvalidated true with no
+   * walk in flight and no timer queued. Convergence fell back to "someone
+   * reads again" — precisely the property invalidateTreeCache's contract
+   * says has been removed. The fix invalidates with reason
+   * 'auth-restore-failed' inside the catch after the rollback.
+   */
+  it('re-enters the convergence path when a restore attempt fails', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    writeAuth(authDir);
+
+    // Seed a real backup so the restore reaches the destructive body rather
+    // than bailing at "no auth-bond backup available".
+    const clean = await importGuardWithFsMock(() => ({}));
+    const seeded = new clean.AuthBondGuard({
+      authDir, stateRoot, instanceName: 'restore-fail-bot',
+      now: () => new Date('2026-09-03T12:00:00Z'),
+    }).capture('seed');
+    expect(seeded).toMatchObject({ ok: true, captured: true });
+
+    // Cause a non-'present' status so restoreLatestIfNeeded proceeds, then
+    // fail the last rename (tmp → authDir) after the quarantine rename has
+    // succeeded. The quarantine rename is authDir → <state>/…/quarantine/…,
+    // so intercepting only renames whose DESTINATION is authDir leaves the
+    // quarantine step untouched.
+    actualFs.unlinkSync(join(authDir, 'creds.json'));
+    let renameFailures = 0;
+    const mod = await importGuardWithFsMock((actual) => ({
+      renameSync: vi.fn((
+        src: Parameters<FsModule['renameSync']>[0],
+        dst: Parameters<FsModule['renameSync']>[1],
+      ) => {
+        if (String(dst) === authDir) {
+          renameFailures += 1;
+          throw Object.assign(new Error('EIO: forced restore failure'), { code: 'EIO' });
+        }
+        return actual.renameSync(src, dst);
+      }) as FsModule['renameSync'],
+    }));
+
+    const guard = new mod.AuthBondGuard({
+      authDir, stateRoot, instanceName: 'restore-fail-bot',
+      treeRefreshMinIntervalMs: 5_000,
+    });
+
+    // Cold walk that fails and arms a successor. markTreeStale in the restore
+    // will then cancel this successor, which is the exact window the fix
+    // exists to close.
+    await guard.warmTreeCache();
+
+    const result = guard.restoreLatestIfNeeded();
+
+    // Coverage: the injected failure fired for the reason under test.
+    expect(renameFailures).toBeGreaterThanOrEqual(1);
+    expect(result.attempted).toBe(true);
+    expect(result.restored).toBe(false);
+    expect(result.error).toContain('quarantine=');
+
+    // The catch called invalidateTreeCache('auth-restore-failed'), which
+    // re-fenced the generation with its own reason and re-entered the
+    // scheduler through refreshTreeCache(fromInvalidation=true). That call is
+    // floor-blocked (a successful warm happened seconds ago) but a
+    // fromInvalidation floor-block still arms a successor synchronously, so
+    // both the reason and the armed timer are visible without draining.
+    //
+    // Without the fix the catch does nothing after the quarantine rollback:
+    // lastInvalidationReason stays 'auth-restore-started' (from the try's
+    // markTreeStale) and no successor is armed — markTreeStale cancelled the
+    // one warmTreeCache did not leave behind, and no later call re-arms it.
+    // Both assertions go red under that mutation.
+    const afterCatch = guard.inspectCached().treeProvenance!;
+    expect(afterCatch.lastInvalidationReason).toBe('auth-restore-failed');
+    expect(afterCatch.refreshScheduled).toBe(true);
+  });
+
+  /**
+   * SHOULD-5, guard-side accounting — a transient credential read that
+   * persists past treeStaleRiskMs flips the snapshot's transientReadPersistent
+   * flag from false to true, mirroring how a stale tree observation flips
+   * status to 'unknown' at the same bound. The classifier consumes this flag
+   * to escalate a permanently transient read out of `auth_bond_at_risk`.
+   */
+  it('flips transientReadPersistent after the stale-risk bound while EAGAIN persists', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    // A programmable transient: when true, the credential open throws EAGAIN;
+    // when false, the real open runs. One guard sees both regimes so the
+    // streak reset is tested on the SAME instance, not on a fresh one.
+    const inject = { transient: true };
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        if (String(path) === credsPath && inject.transient) {
+          throw Object.assign(
+            new Error('EAGAIN: resource temporarily unavailable, open'),
+            { code: 'EAGAIN' },
+          );
+        }
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    // A short treeCacheMaxAgeMs so treeStaleRiskMs is 40 ms (× 4). Uses the
+    // same multiple production uses and keeps the test fast.
+    const clock = { value: 0 };
+    const guard = new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'transient-persist-bot',
+      treeCacheMaxAgeMs: 10,
+      monotonicNow: () => clock.value,
+    });
+
+    // First observation: the transient has just been seen, so it is at-risk
+    // but not yet persistent. Coverage assertion for the "flips to true"
+    // claim below — without it that claim could hold vacuously.
+    const first = guard.inspect();
+    expect(first.issues).toContain('creds_json_read_transient:EAGAIN');
+    expect(first.transientReadPersistent).toBe(false);
+
+    // Inside the bound: still not persistent.
+    clock.value = 30;
+    expect(guard.inspect().transientReadPersistent).toBe(false);
+
+    // Past 40 ms (10 × 4): persistent. Removing the >= comparison in
+    // noteTransientReadState — for example forcing the flip to a hardcoded
+    // false — makes this assertion red.
+    clock.value = 41;
+    const persistent = guard.inspect();
+    expect(persistent.issues).toContain('creds_json_read_transient:EAGAIN');
+    expect(persistent.transientReadPersistent).toBe(true);
+
+    // The fault recovers. The streak resets the moment a snapshot no longer
+    // carries a transient — on the SAME guard — so the persistent flag does
+    // not latch on a fault that has already recovered.
+    inject.transient = false;
+    clock.value = 100;
+    const recovered = guard.inspect();
+    expect(recovered.issues).not.toContain('creds_json_read_transient:EAGAIN');
+    expect(recovered.transientReadPersistent).toBe(false);
+
+    // A fresh streak starts from scratch: a transient reappearing after
+    // recovery is at-risk, not immediately persistent, so the guard cannot
+    // carry a stale "persistent" flag past a recovery.
+    inject.transient = true;
+    clock.value = 105;
+    const reappeared = guard.inspect();
+    expect(reappeared.issues).toContain('creds_json_read_transient:EAGAIN');
+    expect(reappeared.transientReadPersistent).toBe(false);
   });
 });

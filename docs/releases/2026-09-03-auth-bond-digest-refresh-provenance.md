@@ -46,16 +46,27 @@
   `auth_dir_read_transient:<errno>` or `creds_json_read_transient:<errno>`
   rather than as `creds_json_unreadable:<errno>`, so a "not right now" is
   distinguishable from a corrupt credential.
-- A transient credential read now degrades rather than pages:
-  `whatsapp.connection.auth_failure_class` reports `auth_bond_at_risk` (HTTP
-  200) instead of `local_corruption_restorable` /
-  `local_corruption_unrestorable`. The auth-bond status itself is unchanged and
-  still fail-closed.
+- A transient credential read now degrades rather than pages while the
+  transient stays short-lived: `whatsapp.connection.auth_failure_class` reports
+  `auth_bond_at_risk` (HTTP 200) instead of `local_corruption_restorable` /
+  `local_corruption_unrestorable`. The auth-bond status itself is unchanged
+  and still fail-closed. Bounded in time the same way `unknown` is: a
+  transient credential read that has persisted continuously past the 120-
+  second stale-risk bound stops suppressing outage escalation and classifies
+  as `local_corruption_*`, so the fleet outage record eventually opens.
+  Escalation is a fleet-outage decision only — the destructive local restore
+  stays withheld on any transient regardless of age.
 - A transient credential read no longer satisfies the precondition for the
   destructive quarantine-and-restore. That repair renames the live auth root
   away and replaces it from a backup, and its only precondition was a
-  non-`present` status. It is now withheld until a definite read, and a refresh
-  retry is armed in the meantime.
+  non-`present` status. It is now withheld until a definite read, which
+  arrives when the credential is re-read live on the next `/health` or the
+  next connect attempt; no tree walk is armed in the meantime because a walk
+  cannot re-establish a credential and would only defer reader-driven walks.
+- A failed auth-bond restore re-enters the convergence path with reason
+  `auth-restore-failed` after the quarantine rollback, so a fresh walk is
+  scheduled under the failure back-off instead of waiting for the next reader
+  to arrive.
 - A refusal raised on the auth ROOT no longer reports `creds.exists: true` for
   a credential it never examined, and no longer lets a root-side fault be
   described as a missing credential.

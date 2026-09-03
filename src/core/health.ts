@@ -1040,7 +1040,20 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   // with the 'unknown' check and BEFORE the fresh-write debounce for the reason
   // that comment gives: degrading costs nothing inside the write window, while
   // a false clean there lands in exactly the window a restore may act on.
-  if (hasTransientAuthReadIssue(authBond.issues)) return 'auth_bond_at_risk';
+  //
+  // Bounded in TIME the same way 'unknown' is: a transient read that has
+  // persisted past the guard's treeStaleRiskMs stops suppressing outage
+  // escalation, so the not-'present' branch below runs and reports
+  // 'local_corruption_*'. The mode-bucket contract then opens an outage on
+  // that class (auth-loss-mode-bucket-contract.ts). The tracking lives on the
+  // guard because a transient prefix is issue text with no age of its own,
+  // and this must be one shared bound across live and cached reads.
+  if (
+    hasTransientAuthReadIssue(authBond.issues)
+    && !authBond.transientReadPersistent
+  ) {
+    return 'auth_bond_at_risk';
+  }
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 

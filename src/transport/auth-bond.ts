@@ -11,6 +11,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -148,6 +149,15 @@ export interface AuthBondSnapshot {
   backup: AuthBondBackupSnapshot;
   issues: string[];
   treeProvenance?: AuthBondTreeProvenance;
+  /**
+   * True once a transient credential read has persisted continuously past
+   * treeStaleRiskMs (the same bound `unknown` uses). Consumed by
+   * classifyAuthFailure to escalate a permanently transient read out of
+   * `auth_bond_at_risk` and onto the local-corruption path, so an outage is
+   * eventually opened. Optional so hand-constructed test snapshots keep
+   * compiling without one; undefined reads as `false`.
+   */
+  transientReadPersistent?: boolean;
 }
 
 export interface AuthBondCaptureResult {
@@ -270,7 +280,11 @@ const MIN_REFRESH_RETRY_INTERVAL_MS = 50;
  * check is still read synchronously, on the main thread, on an unauthenticated
  * GET /health. The held-descriptor swap check is detection and not a boundary
  * (Node exposes no openat(2)), so an ABA swap can still put an attacker-chosen
- * regular file behind this descriptor. This bounds the consequence.
+ * regular file behind this descriptor. The cap is enforced against the
+ * descriptor by a bounded readSync loop, so an actor who extends the object
+ * between the fstat and the read cannot get more than MAX_CREDS_BYTES out of
+ * the reader: the loop refuses `creds_json_too_large:<bytes>` on the first
+ * chunk that would exceed the buffer.
  *
  * A real creds.json is a few kilobytes: the fixtures in this repo write ~150
  * bytes, and a live Baileys credential holds a handful of base64 keys plus one
@@ -444,8 +458,11 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
   // `credsExists` defaults to FALSE because most refusals happen on the ROOT,
   // before the child is looked at at all, and a snapshot that claims
   // creds.json exists while carrying null mode, size, mtime and hash is
-  // internally inconsistent telemetry. Only a refusal that actually observed
-  // the child passes true.
+  // internally inconsistent telemetry. Only a refusal that observed the child
+  // AND can still vouch for the root it was resolved through passes true —
+  // `auth_dir_replaced_during_read` and `creds_json_too_large:<bytes>` both
+  // opened the child but cannot vouch for the pathname the descriptor still
+  // names, so they take the false default even though a child was looked at.
   const refused = (kindIssue: string, credsExists = false): CredsRead => ({
     snapshot: { path, exists: credsExists, mode: null, size: null, mtime: null, sha256: null, error: null },
     bytes: null,
@@ -533,7 +550,33 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       if (rootNow.dev !== rootStat.dev || rootNow.ino !== rootStat.ino) {
         return refused('auth_dir_replaced_during_read');
       }
-      const bytes = readFileSync(fd);
+      // Enforce the cap against the DESCRIPTOR, not st.size, so an actor who
+      // extends the object between the fstat above and this read cannot get
+      // more bytes past the check than the buffer holds. readFileSync(fd) took
+      // its own stat internally, which made the earlier size check informative
+      // and not load-bearing. See MAX_CREDS_BYTES.
+      const buf = Buffer.allocUnsafe(MAX_CREDS_BYTES);
+      let filled = 0;
+      while (filled < MAX_CREDS_BYTES) {
+        const n = readSync(fd, buf, filled, MAX_CREDS_BYTES - filled, null);
+        if (n === 0) break;
+        filled += n;
+      }
+      // The buffer is full and the descriptor still has more to give. Refuse
+      // by kind: reported bytes are the ones observed on the descriptor, which
+      // is the same shape as the fstat-based refusal above.
+      const probe = Buffer.allocUnsafe(1);
+      const overflow = filled === MAX_CREDS_BYTES && readSync(fd, probe, 0, 1, null) > 0;
+      if (overflow) {
+        return {
+          snapshot: present(st, null, null),
+          bytes: null,
+          kindIssue: `creds_json_too_large:${filled + 1}`,
+        };
+      }
+      // Copy the filled prefix out; the MAX_CREDS_BYTES scratch buffer stays
+      // local so a ~150 byte credential is not held with a 1 MiB backing.
+      const bytes = Buffer.from(buf.subarray(0, filled));
       return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
     } catch (err) {
       let st = null;
@@ -621,6 +664,10 @@ function isVanishedEntry(err: unknown): boolean {
  * carries no code — an unlabelled failure is still a failure, and returning
  * null there would make it indistinguishable from success.
  */
+function errnoCode(err: unknown): string {
+  return (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
+}
+
 /**
  * Errnos that mean "not right now", never "this object is broken".
  *
@@ -630,11 +677,6 @@ function isVanishedEntry(err: unknown): boolean {
  */
 function isTransientOpenErrno(code: string): boolean {
   return code === 'EAGAIN' || code === 'EWOULDBLOCK';
-}
-
-
-function errnoCode(err: unknown): string {
-  return (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
 }
 
 export interface AuthTreeObservation {
@@ -1028,6 +1070,14 @@ export class AuthBondGuard {
    */
   private treeSuccessorEpoch = 0;
   /**
+   * Monotonic timestamp of the first snapshot in the current transient-read
+   * streak, cleared as soon as a snapshot no longer carries one. Compared to
+   * treeStaleRiskMs so a permanently transient credential eventually stops
+   * suppressing outage escalation. See the transientReadPersistent field on
+   * AuthBondSnapshot and classifyAuthFailure in src/core/health.ts.
+   */
+  private transientReadStartedAtMs: number | null = null;
+  /**
    * Monotonic clock for digest age.
    *
    * Age must never come from wall time: a clock adjustment backwards would make
@@ -1240,9 +1290,13 @@ export class AuthBondGuard {
    * does not go through it. Widening the floor by the same factor puts
    * reader-driven and mutation-driven walks on one budget.
    *
-   * It stays a FLOOR, not a lock. Once the interval has elapsed the next read
-   * starts a walk in the ordinary way, whether or not a successor is queued, so
-   * a reader can still be the thing that observes a recovered tree.
+   * It stays a FLOOR, not a lock. The floor is consulted only when NO
+   * successor is armed: refreshTreeCache returns above at the armed-successor
+   * check before this widening is reached, so in ordinary failing operation
+   * the timer is the binding guard and this widening is a backstop for the
+   * paths where no timer is queued. The stubbed-scheduler test at
+   * tests/core/health-auth-bond-digest-cost.test.ts:1426 holds that backstop
+   * directly by removing the outer guard.
    *
    * The price is detection latency on the recovery edge: after four
    * consecutive failures a reader re-observes a tree that has come back up to
@@ -1375,8 +1429,9 @@ export class AuthBondGuard {
     // last walk's START and the successor's wait from its END, so the floor can
     // elapse while the timer is still pending, which is the window a 5 s poller
     // used to walk through. Mutations are deliberately NOT gated here — a
-    // mutation is new information, and markTreeStale has already re-timed the
-    // successor when the episode changed.
+    // mutation is new information, and markTreeStale has already cancelled
+    // the successor at the START of a new episode; the replacement is armed
+    // later, by the floor branch below or by the walk's own `finally`.
     if (!force && !fromInvalidation && this.treeSuccessorTimer !== null) {
       return Promise.resolve();
     }
@@ -1586,6 +1641,7 @@ export class AuthBondGuard {
       status = 'unknown';
       issues.push(unknownReason);
     }
+    const transientReadPersistent = this.noteTransientReadState(issues);
     return {
       status,
       authDir,
@@ -1597,7 +1653,29 @@ export class AuthBondGuard {
       backup: this.backupSnapshot(),
       issues,
       ...(treeProvenance ? { treeProvenance } : {}),
+      transientReadPersistent,
     };
+  }
+
+  /**
+   * Update the transient-read streak and report whether it has persisted past
+   * the stale-risk bound. Called at the tail of every buildSnapshot so live
+   * and cached snapshots share the same accounting: the streak starts on the
+   * first transient-carrying snapshot, is reset by the first snapshot without
+   * one, and flips to persistent at the same age the tree observation would
+   * flip to `unknown`.
+   */
+  private noteTransientReadState(issues: readonly string[]): boolean {
+    if (!hasTransientAuthReadIssue(issues)) {
+      this.transientReadStartedAtMs = null;
+      return false;
+    }
+    const nowMs = this.monotonicNow();
+    if (this.transientReadStartedAtMs === null) {
+      this.transientReadStartedAtMs = nowMs;
+      return false;
+    }
+    return nowMs - this.transientReadStartedAtMs >= this.treeStaleRiskMs;
   }
 
   capture(reason: string): AuthBondCaptureResult {
@@ -1752,13 +1830,15 @@ export class AuthBondGuard {
     // delay before a genuine fault reaches the restore, and delay is the safe
     // direction for a destructive path.
     if (hasTransientAuthReadIssue(before.issues)) {
-      // Converge without conflating two faults: arm a successor if none is
-      // armed, so the guard re-observes on its own rather than waiting for a
-      // caller. Deliberately NOT noteRefreshNeedsRetry() — the failure streak
-      // belongs to tree walks, and a credential read fault is not a walk
-      // fault. Raising it here would re-introduce exactly the cross-episode
-      // contamination the streak scoping removes.
-      this.scheduleTreeRefreshSuccessor();
+      // Withheld until the next connect attempt produces a definite read.
+      // No tree walk is armed here: restoreLatestIfNeeded reads through
+      // inspect() (the live path), which never consults the cached tree, so
+      // a tree walk cannot re-establish the credential and would only defer
+      // reader-driven walks in the meantime. The credential is re-read live
+      // on every /health and by every connect attempt, so the definite read
+      // that unblocks this path arrives whenever the transient stops. The
+      // failure streak stays clean deliberately — noteRefreshNeedsRetry() is
+      // for tree walks, and a credential read fault is not a walk fault.
       return {
         attempted: false,
         restored: false,
@@ -1882,6 +1962,14 @@ export class AuthBondGuard {
           // Preserve the original failure; the alert evidence includes the quarantine path.
         }
       }
+      // The start of this attempt called markTreeStale('auth-restore-started'),
+      // which cancelled any successor armed against the previous streak and
+      // scheduled none of its own. Reaching this catch leaves treeInvalidated
+      // true with no walk in flight and no timer queued, so nothing would
+      // converge until a later reader arrived — precisely the property
+      // invalidateTreeCache's contract removes. Re-enter the normal
+      // convergence path so a walk lands under the failure back-off.
+      this.invalidateTreeCache('auth-restore-failed');
       const error = errorMessage(err);
       this.lastRestoreAt = restoredAt.toISOString();
       this.lastRestoreSource = latestBackupPath;
