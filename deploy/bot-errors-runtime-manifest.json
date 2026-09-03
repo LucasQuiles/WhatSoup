@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "ea86d41f4af670fc0227f50cacc06c3e7fdbdd0f566333826d7c8d303bc9441d",
+      "sha256": "386eb52ed51b6fbd7533d9be1279b066481351ba4d69bbf01ef655ff8f9e1d27",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -377,7 +377,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "c756f7497a443cabae2c06f1ccb9d15bbed07b037a73f0f36ef537f6abae797d",
+      "sha256": "b79eff923e3b1e9b2b589a207669f1312e3ec8ad2b5c130aeb189c6626e486e0",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -392,7 +392,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "38f499eb39ac628c99579470c839f6c56e7604de4e839e5036bb96539b8efffd",
+      "sha256": "a00b0441c15b9571680132784ef4300b6e34e0462017e736d3d96beb3c6096cb",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
