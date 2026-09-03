@@ -778,17 +778,100 @@ def unrenderable_alert_signal(event: Any, *, kind: str = "", severity: str = "")
     }
 
 
+def _unrenderable_breadcrumb_id(dest: Path) -> str:
+    """A stable, content-free name for one quarantined event's pending signal.
+
+    Derived from the durable artifact's own name so the same event always maps to
+    the same breadcrumb, and digested because that name embeds the producer's
+    queue filename, which is unvalidated text.
+    """
+    return hashlib.sha256(dest.name.encode("utf-8")).hexdigest()[:32]
+
+
+def write_unrenderable_breadcrumb(paths: dict[str, Path], dest: Path, signal: dict[str, str]) -> str:
+    """Persist the obliged operator signal BEFORE the queue file is moved (#2386).
+
+    The move is durable; the signal was not. Holding it only in module globals
+    until the end-of-cycle fold meant a process that died in between left the
+    event permanently out of the queue with nothing ever paged about it, and no
+    durable key from which a later process could tell that a page was owed. This
+    is the crash-durability of the SIGNAL, which is a different property from the
+    same-process telemetry counter and is not covered by it.
+
+    The breadcrumb holds the canonical signal and nothing else, so the artifact
+    that survives the crash is not itself a content channel.
+    """
+    crumb_id = _unrenderable_breadcrumb_id(dest)
+    directory = paths.get("unrenderable_signals")
+    if directory is None:
+        return crumb_id
+    ensure_private_dir(directory)
+    target = directory / f"{crumb_id}.json"
+    tmp = directory / f".{crumb_id}.tmp"
+    payload = json.dumps({"signal": signal, "breadcrumb": crumb_id}, sort_keys=True)
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
+    return crumb_id
+
+
+def reconcile_unrenderable_signals(paths: dict[str, Path]) -> int:
+    """Adopt breadcrumbs this process did not write, so a restart still pages.
+
+    Ack-after-publish: a breadcrumb is removed only once its page has been
+    published or deliberately debounced, so a death before publication retries
+    and a death after it is absorbed by the per-identity throttle rather than
+    producing a second page.
+    """
+    directory = paths.get("unrenderable_signals")
+    if directory is None or not directory.is_dir():
+        return 0
+    known = {entry.get("breadcrumb") for entry in _pending_unrenderable_signals}
+    adopted = 0
+    for crumb in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(crumb.read_text(encoding="utf-8"))
+            signal = record["signal"]
+            crumb_id = str(record["breadcrumb"])
+        except Exception:  # noqa: BLE001 -- a damaged crumb must not wedge the cycle
+            continue
+        if crumb_id in known:
+            continue
+        if len(_pending_unrenderable_signals) >= UNRENDERABLE_SIGNAL_CAP:
+            break
+        _pending_unrenderable_signals.append({"signal": signal, "breadcrumb": crumb_id})
+        known.add(crumb_id)
+        adopted += 1
+    return adopted
+
+
+def drop_unrenderable_breadcrumbs(paths: dict[str, Path], crumb_ids: set[str]) -> None:
+    """Remove the breadcrumbs whose signal is now published or debounced."""
+    directory = paths.get("unrenderable_signals")
+    if directory is None:
+        return
+    for crumb_id in crumb_ids:
+        try:
+            (directory / f"{crumb_id}.json").unlink()
+        except FileNotFoundError:
+            continue
+
+
 def note_unrenderable_quarantine(
-    event: Any = None, *, kind: str = "", severity: str = ""
+    event: Any = None, *, kind: str = "", severity: str = "", breadcrumb: str = ""
 ) -> None:
     """Record that one event was quarantined for unrenderable alert content."""
     global _pending_unrenderable_quarantines, _unrenderable_quarantines_total
     _pending_unrenderable_quarantines += 1
     _unrenderable_quarantines_total += 1
     if len(_pending_unrenderable_signals) < UNRENDERABLE_SIGNAL_CAP:
-        _pending_unrenderable_signals.append(
-            unrenderable_alert_signal(event, kind=kind, severity=severity)
-        )
+        _pending_unrenderable_signals.append({
+            "signal": unrenderable_alert_signal(event, kind=kind, severity=severity),
+            "breadcrumb": breadcrumb,
+        })
 
 
 def unrenderable_quarantine_total() -> int:
@@ -902,6 +985,7 @@ def state_paths() -> dict[str, Path]:
         "storm_manifests": root / "storm-manifests",
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
+        "unrenderable_signals": root / "unrenderable-signals",
         "testleak": root / "testleak",
         "writefail_recovered": root / "writefail-recovered",
         "writefail_quarantine": root / "writefail-quarantine",
@@ -952,6 +1036,7 @@ def setup_dirs() -> dict[str, Path]:
         "storm_manifests",
         "suppressed",
         "quarantine",
+        "unrenderable_signals",
         "testleak",
         "writefail_recovered",
         "writefail_quarantine",
@@ -6164,9 +6249,14 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
         return 0
 
     grouped: dict[str, dict[str, Any]] = {}
-    for signal in _pending_unrenderable_signals:
-        entry = grouped.setdefault(signal["identity"], {"signal": signal, "count": 0})
+    for pending in _pending_unrenderable_signals:
+        signal = pending["signal"]
+        entry = grouped.setdefault(
+            signal["identity"], {"signal": signal, "count": 0, "breadcrumbs": set()}
+        )
         entry["count"] = int(entry["count"]) + 1
+        if pending.get("breadcrumb"):
+            entry["breadcrumbs"].add(pending["breadcrumb"])
 
     state = read_meta_state(paths)
     seen = state.get("unrenderableMetaAlertAtEpoch")
@@ -6222,9 +6312,17 @@ def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
     }
     state["unrenderableMetaAlertAtEpoch"] = seen
     write_meta_state(paths, state)
+    # Ack after publish: a breadcrumb only goes once its page is published or
+    # deliberately debounced, so a death before publication retries next cycle.
+    drop_unrenderable_breadcrumbs(paths, {
+        crumb
+        for identity, entry in grouped.items()
+        if identity in settled
+        for crumb in entry["breadcrumbs"]
+    })
     _pending_unrenderable_signals = [
-        signal for signal in _pending_unrenderable_signals
-        if signal["identity"] not in settled
+        pending for pending in _pending_unrenderable_signals
+        if pending["signal"]["identity"] not in settled
     ]
     return queued
 
@@ -6413,15 +6511,30 @@ def quarantine_invalid_envelope(
     """
 
     ensure_private_dir(quarantine_dir)
-    if code == UNRENDERABLE_ALERT_CONTENT_CODE:
-        note_unrenderable_quarantine(event, kind=kind, severity=severity)
     reason = safe_segment(code)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
+    if code == UNRENDERABLE_ALERT_CONTENT_CODE:
+        signal = unrenderable_alert_signal(event, kind=kind, severity=severity)
+        # BEFORE the move: after it the queue file is gone and the obligation to
+        # page about it exists only in this process. A crash in that window left
+        # the event permanently dropped and silent.
+        breadcrumb = write_unrenderable_breadcrumb(_state_paths_for(quarantine_dir), dest, signal)
+        note_unrenderable_quarantine(event, kind=kind, severity=severity, breadcrumb=breadcrumb)
     try:
         shutil.move(str(path), str(dest))
     except FileNotFoundError:
         return dest
     return dest
+
+
+def _state_paths_for(quarantine_dir: Path) -> dict[str, Path]:
+    """The breadcrumb directory beside a given quarantine directory.
+
+    quarantine_invalid_envelope takes a directory rather than the paths map --
+    several callers, including tests, pass a bare temporary directory -- so the
+    sibling is derived rather than looked up.
+    """
+    return {"unrenderable_signals": quarantine_dir.parent / "unrenderable-signals"}
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
@@ -7278,6 +7391,10 @@ def run_once(max_events: int) -> dict[str, Any]:
             # pass below calls ready(), which is where an unrenderable event is
             # removed from the queue.
             quarantine_mark = unrenderable_quarantine_total()
+            # #2386: adopt any signal a previous process owed but died before
+            # publishing. Runs before the passes that can quarantine, so a crumb
+            # this cycle writes is not adopted twice.
+            reconcile_unrenderable_signals(paths)
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)

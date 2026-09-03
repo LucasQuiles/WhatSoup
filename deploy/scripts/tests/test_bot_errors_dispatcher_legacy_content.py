@@ -1795,3 +1795,107 @@ def test_no_signal_value_carries_a_newline_or_free_text(tmp_path, monkeypatch) -
     assert set(signal) == set(patterns), sorted(signal)
     for field, pattern in patterns.items():
         assert re.fullmatch(pattern, signal[field]), (field, signal[field])
+
+
+# ---------------------------------------------------------------------------
+# The operator signal survives a process death after the move (B3)
+# ---------------------------------------------------------------------------
+# The quarantine move is durable. The signal it obliges was held only in module
+# globals until the end-of-cycle fold, so a process that died in between left the
+# event permanently out of the queue with nothing ever paged about it. Same-
+# process telemetry durability is a different property and does not cover this.
+
+
+def _dispatcher_bound_to(root: Path):
+    """A FRESH module object against an existing state root: the death boundary."""
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(root)
+    os.environ["BOT_ERRORS_OUTBOX_DIR"] = str(root / "outbox")
+    os.environ["BOT_ERRORS_JID"] = "12345@g.us"
+    mod = _load_module()
+    mod.send_whatsapp = lambda text, socket_path="": None
+    return mod
+
+
+def test_a_crash_after_the_move_still_pages_exactly_once(tmp_path, monkeypatch) -> None:
+    """Quarantine, die, restart: one page, and not a second one on the next pass."""
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+
+    before = _dispatcher_bound_to(root)
+    paths = before.setup_dirs()
+    _queue_event(paths, "aaa-crash.json", _unrenderable_event(id="crash-001"))
+    # Quarantine only. The process dies here: no fold, no publication.
+    assert before.load_valid_event_or_quarantine(
+        paths["outbox"] / "aaa-crash.json", paths["quarantine"]
+    ) is None
+    assert len(list(paths["quarantine"].iterdir())) == 1, "the move must be durable"
+    assert _queued_meta_alerts(paths, before) == [], "nothing published before the death"
+
+    after = _dispatcher_bound_to(root)
+    after.run_once(max_events=25)
+    alerts = _queued_meta_alerts(paths, after)
+    assert len(alerts) == 1, f"the restart must page exactly once, got {len(alerts)}"
+    assert UNRENDERABLE_NONCE not in json.dumps(alerts[0])
+
+    # Another pass, and a third process, must not page again.
+    again = _dispatcher_bound_to(root)
+    again.run_once(max_events=25)
+    assert len(_queued_meta_alerts(paths, again)) <= 1, "a replay must not duplicate the page"
+
+
+def test_the_durable_breadcrumb_is_content_free(tmp_path, monkeypatch) -> None:
+    """The thing that survives the crash must not itself be a content channel."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    event = _identity_hostile_event()
+    _queue_event(paths, "aaa-breadcrumb.json", event)
+    mod.load_valid_event_or_quarantine(paths["outbox"] / "aaa-breadcrumb.json", paths["quarantine"])
+
+    crumbs = sorted(paths["unrenderable_signals"].glob("*.json"))
+    assert len(crumbs) == 1, crumbs
+    body = crumbs[0].read_text(encoding="utf-8")
+    for marker in IDENTITY_MARKERS.values():
+        assert marker not in body, marker
+    assert UNRENDERABLE_NONCE not in body
+    # The filename is derived, not the producer's queue name.
+    assert re.fullmatch(r"[0-9a-f]{32}\.json", crumbs[0].name), crumbs[0].name
+    record = json.loads(body)
+    assert set(record["signal"]) == {
+        "reason", "kind", "severity", "failureClass", "unrenderableFields", "identity",
+    }, record
+
+
+def test_a_published_breadcrumb_is_acked_and_never_pages_again(tmp_path, monkeypatch) -> None:
+    """Ack-after-publish, checked past the throttle window.
+
+    Inside the window the per-identity throttle hides a breadcrumb that was never
+    removed, so a replay test that stays inside it cannot tell the two apart. Once
+    the window expires an un-acked breadcrumb is adopted again and pages a second
+    time for an event that was already reported, and the directory grows without
+    bound. Both are asserted here.
+    """
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+
+    mod = _dispatcher_bound_to(root)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-ack.json", _unrenderable_event(id="ack-001"))
+    mod.load_valid_event_or_quarantine(paths["outbox"] / "aaa-ack.json", paths["quarantine"])
+    assert len(list(paths["unrenderable_signals"].glob("*.json"))) == 1
+
+    now = int(time.time())
+    assert mod.queue_unrenderable_meta_alerts(paths, now) == 1
+    assert list(paths["unrenderable_signals"].glob("*.json")) == [], (
+        "a published signal must be acked, or it is adopted again and leaks"
+    )
+
+    # A fresh process, past the throttle window: nothing is owed any more.
+    later = _dispatcher_bound_to(root)
+    beyond = now + mod.UNRENDERABLE_META_ALERT_THROTTLE_SECONDS + 1
+    assert later.reconcile_unrenderable_signals(paths) == 0
+    assert later.queue_unrenderable_meta_alerts(paths, beyond) == 0
+    assert len(_queued_meta_alerts(paths, later)) == 1, "exactly one page, ever"
