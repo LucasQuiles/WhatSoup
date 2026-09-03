@@ -538,3 +538,126 @@ def test_the_tombstone_ttl_matches_the_documented_value(tmp_path):
     assert not evicted_at(documented + 1), (
         f"a tombstone {documented + 1}s old is past the documented window and must expire"
     )
+
+
+# ---------------------------------------------------------------------------
+# Saturation: more cycling keys than BOTH maps can hold together.
+# ---------------------------------------------------------------------------
+#
+# A key is suppressed only if it sits in conversationScopes or carries an exact
+# tombstone. Both maps are bounded by the same cap with oldest-drop, so at most
+# 2C keys can be known at once. Cycling 2C+1 distinct keys guarantees at least
+# one key is in neither map every round: it pages, and recording it evicts
+# another key and drops another tombstone, cascading through the whole set
+# inside one cycle. Exactness cannot survive that -- "every new conversation
+# pages" and "every evicted conversation stays suppressed" cannot both hold in
+# finite exact state -- so the contract says which yields: above saturation,
+# suppression wins, and the state file records that it is in force.
+
+
+def _seed_open_incident_without_records(mod, paths, key: str, now: int) -> None:
+    """An open incident whose scope subtree is gone, neighbours untouched."""
+    from lib.controller_state import open_controller_state
+
+    session = open_controller_state(
+        paths["incident_state"],
+        component="dispatcher-incident",
+        bootstrap=mod.dispatcher_bootstrap_state,
+        validate_payload=mod.validate_dispatcher_state,
+        lock_timeout_seconds=10,
+    )
+    with session:
+        result = session.load()
+        payload = dict(result.payload or {})
+        payload.setdefault("openIncidents", {})[key] = {
+            "status": "open", "openedAt": now - 600, "lastSeenAt": now,
+        }
+        payload.setdefault("lastSentAt", {})[key] = now - 60
+        session.save(payload, result.capability)
+
+
+def test_cycling_more_keys_than_both_maps_hold_does_not_re_page_every_round(tmp_path):
+    """MUST-4: above 2C keys the gate must not amplify."""
+    cap = 2
+    keys = cap * 2 + 1
+    mod = _load(tmp_path / "saturation-small", cap)
+    paths = _dirs(mod)
+
+    pages = [_round(mod, paths, keys, rnd) for rnd in (1, 2, 3, 4)]
+
+    assert pages == [keys, 0, 0, 0], (
+        "cycling more keys than the scope map and the tombstone map can hold "
+        f"together must not re-page every round: {pages}"
+    )
+
+
+def test_the_saturation_threshold_is_not_a_small_number_artifact(tmp_path):
+    """Same at the shipped cap's scale."""
+    cap = 8
+    keys = cap * 2 + 1
+    mod = _load(tmp_path / "saturation-large", cap)
+    paths = _dirs(mod)
+
+    pages = [_round(mod, paths, keys, rnd) for rnd in (1, 2, 3, 4)]
+
+    assert pages == [keys, 0, 0, 0], f"pages per round = {pages}"
+
+
+def test_a_never_evicted_key_pages_while_its_neighbours_are_fresh(tmp_path):
+    """The leg that discriminates between the two candidate saturation rules.
+
+    Cap C with C fresh keys live, and a key K whose records aged out while its
+    incident stayed open. K's next conversation is one nobody has been told
+    about, so it must page. A rule keyed on "the map is at capacity" silences
+    it; a rule keyed on "a tombstone was dropped for capacity" does not,
+    because nothing has been dropped here.
+    """
+    cap = 2
+    mod = _load(tmp_path / "fresh-neighbours", cap)
+    paths = _dirs(mod)
+
+    # C keys, so the map is exactly at capacity with nothing evicted.
+    first = _round(mod, paths, cap, 1)
+    assert first == cap, first
+    state = mod.load_incident_state(paths)
+    assert len(state.get("conversationScopes") or {}) == cap, "no eviction may have occurred"
+    assert not (state.get(mod.CONVERSATION_SCOPE_EVICTED_FIELD) or {}), "no tombstones either"
+
+    # K: an open incident whose scope records aged out, neighbours still fresh.
+    now = int(time.time())
+    key_index = cap + 300
+    key = f"{MACHINE}|instance-{key_index:04d}|{SOURCE}"
+    _seed_open_incident_without_records(mod, paths, key, now)
+
+    pages = _fresh_conversation(mod, paths, key_index, 9100, 2)
+
+    assert pages == 1, (
+        "a conversation nobody has been told about must page while the map is "
+        f"merely full and nothing has been dropped: pages = {pages}"
+    )
+
+
+def test_the_drop_marker_is_written_then_expires(tmp_path):
+    """The saturation signal is fresh after a drop and gone once it ages out."""
+    cap = 2
+    mod = _load(tmp_path / "drop-marker", cap)
+    paths = _dirs(mod)
+
+    _round(mod, paths, cap * 2 + 1, 1)
+    state = mod.load_incident_state(paths)
+    marker = state.get(mod.CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD) or {}
+    assert marker.get("tombstonesDroppedAt"), (
+        f"a tombstone dropped for capacity must stamp the marker: {marker!r}"
+    )
+    assert marker.get("tombstonesDroppedCount", 0) >= 1, marker
+    assert mod.conversation_scopes_have_overflowed(state), "the freshness test must hold"
+
+    # Age the stamp past the window: the sweep clears it and saturation lifts.
+    state[mod.CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD]["tombstonesDroppedAt"] = (
+        int(time.time()) - SHIPPED_RETENTION_SECONDS - 60
+    )
+    mod.sweep_conversation_scopes(state, int(time.time()))
+    assert not mod.conversation_scopes_have_overflowed(state), (
+        f"an aged drop marker must stop asserting saturation: "
+        f"{state.get(mod.CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)!r}"
+    )
