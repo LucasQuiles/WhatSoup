@@ -1622,3 +1622,58 @@ def test_both_single_token_signal_fields_go_through_safe_segment() -> None:
     assert wrapped.get("source") == "safe_segment", wrapped
     assert wrapped.get("failureClass") == "safe_segment", wrapped
     assert wrapped.get("incidentKey") == "_bounded_signal_token", wrapped
+
+
+# ---------------------------------------------------------------------------
+# One quarantined event is accounted ONCE (B1)
+# ---------------------------------------------------------------------------
+# Quarantine can happen at two sites. The pre-loop passes reach it through
+# ready(), before the cycle counts anything, which is why the cycle folds a
+# delta. process_one reaches it AFTER `processed` was incremented and returns a
+# failure, so the same event is counted by both mechanisms.
+
+
+def test_a_rewrite_between_ready_and_claim_is_accounted_once(tmp_path, monkeypatch) -> None:
+    """The claim-race quarantine must not be counted by both mechanisms.
+
+    A healthy event passes ready(), then the file is rewritten before the claim
+    reads it -- the exact window the second quarantine site exists for. The
+    cycle's blanket delta and process_one's own failure both describe THAT event,
+    so a run reporting one quarantine reported two processed and two failed.
+    All four counters are asserted together: quarantine and signal counts alone
+    stay correct under the double count and cannot falsify it.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-race.json", _make_event(
+        id="race-001", summary="healthy at scan time", evidence="healthy evidence",
+    ))
+
+    real_claim = mod.claim
+
+    def rewriting_claim(path, processing_dir):
+        claimed = real_claim(path, processing_dir)
+        # The rewrite the second site exists for: renderable at ready(), not
+        # renderable by the time the claimed file is parsed.
+        claimed.write_text(json.dumps(_make_event(
+            id="race-001", summary=[UNRENDERABLE_NONCE], evidence="evidence",
+        )), encoding="utf-8")
+        return claimed
+
+    monkeypatch.setattr(mod, "claim", rewriting_claim)
+
+    result = mod.run_once(max_events=25)
+
+    observed = {
+        "processed": result["processed"],
+        "failed": result["failed"],
+        "unrenderableQuarantined": result["unrenderableQuarantined"],
+        "unrenderableMetaAlerted": result["unrenderableMetaAlerted"],
+    }
+    assert observed == {
+        "processed": 1,
+        "failed": 1,
+        "unrenderableQuarantined": 1,
+        "unrenderableMetaAlerted": 1,
+    }, observed
+    assert result["lastError"] == mod.UNRENDERABLE_ALERT_CONTENT_CODE

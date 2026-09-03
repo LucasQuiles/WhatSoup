@@ -7280,6 +7280,12 @@ def run_once(max_events: int) -> dict[str, Any]:
             sent = 0
             suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
             failed = 0
+            # #2386: quarantines the LOOP already accounted. The cycle folds a
+            # delta because the pre-loop passes can quarantine before the loop
+            # runs, but process_one's own site fires after `processed` was
+            # incremented and returns a failure, so that event is described by
+            # both mechanisms and must be folded only once.
+            claim_race_quarantines = 0
             test_leak_dropped = 0
             last_error = None
             touched_incident_keys: set[str] = set()
@@ -7311,7 +7317,9 @@ def run_once(max_events: int) -> dict[str, Any]:
                 except Exception:
                     pass
                 processed += 1
+                claim_mark = unrenderable_quarantine_total()
                 ok, detail = process_one(path, paths, incident=_incident_cycle)
+                claim_race_quarantines += unrenderable_quarantine_total() - claim_mark
                 if detail == "test_leak":
                     test_leak_dropped += 1
                 elif ok:
@@ -7380,8 +7388,12 @@ def run_once(max_events: int) -> dict[str, Any]:
                 # the count off the cycle delta catches it wherever it happened.
                 # `failed` carries it so existing health inspection and the one-shot
                 # exit status observe the drop with no new predicate.
-                processed += unrenderable_quarantined
-                failed += unrenderable_quarantined
+                # Only the events the loop did NOT already account for. The
+                # reported count stays the true total: it names the unrenderable
+                # class, not the bookkeeping.
+                unaccounted = unrenderable_quarantined - claim_race_quarantines
+                processed += unaccounted
+                failed += unaccounted
                 last_error = UNRENDERABLE_ALERT_CONTENT_CODE
 
             record_state(
