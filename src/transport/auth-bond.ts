@@ -93,7 +93,13 @@ export interface AuthBondTreeProvenance {
   /** Age of the cached walk in milliseconds; null when source is 'absent'. */
   readonly ageMs: number | null;
   readonly refreshInFlight: boolean;
-  /** Completed refreshes since construction. */
+  /**
+   * Walks that PUBLISHED a new observation since construction.
+   *
+   * Not the number of completed walks: `incomplete`, `failed` and `superseded`
+   * all complete without incrementing this. `refreshAttemptCount` is the cost
+   * counterpart.
+   */
   readonly refreshCount: number;
   readonly lastInvalidationReason: string | null;
   /**
@@ -107,6 +113,20 @@ export interface AuthBondTreeProvenance {
    */
   readonly lastRefreshKind: TreeRefreshKind;
   readonly lastRefreshReason: string | null;
+  /**
+   * A successor walk is queued but has not started.
+   *
+   * Separate from `lastRefreshKind`, which describes the last COMPLETED attempt.
+   * Without this, a reader immediately after a floor-blocked invalidation sees
+   * `source: 'stale'`, `refreshInFlight: false`, `lastRefreshKind: 'fresh'` —
+   * four fields that together say "the last walk succeeded and nothing is
+   * happening" while a walk is in fact queued.
+   */
+  readonly refreshScheduled: boolean;
+  /** Milliseconds until the queued successor may start; null when none is queued. */
+  readonly nextRefreshEligibleInMs: number | null;
+  /** Walks STARTED since construction, including ones that did not publish. */
+  readonly refreshAttemptCount: number;
 }
 
 export type TreeRefreshKind = 'none' | 'fresh' | 'incomplete' | 'failed' | 'superseded';
@@ -188,6 +208,11 @@ interface AuthBondGuardOptions {
 interface AuthBondTreeObservation {
   readonly hardenIssues: string[];
   readonly tree: AuthTreeObservation | null;
+  /**
+   * MONOTONIC milliseconds (see AuthBondGuard.monotonicNow), never wall time.
+   * Age is derived from this, and a wall-clock rollback would otherwise make a
+   * stale digest read as fresh.
+   */
   readonly observedAtMs: number;
 }
 
@@ -224,17 +249,18 @@ const DEFAULT_TREE_CACHE_MAX_AGE_MS = 30_000;
  * this bound; only a genuinely stuck refresh can.
  */
 const TREE_STALE_RISK_MULTIPLE = 4;
+/** Backoff ceiling for walks that keep failing: 2^4 = 16 refresh floors. */
+const MAX_REFRESH_BACKOFF_STEPS = 4;
 /**
  * Floor between the STARTS of two tree walks.
  *
- * Needed because one of the two invalidation triggers is far coarser than its
- * name suggests: `hasAuthKeyMaterialChurnSignal`
- * (src/transport/connection.ts) returns true for `messages.upsert`,
- * `messages.update`, `message-receipt.update`, `messages.reaction`,
- * `groups.*`, `messaging-history.set` and `lid-mapping.update` — every inbound
- * message batch, not every key-material write. Without a floor, a busy
- * instance would start a fresh 614 ms walk per batch and spend more CPU on the
- * digest than the per-request walk this change exists to remove.
+ * Needed because the key-store seam fires far more often than once per send.
+ * Baileys writes one Signal session per recipient device
+ * (node_modules/@whiskeysockets/baileys/lib/Signal/libsignal.js:361) plus a few
+ * constant writes per send, so a 50-device group send drives roughly 50
+ * invalidations. Without a floor, a busy instance would start a fresh 614 ms
+ * walk per write and spend more CPU on the digest than the per-request walk
+ * this change exists to remove.
  *
  * Five seconds is chosen as a strict non-regression bound: the fleet polls
  * /health every 5 s, so the pre-change code performed two full walks every 5 s
@@ -350,7 +376,12 @@ interface CredsRead {
   readonly kindIssue: string | null;
 }
 
-function readCredsThroughNoFollow(path: string): CredsRead {
+/**
+ * O_DIRECTORY is absent on some platforms; 0 is a safe no-op in an OR of flags.
+ */
+const O_DIRECTORY_FLAG = fsConstants.O_DIRECTORY ?? 0;
+
+function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
   const absent = (error: string | null): CredsRead => ({
     snapshot: { path, exists: false, mode: null, size: null, mtime: null, sha256: null, error },
     bytes: null,
@@ -370,47 +401,85 @@ function readCredsThroughNoFollow(path: string): CredsRead {
     error,
   });
 
-  let fd: number;
+  const refused = (kindIssue: string): CredsRead => ({
+    snapshot: { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: null },
+    bytes: null,
+    kindIssue,
+  });
+
+  // Pin the auth root by descriptor first. O_DIRECTORY refuses a non-directory
+  // and O_NOFOLLOW refuses a symlinked root, both in the kernel, before any
+  // child path is resolved through it. Holding the descriptor open across the
+  // child open is what lets the swap check below mean anything: on POSIX the
+  // descriptor keeps referring to the directory we validated even if the path
+  // is renamed away underneath it.
+  //
+  // Node exposes no openat(2), so the child is still opened by path. This is
+  // therefore swap DETECTION anchored on a held descriptor, not true openat
+  // semantics; the window is one open wide and a swap inside it is refused.
+  let rootFd: number;
   try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    rootFd = openSync(authDir, fsConstants.O_RDONLY | O_DIRECTORY_FLAG | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (err) {
     if (isVanishedEntry(err)) return absent(null);
     const code = errnoCode(err);
-    // O_NOFOLLOW reports a symlinked target as ELOOP on Linux and macOS. That
-    // is a refusal to follow, which is a finding about the tree, not an
-    // unreadable file — the operator's next move differs.
-    if (code === 'ELOOP') {
-      return {
-        snapshot: { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: null },
-        bytes: null,
-        kindIssue: 'creds_json_symlink',
-      };
-    }
+    if (code === 'ELOOP') return refused('auth_dir_symlink');
+    if (code === 'ENOTDIR') return refused('auth_dir_not_directory');
     return absent(code);
   }
 
   try {
-    const st = fstatSync(fd);
-    // A FIFO, socket or device would block or misreport on read. Refuse by kind
-    // rather than by name, before any byte is taken from it.
-    if (!st.isFile()) {
-      return { snapshot: present(st, null, null), bytes: null, kindIssue: 'creds_json_not_regular_file' };
+    const rootStat = fstatSync(rootFd);
+
+    let fd: number;
+    try {
+      // O_NONBLOCK is load-bearing, not tidiness. open(2) on a FIFO with
+      // O_RDONLY and no writer BLOCKS until a writer arrives. This is a
+      // synchronous call on the main thread reached from an unauthenticated
+      // GET /health, so without it a FIFO planted at creds.json stops the
+      // process serving anything, forever, and no watchdog that waits for exit
+      // ever fires. The kind check below cannot help: it runs after the open.
+      fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    } catch (err) {
+      if (isVanishedEntry(err)) return absent(null);
+      const code = errnoCode(err);
+      // O_NOFOLLOW reports a symlinked target as ELOOP on Linux and macOS. That
+      // is a refusal to follow, which is a finding about the tree, not an
+      // unreadable file — the operator's next move differs.
+      if (code === 'ELOOP') return refused('creds_json_symlink');
+      return absent(code);
     }
-    const bytes = readFileSync(fd);
-    return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
-  } catch (err) {
-    let st = null;
-    try { st = fstatSync(fd); } catch { /* descriptor already unusable */ }
-    return {
-      snapshot: st
-        ? present(st, null, errnoCode(err))
-        : { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: errnoCode(err) },
-      bytes: null,
-      kindIssue: null,
-    };
+
+    try {
+      const st = fstatSync(fd);
+      // A FIFO, socket or device would block or misreport on read. Refuse by
+      // kind rather than by name, before any byte is taken from it.
+      if (!st.isFile()) {
+        return { snapshot: present(st, null, null), bytes: null, kindIssue: 'creds_json_not_regular_file' };
+      }
+      // The root that resolved this child must still be the root we validated.
+      const rootNow = lstatSync(authDir);
+      if (rootNow.dev !== rootStat.dev || rootNow.ino !== rootStat.ino) {
+        return refused('auth_dir_replaced_during_read');
+      }
+      const bytes = readFileSync(fd);
+      return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
+    } catch (err) {
+      let st = null;
+      try { st = fstatSync(fd); } catch { /* descriptor already unusable */ }
+      return {
+        snapshot: st
+          ? present(st, null, errnoCode(err))
+          : { path, exists: true, mode: null, size: null, mtime: null, sha256: null, error: errnoCode(err) },
+        bytes: null,
+        kindIssue: null,
+      };
+    } finally {
+      // readFileSync(fd) does not close a caller-supplied descriptor.
+      try { closeSync(fd); } catch { /* nothing left to release */ }
+    }
   } finally {
-    // readFileSync(fd) does not close a caller-supplied descriptor.
-    try { closeSync(fd); } catch { /* nothing left to release */ }
+    try { closeSync(rootFd); } catch { /* nothing left to release */ }
   }
 }
 
@@ -860,6 +929,9 @@ export class AuthBondGuard {
   /** True from an invalidation until the next successful refresh publishes. */
   private treeInvalidated = false;
   private lastRefreshOutcome: TreeRefreshOutcome | null = null;
+  private treeRefreshAttempts = 0;
+  private consecutiveRefreshFailures = 0;
+  private successorDueAtMs: number | null = null;
   /** An invalidation arrived that no started walk has covered yet. */
   private treeRefreshRequested = false;
   /** At most one pending successor walk. */
@@ -965,6 +1037,11 @@ export class AuthBondGuard {
         lastInvalidationReason: this.lastTreeInvalidationReason,
         lastRefreshKind: this.lastRefreshOutcome?.kind ?? 'none',
         lastRefreshReason: this.lastRefreshOutcome?.reason ?? null,
+        refreshScheduled: this.treeSuccessorTimer !== null,
+        nextRefreshEligibleInMs: this.successorDueAtMs === null
+          ? null
+          : Math.max(0, this.successorDueAtMs - this.monotonicNow()),
+        refreshAttemptCount: this.treeRefreshAttempts,
       },
       unknownReason,
     );
@@ -994,7 +1071,22 @@ export class AuthBondGuard {
   invalidateTreeCache(reason: string): void {
     this.markTreeStale(reason);
     this.treeRefreshRequested = true;
-    void this.refreshTreeCache();
+    void this.refreshTreeCache(false, true);
+  }
+
+  /**
+   * Record that a walk ended without publishing and a retry is owed.
+   *
+   * Only an outstanding invalidation earns a retry. A reader-driven walk that
+   * fails over an unchanged tree has nothing to converge on, and retrying it
+   * would spin at the floor cadence for as long as the fault lasts.
+   */
+  private noteRefreshNeedsRetry(): void {
+    this.consecutiveRefreshFailures = Math.min(
+      this.consecutiveRefreshFailures + 1,
+      MAX_REFRESH_BACKOFF_STEPS,
+    );
+    if (this.treeInvalidated) this.treeRefreshRequested = true;
   }
 
   /**
@@ -1025,12 +1117,23 @@ export class AuthBondGuard {
     const sinceLastStartMs = this.lastRefreshStartedAtMs === null
       ? Number.POSITIVE_INFINITY
       : this.monotonicNow() - this.lastRefreshStartedAtMs;
-    const waitMs = Math.max(0, this.treeRefreshMinIntervalMs - sinceLastStartMs);
+    const floorWaitMs = Number.isFinite(sinceLastStartMs)
+      ? Math.max(0, this.treeRefreshMinIntervalMs - sinceLastStartMs)
+      : 0;
+    // Back off after repeated non-publishing walks so a persistent I/O fault
+    // does not walk the tree at the floor cadence forever. Capped at 2^4 = 16
+    // floors, which at the 5 s default is 80 s — still inside the 120 s stale
+    // risk bound, so a recovering tree is re-observed before the digest is
+    // declared unknown.
+    const backoffMs = this.treeRefreshMinIntervalMs * 2 ** this.consecutiveRefreshFailures;
+    const waitMs = Math.max(floorWaitMs, this.consecutiveRefreshFailures > 0 ? backoffMs : 0);
+    this.successorDueAtMs = this.monotonicNow() + waitMs;
     this.treeSuccessorTimer = setTimeout(() => {
       this.treeSuccessorTimer = null;
+      this.successorDueAtMs = null;
       // Forced: the floor was already served by waiting it out here.
       void this.refreshTreeCache(true);
-    }, Number.isFinite(waitMs) ? waitMs : 0);
+    }, waitMs);
     this.treeSuccessorTimer.unref?.();
   }
 
@@ -1054,13 +1157,13 @@ export class AuthBondGuard {
     }
   }
 
-  private refreshTreeCache(force = false): Promise<void> {
+  private refreshTreeCache(force = false, fromInvalidation = false): Promise<void> {
     const inFlight = this.treeRefresh;
     if (inFlight !== null) {
-      // The walk already running started before this request, so it cannot
-      // describe the mutation that prompted it. Record that a successor is owed
-      // and let the in-flight walk's own completion schedule it.
-      this.treeRefreshRequested = true;
+      // Only a MUTATION earns a successor. A reader or a warm that merely
+      // arrived during a walk is answered by that walk; queueing a successor
+      // for them bought a second full traversal for no new information.
+      if (fromInvalidation) this.treeRefreshRequested = true;
       return inFlight;
     }
     const startedAtMs = this.monotonicNow();
@@ -1070,13 +1173,17 @@ export class AuthBondGuard {
       && startedAtMs - this.lastRefreshStartedAtMs < this.treeRefreshMinIntervalMs
     ) {
       // Too soon to walk again. Deferred, not dropped: queue one successor so
-      // convergence does not depend on a reader arriving after the floor.
-      this.treeRefreshRequested = true;
-      this.scheduleTreeRefreshSuccessor();
+      // convergence does not depend on a reader arriving after the floor. Only
+      // for a mutation — a floor-blocked reader has nothing to converge on.
+      if (fromInvalidation) {
+        this.treeRefreshRequested = true;
+        this.scheduleTreeRefreshSuccessor();
+      }
       return Promise.resolve();
     }
     this.treeRefreshRequested = false;
     this.lastRefreshStartedAtMs = startedAtMs;
+    this.treeRefreshAttempts += 1;
     const generation = this.treeGeneration;
     const run = (async (): Promise<void> => {
       try {
@@ -1107,16 +1214,28 @@ export class AuthBondGuard {
         // as `digest_source: "cached"` with no issue and no hash — green health
         // built from a walk that never completed. Keep the previous observation
         // and let it age instead.
-        if (tree === null && rootPresent && !symlinked) {
+        if (tree === null && !symlinked) {
+          // Deliberately NOT conditioned on the root being present. A walk over
+          // an absent root inspected nothing and its harden pass returns an
+          // empty issue list, so publishing it stamped a current timestamp on a
+          // null digest with no issues — which reads back as `cached` with a
+          // clean tree once the root returns. That window is the auto-restore
+          // rename, which is on by default. An absent root is already reported
+          // by buildSnapshot's live authDir check, so declining to publish here
+          // loses no evidence.
           this.lastRefreshOutcome = {
-            kind: 'incomplete', atMs: this.monotonicNow(), reason: 'auth_tree_walk_incomplete',
+            kind: 'incomplete',
+            atMs: this.monotonicNow(),
+            reason: rootPresent ? 'auth_tree_walk_incomplete' : 'auth_root_absent',
           };
+          this.noteRefreshNeedsRetry();
           return;
         }
 
         this.treeObservation = { hardenIssues, tree, observedAtMs: this.monotonicNow() };
         this.treeInvalidated = false;
         this.treeRefreshCount += 1;
+        this.consecutiveRefreshFailures = 0;
         this.lastRefreshOutcome = { kind: 'fresh', atMs: this.monotonicNow(), reason: null };
       } catch (err) {
         // Keep the last known observation and let it go on ageing. A failed
@@ -1128,6 +1247,7 @@ export class AuthBondGuard {
         this.lastRefreshOutcome = {
           kind: 'failed', atMs: this.monotonicNow(), reason: errorMessage(err),
         };
+        this.noteRefreshNeedsRetry();
       } finally {
         this.treeRefresh = null;
         // An invalidation landed while this walk ran, so this walk's result was
@@ -1153,7 +1273,18 @@ export class AuthBondGuard {
     issues.push(...hardenIssues);
     const authDir = fileSnapshot(this.authDir);
     const rootKindIssue = authRootKindIssue(this.authDir);
-    const credsRead = readCredsThroughNoFollow(credsPath);
+    // A bad root is the finding, and nothing under it can be trusted. Do not
+    // open the child at all: O_NOFOLLOW constrains only the final component, so
+    // reading creds.json under a symlinked root traverses whatever directory
+    // the link points at, and a FIFO planted there is reached through exactly
+    // this path.
+    const credsRead: CredsRead = rootKindIssue === null
+      ? readCredsThroughNoFollow(this.authDir, credsPath)
+      : {
+          snapshot: { path: credsPath, exists: false, mode: null, size: null, mtime: null, sha256: null, error: null },
+          bytes: null,
+          kindIssue: null,
+        };
     const creds = credsRead.snapshot;
     let status: AuthBondStatus = 'present';
     let meHash: string | null = null;
@@ -1174,7 +1305,12 @@ export class AuthBondGuard {
       status = 'missing';
       issues.push('auth_dir_missing');
     }
-    if (credsUnreadable) {
+    if (rootKindIssue !== null) {
+      // The credential was never looked at, so say nothing about it. Reporting
+      // `creds_json_missing` here would send an operator to re-pair over a
+      // symlinked directory, which is a different and less destructive fix.
+      status = 'invalid';
+    } else if (credsUnreadable) {
       status = 'invalid';
       issues.push(`creds_json_unreadable:${creds.error}`);
     } else if (!creds.exists) {

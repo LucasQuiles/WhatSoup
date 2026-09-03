@@ -256,6 +256,12 @@ type RecoveryClearWithheldReason =
   | 'transport_not_connected'
   | 'connection_not_connected'
   | 'auth_bond_missing'
+  // The instance reported an auth bond whose tree digest has no current
+  // evidence. Withheld for the same reason as 'missing' — an unknown tree must
+  // not clear a recovery record — but the operator's next move is different, so
+  // it does not borrow the word "missing" for a credential that demonstrably
+  // exists.
+  | 'auth_bond_unknown'
   | 'credentials_empty'
   | 'credentials_mtime_unavailable'
   | 'post_bond_send_missing'
@@ -2456,6 +2462,9 @@ export class HealthPoller {
 
     const authBond = this.readRecord(whatsapp['auth_bond']);
     const creds = this.readRecord(authBond?.['creds']);
+    if (authBond && creds && authBond['status'] === 'unknown') {
+      return { eligible: false, reason: 'auth_bond_unknown' };
+    }
     if (!authBond || !creds || authBond['status'] !== 'present' || creds['exists'] !== true) {
       return { eligible: false, reason: 'auth_bond_missing' };
     }

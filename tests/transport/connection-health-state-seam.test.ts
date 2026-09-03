@@ -14,7 +14,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'whatsoup-p42-seam-'));
 const fixtureAuthDir = join(fixtureRoot, 'auth');
@@ -63,6 +63,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: vi.fn(() => true),
 }));
 
+import { makeWASocket, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
 import { createAtomicCredsSaver } from '../../src/transport/atomic-auth-save.ts';
 
@@ -87,6 +88,64 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+// The fixture root was created with mkdtempSync and never removed.
+afterAll(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
+
+/**
+ * Drain a background walk by waiting for it to land, not by sleeping a guess.
+ *
+ * Bounded so a genuine failure to converge still fails the test rather than
+ * hanging, but it returns the moment the digest is published — no fixed wall
+ * time, which is what makes it safe on a loaded worker.
+ */
+async function settleDigest(read: () => string | undefined, boundMs = 5_000): Promise<string | undefined> {
+  const deadline = Date.now() + boundMs;
+  let seen = read();
+  while (seen !== 'cached' && Date.now() < deadline) {
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    seen = read();
+  }
+  return seen;
+}
+
+/**
+ * Build a key store the wrapper can actually wrap; the shared helper returns {}.
+ *
+ * The original `set` is handed back separately because the wrapper replaces the
+ * member IN PLACE, so after wiring `store.set` is the wrapper and no longer the
+ * function installed here.
+ */
+function installKeyStore(): {
+  store: Record<string, unknown>;
+  originalSet: ReturnType<typeof vi.fn>;
+} {
+  const originalSet = vi.fn(async () => undefined);
+  const store: Record<string, unknown> = {
+    get: vi.fn(async () => ({})),
+    set: originalSet,
+    clear: vi.fn(async () => undefined),
+  };
+  vi.mocked(makeCacheableSignalKeyStore).mockReturnValue(store as never);
+  return { store, originalSet };
+}
+
+function makeConnectableSocket() {
+  let handler: ((events: Record<string, unknown>) => void) | undefined;
+  const sock = {
+    ev: { process: vi.fn((cb: (events: Record<string, unknown>) => void) => { handler = cb; }) },
+    sendMessage: vi.fn(),
+    sendPresenceUpdate: vi.fn(async () => undefined),
+    query: vi.fn(async () => ({})),
+    end: vi.fn(),
+    ws: { isOpen: true },
+    user: { id: '15551230004:1@s.whatsapp.net', lid: '111:1@lid', name: 'seam' },
+  };
+  vi.mocked(makeWASocket).mockReturnValue(sock as never);
+  return { sock, emit: (events: Record<string, unknown>) => handler?.(events) };
+}
 
 describe('ConnectionManager — live gate vs cached health projection', () => {
   it('serves getConnectionState live, with no cache provenance, before any warm', () => {
@@ -115,10 +174,12 @@ describe('ConnectionManager — live gate vs cached health projection', () => {
     // And it must not read as a clean tree.
     expect(health.authBond?.status).toBe('unknown');
 
-    // That cold read started a walk. Let it finish here rather than letting it
-    // run into the next beforeEach, which removes the fixture underneath it.
-    await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
-    expect(manager.getHealthConnectionState().authBond?.treeProvenance?.source).toBe('cached');
+    // That cold read started a walk. Drain it here rather than letting it run
+    // into the next beforeEach, which removes the fixture underneath it.
+    const settled = await settleDigest(
+      () => manager.getHealthConnectionState().authBond?.treeProvenance?.source,
+    );
+    expect(settled).toBe('cached');
   });
 
   it('keeps the delivery gate live even while the cached projection is unknown', () => {
@@ -175,5 +236,52 @@ describe('MED-4 — invalidation hangs off the write, not off an event name', ()
     expect(readFileSync(join(dir, 'creds.json'), 'utf8')).toContain('x:1@s.whatsapp.net');
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('r3 SHOULD-3 — the two production wiring lines are exercised', () => {
+  it('invalidates the digest when Baileys writes through the configured key store', async () => {
+    const { store, originalSet } = installKeyStore();
+    makeConnectableSocket();
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    // Read the store off the socket config the manager actually built. The
+    // wrapper replaces `set` in place, so wrapping shows up as the member no
+    // longer being the function we installed. Deleting the invalidatingKeyStore
+    // call in connection.ts leaves it unwrapped and both assertions fail.
+    const configured = vi.mocked(makeWASocket).mock.calls[0]![0] as {
+      auth: { keys: { set: (data: unknown) => Promise<void> } };
+    };
+    expect(configured.auth.keys).toBe(store);
+    expect(store['set']).not.toBe(originalSet);
+
+    await configured.auth.keys.set({ 'pre-key': { 1: { public: 'x' } } });
+
+    // The underlying write still happens; the wrapper only observes it.
+    expect(originalSet).toHaveBeenCalledTimes(1);
+    expect(
+      manager.getHealthConnectionState().authBond?.treeProvenance?.lastInvalidationReason,
+    ).toBe('key-store-set');
+  });
+
+  it('invalidates the digest when the credential saver commits', async () => {
+    installKeyStore();
+    const { emit } = makeConnectableSocket();
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    // Drive the real creds.update path. The manager passes its own commit hook
+    // as the saver's third argument; removing that argument leaves the reason
+    // untouched and this fails.
+    emit({ 'creds.update': [{}] });
+    const deadline = Date.now() + 2_000;
+    let reason = manager.getHealthConnectionState().authBond?.treeProvenance?.lastInvalidationReason;
+    while (reason !== 'creds-file-committed' && Date.now() < deadline) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      reason = manager.getHealthConnectionState().authBond?.treeProvenance?.lastInvalidationReason;
+    }
+
+    expect(reason).toBe('creds-file-committed');
   });
 });

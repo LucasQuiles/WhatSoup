@@ -37,6 +37,12 @@ async function assertWritableAuthJsonTarget(path: string): Promise<void> {
  * invalidated here rather than after the returned promise settles: the rename
  * is the commit point, and a chmod failure after it would otherwise leave a
  * committed write that no observer was told about.
+ *
+ * Declared `void`, and the caller does not await it: the commit point must not
+ * wait on an observer. TypeScript admits an async function in a void slot, so
+ * the call site attaches a rejection handler to anything thenable rather than
+ * letting it become an unhandled rejection — which main.ts turns into an
+ * instance shutdown.
  */
 export type AuthJsonCommitHook = () => void;
 
@@ -70,7 +76,13 @@ export async function writeAtomicBaileysJson(
     // The commit point. Fire before chmod, and never let a hook failure undo a
     // write that already succeeded.
     if (onCommitted) {
-      try { onCommitted(); } catch { /* observers must not break the save */ }
+      try {
+        const settled = onCommitted() as unknown;
+        // An async hook's rejection cannot reach the synchronous catch above.
+        if (settled && typeof (settled as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(settled).catch(() => { /* observers must not break the save */ });
+        }
+      } catch { /* observers must not break the save */ }
     }
     await chmod(path, 0o600);
 

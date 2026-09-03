@@ -116,8 +116,8 @@ interface ObserverSpan {
 /**
  * Ceiling on retained observer spans.
  *
- * Spans are trimmed against the baseline on every recorded observation, so this
- * only bounds a pathological burst of concurrent requests between two ticks.
+ * Closed spans are pruned once the consume cursor passes them, so this only
+ * bounds a pathological burst of concurrent requests between two ticks.
  */
 const MAX_OBSERVER_SPANS = 64;
 

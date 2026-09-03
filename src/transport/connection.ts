@@ -2516,11 +2516,23 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         return result;
       };
 
+    // Wrapping mutates the store in place, which depends on the members being
+    // writable own properties. Baileys returns a plain object literal today, so
+    // this holds — but this call sits inline in the socket config, so a frozen
+    // or accessor-only member would throw here in strict module code and fail
+    // the whole connect. Losing the digest invalidation is a far smaller harm
+    // than losing the connection, so a refusal degrades rather than propagates.
     const store = keys as Record<string, unknown>;
     for (const seam of ['set', 'clear'] as const) {
       const original = store[seam];
-      if (typeof original === 'function') {
+      if (typeof original !== 'function') continue;
+      try {
         store[seam] = wrap(original as (...args: unknown[]) => unknown, seam);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest will not track this key-store seam; member is not writable',
+        );
       }
     }
     return keys;

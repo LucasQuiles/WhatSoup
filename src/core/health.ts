@@ -957,6 +957,15 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     // digest that is merely old from one that cannot be replaced.
     digest_refresh_outcome: authBond.treeProvenance?.lastRefreshKind ?? 'live',
     digest_refresh_reason: authBond.treeProvenance?.lastRefreshReason ?? null,
+    // Queued-but-not-started, reported separately from the last COMPLETED
+    // attempt. Without these two, a reader immediately after a floor-blocked
+    // invalidation sees a successful outcome and no refresh in flight, which
+    // together read as "nothing is happening" while a walk is queued.
+    digest_refresh_scheduled: authBond.treeProvenance?.refreshScheduled ?? false,
+    digest_next_refresh_eligible_ms: authBond.treeProvenance?.nextRefreshEligibleInMs ?? null,
+    // Walks started, including ones that did not publish. digest_refresh_count
+    // counts only publications, so the pair separates cost from progress.
+    digest_refresh_attempts: authBond.treeProvenance?.refreshAttemptCount ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,

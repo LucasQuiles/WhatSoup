@@ -16,7 +16,7 @@
  *      only the request that is being served.
  */
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
@@ -752,6 +752,82 @@ describe('HIGH-2 — credential reads refuse to follow a link, cache or no cache
   });
 });
 
+describe('r3 MUST-1 — a bad auth root is refused before the credential is read', () => {
+  it('does not read creds.json through a symlinked auth root, even on a clean cache', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: 'p42-r3-must1', treeRefreshMinIntervalMs: 0,
+    });
+    await guard.warmTreeCache();
+    expect(guard.inspectCached().meHash).not.toBeNull();
+
+    // Swap the root for a link to a directory holding DIFFERENT credentials.
+    // O_NOFOLLOW guards only the final component, so the child open still
+    // traverses the attacker-chosen directory unless the root check gates it.
+    const decoy = join(fx.root, 'decoy');
+    mkdirSync(decoy, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decoy, 'creds.json'), JSON.stringify({
+      me: { id: '19998887777:1@s.whatsapp.net' },
+    }), { mode: 0o600 });
+    renameSync(fx.authDir, join(fx.root, 'auth-real'));
+    symlinkSync(decoy, fx.authDir);
+
+    const snap = guard.inspectCached();
+
+    expect(snap.issues).toContain('auth_dir_symlink');
+    expect(snap.status).toBe('invalid');
+    // The load-bearing assertion: no identity was taken from the link target.
+    expect(snap.meHash).toBeNull();
+    expect(snap.creds.sha256).toBeNull();
+  });
+});
+
+describe('r3 MUST-2 — a walk that never inspected a tree is not a fresh observation', () => {
+  it('does not publish an absent root as a fresh digest', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const missingRoot = join(fx.root, 'not-created-yet');
+    const guard = new AuthBondGuard({
+      authDir: missingRoot, stateRoot: fx.stateRoot, instanceName: 'p42-r3-must2', treeRefreshMinIntervalMs: 0,
+    });
+
+    await guard.warmTreeCache();
+
+    const prov = guard.inspectCached().treeProvenance!;
+    // A walk over a root that is not there inspected nothing. Publishing it as
+    // `fresh` stamps a current timestamp on a null digest and an empty issue
+    // list, which later reads as a clean tree.
+    expect(prov.lastRefreshKind).not.toBe('fresh');
+    expect(prov.source).toBe('absent');
+  });
+
+  it('does not read green after the root reappears under a null-tree observation', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const lateRoot = join(fx.root, 'late-auth');
+    const guard = new AuthBondGuard({
+      authDir: lateRoot, stateRoot: fx.stateRoot, instanceName: 'p42-r3-must2-window', treeRefreshMinIntervalMs: 0,
+    });
+
+    // A walk lands while the root is absent — the restore window.
+    await guard.warmTreeCache();
+
+    // The root comes back, healthy.
+    mkdirSync(lateRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lateRoot, 'creds.json'), JSON.stringify({
+      me: { id: '15550100001:1@s.whatsapp.net', lid: '12345:1@lid' },
+    }), { mode: 0o600 });
+
+    const snap = guard.inspectCached();
+
+    // Live credential checks now pass, so nothing else stops `present`. The
+    // cached observation must not be allowed to supply a clean tree it never saw.
+    expect(snap.treeHash).toBeNull();
+    expect(snap.status).not.toBe('present');
+  });
+});
+
 describe('MED-3 — refresh outcome is typed and age is monotonic', () => {
   it('reports a completed walk as fresh and counts it', async () => {
     const fx = makeOwnFixture();
@@ -797,27 +873,37 @@ describe('MED-3 — refresh outcome is typed and age is monotonic', () => {
   });
 });
 
-/** Let real timers and the refresh loop run, without reading the cache. */
-async function quietMs(totalMs: number): Promise<void> {
-  const step = 20;
-  for (let waited = 0; waited < totalMs; waited += step) {
-    await new Promise<void>((resolve) => { setTimeout(resolve, step); });
-  }
+/**
+ * Advance fake time without touching the cache.
+ *
+ * These two tests must not READ while they wait: a read of its own can start a
+ * walk, which is exactly the behaviour under test. Fake timers give a wait that
+ * observes nothing, and they drive both the successor `setTimeout` and the
+ * `setImmediate` yields inside the walk, so no wall-clock margin is being
+ * guessed at on a shared worker.
+ */
+async function advanceQuietly(guardClock: { value: number }, ms: number): Promise<void> {
+  guardClock.value += ms;
+  await vi.advanceTimersByTimeAsync(ms);
 }
 
 describe('r2 MUST-1 — an invalidated digest converges without a reader', () => {
   it('publishes a fresh observation after a burst of writes, using one extra walk', async () => {
+    vi.useFakeTimers();
     const fx = makeOwnFixture();
     ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
     const guard = new AuthBondGuard({
       authDir: fx.authDir,
       stateRoot: fx.stateRoot,
       instanceName: 'p42-r2-must1',
-      // Small but non-zero, so the rate floor is genuinely exercised and the
-      // test still finishes quickly.
+      // Non-zero so the rate floor is genuinely exercised.
       treeRefreshMinIntervalMs: 50,
+      monotonicNow: () => clock.value,
     });
-    await guard.warmTreeCache();
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
     const before = guard.inspectCached().treeProvenance!;
     expect(before.source).toBe('cached');
 
@@ -832,7 +918,7 @@ describe('r2 MUST-1 — an invalidated digest converges without a reader', () =>
     // refresh and mask whether invalidation converges on its own. This is the
     // whole point — the fleet poller reads every 5 s, but the digest must not
     // depend on that to stop being stale.
-    await quietMs(400);
+    await advanceQuietly(clock, 400);
 
     const after = guard.inspectCached().treeProvenance!;
     expect(after.source).toBe('cached');
@@ -840,18 +926,27 @@ describe('r2 MUST-1 — an invalidated digest converges without a reader', () =>
     // Exactly one walk lands for the whole burst. A walk per write is what the
     // begin/end pair used to buy, and every one of those was discarded.
     expect(after.refreshCount - before.refreshCount).toBe(1);
+    // And exactly one walk was STARTED. refreshCount alone counts publications,
+    // so it cannot see a traversal that ran and was thrown away; this is the
+    // assertion that actually pins the cost claim.
+    expect(after.refreshAttemptCount - before.refreshAttemptCount).toBe(1);
   });
 
   it('does not discard the walk its own invalidation started', async () => {
+    vi.useFakeTimers();
     const fx = makeOwnFixture();
     ownFixtureRoots.push(fx.root);
+    const clock = { value: 0 };
     const guard = new AuthBondGuard({
       authDir: fx.authDir,
       stateRoot: fx.stateRoot,
       instanceName: 'p42-r2-must1-pair',
       treeRefreshMinIntervalMs: 0,
+      monotonicNow: () => clock.value,
     });
-    await guard.warmTreeCache();
+    const warm = guard.warmTreeCache();
+    await vi.advanceTimersByTimeAsync(1);
+    await warm;
     const before = guard.inspectCached().treeProvenance!;
 
     // The shape the key-store wrapper used to produce: two invalidations around
@@ -860,7 +955,7 @@ describe('r2 MUST-1 — an invalidated digest converges without a reader', () =>
     guard.invalidateTreeCache('key-store-set-begin');
     guard.invalidateTreeCache('key-store-set-end');
 
-    await quietMs(300);
+    await advanceQuietly(clock, 300);
 
     const after = guard.inspectCached().treeProvenance!;
     expect(after.lastRefreshKind).toBe('fresh');
