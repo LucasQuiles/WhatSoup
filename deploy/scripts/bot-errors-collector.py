@@ -4392,15 +4392,60 @@ def main() -> int:
     parser.add_argument("--alert-cooldown", type=int, default=900)
     parser.add_argument("--recovery-successes", type=int, default=default_recovery_successes())
     parser.add_argument("--daemon", action="store_true")
+    parser.add_argument("--allow-empty-roster", action="store_true")
     args = parser.parse_args()
 
-    remotes = args.remote or [r for r in os.environ.get("BOT_ERRORS_RELAY_REMOTES", "").split(",") if r]
-    if not remotes:
+    if args.daemon and args.allow_empty_roster:
+        # A declared-empty retirement is one-shot by definition, so this pair is
+        # refused at the usage boundary rather than reconciled. Parked in a
+        # unit's ExecStart it would look harmless while a roster existed and
+        # degrade the moment one emptied: the cycle would succeed, exit, and be
+        # restarted on the service manager's schedule, rewriting state every
+        # cycle instead of retiring once. Checked first because it reads only
+        # argv, so the answer cannot depend on the environment, and checked
+        # above the state session, so the ledger is never opened.
+        print(
+            "--allow-empty-roster is a one-shot retirement and cannot be combined with --daemon",
+            file=sys.stderr,
+        )
+        return 64
+    # None (never set, or an environment file that failed to load) is NOT the
+    # same as "" (an operator emptying the list), and reading with a default
+    # collapses the two. Keep the distinction: only a PRESENT variable can be
+    # declared empty.
+    roster_env = os.environ.get("BOT_ERRORS_RELAY_REMOTES")
+    remotes = args.remote or [r for r in (roster_env or "").split(",") if r]
+    declared_empty_roster = args.allow_empty_roster and roster_env is not None
+    if not remotes and not declared_empty_roster:
+        # Unchanged fail-closed default, now covering one more case. An absent
+        # or unreadable poll list is inconclusive configuration, not a decision
+        # to poll nothing, and that stays true when --allow-empty-roster is
+        # standing: the flag declares an EMPTY roster, never a MISSING one, so
+        # a broken environment file cannot retire the whole ledger. EX_USAGE,
+        # and no state work at all.
         print("no remotes configured", file=sys.stderr)
         return 64
     best_effort_remotes = set(args.best_effort_remote or [])
     recovery_successes = max(1, int(args.recovery_successes))
     try:
+        # A declared empty roster is a retirement, not a poll: it runs exactly
+        # one cycle so prune_state_to_configured_remotes can disposition every
+        # open record the departed remotes still own, then stops. The two
+        # guards above make that exact, so no third check is needed here:
+        # reaching this line with args.daemon set proves the roster is
+        # non-empty, because --daemon over an empty roster is either the
+        # fail-closed 64 or the refused combination. The cycle reaches the
+        # state session and nothing else, because _run_once_with_state's only
+        # work between the prune and the save is `for remote in remotes`, so an
+        # empty roster performs no remote, probe, claim or acknowledgement
+        # effect. It is not silent, though: the prune emits one info-severity
+        # observation per retired (remote, source) pair, which the dispatcher
+        # delivers as a BOT INFO line. That is not one per open record --
+        # acknowledgement membership is digest-keyed and collapses to a single
+        # disposition per remote carrying the count of records it retires.
+        # An unregistered bucket key still fails the whole cycle
+        # closed, which matters most here: retiring every remote at once is the
+        # widest reach the pruning validation pass ever has.
         if args.daemon:
             run_daemon(
                 remotes,
@@ -4431,14 +4476,18 @@ def main() -> int:
         emit_state_recovery_fallback(exc.diagnostic)
         return STATE_RECOVERY_REQUIRED_EXIT
     except UnregisteredAlertSourceError as exc:
-        # Same process boundary as ControllerStateRequired, and deliberately the
-        # same exit code: 78 is held out of the service manager's restart loop
-        # (RestartPreventExitStatus=78 in deploy/whatsoup@.service), which is the
-        # correct shape here. An unregistered source means the state file or the
-        # registry needs an operator edit; restarting cannot clear it, and a
-        # bare traceback in a restart loop is what this replaces. The line is the
-        # exception's own bounded message: a count and an opaque digest, never a
-        # key, a remote identity, or a remote root.
+        # Same process boundary and the same exit code as
+        # ControllerStateRequired: 78 is this estate's typed "state needs an
+        # operator decision" code across collector, dispatcher and watchdog.
+        # It does NOT suppress restarts for this process -- the collector runs
+        # under deploy/bot-errors-collector.service (Restart=always,
+        # RestartSec=10, no RestartPreventExitStatus); the unit that holds 78
+        # out of its restart loop is deploy/whatsoup@.service, a different
+        # unit. What this replaces is therefore the bare traceback, not the
+        # loop: an operator gets a typed exit code and one bounded line instead
+        # of a stack trace every ten seconds. The line is the exception's own
+        # message, a count and an opaque digest, never a key, a remote
+        # identity, or a remote root.
         print(f"bot-errors-collector: {exc}", file=sys.stderr)
         return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
