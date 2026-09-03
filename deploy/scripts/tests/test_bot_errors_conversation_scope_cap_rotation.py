@@ -31,6 +31,11 @@ _SCRIPT = _SCRIPTS / "bot-errors-dispatcher.py"
 sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_SCRIPTS / "lib"))
 
+# The shipped retention default, stated as a literal ON PURPOSE. The ageing
+# helper seeds against this rather than against the module's constant, so
+# widening the window makes the expiry leg fail instead of tracking it.
+SHIPPED_RETENTION_SECONDS = 7 * 24 * 3600
+
 SOURCE = "agent_turn_admission_rejected"
 MACHINE = "unknown"
 
@@ -113,12 +118,26 @@ def _age_state_past_retention(mod, paths, margin: int = 60) -> None:
 
     Deterministic by construction: the code under test compares stored
     timestamps against `time.time()`, so moving the stored values backwards is
-    the same input a real wait would eventually produce, without the wait. A
-    wall-clock sleep would also couple the test to whatever retention value the
-    module happened to load.
+    the same input a real wait would eventually produce, without the wait.
+
+    The age is ABSOLUTE, not derived from the retention constant. Deriving it
+    would make these legs insensitive to that constant: widen the window and
+    the seed widens with it, so the leg would pass under any retention value
+    and stop being a coverage assertion at all. Seeding a fixed age keeps the
+    leg falsifiable -- widening the window past this age must make the expiry
+    leg fail. The assertion below pins the shipped default, so a deliberate
+    change to it fails here loudly and self-explaining rather than silently
+    weakening the leg.
     """
     from lib.controller_state import open_controller_state
 
+    assert mod.CONVERSATION_SCOPE_RETENTION_SECONDS == SHIPPED_RETENTION_SECONDS, (
+        "the retention default moved: these legs seed a fixed age of "
+        f"{SHIPPED_RETENTION_SECONDS}s + margin so they stay sensitive to it. "
+        f"Update SHIPPED_RETENTION_SECONDS to "
+        f"{mod.CONVERSATION_SCOPE_RETENTION_SECONDS} deliberately, never by "
+        "deriving the seed from the constant."
+    )
     session = open_controller_state(
         paths["incident_state"],
         component="dispatcher-incident",
@@ -126,7 +145,7 @@ def _age_state_past_retention(mod, paths, margin: int = 60) -> None:
         validate_payload=mod.validate_dispatcher_state,
         lock_timeout_seconds=10,
     )
-    stale = int(time.time()) - mod.CONVERSATION_SCOPE_RETENTION_SECONDS - margin
+    stale = int(time.time()) - SHIPPED_RETENTION_SECONDS - margin
     with session:
         result = session.load()
         payload = dict(result.payload or {})
