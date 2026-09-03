@@ -212,7 +212,23 @@
         "lastCheckGapAt",
         "grace_refused",
         "deadman_observation_gap_line",
-        "deadman_observation_gap_inventory"
+        "deadman_observation_gap_inventory",
+        "instance_plist_environment",
+        "instance_plist_governed_environment",
+        "GOVERNED_PLIST_UNREADABLE",
+        "GOVERNED_PLIST_NOT_APPLICABLE",
+        "provider_runtime_plist_unreadable",
+        "governed_child_environment",
+        "environment_value",
+        "environment_provider_path",
+        "generated_provider_path_absence_failure",
+        "reason=generated_path_absent",
+        "governed_prepend_failure_class",
+        "instance_provider_path_prepend_match",
+        "path_starts_with_entries",
+        "WHATSOUP_PATH_PREPEND",
+        "provider_runtime_path_prepend_mismatch",
+        "provider_runtime_path_prepend_inconsistent"
       ]
     },
     {
