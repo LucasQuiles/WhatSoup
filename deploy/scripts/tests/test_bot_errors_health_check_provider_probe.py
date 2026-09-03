@@ -3015,6 +3015,84 @@ def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypat
         assert row["path"] == _mod.effective_instance_provider_path(environment), label
 
 
+def test_an_unwritable_temp_root_is_a_probe_environment_failure_not_a_compatibility_one(
+    monkeypatch, tmp_path
+):
+    """LOW-6. The opencode arm's catch-all misnamed its own environment.
+
+    Its `except FileNotFoundError` already separates "the probe brought
+    something missing" from "the binary is unusable", because reporting the
+    first as a compatibility failure tells an operator to upgrade opencode when
+    opencode is fine. Every OTHER OSError from the same block -- a PermissionError
+    or an ENOSPC out of the tempdir path -- fell through to the bare
+    `except Exception`, which returns exactly that misleading class and the
+    install_or_upgrade remediation.
+
+    The claude-cli arm's catch-all already answers provider_probe_failed here,
+    so this is an asymmetry between two arms of one function, not a new policy.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    unwritable = tmp_path / "unwritable-temp-root"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+
+    # Vacuity guard: assert the fixture raises, and raises the RIGHT class. A
+    # root-run suite, or a filesystem ignoring the mode, would otherwise make
+    # this row pass against a probe that never reached the branch it names.
+    with pytest.raises(PermissionError):
+        _mod.tempfile.mkdtemp(dir=str(unwritable))
+    monkeypatch.setattr(_mod.tempfile, "tempdir", str(unwritable))
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+    assert "failure_class=provider_probe_failed" in lines[0], lines[0]
+    assert "remediation=repair_the_probe_environment_and_retry" in lines[0], lines[0]
+    # The wrong answer named explicitly, so a future widening cannot restore it.
+    assert "provider_compatibility_unsupported" not in lines[0], lines[0]
+    assert "install_or_upgrade_opencode" not in lines[0], lines[0]
+
+
+def test_an_unusable_opencode_binary_still_reports_the_compatibility_class(monkeypatch, tmp_path):
+    """Control for the row above: the compatibility class is NOT removed.
+
+    Without this, widening the OSError arm to answer provider_probe_failed for
+    everything would satisfy the assertion above and silently retire the class
+    that tells an operator to upgrade opencode.
+    """
+    environment = _matrix_environment(tmp_path)
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+
+    resolved = _mod.executable_candidate("opencode", _mod.effective_instance_provider_path(environment))
+    assert resolved, "fixture must resolve an opencode on the governed PATH"
+
+    def _enoent(command, *args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    monkeypatch.setattr(_mod, "provider_command_output", _enoent)
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+    assert "failure_class=provider_compatibility_unsupported" in lines[0], lines[0]
+    assert "remediation=install_or_upgrade_opencode_modern_run_cli" in lines[0], lines[0]
+
+
 def test_opencode_functional_probe_keeps_the_workspace_and_socket(monkeypatch, tmp_path):
     """Control for the row above: the functional probe is NOT moved.
 

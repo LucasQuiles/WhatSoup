@@ -5073,14 +5073,29 @@ def opencode_provider_probe_inventory(
                 child_env=diagnostic_env,
                 child_cwd=diagnostic_cwd,
             )
-    except FileNotFoundError as exc:
-        # Same discrimination as the default provider's arm. ENOENT here means
-        # either the binary itself is gone or unrunnable -- which the compatibility
-        # class and its upgrade remediation describe correctly -- or something the
-        # probe brought with it is missing, such as the temporary directory this
-        # range added. Reporting the second as provider_compatibility_unsupported
-        # tells an operator to upgrade opencode when opencode is fine, so the two
-        # are separated by whether the missing file IS the command.
+    except OSError as exc:
+        # Same discrimination as the default provider's arm. An OS-level failure
+        # here means either the binary itself is gone or unrunnable -- which the
+        # compatibility class and its upgrade remediation describe correctly --
+        # or something the probe brought with it failed, such as the temporary
+        # directory this range added. Reporting the second as
+        # provider_compatibility_unsupported tells an operator to upgrade
+        # opencode when opencode is fine, so the two are separated by whether
+        # the failing file IS the command.
+        #
+        # OSError, not FileNotFoundError. ENOENT was only the errno that had
+        # been noticed: a PermissionError or an ENOSPC out of the same tempdir
+        # path fell through to the catch-all below, which answers the
+        # compatibility class unconditionally. Measured -- an unwritable temp
+        # root reported "[Errno 13] Permission denied ... failure_class=
+        # provider_compatibility_unsupported remediation=
+        # install_or_upgrade_opencode_modern_run_cli". The claude-cli arm's own
+        # catch-all already answers provider_probe_failed for exactly this, so
+        # this closes an asymmetry between two arms of one function rather than
+        # setting new policy. An OSError carrying no filename cannot be the
+        # command either, and lands on the environment class, which is the
+        # safer of the two to be wrong about: it asks the operator to look at
+        # the probe host instead of at a provider that may be fine.
         if exc.filename == command:
             return [(
                 f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
