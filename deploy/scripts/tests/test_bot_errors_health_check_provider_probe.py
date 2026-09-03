@@ -3409,11 +3409,40 @@ def test_an_unterminated_comment_is_refused_rather_than_ignored(monkeypatch, tmp
     assert _mod.instance_plist_environment("agent-alpha") is None
 
 
+def _unicode_only_whitespace() -> list[str]:
+    """Codepoints ``str.strip()`` removes that the XML whitespace set does not.
+
+    DERIVED from the production constant rather than enumerated by hand. Three
+    hand-picked fillers were a sample of this domain, not the whole of it: at
+    Python 3.12 the domain is 25 codepoints. Deriving it covers all of them and
+    keeps the test correct if ``PLIST_XML_SPACE`` ever changes.
+    """
+    return [
+        chr(cp)
+        for cp in range(0x110000)
+        if chr(cp).strip() == "" and chr(cp) not in _mod.PLIST_XML_SPACE
+    ]
+
+
+_UNICODE_ONLY_WHITESPACE = _unicode_only_whitespace()
+
+
+def test_the_unicode_only_whitespace_domain_is_not_empty():
+    """Guard against a vacuous parametrize.
+
+    If the derivation ever yields an empty list the parametrized test below
+    silently runs ZERO cases and reports green. Assert the domain is populated
+    and still contains the three characters that motivated the fix.
+    """
+    assert len(_UNICODE_ONLY_WHITESPACE) >= 20
+    for ch in ("\u00a0", "\x0c", "\x0b"):
+        assert ch in _UNICODE_ONLY_WHITESPACE
+
+
 @pytest.mark.parametrize(
-    "label,filler",
-    [("non-breaking space", "\u00a0"), ("form feed", "\x0c"), ("vertical tab", "\x0b")],
+    "filler", _UNICODE_ONLY_WHITESPACE, ids=lambda c: f"U+{ord(c):04X}"
 )
-def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_path, label, filler):
+def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_path, filler):
     """glm-3. One gap in this reader still used a Unicode-wide strip.
 
     Body consumption was tightened to the four XML whitespace characters, but
@@ -3446,7 +3475,7 @@ def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_pat
     assert _mod.instance_plist_environment("agent-alpha") == {"PATH": "/fixture/pin/bin"}
 
     target.write_text(_plist(f"\n {filler} "))
-    assert _mod.instance_plist_environment("agent-alpha") is None, label
+    assert _mod.instance_plist_environment("agent-alpha") is None, f"U+{ord(filler):04X}"
 
 
 def test_only_the_dry_path_override_marks_the_governed_surfaces_not_applicable(
