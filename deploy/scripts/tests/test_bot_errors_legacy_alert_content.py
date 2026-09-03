@@ -17,6 +17,7 @@ All fixtures are synthetic.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 import sys
 
@@ -245,8 +246,15 @@ def test_overlong_integer_in_a_non_envelope_repr_does_not_raise() -> None:
     assert mod.alert_text_kind(probe) == "string"
 
 
-def test_nineteen_digit_length_is_still_the_envelope() -> None:
-    """The bound is 19 digits, so a 19-digit count still renders canonically."""
+def test_nineteen_digit_length_is_over_the_value_bound_and_does_not_render() -> None:
+    """The repr GRAMMAR admits 19 digits; the VALUE bound does not.
+
+    Renamed and re-aimed: the grammar's 19-digit cap exists only to keep int()
+    from raising, and it is two orders of magnitude looser than any real
+    character count. The value rule is what decides, so a 19-nine count is now
+    unrenderable and falls through to the text path rather than rendering a
+    number the producer could never have emitted.
+    """
     mod = load_redaction()
     nineteen = "9" * 19
     text = (
@@ -256,4 +264,176 @@ def test_nineteen_digit_length_is_still_the_envelope() -> None:
         + DIGEST
         + "'}"
     )
-    assert mod.alert_text(text) == f"TypeError - {int(nineteen)} chars - digest a1b2c3d4"
+    assert int(nineteen) > mod.LEGACY_MAX_CONFINED_LENGTH
+    assert mod.alert_text(text) == text
+    assert mod.alert_text_kind(text) == "string"
+
+
+# ---------------------------------------------------------------------------
+# The legacy map's VALUES are bounded, not just its shape (#2386)
+# ---------------------------------------------------------------------------
+# The three-key shape check answers "is this the envelope". It says nothing about
+# what the values hold, and `failureClass` is interpolated straight into
+# operator-visible text and into the quarantine meta-alert. An unregistered class
+# is therefore an open content channel wearing a field name, which is exactly what
+# this issue exists to close. The producer's vocabulary is closed and enumerable,
+# so the reader enforces membership rather than a lexical grammar: a grammar like
+# "single-line ASCII token" still admits an unregistered content-bearing token.
+
+_PRODUCER_VOCABULARY_TS = (
+    Path(__file__).resolve().parents[3] / "src" / "lib" / "alert-evidence.ts"
+)
+
+
+def _producer_failure_classes() -> set[str]:
+    """Extract the producer's closed vocabulary from alert-evidence.ts.
+
+    Deliberately parses the TypeScript rather than restating it: a duplicated
+    Python constant that nobody compares to its source silently rots the moment
+    the producer gains a class, and the consumer then fails closed on a healthy
+    alert. Coverage-asserted below so a parse that finds nothing cannot pass.
+    """
+    source = _PRODUCER_VOCABULARY_TS.read_text(encoding="utf-8")
+    start = source.index("const FAILURE_CLASS_PATTERNS")
+    end = source.index("];", start)
+    block = source[start:end]
+
+    classes: set[str] = set()
+    for entry in re.finditer(r"\{\s*pattern:\s*(/.*?/),\s*label:\s*'([^']*)'\s*\}", block):
+        pattern, label = entry.group(1), entry.group(2)
+        if label == "$0":
+            # The label IS the matched text, so every alternative is a class.
+            group = re.search(r"\(\?:([^)]*)\)", pattern)
+            assert group, f"a $0 label needs an alternation to enumerate: {pattern}"
+            classes.update(part.strip() for part in group.group(1).split("|"))
+        else:
+            classes.add(label)
+
+    # The empty-content sentinel and the extractor's fallback are emitted too,
+    # and neither comes from the pattern table.
+    sentinel = re.search(r"failureClass:\s*'([^']*)'", source)
+    assert sentinel, "the EMPTY_CONFINED sentinel class must be present"
+    classes.add(sentinel.group(1))
+    fallback = re.search(r"return\s+'([^']*)';\s*\n\}", source)
+    assert fallback, "the extractFailureClass fallback must be present"
+    classes.add(fallback.group(1))
+    return classes
+
+
+def test_producer_failure_class_vocabulary_parity() -> None:
+    """Cross-language parity, so drift in EITHER direction is red.
+
+    A class the producer gains but the consumer does not know would be
+    quarantined as unrenderable, turning a healthy alert into a dropped one. A
+    class the consumer keeps after the producer drops it is a stale hole in the
+    allowlist. Both are failures, so this asserts set equality, not containment.
+    """
+    mod = load_redaction()
+    producer = _producer_failure_classes()
+    # Coverage assertion: an extraction that silently found nothing would make
+    # any containment check vacuous, and equality against an empty set would
+    # only fail confusingly.
+    assert len(producer) >= 15, f"vocabulary extraction looks truncated: {sorted(producer)}"
+    assert set(mod.LEGACY_FAILURE_CLASSES) == producer, (
+        "consumer allowlist has drifted from src/lib/alert-evidence.ts; "
+        f"consumer-only={sorted(set(mod.LEGACY_FAILURE_CLASSES) - producer)} "
+        f"producer-only={sorted(producer - set(mod.LEGACY_FAILURE_CLASSES))}"
+    )
+
+
+def test_every_producer_emitted_failure_class_is_accepted() -> None:
+    """No registered class may be rejected: that would drop a healthy alert."""
+    mod = load_redaction()
+    for failure_class in sorted(_producer_failure_classes()):
+        value = {"failureClass": failure_class, "length": 12, "correlationDigest": DIGEST}
+        rendered = mod.alert_text(value)
+        assert rendered == f"{failure_class} - 12 chars - digest a1b2c3d4", failure_class
+        assert mod.alert_text_kind(value) == "legacy_object", failure_class
+
+
+def test_the_vocabulary_members_are_single_line_ascii_tokens() -> None:
+    """The allowlist implies the lexical rules, so they are asserted, not re-checked."""
+    mod = load_redaction()
+    for failure_class in mod.LEGACY_FAILURE_CLASSES:
+        assert failure_class, "an empty class is not a token"
+        assert failure_class.isascii(), failure_class
+        assert failure_class.isprintable(), failure_class
+        assert "\n" not in failure_class and "\r" not in failure_class, failure_class
+        assert len(failure_class) <= 21, failure_class
+
+
+HOSTILE_MARKER = "hostilemarker8842"
+
+HOSTILE_FAILURE_CLASSES = {
+    "empty": "",
+    "unregistered": HOSTILE_MARKER,
+    "multi_line": "TypeError\n" + HOSTILE_MARKER,
+    "control_bearing": "TypeError\x00" + HOSTILE_MARKER,
+    "over_length": "TypeError" + HOSTILE_MARKER * 40,
+    "case_variant_of_a_registered_class": "typeerror",
+    "registered_class_with_a_suffix": "TypeError " + HOSTILE_MARKER,
+}
+
+
+def test_a_hostile_failure_class_in_the_exact_shape_is_never_interpolated() -> None:
+    """The EXACT three-key shape is not a licence to render the values.
+
+    Each fixture below is a well-formed envelope by shape. The class is the only
+    hostile part, and none of it may reach the rendered text: the value falls
+    through to the fixed sentinel, which the caller quarantines.
+    """
+    mod = load_redaction()
+    for name, failure_class in HOSTILE_FAILURE_CLASSES.items():
+        value = {
+            "failureClass": failure_class,
+            "length": 54,
+            "correlationDigest": DIGEST,
+        }
+        assert mod.legacy_confined_to_text(value) is None, name
+        assert mod.alert_text_kind(value) == "unrenderable", name
+        rendered = mod.alert_text(value)
+        assert rendered == mod.UNRENDERABLE_ALERT_CONTENT, name
+        assert HOSTILE_MARKER not in rendered, name
+        assert failure_class not in rendered or not failure_class, name
+
+
+def test_a_hostile_failure_class_in_a_baked_repr_is_never_interpolated() -> None:
+    """Same rule on the string serialisation, which takes a different code path."""
+    mod = load_redaction()
+    text = (
+        "{'failureClass': '" + HOSTILE_MARKER + "', 'length': 54, "
+        "'correlationDigest': '" + DIGEST + "'}"
+    )
+    # A repr that is not the envelope stays verbatim text rather than rendering,
+    # so the marker is still present as INPUT; what matters is that it was never
+    # parsed into a rendered class.
+    assert mod.alert_text_kind(text) == "string"
+    assert mod.alert_text(text) == text
+    assert mod.legacy_confined_to_text(text) is None
+
+
+BAD_LENGTHS = {
+    "negative": -1,
+    "boolean_true": True,
+    "boolean_false": False,
+    "string": "54",
+    "float": 54.0,
+    "over_the_bound": 2 ** 53,
+    "none": None,
+}
+
+
+def test_out_of_contract_lengths_are_not_the_envelope() -> None:
+    mod = load_redaction()
+    for name, length in BAD_LENGTHS.items():
+        value = {"failureClass": "TypeError", "length": length, "correlationDigest": DIGEST}
+        assert mod.legacy_confined_to_text(value) is None, name
+        assert mod.alert_text_kind(value) == "unrenderable", name
+
+
+def test_the_boundary_lengths_are_accepted() -> None:
+    """Both ends of the closed interval render, so the bound is not off by one."""
+    mod = load_redaction()
+    for length in (mod.LEGACY_MIN_CONFINED_LENGTH, mod.LEGACY_MAX_CONFINED_LENGTH):
+        value = {"failureClass": "TypeError", "length": length, "correlationDigest": DIGEST}
+        assert mod.alert_text(value) == f"TypeError - {length} chars - digest a1b2c3d4"

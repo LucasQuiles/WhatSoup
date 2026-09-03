@@ -203,6 +203,53 @@ def redact_json_value(value: Any, redact_text) -> Any:
 
 LEGACY_CONFINED_KEYS = frozenset({"failureClass", "length", "correlationDigest"})
 
+# The CLOSED failure-class vocabulary the producer can emit (#2386). The
+# confinement envelope has exactly one constructor, `confineAlertContent` in
+# src/lib/alert-evidence.ts, and its class always comes from `extractFailureClass`
+# there: either one of the six standard Error subclasses matched verbatim, one of
+# the nine fixed labels, the "none" sentinel for empty content, or the "unknown"
+# fallback. Nothing else can reach this reader from that producer.
+#
+# A lexical grammar is NOT enough on its own. "single-line ASCII token under N
+# characters" still admits an unregistered, content-bearing token, and this value
+# is interpolated into operator-visible text and into a quarantine meta-alert, so
+# an unregistered class is exactly the content channel this issue exists to close.
+# Membership in this set implies the lexical rules as well: every member is a
+# single-line ASCII token of at most 21 characters, which a test asserts rather
+# than a redundant second check asserting it at runtime.
+#
+# Kept in sync with the producer by test_producer_failure_class_vocabulary_parity,
+# which parses alert-evidence.ts and fails on drift in either direction.
+LEGACY_FAILURE_CLASSES = frozenset({
+    # Standard Error subclasses, returned as the matched text.
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "EvalError",
+    "URIError",
+    # Fixed labels.
+    "Error",
+    "provider_unknown",
+    "provider_timeout",
+    "provider_rate_limited",
+    "provider_auth_failure",
+    "finalization_failed",
+    "runtime_verify_failed",
+    "bundle_mismatch",
+    "preflight_failed",
+    # Sentinel for empty content, and the extractor's fallback.
+    "none",
+    "unknown",
+})
+
+# A character count, not an arbitrary integer. The upper bound is the largest
+# integer JavaScript represents exactly, so a value the producer could not have
+# produced is rejected rather than rendered. Negative counts are meaningless; the
+# repr grammar cannot express one, but a live mapping can carry one.
+LEGACY_MIN_CONFINED_LENGTH = 0
+LEGACY_MAX_CONFINED_LENGTH = 2 ** 53 - 1
+
 UNRENDERABLE_ALERT_CONTENT = "[unrenderable alert content]"
 
 _LEGACY_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -258,8 +305,15 @@ def _legacy_confined_mapping_to_text(
     digest = value.get("correlationDigest")
     if not isinstance(failure_class, str):
         return None
+    # #2386: a class outside the producer's closed vocabulary is not a class, it
+    # is unvalidated content wearing the field's name. Fail closed so it is
+    # quarantined and signalled rather than interpolated into operator text.
+    if failure_class not in LEGACY_FAILURE_CLASSES:
+        return None
     # bool is an int subclass; a boolean is not a character count.
     if isinstance(length, bool) or not isinstance(length, int):
+        return None
+    if not LEGACY_MIN_CONFINED_LENGTH <= length <= LEGACY_MAX_CONFINED_LENGTH:
         return None
     if not isinstance(digest, str) or not _LEGACY_DIGEST_RE.match(digest):
         return None

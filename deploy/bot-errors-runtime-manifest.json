@@ -38,7 +38,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "94922874d334e704bf3c4ddab8cbe30e8cb675d85b4bc56115c15a2d30814017",
+      "sha256": "ea86d41f4af670fc0227f50cacc06c3e7fdbdd0f566333826d7c8d303bc9441d",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -70,7 +70,10 @@
         "note_unrenderable_quarantine",
         "flush_unrenderable_quarantine_telemetry",
         "event_fingerprint_text",
-        "ack_unrenderable_quarantine_telemetry"
+        "ack_unrenderable_quarantine_telemetry",
+        "queue_unrenderable_meta_alerts",
+        "unrenderable_alert_signal",
+        "dispatcher.unrenderable_meta_alert"
       ]
     },
     {
