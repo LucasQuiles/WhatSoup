@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+try:  # imported as ``lib.bot_errors_envelope`` by every deploy script
+    from lib.bot_errors_redaction import has_malformed_legacy_confined_repr, legacy_confined_to_text
+except ImportError:  # loaded by file path, without the package context
+    from bot_errors_redaction import has_malformed_legacy_confined_repr, legacy_confined_to_text
+
 
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
@@ -16,10 +21,20 @@ INCIDENT_SEVERITIES = frozenset(("critical", "error", "warning"))
 
 
 class EnvelopeError(ValueError):
-    """A bounded reason why a queue event is not safe to consume."""
+    """A bounded reason why a queue event is not safe to consume.
 
-    def __init__(self, code: str) -> None:
+    ``kind`` and ``severity`` are populated only when classification had ALREADY
+    validated them before the failure was raised, which is the case for
+    ``unrenderable_alert_content``: the header is sound, the alert content is not.
+    They are canonical values from a closed set, never raw event text, so a
+    consumer can report what class of alert it dropped without echoing content.
+    Both are empty when the failure happened before or during header validation.
+    """
+
+    def __init__(self, code: str, *, kind: str = "", severity: str = "") -> None:
         self.code = code
+        self.kind = kind
+        self.severity = severity
         super().__init__(code)
 
 
@@ -89,7 +104,66 @@ def _classify_v2(event: Mapping[str, Any]) -> EventClassification:
     expected_kind, canonical_event_type, canonical_severity = _classify_v2_pair(event_type, severity)
     if kind != expected_kind:
         raise EnvelopeError("invalid_kind_severity")
+    _require_renderable_alert_content_classified(event, expected_kind, canonical_severity)
     return EventClassification(kind, canonical_event_type, canonical_severity, SCHEMA_VERSION, False)
+
+
+ALERT_CONTENT_FIELDS = ("summary", "evidence")
+
+
+def _require_renderable_alert_content(event: Mapping[str, Any]) -> None:
+    """Reject a mapping the consumer has no safe way to render (#2386).
+
+    `summary` and `evidence` are operator-visible text. The one non-string value
+    a consumer can render is the legacy confinement envelope, whose exact
+    three-key shape carries a failure class, a length, and a digest. Any other
+    mapping would have to be stringified to be displayed, which is precisely how
+    Python dict reprs were baked into WhatsApp messages and persisted incident
+    state. Quarantine it instead: `load_valid_event_or_quarantine` already routes
+    `EnvelopeError` to the quarantine directory, so no new plumbing is needed.
+
+    A string is always accepted here -- rendering it is the reader's job, not the
+    envelope's -- and so is an absent field.
+
+    The rule is deliberately SYMMETRIC across types. An earlier version rejected
+    only non-legacy mappings, which let a list, an int, a bool or a float pass
+    classification and reach the reader, where it rendered as the sentinel. That is
+    the same "no safe way to render this" condition arriving by a different type,
+    so it gets the same fail-closed answer instead of a silently degraded alert.
+
+    Booleans are intentionally unrenderable, not an oversight: a read-only survey
+    of the live sent corpus (9,221 events, full coverage, zero parse failures)
+    found zero events carrying a boolean in either field, so nothing in the estate
+    relies on one being rendered, and a producer that starts emitting one is
+    reporting a bug rather than an alert.
+    """
+    for field in ALERT_CONTENT_FIELDS:
+        value = event.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            # #2386: a string is normally the reader's job, but a string that IS
+            # this envelope's repr with values outside the bounds is confined
+            # material, not prose. Accepting it kept an invalid failure class and
+            # a digest-shaped field inside a routable incident alert, which is
+            # the content channel this issue closes. Ordinary text, including
+            # text carrying a VALID envelope repr, is unaffected.
+            if has_malformed_legacy_confined_repr(value):
+                raise EnvelopeError("unrenderable_alert_content")
+            continue
+        if isinstance(value, Mapping) and legacy_confined_to_text(dict(value)) is not None:
+            continue
+        raise EnvelopeError("unrenderable_alert_content")
+
+
+def _require_renderable_alert_content_classified(
+    event: Mapping[str, Any], kind: str, severity: str
+) -> None:
+    """Validate alert content, tagging the failure with the validated header."""
+    try:
+        _require_renderable_alert_content(event)
+    except EnvelopeError as exc:
+        raise EnvelopeError(exc.code, kind=kind, severity=severity) from None
 
 
 def classify_event(event: Mapping[str, Any]) -> EventClassification:
@@ -104,6 +178,7 @@ def classify_event(event: Mapping[str, Any]) -> EventClassification:
     event_type = _required_string(event, "eventType", "missing_event_type")
     severity = _required_string(event, "severity", "missing_severity")
     kind, canonical_event_type, canonical_severity = _classify_legacy_pair(event_type, severity)
+    _require_renderable_alert_content_classified(event, kind, canonical_severity)
     return EventClassification(kind, canonical_event_type, canonical_severity, LEGACY_SCHEMA_VERSION, True)
 
 
