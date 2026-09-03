@@ -812,10 +812,12 @@ running, and detaching it would let the next message start a second incarnation 
 conversation. The chat is therefore wedged until termination is proved. That is the intended
 state — do not force it by deleting the session, the queue or the checkpoint.
 
-It settles when the chat serves again. The next inbound turn finds the retained session and
-respawns it in place, which clears the abandonment and, if no other chat is exhausted or
-abandoned, clears this alert; failing that the record expires on age. Health reports
-`per_chat_respawn_abandoned` until it settles. Note the deferral guarantee quoted above belongs to
+It settles when a new owned session is indexed for the chat, or when an in-place re-activation
+of that chat completes, or when the record ages out of the retention window; settling clears
+this alert only if no other chat is exhausted or abandoned. Whether an ordinary inbound message
+reaches either of those routes for an abandoned chat is NOT established — do not rely on it. If
+the chat stays wedged, the remedies are the retention window or a process restart, not deleting
+the session. Health reports `per_chat_respawn_abandoned` until it settles. Note the deferral guarantee quoted above belongs to
 the crash-exhaustion path: abandonment passes no crash context, so there is no destructive cleanup
 to defer.
 

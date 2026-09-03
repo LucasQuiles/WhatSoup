@@ -994,7 +994,7 @@
         "impactTier": "page",
         "notification": "critical",
         "rootOwner": "agent_runtime_supervisor",
-        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it is settled when the chat serves again \u2014 either recovery route, in-place re-activation or session creation \u2014 and otherwise expires on age; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned",
+        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it is settled when a new owned session is indexed for the chat or an in-place re-activation of it completes, and otherwise when the record ages out; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned",
         "requiresCorroborationBeforePaging": false
       }
     }
