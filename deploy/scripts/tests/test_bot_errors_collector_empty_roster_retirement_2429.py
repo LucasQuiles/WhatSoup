@@ -207,8 +207,9 @@ def test_the_declared_empty_cycle_performs_no_remote_effects(tmp_state):
     """No probe, claim or acknowledgement effect: the seams are never reached.
 
     "No effects" is scoped deliberately. The cycle DOES publish, one
-    info-severity disposition per retired record, which the dispatcher
-    delivers as a BOT INFO line. What it must not do is touch a remote.
+    info-severity disposition per retired (remote, source) pair, which the
+    dispatcher delivers as a BOT INFO line. What it must not do is touch a
+    remote.
 
     The outbox assertion is a whitelist over the events THIS cycle added, not
     a blacklist of a few known-bad types. Naming only the types the cycle must
