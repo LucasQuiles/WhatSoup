@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "0884f949aae18fb55c41a3052a90ee71cbf2074e5f05d6fecd3bc266e0662bdc",
+      "sha256": "2bbeae2e5af3bb34878b42588df7a30a73416bfd966a84db4b854d52567d17ce",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "e1c59ae80cc4f0f5cd108dc8a9d1c9ebbb8be1a357512b7dddc7458bdb015775",
+      "sha256": "8f2f0999c9c17deb7a8fafcbbcbcc4ce0bd4f7c9c2dfba40fc3dcdd9e6d26045",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -225,7 +225,23 @@
         "lastCheckGapAt",
         "grace_refused",
         "deadman_observation_gap_line",
-        "deadman_observation_gap_inventory"
+        "deadman_observation_gap_inventory",
+        "instance_plist_environment",
+        "instance_plist_governed_environment",
+        "GOVERNED_PLIST_UNREADABLE",
+        "GOVERNED_PLIST_NOT_APPLICABLE",
+        "provider_runtime_plist_unreadable",
+        "governed_child_environment",
+        "environment_value",
+        "environment_provider_path",
+        "generated_provider_path_absence_failure",
+        "reason=generated_path_absent",
+        "governed_prepend_failure_class",
+        "instance_provider_path_prepend_match",
+        "path_starts_with_entries",
+        "WHATSOUP_PATH_PREPEND",
+        "provider_runtime_path_prepend_mismatch",
+        "provider_runtime_path_prepend_inconsistent"
       ]
     },
     {
