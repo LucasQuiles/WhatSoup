@@ -807,19 +807,17 @@ bound and no chat identifier; the **crash-exhaustion** path names the chat and t
 
 Abandonment means auto-respawn stopped re-arming because provider termination was never proved.
 On that path the runtime deliberately retains the session entry, the ownership record and the
-manager index, and calls no shutdown: a provider child that is not provably gone may still be
-running, and detaching it would let the next message start a second incarnation of the same
-conversation. The chat is therefore wedged until termination is proved. That is the intended
-state — do not force it by deleting the session, the queue or the checkpoint.
+manager index, and calls no shutdown: a provider child that is not provably gone could still be
+running, and detaching it would let a replacement start a second incarnation of the same
+conversation. Do not delete the session, the queue or the checkpoint to force health green.
 
-It settles when a new owned session is indexed for the chat, or when an in-place re-activation
-of that chat completes, or when the record ages out of the retention window; settling clears
-this alert only if no other chat is exhausted or abandoned. Whether an ordinary inbound message
-reaches either of those routes for an abandoned chat is NOT established — do not rely on it. If
-the chat stays wedged, the remedies are the retention window or a process restart, not deleting
-the session. Health reports `per_chat_respawn_abandoned` until it settles. Note the deferral guarantee quoted above belongs to
-the crash-exhaustion path: abandonment passes no crash context, so there is no destructive cleanup
-to defer.
+The chat recovers on its own. The abandonment settles when the chat's next inbound turn brings
+it back into service, when a new owned session is indexed for it, or when the record ages out of
+the retention window. Which of the first two routes the turn takes depends on the shape: a session
+that had gone inactive is respawned in place and settled by that re-activation, while one that
+still reported active when it was abandoned is settled on the served-turn path. Settling clears
+this alert only when no chat is either exhausted or abandoned. Health reports
+`per_chat_respawn_abandoned` until it settles.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
