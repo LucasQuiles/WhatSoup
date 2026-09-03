@@ -272,10 +272,17 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "075137829d4d072bbd23282c58e8731c910d20f7a5642f64a28c17b58c3f8573",
+      "sha256": "bac61da4404985a51d192af97ced57c7d1dc917c0ba62394796d640878bc32fe",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
-        "DEFAULT_HYSTERESIS_CYCLES"
+        "DEFAULT_HYSTERESIS_CYCLES",
+        "configuration_retired",
+        "retire_unconfigured_hosts",
+        "RETIRED_HOST_TOMBSTONE_MAX",
+        "reconcile_retirement_intents",
+        "enforce_retired_host_tombstone_cap",
+        "qRemediationDisposition",
+        "episodeSeq"
       ]
     },
     {
@@ -603,6 +610,15 @@
       ]
     },
     {
+      "path": "src/lib/alert-evidence.ts",
+      "sha256": "b15832328db5aaade620a23987f26c9102e2073b01ba9ae85733537f0da2ac32",
+      "mustContain": [
+        "confineAlertContent",
+        "ConfinedAlertContent",
+        "bot-errors-evidence:"
+      ]
+    },
+    {
       "path": "src/lib/bot-errors-outbox.ts",
       "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
       "mustContain": [
@@ -622,6 +638,29 @@
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
+      ]
+    },
+    {
+      "path": "src/lib/private-fs.ts",
+      "sha256": "405975415cbbb023b19d8497afb6c3be09e411611b4dc79623f95b2c17faf60c",
+      "mustContain": [
+        "forceEnsurePrivateDirectorySync",
+        "fsyncDirectory"
+      ]
+    },
+    {
+      "path": "src/lib/redaction-patterns.ts",
+      "sha256": "c91114fedbba5bbabb1d8285cb47d0a1f1b008207dde92578ff3128dc89c827d",
+      "mustContain": [
+        "jidPattern"
+      ]
+    },
+    {
+      "path": "src/lib/type-guards.ts",
+      "sha256": "a5c720ed58c8bea11774cbc4d5eb1edb4fc7bbce4cabdd36dde74bdcc2e58e92",
+      "mustContain": [
+        "asNonEmptyString",
+        "isRecord"
       ]
     }
   ]
