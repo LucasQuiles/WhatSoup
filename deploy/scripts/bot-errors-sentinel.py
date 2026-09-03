@@ -85,6 +85,15 @@ CONFIGURATION_RETIRED_LANE = "configuration_retirement"
 # Bounded tombstone: long enough to dedupe a delayed acknowledgement or action
 # for a retired member and to correlate a re-addition, short enough that the
 # state file cannot grow without bound.
+#
+# This bound and RETIREMENT_INTENT_MAX below are both 64 and do NOT have to
+# track each other: they bound different ledgers with different costs. This one
+# bounds how many retired members stay dedupable across LATER cycles; exceeding
+# it costs a stale acknowledgement or a lost re-addition correlation. The intent
+# cap bounds how many first-attempt clocks are pinned within ONE cycle;
+# exceeding it costs a duplicate audit record on a retry. Neither is derived
+# from the other, and the execution guard no longer reads this map directly
+# (see retirement_action_guard_hosts), so they may diverge freely.
 RETIRED_HOST_TOMBSTONE_MAX = 64
 RETIRED_HOST_TOMBSTONE_TTL_SECONDS = 30 * 24 * 3600
 # What a retirement did to the fleet-wide Tier-2 remediation slot, as bounded
@@ -99,6 +108,15 @@ QREMEDIATION_RETIREMENT_NONE = "none"
 RETIREMENT_INTENT_LEDGER = "sentinel-retirement-intents.json"
 RETIREMENT_INTENT_MAX = 64
 RETIREMENT_INTENT_TTL_SECONDS = 7 * 24 * 3600
+# Why a retiring member has no usable pinned clock, as bounded enum tokens.
+# Counts only and never member names: #2429 requires operator-visible
+# diagnostics to carry reserved synthetic identities, bounded enums/counts and
+# opaque digests, and a truncated-member list would be an unbounded list keyed
+# by identity. The two causes need different remediations -- one is a fleet that
+# outgrew the bound, the other is a ledger file to inspect -- which is why they
+# are two tokens rather than one.
+RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED = "intent_cap_exceeded"
+RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE = "intent_ledger_entry_unusable"
 
 ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift", "q_unavailable"}
 ATTENTION_FLEET_ACTIONS = {
@@ -2161,8 +2179,8 @@ def prune_retired_host_tombstones(state: dict, now: float) -> dict:
     return enforce_retired_host_tombstone_cap(state)
 
 
-def load_retirement_intents(config: SentinelConfig) -> dict:
-    """Pending retirement intents, keyed by member.
+def load_retirement_intents(config: SentinelConfig) -> tuple[dict, int]:
+    """Pending retirement intents keyed by member, with the count discarded.
 
     Deliberately NOT part of ``state``. retire_unconfigured_hosts rolls state
     back to a pre-publication deepcopy on failure, and the cycle's ``save_state``
@@ -2173,7 +2191,11 @@ def load_retirement_intents(config: SentinelConfig) -> dict:
 
     Unreadable, malformed, or unusably-timestamped entries are dropped rather
     than raising, so READING the ledger never fails a cycle: a lost pin costs a
-    duplicate audit record.
+    duplicate audit record. The count of discarded entries is returned rather
+    than swallowed, because that cost was previously silent -- the member is
+    re-pinned at the current clock, so it never reaches the emit loop's unpinned
+    fallback and nothing downstream could tell a corrupt ledger from a healthy
+    one. The caller reports it as a bounded diagnostic.
 
     That tolerance does NOT extend to writing it. ``save_retirement_intents``
     publishes through the durable-state path, which refuses to replace a file
@@ -2187,15 +2209,32 @@ def load_retirement_intents(config: SentinelConfig) -> dict:
     ledger = optional_json_object(retirement_intent_path(config)) or {}
     intents = ledger.get("intents")
     if not isinstance(intents, dict):
-        return {}
+        return {}, 0
     usable = {}
+    discarded = 0
     for host, entry in intents.items():
         if not isinstance(entry, dict):
+            discarded += 1
             continue
         if finite_float(entry.get("firstAttemptEpoch")) is None:
+            discarded += 1
             continue
         usable[str(host)] = dict(entry)
-    return usable
+    return usable, discarded
+
+
+def report_lost_retirement_pins(cause: str, count: int) -> None:
+    """One bounded operator-visible line per cause, carrying a count and nothing else.
+
+    A lost pin means a retry republishes a second timestamped artifact instead
+    of reconciling onto the first. That was the ledger's whole purpose, and both
+    ways of losing one were silent: no diagnostic, no test, no count.
+    """
+    if count > 0:
+        print(
+            f"[bot-errors-sentinel] retirement intent pin lost: cause={cause} count={count}",
+            file=sys.stderr,
+        )
 
 
 def save_retirement_intents(config: SentinelConfig, intents: dict) -> None:
@@ -2310,7 +2349,21 @@ def reconcile_retirement_intents(
     rewrites the ledger down to that cycle's retiring set; age and count bounds
     are the backstop.
     """
-    stored = load_retirement_intents(config)
+    stored, unusable = load_retirement_intents(config)
+    # Two distinct causes leave a member without the pin it should have had, and
+    # they are reported separately because they call for different responses.
+    # An unusable stored entry is discarded by the loader and re-minted here at
+    # the current clock, so the member IS pinned and never reaches the emit
+    # loop's fallback -- what it lost is the ORIGINAL clock, which is why this
+    # cause is only observable here.
+    report_lost_retirement_pins(RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE, unusable)
+    # The cap is the ledger's storage bound and is kept: ``kept`` fully replaces
+    # ``stored`` below, so the file holds at most this many entries. What was
+    # wrong was the silence -- members past the cap take the emit loop's
+    # unpinned fallback with nothing said about how many.
+    report_lost_retirement_pins(
+        RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED, max(0, len(bindings) - RETIREMENT_INTENT_MAX)
+    )
     kept: dict = {}
     for host in sorted(bindings)[:RETIREMENT_INTENT_MAX]:
         binding = bindings[host]
@@ -2424,6 +2477,12 @@ def retire_unconfigured_hosts(
         intent = intents.get(host)
         pinned_at = finite_float(intent.get("firstAttemptEpoch")) if isinstance(intent, dict) else None
         if pinned_at is None:
+            # Reaching this means one thing only: the member fell past
+            # RETIREMENT_INTENT_MAX in reconcile_retirement_intents, which
+            # already reported the count under
+            # RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED. An unusable stored entry
+            # does NOT arrive here -- it is re-minted with a fresh clock and
+            # reported under its own cause.
             pinned_at = now
         request_id = request_ids[host]
         path = action_event_path(

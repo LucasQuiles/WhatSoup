@@ -4455,3 +4455,101 @@ def test_the_tombstone_cap_itself_is_unchanged_by_the_guard_fix(tmp_path: Path, 
     assert observed["dropped"] not in state["retiredHosts"]
 
 
+def test_a_retirement_batch_past_the_intent_cap_reports_the_unpinned_count(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """A truncated pin is a duplicate audit record on the next retry.
+
+    The ledger caps at RETIREMENT_INTENT_MAX while the binding and emit loops
+    iterate every retiring member, so members past the cap publish on an
+    unpinned clock. That is defensible as a storage bound and indefensible as a
+    silent one: nothing said how many members were left unpinned.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    unpinned = len(observed["retiring"]) - _mod.RETIREMENT_INTENT_MAX
+
+    assert unpinned == 1
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in captured.err
+    assert f"count={unpinned}" in captured.err
+
+
+def _intent_ledger_with_an_unusable_entry(tmp_path: Path, monkeypatch) -> dict:
+    """A batch past the cap whose stored ledger also holds one unusable entry.
+
+    A non-finite ``firstAttemptEpoch`` is exactly what the loader drops, and a
+    dropped entry costs that member its ORIGINAL pinned clock -- a different
+    cause from cap truncation, with the same downstream cost.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    retiring = [f"retire-{index:03d}" for index in range(_mod.RETIREMENT_INTENT_MAX + 1)]
+    host_records = {"host-a": {"alertState": "closed"}}
+    for host in retiring:
+        host_records[host] = {"alertState": "open", "consecutive": 1, "transitions": []}
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": host_records, "retiredHosts": {}},
+    )
+    ledger_path = _mod.retirement_intent_path(config)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _write_json(
+        ledger_path,
+        {
+            "schemaVersion": 1,
+            "intents": {
+                retiring[0]: {
+                    "contentBinding": "seeded-binding",
+                    "episodeSeq": 0,
+                    "firstAttemptEpoch": "not-a-number",
+                    "firstAttemptAtIso": "seeded",
+                }
+            },
+        },
+    )
+    os.chmod(ledger_path, 0o600)
+    monkeypatch.setattr(_mod, "execute_action", lambda action: None)
+    result = _mod.run_once(
+        config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    )
+    return {"config": config, "result": result, "retiring": retiring}
+
+
+def test_a_truncated_pin_and_an_unusable_pin_are_reported_differently(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Two causes, two bounded tokens, so remediation can tell them apart.
+
+    A capacity excursion and a corrupt ledger both cost a duplicate audit
+    record, and before this change both were silent. They need different
+    operator-visible causes, because the remediations differ: one is a fleet
+    that outgrew the bound, the other is a file to inspect.
+    """
+    _intent_ledger_with_an_unusable_entry(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in captured.err
+    assert _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE in captured.err
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED != _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE
+
+
+def test_the_unpinned_diagnostics_carry_no_member_names(tmp_path: Path, monkeypatch, capsys):
+    """#2429's diagnostics line: bounded enums and counts, never identities.
+
+    The batch is 65 synthetic members; a diagnostic that named the truncated or
+    unusable ones would be an unbounded operator-visible list keyed by member.
+    """
+    observed = _intent_ledger_with_an_unusable_entry(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    diagnostics = [
+        line
+        for line in captured.err.splitlines()
+        if _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in line
+        or _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE in line
+    ]
+
+    assert diagnostics, "the diagnostics must exist before their content can be asserted"
+    for line in diagnostics:
+        for host in observed["retiring"]:
+            assert host not in line, "an unpinned-member diagnostic must not name members"
