@@ -1392,6 +1392,117 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(state.pendingRespawnTimers.size).toBe(0);
     });
 
+    /**
+     * Arrange and act for the abandonment path, returning observations.
+     *
+     * Split from the assertions deliberately: vitest aborts a case at its first
+     * failing `expect`, so three assertions in one case can only ever prove the
+     * first one red. Each named test below asserts on one observation and
+     * carries its own independent red.
+     */
+    async function abandonRespawnAndObserve(): Promise<{
+      mapKey: string;
+      abandoned: boolean;
+      alertSources: string[];
+      alertBodies: string[];
+      degradedReasons: string[];
+      abandonedCount: unknown;
+      pendingTimers: number;
+    }> {
+      mockEmitAlert.mockClear();
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // Termination never proves, so every deferral re-arms until the bound.
+      mockSession.getStatus.mockReturnValue({
+        active: false, pid: null, providerTerminated: false,
+        sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: null, signal: null, sessionId: 'sess-abandon', dbRowId: 15,
+        provider: 'p', crashClass: 'managed_provider_error', stderrPreview: 'never settles',
+      });
+
+      // The whole deferral budget at this backoff fits well inside 120s.
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      const health = runtime.getHealthSnapshot();
+      const details = health.details as Record<string, unknown>;
+      return {
+        mapKey,
+        // Read defensively: the observation is "is this chat marked abandoned",
+        // and a tree without the set answers `false` rather than throwing. That
+        // keeps each named test's red its OWN assertion failure instead of one
+        // shared TypeError raised here, in the arrange step, for all three.
+        abandoned: (state as unknown as { abandonedRespawnOwners?: Set<string> })
+          .abandonedRespawnOwners?.has(mapKey) === true,
+        alertSources: mockEmitAlert.mock.calls.map((call) => String(call[1])),
+        alertBodies: mockEmitAlert.mock.calls.map((call) => String(call[3] ?? '')),
+        degradedReasons: (details['degradedReasons'] as string[] | undefined) ?? [],
+        abandonedCount: details['perChatRespawnAbandoned'],
+        pendingTimers: state.pendingRespawnTimers.size,
+      };
+    }
+
+    it('marks the manager abandoned when the deferral budget is spent', async () => {
+      const observed = await abandonRespawnAndObserve();
+      expect(observed.abandoned, 'abandoned respawn owners contains the chat').toBe(true);
+      // The bound itself is unchanged: no timer survives the abandonment.
+      expect(observed.pendingTimers).toBe(0);
+    });
+
+    it('emits agent_respawn_failed when termination is never proved', async () => {
+      const observed = await abandonRespawnAndObserve();
+      expect(observed.alertSources).toContain('agent_respawn_failed');
+      const body = observed.alertBodies.join('\n');
+      expect(body).toContain('Abandoned chats: 1');
+      // Content-free by construction: counts and a bound, never a chat identity.
+      // The sibling crash-exhaustion alert carries a Chat: line; this one must not.
+      expect(body).not.toContain('Chat:');
+      expect(body).not.toContain(observed.mapKey);
+      expect(body).not.toContain('@');
+      expect(body).not.toMatch(/\d{7,}/);
+    });
+
+    it('degrades health with a reason that does not decay with the crash window', async () => {
+      const observed = await abandonRespawnAndObserve();
+      expect(observed.degradedReasons).toContain('per_chat_respawn_abandoned');
+      // recent_crashes is present too and decays after CRASH_HEALTH_DECAY_WINDOW_MS,
+      // so an unfiltered "not empty" assertion would pass without the new reason.
+      expect(observed.degradedReasons.filter((reason) => reason !== 'recent_crashes'))
+        .toContain('per_chat_respawn_abandoned');
+      // Counts only — the snapshot never carries the chat identity.
+      expect(observed.abandonedCount).toBe(1);
+    });
+
+    it('does NOT report an abandoned respawn for a chat that merely exhausted its crash budget', async () => {
+      // Negative control for the dedicated set. The crash-exhaustion path writes
+      // `exhaustedRespawnOwners`, and those chats already alert under
+      // agent_respawn_failed with their own operator surface. A counter reading
+      // that set instead of the abandonment set would degrade health for every
+      // crash-exhausted chat too — a behaviour change this item's scope forbids.
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+
+      // Crash-exhausted, and NOT abandoned.
+      (state as unknown as { exhaustedRespawnOwners: Set<string> }).exhaustedRespawnOwners.add(mapKey);
+
+      const details = runtime.getHealthSnapshot().details as Record<string, unknown>;
+      expect((details['degradedReasons'] as string[] | undefined) ?? [])
+        .not.toContain('per_chat_respawn_abandoned');
+      expect(details['perChatRespawnAbandoned']).toBe(0);
+    });
+
     it('recovers on the first firing when termination is already proven', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();

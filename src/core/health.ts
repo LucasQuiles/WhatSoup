@@ -256,6 +256,24 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.provider_fallback_active',
 ]);
 
+/** Status reasons whose condition is re-probed in full on EVERY evaluation, so
+ * they are not silence-prone and must never arm the degradation latch. This is
+ * the same rule the late-source reasons already follow ("directly probed every
+ * evaluation, not silence-prone" — see the latch-maintenance comment below);
+ * these two simply reach the early path instead of the late one.
+ *
+ * Why they need it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn in
+ * an unrelated chat proves nothing about a per-chat ownership map — so a latch
+ * carrying one could never be released by the only release channel that exists,
+ * and the instance would report degraded until process restart even after the
+ * runtime had repaired itself and its own snapshot read healthy. Not arming is
+ * correct rather than merely convenient: the condition is recomputed from live
+ * state on the next poll, so a still-broken map degrades again immediately. */
+export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'runtime.per_chat_session_without_owner',
+  'runtime.per_chat_respawn_abandoned',
+]);
+
 /** The primary route the latch release compares a receipt against: the
  * primary provider (only known while no fallback window is live) and its
  * configured model, null meaning the provider default. */
@@ -454,6 +472,10 @@ export type HealthDegradationCause =
   // and a mismatch never hides behind "unknown").
   | 'credential_identity_mismatch'
   | 'credential_identity_unverifiable'
+  // per-chat dispatch-ownership conditions: named and deliberate, so they do not
+  // belong in the unclassified fall-through below.
+  | 'per_chat_session_without_owner'
+  | 'per_chat_respawn_abandoned'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
@@ -551,6 +573,11 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   // verdict (runtime.agent.accountIdentity.status).
   credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
   credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
+  // per-chat dispatch ownership: both conditions are named, deliberate and
+  // directly re-probed, so each carries its own cause rather than landing in the
+  // fall-through where an operator cannot separate it from a genuine unknown.
+  per_chat_session_without_owner: { reasonTwins: ['runtime.per_chat_session_without_owner'] },
+  per_chat_respawn_abandoned: { reasonTwins: ['runtime.per_chat_respawn_abandoned'] },
   // the fall-through when the agent runtime is degraded for a reason no named
   // cause covers: the degradedReasons without a cause of their own, plus the
   // bare marker used when the runtime reported no reasons at all.
@@ -559,7 +586,6 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
       'runtime.turn_queue_halted',
       'runtime.poll_persistence_failure',
       'runtime.offline_decision_retry_exhausted',
-      'runtime.per_chat_session_without_owner',
       'agent_runtime_degraded',
     ],
   },
@@ -2549,6 +2575,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         : undefined;
       if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
       else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
+      // Registering a cause is not enough to emit one: the derived membership
+      // below only suppresses the fall-through. Both per-chat ownership counts
+      // reach the wire through the runtime details block, so name them here.
+      if (positiveRuntimeCounter('perChatSessionsWithoutOwner')) {
+        addDegradationCause('per_chat_session_without_owner');
+      }
+      if (positiveRuntimeCounter('perChatRespawnAbandoned')) {
+        addDegradationCause('per_chat_respawn_abandoned');
+      }
       // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
       // cause registry: a newly registered runtime-scoped cause classifies
       // itself here without an edit to this guard.
@@ -2609,7 +2644,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //     early-degraded evidence on an unhealthy-verdict evaluation arms
       //     nothing — is exactly base behavior for every unhealthy verdict.
       const realReasons = statusReasons.filter(
-        (reason) => reason !== 'degradation_silence_unproven' && reason !== 'unclassified',
+        (reason) => reason !== 'degradation_silence_unproven'
+          && reason !== 'unclassified'
+          // Directly re-probed reasons never arm and are never latched: no
+          // release channel could ever clear them, so latching one pins the
+          // instance degraded past its own repair. See
+          // DIRECTLY_REPROBED_STATUS_REASONS.
+          && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason),
       );
       if (realReasons.length > 0) {
         const existingLatch = recentlyDegraded.get(deps.instanceName);

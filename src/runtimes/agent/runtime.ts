@@ -761,6 +761,14 @@ export class AgentRuntime implements Runtime {
   private readonly deferredTurnAdmissionOptions: { enabled: boolean } | null;
   /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
   private readonly exhaustedRespawnOwners = new Set<string>();
+  /**
+   * mapKeys whose auto-respawn was abandoned because provider termination was
+   * never proved. Deliberately NOT `exhaustedRespawnOwners`: the crash-exhaustion
+   * path writes that set too, so a health counter reading it would degrade for
+   * every crash-exhausted chat as well — chats that already alert under
+   * `agent_respawn_failed` and whose behaviour this signal does not describe.
+   */
+  private readonly abandonedRespawnOwners = new Set<string>();
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
   private readonly cwd: string | undefined;
@@ -1054,8 +1062,10 @@ export class AgentRuntime implements Runtime {
    * Window for the health-degraded crash signal (#1427). A crash older than this
    * no longer degrades health, so a transient crash that immediately recovers
    * clears within the window instead of pinning status=degraded forever. Sustained
-   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), so
-   * a short window here only governs the soft "crashed recently" health hint.
+   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), and
+   * a respawn abandoned with termination unproved raises its own alert and its own
+   * non-decaying health reason, so a short window here only governs the soft
+   * "crashed recently" health hint.
    */
   private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * MS_PER_MINUTE;
 
@@ -6867,6 +6877,7 @@ export class AgentRuntime implements Runtime {
     // Chats wedged with a session entry no ownership record backs. Read pure
     // here: this snapshot is polled, so the warning sweep stays on the tick.
     const perChatSessionsWithoutOwner = this.perChatSessionsWithoutOwner();
+    const perChatRespawnAbandoned = this.perChatRespawnAbandonedCount();
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
     const publicPoisonHealth = {
@@ -6908,6 +6919,7 @@ export class AgentRuntime implements Runtime {
       suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
       providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
       perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length,
+      perChatRespawnAbandoned,
       ...this.turnChronology.healthDetails(),
       providerExecution,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -6951,6 +6963,12 @@ export class AgentRuntime implements Runtime {
       // the eviction path, did so with no operator-visible signal at all.
       if (perChatSessionsWithoutOwner.length > 0) {
         degradedReasons.push('per_chat_session_without_owner');
+      }
+      // An abandoned respawn stops recovering this chat until the user writes
+      // again, and unlike recent_crashes this signal does not decay inside the
+      // crash-health window.
+      if (perChatRespawnAbandoned > 0) {
+        degradedReasons.push('per_chat_respawn_abandoned');
       }
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
@@ -7893,6 +7911,13 @@ export class AgentRuntime implements Runtime {
         this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
       }
       this.chatSessions.delete(mapKey);
+      // Forget the chat's throttle history here, alongside the map entry the
+      // sweep iterates. Deliberately OUTSIDE the `if (current)` above: the
+      // throttle is keyed by mapKey, not by a manager id, and the eviction
+      // shape that has no ownership record at all is exactly one of the shapes
+      // that leaked. Without this, a deleted-then-re-added chat inherits its
+      // suppressed count and its next FIRST failure is silently dropped.
+      this.unownedSweepLogThrottle.onSuccess(mapKey);
     }
     return mapped !== undefined;
   }
@@ -8036,12 +8061,25 @@ export class AgentRuntime implements Runtime {
     return unowned;
   }
 
+  /**
+   * Chats whose auto-respawn was abandoned with provider termination unproved.
+   * Pure, like its sibling above, so the polled health snapshot can read it
+   * without emitting a log line per poll. Counts only — the chat identities stay
+   * out of the health surface.
+   */
+  private perChatRespawnAbandonedCount(): number {
+    return this.abandonedRespawnOwners.size;
+  }
+
   /** Periodic sweep: report the impossible state. Health tick only. */
   private sweepPerChatSessionsWithoutOwner(): number {
     const unowned = this.perChatSessionsWithoutOwner();
     const unownedKeys = new Set(unowned);
-    // A chat that recovered clears its history, so a later recurrence logs from
-    // the first occurrence again instead of inheriting a suppressed count.
+    // A chat that recovered while still mapped clears its history here, so a
+    // later recurrence logs from the first occurrence again instead of
+    // inheriting a suppressed count. A chat that leaves the map entirely is
+    // cleared by `deleteOwnedPerChatSession`, not by this loop: it iterates
+    // chatSessions, so an evicted key is no longer reachable from it.
     for (const mapKey of this.chatSessions.keys()) {
       if (!unownedKeys.has(mapKey)) this.unownedSweepLogThrottle.onSuccess(mapKey);
     }
@@ -10371,6 +10409,34 @@ export class AgentRuntime implements Runtime {
       log.warn(
         evidence,
         'auto-respawn abandoned — provider termination never proved; the next inbound message rebuilds this chat',
+      );
+      // The abandonment is deliberate, but until now it reached no operator
+      // surface: the chat keeps a correct ownership record, so the unowned
+      // predicate stays false and health never saw it, and the only other
+      // signal (recent_crashes) decays after CRASH_HEALTH_DECAY_WINDOW_MS.
+      this.abandonedRespawnOwners.add(mapKey);
+      // Same retention shape as the crash-exhaustion path: prune after 1h so a
+      // never-recovered conversation does not leak. Unref so the timer does not
+      // prevent process shutdown.
+      setTimeout(() => { this.abandonedRespawnOwners.delete(mapKey); }, 3600_000).unref();
+      // Route through the helper rather than transitioning ownership inline: it
+      // re-checks the map entry and the generation and clears the respawn timer,
+      // all of which this path also needs. No crashContext here, so an abandoned
+      // chat holding a journaled turn is retained rather than released.
+      this.terminalizeExhaustedPerChatSession(
+        mapKey,
+        args.session,
+        args.managerId,
+        args.recoveryGeneration,
+      );
+      emitAlertChecked(
+        this.instanceName,
+        'agent_respawn_failed',
+        `whatsoup@${this.instanceName} agent respawn abandoned — provider termination never proved`,
+        [
+          `Abandoned chats: ${this.abandonedRespawnOwners.size}`,
+          `Deferral bound: ${AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS}`,
+        ].join('\n'),
       );
       return;
     }
