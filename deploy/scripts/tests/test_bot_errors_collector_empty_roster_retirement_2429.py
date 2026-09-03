@@ -43,8 +43,6 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 _CONFTEST_PATH = Path(__file__).resolve().parent / "conftest.py"
 _conftest_spec = importlib.util.spec_from_file_location(
     "bot_errors_collector_test_conftest_2429_empty_roster", _CONFTEST_PATH
@@ -352,20 +350,22 @@ def test_an_unregistered_key_still_fails_the_declared_empty_cycle_closed(tmp_sta
         assert _dispositions(outbox_dir) == []
 
 
-@pytest.mark.parametrize("roster", ["", "h1.example", ","])
-def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys, roster):
-    """A declared-empty retirement is one-shot and must never be a daemon.
+def _refuse_the_pair(tmp_state, capsys, roster: str) -> dict:
+    """Arrange and act for the three refusal cases; the callers assert.
 
-    Parked in the unit's ExecStart the pair would look harmless while a roster
+    A declared-empty retirement is one-shot and must never be a daemon. Parked
+    in the unit's ExecStart the pair would look harmless while a roster
     existed, then degrade the moment it emptied: the process would succeed,
     exit, and be restarted on the service manager's schedule, rewriting state
     every cycle. The combination is refused at the usage boundary, above the
     state session, so the ledger is never opened.
 
-    The roster is varied to pin that the refusal is decided on argv ALONE: an
-    empty list, a populated one, and a separators-only value must all be
-    refused identically. Otherwise a guard that happened to key off the roster
-    would pass a test that only ever supplied one.
+    Each caller supplies a different roster because the refusal must be
+    decided on argv ALONE. A guard that happened to key off the roster would
+    pass a suite that only ever supplied one value. They are separate named
+    tests rather than one case list so that a failure names the roster shape
+    that broke, and this helper deliberately returns observations instead of
+    asserting on them, so each named test carries its own assertions.
     """
     state_dir, outbox_dir = tmp_state
     roster_env = {"BOT_ERRORS_RELAY_REMOTES": roster}
@@ -383,14 +383,41 @@ def test_daemon_and_allow_empty_roster_are_mutually_exclusive(tmp_state, capsys,
             )
             rc = _main(mod, ["--daemon", "--allow-empty-roster"])
 
-        assert rc == 64
-        stderr = capsys.readouterr().err
-        assert "--allow-empty-roster" in stderr
-        assert "--daemon" in stderr
-        assert daemon.call_count == 0
-        # Refused above the state session: nothing loaded, pruned, saved or published.
-        assert state_file.read_bytes() == before
-        assert _dispositions(outbox_dir) == []
+        return {
+            "rc": rc,
+            "stderr": capsys.readouterr().err,
+            "daemon_calls": daemon.call_count,
+            # Refused above the state session: nothing loaded, pruned or saved.
+            "ledger_unchanged": state_file.read_bytes() == before,
+            "dispositions": _dispositions(outbox_dir),
+        }
+
+
+def _assert_refused(outcome: dict) -> None:
+    assert outcome["rc"] == 64
+    assert "--allow-empty-roster" in outcome["stderr"]
+    assert "--daemon" in outcome["stderr"]
+    assert outcome["daemon_calls"] == 0
+    assert outcome["ledger_unchanged"]
+    assert outcome["dispositions"] == []
+
+
+def test_daemon_and_allow_empty_roster_are_refused_on_an_empty_roster(tmp_state, capsys):
+    outcome = _refuse_the_pair(tmp_state, capsys, "")
+    assert outcome["rc"] == 64
+    _assert_refused(outcome)
+
+
+def test_daemon_and_allow_empty_roster_are_refused_on_a_populated_roster(tmp_state, capsys):
+    outcome = _refuse_the_pair(tmp_state, capsys, REMOTE)
+    assert outcome["rc"] == 64
+    _assert_refused(outcome)
+
+
+def test_daemon_and_allow_empty_roster_are_refused_on_a_separators_only_roster(tmp_state, capsys):
+    outcome = _refuse_the_pair(tmp_state, capsys, ",")
+    assert outcome["rc"] == 64
+    _assert_refused(outcome)
 
 
 def test_the_flag_does_not_declare_anything_when_the_variable_is_absent(tmp_state, capsys):
