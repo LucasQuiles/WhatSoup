@@ -3069,16 +3069,24 @@ def test_opencode_functional_probe_keeps_the_workspace_and_socket(monkeypatch, t
     assert socket_path.startswith(f"{workspace}/")
 
 
-def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_path):
-    """Named pin for the environment affordances that switch the checks off.
+def test_only_the_dry_path_override_marks_the_governed_surfaces_not_applicable(
+    monkeypatch, tmp_path
+):
+    """MED-2. Stubbing the probe's OUTPUT must not un-apply the plist checks.
 
-    Two environment variables mark the governed surfaces not-applicable: the
-    dry-run PATH override and an injected probe result. Both are production-code
-    bypasses of a fail-closed path, so this asserts explicitly that with NEITHER
-    set the fail-closed still holds, and that each one alone is enough to switch
-    it off. Without this the six-row matrix would still pass if an affordance
-    leaked in from the ambient environment, because the assertion would never
-    reach the code it names.
+    Exactly one environment variable may mark the governed surfaces
+    not-applicable: BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH, which replaces the
+    provider PATH at its source, so there is genuinely no plist-derived value
+    left to govern.
+
+    The probe-stub variables are a different kind of affordance. They replace
+    what the CHILD PROCESS returns; they say nothing about whether this host has
+    a LaunchAgent surface or whether that surface is readable. Letting them
+    reach applicability meant a stub variable leaking into a deployed
+    environment silently switched off every check this branch added: the plist
+    could be missing, planted, symlinked or wrongly labelled and the default
+    provider still reported healthy. This asserts the inverse, per variable:
+    with a broken plist, each stub variable alone leaves the state UNREADABLE.
     """
     environment = _matrix_environment(tmp_path)
     target = _arm_darwin_plist(
@@ -3091,23 +3099,67 @@ def test_governed_checks_apply_when_no_dry_affordance_is_set(monkeypatch, tmp_pa
     assert os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is None
     assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT") is None
     assert os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_RC") is None
-    assert _mod.provider_probe_output_is_stubbed() is False
     assert _mod.instance_plist_governed_environment("agent-alpha") == (
         _mod.GOVERNED_PLIST_UNREADABLE,
         None,
     )
 
-    # Each affordance ALONE switches the governed surfaces off, which is the
-    # bypass being disclosed rather than hidden.
-    monkeypatch.setenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", "0")
-    assert _mod.provider_probe_output_is_stubbed() is True
-    assert _mod.instance_plist_governed_environment("agent-alpha") == (
-        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
-        None,
-    )
-    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", raising=False)
+    # Each stub variable alone: still UNREADABLE. Both are asserted rather than
+    # one, because either alone used to be sufficient to switch the checks off.
+    for stub_variable, stub_value in (
+        ("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", "0"),
+        ("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT", "OK"),
+    ):
+        monkeypatch.setenv(stub_variable, stub_value)
+        assert _mod.instance_plist_governed_environment("agent-alpha") == (
+            _mod.GOVERNED_PLIST_UNREADABLE,
+            None,
+        ), f"{stub_variable} must not un-apply the governed plist checks"
+        monkeypatch.delenv(stub_variable, raising=False)
+
+    # The one affordance that legitimately does: it replaces the provider PATH
+    # at its source, so no plist-derived governed value survives to compare.
     monkeypatch.setenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", "/fixture/dry/bin")
     assert _mod.instance_plist_governed_environment("agent-alpha") == (
         _mod.GOVERNED_PLIST_NOT_APPLICABLE,
         None,
     )
+
+
+@pytest.mark.parametrize(
+    "stub_variable,stub_value",
+    [("BOT_ERRORS_DRY_PROVIDER_PROBE_RC", "0"), ("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT", "OK")],
+)
+def test_a_leaked_probe_stub_variable_cannot_disable_the_plist_gate(
+    monkeypatch, tmp_path, stub_variable, stub_value
+):
+    """MED-2, the consequence rather than the predicate.
+
+    The unit row above pins the state; this one pins what an operator sees. A
+    dry-probe variable present in a DEPLOYED environment is not a hypothetical:
+    it is one exported line in a service plist or a shell profile away, and it
+    is the same class of leak the dry-run PATH override is documented as. With
+    the plist missing, the default provider must still refuse and name the
+    plist as the problem. Before the fix it spawned and reported healthy, which
+    is the fail-open itself: the checks this branch adds were silently off.
+
+    provider_command_output is stubbed by _claude_probe, so the variable is
+    never consumed here; its mere PRESENCE is what used to be load-bearing.
+    """
+    environment = _matrix_environment(tmp_path)
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target, "missing", tmp_path)
+    monkeypatch.setenv(stub_variable, stub_value)
+
+    # Vacuity guard: the fixture really is unreadable, so a pass cannot come
+    # from a plist that happens to parse.
+    assert _mod.instance_plist_environment("agent-alpha") is None
+
+    captured, lines = _claude_probe(monkeypatch, {}, dict(environment))
+
+    assert not captured, "probe must not run a provider it cannot vouch for"
+    assert "failure_class=provider_runtime_plist_unreadable" in lines[0], lines[0]
+    _assert_fail_line_is_path_free(lines[0], tmp_path)

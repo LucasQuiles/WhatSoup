@@ -4383,23 +4383,6 @@ def instance_provider_path(name: str) -> str | None:
     return environment_provider_path(instance_plist_environment(name))
 
 
-def provider_probe_output_is_stubbed() -> bool:
-    """True when the provider probe's output is injected rather than executed.
-
-    Same class of test affordance as BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: when
-    the probe result is supplied by the caller, the probe is not vouching for a
-    real provider, so the governed LaunchAgent checks have nothing to govern and
-    would otherwise mask the classification under test. Without this the checks
-    would also make those suites platform-divergent, passing on a Linux runner
-    and failing on a macOS one purely because HOST_PLATFORM is read from the
-    host rather than pinned.
-    """
-    return (
-        os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT") is not None
-        or os.environ.get("BOT_ERRORS_DRY_PROVIDER_PROBE_RC") is not None
-    )
-
-
 GOVERNED_PLIST_READABLE = "readable"
 GOVERNED_PLIST_NOT_APPLICABLE = "not_applicable"
 GOVERNED_PLIST_UNREADABLE = "unreadable"
@@ -4418,6 +4401,20 @@ def instance_plist_governed_environment(name: str) -> tuple[str, dict[str, str] 
       not_applicable -- benign. No LaunchAgent surface exists (systemd host) or
         the dry-run PATH override is active. The governed checks genuinely do
         not apply and resolution proceeds unchanged.
+
+        EXACTLY TWO conditions reach this state, and stubbing the probe's OUTPUT
+        is not one of them. BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT and
+        BOT_ERRORS_DRY_PROVIDER_PROBE_RC replace what the CHILD PROCESS returns;
+        they are consumed by provider_command_output and say nothing about
+        whether this host has a LaunchAgent surface or whether that surface is
+        readable. They used to be read here too, which made either variable
+        leaking into a deployed environment silently switch off every check
+        below: a missing, planted, symlinked or wrongly-labelled plist still
+        reported healthy. A test affordance may shape what the probe EXECUTES
+        and what it READS BACK; it may never decide whether a fail-closed path
+        applies. Suites that stub the probe pin HOST_PLATFORM and Path.home
+        themselves, which is also what keeps them from diverging between a Linux
+        runner and a macOS one.
       unreadable -- NOT benign. This is darwin, a plist is expected, and the
         parser refused it. Its docstring already says None means UNKNOWN, so
         callers must fail closed rather than read it as absence of drift.
@@ -4425,8 +4422,6 @@ def instance_plist_governed_environment(name: str) -> tuple[str, dict[str, str] 
         can never come from two different states of the same file.
     """
     if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
-        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
-    if provider_probe_output_is_stubbed():
         return (GOVERNED_PLIST_NOT_APPLICABLE, None)
     if HOST_PLATFORM != "darwin":
         return (GOVERNED_PLIST_NOT_APPLICABLE, None)
