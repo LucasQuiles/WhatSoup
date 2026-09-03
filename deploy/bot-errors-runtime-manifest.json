@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "386eb52ed51b6fbd7533d9be1279b066481351ba4d69bbf01ef655ff8f9e1d27",
+      "sha256": "dc2b73bd8ba897fd4a6ac2479034a2fc6d21653dbcf612f2a7fab339c9e4d64f",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -75,7 +75,10 @@
         "ack_unrenderable_quarantine_telemetry",
         "queue_unrenderable_meta_alerts",
         "unrenderable_alert_signal",
-        "dispatcher.unrenderable_meta_alert"
+        "dispatcher.unrenderable_meta_alert",
+        "write_unrenderable_breadcrumb",
+        "reconcile_unrenderable_signals",
+        "drop_unrenderable_breadcrumbs"
       ]
     },
     {
@@ -386,7 +389,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "b79eff923e3b1e9b2b589a207669f1312e3ec8ad2b5c130aeb189c6626e486e0",
+      "sha256": "356d0dc9527fb45dd7d42e7bd2033cf4815ce029fd0f397b18d3ff1a9f2a3bdb",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -401,7 +404,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "a00b0441c15b9571680132784ef4300b6e34e0462017e736d3d96beb3c6096cb",
+      "sha256": "b2aebab270d03f6465da1d70283875aad94e8fef24fdf0d209e0b8d8e72255d3",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -416,7 +419,8 @@
         "alert_text",
         "alert_text_kind",
         "alert_text_for_fingerprint",
-        "LEGACY_FULL_DIGEST_CHARS"
+        "LEGACY_FULL_DIGEST_CHARS",
+        "has_malformed_legacy_confined_repr"
       ]
     },
     {
