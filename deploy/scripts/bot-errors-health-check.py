@@ -4238,6 +4238,13 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
 # are held to one corpus at tests/fixtures/launchd-env-plist-contract/. Change
 # the contract before changing either reader.
 PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
+# Duplicate detection covers the canonical marker and the measured variant
+# where either key tag has only XML whitespace before ">". It does not claim
+# general XML equivalence, and the canonical literal above remains the only
+# marker that selects a dictionary to parse.
+PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE = re.compile(
+    r"<key[ \t\r\n]*>EnvironmentVariables</key[ \t\r\n]*>"
+)
 # The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
 # `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
 # reader, so matching the literal "<dict>" made the nested-dict guard below miss
@@ -4404,12 +4411,10 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     if marker < 0:
         return None
     after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
-    # "Exactly one top-level EnvironmentVariables dictionary." A second surviving
-    # marker means the file declares the element twice. The system parser has its
-    # own precedence for that; this reader must not invent a different one and
-    # then report a map the loaded job does not have. Mirrors the TypeScript
-    # comparator (src/fleet/launchd-env-drift.ts).
-    if raw.find(PLIST_ENVIRONMENT_KEY_MARKER, after_marker) >= 0:
+    # Count only the canonical and XML-whitespace-padded key tags promised by
+    # this detector. A second match is ambiguous to this narrow reader, so it
+    # refuses rather than reporting a block the system parser may not load.
+    if len(PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE.findall(raw)) > 1:
         return None
     token_match = PLIST_DICT_OPEN_TOKEN_RE.search(raw, after_marker)
     if token_match is None:

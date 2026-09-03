@@ -776,6 +776,52 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });
 
+  it('refuses mixed canonical and XML-whitespace-padded declarations before any apply mutation', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const observed = rendered.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict>',
+        '    <key>PATH</key>',
+        '    <string>/opt/decoy-bin</string>',
+        '  </dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+    expect(observed).not.toBe(rendered);
+    expect(observed).toContain('<key>EnvironmentVariables</key>');
+    expect(observed).toContain('<key >EnvironmentVariables</key >');
+    expect(observed).toContain('/opt/decoy-bin');
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const launchctlCalls = childProcessMocks.execFile.mock.calls
+      .filter(([command]) => command === 'launchctl').length;
+    expect({
+      refused: thrown instanceof LaunchdReconcileRefusedError,
+      writeCalls: fsMocks.writeFileSync.mock.calls.length,
+      renameCalls: fsMocks.renameSync.mock.calls.length,
+      unlinkCalls: fsMocks.unlinkSync.mock.calls.length,
+      launchctlCalls,
+    }).toEqual({
+      refused: true,
+      writeCalls: 0,
+      renameCalls: 0,
+      unlinkCalls: 0,
+      launchctlCalls: 0,
+    });
+  });
+
   it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();

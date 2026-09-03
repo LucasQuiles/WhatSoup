@@ -31,7 +31,7 @@
       "name": "cdata_decoy_before_marker",
       "fixture": "cdata-decoy-before-marker.plist",
       "answer": "map",
-      "why": "Row 130. A CDATA section is inert text to the system plist parser; plutil extracts the LIVE environment from this file. Before the fix the marker inside the section won the lookup and the empty decoy was read as the environment, so an apply deleted OPERATOR_SECRET without naming it.",
+      "why": "Row 130. The CDATA decoy is character data inside a Notes string, which keeps this fixture valid while leaving the decoy inert. The macOS system parser lints the fixture and extracts the declared live environment. Before the fix the marker inside the section won the lookup and the empty decoy was read as the environment, so an apply deleted OPERATOR_SECRET without naming it.",
       "environment": {
         "PATH": "/opt/bin:/usr/bin",
         "OPERATOR_SECRET": "keep-me"
@@ -57,7 +57,13 @@
       "name": "environment_variables_declared_twice",
       "fixture": "environment-variables-declared-twice.plist",
       "answer": "refuse",
-      "why": "Exactly one top-level EnvironmentVariables dictionary. The system parser has its own precedence for a repeated key and these readers must not invent a different one. Before the fix both readers took the FIRST declaration and reported the decoy map."
+      "why": "Two canonical EnvironmentVariables declarations must refuse. The macOS system parser selects the last, while both readers previously parsed the first. This positional detector does not claim document-depth validation."
+    },
+    {
+      "name": "mixed_marker_spellings",
+      "fixture": "mixed-marker-spellings.plist",
+      "answer": "refuse",
+      "why": "A canonical declaration followed by a declaration whose key tags carry XML whitespace before > must refuse. The duplicate detector covers those measured tag forms only; the canonical literal remains the only form that selects a block. Before the fix both readers parsed the first block while the macOS system parser loaded the second."
     },
     {
       "name": "environment_variables_absent",

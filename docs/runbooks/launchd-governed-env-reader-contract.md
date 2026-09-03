@@ -29,8 +29,9 @@ them did.
 
 ## The answer vocabulary
 
-Every input shape resolves to exactly one of three answers. "Unspecified" is not
-a cell, and a corpus fixture without a decided answer fails its own suite.
+Every input shape covered by this contract resolves to exactly one of three
+answers. "Unspecified" is not a cell, and a corpus fixture without a decided
+answer fails its own suite.
 
 | answer | TypeScript | Python | meaning |
 |---|---|---|---|
@@ -45,7 +46,13 @@ installed job carried without naming a single key.
 
 ## The cells
 
-Each row is pinned by a fixture in `tests/fixtures/launchd-env-plist-contract/`.
+Every corpus row is pinned by a fixture in
+`tests/fixtures/launchd-env-plist-contract/`, driven by both reader suites.
+Additional dict and marker variants are pinned directly by the spelling tables
+in `tests/fleet/launchd-env-drift.test.ts` and
+`deploy/scripts/tests/test_bot_errors_health_check_provider_probe.py`; the
+corpus does not cover every spelling in this table. The nested-marker known
+residual records measured current behavior rather than a parser promise.
 
 | input shape | answer | why |
 |---|---|---|
@@ -56,10 +63,11 @@ Each row is pinned by a fixture in `tests/fixtures/launchd-env-plist-contract/`.
 | nested dict inside the body | refuse | the body truncates at the first `</dict>`, so a key after it reads as absent |
 | duplicate key | refuse | TypeScript took the last, Python took the first; neither precedence is defensible against a parser with its own |
 | comment / CDATA / processing instruction inside the body | refuse | the body must be fully consumed by matched key/string pairs and XML whitespace |
-| comment / CDATA / processing instruction **before** the marker, carrying a decoy dict | map, from the LIVE dict | inert text is not markup: the decoy must make no difference at all |
-| unterminated `<!--`, `<![CDATA[` or `<?` | refuse | not well-formed XML; ignoring it parses every following byte as live markup |
+| comment / CDATA / processing instruction **before** the marker, carrying a decoy dict | map, from the live dict | inert text is not markup: the decoy must make no difference at all. The CDATA corpus decoy sits inside a plist-valid string value |
+| unterminated `<!--`, `<![CDATA[` or `<?` | refuse | not well-formed XML; ignoring it parses every following byte as live markup. `unterminated-comment.plist` is the intentionally malformed corpus fixture |
 | no `EnvironmentVariables` element | refuse | the reader cannot claim "no keys" about an element it never found |
-| `EnvironmentVariables` declared more than once | refuse | exactly one top-level dictionary; the system parser has its own precedence and these readers must not invent a different one |
+| `EnvironmentVariables` declared more than once using canonical or XML-whitespace-padded key tags | refuse | the duplicate detector covers these measured tag forms. It does not claim general XML-equivalent spelling detection |
+| marker that exists only inside a nested dictionary | map, from the nested dict — **known residual, not fixed here** | both readers search by position rather than document depth, so they mistake the nested marker for the top-level environment |
 | marker spelled `<key >EnvironmentVariables</key >` | refuse | see below |
 | the five XML predefined entities in a value | map, decoded | the shipped escaping |
 | leading or trailing whitespace in a value | map, kept verbatim | `<string>` content is significant |
@@ -67,8 +75,10 @@ Each row is pinned by a fixture in `tests/fixtures/launchd-env-plist-contract/`.
 ### Why a non-canonical marker spelling is refused rather than parsed
 
 `<key >EnvironmentVariables</key >` is the same element to the system parser, and
-`plutil` reads the file correctly. Both readers hold the marker as ONE literal
-spelling and therefore do not find it, which now lands in `refuse`.
+`plutil` reads the file correctly. Both readers select a dictionary through one
+literal marker and therefore do not parse this spelling, which lands in
+`refuse`. The separate duplicate detector sees this spelling when a canonical
+marker also exists.
 
 Broadening the marker to an element token — the way the dict token is already
 broadened — would make these readers newly **accept** a file they used to refuse.
@@ -80,6 +90,13 @@ to overwrite") and costs one acknowledgement flag; a second parsing dialect on a
 security-sensitive reader costs a class of surprises. If the spelling ever turns
 up in the field, widening it is a deliberate change with its own disclosure —
 and this row is where it gets decided.
+
+The duplicate detector is narrower than XML equivalence. It counts the
+canonical marker and markers whose opening or closing `key` tag has only XML
+whitespace before `>`. The canonical literal remains the only marker that
+selects a dictionary to parse. Entity-encoded key text, key text split by CDATA
+or comments, document depth, and other full-XML semantics remain outside this
+detector and require separate contract rows before either reader changes.
 
 ### Why inert regions are masked AND their spans are reported
 

@@ -8,15 +8,14 @@
     <key>Crashed</key>
     <true/>
   </dict>
-  <key>Notes</key>
-  <string><![CDATA[
-  <key>EnvironmentVariables</key>
-  <dict/>
-  ]]></string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/bin:/usr/bin</string>
     <key>OPERATOR_SECRET</key><string>keep-me</string>
+  </dict>
+  <key >EnvironmentVariables</key >
+  <dict>
+    <key>PATH</key><string>/decoy/bin</string>
   </dict>
 </dict>
 </plist>

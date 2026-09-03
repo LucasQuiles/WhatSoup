@@ -3603,9 +3603,9 @@ def test_a_leaked_probe_stub_variable_cannot_disable_the_plist_gate(
 # the system plist parser. Only the comment was masked here, so a decoy
 # ``<key>EnvironmentVariables</key><dict/>`` written inside either of the other
 # two won the marker search and the reader answered with an EMPTY map -- a map
-# it had no basis for. Every fixture below lints clean and
-# ``plutil -extract EnvironmentVariables json`` returns the REAL environment for
-# it. The scenario is operator-caused, not attacker-caused: someone who can
+# it had no basis for. Both decoy shapes below lint clean and
+# ``plutil -extract EnvironmentVariables json`` returns the live environment for
+# each. The scenario is operator-caused, not attacker-caused: someone who can
 # write the LaunchAgent can write an honest dict, so the shape confers nothing
 # on an attacker. What it does is let a hand-edited or hand-migrated plist read
 # as an environment the service does not have.
@@ -3621,13 +3621,18 @@ _LIVE_ENVIRONMENT = {
 _INERT_DECOY = "  <key>EnvironmentVariables</key>\n  <dict/>"
 
 
-def _decoyed_plist(target: Path, opener: str, closer: str) -> str:
+def _decoyed_plist(
+    target: Path, opener: str, closer: str, *, inside_string: bool = False
+) -> str:
     """Return the same plist with an inert decoy dict ahead of the live one."""
     honest = target.read_text()
     assert honest.count("  <key>EnvironmentVariables</key>") == 1, "fixture shape changed"
+    region = f"  {opener}\n{_INERT_DECOY}\n  {closer}"
+    if inside_string:
+        region = f"  <key>Notes</key>\n  <string>{opener}\n{_INERT_DECOY}\n  {closer}</string>"
     return honest.replace(
         "  <key>EnvironmentVariables</key>",
-        f"  {opener}\n{_INERT_DECOY}\n  {closer}\n  <key>EnvironmentVariables</key>",
+        f"{region}\n  <key>EnvironmentVariables</key>",
         1,
     )
 
@@ -3643,7 +3648,7 @@ def test_a_cdata_decoy_dict_cannot_hide_the_live_environment(monkeypatch, tmp_pa
         tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
     )
     honest = target.read_text()
-    decoyed = _decoyed_plist(target, "<![CDATA[", "]]>")
+    decoyed = _decoyed_plist(target, "<![CDATA[", "]]>", inside_string=True)
     assert "<![CDATA[" in decoyed, "fixture must actually carry the decoy"
 
     target.write_text(decoyed)
@@ -3702,6 +3707,35 @@ def test_a_second_environment_variables_declaration_is_refused(monkeypatch, tmp_
             1,
         )
     )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_canonical_then_xml_whitespace_padded_declarations_are_refused(
+    monkeypatch, tmp_path
+):
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    mixed = honest.replace(
+        "</dict>\n</plist>",
+        "  <key >EnvironmentVariables</key >\n"
+        "  <dict><key>PATH</key><string>/fixture/decoy/bin</string></dict>\n"
+        "</dict>\n</plist>",
+        1,
+    )
+    assert "<key>EnvironmentVariables</key>" in mixed
+    assert "<key >EnvironmentVariables</key >" in mixed
+    assert "/fixture/decoy/bin" in mixed
+    target.write_text(mixed)
+
     assert _mod.instance_plist_environment("agent-alpha") is None
     assert _mod.instance_plist_governed_environment("agent-alpha") == (
         _mod.GOVERNED_PLIST_UNREADABLE,

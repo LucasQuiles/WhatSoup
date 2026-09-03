@@ -107,6 +107,16 @@ function sha256Hex(value: string): string {
 
 const ENV_KEY_MARKER = '<key>EnvironmentVariables</key>';
 /**
+ * Duplicate detection covers the canonical marker and the measured variant
+ * where either key tag has only XML whitespace before `>`. It is not a general
+ * XML-equivalence matcher: the canonical literal above remains the only marker
+ * that selects a dictionary to parse.
+ *
+ * Kept as a source string because each comparison parses two plists and a
+ * shared global RegExp would carry lastIndex between calls.
+ */
+const ENV_KEY_MARKER_COUNT_SOURCE = '<key[ \\t\\r\\n]*>EnvironmentVariables</key[ \\t\\r\\n]*>';
+/**
  * The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
  * `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
  * reader, so matching the literal '<dict>' made the nested-dict guard below miss
@@ -262,11 +272,13 @@ function parseEnvironmentVariables(source: string): Map<string, string> | null {
   // not parse — refusing is the fail-closed answer and it is the answer the
   // Python reader already gives (`if marker < 0: return None`).
   if (marker === -1) return null;
-  // "Exactly one top-level EnvironmentVariables dictionary." A second surviving
-  // marker means the file declares the element twice. The system parser has its
-  // own precedence for that; this reader must not invent a different one and
-  // then compare a map the loaded job does not have.
-  if (plist.indexOf(ENV_KEY_MARKER, marker + ENV_KEY_MARKER.length) !== -1) return null;
+  // Count only the canonical and XML-whitespace-padded key tags promised by
+  // this detector. A second match is ambiguous to this narrow reader, so it
+  // refuses rather than comparing a block the system parser may not load.
+  const declarationPattern = new RegExp(ENV_KEY_MARKER_COUNT_SOURCE, 'g');
+  let declarations = 0;
+  while (declarationPattern.exec(plist) !== null) declarations += 1;
+  if (declarations > 1) return null;
   const afterMarker = marker + ENV_KEY_MARKER.length;
   const tokenPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
   tokenPattern.lastIndex = afterMarker;

@@ -6,6 +6,7 @@
  * Installed bot plists carry live credentials, so no report may ever contain
  * a raw environment value — several tests below assert exactly that.
  */
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -682,9 +683,9 @@ describe('compareGovernedLaunchdEnv', () => {
   // A comment, a CDATA section and a processing instruction are all inert text
   // to the system plist parser. Only the comment was masked, so a decoy
   // `<key>EnvironmentVariables</key><dict/>` written inside either of the other
-  // two won the marker lookup and was read as the live environment. Every
-  // fixture below lints clean and `plutil -extract EnvironmentVariables json`
-  // returns the REAL environment for it: these are valid plists the
+  // two won the marker lookup and was read as the live environment. Both decoy
+  // fixtures lint clean and `plutil -extract EnvironmentVariables json`
+  // returns the live environment for them: these are valid plists the
   // authoritative parser reads correctly and this reader read wrongly.
   //
   // The scenario is operator-caused, not attacker-caused. Someone who can write
@@ -712,7 +713,13 @@ describe('compareGovernedLaunchdEnv', () => {
     const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
     const decoyed = honest.replace(
       '  <key>EnvironmentVariables</key>',
-      ['  <![CDATA[', ...INERT_DECOY_LINES, '  ]]>', '  <key>EnvironmentVariables</key>'].join('\n'),
+      [
+        '  <key>Notes</key>',
+        '  <string><![CDATA[',
+        ...INERT_DECOY_LINES,
+        '  ]]></string>',
+        '  <key>EnvironmentVariables</key>',
+      ].join('\n'),
     );
     expect(decoyed).toContain('<![CDATA['); // the fixture really carries the decoy
 
@@ -791,6 +798,33 @@ describe('compareGovernedLaunchdEnv', () => {
     });
     // Positive control: one declaration of the same body still compares.
     expect(compareGovernedLaunchdEnv(expected, honest).comparable).toBe(true);
+  });
+
+  it('refuses a canonical marker followed by an XML-whitespace-padded marker', () => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const mixed = honest.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict><key>PATH</key><string>/opt/decoy-bin</string></dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+
+    expect(mixed).toContain('<key>EnvironmentVariables</key>');
+    expect(mixed).toContain('<key >EnvironmentVariables</key >');
+    expect(mixed).toContain('/opt/decoy-bin');
+    expect(compareGovernedLaunchdEnv(expected, honest).droppedNonGovernedKeys)
+      .toEqual(['OPERATOR_SECRET']);
+
+    expect(compareGovernedLaunchdEnv(expected, mixed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
   });
 
   it('keeps refusing a CDATA value inside the body, which masking alone would have let through', () => {
@@ -969,10 +1003,15 @@ describe('launchd governed-env reader contract corpus', () => {
       const expectedDropped = Object.keys(environment)
         .filter((key) => !GOVERNED_KEYS_UNDER_CONTRACT.includes(key))
         .sort();
+      const declaredPath = environment.PATH;
+      const pathValueMatches = declaredPath === undefined
+        || mirror.pathPrefix?.observedDigest === sha256(declaredPath);
 
       let observed: string;
       if (!mirror.comparable || !stripped.comparable) {
         observed = 'refuse';
+      } else if (!pathValueMatches) {
+        observed = 'path-value-mismatch';
       } else if (mirror.drift.length > 0 || mirror.droppedNonGovernedKeys.length > 0) {
         observed = `disagrees(drift=${mirror.drift.map((entry) => `${entry.key}:${entry.state}`).join('|') || 'none'},dropped=${mirror.droppedNonGovernedKeys.join('|') || 'none'})`;
       } else if (JSON.stringify(stripped.droppedNonGovernedKeys) !== JSON.stringify(expectedDropped)) {
@@ -1006,6 +1045,23 @@ describe('launchd governed-env reader contract corpus', () => {
     const observations = runContractCorpus();
     expect(observations.map((observation) => `${observation.name}=${observation.observed}`))
       .toEqual(observations.map((observation) => `${observation.name}=${observation.declared}`));
+  });
+
+  // @skip-env plutil is the macOS system parser and is unavailable on other CI hosts.
+  it.skipIf(process.platform !== 'darwin')('pins the CDATA fixture validity and live dictionary with the macOS system parser', () => {
+    const fixture = path.join(CORPUS_DIR, 'cdata-decoy-before-marker.plist');
+    const lint = execFileSync('/usr/bin/plutil', ['-lint', fixture], { encoding: 'utf-8' });
+    const extracted = execFileSync(
+      '/usr/bin/plutil',
+      ['-extract', 'EnvironmentVariables', 'json', '-o', '-', fixture],
+      { encoding: 'utf-8' },
+    );
+
+    expect(lint).toContain(': OK');
+    expect(JSON.parse(extracted)).toEqual({
+      PATH: '/opt/bin:/usr/bin',
+      OPERATOR_SECRET: 'keep-me',
+    });
   });
 
   it('runs one case for every manifest entry', () => {
