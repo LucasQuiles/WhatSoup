@@ -8,11 +8,16 @@ Red-first fingerprint on pre-fix main: KeyError 'targetProvenance' /
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_ROOT) not in sys.path:
@@ -22,12 +27,7 @@ _HEALTH = _SCRIPT_ROOT / "bot-errors-health-check.py"
 _RUNNER = _SCRIPT_ROOT / "bot-errors-runner.py"
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+_load = dispatcher_fixtures.load_module_from_path
 
 
 def _runner_args(instance: str) -> argparse.Namespace:

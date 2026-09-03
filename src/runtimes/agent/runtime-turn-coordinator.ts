@@ -260,6 +260,12 @@ export interface RuntimeTurnCoordinatorPort {
   readonly runtimeTurnAfterTerminal: Map<string, RuntimeTurnAfterTerminalAction>;
   managerIdFor(session: SessionManager): string;
   /**
+   * The event tool scope key the runtime registered for this session. Throws
+   * for a session the runtime never created, which is fail-closed: a dispatch
+   * whose target has no scope cannot have its events admitted anyway.
+   */
+  requireSessionToolScopeKey(session: SessionManager): string;
+  /**
    * Capability-obligation replay: derive the C3 decision for a finalizing
    * turn (undefined = the turn owes nothing / feature inert). Runs BEFORE
    * `finalizeTurnTerminal` so media staging precedes the transaction (D3).
@@ -559,9 +565,19 @@ rebindRuntimeTurnForDispatch(
   if (!owner || owner.managerId !== managerId) {
     throw new Error(`Per-chat runtime turn has no current dispatch owner for "${mapKey}"`);
   }
+  // The tool scope has to move with the manager. Tool scope keys are
+  // incarnation-specific (`createToolScopeKey` appends a monotonic ordinal), so
+  // when the eviction repair replaces a stale mapped session the turn is
+  // dispatched to a session whose scope the inbound context has never seen.
+  // Rebinding manager and generation alone leaves the predecessor's scope in
+  // the context that provider-event admission compares against, and the
+  // replacement's own terminal is then rejected as unowned: the dispatched turn
+  // runs, its completion never settles, and the chat stays pinned behind the
+  // FIFO conflict guard until the wedged-lane sweep's 24h grace releases it.
   return rebindRuntimeTurnOwner(context, {
     managerId: owner.managerId,
     generation: owner.generation,
+    toolScopeKey: this.host.requireSessionToolScopeKey(session),
   });
 }
 
@@ -893,12 +909,22 @@ turnFinalizationBookkeeping(
       { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason },
       'journaled agent turn rejected before dispatch — automatic replay unavailable',
     );
+    // The `scope` above is the turn-scope KIND (per_chat | shared | singleton),
+    // not a conversation, and it is confined to metadata at the emission
+    // boundary regardless. The conversation must ride its own field or the
+    // dispatcher — which keys incidents on machine|instance|source — files
+    // every chat's rejection into whichever chat opened the incident first.
+    // The raw key is never emitted: buildBotErrorsEvent projects it to a
+    // bounded digest.
     emitAlertChecked(
       this.host.instanceName,
       'agent_turn_admission_rejected',
       'Journaled agent turn rejected before dispatch',
       `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`,
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: context.identity.conversationKey },
     );
   }
   // #1775: a turn only reaches here without recorded usage in two cases —
