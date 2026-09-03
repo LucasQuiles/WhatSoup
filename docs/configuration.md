@@ -370,6 +370,10 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `BOT_ERRORS_JID` | group JID (`<digits>@g.us`) | (unset) | Destination group for BOT ERRORS alerts. Read call-time by the legacy alert helper (`src/lib/emit-alert.ts`) and by outbound audience classification (`src/core/outbound-message-safety.ts` — a send to this JID is the `ops` audience). Unset or non-group-shaped disables the legacy helper (fail-closed, warn-once). Fronted by the typed `botErrorsJid` instance-config field (#2192): when instance-config sets it, config.ts publishes the value back to `process.env` at load (TMPDIR pattern) so both env-reading sites and the typed field agree; env-only and unset deployments are byte-identical to before. |
 | `BOT_ERRORS_EXPECTED_JID` | string | (unset) | Pinned expected destination group JID for the legacy alert helper (`src/lib/emit-alert.ts`). When set, the runtime-configured `BOT_ERRORS_JID` must equal it or the legacy helper is disabled (drift guard against misrouted alerts). When unset, the helper is disabled unless `BOT_ERRORS_REQUIRE_EXPECTED` is turned off — see below. Fronted by the typed `botErrorsExpectedJid` instance-config field (#2192), published like `BOT_ERRORS_JID`. |
 | `BOT_ERRORS_REQUIRE_EXPECTED` | boolean (`0`/`false`/`no`/`off` disables) | enabled | Whether an unset `BOT_ERRORS_EXPECTED_JID` disables the legacy alert helper (`src/lib/emit-alert.ts`). Default (any value other than `0`/`false`/`no`/`off`, including unset) is fail-closed: without a pinned expected JID the legacy helper stays disabled. Set to one of the disabling tokens to allow the legacy helper to run against `BOT_ERRORS_JID` without the pin. Fronted by the typed `botErrorsRequireExpected` instance-config field (#2192); an instance-config value publishes as `1`/`0`. |
+| `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` | comma-separated source names | `agent_turn_admission_rejected` | Alert sources whose incidents are scoped per conversation by the dispatcher (`deploy/scripts/bot-errors-dispatcher.py`). An alert naming a conversation the open incident does not yet represent forces one notification, so one chat's open incident cannot mask another chat's outage; the incident key itself is unchanged, so recovery still matches and no state migration is needed. A source not listed behaves exactly as before. Set empty to disable the gate entirely (rollback). |
+| `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` | positive integer | `604800` (7 days) | How long a conversation stays recorded as represented. Past the window that conversation can force a notification again. Enforced on both incident-state save paths (the controller-backed `IncidentStateCycle.commit()` that production takes, and the RESTORE-COMPAT `save_incident_state` wrapper), not only when the key next sees traffic, so a quiet instance cannot retain digests indefinitely. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY` | positive integer | `256` | Conversations tracked per incident key, and event ids retained per conversation. Exceeding it evicts the oldest and sets an overflow marker, after which untracked conversations are treated as represented rather than new — without that, eviction recycles conversations into "new" status and one large incident becomes an unbounded alert loop. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS` | positive integer | `128` | Incident keys carrying a conversation-scope sidecar at once. Bounds the state file against a long tail of historical keys. Evicting past this cap tombstones each evicted key in `conversationScopesEvicted` (`{incident key: eviction time}`, expiring after `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` and hard-capped at this same limit). The admission gate consults the tombstone for THAT key only: a conversation with no record under a recently evicted key is treated as represented rather than new, which stops an evicted conversation paging again on its next rejection, re-adding its key and evicting another. A key that was never evicted, or whose tombstone has expired, still forces one notification, so emptying the sidecar for ordinary reasons never silences a genuinely new conversation. A separate `conversationScopesOverflow` record counts evictions for telemetry and does not gate. |
 | `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. **The recommended way to reach the fleet from another host is to keep this loopback and front the port with `tailscale serve` (TLS), not to set the override** — see [Remote fleet access via tailscale serve](#remote-fleet-access-via-tailscale-serve). When a request arrives over TLS (a TLS-terminating front sets `X-Forwarded-Proto: https`, or the socket is directly encrypted) the console session cookie now carries `Secure`; a plain loopback-HTTP unlock omits it (localhost is a secure context, so the cookie still delivers). The root-token mint endpoints (`POST /api/console-session`, `/api/auth-ticket`, `/api/ws-ticket`) additionally refuse any non-loopback TCP source — behind `tailscale serve` the proxy connects from loopback, so legitimate remote mints still pass while a direct peer after a bind regression is rejected. |
 
 ### Docker Volume Layout
@@ -546,10 +550,70 @@ config-owned and regeneration-safe:
 }
 ```
 
+#### `WHATSOUP_PATH_PREPEND` (second rendered surface of `pathPrepend`)
+
+`service.pathPrepend` stays the single source of truth; the plist carries it
+twice because the launcher cannot recover it from `PATH` alone. `deploy/whatsoup`
+sources `deploy/lib/runtime-path.sh`, which receives one already-joined `PATH`
+string with no marker separating a governed prefix from an ambient entry — so
+honouring the prepend launcher-side would mean reordering the composition for
+every caller on every host. The dedicated key gives the launcher, the drift
+comparator and the daily health probe a typed value to read instead:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>PATH</key>
+  <string>$HOME/pinned-cli/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  <key>WHATSOUP_PATH_PREPEND</key>
+  <string>$HOME/pinned-cli/bin</string>
+</dict>
+```
+
+`$HOME` stands for the absolute home path here; the rendered plist carries the
+expanded value, since launchd does not expand variables in
+`EnvironmentVariables`. The example pins a directory inside the home directory
+on purpose: entries written through the fleet API are home-confined, so an
+out-of-home prepend is refused at the route even though a value hand-edited into
+`config.json` still loads and renders.
+
+A configured prepend therefore appears **twice** in the effective runtime PATH,
+once from the key and once inside the plist `PATH`:
+`<prepend>:$HOME/.local/bin:<node-dir>:<prepend>:<ambient>`. First match wins, so
+the launcher and the probe resolve the same binary; the duplicate is accepted
+deliberately rather than removed by string surgery in the launcher.
+
+**The prepend also outranks the pinned Node directory.** The composition above
+puts it ahead of `<node-dir>`, so a prepend directory containing a `node` binary
+shadows the `WHATSOUP_NODE` pin for every child process that resolves `node`
+from `PATH`. The launcher itself is unaffected, because it invokes the resolved
+Node by absolute path at every call site, but the exported `PATH` is inherited by
+the bot and its children. Do not put a `node` binary in `service.pathPrepend`.
+
+**Platform scope.** Rendering is macOS-only: the systemd service manager writes
+no unit file, so nothing on a Linux host renders this key. The shared helper
+`deploy/lib/runtime-path.sh` has no platform guard and is sourced by
+`deploy/whatsoup` on **both** operating systems, so two of its behaviours apply
+everywhere: repeated colons in the inherited `PATH` are collapsed, and an empty
+segment in `WHATSOUP_PATH_PREPEND` aborts instance start with a `FATAL:` line.
+On a Linux host the variable is settable through the unit's optional
+environment files and is honoured by the launcher, but no drift comparator
+covers it there and the health probe's prepend readers return nothing off
+macOS. Governing it on Linux is a follow-up, not part of this contract.
+
+**Colon footgun.** An empty `PATH` entry means the *current directory*, so a
+value with a leading, trailing, or doubled colon would put the working directory
+ahead of every system binary on a service PATH. Config admission already rejects
+empty entries and entries containing `:`, and the shared helper independently
+fails closed on a hand-set `WHATSOUP_PATH_PREPEND` containing one, printing a
+`FATAL:` line and refusing to start the instance. Set the value through
+`service.pathPrepend`, never by hand-editing the plist: the key is governed, so
+`reconcile-launchd-restart-policy --apply` overwrites a hand-added value.
+
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
 | `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory when written through the API (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
-| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory when written through the API (see below) | Prepended in order ahead of the generating shell's ambient `PATH` in the rendered service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd). Omitted or empty → byte-identical `PATH` to the historical render. |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory when written through the API (see below) | Rendered onto **two** surfaces of the same plist: prepended in order ahead of the generating shell's ambient `PATH` in the service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd), **and** joined with `:` into a second governed key `WHATSOUP_PATH_PREPEND`. Omitted or empty → neither surface changes and the plist is byte-identical to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
@@ -581,7 +645,8 @@ block with `"service": null` and re-add the fields you want, or edit
 `config.json` directly.
 
 Reconciliation (`npm run reconcile-launchd-restart-policy -- --instance <name>`)
-additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`) between
+additionally reports governed-key drift (`CLAUDE_CONFIG_DIR`, `PATH`,
+`WHATSOUP_PATH_PREPEND`) between
 the fresh render and the installed plist by key and SHA-256 value digest —
 never by value; installed bot plists carry live credentials. `PATH` is
 decomposed into the config-owned prefix (does the installed `PATH` start with
@@ -1541,7 +1606,46 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    the effective provider PATH through `deploy/lib/runtime-path.sh`, including
    the launcher's `$HOME/.local/bin` and pinned-Node prefixes. This second step
    prevents a matching static LaunchAgent PATH from hiding a runtime-only
-   binary shadow or ordering change.
+   binary shadow or ordering change. The probe passes the plist's
+   `WHATSOUP_PATH_PREPEND` to that helper as its fourth argument, exactly as the
+   launcher does, so a governed prepend cannot be honoured by the service and
+   ignored by the probe. It also compares the prepend the plist declares against
+   the one the loaded job carries (`provider_runtime_path_prepend_mismatch`) and
+   checks that a declared prepend actually leads the plist's own `PATH`
+   (`provider_runtime_path_prepend_inconsistent`).
+
+   The second step — deriving the effective provider PATH through the shared
+   helper — runs for **both** providers, `opencode-cli` and the default
+   `claude-cli`, and so do the two prepend checks. The first step, comparing the
+   generated plist's `PATH` against the loaded job's for equality
+   (`provider_runtime_path_mismatch`), runs for `opencode-cli` only. For
+   `claude-cli` a governed PATH that cannot supply the binary is reported through
+   `provider_runtime_path_unavailable` with a `reason`, rather than as its own
+   mismatch class. On macOS the probe distinguishes three states of the instance
+   LaunchAgent, and only one of them is benign:
+
+   - **Readable.** The governed checks run. If the loaded job environment
+     cannot be composed, or it composes and holds no `claude`, the probe fails
+     closed with `provider_runtime_path_unavailable` and a `reason` naming
+     which of the two applies, rather than quietly resolving the CLI from the
+     probe process's own `PATH`.
+   - **Unreadable.** The plist is missing, wrongly labelled, symlinked,
+     oversized, carries a nested `<dict>`, or cannot be read. A plist is
+     expected here and the parser refused it, so the probe fails closed with
+     `provider_runtime_plist_unreadable`. It does not report a healthy provider
+     on a LaunchAgent it could not verify.
+   - **Not applicable.** No LaunchAgent surface exists, which is every Linux
+     host. The governed checks genuinely do not apply and resolution is
+     unchanged.
+
+   A configured `providerProbeCommand` chooses **which** binary is probed; it
+   does not exempt the service from the runtime-path gate, because the gate is
+   a statement about the service's own `PATH` rather than about the probe. The
+   selected provider is also executed with the governed `PATH`, so an
+   interpreter-resolving wrapper cannot pick up a different runtime than the
+   service uses. The remediation for these classes names both repairs, because
+   `launchctl print` output is explicitly not a stable interface: regenerate and
+   reload the LaunchAgent, or check that its output still parses.
 
 2. **Provision the provider API key** via one of three portable routes. Runtime
    lookup order is environment variable, private WhatSoup credential file,

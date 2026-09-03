@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "0884f949aae18fb55c41a3052a90ee71cbf2074e5f05d6fecd3bc266e0662bdc",
+      "sha256": "2bbeae2e5af3bb34878b42588df7a30a73416bfd966a84db4b854d52567d17ce",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "2c791d7e16dd86243d5d001f86488a998280e2c6a90c5e5b3823bdd61bbc912b",
+      "sha256": "b3ccfc334344984a19408244a74a57732f7264752e7889d59905da1f828466bc",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -65,7 +65,36 @@
         "degradation_causes_from_event",
         "degradationCauseDispositions",
         "autocloseHoldReleasedAt",
-        "autocloseHoldReleasedReason"
+        "autocloseHoldReleasedReason",
+        "conversation_scope_is_unrepresented",
+        "CONVERSATION_SCOPED_SOURCES",
+        "event_conversation_scope(event)",
+        "storm_unrepresented",
+        "CONVERSATION_SCOPE_TAG",
+        "record_conversation_scope_delivered",
+        "CONVERSATION_SCOPE_OVERFLOW_KEY",
+        "sweep_conversation_scopes",
+        "tombstonesDroppedAt",
+        "conversation_scopes_have_overflowed(incident_state, current)",
+        "mark_incident_sent(event, replay_state)",
+        "_reject_bare_write_if_adopted",
+        "_incident_state_is_adopted",
+        "_reject_bare_write_over_envelope",
+        "INCIDENT_CYCLE_REQUIRED_EXIT",
+        "_AdoptionLock",
+        "event_text",
+        "record_legacy_alert_content",
+        "legacyAlertContent",
+        "note_unrenderable_quarantine",
+        "flush_unrenderable_quarantine_telemetry",
+        "event_fingerprint_text",
+        "ack_unrenderable_quarantine_telemetry",
+        "queue_unrenderable_meta_alerts",
+        "unrenderable_alert_signal",
+        "dispatcher.unrenderable_meta_alert",
+        "write_unrenderable_breadcrumb",
+        "reconcile_unrenderable_signals",
+        "drop_unrenderable_breadcrumbs"
       ]
     },
     {
@@ -99,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "37eb44bb5ad87d14b391dd9e677270e3c695c26dcef85ab76de7abe5b05c9aec",
+      "sha256": "8f2f0999c9c17deb7a8fafcbbcbcc4ce0bd4f7c9c2dfba40fc3dcdd9e6d26045",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -178,7 +207,41 @@
         "required_tools_lifecycle",
         "save_tool_inventory_state",
         "MCP_TOOL_INVENTORY_UNOBSERVED",
-        "MCP_REQUIRED_TOOLS_MISSING"
+        "MCP_REQUIRED_TOOLS_MISSING",
+        "_restart_explains_cycle_age",
+        "_cycle_stale_should_report",
+        "_note_grace_streak",
+        "_grace_still_credible",
+        "graceStreakSeenAt",
+        "DEADMAN_CHECK_INTERVAL_SECONDS",
+        "_host_boot_id",
+        "graceStreakBootId",
+        "lastCheckGapSeconds",
+        "_host_monotonic_seconds",
+        "graceStreakSeenMonotonic",
+        "graceStreakAccumulated",
+        "graceStreakGapForgiven",
+        "_grace_streak_record_state",
+        "lastCheckGapAt",
+        "grace_refused",
+        "deadman_observation_gap_line",
+        "deadman_observation_gap_inventory",
+        "instance_plist_environment",
+        "instance_plist_governed_environment",
+        "GOVERNED_PLIST_UNREADABLE",
+        "GOVERNED_PLIST_NOT_APPLICABLE",
+        "provider_runtime_plist_unreadable",
+        "governed_child_environment",
+        "environment_value",
+        "environment_provider_path",
+        "generated_provider_path_absence_failure",
+        "reason=generated_path_absent",
+        "governed_prepend_failure_class",
+        "instance_provider_path_prepend_match",
+        "path_starts_with_entries",
+        "WHATSOUP_PATH_PREPEND",
+        "provider_runtime_path_prepend_mismatch",
+        "provider_runtime_path_prepend_inconsistent"
       ]
     },
     {
@@ -251,7 +314,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "bac61da4404985a51d192af97ced57c7d1dc917c0ba62394796d640878bc32fe",
+      "sha256": "dd3666fcc979685aacc926f5cd4e62a38268fe0fc8665a37cbcd927ccb853c52",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES",
@@ -261,7 +324,9 @@
         "reconcile_retirement_intents",
         "enforce_retired_host_tombstone_cap",
         "qRemediationDisposition",
-        "episodeSeq"
+        "episodeSeq",
+        "retirement_action_guard_hosts",
+        "require_retirement_binding_match"
       ]
     },
     {
@@ -376,7 +441,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
+      "sha256": "90d9df751f501ee4582382618f7f769737ae705778173a7db7ed6fe951dbc883",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -384,12 +449,14 @@
         "class EventClassification",
         "classify_event",
         "normalize_event",
-        "new_event_fields"
+        "new_event_fields",
+        "_require_renderable_alert_content",
+        "unrenderable_alert_content"
       ]
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
+      "sha256": "26b1afe5b7f57420bb90b28bf97cbe83168c3402c76d845f8777923f3722548d",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -397,7 +464,15 @@
         "AUTHORIZATION_BEARER_RE",
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
-        "PEM_PRIVATE_KEY_RE"
+        "PEM_PRIVATE_KEY_RE",
+        "LEGACY_CONFINED_KEYS",
+        "_BAKED_REPR_RE",
+        "legacy_confined_to_text",
+        "alert_text",
+        "alert_text_kind",
+        "alert_text_for_fingerprint",
+        "LEGACY_FULL_DIGEST_CHARS",
+        "has_malformed_legacy_confined_repr"
       ]
     },
     {
@@ -589,34 +664,27 @@
       ]
     },
     {
-      "path": "src/lib/alert-evidence.ts",
-      "sha256": "b15832328db5aaade620a23987f26c9102e2073b01ba9ae85733537f0da2ac32",
-      "mustContain": [
-        "confineAlertContent",
-        "ConfinedAlertContent",
-        "bot-errors-evidence:"
-      ]
-    },
-    {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
+      "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail",
-        "confineAlertContent"
+        "confineAlertContent",
+        "confineConversationScope"
       ]
     },
     {
-      "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "9fc3b76731275c7c9a7a152619b20bb54c7244e5c976bf20263a42485b738316",
+      "path": "src/lib/alert-evidence.ts",
+      "sha256": "751cfb1f9bad824edb6353491dfe258735bf3f0ad8b2a3dea9ffe4451ea75bf1",
       "mustContain": [
-        "whatsoup-fault-taxonomy-registry-v3",
-        "runtimeAgentHealthSignals",
-        "turnRecoveryBlockedUnsafe",
-        "autoCompactActiveBackoffScopes"
+        "ConfinedAlertContent",
+        "confineAlertContent",
+        "confineConversationScope",
+        "CONVERSATION_SCOPE_TAG",
+        "bot-errors-evidence:"
       ]
     },
     {
@@ -629,7 +697,7 @@
     },
     {
       "path": "src/lib/redaction-patterns.ts",
-      "sha256": "c91114fedbba5bbabb1d8285cb47d0a1f1b008207dde92578ff3128dc89c827d",
+      "sha256": "dc4910405e7cf44b597cea67411f45bbc06487b37c679fff8e0ad00c75f583c1",
       "mustContain": [
         "jidPattern"
       ]
@@ -640,6 +708,16 @@
       "mustContain": [
         "asNonEmptyString",
         "isRecord"
+      ]
+    },
+    {
+      "path": "src/lib/fault-taxonomy-registry.json",
+      "sha256": "a7580eae76cb91f3a192a6a3a72135865daba33ac263a263142f494f3d9adef6",
+      "mustContain": [
+        "whatsoup-fault-taxonomy-registry-v3",
+        "runtimeAgentHealthSignals",
+        "turnRecoveryBlockedUnsafe",
+        "autoCompactActiveBackoffScopes"
       ]
     }
   ]

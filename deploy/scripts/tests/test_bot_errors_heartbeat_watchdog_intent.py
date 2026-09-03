@@ -4,9 +4,16 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-heartbeat-watchdog.py"
 
@@ -20,17 +27,7 @@ _ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_env():
-    saved = {key: os.environ.get(key) for key in _ENV_KEYS}
-    for key in _ENV_KEYS:
-        os.environ.pop(key, None)
-    yield
-    for key, value in saved.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
+_clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 
 def _load_module():

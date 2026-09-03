@@ -801,6 +801,24 @@ cleanup until the crashed turn's evidence reaches durable terminal state; a jour
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
 degraded so the exhausted episode is not hidden.
 
+The same alert source has a second path, and the two behave differently, so read the body first.
+An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
+bound and no chat identifier; the **crash-exhaustion** path names the chat and the crash count.
+
+Abandonment means auto-respawn stopped re-arming because provider termination was never proved.
+On that path the runtime deliberately retains the session entry, the ownership record and the
+manager index, and calls no shutdown: a provider child that is not provably gone could still be
+running, and detaching it would let a replacement start a second incarnation of the same
+conversation. Do not delete the session, the queue or the checkpoint to force health green.
+
+The chat recovers on its own. The abandonment settles when the chat's next inbound turn brings
+it back into service, when a new owned session is indexed for it, or when the record ages out of
+the retention window. Which of the first two routes the turn takes depends on the shape: a session
+that had gone inactive is respawned in place and settled by that re-activation, while one that
+still reported active when it was abandoned is settled on the served-turn path. Settling clears
+this alert only when no chat is either exhausted or abandoned. Health reports
+`per_chat_respawn_abandoned` until it settles.
+
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
 
@@ -1905,6 +1923,19 @@ If either durability ledger cannot be read, authenticated health reports null ag
 sets `status=degraded`, and includes `durability_evidence_unreadable`. A failed retention
 sweep remains degraded with `database_retention_failed` until a later successful sweep
 resets the consecutive-failure count.
+
+### BOT ERRORS dispatcher exit codes
+
+`deploy/bot-errors-dispatcher.service` runs `bot-errors-dispatcher.py --daemon` under
+`Restart=always` / `RestartSec=10` with no `RestartPreventExitStatus`, so every non-zero
+exit below is retried by systemd every 10 seconds until an operator intervenes. Read the
+last JSON line on the unit's journal (`journalctl --user -u bot-errors-dispatcher -n 20`):
+it carries `"exit": <code>` and the reason.
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| exit 78 (`STATE_RECOVERY_REQUIRED_EXIT`) | Controller-state load classified the incident-state primary as unrecoverable (for example `schema_incompatible`, the #3053/#3054 bare-JSON overwrite). The daemon projects the recovery mode and emits the state-recovery fallback before exiting. | Follow the controller-state recovery procedure (`controller-state-recovery-integrity-design.md`); do not hand-edit the primary. |
+| exit 79 (`INCIDENT_CYCLE_REQUIRED_EXIT`) | A post-adoption bare-JSON write was refused by the writer guard: a helper reached `save_incident_state` without its `IncidentStateCycle`, or the adoption lock was unsafe or stayed busy. Nothing was written; the primary keeps its last `cycleCompletedAt`. This is a programming error, not a transient fault, so the unit restarts it every 10 seconds and fails again immediately. | Find the caller in the journal line and route the write through `IncidentStateCycle.commit()`. Until then the deadman reports the loop: `cycle_stale` once the staleness outgrows the restart, or `state_missing` / `cycle_incomplete` once the restart-grace streak outgrows `--max-state-age`. Holding 78 and 79 out of the restart loop (`RestartPreventExitStatus=78 79` plus `StartLimit*`) is a separate, owner-gated unit change. |
 
 ### BOT ERRORS Source Ownership
 

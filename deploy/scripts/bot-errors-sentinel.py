@@ -85,6 +85,15 @@ CONFIGURATION_RETIRED_LANE = "configuration_retirement"
 # Bounded tombstone: long enough to dedupe a delayed acknowledgement or action
 # for a retired member and to correlate a re-addition, short enough that the
 # state file cannot grow without bound.
+#
+# This bound and RETIREMENT_INTENT_MAX below are both 64 and do NOT have to
+# track each other: they bound different ledgers with different costs. This one
+# bounds how many retired members stay dedupable across LATER cycles; exceeding
+# it costs a stale acknowledgement or a lost re-addition correlation. The intent
+# cap bounds how many first-attempt clocks are pinned within ONE cycle;
+# exceeding it costs a duplicate audit record on a retry. Neither is derived
+# from the other, and the execution guard no longer reads this map directly
+# (see retirement_action_guard_hosts), so they may diverge freely.
 RETIRED_HOST_TOMBSTONE_MAX = 64
 RETIRED_HOST_TOMBSTONE_TTL_SECONDS = 30 * 24 * 3600
 # What a retirement did to the fleet-wide Tier-2 remediation slot, as bounded
@@ -99,6 +108,15 @@ QREMEDIATION_RETIREMENT_NONE = "none"
 RETIREMENT_INTENT_LEDGER = "sentinel-retirement-intents.json"
 RETIREMENT_INTENT_MAX = 64
 RETIREMENT_INTENT_TTL_SECONDS = 7 * 24 * 3600
+# Why a retiring member has no usable pinned clock, as bounded enum tokens.
+# Counts only and never member names: #2429 requires operator-visible
+# diagnostics to carry reserved synthetic identities, bounded enums/counts and
+# opaque digests, and a truncated-member list would be an unbounded list keyed
+# by identity. The two causes need different remediations -- one is a fleet that
+# outgrew the bound, the other is a ledger file to inspect -- which is why they
+# are two tokens rather than one.
+RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED = "intent_cap_exceeded"
+RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE = "intent_ledger_entry_unusable"
 
 ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift", "q_unavailable"}
 ATTENTION_FLEET_ACTIONS = {
@@ -488,8 +506,14 @@ def consume_action_outbox(config: SentinelConfig, retired_hosts: Optional[dict] 
     (``EXTERNAL_REMEDIATION_ACTIONS``), renaming each file to ``.done`` on
     success or ``.failed`` on error.
 
-    ``retired_hosts`` is the live tombstone ledger (``state["retiredHosts"]``).
-    An action whose subject carries a live tombstone is NOT executed: the member
+    ``retired_hosts`` is the cycle's retirement guard set, built by
+    ``retirement_action_guard_hosts`` -- the persisted tombstone ledger UNIONED
+    with every member retired in the current cycle. It is deliberately not
+    ``state["retiredHosts"]`` alone: that map carries a count cap enforced after
+    the retirement loop, so a cycle retiring more members than the cap drops one
+    of them from the ledger while still having retired it, and a guard reading
+    the capped map would execute that member's queued remediation.
+    An action whose subject is in that set is NOT executed: the member
     was deliberately removed from the roster, so a remediation queued before the
     retirement is stale by construction and restarting a decommissioned host is
     exactly the wrong outcome. It is renamed ``.retired``, a terminal
@@ -2044,6 +2068,7 @@ def build_configuration_retired_event(
     controller_host: str,
     request_id: str,
     roster: dict,
+    episode_seq: int,
 ) -> dict:
     """One typed configuration-retirement disposition for one retired member.
 
@@ -2051,13 +2076,22 @@ def build_configuration_retired_event(
     not a page. recoveryClaimed False is explicit because the whole point of
     #2429 is that a retirement must never be mistaken for a recovery.
 
-    CONSUMER CONTRACT -- duplicates are collapsed by ``requestId``, never by
-    file path. The path is not an identity: ``action_event_path`` embeds a
-    timestamp, and a cycle that publishes one member then fails on another
-    persists nothing (the raise escapes above run_once's ``finally:
-    save_state``), so the first member is republished next cycle. A consumer
-    that dedupes on the filename will double-count; one that dedupes on
-    ``requestId`` will not.
+    CONSUMER CONTRACT -- duplicates are collapsed by ``requestId`` TOGETHER
+    WITH ``episodeSeq``, never by file path. The path is not an identity:
+    ``action_event_path`` embeds a timestamp, and a cycle that publishes one
+    member then fails on another persists nothing (the raise escapes above
+    run_once's ``finally: save_state``), so the first member is republished
+    next cycle. A consumer that dedupes on the filename will double-count.
+
+    ``requestId`` alone is NOT sufficient, and this is the case that proves it:
+    a member retired, re-added and retired again under an UNCHANGED roster is
+    two genuine retirements whose digests are identical, so they share one
+    ``requestId``. A consumer collapsing on ``requestId`` alone would drop the
+    second retirement -- a real terminal disposition, silently discarded. The
+    two differ in ``episodeSeq``, which is the cycle counter as it stood on
+    disk when the retirement was decided: identical across a retry of one
+    episode (nothing was saved, so the counter did not move) and different
+    across episodes (a saved cycle sat between them). Collapse on the PAIR.
 
     ``reconcile_retirement_intents`` pins the first attempt's clock so that
     retry reproduces byte-identical bytes and reconciles into the SAME file,
@@ -2085,6 +2119,7 @@ def build_configuration_retired_event(
         "kind": "bot-errors-sentinel-configuration-retired",
         "scope": "host",
         "requestId": request_id,
+        "episodeSeq": episode_seq,
         "createdAt": now_iso(now),
         "controllerHost": controller_host,
         "host": host,
@@ -2144,8 +2179,8 @@ def prune_retired_host_tombstones(state: dict, now: float) -> dict:
     return enforce_retired_host_tombstone_cap(state)
 
 
-def load_retirement_intents(config: SentinelConfig) -> dict:
-    """Pending retirement intents, keyed by member.
+def load_retirement_intents(config: SentinelConfig) -> tuple[dict, int]:
+    """Pending retirement intents keyed by member, with the count discarded.
 
     Deliberately NOT part of ``state``. retire_unconfigured_hosts rolls state
     back to a pre-publication deepcopy on failure, and the cycle's ``save_state``
@@ -2156,7 +2191,11 @@ def load_retirement_intents(config: SentinelConfig) -> dict:
 
     Unreadable, malformed, or unusably-timestamped entries are dropped rather
     than raising, so READING the ledger never fails a cycle: a lost pin costs a
-    duplicate audit record.
+    duplicate audit record. The count of discarded entries is returned rather
+    than swallowed, because that cost was previously silent -- the member is
+    re-pinned at the current clock, so it never reaches the emit loop's unpinned
+    fallback and nothing downstream could tell a corrupt ledger from a healthy
+    one. The caller reports it as a bounded diagnostic.
 
     That tolerance does NOT extend to writing it. ``save_retirement_intents``
     publishes through the durable-state path, which refuses to replace a file
@@ -2170,15 +2209,32 @@ def load_retirement_intents(config: SentinelConfig) -> dict:
     ledger = optional_json_object(retirement_intent_path(config)) or {}
     intents = ledger.get("intents")
     if not isinstance(intents, dict):
-        return {}
+        return {}, 0
     usable = {}
+    discarded = 0
     for host, entry in intents.items():
         if not isinstance(entry, dict):
+            discarded += 1
             continue
         if finite_float(entry.get("firstAttemptEpoch")) is None:
+            discarded += 1
             continue
         usable[str(host)] = dict(entry)
-    return usable
+    return usable, discarded
+
+
+def report_lost_retirement_pins(cause: str, count: int) -> None:
+    """One bounded operator-visible line per cause, carrying a count and nothing else.
+
+    A lost pin means a retry republishes a second timestamped artifact instead
+    of reconciling onto the first. That was the ledger's whole purpose, and both
+    ways of losing one were silent: no diagnostic, no test, no count.
+    """
+    if count > 0:
+        print(
+            f"[bot-errors-sentinel] retirement intent pin lost: cause={cause} count={count}",
+            file=sys.stderr,
+        )
 
 
 def save_retirement_intents(config: SentinelConfig, intents: dict) -> None:
@@ -2200,6 +2256,28 @@ def save_retirement_intents(config: SentinelConfig, intents: dict) -> None:
         generation=(observation.version.generation or 0) + 1,
     )
     require_advance(publication)
+
+
+def require_retirement_binding_match(payload: dict, expected: str) -> None:
+    """Refuse to publish a disposition the pin does not bind.
+
+    The pin is computed from a disposition built with a placeholder clock
+    BEFORE the ledger is written; publication rebuilds it with the pinned
+    clock. Everything except the clock must be identical, or the pin binds
+    something other than what is published and the ledger silently stops
+    protecting anything -- a retry would then reconcile onto an artifact whose
+    content it never matched.
+
+    A raise, deliberately not an ``assert``: ``python -O`` strips asserts, and
+    this is the regression net for hoisting the episode value above the binding
+    loop. Reported as opaque digests, never member names.
+    """
+    actual = retirement_content_binding(payload)
+    if actual != expected:
+        raise SentinelError(
+            "retirement content binding diverged between the pin and the publication: "
+            f"pinned {expected}, publishing {actual}"
+        )
 
 
 def retirement_content_binding(payload: dict) -> str:
@@ -2271,7 +2349,21 @@ def reconcile_retirement_intents(
     rewrites the ledger down to that cycle's retiring set; age and count bounds
     are the backstop.
     """
-    stored = load_retirement_intents(config)
+    stored, unusable = load_retirement_intents(config)
+    # Two distinct causes leave a member without the pin it should have had, and
+    # they are reported separately because they call for different responses.
+    # An unusable stored entry is discarded by the loader and re-minted here at
+    # the current clock, so the member IS pinned and never reaches the emit
+    # loop's fallback -- what it lost is the ORIGINAL clock, which is why this
+    # cause is only observable here.
+    report_lost_retirement_pins(RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE, unusable)
+    # The cap is the ledger's storage bound and is kept: ``kept`` fully replaces
+    # ``stored`` below, so the file holds at most this many entries. What was
+    # wrong was the silence -- members past the cap take the emit loop's
+    # unpinned fallback with nothing said about how many.
+    report_lost_retirement_pins(
+        RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED, max(0, len(bindings) - RETIREMENT_INTENT_MAX)
+    )
     kept: dict = {}
     for host in sorted(bindings)[:RETIREMENT_INTENT_MAX]:
         binding = bindings[host]
@@ -2339,33 +2431,45 @@ def retire_unconfigured_hosts(
         "manifestDigest": (roster_inventory_data or {}).get("digest"),
         "manifestEpoch": roster_epoch_value,
     }
+    # The episode discriminator is the cycle counter as it stands on disk RIGHT
+    # NOW, before run_once advances it later in the same cycle. Same value
+    # across a retry (nothing was saved), different across episodes (a saved
+    # cycle sat between them). Without it, content equality alone lets a second
+    # retirement reconcile onto the first one's artifact.
+    #
+    # It is computed HERE, above the binding loop, and not at the reconcile call
+    # below: it now rides in the published payload, and retirement_content_binding
+    # strips only ``createdAt``, so it is part of the binding too. The binding
+    # call and the emit call must receive the SAME value or every attempt mints a
+    # fresh pin and republishes duplicates -- the defect the ledger exists to end.
+    episode_seq = int_or_zero(state.get("cycleSeq"))
     # Durable BEFORE any publication, so a retry can reproduce this cycle's
     # bytes exactly. Only the CLOCK is pinned -- never the requestId, and never
     # across changed content. Each member's disposition is built once with a
     # placeholder clock purely to bind the pin to what will be published.
+    #
+    # The requestId is computed once per member here and reused by the emit loop
+    # below: the two calls took identical arguments, and computing it twice
+    # invited them to drift apart.
     bindings = {}
+    request_ids = {}
     for host in retiring:
         record = host_state.get(host)
+        request_ids[host] = stable_request_id(
+            "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
+        )
         bindings[host] = retirement_content_binding(
             build_configuration_retired_event(
                 host,
                 record if isinstance(record, dict) else {},
                 0.0,
                 controller_host,
-                stable_request_id(
-                    "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
-                ),
+                request_ids[host],
                 roster,
+                episode_seq,
             )
         )
-    # The episode discriminator is the cycle counter as it stands on disk RIGHT
-    # NOW, before run_once advances it later in the same cycle. Same value
-    # across a retry (nothing was saved), different across episodes (a saved
-    # cycle sat between them). Without it, content equality alone lets a second
-    # retirement reconcile onto the first one's artifact.
-    intents = reconcile_retirement_intents(
-        config, bindings, now, int_or_zero(state.get("cycleSeq"))
-    )
+    intents = reconcile_retirement_intents(config, bindings, now, episode_seq)
     emitted = []
     for host in retiring:
         record = host_state.get(host)
@@ -2373,16 +2477,29 @@ def retire_unconfigured_hosts(
         intent = intents.get(host)
         pinned_at = finite_float(intent.get("firstAttemptEpoch")) if isinstance(intent, dict) else None
         if pinned_at is None:
+            # Reaching this means one thing only: the member fell past
+            # RETIREMENT_INTENT_MAX in reconcile_retirement_intents, which
+            # already reported the count under
+            # RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED. An unusable stored entry
+            # does NOT arrive here -- it is re-minted with a fresh clock and
+            # reported under its own cause.
             pinned_at = now
-        request_id = stable_request_id(
-            "configuration_retired", host, roster["previousDigest"], roster["currentDigest"]
-        )
+        request_id = request_ids[host]
         path = action_event_path(
             config, pinned_at, "retirement", host, CONFIGURATION_RETIRED_ACTION, request_id
         )
         payload = build_configuration_retired_event(
-            host, record if isinstance(record, dict) else {}, pinned_at, controller_host, request_id, roster
+            host,
+            record if isinstance(record, dict) else {},
+            pinned_at,
+            controller_host,
+            request_id,
+            roster,
+            episode_seq,
         )
+        # Before publication, not after: a divergence must stop the cycle rather
+        # than leave a durable artifact the pin does not bind.
+        require_retirement_binding_match(payload, bindings[host])
         target = _durable_target(path)
         absent = JsonVersion(False, None, None, None)
         publication_operation = operation_id(
@@ -2455,6 +2572,37 @@ def retire_unconfigured_hosts(
     # count is enforced here rather than only before the loop.
     enforce_retired_host_tombstone_cap(state)
     return emitted
+
+
+def retirement_action_guard_hosts(state: dict, retirement_events: list[dict]) -> dict:
+    """Members whose queued remediations must not execute this cycle.
+
+    The tombstone ledger is a PERSISTENCE bound.
+    ``enforce_retired_host_tombstone_cap`` replaces the map with its newest
+    ``RETIRED_HOST_TOMBSTONE_MAX`` entries AFTER the retirement loop has
+    inserted this cycle's members. Every entry a single cycle inserts shares
+    that cycle's clock and the sort is stable, so the tie breaks on insertion
+    order and a cycle retiring more than the cap loses its lexically last
+    member from the map -- while still having retired it, published its
+    disposition, and deleted its record.
+
+    Reading that capped map as the execution guard turned a storage bound into
+    an execution decision: the dropped member's queued ``restart_host`` ran
+    against a host the same cycle decommissioned. So the guard is built from
+    the cycle's COMPLETE retiring set, which ``retirement_events`` already
+    carries per entry, unioned with the persisted tombstones that guard members
+    retired in EARLIER cycles. The cap itself is untouched -- it still bounds
+    what is persisted, which is all it was ever for.
+    """
+    tombstones = state.get("retiredHosts")
+    guard = dict(tombstones) if isinstance(tombstones, dict) else {}
+    for event in retirement_events or []:
+        if not isinstance(event, dict):
+            continue
+        host = str(event.get("host") or "")
+        if host:
+            guard.setdefault(host, {"retiredThisCycle": True})
+    return guard
 
 
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
@@ -2570,7 +2718,9 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Consume pending actions from the outbox, then prune remaining .done/
     # .failed files.  The consumer reads .json, executes, and renames to .done
     # or .failed so the same action is not consumed twice.
-    action_outbox_depth = consume_action_outbox(config, retired_hosts=state.get("retiredHosts"))
+    action_outbox_depth = consume_action_outbox(
+        config, retired_hosts=retirement_action_guard_hosts(state, retirement_events)
+    )
     action_outbox_depth = prune_action_outbox(config)
     sweep_started_at = now_iso(now)
     sweep_ended_epoch = deps.now_epoch()

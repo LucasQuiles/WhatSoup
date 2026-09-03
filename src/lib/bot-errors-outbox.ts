@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts';
-import { confineAlertContent } from './alert-evidence.ts';
+import { confineAlertContent, confineConversationScope } from './alert-evidence.ts';
 import { jidPattern } from './redaction-patterns.ts';
 import { asNonEmptyString } from './type-guards.ts';
 import { homedir, tmpdir } from 'node:os';
@@ -70,6 +70,21 @@ export interface BotErrorsOutboxInput {
    * occurrence, so the marker must ride the event. Omitted when false.
    */
   renotify?: boolean;
+  /**
+   * Raw conversation identifier for a fault that belongs to ONE conversation
+   * (e.g. a turn rejected before dispatch). Never emitted: the builder
+   * projects it to a bounded, non-reversible `conversationScope` digest, the
+   * same way summary and evidence are confined (#2386). Confinement lives
+   * here rather than at the call site so no emitter can ship a raw JID.
+   *
+   * The dispatcher keys incidents on machine|instance|source. Without this
+   * field a second conversation failing under an already-open incident is
+   * filed as a duplicate and produces no operator signal at all.
+   *
+   * Omitted when the emitter has no conversation, which keeps the emitted
+   * event shape unchanged for every existing source.
+   */
+  conversationKey?: string;
 }
 
 export interface BotErrorsOutboxWrite {
@@ -541,6 +556,7 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
   // length, and a non-reversible correlation digest.
   const confinedSummary = confineAlertContent('summary', rawSummary);
   const confinedEvidence = confineAlertContent('evidence', rawEvidence);
+  const conversationScope = confineConversationScope(input.conversationKey);
 
   return {
     ...envelope,
@@ -553,6 +569,10 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
     ...(input.renotify === true ? { renotify: true } : {}),
     summary: confinedSummary,
     evidence: confinedEvidence,
+    // Additive, absent-by-default (back-compat shape): a bounded digest of the
+    // conversation, present only for per-conversation faults. Never the raw
+    // identifier — see BotErrorsOutboxInput.conversationKey.
+    ...(conversationScope !== null ? { conversationScope } : {}),
     // Issue #2386: strip absolute paths and raw process arguments. Keep
     // only bounded process metadata: pid, ppid, and node version.
     process: {

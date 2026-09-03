@@ -20,6 +20,14 @@
  * - ``length``: raw character count of the original string.
  * - ``correlationDigest``: a domain-separated SHA-256 hex digest of
  *   the original content — deterministic, non-reversible, for dedup.
+ * - ``conversationScope`` (see {@link confineConversationScope}): a bounded,
+ *   domain-separated digest of the conversation a per-conversation fault
+ *   belongs to. Emitted as its own event field, never inside prose. It exists
+ *   because the bot-errors dispatcher keys incidents on
+ *   machine|instance|source and otherwise cannot tell one wedged conversation
+ *   from another under the same instance — so one chat's open incident
+ *   silently absorbs every other chat's outage. The digest is the smallest
+ *   value that restores that distinction without shipping an identifier.
  *
  * ## What is stripped
  *
@@ -118,3 +126,95 @@ export function confineAlertContent(
     correlationDigest: digestContent(domain, raw),
   };
 }
+
+/**
+ * Hex length of an emitted conversation digest. Matches the dispatcher's
+ * existing ``incident_source_fingerprint`` convention (16 hex chars), which
+ * is what the incident-state file is already sized and validated for.
+ */
+const CONVERSATION_SCOPE_HEX_LENGTH = 16;
+
+/**
+ * Version tag on every emitted conversation scope.
+ *
+ * Without it the token is bare hex, and bare hex is ambiguous: decimal digits
+ * are hex digits, so a raw conversation local part (what `toConversationKey`
+ * mints) satisfies any plain hex test. The consumer previously compensated by
+ * rejecting all-decimal values, which discarded roughly one genuine digest in
+ * 1,845. The tag removes the ambiguity at the source, so the consumer can
+ * require a shape no raw identifier has instead of guessing at one.
+ *
+ * The `1` is a format version. A future change to the digest width or
+ * algorithm takes a new tag, so a consumer can tell the formats apart rather
+ * than mis-parsing one as the other.
+ */
+export const CONVERSATION_SCOPE_TAG = 'cs1_';
+
+/**
+ * Project a raw conversation identifier into a bounded, non-reversible scope
+ * digest.
+ *
+ * Uses the same slow KDF as {@link confineAlertContent} under its own domain
+ * salt, and domain separation keeps this digest from colliding with an
+ * evidence or summary digest of the same bytes.
+ *
+ * What this provides, stated precisely: the emitted value is not a plaintext
+ * identifier, it is deterministic so the dispatcher can compare two events,
+ * and it is domain-separated. What it does NOT provide is secrecy against a
+ * determined offline attacker. The salt is fixed and public, the iteration
+ * count is 1000, and the output is truncated to 16 hex characters, so against
+ * a conversation-identifier space of roughly 10^10 candidates an exhaustive
+ * search remains tractable on commodity hardware — 1000 iterations raises the
+ * cost by about three orders of magnitude, which is a real but not decisive
+ * margin. Treat this as a bounded, non-reversible-in-practice value for logs
+ * and alert routing, never as a secret. Raising the cost was considered and
+ * not done here: this is an error path that must stay cheap, and the value's
+ * job is de-duplication rather than confidentiality.
+ *
+ * The emitted value is ``cs1_`` followed by 16 lowercase hex characters. The
+ * tag is not decoration: it is what lets the consumer accept a scope by shape
+ * without having to guess whether an untagged hex run is a digest or a raw
+ * identifier.
+ *
+ * Returns ``null`` — never an empty string or a placeholder — when the caller
+ * has no conversation, so the field can be omitted from the event entirely and
+ * the emitted shape stays backward compatible.
+ *
+ * @param conversationKey - raw conversation identifier (never emitted)
+ */
+export function confineConversationScope(
+  conversationKey: string | undefined | null,
+): string | null {
+  const trimmed = conversationKey?.trim() ?? '';
+  if (trimmed.length === 0) return null;
+  const digest = digestContent('conversation', trimmed).slice(0, CONVERSATION_SCOPE_HEX_LENGTH);
+  return `${CONVERSATION_SCOPE_TAG}${digest}`;
+}
+
+/**
+ * Failure-class tokens the CONSUMER synthesises, which this module never emits.
+ *
+ * `confineAlertContent` cannot produce these: they are not in
+ * {@link FAILURE_CLASS_PATTERNS}, they are not the empty sentinel, and they are
+ * not the extractor's fallback. They are declared here anyway, and this is
+ * deliberate.
+ *
+ * The Python consumer's allowlist
+ * (`LEGACY_FAILURE_CLASSES` in `deploy/scripts/lib/bot_errors_redaction.py`) must
+ * equal ONE registry, and `test_producer_failure_class_vocabulary_parity` asserts
+ * that equality in both directions by parsing this file. A token the consumer
+ * knows and this file does not would fail that test as consumer drift, and
+ * "add it to the test's expectations instead" would put the vocabulary in two
+ * places — which is the exact rot the parity test exists to prevent. So the
+ * registry stays here and states which side mints each token.
+ *
+ * `unconfined_object` is the class the consumer renders for alert content that is
+ * a mapping but not a {@link ConfinedAlertContent} envelope — the shape emitted
+ * by producers outside this repository, which pinned the schema-v1 contract where
+ * `evidence` was free-form. The consumer projects it into the same metadata-only
+ * triple this module produces (a class, a character count, a digest) without
+ * copying any key or value out of it.
+ */
+export const CONSUMER_SYNTHESISED_FAILURE_CLASSES: readonly string[] = Object.freeze([
+  'unconfined_object',
+]);

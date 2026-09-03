@@ -1,7 +1,8 @@
 /**
  * Governed-env drift comparator: detects missing/extra/mismatched governed
- * EnvironmentVariables keys (CLAUDE_CONFIG_DIR, PATH) between a freshly
- * rendered plist and the installed one, by key and SHA-256 value digest only.
+ * EnvironmentVariables keys (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND)
+ * between a freshly rendered plist and the installed one, by key and SHA-256
+ * value digest only.
  * Installed bot plists carry live credentials, so no report may ever contain
  * a raw environment value — several tests below assert exactly that.
  */
@@ -235,6 +236,64 @@ describe('compareGovernedLaunchdEnv', () => {
     }]);
   });
 
+  it('reports a configured PATH prepend that the installed plist never rendered as missing', () => {
+    // A host configured with service.pathPrepend whose installed plist predates
+    // the governed key: this must read as drift, not as "no drift".
+    const expected = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+    const observed = plistWithEnv({ PATH: '/opt/bin:/usr/bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
+
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'missing',
+      expectedDigest: sha256('/opt/bin'),
+      observedDigest: null,
+    }]);
+    // The key is governed now, so it must never be reported as a dropped
+    // non-governed key -- that is what would refuse --apply on affected hosts.
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+  });
+
+  it('reports no drift when the installed plist carries the same governed PATH prepend', () => {
+    const expected = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+    const observed = plistWithEnv({
+      PATH: '/opt/bin:/usr/bin',
+      WHATSOUP_PATH_PREPEND: '/opt/bin',
+    });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed, { pathPrepend: ['/opt/bin'] });
+
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+  });
+
+  it('reports a hand-added PATH prepend with no config source as governed extra drift', () => {
+    const expected = plistWithEnv({ PATH: '/usr/bin' });
+    const observed = plistWithEnv({ PATH: '/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/hand-added-bin' });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+
+    expect(comparison.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'extra',
+      expectedDigest: null,
+      observedDigest: sha256('/opt/hand-added-bin'),
+    }]);
+    // Behaviour change disclosed in the PR body: before this key was governed a
+    // hand-added value refused --apply as a non-governed drop; now --apply
+    // overwrites it.
+    expect(comparison.droppedNonGovernedKeys).toEqual([]);
+    expect(JSON.stringify(comparison)).not.toContain('hand-added-bin');
+  });
+
   it('fails closed when an EnvironmentVariables dict exists but cannot be parsed', () => {
     const expected = plistWithEnv({ PATH: '/usr/bin' });
     const observed = [
@@ -252,5 +311,354 @@ describe('compareGovernedLaunchdEnv', () => {
       drift: [],
       droppedNonGovernedKeys: [],
     });
+  });
+
+  // MED-7: the reader must match the dict ELEMENT, not one spelling of it.
+  //
+  // `<dict>`, `<dict >`, `<dict\n>`, `<dict/>` and `<dict attr="x">` are the
+  // same element. Matching the literal '<dict>' let every other spelling of a
+  // NESTED dict past the fail-closed guard while the body still truncated at
+  // that dict's close, so a governed key declared after it read as absent and
+  // was reported as benign 'missing' drift instead of an unparseable plist.
+  //
+  // The nested dict goes BEFORE the governed key on purpose: with it last,
+  // every key is already parsed before the truncation point and the defect
+  // cannot show.
+  // Nested-dict DETECTION is broad: any dict opening token at all truncates the
+  // body and must fail closed. What the reader PARSES is narrower.
+  const NESTED_DICT_SPELLINGS = [
+    '<dict>',
+    '<dict >',
+    '<dict\n    >',
+    '<dict/>',
+    '<dict />',
+    '<dict class="x">',
+    '<dict foo="a>b">',
+  ];
+  const OUTER_DICT_SPELLINGS = ['<dict>', '<dict >', '<dict\n  >'];
+  const OUTER_SELF_CLOSING_SPELLINGS = ['<dict/>', '<dict />'];
+  // An attributed dict is REFUSED, not consumed. `<dict a="x>y">` is legal XML,
+  // and consuming to the first '>' would end the token inside the attribute
+  // value and read the rest of the opening tag as body pairs.
+  const OUTER_DICT_REFUSED_SPELLINGS = ['<dict class="x">', '<dict foo="a>b">'];
+
+  function plistWithSpelledEnv(options: {
+    outerSpelling?: string;
+    nestedSpelling?: string;
+    env?: Record<string, string>;
+    trailingEnv?: Record<string, string>;
+  }): string {
+    const outerSpelling = options.outerSpelling ?? '<dict>';
+    const entries = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
+      `    <key>${key}</key>`,
+      `    <string>${value}</string>`,
+    ]);
+    if (options.nestedSpelling !== undefined) {
+      entries.push(
+        options.nestedSpelling.endsWith('/>')
+          ? `    <key>Nested</key>${options.nestedSpelling}`
+          : `    <key>Nested</key>${options.nestedSpelling}<key>Inner</key><string>x</string></dict>`,
+      );
+    }
+    entries.push(
+      ...Object.entries(options.trailingEnv ?? {}).flatMap(([key, value]) => [
+        `    <key>${key}</key>`,
+        `    <string>${value}</string>`,
+      ]),
+    );
+    const envBlock = outerSpelling.endsWith('/>')
+      ? [`  ${outerSpelling}`]
+      : [`  ${outerSpelling}`, ...entries, '  </dict>'];
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>Label</key>',
+      '  <string>com.whatsoup.agent</string>',
+      '  <key>KeepAlive</key>',
+      '  <dict>',
+      '    <key>Crashed</key>',
+      '    <true/>',
+      '  </dict>',
+      '  <key>EnvironmentVariables</key>',
+      ...envBlock,
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  it.each(NESTED_DICT_SPELLINGS)(
+    'fails closed when a nested dict spelled %j hides a governed key',
+    (nestedSpelling) => {
+      const expected = plistWithSpelledEnv({
+        env: { PATH: '/opt/bin:/usr/bin' },
+        trailingEnv: { WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+      const observed = plistWithSpelledEnv({
+        nestedSpelling,
+        env: { PATH: '/opt/bin:/usr/bin' },
+        trailingEnv: { WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      expect(compareGovernedLaunchdEnv(observed, observed)).toEqual({
+        comparable: false,
+        reason: 'environment-variables-unparseable',
+        drift: [],
+        droppedNonGovernedKeys: [],
+      });
+      // Against a well-formed render the same plist previously produced a
+      // bogus 'missing' row for the key the truncation ate.
+      expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+    },
+  );
+
+  it.each(OUTER_DICT_SPELLINGS)(
+    'reads an EnvironmentVariables dict spelled %j',
+    (outerSpelling) => {
+      const observed = plistWithSpelledEnv({
+        outerSpelling,
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+      const expected = plistWithSpelledEnv({
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      const comparison = compareGovernedLaunchdEnv(expected, observed, {
+        pathPrepend: ['/opt/bin'],
+      });
+      expect(comparison.comparable).toBe(true);
+      expect(comparison.drift).toEqual([]);
+      expect(comparison.droppedNonGovernedKeys).toEqual([]);
+    },
+  );
+
+  it.each(OUTER_DICT_REFUSED_SPELLINGS)(
+    'refuses an EnvironmentVariables dict spelled %j rather than consuming it',
+    (outerSpelling) => {
+      const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+      const observed = plistWithSpelledEnv({
+        outerSpelling,
+        env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+      });
+
+      expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+        comparable: false,
+        reason: 'environment-variables-unparseable',
+        drift: [],
+        droppedNonGovernedKeys: [],
+      });
+    },
+  );
+
+  it.each(OUTER_SELF_CLOSING_SPELLINGS)('reads %j as an empty environment', (outerSpelling) => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = plistWithSpelledEnv({ outerSpelling });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([{
+      key: 'PATH',
+      state: 'missing',
+      expectedDigest: sha256('/opt/bin:/usr/bin'),
+      observedDigest: null,
+    }]);
+  });
+
+  // The silent-absence class. Each body below is a VALID plist the system
+  // parser accepts, which pair-extraction turned into a MISSING governed key.
+  // Here that also emptied droppedNonGovernedKeys, so an apply proceeded as
+  // though there were no non-governed keys to drop.
+  const SILENT_ABSENCE_BODIES: Record<string, string[]> = {
+    cdata_value: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><string><![CDATA[/opt/bin]]></string>',
+    ],
+    cdata_key_name: [
+      '    <key><![CDATA[PATH]]></key><string>/opt/bin:/usr/bin</string>',
+    ],
+    comment_between_key_and_string: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><!-- note --><string>/opt/bin</string>',
+    ],
+    processing_instruction_between_key_and_string: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><?ide fold?><string>/opt/bin</string>',
+    ],
+    whitespace_in_key_end_tag: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key ><string>/opt/bin</string>',
+    ],
+    whitespace_in_string_start_tag: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><string >/opt/bin</string>',
+    ],
+    unpaired_key: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>',
+    ],
+    duplicate_key: [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>PATH</key><string>/opt/other/bin</string>',
+    ],
+  };
+
+  function plistWithRawEnvBody(entries: string[]): string {
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>EnvironmentVariables</key>',
+      '  <dict>',
+      ...entries,
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  it.each(Object.keys(SILENT_ABSENCE_BODIES))('fails closed on %s', (cell) => {
+    const expected = plistWithSpelledEnv({
+      env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+    });
+    const observed = plistWithRawEnvBody(SILENT_ABSENCE_BODIES[cell] as string[]);
+
+    expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+  });
+
+  it('reports a non-governed key it can see, so the refusal is not blanket', () => {
+    // Positive control for the class above: a body the reader DOES fully consume
+    // still enumerates its non-governed keys, which is what an apply relies on.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = plistWithRawEnvBody([
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>OPERATOR_SECRET</key><string>keep-me</string>',
+    ]);
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(comparison)).not.toContain('keep-me');
+  });
+
+  // --- HIGH-1: an XML comment is not markup this reader may read ---
+
+  it('cannot be steered by a commented-out decoy dict placed before the live one', () => {
+    // Stated as a DIFFERENTIAL, not as one expectation. The same installed
+    // plist is compared twice, once with the decoy comment and once with that
+    // comment removed, and the two results must be identical. An assertion
+    // that only pinned the post-fix value would keep passing if the parser
+    // started refusing BOTH, which is a different behaviour wearing the same
+    // green.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const live = [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>OPERATOR_SECRET</key><string>keep-me</string>',
+    ];
+    const decoyed = plistWithRawEnvBody(live).replace(
+      '  <key>EnvironmentVariables</key>',
+      [
+        '  <!-- <key>EnvironmentVariables</key>',
+        '  <dict>',
+        '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+        '  </dict> -->',
+        '  <key>EnvironmentVariables</key>',
+      ].join('\n'),
+    );
+    const honest = plistWithRawEnvBody(live);
+
+    const decoyedComparison = compareGovernedLaunchdEnv(expected, decoyed);
+    expect(decoyedComparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
+    // And the shared value is the LIVE dict's, so neither side is the decoy's.
+    expect(decoyedComparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(decoyedComparison)).not.toContain('keep-me');
+  });
+
+  it('refuses a plist carrying an unterminated comment', () => {
+    // Not well-formed XML at all. It used to be ignored outright, so every byte
+    // after the opener was read as live markup.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = `${plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } })}<!-- never closed\n`;
+
+    expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+  });
+
+  it('masks a comment without letting it act as whitespace', () => {
+    // The mask is length-preserving and non-whitespace ON PURPOSE, so the
+    // comment_between_key_and_string cell above keeps refusing. This names that
+    // coupling, so a future switch from masking to deletion cannot silently
+    // relax a pinned fail-closed and still show a green suite.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = plistWithRawEnvBody([
+      '    <key>PATH</key><!-- interposed --><string>/opt/bin:/usr/bin</string>',
+    ]);
+
+    expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+  });
+
+  it.each([
+    ['non-breaking space', '\u00a0'],
+    ['form feed', '\f'],
+    ['vertical tab', '\v'],
+  ])('refuses %s in the gap between the marker and its dict', (_label, filler) => {
+    // glm-3. Body consumption uses the four XML whitespace characters; this one
+    // gap still used String.trim(), which also removes these three. The system
+    // plist parser rejects them, so the comparator called a plist well-formed
+    // that launchd refuses to load. Pre-existing on main.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const build = (gap: string) => [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      `  <key>EnvironmentVariables</key>${gap}<dict>`,
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+
+    // Positive control: a legal XML-whitespace gap parses, so the refusal is
+    // attributable to the filler.
+    expect(compareGovernedLaunchdEnv(expected, build('\n  ')).comparable).toBe(true);
+    expect(compareGovernedLaunchdEnv(expected, build(`\n ${filler} `)).comparable).toBe(false);
+  });
+
+  it('still parses the generator-escaped form, which is not CDATA', () => {
+    // Positive control for the refusal: without it, refusing every plist that
+    // mentions a '<' would satisfy the rows above and break the shipped form.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/&lt;bin' } });
+    const observed = plistWithSpelledEnv({ env: { PATH: '/opt/&lt;bin' } });
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.drift).toEqual([]);
+    expect(comparison.pathPrefix?.expectedDigest).toBe(sha256('/opt/<bin'));
+  });
+
+  it('does not carry regex state between the two plists of one comparison', () => {
+    // The reader builds its patterns per call. A module-scope /g pattern would
+    // keep lastIndex from the expected plist and start the observed plist's
+    // search past its own EnvironmentVariables dict.
+    const plist = plistWithSpelledEnv({
+      env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      const comparison = compareGovernedLaunchdEnv(plist, plist, { pathPrepend: ['/opt/bin'] });
+      expect(comparison.comparable).toBe(true);
+      expect(comparison.drift).toEqual([]);
+    }
   });
 });

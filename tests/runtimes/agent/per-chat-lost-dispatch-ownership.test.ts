@@ -982,6 +982,41 @@ describe('unowned per-chat session sweep', () => {
     }
   });
 
+  it('forgets an evicted chat, so a later recurrence logs from the first occurrence again', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makePerChatRuntime(db);
+      state.chatSessions.set(MAP_KEY, sessionStub());
+
+      // Two unowned sweeps: the throttle now holds a count of 2 for this key.
+      expect(state.sweepPerChatSessionsWithoutOwner()).toBe(1);
+      expect(state.sweepPerChatSessionsWithoutOwner()).toBe(1);
+
+      // Evict through the canonical deletion path, which is what the repair
+      // does. The sweep iterates chatSessions, so once the key is gone the
+      // sweep's own onSuccess loop can never reach it again.
+      state.deleteOwnedPerChatSession(MAP_KEY);
+
+      // The chat comes back and is unowned again.
+      state.chatSessions.set(MAP_KEY, sessionStub());
+      runtimeLogger.warn.mockClear();
+      expect(state.sweepPerChatSessionsWithoutOwner()).toBe(1);
+
+      // Without the clear on deletion the count resumes at 3, which is not a
+      // power of two, so this FIRST failure after the chat returned would be
+      // silently dropped instead of logged.
+      const sweepWarnings = runtimeLogger.warn.mock.calls.filter(
+        ([, message]) => typeof message === 'string'
+          && message.includes('no current dispatch owner'),
+      );
+      expect(sweepWarnings, 'first failure after eviction must log').toHaveLength(1);
+      expect((sweepWarnings[0]?.[0] as { tickCount?: number } | undefined)?.tickCount).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it('reports the unowned count in the periodic health payload', () => {
     const db = new Database(':memory:');
     db.open();
