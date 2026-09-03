@@ -2000,7 +2000,11 @@ def test_dropping_a_breadcrumb_survives_any_os_error(tmp_path, monkeypatch) -> N
         raise PermissionError("unlink denied")
 
     monkeypatch.setattr(type(directory), "unlink", deny)
-    mod.drop_unrenderable_breadcrumbs(paths, {"d" * 32, "absent" * 5})  # no raise
+    assert mod.drop_unrenderable_breadcrumbs(paths, {"d" * 32, "absent" * 5}) is None  # returns, never raises
+    # the denied unlink left the crumb in place, so the next cycle re-adopts it and the
+    # per-identity throttle absorbs the duplicate instead of a lost page
+    assert (directory / f"{'d' * 32}.json").is_file()
+    assert mod.reconcile_unrenderable_signals(paths) == 1
 
 
 def test_the_breadcrumb_write_syncs_its_directory(tmp_path, monkeypatch) -> None:
