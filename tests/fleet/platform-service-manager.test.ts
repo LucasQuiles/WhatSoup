@@ -790,6 +790,67 @@ describe('platform service managers', () => {
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
   });
 
+  it('refuses an apply when a commented-out decoy dict hides the live one', async () => {
+    // HIGH-1 at apply level, which is where the damage is. The comparator read
+    // the marker INSIDE the comment, parsed the decoy's body as the installed
+    // environment, and never looked at the live dict -- so
+    // droppedNonGovernedKeys came back empty, the apply concluded there was
+    // nothing to drop, regenerated the plist and deleted the credential.
+    //
+    // The decoy body is deliberately IDENTICAL to the fresh render, so before
+    // the fix the comparison was not merely wrong, it was clean: no drift, no
+    // dropped keys, nothing for an operator to notice.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    // Vacuity guard: the slice really is the environment block, so a pass
+    // cannot come from commenting out nothing at all.
+    expect(environmentBlock).toContain('<key>EnvironmentVariables</key>');
+    expect(environmentBlock).toContain('<key>HOME</key>');
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // Refused BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('names the hidden key in the dry-run report rather than reporting an all-clear', async () => {
+    // The reporting half of the row above. A refusal alone would satisfy the
+    // apply assertion even if the comparator had merely become unparseable; the
+    // operator has to be told WHICH key the comment was hiding.
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.droppedNonGovernedKeys).toEqual(['OPERATOR_API_KEY']);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('fixture-not-a-real-key');
+  });
+
   it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
     setPlatform('darwin');
     const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();

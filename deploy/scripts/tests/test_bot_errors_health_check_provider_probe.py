@@ -3069,6 +3069,116 @@ def test_opencode_functional_probe_keeps_the_workspace_and_socket(monkeypatch, t
     assert socket_path.startswith(f"{workspace}/")
 
 
+# --- HIGH-1: an XML comment is not markup these readers may act on ---
+#
+# Pre-existing on main, taken here because this branch already hardens this
+# parser and the TypeScript comparator it mirrors. Both were measured on the
+# pre-fix code, not reasoned about:
+#   a commented-out Label naming this instance, above a real Label naming
+#     another, made the reader return the OTHER instance's environment
+#     ({'PATH': '/planted/bin'}) for agent-alpha;
+#   a commented-out EnvironmentVariables dict before the live one won the
+#     `find`, so the decoy's body was read and the live dict never looked at;
+#   an unterminated `<!--` was ignored outright and everything after it parsed
+#     as live markup.
+
+
+def test_a_commented_out_label_cannot_vouch_for_a_plist_labelled_for_another_instance(
+    monkeypatch, tmp_path
+):
+    """The Label guard is what keeps a planted plist from being parsed at all.
+
+    Its docstring says a Label that matches the instance is why "an unrelated or
+    planted plist at the expected pathname is never parsed". One comment turned
+    that off: the FIRST Label match was the commented-out one.
+    """
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha", {"PATH": "/planted/bin"},
+    )
+    raw = target.read_text()
+    # The comment must span a COMPLETE Label element. Commenting out only the
+    # <string> half leaves a live <key>Label</key> above the opener, the pairing
+    # regex fails to match there, and the read refuses for an unrelated reason --
+    # a fixture that passes on the unfixed reader and proves nothing. Measured:
+    # the first shape of this test did exactly that.
+    label_element = "  <key>Label</key>\n  <string>com.whatsoup.agent-alpha</string>"
+    assert raw.count(label_element) == 1, "fixture shape changed"
+    decoyed = raw.replace(
+        label_element,
+        f"  <!-- {label_element} -->\n"
+        "  <key>Label</key>\n"
+        "  <string>com.whatsoup.some-other-instance</string>",
+        1,
+    )
+    # Vacuity guard: on the UNFIXED reader this fixture is accepted and returns
+    # the other instance's environment. Asserting that here would pin the
+    # defect, so instead assert the two properties that make the fixture real:
+    # the decoy is a complete commented Label naming THIS instance, and the only
+    # live Label names a DIFFERENT one.
+    assert "<!--   <key>Label</key>\n  <string>com.whatsoup.agent-alpha</string> -->" in decoyed
+    live = decoyed.replace(decoyed[decoyed.index("<!--"):decoyed.index("-->") + 3], "")
+    assert "com.whatsoup.agent-alpha" not in live
+    assert "<string>com.whatsoup.some-other-instance</string>" in live
+    target.write_text(decoyed)
+
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+    # Positive control: the refusal is about the DECOY, not about comments or
+    # about this pathname. The same plist, correctly labelled, still parses.
+    target.write_text(raw)
+    assert _mod.instance_plist_environment("agent-alpha") == {"PATH": "/planted/bin"}
+
+
+def test_a_commented_out_decoy_dict_cannot_hide_the_live_environment(monkeypatch, tmp_path):
+    """Stated as a DIFFERENTIAL: the comment must make no difference at all.
+
+    Asserting only the post-fix map would keep passing if the reader started
+    refusing BOTH shapes, which is different behaviour wearing the same green.
+    The decoy body is deliberately a PLAUSIBLE one, so before the fix the read
+    succeeded and looked ordinary rather than failing loudly.
+    """
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": "/real/bin", "OPERATOR_API_KEY": "fixture-not-a-real-key"},
+    )
+    honest = target.read_text()
+    decoyed = honest.replace(
+        "  <key>EnvironmentVariables</key>",
+        "  <!-- <key>EnvironmentVariables</key>\n"
+        "  <dict>\n"
+        "    <key>PATH</key><string>/decoy/bin</string>\n"
+        "  </dict> -->\n"
+        "  <key>EnvironmentVariables</key>",
+        1,
+    )
+    assert "/decoy/bin" in decoyed, "fixture must actually carry the decoy"
+
+    target.write_text(decoyed)
+    from_decoyed = _mod.instance_plist_environment("agent-alpha")
+    target.write_text(honest)
+    from_honest = _mod.instance_plist_environment("agent-alpha")
+
+    assert from_decoyed == from_honest
+    # And the shared value is the LIVE dict's, so neither side is the decoy's.
+    assert from_decoyed == {"PATH": "/real/bin", "OPERATOR_API_KEY": "fixture-not-a-real-key"}
+
+
+def test_an_unterminated_comment_is_refused_rather_than_ignored(monkeypatch, tmp_path):
+    target = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha", {"PATH": "/real/bin"},
+    )
+    # Positive control: the same file parses before the opener is appended, so
+    # the refusal below is attributable to the comment and to nothing else.
+    assert _mod.instance_plist_environment("agent-alpha") == {"PATH": "/real/bin"}
+
+    target.write_text(target.read_text() + "<!-- never closed\n")
+    assert _mod.instance_plist_environment("agent-alpha") is None
+
+
 def test_only_the_dry_path_override_marks_the_governed_surfaces_not_applicable(
     monkeypatch, tmp_path
 ):

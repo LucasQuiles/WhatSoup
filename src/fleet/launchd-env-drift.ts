@@ -125,6 +125,47 @@ const DICT_CLOSE_SOURCE = '</dict[ \\t\\r\\n]*>';
 const XML_SPACE_ONLY = /^[ \t\r\n]*$/;
 
 /**
+ * Blank every XML comment, PRESERVING LENGTH, or null if one is unterminated.
+ *
+ * Comments were invisible to this reader, so a commented-out decoy dict placed
+ * before the real one won: `indexOf` found the marker INSIDE the comment, the
+ * decoy's body was parsed as the environment, and the live dict was never
+ * looked at. Measured against the pre-fix reader, the same file with and
+ * without the comment gave droppedNonGovernedKeys [] and ['ANTHROPIC_API_KEY'].
+ * The empty one is an apply that deletes a key it never reported.
+ *
+ * MASKED, not deleted, and that is the whole design:
+ *   - length is preserved, so every offset below still indexes the real file
+ *     and the body slice stays byte-aligned with it. No offset map to keep
+ *     honest, and the decoy dies because its CONTENT is masked, wherever it
+ *     sits — not because it happened to precede the marker.
+ *   - '-' is not XML whitespace, so a comment INSIDE the environment body is
+ *     still not "fully consumed by the pairs" and the body still fails closed.
+ *     That cell is pinned by comment_between_key_and_string and is unchanged
+ *     here; making this reader newly accept a plist it used to refuse is a
+ *     contract change, and this fix is not the place for one.
+ * '-' is also the one filler that carries no ambiguity: `--` cannot occur
+ * inside a well-formed XML comment, so a masked run can never be mistaken for
+ * planted content, and it starts no token this reader searches for.
+ *
+ * An unterminated `<!--` is not well-formed XML at all. It used to be ignored
+ * outright, so everything after it parsed as live markup; it is now refused.
+ */
+function maskXmlComments(plist: string): string | null {
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const open = plist.indexOf('<!--', cursor);
+    if (open === -1) return out + plist.slice(cursor);
+    const close = plist.indexOf('-->', open + 4);
+    if (close === -1) return null;
+    const end = close + 3;
+    out += plist.slice(cursor, open) + '-'.repeat(end - open);
+    cursor = end;
+  }
+}
+
+/**
  * Extract the EnvironmentVariables dict as a key -> value map. Returns an
  * empty map when the plist has no EnvironmentVariables key at all, and null
  * when the dict exists but cannot be parsed — the caller must treat null as
@@ -132,7 +173,10 @@ const XML_SPACE_ONLY = /^[ \t\r\n]*$/;
  * element structure, not the generator's exact formatting, because the whole
  * point is comparing against plists someone edited by hand.
  */
-function parseEnvironmentVariables(plist: string): Map<string, string> | null {
+function parseEnvironmentVariables(source: string): Map<string, string> | null {
+  // Masked FIRST, so no search below can match text inside a comment.
+  const plist = maskXmlComments(source);
+  if (plist === null) return null;
   const marker = plist.indexOf(ENV_KEY_MARKER);
   if (marker === -1) return new Map();
   const afterMarker = marker + ENV_KEY_MARKER.length;

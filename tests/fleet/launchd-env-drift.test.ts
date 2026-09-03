@@ -547,6 +547,66 @@ describe('compareGovernedLaunchdEnv', () => {
     expect(JSON.stringify(comparison)).not.toContain('keep-me');
   });
 
+  // --- HIGH-1: an XML comment is not markup this reader may read ---
+
+  it('cannot be steered by a commented-out decoy dict placed before the live one', () => {
+    // Stated as a DIFFERENTIAL, not as one expectation. The same installed
+    // plist is compared twice, once with the decoy comment and once with that
+    // comment removed, and the two results must be identical. An assertion
+    // that only pinned the post-fix value would keep passing if the parser
+    // started refusing BOTH, which is a different behaviour wearing the same
+    // green.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const live = [
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>OPERATOR_SECRET</key><string>keep-me</string>',
+    ];
+    const decoyed = plistWithRawEnvBody(live).replace(
+      '  <key>EnvironmentVariables</key>',
+      [
+        '  <!-- <key>EnvironmentVariables</key>',
+        '  <dict>',
+        '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+        '  </dict> -->',
+        '  <key>EnvironmentVariables</key>',
+      ].join('\n'),
+    );
+    const honest = plistWithRawEnvBody(live);
+
+    const decoyedComparison = compareGovernedLaunchdEnv(expected, decoyed);
+    expect(decoyedComparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
+    // And the shared value is the LIVE dict's, so neither side is the decoy's.
+    expect(decoyedComparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(decoyedComparison)).not.toContain('keep-me');
+  });
+
+  it('refuses a plist carrying an unterminated comment', () => {
+    // Not well-formed XML at all. It used to be ignored outright, so every byte
+    // after the opener was read as live markup.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = `${plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } })}<!-- never closed\n`;
+
+    expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+  });
+
+  it('masks a comment without letting it act as whitespace', () => {
+    // The mask is length-preserving and non-whitespace ON PURPOSE, so the
+    // comment_between_key_and_string cell above keeps refusing. This names that
+    // coupling, so a future switch from masking to deletion cannot silently
+    // relax a pinned fail-closed and still show a green suite.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const observed = plistWithRawEnvBody([
+      '    <key>PATH</key><!-- interposed --><string>/opt/bin:/usr/bin</string>',
+    ]);
+
+    expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
+  });
+
   it('still parses the generator-escaped form, which is not CDATA', () => {
     // Positive control for the refusal: without it, refusing every plist that
     // mentions a '<' would satisfy the rows above and break the shipped form.

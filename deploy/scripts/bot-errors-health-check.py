@@ -4259,6 +4259,55 @@ PLIST_ENV_PAIR_RE = re.compile(
 )
 
 
+def mask_xml_comments(raw: str) -> str | None:
+    """Blank every XML comment, PRESERVING LENGTH. None if one is unterminated.
+
+    Comments were invisible to this reader, and TWO guards were defeated by
+    that, both measured on the pre-fix code rather than reasoned about:
+
+      the Label guard. A commented-out Label naming this instance, above a real
+      Label naming a DIFFERENT one, was accepted: the reader returned the other
+      instance's environment ({'PATH': '/planted/bin'}) for agent-alpha. That
+      guard exists precisely so an unrelated or planted plist at the expected
+      pathname is never parsed, and one comment turned it off.
+
+      the EnvironmentVariables marker. A commented-out decoy dict before the
+      live one won the `find`, so the decoy's body was read as the environment
+      and the live dict never looked at. The TypeScript comparator has the same
+      shape and the same defect, so both are fixed together.
+
+    MASKED, not deleted: length is preserved, so every offset below still
+    indexes the real text and no offset map has to be kept honest. '-' is not
+    XML whitespace, so a comment inside the environment block still fails the
+    "fully consumed by the pairs" rule and that cell -- pinned by
+    comment_between_key_and_string -- keeps refusing exactly as before. Making
+    this reader newly ACCEPT a plist it used to refuse would be a contract
+    change, and this fix is not the place for one. '-' also carries no
+    ambiguity as filler, because `--` cannot appear inside a well-formed XML
+    comment, and it starts no token this reader searches for.
+
+    An unterminated `<!--` is not well-formed XML. It used to be ignored, so
+    everything after it was parsed as live markup; it is refused now.
+
+    Applied once, to the whole file, BEFORE the Label search -- not just before
+    the marker search. Fixing the marker alone would leave the Label decoy.
+    """
+    out: list[str] = []
+    cursor = 0
+    while True:
+        open_at = raw.find("<!--", cursor)
+        if open_at < 0:
+            out.append(raw[cursor:])
+            return "".join(out)
+        close_at = raw.find("-->", open_at + 4)
+        if close_at < 0:
+            return None
+        end = close_at + 3
+        out.append(raw[cursor:open_at])
+        out.append("-" * (end - open_at))
+        cursor = end
+
+
 def instance_plist_environment(name: str) -> dict[str, str] | None:
     """Read the WHOLE EnvironmentVariables map out of a generated instance plist.
 
@@ -4279,6 +4328,12 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         raw = plist_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+    # Masked FIRST: every search below -- Label, marker, dict bounds, body --
+    # must see comments as inert filler rather than as live markup.
+    masked = mask_xml_comments(raw)
+    if masked is None:
+        return None
+    raw = masked
     label_match = re.search(
         r"<key>Label</key>\s*<string>(.*?)</string>", raw, re.DOTALL
     )
