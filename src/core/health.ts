@@ -1822,6 +1822,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    // #1753 rem-1 excluded this request's own cost from this request's reading
+    // by snapshotting first. That is not enough: the window is 20 samples at
+    // 500 ms, so the PREVIOUS request's block sits inside it and, at any poll
+    // cadence faster than one request per 5 s, requests contaminate each
+    // other's readings. Bracketing the handler tells the sampler which spans
+    // were the observer's, so the exclusion covers the whole window.
+    //
+    // Scoped to GET /health deliberately. A slow POST /send is real work
+    // blocking the loop and must keep showing up in the gauge.
+    const endObserverSpan = loopLagSampler.beginObserverSpan();
+
     try {
       const startupNotification = deps.getStartupNotificationHealth?.()
         ?? NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH;
@@ -2812,6 +2823,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           lag_p95_ms: loopLag.p95LagMs,
           sample_count: loopLag.sampleCount,
           locally_starved: loopLag.locallyStarved,
+          // Health-handler time ALREADY subtracted from the lag figures above.
+          // Published so a consumer can see what the observer cost; subtracting
+          // it a second time double-counts.
+          observer_cost_ms: loopLag.observerCostMs,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
           discontinuity_count: loopLag.discontinuityCount,
           lag_min_ms: loopLag.minLagMs,
@@ -2848,6 +2863,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       log.error({ err }, 'health check failed');
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error' }));
+    } finally {
+      // finally, not a trailing call: the handler has early returns (the public
+      // envelope) and a catch, and an unclosed span would leak observer time
+      // into every later interval.
+      endObserverSpan();
     }
   });
 

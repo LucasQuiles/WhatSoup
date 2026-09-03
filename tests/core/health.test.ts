@@ -6534,8 +6534,13 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
           snapshotSampleCount: 0,
           lastEluUtilization: null,
           lastCpuDeltaMs: null,
+          observerCostMs: 0,
           ...snapshot,
         }),
+        // P42: the handler brackets itself with an observer span, so the
+        // double has to answer beginObserverSpan like the real sampler.
+        beginObserverSpan: vi.fn().mockReturnValue(() => {}),
+        recordObserverSpan: vi.fn(),
         rawSamples: vi.fn().mockReturnValue([]),
         rawSamplePage: vi.fn().mockReturnValue({
           oldestSequence: null,

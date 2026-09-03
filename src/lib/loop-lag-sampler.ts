@@ -62,6 +62,14 @@ export interface LoopLagSnapshot {
   intervalSampleCount: number;
   snapshotSampleCount: number;
   locallyStarved: boolean;
+  /**
+   * Observer time already subtracted from the lag samples in this window.
+   *
+   * Do NOT subtract it again. It is reported so a consumer can see what the
+   * health path cost and reconstruct the raw wall-clock delay if it wants one;
+   * `p95LagMs`, `minLagMs`, `medianLagMs` and `maxLagMs` are all net of it.
+   */
+  observerCostMs: number;
   discontinuityCount: number;
   lastEluUtilization: number | null;
   lastCpuDeltaMs: number | null;
@@ -80,7 +88,23 @@ interface CpuReading {
 interface WindowSample {
   readonly lagMs: number;
   readonly source: LoopLagObservationSource;
+  /** Observer time excluded from this sample's lagMs. */
+  readonly observerCostMs: number;
 }
+
+/** A stretch of wall time spent inside an observer, on the sampler's own clock. */
+interface ObserverSpan {
+  startMs: number;
+  readonly endMs: number;
+}
+
+/**
+ * Ceiling on retained observer spans.
+ *
+ * Spans are trimmed against the baseline on every recorded observation, so this
+ * only bounds a pathological burst of concurrent requests between two ticks.
+ */
+const MAX_OBSERVER_SPANS = 64;
 
 export interface LoopLagSamplerOptions {
   now?: () => number;
@@ -105,6 +129,7 @@ function defaultCpuReader(): CpuReading | null {
 export class LoopLagSampler {
   private timer: NodeJS.Timeout | null = null;
   private window: WindowSample[] = [];
+  private observerSpans: ObserverSpan[] = [];
   private rawRing: RawLoopLagSample[] = [];
   private lastIntervalAtMs: number | null = null;
   private discontinuityCount = 0;
@@ -141,6 +166,7 @@ export class LoopLagSampler {
       this.timer = null;
     }
     this.resetWindow();
+    this.observerSpans = [];
     this.lastIntervalAtMs = null;
     this.prevElu = null;
     this.prevCpu = null;
@@ -159,6 +185,7 @@ export class LoopLagSampler {
       maxLagMs: lags.length > 0 ? Math.max(...lags) : null,
       intervalSampleCount: this.window.filter((sample) => sample.source === 'interval').length,
       snapshotSampleCount: this.window.filter((sample) => sample.source === 'snapshot').length,
+      observerCostMs: this.window.reduce((total, sample) => total + sample.observerCostMs, 0),
       locallyStarved:
         this.window.length === LOOP_LAG_WINDOW_SAMPLES
         && p95LagMs !== null
@@ -215,6 +242,68 @@ export class LoopLagSampler {
     });
   }
 
+  /**
+   * Mark the start of a stretch of observer work; the returned function ends it.
+   *
+   * #1753 rem-1 already excluded the CURRENT request's cost from the CURRENT
+   * reading by snapshotting before the handler's own work. That left the
+   * cross-request case: the window is 10 seconds wide, so at any poll cadence
+   * faster than one request per 5 seconds the PREVIOUS request's block is still
+   * inside it and requests contaminate each other. Recording the span itself,
+   * rather than ordering one read against one write, is what makes the
+   * exclusion cover the whole window.
+   */
+  beginObserverSpan(): () => void {
+    const startMs = this.now();
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.recordObserverSpan(startMs, this.now());
+    };
+  }
+
+  /** Record an already-measured observer span. Times must be on this sampler's clock. */
+  recordObserverSpan(startMs: number, endMs: number): void {
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+    this.observerSpans.push({ startMs, endMs });
+    if (this.observerSpans.length > MAX_OBSERVER_SPANS) this.observerSpans.shift();
+  }
+
+  /**
+   * Observer time inside [fromMs, toMs].
+   *
+   * Only the overlapping portion counts. Subtracting a whole span that merely
+   * started inside the interval would over-subtract and hide real lag in that
+   * same interval, and the clamp at zero would hide the fact that it had.
+   */
+  private observerOverlapMs(fromMs: number, toMs: number): number {
+    let total = 0;
+    for (const span of this.observerSpans) {
+      const lo = Math.max(span.startMs, fromMs);
+      const hi = Math.min(span.endMs, toMs);
+      if (hi > lo) total += hi - lo;
+    }
+    return total;
+  }
+
+  /**
+   * Drop the part of every span at or before the new baseline.
+   *
+   * Called only after an observation is actually recorded, which is the moment
+   * the baseline moves. A span's remainder stays eligible for the next
+   * interval, so nothing is counted twice and nothing is lost.
+   */
+  private trimObserverSpans(baselineMs: number): void {
+    const kept: ObserverSpan[] = [];
+    for (const span of this.observerSpans) {
+      if (span.endMs <= baselineMs) continue;
+      span.startMs = Math.max(span.startMs, baselineMs);
+      kept.push(span);
+    }
+    this.observerSpans = kept;
+  }
+
   private sample(): void {
     this.observe('interval');
   }
@@ -237,7 +326,10 @@ export class LoopLagSampler {
     // recording lag-0 samples on every health request would dilute the window
     // with zeros under frequent polling and mask real starvation. Interval
     // fires always record — discarding "early" fires is the phantom mechanism.
-    const overdueMs = actualAtMs - baselineAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
+    const observerCostMs = this.observerOverlapMs(baselineAtMs, actualAtMs);
+    const overdueMs = actualAtMs - baselineAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS - observerCostMs;
+    // Returning here leaves the spans untouched on purpose: no observation was
+    // recorded, so the baseline does not move and nothing has been consumed.
     if (source === 'snapshot' && overdueMs <= 0) return;
 
     const lagMs = Math.max(0, overdueMs);
@@ -263,7 +355,7 @@ export class LoopLagSampler {
         this.discontinuityCount + 1,
       );
     } else {
-      this.window.push({ lagMs, source });
+      this.window.push({ lagMs, source, observerCostMs });
     }
     if (this.window.length > LOOP_LAG_WINDOW_SAMPLES) this.window.shift();
     this.lastIntervalAtMs = source === 'interval'
@@ -271,6 +363,7 @@ export class LoopLagSampler {
       // A recorded snapshot consumed the overdue span; measure only residual
       // delay from here so the next interval fire cannot double-count it.
       : actualAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
+    this.trimObserverSpans(this.lastIntervalAtMs);
   }
 
   private pushRaw(sample: RawLoopLagSample): void {
