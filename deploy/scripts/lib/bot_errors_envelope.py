@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 try:  # imported as ``lib.bot_errors_envelope`` by every deploy script
-    from lib.bot_errors_redaction import legacy_confined_to_text
+    from lib.bot_errors_redaction import has_malformed_legacy_confined_repr, legacy_confined_to_text
 except ImportError:  # loaded by file path, without the package context
-    from bot_errors_redaction import legacy_confined_to_text
+    from bot_errors_redaction import has_malformed_legacy_confined_repr, legacy_confined_to_text
 
 
 SCHEMA_VERSION = 2
@@ -139,7 +139,17 @@ def _require_renderable_alert_content(event: Mapping[str, Any]) -> None:
     """
     for field in ALERT_CONTENT_FIELDS:
         value = event.get(field)
-        if value is None or isinstance(value, str):
+        if value is None:
+            continue
+        if isinstance(value, str):
+            # #2386: a string is normally the reader's job, but a string that IS
+            # this envelope's repr with values outside the bounds is confined
+            # material, not prose. Accepting it kept an invalid failure class and
+            # a digest-shaped field inside a routable incident alert, which is
+            # the content channel this issue closes. Ordinary text, including
+            # text carrying a VALID envelope repr, is unaffected.
+            if has_malformed_legacy_confined_repr(value):
+                raise EnvelopeError("unrenderable_alert_content")
             continue
         if isinstance(value, Mapping) and legacy_confined_to_text(dict(value)) is not None:
             continue

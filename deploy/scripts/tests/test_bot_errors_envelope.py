@@ -324,3 +324,55 @@ def test_classify_event_still_accepts_string_and_absent_alert_content() -> None:
     assert envelope.classify_event(_alert_event()).kind == "incident_alert"
     assert envelope.classify_event(_alert_event(summary="", evidence="")).kind == "incident_alert"
     assert envelope.classify_event(_alert_event(summary=None, evidence=None)).kind == "incident_alert"
+
+
+# ---------------------------------------------------------------------------
+# A string that IS the confinement envelope's repr, with invalid values (B4)
+# ---------------------------------------------------------------------------
+# A string is normally the reader's job. But syntactically legacy material is
+# distinguishable from prose, and accepting it kept an invalid failure class and
+# a digest-shaped field inside a routable incident alert.
+
+_B4_DIGEST = "a1b2c3d4" + "e5f60789" * 7
+_B4_MARKER = "hostilemarker8842"
+
+
+def _legacy_repr(failure_class: str, length: str = "54", digest: str = _B4_DIGEST) -> str:
+    return (
+        "{'failureClass': '" + failure_class + "', 'length': " + length
+        + ", 'correlationDigest': '" + digest + "'}"
+    )
+
+
+def test_classify_event_rejects_a_malformed_legacy_repr_string() -> None:
+    envelope = load_envelope()
+    hostile = {
+        "unregistered_class": _legacy_repr(_B4_MARKER),
+        "out_of_bounds_length": _legacy_repr("TypeError", length="9" * 19),
+        "short_digest": _legacy_repr("TypeError", digest="deadbeef"),
+        "embedded_in_prose": "ESCALATED still open: " + _legacy_repr(_B4_MARKER) + " seen 10:02Z",
+        "nested_reserved_first": "{'failureClass': 'decoy', 'wrapper': " + _legacy_repr(_B4_MARKER) + "}",
+        "nested_wrapper_first": "{'wrapper': " + _legacy_repr(_B4_MARKER) + ", 'failureClass': 'decoy'}",
+    }
+    for name, value in hostile.items():
+        with pytest.raises(envelope.EnvelopeError) as excinfo:
+            envelope.classify_event(_alert_event(summary=value))
+        assert excinfo.value.code == "unrenderable_alert_content", name
+        with pytest.raises(envelope.EnvelopeError) as excinfo:
+            envelope.classify_event(_alert_event(evidence=value))
+        assert excinfo.value.code == "unrenderable_alert_content", name
+
+
+def test_classify_event_still_accepts_prose_and_a_valid_legacy_repr() -> None:
+    """Over-rejection control: only the malformed structural form is refused."""
+    envelope = load_envelope()
+    benign = (
+        _legacy_repr("TypeError"),
+        "restart loop: {'attempt': 3, 'code': 'EAGAIN', 'unit': 'whatsoup'}",
+        "queue drained, 4 alerts delivered",
+        # Over the grammar's digit bound, so it is not this envelope's shape at
+        # all and stays ordinary text.
+        _legacy_repr("TypeError", length="9" * 5000),
+    )
+    for value in benign:
+        assert envelope.classify_event(_alert_event(summary=value)).kind == "incident_alert", value[:60]

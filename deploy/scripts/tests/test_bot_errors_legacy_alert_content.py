@@ -265,8 +265,12 @@ def test_nineteen_digit_length_is_over_the_value_bound_and_does_not_render() -> 
         + "'}"
     )
     assert int(nineteen) > mod.LEGACY_MAX_CONFINED_LENGTH
-    assert mod.alert_text(text) == text
-    assert mod.alert_text_kind(text) == "string"
+    # Superseded contract (B4): falling through to the text path handed the
+    # digest-shaped field back verbatim. A string that IS this envelope's shape
+    # with an out-of-bounds value is confined material, so it gets the sentinel.
+    assert mod.alert_text(text) == mod.UNRENDERABLE_ALERT_CONTENT
+    assert mod.alert_text_kind(text) == "unrenderable"
+    assert DIGEST not in mod.alert_text(text)
 
 
 # ---------------------------------------------------------------------------
@@ -404,11 +408,15 @@ def test_a_hostile_failure_class_in_a_baked_repr_is_never_interpolated() -> None
         "{'failureClass': '" + HOSTILE_MARKER + "', 'length': 54, "
         "'correlationDigest': '" + DIGEST + "'}"
     )
-    # A repr that is not the envelope stays verbatim text rather than rendering,
-    # so the marker is still present as INPUT; what matters is that it was never
-    # parsed into a rendered class.
-    assert mod.alert_text_kind(text) == "string"
-    assert mod.alert_text(text) == text
+    # Superseded contract (B4): this was asserted to stay verbatim on the
+    # grounds that it was never parsed into a rendered class. That left the
+    # hostile class and the digest in operator-visible text, and left the event
+    # routable as an ordinary incident alert. It IS this envelope's shape, so it
+    # is confined material and gets the fixed sentinel.
+    assert mod.alert_text_kind(text) == "unrenderable"
+    assert mod.alert_text(text) == mod.UNRENDERABLE_ALERT_CONTENT
+    assert HOSTILE_MARKER not in mod.alert_text(text)
+    assert DIGEST not in mod.alert_text(text)
     assert mod.legacy_confined_to_text(text) is None
 
 
@@ -437,3 +445,112 @@ def test_the_boundary_lengths_are_accepted() -> None:
     for length in (mod.LEGACY_MIN_CONFINED_LENGTH, mod.LEGACY_MAX_CONFINED_LENGTH):
         value = {"failureClass": "TypeError", "length": length, "correlationDigest": DIGEST}
         assert mod.alert_text(value) == f"TypeError - {length} chars - digest a1b2c3d4"
+
+
+# ---------------------------------------------------------------------------
+# A malformed STRUCTURAL legacy repr is not ordinary operator text (B4)
+# ---------------------------------------------------------------------------
+# Bounding the live mapping closed one of two doors. A string that IS the legacy
+# envelope's repr, with the same three keys, is syntactically distinguishable
+# from ordinary text; when its values fail the bounds the reader used to hand it
+# back verbatim, so the invalid class and the digest-shaped field stayed in
+# operator-visible text and the event stayed a routable incident alert.
+
+MALFORMED_MARKER = "hostilemarker8842"
+
+
+def malformed_repr(failure_class: str = MALFORMED_MARKER, length: str = "54",
+                   digest: str = DIGEST) -> str:
+    return (
+        "{'failureClass': '" + failure_class + "', 'length': " + length
+        + ", 'correlationDigest': '" + digest + "'}"
+    )
+
+
+def test_an_exact_malformed_legacy_repr_is_not_returned_verbatim() -> None:
+    """The whole string is the envelope's repr and its class is unregistered."""
+    mod = load_redaction()
+    text = malformed_repr()
+    rendered = mod.alert_text(text)
+    assert MALFORMED_MARKER not in rendered, rendered
+    assert DIGEST not in rendered, rendered
+    assert rendered == mod.UNRENDERABLE_ALERT_CONTENT
+    assert mod.alert_text_kind(text) == "unrenderable"
+
+
+def test_an_embedded_malformed_legacy_repr_is_replaced_not_dropped() -> None:
+    """Surrounding operator text is preserved; only the envelope span goes."""
+    mod = load_redaction()
+    text = "ESCALATED still open: " + malformed_repr() + " (first seen 10:02Z)"
+    rendered = mod.alert_text(text)
+    assert MALFORMED_MARKER not in rendered, rendered
+    assert DIGEST not in rendered, rendered
+    assert rendered.startswith("ESCALATED still open: ")
+    assert rendered.endswith(" (first seen 10:02Z)")
+    assert mod.UNRENDERABLE_ALERT_CONTENT in rendered
+
+
+def test_an_out_of_bounds_length_is_malformed_not_ordinary_text() -> None:
+    """B4 names invalid class AND length fields; the digest is shaped material."""
+    mod = load_redaction()
+    text = malformed_repr(failure_class="TypeError", length="9" * 19)
+    rendered = mod.alert_text(text)
+    assert DIGEST not in rendered, rendered
+    assert rendered == mod.UNRENDERABLE_ALERT_CONTENT
+    assert mod.alert_text_kind(text) == "unrenderable"
+
+
+def test_a_short_digest_is_malformed_not_ordinary_text() -> None:
+    mod = load_redaction()
+    text = malformed_repr(failure_class="TypeError", digest="deadbeef")
+    assert mod.alert_text(text) == mod.UNRENDERABLE_ALERT_CONTENT
+
+
+def test_a_nested_malformed_repr_is_caught_in_BOTH_outer_key_orders() -> None:
+    """The key-order permutation, as a permanent regression.
+
+    A detector that finds a balanced outer mapping and skips to its end never
+    examines a nested envelope, so acceptance turns on insertion order alone.
+    Both wrappers below are logically the same mapping.
+    """
+    mod = load_redaction()
+    inner = malformed_repr()
+    orders = {
+        "reserved_first": "{'failureClass': 'decoy', 'wrapper': " + inner + "}",
+        "wrapper_first": "{'wrapper': " + inner + ", 'failureClass': 'decoy'}",
+    }
+    results = {}
+    for name, text in orders.items():
+        rendered = mod.alert_text(text)
+        results[name] = {
+            "kind": mod.alert_text_kind(text),
+            "marker_present": MALFORMED_MARKER in rendered,
+            "digest_present": DIGEST in rendered,
+        }
+    assert results["reserved_first"] == results["wrapper_first"], results
+    for name, row in results.items():
+        assert not row["marker_present"], (name, row)
+        assert not row["digest_present"], (name, row)
+
+
+def test_ordinary_text_and_valid_reprs_are_untouched() -> None:
+    """Negative control: the detector must not swallow non-legacy material."""
+    mod = load_redaction()
+    ordinary = "restart loop: {'attempt': 3, 'code': 'EAGAIN', 'unit': 'whatsoup'}"
+    assert mod.alert_text(ordinary) == ordinary
+    assert mod.alert_text_kind(ordinary) == "string"
+
+    valid = malformed_repr(failure_class="TypeError")
+    assert mod.alert_text(valid) == CANONICAL
+    assert mod.alert_text_kind(valid) == "baked_repr"
+
+    plain = "queue drained, 4 alerts delivered"
+    assert mod.alert_text(plain) == plain
+
+
+def test_a_five_thousand_digit_length_is_still_ordinary_text() -> None:
+    """The grammar bound keeps int() safe; that run is not the envelope at all."""
+    mod = load_redaction()
+    text = malformed_repr(failure_class="TypeError", length="9" * 5000)
+    assert mod.alert_text(text) == text
+    assert mod.alert_text_kind(text) == "string"

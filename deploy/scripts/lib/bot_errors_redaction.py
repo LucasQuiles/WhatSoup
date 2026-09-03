@@ -367,6 +367,37 @@ def legacy_confined_to_text(
     return None
 
 
+def _is_malformed_legacy_span(span: str) -> bool:
+    """True when a matched span IS this envelope's shape but not a valid one.
+
+    The three-pair grammar alone only says "a brace group holding three typed
+    pairs"; this adds "and its keys are exactly the legacy envelope's three". A
+    brace group carrying three unrelated keys is ordinary operator text and is
+    left alone, which is what keeps the rule from swallowing prose.
+    """
+    parsed = _parse_baked_repr(span)
+    if parsed is None:
+        return False
+    return _legacy_confined_mapping_to_text(parsed) is None
+
+
+def has_malformed_legacy_confined_repr(value: Any) -> bool:
+    """True when a string carries a structurally legacy envelope that is invalid.
+
+    Structural, never evaluated: the span comes from the same bounded grammar the
+    renderer matches, and its three values are read out of regex groups, so
+    nothing here executes the string or decodes it permissively. The scan is
+    unanchored, so a span nested inside a larger mapping is found wherever it sits
+    and the answer cannot depend on the key order of whatever wraps it.
+    """
+    if not isinstance(value, str):
+        return False
+    return any(
+        _is_malformed_legacy_span(match.group(0))
+        for match in _BAKED_REPR_SCAN_RE.finditer(value)
+    )
+
+
 def _render_embedded_baked_reprs(
     text: str, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
 ) -> str:
@@ -377,8 +408,19 @@ def _render_embedded_baked_reprs(
     """
 
     def replace(match: re.Match[str]) -> str:
-        rendered = _baked_repr_to_text(match.group(0), digest_chars=digest_chars)
-        return rendered if rendered is not None else match.group(0)
+        span = match.group(0)
+        rendered = _baked_repr_to_text(span, digest_chars=digest_chars)
+        if rendered is not None:
+            return rendered
+        if _is_malformed_legacy_span(span):
+            # #2386: this IS the envelope's shape and its values are outside the
+            # bounds. Handing it back verbatim left the invalid class and the
+            # digest-shaped field in operator-visible text; it is confined
+            # material the consumer cannot render, not prose that happens to
+            # contain braces, so it gets the same fixed sentinel a live mapping
+            # of the same kind gets. Surrounding text is preserved.
+            return UNRENDERABLE_ALERT_CONTENT
+        return span
 
     return _BAKED_REPR_SCAN_RE.sub(replace, text)
 
@@ -426,6 +468,11 @@ def alert_text_kind(value: Any) -> str:
     if _legacy_confined_mapping_to_text(value) is not None:
         return "legacy_object"
     if isinstance(value, str):
+        # Checked BEFORE "baked_repr": a malformed span also changes under
+        # rendering, and labelling it as a readable legacy form would tell
+        # telemetry the opposite of what happened to it.
+        if has_malformed_legacy_confined_repr(value):
+            return "unrenderable"
         if _BAKED_REPR_SCAN_RE.search(value) and _render_embedded_baked_reprs(value) != value:
             return "baked_repr"
         return "string"
