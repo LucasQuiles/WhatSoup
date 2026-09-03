@@ -37,6 +37,20 @@ ROOT="${2:?missing <root>}"
 # tests/scripts/deployer-static-parity.test.ts) reads it statically out of
 # this file's source text to derive the managed-path set independent of any
 # runtime manifest lookup.
+#
+# The array body is parsed statically by scripts/lib/deployer-import-closure.ts
+# (parseDeployPinPaths), which anchors on the closing ")" at column 0 and skips
+# blank and "#" lines, so comments between the entries are safe and the array
+# below carries them. Each remaining line must be a single quoted bare path.
+#
+# On the src/lib entries: bot-errors-outbox.ts imports alert-evidence.ts,
+# private-fs.ts, redaction-patterns.ts and type-guards.ts at module scope.
+# Node links them on import, so shipping the importer without them yields an
+# unstartable runtime rather than a degraded one. The omission predates the
+# conversation-scope work and became fatal when the outbox began importing a
+# NEW export that an old dependency lacked. Same deployer-scope class as the
+# #3452 note. deploy/scripts/tests/test_bot_errors_deploy_import_closure.py
+# enforces the closure so a future import cannot reopen this silently.
 FILES=(
   "deploy/lib/runtime-path.sh"
   "deploy/scripts/bot-errors-dispatcher.py"

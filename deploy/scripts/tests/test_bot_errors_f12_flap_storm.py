@@ -22,10 +22,16 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
-import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -49,17 +55,7 @@ _TEST_ENV = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _clean_env():
-    saved = {k: os.environ.get(k) for k in _ENV_KEYS}
-    for k in _ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+_clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 
 def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
