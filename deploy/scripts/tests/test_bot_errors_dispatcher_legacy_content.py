@@ -1899,3 +1899,40 @@ def test_a_published_breadcrumb_is_acked_and_never_pages_again(tmp_path, monkeyp
     assert later.reconcile_unrenderable_signals(paths) == 0
     assert later.queue_unrenderable_meta_alerts(paths, beyond) == 0
     assert len(_queued_meta_alerts(paths, later)) == 1, "exactly one page, ever"
+
+
+def test_a_failing_breadcrumb_write_does_not_wedge_the_cycle(tmp_path, monkeypatch) -> None:
+    """The durability fix must not reintroduce the poison it was built beside.
+
+    The breadcrumb is written inside ready(), above every pre-loop pass, and the
+    caller has no guard. Filesystem I/O there that can raise is the queue-wedge
+    class this PR removes: the cycle aborts and the event stays in the outbox to
+    poison the next one. Losing one breadcrumb costs the crash guarantee for one
+    event; raising costs the whole cycle.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    real_ensure = mod.ensure_private_dir
+
+    def refuse_signal_dir(directory):
+        if Path(directory).name == "unrenderable-signals":
+            raise OSError("read-only file system")
+        return real_ensure(directory)
+
+    monkeypatch.setattr(mod, "ensure_private_dir", refuse_signal_dir)
+    _queue_event(paths, "aaa-nofs.json", _unrenderable_event(id="nofs-001"))
+    _queue_event(paths, "zzz-healthy.json", _make_event(
+        id="healthy-002", source="agent_respawn_failed",
+        summary="healthy alert", evidence="healthy evidence",
+    ))
+
+    result = mod.run_once(max_events=25)
+
+    # The cycle completed: quarantined, accounted, paged, and the sibling ran.
+    assert result["unrenderableQuarantined"] == 1
+    assert result["failed"] == 1
+    assert result["lastError"] == mod.UNRENDERABLE_ALERT_CONTENT_CODE
+    assert len(_queued_meta_alerts(paths, mod)) == 1, "the in-process page still happens"
+    assert result["sent"] == 1, "the healthy sibling must still deliver"
+    # No breadcrumb survived, which is the disclosed cost.
+    assert not list(paths["unrenderable_signals"].glob("*.json"))

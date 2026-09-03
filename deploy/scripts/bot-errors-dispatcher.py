@@ -801,20 +801,34 @@ def write_unrenderable_breadcrumb(paths: dict[str, Path], dest: Path, signal: di
     The breadcrumb holds the canonical signal and nothing else, so the artifact
     that survives the crash is not itself a content channel.
     """
-    crumb_id = _unrenderable_breadcrumb_id(dest)
     directory = paths.get("unrenderable_signals")
     if directory is None:
-        return crumb_id
-    ensure_private_dir(directory)
+        return ""
+    crumb_id = _unrenderable_breadcrumb_id(dest)
     target = directory / f"{crumb_id}.json"
     tmp = directory / f".{crumb_id}.tmp"
     payload = json.dumps({"signal": signal, "breadcrumb": crumb_id}, sort_keys=True)
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, target)
+    try:
+        ensure_private_dir(directory)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+    except Exception:  # noqa: BLE001 -- see below; this must never wedge the queue
+        # FAIL OPEN. This runs inside ready(), above every pre-loop pass, and the
+        # caller has no guard: an exception here escapes to run_once, aborts the
+        # cycle, and leaves the event in the outbox to poison the next one --
+        # exactly the queue wedge this PR exists to remove, reintroduced by the
+        # durability fix. Losing the breadcrumb costs the crash guarantee for one
+        # event; raising costs the whole cycle, so the move and the in-process
+        # page proceed without it.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return ""
     return crumb_id
 
 
@@ -1036,7 +1050,6 @@ def setup_dirs() -> dict[str, Path]:
         "storm_manifests",
         "suppressed",
         "quarantine",
-        "unrenderable_signals",
         "testleak",
         "writefail_recovered",
         "writefail_quarantine",
@@ -1045,6 +1058,11 @@ def setup_dirs() -> dict[str, Path]:
         "dead_letter",
     ):
         ensure_private_dir(paths[key])
+    # "unrenderable_signals" is deliberately NOT ensured here. It is created
+    # lazily inside write_unrenderable_breadcrumb's own fail-open guard, because
+    # every directory in the list above is a cycle-abort cause if it cannot be
+    # made, and the breadcrumb must never be one: it is written from inside
+    # ready(), above every pre-loop pass, on the path this PR exists to unwedge.
     return paths
 
 
