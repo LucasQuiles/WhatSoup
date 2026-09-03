@@ -3409,38 +3409,60 @@ def test_an_unterminated_comment_is_refused_rather_than_ignored(monkeypatch, tmp
     assert _mod.instance_plist_environment("agent-alpha") is None
 
 
-def _unicode_only_whitespace() -> list[str]:
-    """Codepoints ``str.strip()`` removes that the XML whitespace set does not.
+# The XML whitespace set, OWNED BY THIS TEST and written as a literal.
+#
+# The case list below is built from this constant and never from
+# ``_mod.PLIST_XML_SPACE``. Deriving the domain from the value under test makes
+# the oracle depend on the implementation: if production ever widened its set
+# wrongly, the characters that prove the widening wrong would vanish FROM THE
+# GENERATED DOMAIN, and this test would pass while no longer testing what it
+# claims. A non-vacuity floor does not save it, because cases disappear above
+# the floor.
+XML_SPACE_NORMATIVE = " \t\r\n"
 
-    DERIVED from the production constant rather than enumerated by hand. Three
-    hand-picked fillers were a sample of this domain, not the whole of it: at
-    Python 3.12 the domain is 25 codepoints. Deriving it covers all of them and
-    keeps the test correct if ``PLIST_XML_SPACE`` ever changes.
+
+def _strippable_non_xml_whitespace() -> list[str]:
+    """Codepoints ``str.strip()`` removes that XML whitespace does not contain.
+
+    Derived from the test-owned normative set. Six of the resulting codepoints
+    are ASCII C0 controls and one is C1, so "Unicode-only" would misdescribe
+    it; the name says what the set actually is.
     """
     return [
         chr(cp)
         for cp in range(0x110000)
-        if chr(cp).strip() == "" and chr(cp) not in _mod.PLIST_XML_SPACE
+        if chr(cp).strip() == "" and chr(cp) not in XML_SPACE_NORMATIVE
     ]
 
 
-_UNICODE_ONLY_WHITESPACE = _unicode_only_whitespace()
+_STRIPPABLE_NON_XML_WHITESPACE = _strippable_non_xml_whitespace()
 
 
-def test_the_unicode_only_whitespace_domain_is_not_empty():
+def test_the_production_xml_space_equals_the_normative_set():
+    """The independence check that makes the test-owned constant a valid oracle.
+
+    Building the domain from XML_SPACE_NORMATIVE is only sound while production
+    agrees with it. That agreement is asserted here, as its own named failure,
+    instead of being assumed by construction. If production widens its set this
+    test fails loudly rather than the domain silently shrinking.
+    """
+    assert _mod.PLIST_XML_SPACE == XML_SPACE_NORMATIVE
+
+
+def test_the_strippable_non_xml_whitespace_domain_is_not_empty():
     """Guard against a vacuous parametrize.
 
-    If the derivation ever yields an empty list the parametrized test below
-    silently runs ZERO cases and reports green. Assert the domain is populated
-    and still contains the three characters that motivated the fix.
+    An empty derivation would run ZERO cases and report green. Assert the
+    domain is populated and still contains the three characters that motivated
+    the original fix.
     """
-    assert len(_UNICODE_ONLY_WHITESPACE) >= 20
+    assert len(_STRIPPABLE_NON_XML_WHITESPACE) >= 20
     for ch in ("\u00a0", "\x0c", "\x0b"):
-        assert ch in _UNICODE_ONLY_WHITESPACE
+        assert ch in _STRIPPABLE_NON_XML_WHITESPACE
 
 
 @pytest.mark.parametrize(
-    "filler", _UNICODE_ONLY_WHITESPACE, ids=lambda c: f"U+{ord(c):04X}"
+    "filler", _STRIPPABLE_NON_XML_WHITESPACE, ids=lambda c: f"U+{ord(c):04X}"
 )
 def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_path, filler):
     """glm-3. One gap in this reader still used a Unicode-wide strip.
@@ -3471,7 +3493,7 @@ def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_pat
 
     # Positive control: the same fixture with a LEGAL XML-whitespace gap parses,
     # so the refusal below is attributable to the filler and to nothing else.
-    target.write_text(_plist("\n  "))
+    target.write_text(_plist(XML_SPACE_NORMATIVE))
     assert _mod.instance_plist_environment("agent-alpha") == {"PATH": "/fixture/pin/bin"}
 
     target.write_text(_plist(f"\n {filler} "))
