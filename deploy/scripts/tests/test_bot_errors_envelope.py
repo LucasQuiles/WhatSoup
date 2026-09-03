@@ -241,12 +241,33 @@ def test_direct_queue_event_constructors_do_not_inline_v1_envelopes() -> None:
 # ---------------------------------------------------------------------------
 # #2386 -- alert-content shape check
 # ---------------------------------------------------------------------------
-# A mapping reaching `summary`/`evidence` is only safe to consume when it is the
-# exact legacy confinement envelope. Any other mapping is unrenderable: the
-# consumer would have to str() it, which is what baked reprs into operator
-# messages and persisted state in the first place. Quarantine it instead.
+# A mapping reaching `summary`/`evidence` is safe to consume in two ways, and
+# which one applies is decided by what the value CLAIMS to be. Wearing the
+# envelope's exact three keys is a claim, so it is validated or quarantined on the
+# envelope's terms. Any other key set never made that claim: it is projected into
+# the same metadata-only triple and delivered, because dropping it dropped 54
+# delivered events from producers outside this repository (r18).
 
 _LEGACY_DIGEST = "a1b2c3d4" + "e5f60789" * 7
+
+# SYNTHETIC fixtures. The key names are invented and deliberately do not
+# reproduce the live corpus's, one of which is an email-shaped identifier. Only
+# the STRUCTURE is modelled from the live shape -- the key counts (six and four)
+# and the per-key value types -- since that is all the classification depends on.
+_SIX_KEY_EVIDENCE = {
+    "alpha_reason": "alpha-fixture",
+    "beta_detail": "beta-fixture",
+    "gamma_missing": None,
+    "delta_missing": None,
+    "epsilon_nested": {"eta_inner": "fixture", "theta_flag": False},
+    "zeta_pointer": "zeta-fixture",
+}
+_FOUR_KEY_EVIDENCE = {
+    "alpha_reason": "alpha-fixture",
+    "beta_detail": "beta-fixture",
+    "delta_action": "delta-fixture",
+    "epsilon_probe": "epsilon-fixture",
+}
 
 
 def _alert_event(**overrides):
@@ -255,20 +276,83 @@ def _alert_event(**overrides):
     return event
 
 
-def test_classify_event_rejects_arbitrary_mapping_summary() -> None:
+def _v1_clear_event(**overrides):
+    """A schema-v1 recovery: no eventKind tag, which is 37 of the 54 live records."""
+    event = {"schemaVersion": 1, "eventType": "clear", "severity": "info"}
+    event.update(overrides)
+    return event
+
+
+def test_classify_event_accepts_an_arbitrary_mapping_summary() -> None:
+    """INVERTED by the r18 hot-fix: this rejection WAS the live defect."""
     envelope = load_envelope()
     event = _alert_event(summary={"failureClass": "TypeError", "note": "unexpected"})
-    with pytest.raises(envelope.EnvelopeError) as excinfo:
-        envelope.classify_event(event)
-    assert excinfo.value.code == "unrenderable_alert_content"
+    assert envelope.classify_event(event).kind == "incident_alert"
 
 
-def test_classify_event_rejects_arbitrary_mapping_evidence() -> None:
+def test_classify_event_accepts_an_arbitrary_mapping_evidence() -> None:
+    """INVERTED by the r18 hot-fix, with the summary case above."""
     envelope = load_envelope()
     event = _alert_event(evidence={"anything": "at all"})
-    with pytest.raises(envelope.EnvelopeError) as excinfo:
-        envelope.classify_event(event)
-    assert excinfo.value.code == "unrenderable_alert_content"
+    assert envelope.classify_event(event).kind == "incident_alert"
+
+
+def test_classify_event_accepts_a_six_key_unconfined_evidence_mapping() -> None:
+    """r18 section 3, record A: 30 of the 54 delivered events carried this."""
+    envelope = load_envelope()
+    event = _alert_event(summary="operator prose", evidence=dict(_SIX_KEY_EVIDENCE))
+    classification = envelope.classify_event(event)
+    assert classification.kind == "incident_alert"
+    assert classification.severity == "critical"
+
+
+def test_classify_event_accepts_a_four_key_unconfined_evidence_mapping() -> None:
+    """r18 section 4: the other live key-set, 24 of the 54."""
+    envelope = load_envelope()
+    event = _alert_event(summary="operator prose", evidence=dict(_FOUR_KEY_EVIDENCE))
+    assert envelope.classify_event(event).kind == "incident_alert"
+
+
+def test_classify_event_accepts_an_unconfined_mapping_under_schema_v1() -> None:
+    """The production-majority envelope version for this producer family."""
+    envelope = load_envelope()
+    event = {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": "warning",
+        "summary": "operator prose",
+        "evidence": dict(_SIX_KEY_EVIDENCE),
+    }
+    classification = envelope.classify_event(event)
+    assert classification.kind == "incident_alert"
+    assert classification.legacy is True
+
+
+def test_classify_event_still_rejects_a_mapping_claiming_to_be_the_envelope() -> None:
+    """Control: #3452's malformed-envelope rule is untouched.
+
+    Exactly the envelope's three keys, so the value claims to be one. A claim that
+    fails the closed vocabulary or the value bounds is confined material, not an
+    arbitrary mapping, and it still fails closed.
+    """
+    envelope = load_envelope()
+    claims = {
+        "unregistered_class": {
+            "failureClass": "unregistered_marker", "length": 54,
+            "correlationDigest": _LEGACY_DIGEST,
+        },
+        "short_digest": {
+            "failureClass": "TypeError", "length": 54, "correlationDigest": "abc",
+        },
+        "boolean_length": {
+            "failureClass": "TypeError", "length": True,
+            "correlationDigest": _LEGACY_DIGEST,
+        },
+    }
+    for name, value in claims.items():
+        with pytest.raises(envelope.EnvelopeError) as excinfo:
+            envelope.classify_event(_alert_event(summary=value))
+        assert excinfo.value.code == "unrenderable_alert_content", name
 
 
 def test_classify_event_accepts_exact_legacy_shape() -> None:
@@ -285,7 +369,16 @@ def test_classify_event_accepts_string_alert_content() -> None:
     assert envelope.classify_event(event).kind == "incident_alert"
 
 
-def test_classify_event_rejects_extra_key_mapping_summary() -> None:
+def test_classify_event_accepts_extra_key_mapping_summary() -> None:
+    """INVERTED by the r18 hot-fix, and the one genuine judgement call in it.
+
+    Four keys is not the envelope's key set, so under the rule as stated the value
+    never claimed to be an envelope and is synthesised over. The narrower reading
+    -- treat "envelope keys plus extras" as a damaged claim and keep quarantining
+    it -- is defensible, and the live corpus does not decide between them: both
+    live key-sets share no keys with the envelope, so all 54 events are fixed
+    either way. This follows the plain reading of the r18 remedy.
+    """
     envelope = load_envelope()
     four_key = {
         "failureClass": "TypeError",
@@ -293,9 +386,7 @@ def test_classify_event_rejects_extra_key_mapping_summary() -> None:
         "correlationDigest": _LEGACY_DIGEST,
         "extra": "x",
     }
-    with pytest.raises(envelope.EnvelopeError) as excinfo:
-        envelope.classify_event(_alert_event(summary=four_key))
-    assert excinfo.value.code == "unrenderable_alert_content"
+    assert envelope.classify_event(_alert_event(summary=four_key)).kind == "incident_alert"
 
 
 # ---------------------------------------------------------------------------
@@ -376,3 +467,102 @@ def test_classify_event_still_accepts_prose_and_a_valid_legacy_repr() -> None:
     )
     for value in benign:
         assert envelope.classify_event(_alert_event(summary=value)).kind == "incident_alert", value[:60]
+
+
+# ---------------------------------------------------------------------------
+# A recovery is never rejected on alert-content grounds (r18 hot-fix, F2)
+# ---------------------------------------------------------------------------
+# classify_event knows the kind before it inspects the content, and a clear's job
+# is its identity, not its body. Rejecting one does not protect an operator from
+# anything: it deletes the only thing that closes an open incident, and a
+# quarantined file is never re-read. Observed live on 2026-09-03, which left
+# the incident it was closing permanently open, with nothing able to close it.
+
+
+def _clear_event(**overrides):
+    event = {
+        "schemaVersion": 2,
+        "eventKind": "incident_recovery",
+        "eventType": "clear",
+        "severity": "info",
+    }
+    event.update(overrides)
+    return event
+
+
+def test_a_v2_recovery_with_an_evidence_dict_classifies_as_a_recovery() -> None:
+    envelope = load_envelope()
+    event = _clear_event(summary="recovered", evidence={"kappa_phase": "settled"})
+    assert envelope.classify_event(event).kind == "incident_recovery"
+
+
+def test_a_v1_recovery_with_an_evidence_dict_classifies_as_a_recovery() -> None:
+    """r18 section 3, record B: the exact record that stuck an incident open."""
+    envelope = load_envelope()
+    event = _v1_clear_event(summary="recovered", evidence={"kappa_phase": "settled"})
+    classification = envelope.classify_event(event)
+    assert classification.kind == "incident_recovery"
+    assert classification.legacy is True
+
+
+def test_a_recovery_body_unrenderable_by_any_rule_still_classifies() -> None:
+    """The F2-ONLY falsifier: bodies F1 cannot rescue.
+
+    A mapping is rescued by F1 alone, so it cannot separate the two fixes. None of
+    these can be synthesised over -- a list and an int have no key-value structure,
+    and the three-key mapping CLAIMS to be an envelope and fails it -- so only the
+    recovery exemption keeps them out of quarantine.
+    """
+    envelope = load_envelope()
+    bodies = {
+        "list": ["not", "renderable"],
+        "int": 17,
+        "bool": True,
+        "malformed_envelope_claim": {
+            "failureClass": "unregistered_marker",
+            "length": 54,
+            "correlationDigest": _LEGACY_DIGEST,
+        },
+    }
+    for name, body in bodies.items():
+        assert envelope.classify_event(_clear_event(evidence=body)).kind == "incident_recovery", name
+        assert envelope.classify_event(_clear_event(summary=body)).kind == "incident_recovery", name
+        assert envelope.classify_event(_v1_clear_event(evidence=body)).kind == "incident_recovery", name
+
+
+def test_the_recovery_exemption_does_not_leak_to_alerts_or_observations() -> None:
+    """Control: F2 is scoped by KIND, not a global switch-off.
+
+    If the exemption were reachable by anything but a recovery, the alert-content
+    rule would be off entirely and #3452's acceptance would be vacuous.
+    """
+    envelope = load_envelope()
+    body = ["not", "renderable"]
+
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(_alert_event(summary=body))
+    assert excinfo.value.code == "unrenderable_alert_content"
+
+    observation = {
+        "schemaVersion": 2, "eventKind": "observation",
+        "eventType": "observation", "severity": "info", "summary": body,
+    }
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(observation)
+    assert excinfo.value.code == "unrenderable_alert_content"
+
+    v1_observation = {
+        "schemaVersion": 1, "eventType": "alert", "severity": "info", "summary": body,
+    }
+    with pytest.raises(envelope.EnvelopeError) as excinfo:
+        envelope.classify_event(v1_observation)
+    assert excinfo.value.code == "unrenderable_alert_content"
+
+
+def test_normalize_event_carries_a_recovery_body_through_unchanged() -> None:
+    """The exemption must not mutate the body on its way past the check."""
+    envelope = load_envelope()
+    body = {"kappa_phase": "settled"}
+    normalized = envelope.normalize_event(_v1_clear_event(evidence=body, summary="recovered"))
+    assert normalized["eventKind"] == "incident_recovery"
+    assert normalized["evidence"] == {"kappa_phase": "settled"}

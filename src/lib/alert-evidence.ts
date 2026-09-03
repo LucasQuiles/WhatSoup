@@ -190,3 +190,31 @@ export function confineConversationScope(
   const digest = digestContent('conversation', trimmed).slice(0, CONVERSATION_SCOPE_HEX_LENGTH);
   return `${CONVERSATION_SCOPE_TAG}${digest}`;
 }
+
+/**
+ * Failure-class tokens the CONSUMER synthesises, which this module never emits.
+ *
+ * `confineAlertContent` cannot produce these: they are not in
+ * {@link FAILURE_CLASS_PATTERNS}, they are not the empty sentinel, and they are
+ * not the extractor's fallback. They are declared here anyway, and this is
+ * deliberate.
+ *
+ * The Python consumer's allowlist
+ * (`LEGACY_FAILURE_CLASSES` in `deploy/scripts/lib/bot_errors_redaction.py`) must
+ * equal ONE registry, and `test_producer_failure_class_vocabulary_parity` asserts
+ * that equality in both directions by parsing this file. A token the consumer
+ * knows and this file does not would fail that test as consumer drift, and
+ * "add it to the test's expectations instead" would put the vocabulary in two
+ * places — which is the exact rot the parity test exists to prevent. So the
+ * registry stays here and states which side mints each token.
+ *
+ * `unconfined_object` is the class the consumer renders for alert content that is
+ * a mapping but not a {@link ConfinedAlertContent} envelope — the shape emitted
+ * by producers outside this repository, which pinned the schema-v1 contract where
+ * `evidence` was free-form. The consumer projects it into the same metadata-only
+ * triple this module produces (a class, a character count, a digest) without
+ * copying any key or value out of it.
+ */
+export const CONSUMER_SYNTHESISED_FAILURE_CLASSES: readonly string[] = Object.freeze([
+  'unconfined_object',
+]);

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { confineAlertContent } from '../../src/lib/alert-evidence.ts';
+import {
+  CONSUMER_SYNTHESISED_FAILURE_CLASSES,
+  confineAlertContent,
+} from '../../src/lib/alert-evidence.ts';
 import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -170,5 +173,45 @@ describe('buildBotErrorsEvent evidence boundary (issue #2386)', () => {
     });
     expect(event1.evidence.correlationDigest).not.toBe(event2.evidence.correlationDigest);
     expect(event1.summary.correlationDigest).not.toBe(event2.summary.correlationDigest);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// The failure-class registry has two halves and one home.
+//
+// The Python consumer's allowlist must equal producer-emitted ∪
+// consumer-synthesised, and test_producer_failure_class_vocabulary_parity
+// asserts that by parsing this module. These tests hold up the producer's end:
+// the synthesised half is declared, non-empty, and cannot be emitted here.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('consumer-synthesised failure classes', () => {
+  it('declares the synthesised half of the registry', () => {
+    expect(CONSUMER_SYNTHESISED_FAILURE_CLASSES.length).toBeGreaterThan(0);
+    expect(CONSUMER_SYNTHESISED_FAILURE_CLASSES).toContain('unconfined_object');
+  });
+
+  it('holds single-line ASCII tokens, which the consumer interpolates into operator text', () => {
+    for (const token of CONSUMER_SYNTHESISED_FAILURE_CLASSES) {
+      expect(token).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+      expect(token.length).toBeLessThanOrEqual(21);
+    }
+  });
+
+  it('cannot be emitted by confineAlertContent, which is what makes it synthesised', () => {
+    // The extractor's own vocabulary is matched from content. Feeding it the
+    // synthesised token must still fall through to the 'unknown' fallback: a
+    // producer able to mint a consumer token would make the rendered class
+    // ambiguous about which side of the boundary the value came from.
+    for (const token of CONSUMER_SYNTHESISED_FAILURE_CLASSES) {
+      expect(confineAlertContent('evidence', token).failureClass).toBe('unknown');
+      expect(confineAlertContent('summary', `stderr: ${token} at line 1`).failureClass).toBe(
+        'unknown',
+      );
+    }
+  });
+
+  it('is frozen, so a caller cannot widen the registry at runtime', () => {
+    expect(Object.isFrozen(CONSUMER_SYNTHESISED_FAILURE_CLASSES)).toBe(true);
   });
 });

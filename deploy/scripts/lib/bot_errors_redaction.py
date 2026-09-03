@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
@@ -220,6 +223,19 @@ LEGACY_CONFINED_KEYS = frozenset({"failureClass", "length", "correlationDigest"}
 #
 # Kept in sync with the producer by test_producer_failure_class_vocabulary_parity,
 # which parses alert-evidence.ts and fails on drift in either direction.
+
+# The one class token this READER synthesises rather than reads. It is not a
+# producer vocabulary member: `confineAlertContent` cannot emit it. It is the
+# class of a mapping that never claimed to be the confinement envelope at all --
+# the shape every out-of-repo producer emits, of which the live corpus carries
+# 54 delivered events across 30 producer identities since 2026-07-04.
+#
+# It is declared on the producer side too, at the bottom of alert-evidence.ts, so
+# the vocabulary keeps ONE registry that the parity test checks in both
+# directions. A token declared only here would be exactly the drift that test
+# exists to catch.
+UNCONFINED_OBJECT_CLASS = "unconfined_object"
+
 LEGACY_FAILURE_CLASSES = frozenset({
     # Standard Error subclasses, returned as the matched text.
     "TypeError",
@@ -241,6 +257,8 @@ LEGACY_FAILURE_CLASSES = frozenset({
     # Sentinel for empty content, and the extractor's fallback.
     "none",
     "unknown",
+    # Synthesised by this reader, never emitted by the producer.
+    UNCONFINED_OBJECT_CLASS,
 })
 
 # A character count, not an arbitrary integer. The upper bound is the largest
@@ -318,6 +336,93 @@ def _legacy_confined_mapping_to_text(
     if not isinstance(digest, str) or not _LEGACY_DIGEST_RE.match(digest):
         return None
     return f"{failure_class} - {length} chars - digest {digest[:digest_chars]}"
+
+
+# The canonical serialisation an UNCONFINED mapping is measured and digested by.
+# It is pinned, not incidental: the character count and the digest are the only
+# two things that cross the boundary, so both must be reproducible from the value
+# alone and independent of Python's dict insertion order.
+#
+# `default=str` is a totality guard, not a rendering choice. Nothing it produces
+# is ever emitted -- only the LENGTH of this text and a digest OF it leave this
+# function -- so a value json cannot encode changes the count, never the
+# confinement.
+#
+# `sort_keys`, `separators` and `default` are the row-164 packet's serialisation.
+# `ensure_ascii` is json's own default and is stated here rather than inherited,
+# because a future default change would silently move every count and digest.
+_UNCONFINED_JSON_ARGS: dict[str, Any] = {
+    "sort_keys": True,
+    "separators": (",", ":"),
+    "ensure_ascii": True,
+    "default": str,
+}
+
+def _unconfined_serialisation(value: Any) -> str | None:
+    """Canonical text for a mapping that does NOT claim to be the envelope.
+
+    Returns None for three distinct cases, all of which mean "not a synthesisable
+    mapping":
+
+    * a non-Mapping -- #3452's symmetric rule stands, a list or an int or a bool
+      is still unrenderable and still quarantined;
+    * a mapping whose key set IS ``LEGACY_CONFINED_KEYS`` -- that value CLAIMS to
+      be the envelope, so it is validated or quarantined on the envelope's own
+      terms. Synthesising over it would silently accept a malformed envelope,
+      which is the one shape #3452 was right to fail closed on;
+    * a value this cannot serialise at all.
+
+    Never raises. This runs inside the dispatcher's render path, which has no
+    guard above it: a raised exception there aborts the whole cycle and leaves the
+    event in the outbox to re-poison the next one.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        if frozenset(value.keys()) == LEGACY_CONFINED_KEYS:
+            return None
+        return json.dumps(dict(value), **_UNCONFINED_JSON_ARGS)
+    except Exception:  # noqa: BLE001 -- rendering must never abort a dispatch cycle
+        return None
+
+
+def is_renderable_unconfined_mapping(value: Any) -> bool:
+    """Whether ``alert_text`` can render this mapping without leaking it.
+
+    Serialisation only, no digest. The envelope check runs on EVERY queue event
+    and only needs to know whether a rendering EXISTS, so it does not pay for one
+    it will not use. Keeping the two questions in separate functions is also what
+    guarantees they cannot disagree.
+    """
+    return _unconfined_serialisation(value) is not None
+
+
+def unconfined_mapping_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
+    """Synthesise a confinement string for a mapping that is not the envelope.
+
+    The output is the same ``"{class} - {n} chars - digest {hex}"`` form the
+    confinement envelope renders as, so an operator reads one shape rather than
+    two. What it is NOT is the same measurement: ``n`` is the length of the
+    canonical serialisation this reader built, not of any original content, so it
+    is not comparable to an envelope's producer-supplied ``length``. The class
+    token says which of the two it is.
+
+    No key and no value crosses the boundary -- only a count and a digest -- so
+    #2386's metadata-only contract holds for a mapping the producer never
+    confined, exactly as it holds for one the producer did.
+    """
+    serialised = _unconfined_serialisation(value)
+    if serialised is None:
+        return None
+    # sha256 of the canonical serialisation, as the row-164 packet specifies. It
+    # is a correlation digest for grouping, never a secret: it is one-way, only 8
+    # of its characters are displayed, and the 64-character form exists solely so
+    # alert_text_for_fingerprint keeps full incident-identity entropy -- the same
+    # width the envelope path already carries, so that slice needs no special case.
+    digest = hashlib.sha256(serialised.encode("utf-8")).hexdigest()
+    return f"{UNCONFINED_OBJECT_CLASS} - {len(serialised)} chars - digest {digest[:digest_chars]}"
 
 
 def _parse_baked_repr(text: str) -> dict[str, Any] | None:
@@ -429,9 +534,12 @@ def alert_text(value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS) -
     """The single funnel every alert-content read passes through.
 
     A string renders as itself, with any embedded envelope repr replaced by its
-    canonical form. The live envelope mapping renders canonically. Anything else
-    -- an arbitrary mapping, a list, a number -- renders as the fixed sentinel and
-    is never printed, so an unexpected shape cannot leak through the boundary.
+    canonical form. The live envelope mapping renders canonically. A mapping that
+    never claimed to be that envelope renders as a SYNTHESISED confinement string
+    carrying only a class, a count and a digest. Anything else -- a list, a
+    number, a boolean, or a mapping wearing the envelope's exact keys with values
+    outside its bounds -- renders as the fixed sentinel and is never printed, so
+    an unexpected shape cannot leak through the boundary.
     """
     if value is None:
         return ""
@@ -440,6 +548,9 @@ def alert_text(value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS) -
         return rendered
     if isinstance(value, str):
         return _render_embedded_baked_reprs(value, digest_chars=digest_chars)
+    synthesised = unconfined_mapping_to_text(value, digest_chars=digest_chars)
+    if synthesised is not None:
+        return synthesised
     return UNRENDERABLE_ALERT_CONTENT
 
 
@@ -459,9 +570,16 @@ def alert_text_for_fingerprint(value: Any) -> str:
 def alert_text_kind(value: Any) -> str:
     """Telemetry label for one alert-content value.
 
-    One of "string", "legacy_object", "baked_repr", "unrenderable". Callers count
-    these per event; an event can carry more than one kind across its fields, so
-    the counters are never summed.
+    One of "string", "legacy_object", "baked_repr", "unconfined_object",
+    "unrenderable". Callers count these per event; an event can carry more than
+    one kind across its fields, so the counters are never summed.
+
+    "unconfined_object" is its own label rather than a reuse of "unrenderable"
+    because the two now mean opposite things to a caller: "unrenderable" is the
+    quarantine signal -- the dispatcher folds it into queueUnrenderable alongside
+    the pending-quarantine count and names the field in the operator meta-alert --
+    while an unconfined object is DELIVERED. Labelling a delivered event
+    unrenderable would report a dropped alert that was never dropped.
     """
     if value is None:
         return "string"
@@ -476,4 +594,6 @@ def alert_text_kind(value: Any) -> str:
         if _BAKED_REPR_SCAN_RE.search(value) and _render_embedded_baked_reprs(value) != value:
             return "baked_repr"
         return "string"
+    if is_renderable_unconfined_mapping(value):
+        return UNCONFINED_OBJECT_CLASS
     return "unrenderable"

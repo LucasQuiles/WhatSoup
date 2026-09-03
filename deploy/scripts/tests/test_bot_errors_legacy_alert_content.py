@@ -16,7 +16,9 @@ All fixtures are synthetic.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import re
 from pathlib import Path
 import sys
@@ -82,21 +84,41 @@ def test_plain_string_passes_through_unchanged() -> None:
     assert mod.alert_text(text) == text
 
 
-def test_arbitrary_mapping_is_quarantined_not_rendered() -> None:
-    """A mapping that is not the envelope must never have its values rendered."""
+def test_arbitrary_mapping_values_are_never_rendered() -> None:
+    """A mapping that is not the envelope must never have its values rendered.
+
+    INVERTED by the r18 hot-fix, on the outcome only. The property this test
+    exists for -- no value crosses the boundary -- is unchanged and still
+    asserted. What changed is what happens instead: the value is projected into
+    the same metadata-only triple a confined value gets, rather than dropped.
+    Dropping it is what silenced 54 delivered events from 30 producer identities.
+    """
     mod = load_redaction()
     hostile = {"failureClass": "TypeError", "note": "unexpected-value-must-not-render"}
     rendered = mod.alert_text(hostile)
-    assert rendered == "[unrenderable alert content]"
+    assert rendered.startswith("unconfined_object - "), rendered
     assert "unexpected-value-must-not-render" not in rendered
+    assert "note" not in rendered
+    assert "TypeError" not in rendered, "a value must not be mistaken for a class"
 
 
 def test_extra_key_is_not_legacy_shape() -> None:
-    """Four keys is not the envelope, in either representation."""
+    """Four keys is not the envelope, in either representation.
+
+    INVERTED by the r18 hot-fix, on the mapping arm only. Four keys is still not
+    the envelope -- `legacy_confined_to_text` still refuses it -- but the mapping
+    now renders as a synthesised confinement string instead of being dropped,
+    because its key set is not the envelope's and so it never claimed to be one.
+    The digest and length of the real envelope inside it do not survive.
+    """
     mod = load_redaction()
     four_key = dict(legacy_object())
     four_key["extra"] = "x"
-    assert mod.alert_text(four_key) == "[unrenderable alert content]"
+    assert mod.legacy_confined_to_text(four_key) is None
+    rendered = mod.alert_text(four_key)
+    assert rendered.startswith("unconfined_object - "), rendered
+    assert DIGEST[:8] not in rendered, "the inner digest must not survive"
+    assert "TypeError" not in rendered
 
     four_key_repr = (
         "{'failureClass': 'TypeError', 'length': 54, 'correlationDigest': '"
@@ -107,9 +129,13 @@ def test_extra_key_is_not_legacy_shape() -> None:
 
 
 def test_two_key_shape_is_not_legacy_shape() -> None:
+    """INVERTED with the four-key case above, and for the same reason."""
     mod = load_redaction()
     two_key = {"failureClass": "TypeError", "length": 54}
-    assert mod.alert_text(two_key) == "[unrenderable alert content]"
+    assert mod.legacy_confined_to_text(two_key) is None
+    rendered = mod.alert_text(two_key)
+    assert rendered.startswith("unconfined_object - "), rendered
+    assert "TypeError" not in rendered
 
     two_key_repr = "{'failureClass': 'TypeError', 'length': 54}"
     assert mod.legacy_confined_to_text(two_key_repr) is None
@@ -164,7 +190,12 @@ def test_alert_text_kind_classifies_each_form() -> None:
     assert mod.alert_text_kind(legacy_object()) == "legacy_object"
     assert mod.alert_text_kind(REPR_ALPHABETICAL) == "baked_repr"
     assert mod.alert_text_kind(REPR_FAILURE_CLASS_FIRST) == "baked_repr"
-    assert mod.alert_text_kind({"unexpected": "mapping"}) == "unrenderable"
+    # INVERTED by the r18 hot-fix. A mapping that never claimed to be the
+    # envelope is now synthesised over and DELIVERED, so labelling it
+    # "unrenderable" would report a dropped alert that was never dropped: the
+    # dispatcher folds that label into queueUnrenderable beside the pending
+    # quarantine count and names the field in the operator meta-alert.
+    assert mod.alert_text_kind({"unexpected": "mapping"}) == "unconfined_object"
     assert mod.alert_text_kind(["a", "list"]) == "unrenderable"
     assert mod.alert_text_kind(17) == "unrenderable"
 
@@ -324,6 +355,23 @@ def _producer_failure_classes() -> set[str]:
     return classes
 
 
+def _consumer_synthesised_failure_classes() -> set[str]:
+    """The tokens the CONSUMER mints, declared beside the producer's own.
+
+    Parsed from the same TypeScript file, for the same reason the producer's are:
+    the vocabulary must have ONE home. A token the consumer knows and that file
+    does not is indistinguishable from consumer drift, which is exactly what the
+    parity assertion below exists to catch -- so the registry keeps both halves
+    and states which side mints each.
+    """
+    source = _PRODUCER_VOCABULARY_TS.read_text(encoding="utf-8")
+    match = re.search(
+        r"CONSUMER_SYNTHESISED_FAILURE_CLASSES[^=]*=[^\[]*\[(?P<body>[^\]]*)\]", source
+    )
+    assert match, "the consumer-synthesised vocabulary must be declared in alert-evidence.ts"
+    return {token for token in re.findall(r"'([^']*)'", match.group("body"))}
+
+
 def test_producer_failure_class_vocabulary_parity() -> None:
     """Cross-language parity, so drift in EITHER direction is red.
 
@@ -331,17 +379,40 @@ def test_producer_failure_class_vocabulary_parity() -> None:
     quarantined as unrenderable, turning a healthy alert into a dropped one. A
     class the consumer keeps after the producer drops it is a stale hole in the
     allowlist. Both are failures, so this asserts set equality, not containment.
+
+    The consumer's allowlist covers BOTH halves of the registry: what the producer
+    emits, and what the consumer synthesises for content the producer never
+    confined. The two halves must stay disjoint -- a token minted by both sides
+    would make the rendered class ambiguous about where the value came from.
     """
     mod = load_redaction()
     producer = _producer_failure_classes()
-    # Coverage assertion: an extraction that silently found nothing would make
+    synthesised = _consumer_synthesised_failure_classes()
+    # Coverage assertions: an extraction that silently found nothing would make
     # any containment check vacuous, and equality against an empty set would
-    # only fail confusingly.
+    # only fail confusingly. Each half is asserted separately, so a parse that
+    # loses one half cannot be masked by the other half still matching.
     assert len(producer) >= 15, f"vocabulary extraction looks truncated: {sorted(producer)}"
-    assert set(mod.LEGACY_FAILURE_CLASSES) == producer, (
+    assert synthesised, "synthesised-vocabulary extraction found nothing"
+    assert not (producer & synthesised), (
+        f"a token is minted by both sides: {sorted(producer & synthesised)}"
+    )
+
+    registry = producer | synthesised
+    assert set(mod.LEGACY_FAILURE_CLASSES) == registry, (
         "consumer allowlist has drifted from src/lib/alert-evidence.ts; "
-        f"consumer-only={sorted(set(mod.LEGACY_FAILURE_CLASSES) - producer)} "
-        f"producer-only={sorted(producer - set(mod.LEGACY_FAILURE_CLASSES))}"
+        f"consumer-only={sorted(set(mod.LEGACY_FAILURE_CLASSES) - registry)} "
+        f"registry-only={sorted(registry - set(mod.LEGACY_FAILURE_CLASSES))}"
+    )
+
+
+def test_the_synthesised_token_is_declared_on_both_sides() -> None:
+    """The specific token this hot-fix adds, named on each side of the boundary."""
+    mod = load_redaction()
+    assert "unconfined_object" in _consumer_synthesised_failure_classes()
+    assert "unconfined_object" in set(mod.LEGACY_FAILURE_CLASSES)
+    assert "unconfined_object" not in _producer_failure_classes(), (
+        "confineAlertContent must not be able to emit a consumer-minted token"
     )
 
 
@@ -554,3 +625,255 @@ def test_a_five_thousand_digit_length_is_still_ordinary_text() -> None:
     text = malformed_repr(failure_class="TypeError", length="9" * 5000)
     assert mod.alert_text(text) == text
     assert mod.alert_text_kind(text) == "string"
+
+
+# ---------------------------------------------------------------------------
+# An UNCONFINED mapping renders; it is not quarantined (r18 hot-fix, F1)
+# ---------------------------------------------------------------------------
+# #3452 gave a mapping exactly two fates: the exact three-key confinement
+# envelope, or quarantine. The live corpus carries a third shape -- a plain
+# diagnostic mapping from producers outside this repository -- in 54 delivered
+# events across 30 producer identities, continuously since 2026-07-04. Failing it
+# closed silenced the whole family.
+#
+# The fix synthesises the SAME metadata-only triple the envelope carries: a class
+# token, a character count, a digest. Nothing else may cross.
+
+UNCONFINED_NONCE = "nonce7c31d0aedonotleak"
+
+# SYNTHETIC fixtures. The key NAMES here are invented; they deliberately do not
+# reproduce the live corpus's key names, one of which is an email-shaped
+# identifier. What is modelled from the live shape is the STRUCTURE only -- the
+# key COUNTS (six and four) and the per-key value TYPES (str, str, None, None,
+# nested mapping, str) -- because that is what the serialisation, the count and
+# the digest actually depend on.
+#
+# Every value carries a nonce, so "no key and no value reaches the rendered text"
+# is a falsifier rather than a restatement of the fixture.
+SIX_KEY_EVIDENCE = {
+    "alpha_reason": "alpha " + UNCONFINED_NONCE,
+    "beta_detail": "beta " + UNCONFINED_NONCE,
+    "gamma_missing": None,
+    "delta_missing": None,
+    "epsilon_nested": {"eta_inner": UNCONFINED_NONCE, "theta_flag": False},
+    "zeta_pointer": "zeta " + UNCONFINED_NONCE,
+}
+
+FOUR_KEY_EVIDENCE = {
+    "alpha_reason": "alpha " + UNCONFINED_NONCE,
+    "beta_detail": "beta " + UNCONFINED_NONCE,
+    "delta_action": "delta " + UNCONFINED_NONCE,
+    "epsilon_probe": "epsilon " + UNCONFINED_NONCE,
+}
+
+ONE_KEY_CLEAR_EVIDENCE = {"kappa_phase": "settled"}
+
+
+def _independent_canonical(value: object) -> str:
+    """Re-derive the canonical serialisation from the stdlib, not from the module.
+
+    Calling the module's own helper to build the expected value would assert
+    f(x) == f(x). Every argument is written out here instead, so changing the
+    sort, the separators or the ASCII escaping in the implementation turns these
+    tests red rather than moving the goalposts with them.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+
+
+def _independent_render(value: object, digest_chars: int = 8) -> str:
+    """The whole expected string, re-derived from stdlib primitives.
+
+    sha256 of the canonical serialisation, as the row-164 packet specifies. It is
+    spelled out here rather than imported so that changing the digest function in
+    the implementation fails this test instead of moving with it.
+    """
+    serialised = _independent_canonical(value)
+    digest = hashlib.sha256(serialised.encode("utf-8")).hexdigest()
+    return f"unconfined_object - {len(serialised)} chars - digest {digest[:digest_chars]}"
+
+
+def _assert_nothing_crossed(rendered: str, value: dict) -> None:
+    """No key name and no value fragment may appear in the rendered text."""
+    assert UNCONFINED_NONCE not in rendered, rendered
+    for key in value:
+        assert key not in rendered, f"key {key!r} reached the rendered text: {rendered}"
+
+
+def test_a_six_key_unconfined_mapping_renders_as_a_confinement_string() -> None:
+    """r18 section 3, record A: the six-key evidence dict, delivered not dropped."""
+    mod = load_redaction()
+    rendered = mod.alert_text(SIX_KEY_EVIDENCE)
+
+    assert rendered == _independent_render(SIX_KEY_EVIDENCE), rendered
+    assert re.fullmatch(r"unconfined_object - \d+ chars - digest [0-9a-f]{8}", rendered), rendered
+    _assert_nothing_crossed(rendered, SIX_KEY_EVIDENCE)
+    # The nested mapping's own key and value must not survive either.
+    assert "probe" not in rendered and "verified" not in rendered, rendered
+    assert mod.alert_text_kind(SIX_KEY_EVIDENCE) == "unconfined_object"
+
+
+def test_a_four_key_unconfined_mapping_renders_as_a_confinement_string() -> None:
+    """r18 section 4: the other live key-set, 24 of the 54 delivered events."""
+    mod = load_redaction()
+    rendered = mod.alert_text(FOUR_KEY_EVIDENCE)
+
+    assert rendered == _independent_render(FOUR_KEY_EVIDENCE), rendered
+    _assert_nothing_crossed(rendered, FOUR_KEY_EVIDENCE)
+    assert mod.alert_text_kind(FOUR_KEY_EVIDENCE) == "unconfined_object"
+
+
+def test_a_one_key_clear_mapping_renders_as_a_confinement_string() -> None:
+    """r18 section 3, record B: the one-key clear body."""
+    mod = load_redaction()
+    rendered = mod.alert_text(ONE_KEY_CLEAR_EVIDENCE)
+
+    assert rendered == _independent_render(ONE_KEY_CLEAR_EVIDENCE), rendered
+    assert "kappa_phase" not in rendered, rendered
+
+
+def test_the_canonical_serialisation_is_pinned_by_hand() -> None:
+    """A hand-written pin on the serialisation, independent of every helper.
+
+    {"b": 1, "a": "x"} canonicalises to the 15 characters {"a":"x","b":1}: keys
+    sorted, no whitespace after the separators. Counting them by hand is the point
+    -- it fixes the count's meaning without deriving it from the code under test.
+    """
+    mod = load_redaction()
+    assert _independent_canonical({"b": 1, "a": "x"}) == '{"a":"x","b":1}'
+    assert len('{"a":"x","b":1}') == 15
+    assert mod.alert_text({"b": 1, "a": "x"}).startswith("unconfined_object - 15 chars - digest ")
+
+
+def test_the_reported_count_is_the_serialisation_not_the_original_content() -> None:
+    """The count must be documented for what it is, so pin the distinction.
+
+    An envelope's `length` is the producer's count of raw content. This count is
+    the length of a serialisation this reader built, and the two are different
+    numbers for the same value. The class token is what tells them apart.
+    """
+    mod = load_redaction()
+    value = {"k": "abc"}
+    # {"k":"abc"} is 11 characters; the content it describes is 3.
+    assert _independent_canonical(value) == '{"k":"abc"}'
+    assert len('{"k":"abc"}') == 11
+    rendered = mod.alert_text(value)
+    assert rendered.startswith("unconfined_object - 11 chars"), rendered
+    assert len("abc") == 3
+
+
+def test_the_synthesised_rendering_does_not_depend_on_insertion_order() -> None:
+    """Two mappings with the same pairs render identically, so incident grouping
+    cannot fork on the order a producer happened to build its dict in."""
+    mod = load_redaction()
+    first = {"alpha": 1, "beta": 2, "gamma": 3}
+    second = {"gamma": 3, "beta": 2, "alpha": 1}
+    assert mod.alert_text(first) == mod.alert_text(second)
+    assert mod.alert_text_for_fingerprint(first) == mod.alert_text_for_fingerprint(second)
+
+
+def test_the_synthesised_fingerprint_rendering_carries_the_full_digest() -> None:
+    """Identity takes all 64 characters, exactly as the envelope path does.
+
+    Grouping on the 8-character display prefix merges distinct incidents, which is
+    the regression the envelope path already fixed. The synthesised path must not
+    reintroduce it.
+    """
+    mod = load_redaction()
+    fingerprint = mod.alert_text_for_fingerprint(SIX_KEY_EVIDENCE)
+
+    assert fingerprint == _independent_render(SIX_KEY_EVIDENCE, digest_chars=64)
+    assert re.fullmatch(r"unconfined_object - \d+ chars - digest [0-9a-f]{64}", fingerprint)
+    _assert_nothing_crossed(fingerprint, SIX_KEY_EVIDENCE)
+
+
+def test_two_different_mappings_get_different_digests() -> None:
+    """Coverage against a constant digest, which would collapse every producer
+    onto one identity while still matching the shape assertions above."""
+    mod = load_redaction()
+    left = mod.alert_text({"alpha_reason": "a"})
+    right = mod.alert_text({"alpha_reason": "b"})
+    assert left != right, "distinct content must not share a digest"
+
+
+def test_the_confinement_envelope_still_renders_exactly_as_before() -> None:
+    """Control: the envelope path is untouched by the synthesised path."""
+    mod = load_redaction()
+    value = legacy_object()
+    assert mod.alert_text(value) == CANONICAL
+    assert mod.alert_text_kind(value) == "legacy_object"
+    assert mod.legacy_confined_to_text(value) == CANONICAL
+    assert mod.unconfined_mapping_to_text(value) is None, (
+        "a value that IS the envelope must never be synthesised over"
+    )
+
+
+def test_a_mapping_claiming_to_be_the_envelope_is_never_synthesised_over() -> None:
+    """Control: #3452's malformed-envelope rule stands, unchanged.
+
+    These wear the envelope's EXACT three keys, so they claim to be one. A claim
+    that fails validation is confined material the consumer cannot render, not an
+    arbitrary mapping -- synthesising over it would silently accept every
+    malformed envelope the closed vocabulary exists to reject.
+    """
+    mod = load_redaction()
+    claims = {
+        "unregistered_class": {
+            "failureClass": HOSTILE_MARKER, "length": 54, "correlationDigest": DIGEST,
+        },
+        "short_digest": {
+            "failureClass": "TypeError", "length": 54, "correlationDigest": "abc",
+        },
+        "boolean_length": {
+            "failureClass": "TypeError", "length": True, "correlationDigest": DIGEST,
+        },
+        "negative_length": {
+            "failureClass": "TypeError", "length": -1, "correlationDigest": DIGEST,
+        },
+    }
+    for name, value in claims.items():
+        assert mod.unconfined_mapping_to_text(value) is None, name
+        assert mod.alert_text(value) == mod.UNRENDERABLE_ALERT_CONTENT, name
+        assert mod.alert_text_kind(value) == "unrenderable", name
+        assert HOSTILE_MARKER not in mod.alert_text(value), name
+
+
+def test_non_mapping_alert_content_is_still_unrenderable() -> None:
+    """Control: #3452's symmetric rule stands for every non-mapping type.
+
+    A list, an int, a bool or a float has no key-value structure to project into
+    bounded metadata, so it stays fail-closed. Only mappings gained a rendering.
+    """
+    mod = load_redaction()
+    for value in (["a", "list"], 17, True, False, 3.5, ("a", "tuple"), {"a", "set"}):
+        assert mod.alert_text(value) == mod.UNRENDERABLE_ALERT_CONTENT, value
+        assert mod.alert_text_kind(value) == "unrenderable", value
+        assert mod.is_renderable_unconfined_mapping(value) is False, value
+
+
+def test_an_unserialisable_mapping_falls_back_instead_of_raising() -> None:
+    """The render path has no guard above it: raising aborts the dispatch cycle.
+
+    Mixed key types defeat sort_keys, and a self-referencing mapping defeats the
+    encoder outright. Both must degrade to the sentinel, not propagate.
+    """
+    mod = load_redaction()
+    mixed_keys = {"a": 1, 2: "b"}
+    assert mod.alert_text(mixed_keys) == mod.UNRENDERABLE_ALERT_CONTENT
+    assert mod.alert_text_kind(mixed_keys) == "unrenderable"
+
+    circular: dict = {"self": None}
+    circular["self"] = circular
+    assert mod.alert_text(circular) == mod.UNRENDERABLE_ALERT_CONTENT
+    assert mod.alert_text_kind(circular) == "unrenderable"
+
+
+def test_the_synthesised_class_token_is_registered_in_the_closed_vocabulary() -> None:
+    """The token is interpolated into operator text, so it must be a member.
+
+    The dispatcher validates a failure class against LEGACY_FAILURE_CLASSES before
+    it reaches a page or an adopted breadcrumb; an unregistered token would be
+    dropped to "unavailable" there.
+    """
+    mod = load_redaction()
+    assert mod.UNCONFINED_OBJECT_CLASS == "unconfined_object"
+    assert mod.UNCONFINED_OBJECT_CLASS in mod.LEGACY_FAILURE_CLASSES

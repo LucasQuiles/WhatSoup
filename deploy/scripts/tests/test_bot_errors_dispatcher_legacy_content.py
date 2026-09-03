@@ -35,6 +35,22 @@ REPR_FAILURE_CLASS_FIRST = (
     "{'failureClass': 'TypeError', 'length': 54, 'correlationDigest': '" + DIGEST + "'}"
 )
 
+# SYNTHETIC. The key names are invented; they deliberately do not reproduce the
+# live corpus's, one of which is an email-shaped identifier. Only the STRUCTURE is
+# modelled from the live shape -- six keys, and the per-key value types (str, str,
+# None, None, nested mapping, str) -- because the serialisation, the count and the
+# digest depend on nothing else. Every value carries a nonce so the no-leak
+# assertions are falsifiers rather than restatements of the fixture.
+EVIDENCE_NONCE = "nonce7c31d0aedonotleak"
+SYNTH_EVIDENCE_DICT: dict[str, Any] = {
+    "alpha_reason": "alpha " + EVIDENCE_NONCE,
+    "beta_detail": "beta " + EVIDENCE_NONCE,
+    "gamma_missing": None,
+    "delta_missing": None,
+    "epsilon_nested": {"eta_inner": EVIDENCE_NONCE, "theta_flag": False},
+    "zeta_pointer": "zeta " + EVIDENCE_NONCE,
+}
+
 
 def _load_module(extra_env: dict[str, str] | None = None):
     env_backup: dict[str, str | None] = {}
@@ -335,11 +351,23 @@ def test_telemetry_accumulates_across_events() -> None:
 # ---------------------------------------------------------------------------
 
 def test_unrenderable_mapping_event_is_quarantined(tmp_path: Path) -> None:
+    """A mapping that CLAIMS to be the envelope and fails it is still quarantined.
+
+    Fixture changed by the r18 hot-fix. It was a two-key mapping, which no longer
+    quarantines: a key set that is not the envelope's never claimed to be one, so
+    it is synthesised over and delivered. What must still quarantine is a value
+    wearing the envelope's exact three keys whose class is outside the closed
+    vocabulary -- confined material the consumer cannot render.
+    """
     outbox = tmp_path / "outbox"
     quarantine = tmp_path / "quarantine"
     outbox.mkdir(mode=0o700)
     quarantine.mkdir(mode=0o700)
-    event = _make_event(summary={"failureClass": "TypeError", "note": "unexpected"})
+    event = _make_event(summary={
+        "failureClass": "unregistered_class_marker",
+        "length": 54,
+        "correlationDigest": DIGEST,
+    })
     path = outbox / "evt-fixture-001.json"
     path.write_text(json.dumps(event), encoding="utf-8")
 
@@ -347,6 +375,67 @@ def test_unrenderable_mapping_event_is_quarantined(tmp_path: Path) -> None:
     landed = list(quarantine.iterdir())
     assert len(landed) == 1
     assert "unrenderable_alert_content" in landed[0].name
+
+
+def test_an_unconfined_mapping_event_is_not_quarantined(tmp_path: Path) -> None:
+    """The r18 defect, at the dispatcher's own load boundary.
+
+    This is the shape 54 delivered events carried before #3452 and zero carried
+    after it. It must load, not quarantine, and its keys and values must not reach
+    the rendered operator text.
+    """
+    outbox = tmp_path / "outbox"
+    quarantine = tmp_path / "quarantine"
+    outbox.mkdir(mode=0o700)
+    quarantine.mkdir(mode=0o700)
+    event = _make_event(summary="operator prose", evidence=SYNTH_EVIDENCE_DICT)
+    path = outbox / "evt-unconfined-001.json"
+    path.write_text(json.dumps(event), encoding="utf-8")
+
+    loaded = _mod.load_valid_event_or_quarantine(path, quarantine)
+    assert loaded is not None, "the alert was dropped instead of delivered"
+    assert list(quarantine.iterdir()) == []
+
+    rendered = _mod.event_text(loaded, "evidence")
+    assert rendered.startswith("unconfined_object - "), rendered
+    assert EVIDENCE_NONCE not in rendered
+    for key in SYNTH_EVIDENCE_DICT:
+        assert key not in rendered, key
+
+
+def test_the_meta_alert_path_is_unreachable_for_an_unconfined_mapping(
+    tmp_path, monkeypatch,
+) -> None:
+    """Packet test (e): this shape must not reach the quarantine meta-alert.
+
+    The meta-alert exists to page about an alert the dispatcher DROPPED. An
+    unconfined mapping is delivered, so a page saying it was dropped would be
+    false, and it would spend the per-identity throttle that a genuinely dropped
+    alert needs.
+
+    Unlike its neighbours in this section, which use the module-level ``_mod`` and
+    bare temporary directories, this one takes the sandboxed module from
+    ``_dispatcher_in``: the assertions are about what a whole ``run_once`` cycle
+    queued, so it needs a state root the dispatcher actually resolves.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-unconfined.json", _make_event(
+        id="unconfined-001", summary="operator prose", evidence=SYNTH_EVIDENCE_DICT,
+    ))
+
+    result = mod.run_once(max_events=25)
+
+    assert _queued_meta_alerts(paths, mod) == [], "a delivered alert must not page as dropped"
+    assert result.get("unrenderableQuarantined", 0) == 0
+    assert result.get("unrenderableMetaAlerted", 0) == 0
+    assert list(paths["quarantine"].iterdir()) == []
+    # The signal builder must agree: no field of this event is unrenderable.
+    signal = mod.unrenderable_alert_signal(
+        _make_event(summary="operator prose", evidence=SYNTH_EVIDENCE_DICT),
+        kind="incident_alert", severity="critical",
+    )
+    assert signal["unrenderableFields"] == "", signal
 
 
 def test_legacy_shaped_mapping_event_is_not_quarantined(tmp_path: Path) -> None:
@@ -2016,3 +2105,136 @@ def test_the_breadcrumb_write_syncs_its_directory(tmp_path, monkeypatch) -> None
     crumb = mod.write_unrenderable_breadcrumb(paths, paths["quarantine"] / "evt-1.json", _canonical_signal(mod))
     assert crumb and (directory / f"{crumb}.json").is_file()
     assert synced and synced[-1] == directory / f"{crumb}.json"
+
+
+# ---------------------------------------------------------------------------
+# A recovery is never quarantined on alert-content grounds (r18 hot-fix, F2)
+# ---------------------------------------------------------------------------
+# Observed live on 2026-09-03T10:25:36Z: a clear carrying an evidence dict was
+# quarantined, and because a quarantined file is never re-read and never
+# re-delivered, the incident it was closing stayed open with no operator surface
+# at all. A clear's job is its identity, not its body.
+
+
+def _v1(event: dict[str, Any]) -> dict[str, Any]:
+    """Demote a fixture to schema v1, the shape 37 of the 54 live records carry."""
+    event = dict(event)
+    event["schemaVersion"] = 1
+    event.pop("eventKind", None)
+    return event
+
+
+def _open_one_incident(mod: Any, paths: dict[str, Path]) -> str:
+    """Cycle one: a plain alert opens the incident the recovery must close."""
+    _queue_event(paths, "a-alert.json", _make_event(
+        id="alert-001", summary="operator prose", evidence="operator evidence",
+    ))
+    mod.run_once(max_events=25)
+    key = mod.incident_key(_make_event())
+    state = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    assert key in (state.get("openIncidents") or {}), (
+        "the fixture must actually open an incident, or the close below is vacuous"
+    )
+    return key
+
+
+def _open_incident_keys(paths: dict[str, Path]) -> set[str]:
+    """The incident keys currently open, read from persisted state."""
+    state = json.loads(paths["incident_state"].read_text(encoding="utf-8"))
+    return set(state.get("openIncidents") or {})
+
+
+def _quarantined_names(paths: dict[str, Path]) -> list[str]:
+    return [entry.name for entry in paths["quarantine"].iterdir()]
+
+
+def test_a_v2_clear_carrying_an_evidence_dict_closes_its_open_incident(
+    tmp_path, monkeypatch,
+) -> None:
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    key = _open_one_incident(mod, paths)
+
+    _queue_event(paths, "b-clear.json", _make_event(
+        id="clear-001", eventKind="incident_recovery", eventType="clear",
+        severity="info", summary="recovered", evidence=SYNTH_EVIDENCE_DICT,
+        createdAt="2026-09-01T00:05:00.000Z",
+    ))
+    mod.run_once(max_events=25)
+
+    assert _quarantined_names(paths) == [], "the recovery was quarantined"
+    assert key not in _open_incident_keys(paths), (
+        "the incident is still open: its recovery never reached the close path"
+    )
+
+
+def test_a_v1_clear_carrying_an_evidence_dict_closes_its_open_incident(
+    tmp_path, monkeypatch,
+) -> None:
+    """The production-majority shape: schemaVersion 1, no eventKind tag."""
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    key = _open_one_incident(mod, paths)
+
+    _queue_event(paths, "b-clear.json", _v1(_make_event(
+        id="clear-001", eventType="clear", severity="info",
+        summary="recovered", evidence=SYNTH_EVIDENCE_DICT,
+        createdAt="2026-09-01T00:05:00.000Z",
+    )))
+    mod.run_once(max_events=25)
+
+    assert _quarantined_names(paths) == [], "the v1 recovery was quarantined"
+    assert key not in _open_incident_keys(paths), (
+        "the incident is still open under the production-majority schema version"
+    )
+
+
+def test_a_clear_whose_body_is_unrenderable_by_any_rule_still_closes_its_incident(
+    tmp_path, monkeypatch,
+) -> None:
+    """The F2-ONLY falsifier, and the reason it is written with a list body.
+
+    A clear carrying a MAPPING is rescued by F1 alone, so it cannot tell the two
+    fixes apart: reverting F2 would leave it green. A list has no key-value
+    structure to synthesise from, so F1 does not reach it and only the recovery
+    exemption keeps it out of quarantine. Reverting F2 turns this red and leaves
+    the two tests above green.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    key = _open_one_incident(mod, paths)
+
+    _queue_event(paths, "b-clear.json", _make_event(
+        id="clear-001", eventKind="incident_recovery", eventType="clear",
+        severity="info", summary="recovered", evidence=["not", "renderable"],
+        createdAt="2026-09-01T00:05:00.000Z",
+    ))
+    mod.run_once(max_events=25)
+
+    assert _quarantined_names(paths) == [], (
+        "a recovery must never be quarantined on alert-content grounds"
+    )
+    assert key not in _open_incident_keys(paths), (
+        "only the recovery exemption can close this one: F1 cannot render a list"
+    )
+
+
+def test_an_unrenderable_alert_is_still_quarantined_while_recoveries_are_exempt(
+    tmp_path, monkeypatch,
+) -> None:
+    """Control: the exemption is scoped to recoveries, not switched off globally.
+
+    Same unrenderable body, carried by an alert instead of a clear. It must still
+    quarantine, or F2 has silently disabled the alert-content rule outright.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+
+    _queue_event(paths, "a-alert.json", _make_event(
+        id="alert-002", summary=["not", "renderable"], evidence="prose",
+    ))
+    mod.run_once(max_events=25)
+
+    landed = list(paths["quarantine"].iterdir())
+    assert len(landed) == 1, "an unrenderable ALERT must still fail closed"
+    assert "unrenderable_alert_content" in landed[0].name
