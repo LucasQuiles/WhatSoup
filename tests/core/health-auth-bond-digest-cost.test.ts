@@ -15,9 +15,10 @@
  *   3. the lag sampler excludes observer cost across the whole window, not
  *      only the request that is being served.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { createServer, request } from 'node:http';
 import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 
@@ -98,6 +99,47 @@ function buildFixture(): void {
 
 function makeGuard(): AuthBondGuard {
   return new AuthBondGuard({ authDir, stateRoot, instanceName: 'p42-test' });
+}
+
+/**
+ * Recompute the tree digest from the documented format alone.
+ *
+ * Comparing inspectCached() against inspect() only proves the two agree; if the
+ * shared walk were wrong they would agree on the wrong answer. This is written
+ * against the format the digest commits to — relative path, octal mode, the
+ * literal 'file', then contents, each NUL-terminated, over lexicographically
+ * sorted paths — so it fails independently if the walk changes what it hashes
+ * or the order it hashes it in. treeHash gates auth-bond tamper detection, so
+ * that property is worth an independent check rather than a self-comparison.
+ */
+function referenceTreeDigest(dir: string): { hash: string; fileCount: number; totalBytes: number } {
+  const paths: string[] = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const st = lstatSync(current);
+    if (st.isDirectory()) {
+      stack.push(...readdirSync(current).filter(name => name !== '.DS_Store').map(name => join(current, name)));
+      continue;
+    }
+    if (st.isFile()) paths.push(current);
+  }
+  paths.sort();
+  const hasher = createHash('sha256');
+  let totalBytes = 0;
+  for (const path of paths) {
+    const st = lstatSync(path);
+    totalBytes += st.size;
+    hasher.update(relative(dir, path));
+    hasher.update('\0');
+    hasher.update((st.mode & 0o777).toString(8));
+    hasher.update('\0');
+    hasher.update('file');
+    hasher.update('\0');
+    hasher.update(readFileSync(path));
+    hasher.update('\0');
+  }
+  return { hash: hasher.digest('hex'), fileCount: paths.length, totalBytes };
 }
 
 /**
@@ -232,6 +274,7 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
 
     const cached = guard.inspectCached();
     const live = guard.inspect();
+    const reference = referenceTreeDigest(authDir);
 
     expect(cached.treeProvenance?.source).toBe('cached');
     expect(cached.treeHash).toBe(live.treeHash);
@@ -240,6 +283,42 @@ describe('AuthBondGuard.inspectCached — the auth-tree walk is off the read pat
     expect(cached.status).toBe(live.status);
     expect(cached.issues).toEqual(live.issues);
     expect(typeof cached.treeProvenance?.ageMs).toBe('number');
+
+    // Independent of both: the digest is what the documented format says it is.
+    expect(cached.treeHash).toBe(reference.hash);
+    expect(live.treeHash).toBe(reference.hash);
+    expect(cached.totalBytes).toBe(reference.totalBytes);
+
+    // Positive control. Everything above would also pass against an empty
+    // directory, where no walk is expensive and the 50 ms budget is met for
+    // the wrong reason. Pin that the fixture really is at the scale the P42
+    // brief names, so the timing assertions are measuring something.
+    expect(reference.fileCount).toBeGreaterThanOrEqual(FIXTURE_FILES);
+    expect(cached.fileCount).toBeGreaterThanOrEqual(FIXTURE_FILES);
+  });
+
+  it('costs materially less than the synchronous walk it replaced', async () => {
+    const guard = makeGuard();
+    await guard.warmTreeCache();
+
+    const syncProbe = startBlockProbe();
+    await settle(5);
+    guard.inspect();
+    await settle(5);
+    const syncBlockMs = syncProbe.stop();
+
+    const cachedProbe = startBlockProbe();
+    await settle(5);
+    guard.inspectCached();
+    await settle(5);
+    const cachedBlockMs = cachedProbe.stop();
+
+    // The comparison is relative on purpose: an absolute floor for the
+    // synchronous walk would be a machine-speed assertion and would flake.
+    // What must hold on any machine is that the read path stopped doing the
+    // work the walk does.
+    expect(syncBlockMs).toBeGreaterThan(cachedBlockMs);
+    expect(cachedBlockMs).toBeLessThan(MAX_BLOCK_MS);
   });
 
   it('refreshes without blocking the loop for the length of a walk', async () => {
