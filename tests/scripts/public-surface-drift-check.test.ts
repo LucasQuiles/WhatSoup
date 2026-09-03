@@ -113,12 +113,21 @@ describe('public surface drift check', () => {
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1811`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1837`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
     expect(healthStatusRow).toContain('provider and synthetic admission blocked');
     expect(healthStatusRow).toContain('`runtime.chat.database_compatibility`');
+    // Contract-member assertions, not line anchors: the row's own line pins
+    // above catch a moved source, but nothing caught a NEW member reaching this
+    // stable surface undocumented — which is how the per-chat ownership gauge
+    // and its reason code shipped with no mention under docs/ at all. These
+    // name the members, so adding another one silently fails here.
+    expect(healthStatusRow).toContain('`perChatSessionsWithoutOwner`');
+    expect(healthStatusRow).toContain('`perChatRespawnAbandoned`');
+    expect(healthStatusRow).toContain('`runtime.per_chat_session_without_owner`');
+    expect(healthStatusRow).toContain('`runtime.per_chat_respawn_abandoned`');
     expect(normalizedRelease).toContain(
       'Every running runtime reports a schema newer than the binary as unhealthy',
     );
