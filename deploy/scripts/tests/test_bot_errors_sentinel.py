@@ -4187,7 +4187,22 @@ def test_a_repeat_retirement_publishes_its_own_artifact_not_a_stale_pin(tmp_path
     # unfixed code without exercising the defect at all, so a mismatch is a broken fixture
     # and must fail loudly rather than read as a pass.
     second_binding = _intent_ledger(config)["repeat-member"]["contentBinding"]
-    assert second_binding == first_binding, (
+    # The content binding is no longer the instrument for this guard, and that is the
+    # point of the fix rather than a casualty of it: the published payload now carries
+    # episodeSeq, retirement_content_binding strips only createdAt, so two episodes bind
+    # DIFFERENTLY by construction. Assert that mechanism directly...
+    assert second_binding != first_binding, (
+        "the episode discriminator rides in the payload, so two episodes must bind differently"
+    )
+    # ...and assert the property the fixture actually needs -- that the two dispositions
+    # are identical apart from the clock and the episode -- on the published payloads.
+    published = [e for e in _retirement_events(config) if e["host"] == "repeat-member"]
+    assert len(published) == 2, "the fixture must produce two episodes before they can be compared"
+    comparable = [
+        {key: value for key, value in event.items() if key not in ("createdAt", "episodeSeq", "_path")}
+        for event in published
+    ]
+    assert comparable[0] == comparable[1], (
         "fixture did not reproduce identical disposition content, so the artifact-count "
         "assertion below would not be testing the collapse"
     )
@@ -4251,3 +4266,290 @@ def test_the_episode_discriminator_holds_across_a_retry_and_moves_across_episode
     _mod.run_once(config, _deps(1300.0, probes))
     advanced = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))["cycleSeq"]
     assert advanced > after_success, "a saved cycle must advance the episode boundary"
+
+
+# ---------------------------------------------------------------------------
+# Cross-cut r9 core follow-ups: a per-episode discriminator in the published
+# payload, the execution guard built from the cycle's complete retiring set,
+# and the intent ledger's silent truncation
+# ---------------------------------------------------------------------------
+
+
+def _two_episodes_of_one_member(tmp_path: Path) -> dict:
+    """Retire, re-add and retire one member under an UNCHANGED roster.
+
+    Arranges and acts only; the named tests below assert on what it returns.
+    The roster file's integer mtime is pinned for the same reason the existing
+    repeat-retirement fixture pins it: it rides in the payload as
+    ``roster.manifestEpoch``, so leaving it to wall-clock would make the two
+    episodes differ by accident and prove nothing.
+    """
+    for host in ("host-a", "repeat-member"):
+        _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=995.0)
+    hosts_path = _write_json(tmp_path / "hosts.json", _roster_with(tmp_path, ["host-a", "repeat-member"]))
+    config = _config(tmp_path, hosts_path)
+    roster_mtime = 900.0
+
+    def _cycle(now: float, roster: list[str]):
+        _write_json(config.hosts_path, _roster_with(tmp_path, roster))
+        os.utime(config.hosts_path, (roster_mtime, roster_mtime))
+        for host in roster:
+            _heartbeat(tmp_path / f"{host}-hb.json", healthy=True, mtime=now - 5.0)
+        probes = {h: {"reachable": True, "healthy": True, "class": "healthy"} for h in roster}
+        return _mod.run_once(config, _deps(now, probes))
+
+    _cycle(1000.0, ["host-a", "repeat-member"])
+    _cycle(1100.0, ["host-a"])
+    _cycle(1200.0, ["host-a", "repeat-member"])
+    _cycle(1300.0, ["host-a"])
+    return {
+        "config": config,
+        "events": [e for e in _retirement_events(config) if e["host"] == "repeat-member"],
+    }
+
+
+def test_two_episodes_of_one_member_are_distinguishable_in_the_published_payload(tmp_path: Path):
+    """The CONSUMER CONTRACT tells consumers to collapse duplicates on requestId.
+
+    Two genuinely distinct retirements of one member under an unchanged roster
+    share that requestId by design -- the digests cover the member set, which
+    did not change. Without a discriminator IN THE PAYLOAD, a consumer obeying
+    the contract drops a real second retirement, so the artifact exists and the
+    retirement is still lost downstream.
+    """
+    observed = _two_episodes_of_one_member(tmp_path)
+    events = observed["events"]
+
+    assert len(events) == 2, "the fixture must produce two distinct retirement episodes"
+    assert events[0]["episodeSeq"] != events[1]["episodeSeq"], (
+        "two episodes must be distinguishable in the published payload, not only in the ledger"
+    )
+
+
+def test_the_two_episodes_still_share_a_request_id(tmp_path: Path):
+    """Guard the other half: the discriminator must not become an identity change.
+
+    Folding the episode into stable_request_id would move an identity that is
+    embedded in the artifact filename and in the tombstone. The requestId is
+    stable across episodes BY DESIGN; the episode field is what separates them.
+    """
+    observed = _two_episodes_of_one_member(tmp_path)
+    events = observed["events"]
+
+    assert events[0]["requestId"] == events[1]["requestId"], (
+        "the requestId must stay stable across episodes; the episode field carries the difference"
+    )
+
+
+def _emit_call_divergence():
+    """Real builder for both call sites, one differing argument on the EMIT call.
+
+    The binding call passes a placeholder clock of 0.0 and the emit call passes
+    the pinned clock, which is what tells the two apart here.
+    """
+    real = _mod.build_configuration_retired_event
+
+    def _stub(host, record, now, controller_host, *args, **kwargs):
+        if now != 0.0:
+            controller_host = f"{controller_host}-divergent"
+        return real(host, record, now, controller_host, *args, **kwargs)
+
+    return _stub
+
+
+def test_the_binding_and_emit_calls_stay_argument_identical(tmp_path: Path, monkeypatch):
+    """The pin binds what the binding call built; publication uses what the emit call built.
+
+    Nothing enforced that the two stayed argument-identical apart from the
+    clock. If they diverge, the pin stops binding what is actually published
+    and the ledger silently stops protecting anything -- so a divergence must
+    be loud, and must happen BEFORE publication rather than after.
+    """
+    config = _two_member_retirement_fixture(tmp_path)
+    probes = {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}
+    monkeypatch.setattr(_mod, "build_configuration_retired_event", _emit_call_divergence())
+
+    with pytest.raises(_mod.SentinelError):
+        _mod.run_once(config, _deps(1000.0, probes))
+
+    assert _retirement_events(config) == [], "a divergence must be caught before anything is published"
+
+
+def _cap_plus_one_retirement_cycle(tmp_path: Path, monkeypatch) -> dict:
+    """One cycle retiring RETIRED_HOST_TOMBSTONE_MAX + 1 members, zero prior tombstones.
+
+    The cap replaces the tombstone map AFTER the retirement loop, and every
+    entry shares this cycle's clock, so the tie breaks on insertion order and
+    the lexically last CURRENT retirement is the one discarded. A queued
+    remediation for exactly that member is what turns a persistence bound into
+    an execution hazard.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    retiring = [f"retire-{index:03d}" for index in range(_mod.RETIRED_HOST_TOMBSTONE_MAX + 1)]
+    host_records = {"host-a": {"alertState": "closed"}}
+    for host in retiring:
+        host_records[host] = {"alertState": "open", "consecutive": 1, "transitions": []}
+    # Zero prior tombstones: the drop must come from THIS cycle's insertions, not
+    # from older entries winning the tie-break.
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": host_records, "retiredHosts": {}},
+    )
+    outbox = _mod.action_outbox_dir(config)
+    outbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dropped = retiring[-1]
+    queued = outbox / f"0999-host-{dropped}-restart_host-stale.json"
+    _write_json(queued, {"action": "restart_host", "host": dropped})
+
+    executed: list[str] = []
+    monkeypatch.setattr(_mod, "execute_action", lambda action: executed.append(str(action.get("host"))))
+    result = _mod.run_once(
+        config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    )
+    return {
+        "config": config,
+        "result": result,
+        "executed": executed,
+        "queued": queued,
+        "retiring": retiring,
+        "dropped": dropped,
+        "state": json.loads(_mod.state_path(config).read_text(encoding="utf-8")),
+    }
+
+
+def test_a_retirement_past_the_tombstone_cap_still_refuses_its_queued_action(tmp_path: Path, monkeypatch):
+    """The execution guard must come from the cycle's retiring set, not the capped map.
+
+    The tombstone cap is a PERSISTENCE bound. Reusing the truncated map as the
+    stale-action guard turns it into an execution decision, and restarting a
+    member this very cycle decommissioned is precisely the outcome the guard
+    exists to prevent.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    queued = observed["queued"]
+
+    assert observed["executed"] == [], (
+        "a remediation queued for a member retired this cycle must not execute, "
+        "even when the tombstone cap dropped its ledger entry"
+    )
+    assert queued.with_suffix(".retired").exists()
+    assert not queued.exists()
+    assert not queued.with_suffix(".done").exists()
+
+
+def test_the_tombstone_cap_itself_is_unchanged_by_the_guard_fix(tmp_path: Path, monkeypatch):
+    """The fix must not raise, remove or route around the persistence cap.
+
+    Every member is still retired and published; the ledger still holds at most
+    the cap; and the dropped member is still the one whose tombstone is absent.
+    A fix that widened the guard by widening the ledger would pass the test
+    above and break the bound this one pins.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    state = observed["state"]
+
+    assert len(observed["result"]["retirementEvents"]) == len(observed["retiring"])
+    assert len(state["retiredHosts"]) == _mod.RETIRED_HOST_TOMBSTONE_MAX
+    assert observed["dropped"] not in state["retiredHosts"]
+
+
+def test_a_retirement_batch_past_the_intent_cap_reports_the_unpinned_count(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """A truncated pin is a duplicate audit record on the next retry.
+
+    The ledger caps at RETIREMENT_INTENT_MAX while the binding and emit loops
+    iterate every retiring member, so members past the cap publish on an
+    unpinned clock. That is defensible as a storage bound and indefensible as a
+    silent one: nothing said how many members were left unpinned.
+    """
+    observed = _cap_plus_one_retirement_cycle(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    unpinned = len(observed["retiring"]) - _mod.RETIREMENT_INTENT_MAX
+
+    assert unpinned == 1
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in captured.err
+    assert f"count={unpinned}" in captured.err
+
+
+def _intent_ledger_with_an_unusable_entry(tmp_path: Path, monkeypatch) -> dict:
+    """A batch past the cap whose stored ledger also holds one unusable entry.
+
+    A non-finite ``firstAttemptEpoch`` is exactly what the loader drops, and a
+    dropped entry costs that member its ORIGINAL pinned clock -- a different
+    cause from cap truncation, with the same downstream cost.
+    """
+    _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(tmp_path / "host-a-hb.json")}])
+    config = _config(tmp_path, hosts)
+    retiring = [f"retire-{index:03d}" for index in range(_mod.RETIREMENT_INTENT_MAX + 1)]
+    host_records = {"host-a": {"alertState": "closed"}}
+    for host in retiring:
+        host_records[host] = {"alertState": "open", "consecutive": 1, "transitions": []}
+    _write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": host_records, "retiredHosts": {}},
+    )
+    ledger_path = _mod.retirement_intent_path(config)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _write_json(
+        ledger_path,
+        {
+            "schemaVersion": 1,
+            "intents": {
+                retiring[0]: {
+                    "contentBinding": "seeded-binding",
+                    "episodeSeq": 0,
+                    "firstAttemptEpoch": "not-a-number",
+                    "firstAttemptAtIso": "seeded",
+                }
+            },
+        },
+    )
+    os.chmod(ledger_path, 0o600)
+    monkeypatch.setattr(_mod, "execute_action", lambda action: None)
+    result = _mod.run_once(
+        config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}})
+    )
+    return {"config": config, "result": result, "retiring": retiring}
+
+
+def test_a_truncated_pin_and_an_unusable_pin_are_reported_differently(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Two causes, two bounded tokens, so remediation can tell them apart.
+
+    A capacity excursion and a corrupt ledger both cost a duplicate audit
+    record, and before this change both were silent. They need different
+    operator-visible causes, because the remediations differ: one is a fleet
+    that outgrew the bound, the other is a file to inspect.
+    """
+    _intent_ledger_with_an_unusable_entry(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in captured.err
+    assert _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE in captured.err
+    assert _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED != _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE
+
+
+def test_the_unpinned_diagnostics_carry_no_member_names(tmp_path: Path, monkeypatch, capsys):
+    """#2429's diagnostics line: bounded enums and counts, never identities.
+
+    The batch is 65 synthetic members; a diagnostic that named the truncated or
+    unusable ones would be an unbounded operator-visible list keyed by member.
+    """
+    observed = _intent_ledger_with_an_unusable_entry(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    diagnostics = [
+        line
+        for line in captured.err.splitlines()
+        if _mod.RETIREMENT_INTENT_CAUSE_CAP_EXCEEDED in line
+        or _mod.RETIREMENT_INTENT_CAUSE_ENTRY_UNUSABLE in line
+    ]
+
+    assert diagnostics, "the diagnostics must exist before their content can be asserted"
+    for line in diagnostics:
+        for host in observed["retiring"]:
+            assert host not in line, "an unpinned-member diagnostic must not name members"

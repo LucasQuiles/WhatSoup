@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import errno
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -356,6 +358,105 @@ MAINTENANCE_ENABLED = env_flag("BOT_ERRORS_MAINTENANCE_WINDOWS", True)
 # sends as before — a real alert is never lost to a tiering bug.
 TRANSIENT_TIERING_ENABLED = env_flag("BOT_ERRORS_TRANSIENT_TIERING", True)
 TRANSIENT_PROMOTE_SECONDS = positive_env_int("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", 30 * 60)
+
+# Per-conversation incident scoping.
+#
+# incident_key() is machine|instance|source. For a fault that belongs to ONE
+# conversation that key is too coarse: the first conversation to fail opens the
+# incident, and every LATER conversation failing under the same instance is
+# filed as a duplicate of it. A chat that goes permanently dead therefore
+# produces no operator signal at all, because a different chat already holds
+# the incident open.
+#
+# The fix does NOT change the key (see the note on clears below). Instead, an
+# alert naming a conversation that the open incident does not yet represent
+# forces one notification, and the conversation is remembered so its own
+# repeats keep deduplicating normally.
+#
+# Why not put the conversation IN the key: a recovery is emitted as
+# clearAlertSource(instance, source) and has no conversation to hash, so a
+# conversation-scoped key would make every clear miss every open incident and
+# the incidents would never close. Keeping the key stable also means existing
+# incident-state files keep working with no migration.
+#
+# The conversation arrives as `conversationScope`, a bounded non-reversible
+# digest minted at the emission boundary (src/lib/alert-evidence.ts). This
+# process never sees a raw identifier.
+CONVERSATION_SCOPED_SOURCES = {
+    item.strip()
+    for item in os.environ.get(
+        "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES", "agent_turn_admission_rejected"
+    ).split(",")
+    if item.strip()
+}
+# Bounded like flapState["seenEventIds"]: prune by age, then hard-cap by count
+# (dropping the oldest), so the state file cannot grow without limit on a host
+# with many conversations.
+CONVERSATION_SCOPE_RETENTION_SECONDS = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS", 7 * 24 * 3600
+)
+CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY", 256
+)
+# Sentinel record marking that this incident key has exceeded the per-key cap.
+# Not a conversation, and deliberately not a valid scope token, so it can never
+# collide with one: valid scopes carry the cs1_ tag and 16 hex characters.
+#
+# Once set, a scope that is NOT individually tracked is treated as already
+# represented rather than as new. Without that, eviction recycles conversations
+# into "new" status — with more failing conversations than the cap, each is
+# dropped before it recurs, so every recurrence forces another notification and
+# one large incident becomes a permanent alert loop that also bypasses storm
+# consolidation. Measured at cap 4 with 5 cycling conversations: 30 events
+# produced 30 notifications instead of 5.
+#
+# The trade is deliberate and is the safer direction at capacity: past the cap
+# an operator is already being told the incident is large, and the storm alert
+# carries the rate, so losing per-conversation granularity there is better than
+# paging without bound.
+# Delivery statuses that mean an operator HAS been shown this event. A file in
+# processing/ carrying one of these is a crash between the terminal state
+# commit and the archive rename, never work still to do.
+TERMINAL_DELIVERY_STATUSES = frozenset({"sent", "email_delivered"})
+CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
+# Top-level counterpart of the per-key marker. Written into the incident state
+# root (NOT into conversationScopes, so it is never a scope key and never an
+# eviction candidate) whenever the sweep evicts a top-level key. Bounded: one
+# object, updated in place, never a growing list.
+CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD = "conversationScopesOverflow"
+# Per-key eviction tombstones: {incident_key: evictedAt}. A key evicted for
+# CAPACITY is remembered here for one retention window, so the admission guard
+# can tell "this key's records were dropped to make room" from "this key has
+# never been seen". The global marker above stays as telemetry ONLY -- it
+# answers "did anything ever evict?", which is not the question the guard asks.
+CONVERSATION_SCOPE_EVICTED_FIELD = "conversationScopesEvicted"
+# Outer bound on how many incident keys carry a scope sidecar at once, so a
+# long tail of historical keys cannot grow the state file without limit.
+CONVERSATION_SCOPE_MAX_KEYS = positive_env_int(
+    "BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS", 128
+)
+# A conversation scope is a TAGGED token: the version tag "cs1_" followed by
+# exactly CONVERSATION_SCOPE_HEX_LENGTH lowercase hex characters, minted at the
+# emission boundary (src/lib/alert-evidence.ts, CONVERSATION_SCOPE_TAG).
+#
+# The tag is what makes validation decidable. Bare hex was ambiguous, because
+# decimal digits are hex digits, so a raw conversation local part — exactly
+# what toConversationKey mints for both the personal and the LID domain —
+# satisfied any plain hex test. Compensating for that required rejecting every
+# all-decimal value, which discarded roughly one genuine digest in 1,845
+# ((10/16) ** 16 = 5.42e-4) and cost those conversations their scope line and
+# their forced notification.
+#
+# Requiring the tag removes both problems at once: no raw identifier carries
+# it, every real digest does, and an all-decimal DIGEST is now perfectly valid.
+# Untagged values are rejected outright with no legacy acceptance, which is
+# safe here because producer and consumer ship together and no intermediate
+# version of this format ever reached a runtime.
+CONVERSATION_SCOPE_HEX_LENGTH = 16
+CONVERSATION_SCOPE_TAG = "cs1_"
+CONVERSATION_SCOPE_RE = re.compile(
+    r"^%s[0-9a-f]{%d}$" % (re.escape(CONVERSATION_SCOPE_TAG), CONVERSATION_SCOPE_HEX_LENGTH)
+)
 
 # #2409 — cause-aware disposition for health_body_degraded. The producer emits a
 # bounded degradation-cause vector; the registered per-cause policy decides
@@ -1102,9 +1203,11 @@ class IncidentStateCycle:
     ``load_incident_state``), then call ``.commit()`` at each semantic
     save barrier.
 
-    ``commit()`` returns the ``PublicationResult`` so callers that batch
-    publication results (e.g. ``collapse_storm_group`` with
-    ``require_all_advance``) can still collect it.
+    ``commit()`` returns the ``StateCommitResult`` from ``session.save()``.
+    Callers do not need to collect it: ``save()`` raises
+    ``ControllerStateRequired`` on any non-advancing outcome, so the three
+    cycle branches in ``collapse_storm_group`` call ``commit()`` bare and
+    rely on that raise rather than on ``require_all_advance``.
     """
 
     def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
@@ -1121,13 +1224,12 @@ class IncidentStateCycle:
     def commit(self) -> Any:
         """Set ``updatedAt``, redact, persist, and advance the capability.
 
-        Returns the ``PublicationResult`` from ``session.save()``.
-        Also writes the raw incident state file so test
-        ``readIncidentState`` surfaces the updated payload
-        (#3053 regression fix — IncidentStateCycle diverts
-        persistence away from save_incident_state).
+        Returns the ``PublicationResult`` from ``session.save()``, which is
+        the only write: the session persists the enveloped primary itself.
+        The raw co-write this once did was removed with the #3053 fix, and
+        the cycle is the supported path away from ``save_incident_state``.
         """
-        self._payload["updatedAt"] = now_iso()
+        _normalize_incident_state_for_save(self._payload)
         redacted = redacted_dispatcher_payload(self._payload)
         result = self._session.save(redacted, self._capability)
         self._capability = result.capability
@@ -1182,9 +1284,255 @@ class _CompatPublication:
         return {"advance_allowed": self.advance_allowed}
 
 
+def _mark_conversation_scope_overflow(
+    incident_state: dict[str, Any], current: int, evicted: int
+) -> None:
+    """Record that the top-level scope map has evicted for capacity.
+
+    Bounded by construction: ONE object updated in place, carrying the last
+    eviction time and a cumulative count. Never a list, so it cannot grow.
+    """
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if not isinstance(marker, dict):
+        marker = {}
+    marker["overflowedAt"] = current
+    marker["overflowCount"] = int_field(marker, "overflowCount") + evicted
+    incident_state[CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD] = marker
+
+
+def _mark_conversation_scope_evicted(
+    incident_state: dict[str, Any], current: int, keys: list[str]
+) -> None:
+    """Tombstone each key evicted for capacity, and drop expired tombstones.
+
+    Bounded twice over: entries expire after one retention window, and the map
+    is hard-capped at the same key cap as the sidecar itself, so it cannot grow
+    past what the sidecar could have held.
+    """
+    stones = incident_state.get(CONVERSATION_SCOPE_EVICTED_FIELD)
+    if not isinstance(stones, dict):
+        stones = {}
+    for key in keys:
+        stones[key] = current
+    for stale in [
+        key
+        for key, at in stones.items()
+        if not isinstance(at, (int, float))
+        or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        stones.pop(stale, None)
+    if len(stones) > CONVERSATION_SCOPE_MAX_KEYS:
+        dropped = 0
+        for oldest in sorted(stones, key=lambda k: stones[k])[
+            : len(stones) - CONVERSATION_SCOPE_MAX_KEYS
+        ]:
+            stones.pop(oldest, None)
+            dropped += 1
+        if dropped:
+            # SATURATION. This is the one point where the gate loses information
+            # it cannot recover: a key evicted for capacity whose tombstone is
+            # then itself dropped for capacity is in neither map, so the gate
+            # can no longer tell it from a conversation nobody has been told
+            # about. Record WHEN, so the rule below is time-bounded rather than
+            # a latch, and HOW MANY, so an operator reading the state file can
+            # see how far past capacity this instance is running.
+            marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+            if not isinstance(marker, dict):
+                marker = {}
+            marker["tombstonesDroppedAt"] = max(
+                int_field(marker, "tombstonesDroppedAt"), current
+            )
+            marker["tombstonesDroppedCount"] = (
+                int_field(marker, "tombstonesDroppedCount") + dropped
+            )
+            incident_state[CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD] = marker
+    if stones:
+        incident_state[CONVERSATION_SCOPE_EVICTED_FIELD] = stones
+    else:
+        incident_state.pop(CONVERSATION_SCOPE_EVICTED_FIELD, None)
+
+
+def conversation_scope_key_was_evicted(
+    incident_state: dict[str, Any], key: str, current: int
+) -> bool:
+    """True when THIS key's records were dropped for capacity, recently."""
+    stones = incident_state.get(CONVERSATION_SCOPE_EVICTED_FIELD)
+    if not isinstance(stones, dict):
+        return False
+    at = stones.get(key)
+    if not isinstance(at, (int, float)):
+        return False
+    return current - at <= CONVERSATION_SCOPE_RETENTION_SECONDS
+
+
+def conversation_scopes_have_overflowed(
+    incident_state: dict[str, Any], current: int | None = None
+) -> bool:
+    """True while the gate is SATURATED: a tombstone was dropped recently.
+
+    Deliberately not "has anything ever evicted". That latches forever and
+    silences every later conversation, which is the defect this gate exists to
+    remove. Saturation is the narrower condition -- a tombstone dropped for
+    capacity inside the retention window -- because that is the only point at
+    which an absent key stops being distinguishable from a new one. It expires
+    with the window, so an instance that drops back under capacity recovers
+    exactness on its own.
+    """
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if not isinstance(marker, dict):
+        return False
+    dropped_at = marker.get("tombstonesDroppedAt")
+    if not isinstance(dropped_at, (int, float)):
+        return False
+    now = int(time.time()) if current is None else current
+    return now - dropped_at <= CONVERSATION_SCOPE_RETENTION_SECONDS
+
+
+def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> int:
+    """Prune the conversation-scope sidecar across the WHOLE state.
+
+    Expiry previously ran only when another event for that same incident key
+    happened to enter the gate, so a quiet or decommissioned instance retained
+    digests indefinitely regardless of the retention setting, and closed
+    incidents left their subtree behind. Both incident-state persistence
+    paths apply this through ``_normalize_incident_state_for_save`` -- the
+    controller-backed ``IncidentStateCycle.commit()`` that production takes
+    and the RESTORE-COMPAT ``save_incident_state`` wrapper -- so the bound
+    holds whether or not that key sees traffic again. Naming both paths is
+    deliberate: the bound previously lived on the compat wrapper alone,
+    which production does not call, so this claim was false where it
+    mattered.
+
+    Removes: expired scope records, subtrees whose incident is no longer open,
+    and empty buckets. Enforces an outer cap on the number of keys tracked so
+    a long tail of historical keys cannot grow the map without limit.
+    Returns the number of keys removed.
+    """
+    scopes = incident_state.get("conversationScopes")
+    if not isinstance(scopes, dict):
+        return 0
+    open_incidents = incident_state.get("openIncidents")
+    open_keys = set(open_incidents) if isinstance(open_incidents, dict) else set()
+    removed = 0
+
+    for key in list(scopes):
+        records = scopes.get(key)
+        if not isinstance(records, dict):
+            scopes.pop(key, None)
+            removed += 1
+            continue
+        # A closed incident's per-conversation bookkeeping is dead weight: the
+        # next alert under that key opens a fresh incident and every
+        # conversation is legitimately new again.
+        if key not in open_keys:
+            scopes.pop(key, None)
+            removed += 1
+            continue
+        for scope in list(records):
+            record = records.get(scope)
+            # Nested prunes COUNT. run_once commits only when this function
+            # reports change, so a prune inside a surviving key that returned 0
+            # never reached disk and the stale record survived every cycle.
+            if not isinstance(record, dict):
+                records.pop(scope, None)
+                removed += 1
+                continue
+            if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
+                records.pop(scope, None)
+                removed += 1
+        if not records:
+            scopes.pop(key, None)
+            removed += 1
+
+    if len(scopes) > CONVERSATION_SCOPE_MAX_KEYS:
+        def _key_recency(name: str) -> float:
+            records = scopes.get(name)
+            if not isinstance(records, dict) or not records:
+                return 0
+            return max(
+                (_conversation_scope_last_seen(item) for item in records.values()),
+                default=0,
+            )
+
+        evicted = 0
+        evicted_keys = []
+        for oldest in sorted(scopes, key=_key_recency)[: len(scopes) - CONVERSATION_SCOPE_MAX_KEYS]:
+            scopes.pop(oldest, None)
+            removed += 1
+            evicted += 1
+            evicted_keys.append(oldest)
+        if evicted_keys:
+            _mark_conversation_scope_evicted(incident_state, current, evicted_keys)
+        if evicted:
+            # A key evicted for CAPACITY is not a key that was never seen. Record
+            # that at the top level so the admission guard can tell the two apart:
+            # without this, an evicted conversation reads as brand new on its next
+            # rejection, force-notifies, re-adds its key and evicts another --
+            # a rotation that pages forever above the cap.
+            _mark_conversation_scope_overflow(incident_state, current, evicted)
+
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if isinstance(marker, dict):
+        dropped_at = marker.get("tombstonesDroppedAt")
+        if isinstance(dropped_at, (int, float)) and (
+            current - dropped_at > CONVERSATION_SCOPE_RETENTION_SECONDS
+        ):
+            # The saturation window has passed; drop the fields that assert it
+            # so the gate returns to exact per-key behaviour on its own.
+            marker.pop("tombstonesDroppedAt", None)
+            marker.pop("tombstonesDroppedCount", None)
+            if not marker:
+                incident_state.pop(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD, None)
+
+    if not scopes:
+        incident_state.pop("conversationScopes", None)
+    return removed
+
+
+def _normalize_incident_state_for_save(state: dict[str, Any]) -> None:
+    """Pre-save normalization shared by BOTH incident-state persistence paths.
+
+    Bounds the conversation-scope sidecar, then stamps ``updatedAt``.
+
+    This exists because the bound used to live inside ``save_incident_state``
+    alone — the RESTORE-COMPAT bare-JSON wrapper — while production saves go
+    through ``IncidentStateCycle.commit()``: ``run_once`` builds the cycle
+    unconditionally, every save barrier is ``if incident: incident.commit()
+    else: save_incident_state(...)``, and post-adoption
+    ``_require_incident_cycle_if_adopted`` forbids the bare path. The
+    retention window and the outer key cap were therefore enforced only on a
+    path production does not take. One function called from both is what makes
+    the documented bound true wherever the state is written.
+
+    Redaction deliberately stays at each call site: the two paths hand the
+    redacted payload to different persistence APIs (``session.save`` versus
+    ``operation_id`` plus ``publish_state_json``), so folding it in here would
+    also change how many times ``redacted_dispatcher_payload`` is applied on
+    the compat path. That is a separate change and not needed for the bound.
+    """
+    try:
+        sweep_conversation_scopes(state, int(time.time()))
+    except Exception as exc:
+        # Never let housekeeping block a state write; a slightly larger state
+        # file is recoverable, a lost incident update is not. This swallow
+        # arrived with the sweep from save_incident_state and now covers the
+        # controller-backed path too, so a sweep fault cannot fail a
+        # production commit either.
+        #
+        # But swallow LOUDLY: silence here means the documented retention
+        # window and key cap can stop holding on every save with nothing to
+        # alert on. log_conversation_scope_error is the module's bounded,
+        # metadata-only reporter and guards its own write, so a diagnostic
+        # cannot turn a state write into an exception.
+        log_conversation_scope_error("save_normalize", "", exc, False)
+    state["updatedAt"] = now_iso()
+
+
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
+    *,
+    lock_timeout_seconds: float = 10.0,
 ) -> PublicationResult:
     """RESTORE-COMPAT compat wrapper — uses ``publish_state_json`` directly.
 
@@ -1199,26 +1547,59 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
-    state["updatedAt"] = now_iso()
-    target = _durable_target(incident_path)
-    observation = observe_json(target)
-    generation = (observation.version.generation or 0) + 1
-    publication_operation = operation_id(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        predecessor=observation.version,
-    )
-    publication = publish_state_json(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=generation,
-    )
+    # An adopted store is refused before contending for the adoption lock.
+    # Adoption is irreversible (the marker never goes away), so a marker seen
+    # here is final; and the caller most likely to reach this writer
+    # post-adoption is a helper inside a controller-state session, which
+    # already holds that session's flock in this process. Waiting on it would
+    # stall the full timeout and report lock contention instead of the routing
+    # error the guard exists to name.
+    _reject_bare_write_if_adopted(incident_path)
+    # The whole observe-then-publish sequence runs under the controller-state
+    # adoption lock, so the two refusals below decide against a store that
+    # adoption cannot change underneath them (see _AdoptionLock). The marker
+    # check repeats under the lock for the not-yet-adopted case, where
+    # adoption can still land between the fast check and the lock.
+    with _AdoptionLock(incident_path, lock_timeout_seconds):
+        _reject_bare_write_if_adopted(incident_path)
+        target = _durable_target(incident_path)
+        observation = observe_json(target)
+        _reject_bare_write_over_envelope(incident_path, observation.payload)
+        # Normalised and stamped only once every refusal has passed: a refused
+        # write hands the caller's dict back exactly as given. The normaliser
+        # (shared with IncidentStateCycle.commit) bounds the conversation-scope
+        # sidecar, then stamps updatedAt.
+        _normalize_incident_state_for_save(state)
+        generation = (observation.version.generation or 0) + 1
+        publication_operation = operation_id(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            operation_id=publication_operation,
+            expected=observation.version,
+            generation=generation,
+        )
     require_advance(publication)
     return publication
+
+# Exit status for a refused post-adoption bare write reached in daemon mode.
+# Distinct from STATE_RECOVERY_REQUIRED_EXIT (78): that path carries a
+# controller-state diagnostic and runs the recovery projection. This one is a
+# programming error (a helper reached save_incident_state without its
+# IncidentStateCycle) and must stop the loop loudly rather than fail every
+# cycle in silence. Restart=always brings the unit back; the deadman then
+# reports cycle_stale once the staleness outgrows what the restart explains,
+# or state_missing / cycle_incomplete once its grace streak outgrows
+# max_state_age. Documented for operators in docs/runbook.md ("BOT ERRORS
+# dispatcher exit codes").
+INCIDENT_CYCLE_REQUIRED_EXIT = 79
+
 
 class IncidentCycleRequiredError(RuntimeError):
     """#3054: a cycle-accepting helper was called post-adoption without the
@@ -1234,6 +1615,194 @@ class IncidentCycleRequiredError(RuntimeError):
     silently corrupting state. Pre-adoption (no ``.initialized``) the bare
     write is still the legitimate legacy/compat path, so the guard is inert.
     """
+
+
+def _incident_state_is_adopted(anchor: Path) -> bool:
+    """True when the incident-state dir carries the ``.initialized`` marker.
+
+    Single definition of "adopted" so the helper-boundary guard and the
+    writer-level guard cannot drift apart.
+    """
+    return (anchor.parent / (anchor.name + ".initialized")).exists()
+
+
+def _reject_bare_write_if_adopted(anchor: Path) -> None:
+    """#3054 writer-level guard — refuse a bare-JSON write post-adoption.
+
+    ``_require_incident_cycle_if_adopted`` is a *helper-boundary* check: it
+    is inert whenever a cycle was supplied, because its question is "does a
+    cycle exist?". That is not the same question as "does this write use
+    the cycle?", so a helper could pass the boundary guard with
+    ``incident`` in hand and still reach ``save_incident_state`` on a later
+    branch — overwriting the ``_controllerState`` envelope with bare JSON
+    and producing the ``schema_incompatible`` corruption #3053 fixed.
+
+    Guarding inside the writer closes that gap for every call site at once,
+    including ones added later, because the bare write is never legitimate
+    post-adoption. Pre-adoption (no ``.initialized``) the bare write is
+    still the correct legacy/compat path, so this stays inert there.
+    ``IncidentStateCycle.commit()`` persists through ``session.save()`` and
+    never routes here, so the supported path is unaffected.
+    """
+    if _incident_state_is_adopted(anchor):
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing a post-adoption bare-JSON write to "
+            f"{anchor.name}. The incident-state primary is enveloped "
+            f"(_controllerState); this wrapper would overwrite it and the next "
+            f"validate would reject it as schema_incompatible (#3053/#3054). "
+            f"Route this write through IncidentStateCycle.commit()."
+        )
+
+
+class _AdoptionLock:
+    """Hold the controller-state adoption lock (``<anchor>.lock``) for a bare write.
+
+    Adoption runs inside a controller-state session, which takes an exclusive
+    ``flock`` on ``<anchor>.lock`` in the state directory. The bare publisher
+    only takes ``.durable-json.lock``, so without this a bare write could pass
+    the marker check and the envelope check, and adoption could still replace
+    the primary between the publisher's version compare and its ``os.replace``.
+    Holding the same lock for the whole observe-then-publish sequence
+    serialises the bare writer with adoption; the marker and envelope checks
+    then decide under the lock and cannot be raced.
+
+    Lock order is adoption lock first, ``.durable-json.lock`` second, the same
+    order a session-holding caller uses when it publishes member files.
+    """
+
+    def __init__(self, anchor: Path, timeout_seconds: float) -> None:
+        self._path = anchor.parent / (anchor.name + ".lock")
+        self._timeout = max(0.0, float(timeout_seconds))
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_AdoptionLock":
+        # Every way of failing to acquire the lock is the guard's error: the
+        # bare write must not run without the store's mutual exclusion, and a
+        # bare OSError from here (a symlinked leaf refused by O_NOFOLLOW with
+        # ELOOP, a missing or unopenable directory, a failed fstat) would be
+        # swallowed by --daemon as a failed cycle and retried every interval,
+        # the silent failure mode the exit-79 path exists to prevent. The
+        # original error stays attached as the cause.
+        try:
+            return self._acquire()
+        except IncidentCycleRequiredError:
+            raise
+        except OSError as exc:
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} could not be acquired safely ({type(exc).__name__}: {exc}); "
+                f"a bare write must not run without the store's mutual exclusion"
+            ) from exc
+
+    @staticmethod
+    def _safe_leaf(observed: os.stat_result) -> bool:
+        return (
+            stat.S_ISREG(observed.st_mode)
+            and observed.st_uid == os.getuid()
+            and observed.st_nlink == 1
+            and not (stat.S_IMODE(observed.st_mode) & 0o077)
+        )
+
+    def _acquire(self) -> "_AdoptionLock":
+        # Pin the parent directory first, as the session does, so the lock is
+        # opened relative to the directory we checked rather than by path. The
+        # descriptor stays open through acquisition: after the flock the named
+        # leaf is re-opened relative to it and must still be the locked inode,
+        # the same identity check the canonical controller-state lock makes
+        # (controller_state._open_lock). Without it a same-owner replacement of
+        # the leaf between open and flock lets adoption lock a different inode
+        # while this writer holds the old one.
+        dir_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(self._path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+            try:
+                self._lock_and_verify(fd, dir_fd)
+            except BaseException:
+                os.close(fd)
+                raise
+        finally:
+            os.close(dir_fd)
+        self._fd = fd
+        return self
+
+    def _lock_and_verify(self, fd: int, dir_fd: int) -> None:
+        observed = os.fstat(fd)
+        if not self._safe_leaf(observed):
+            # The guard's own error class, like the timeout below: a bare
+            # OSError here is swallowed by --daemon as a failed cycle and
+            # retried every interval, which is the silent failure mode the
+            # exit-79 path exists to prevent. The EPERM stays attached as
+            # the cause so the refusal still names the unsafe leaf.
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: unsafe adoption lock file "
+                f"{self._path.name} (regular={stat.S_ISREG(observed.st_mode)} "
+                f"owner_matches={observed.st_uid == os.getuid()} nlink={observed.st_nlink} "
+                f"mode={stat.S_IMODE(observed.st_mode):04o}); the store's lock cannot be "
+                f"trusted and a bare write must not run without it"
+            ) from OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    # Either this process already holds the session lock (a
+                    # helper reached the bare writer from inside the cycle,
+                    # the programming error the guard exists for) or an
+                    # adoption is in progress, after which the bare write
+                    # must be refused anyway. Both are the guard's error,
+                    # so the daemon exits 79 instead of swallowing a
+                    # TimeoutError as a failed cycle.
+                    raise IncidentCycleRequiredError(
+                        f"save_incident_state: the incident-state adoption lock stayed busy for "
+                        f"{self._timeout:g}s ({self._path.name}); a bare write must not run "
+                        f"while a controller-state session holds the store"
+                    ) from None
+                time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+        recheck = os.open(self._path.name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            rechecked = os.fstat(recheck)
+        finally:
+            os.close(recheck)
+        if not self._safe_leaf(rechecked) or (rechecked.st_dev, rechecked.st_ino) != (observed.st_dev, observed.st_ino):
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} was replaced during acquisition (locked inode "
+                f"{observed.st_dev}:{observed.st_ino}, named inode {rechecked.st_dev}:{rechecked.st_ino}); "
+                f"the mutual exclusion this writer holds no longer guards the store"
+            )
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+
+def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:
+    """Second half of the writer guard: never overwrite an observed envelope.
+
+    ``_reject_bare_write_if_adopted`` reads the ``.initialized`` marker before
+    the write observes the file, and adoption takes a different lock
+    (``incident-state.json.lock``) from the bare publisher
+    (``.durable-json.lock``), so a bare caller can pass the marker check while
+    adoption completes underneath it. The write publishes against
+    ``observation.version``: if adoption landed after the observation the
+    compare-and-swap refuses the write, and if it landed before, the observed
+    payload already carries ``_controllerState`` and this check refuses it.
+    Together the marker check, this check, and the CAS leave no window in
+    which bare JSON can replace the envelope.
+    """
+    if isinstance(observed, Mapping) and "_controllerState" in observed:
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing to overwrite the enveloped incident "
+            f"state at {anchor.name} with bare JSON (observed _controllerState "
+            f"without the adoption marker). Route this write through "
+            f"IncidentStateCycle.commit()."
+        )
 
 
 def _require_incident_cycle_if_adopted(
@@ -1257,7 +1826,7 @@ def _require_incident_cycle_if_adopted(
     anchor = paths.get("incident_state")
     if anchor is None:
         return
-    if (anchor.parent / (anchor.name + ".initialized")).exists():
+    if _incident_state_is_adopted(anchor):
         raise IncidentCycleRequiredError(
             f"{helper}: post-adoption incident-state write requires the "
             f"IncidentStateCycle (incident=None would route through "
@@ -1977,6 +2546,220 @@ def force_notify_level(event: dict[str, Any]) -> str | None:
     return safe_segment(str(diagnostics.get("forceNotifyLevel") or "default"))
 
 
+def event_conversation_scope(event: dict[str, Any]) -> str | None:
+    """The bounded conversation digest carried by this event, if any.
+
+    Returns None for every event that predates the field, for a source that is
+    not conversation-scoped, and for any value that is not a bare hex digest.
+    None always means "behave exactly as before".
+    """
+    if str(event.get("source") or "") not in CONVERSATION_SCOPED_SOURCES:
+        return None
+    value = event.get("conversationScope")
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    return candidate if CONVERSATION_SCOPE_RE.match(candidate) else None
+
+
+def conversation_scope_records(
+    incident_state: dict[str, Any], key: str
+) -> dict[str, Any]:
+    """The {scope: {lastSeenAt, eventIds}} sidecar for `key`, created if absent.
+
+    Records are written ONLY by the delivery transition. See
+    record_conversation_scope_delivered.
+    """
+    scopes = incident_state.setdefault("conversationScopes", {})
+    if not isinstance(scopes, dict):
+        scopes = {}
+        incident_state["conversationScopes"] = scopes
+    seen = scopes.get(key)
+    if not isinstance(seen, dict):
+        seen = {}
+        scopes[key] = seen
+    return seen
+
+
+def _conversation_scope_last_seen(record: Any) -> float:
+    if isinstance(record, dict):
+        value = record.get("lastSeenAt")
+        return value if isinstance(value, (int, float)) else 0
+    return 0
+
+
+def conversation_scope_is_unrepresented(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> bool:
+    """True when this event's conversation is not covered by a DELIVERED alert.
+
+    PURE: this is consulted before anything is sent, so it must not write.
+    Recording "represented" here was a real defect — an alert that failed
+    every delivery route still marked its conversation covered, so the next
+    distinct alert for that conversation was suppressed as a duplicate and the
+    conversation went silent while appearing handled. That is precisely the
+    failure this gate exists to remove, reintroduced on the failure path.
+
+    A retry of an event we already forced still counts as unrepresented, so a
+    transient transport failure cannot consume the one forced notification.
+    Expired records are ignored rather than pruned; pruning belongs to the
+    write path.
+    """
+    scope = event_conversation_scope(event)
+    if scope is None:
+        return False
+    # NOTE: no delivery-status check here. An earlier revision short-circuited on
+    # delivery.status == "sent", but process_one calls mark_attempt before this
+    # gate and mark_attempt overwrites the status with "sending", so the branch
+    # was unreachable in production. The crash-window replay it was meant to
+    # stop is handled where the record is still the producer's -- ahead of
+    # mark_attempt, for both terminal statuses -- and pinned end to end in
+    # deploy/scripts/tests/test_bot_errors_terminal_replay_reclaim.py.
+    scopes = incident_state.get("conversationScopes")
+    seen = scopes.get(key) if isinstance(scopes, dict) else None
+    record = seen.get(scope) if isinstance(seen, dict) else None
+    if not isinstance(record, dict):
+        # At capacity, an untracked scope is treated as represented: it may be
+        # one this key has already seen and evicted, and re-forcing evicted
+        # conversations is what turns a large incident into an alert loop.
+        if isinstance(seen, dict) and CONVERSATION_SCOPE_OVERFLOW_KEY in seen:
+            return False
+        # Same policy one level up: once the sweep has evicted a top-level key
+        # for capacity, a MISSING key may be one this dispatcher represented
+        # and then dropped, so treating it as new is what rotates into an
+        # endless page loop. Gated on the marker: with no eviction on record a
+        # missing key really is a conversation nobody has been told about, and
+        # it must still force its one notification.
+        # Scoped to what was actually evicted. A global "something evicted once"
+        # flag answers the wrong question: the sidecar empties for ordinary
+        # reasons (a closed incident's key, aged-out records, the per-cycle
+        # sweep), so after one eviction anywhere an absent key would be the
+        # normal state and NO new conversation could ever force its
+        # notification again. The tombstone is per key and expires with the
+        # retention window, so a key that was never evicted -- or whose
+        # eviction has aged out -- still pages once, as it must.
+        if seen is None and conversation_scope_key_was_evicted(
+            incident_state, key, current
+        ):
+            return False
+        # Saturated: more distinct keys are cycling than the scope map and the
+        # tombstone map can name together, so an absent key may be one whose
+        # tombstone was dropped. Exactness is not available here -- "every new
+        # conversation pages" and "every evicted one stays suppressed" cannot
+        # both hold in finite exact state -- and the contract picks bounded
+        # volume, because an operator paged once per conversation per cycle
+        # sees nothing at all. Time-bounded, so exactness returns by itself.
+        if seen is None and conversation_scopes_have_overflowed(incident_state, current):
+            return False
+        return True
+    if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
+        return True
+    event_ids = record.get("eventIds")
+    event_id = str(event.get("id") or "")
+    if not event_id or not isinstance(event_ids, dict):
+        return False
+    # #2428, applied here: a delivery retry re-reads the SAME event id out of
+    # the outbox with its original identity. A repeat of an id we already
+    # forced must still force, or a transport blip silently consumes it.
+    return event_id in event_ids
+
+
+def log_conversation_scope_error(
+    phase: str, key: str, exc: Exception, treated_as_unrepresented: bool
+) -> None:
+    """Record a scope-bookkeeping failure without letting logging raise.
+
+    Silence here was itself the defect: the previous code swallowed every
+    exception and fell into "represented", which quietly restored the
+    alert-loss behaviour this gate removes. The error is bounded (no raw
+    state, no identifiers) and the log write is itself guarded, because a
+    diagnostic must never convert a deliverable alert into an exception.
+    """
+    try:
+        append_dispatch_log(state_paths(), {
+            "type": "conversation_scope_error",
+            "phase": phase,
+            "incidentKey": key,
+            "error": truncate(str(exc), 300),
+            "treatedAsUnrepresented": treated_as_unrepresented,
+        })
+    except Exception:
+        pass
+
+
+def record_conversation_scope_delivered(
+    event: dict[str, Any], incident_state: dict[str, Any], key: str, current: int
+) -> None:
+    """Mark this event's conversation represented — ONLY after delivery.
+
+    Called from the successful-delivery transition beside mark_incident_sent,
+    so "represented" means an operator has actually been shown this
+    conversation. Bounded like the flap detector's seen-event map: prune by
+    age, then hard-cap by count dropping the oldest, and drop empty buckets.
+    """
+    scope = event_conversation_scope(event)
+    if scope is None:
+        return
+    seen = conversation_scope_records(incident_state, key)
+    for stale in [
+        item
+        for item, value in seen.items()
+        if current - _conversation_scope_last_seen(value) > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        seen.pop(stale, None)
+
+    record = seen.get(scope)
+    if not isinstance(record, dict):
+        record = {"lastSeenAt": current, "eventIds": {}}
+    record["lastSeenAt"] = current
+    if not isinstance(record.get("eventIds"), dict):
+        record["eventIds"] = {}
+    seen[scope] = record
+
+    event_ids = record["eventIds"]
+    for stale_id in [
+        item
+        for item, at in event_ids.items()
+        if not isinstance(at, (int, float))
+        or current - at > CONVERSATION_SCOPE_RETENTION_SECONDS
+    ]:
+        event_ids.pop(stale_id, None)
+    event_id = str(event.get("id") or "")
+    if event_id:
+        event_ids[event_id] = current
+        if len(event_ids) > CONVERSATION_SCOPE_MAX_PER_KEY:
+            for oldest in sorted(event_ids, key=lambda item: event_ids[item])[
+                : len(event_ids) - CONVERSATION_SCOPE_MAX_PER_KEY
+            ]:
+                event_ids.pop(oldest, None)
+
+    tracked = [item for item in seen if item != CONVERSATION_SCOPE_OVERFLOW_KEY]
+    if len(tracked) > CONVERSATION_SCOPE_MAX_PER_KEY:
+        # Evicting alone would recycle those conversations into "new" on their
+        # next event. Record that the key overflowed, so the predicate stops
+        # treating untracked scopes as unseen.
+        for oldest in sorted(tracked, key=lambda item: _conversation_scope_last_seen(seen[item]))[
+            : len(tracked) - CONVERSATION_SCOPE_MAX_PER_KEY
+        ]:
+            seen.pop(oldest, None)
+        overflow = seen.get(CONVERSATION_SCOPE_OVERFLOW_KEY)
+        if not isinstance(overflow, dict):
+            overflow = {"eventIds": {}, "overflowedAt": current, "overflowCount": 0}
+        overflow["lastSeenAt"] = current
+        # int_field, not a raw int(): a malformed counter must not raise out of
+        # post-delivery bookkeeping. mark_incident_sent runs at try-depth 0 in
+        # process_one, AFTER the operator has been paged and BEFORE the state
+        # commit, so a raise there leaves the claimed file in processing/ with
+        # the scope unrecorded and the next cycle pages again.
+        overflow["overflowCount"] = int_field(overflow, "overflowCount") + 1
+        seen[CONVERSATION_SCOPE_OVERFLOW_KEY] = overflow
+
+    scopes = incident_state.get("conversationScopes")
+    if isinstance(scopes, dict):
+        for empty in [item for item, values in scopes.items() if not values]:
+            scopes.pop(empty, None)
+
+
 def int_field(record: dict[str, Any], key: str, fallback: int = 0) -> int:
     try:
         return int(record.get(key) or fallback)
@@ -2544,6 +3327,14 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("source", event.get("source")),
         event_line("alert_source", event.get("alertSource")),
         event_line("incident_key", incident_key(event)),
+        # MUST render the VALIDATED digest, never the raw field. redact() does
+        # not save us here: a bare digit run (exactly what toConversationKey
+        # mints for both the personal and LID domains) has no phone syntax, so
+        # redact_phone_like_match returns it unchanged and it would reach
+        # WhatsApp and the email fallback verbatim. event_conversation_scope
+        # enforces CONVERSATION_SCOPE_RE and the source allowlist, and returns
+        # None for anything else, which omits the line.
+        event_line("conversation_scope", event_conversation_scope(event)),
         event_line("asset_kind", asset.get("kind")),
         event_line("failure_code", failure.get("code")),
         event_line("failure_domain", failure.get("domain")),
@@ -2891,12 +3682,57 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # consolidated flap_storm alert (emitted by the pre-collapse scan) already
     # carries the count/rate. The storm itself never routes through here
     # (it is sent directly), so this cannot suppress the storm alert.
+    #
+    # EXCEPTION: a conversation the storm has never represented. The storm
+    # alert carries a count and a rate, not the identity of a conversation
+    # nobody has been told about, so consolidating a FIRST sighting into it
+    # loses the one signal that conversation will ever produce. This matters
+    # because the storm is the normal state during the fault this gate exists
+    # for: it opens at FLAP_TRIP_THRESHOLD (5) events within FLAP_WINDOW_SECONDS
+    # (600) and stays open until FLAP_STABLE_SECONDS (3600) below threshold, so
+    # without the exception the gate is inert for up to an hour in exactly the
+    # multi-conversation wedge it targets.
+    #
+    # Scope of the exception, deliberately narrow: only the first sighting of an
+    # unrepresented conversation (and a delivery retry of that same event)
+    # escapes. Every repeat is a storm member and stays consolidated, so the
+    # storm still collapses a flapping source into one alert, and an event
+    # carrying no conversation is unaffected.
+    #
+    # ORDERING, deliberate and not an oversight: this block can return before
+    # stronger_open_incident_for below, so a first sighting that escapes an
+    # open storm is not additionally tested against root-cause inhibition.
+    # Reordering the two was considered and DECLINED. The policies overlap
+    # only for a source that is both conversation-scoped
+    # (BOT_ERRORS_CONVERSATION_SCOPED_SOURCES) and listed as a symptom in the
+    # inhibition map, and under shipped defaults that intersection is empty:
+    # the scoped set is {agent_turn_admission_rejected} while the symptom
+    # sources are the instance/health/outbound families, so today's exposure
+    # is zero. It is empty by configuration, though, not by construction --
+    # both sets are env-driven and BOT_ERRORS_INHIBITION_MAP is union-merged
+    # over the seed, so a deployment can add a scoped source as a symptom.
+    # A reorder would then silently change which policy wins, with no test
+    # pinning the answer. That ordering deserves its own test that states
+    # which policy should win; it is not worth changing blind here.
     if FLAP_DETECTION and is_incident_alert(event) and not is_incident_clear(event) and source != "flap_storm":
         flap_state = incident_state.get("flapState")
         if isinstance(flap_state, dict):
             flap_rec = flap_state.get(key)
             if isinstance(flap_rec, dict) and flap_rec.get("stormAt"):
-                return f"flap_storm_member: {key} consolidated into open flap storm"
+                try:
+                    storm_unrepresented = conversation_scope_is_unrepresented(
+                        event, incident_state, key, current
+                    )
+                except Exception as exc:
+                    # A validated scope with broken bookkeeping is treated as
+                    # UNREPRESENTED: an extra alert is recoverable, a silently
+                    # dropped one is not. Swallowing this silently restored the
+                    # exact alert-loss behaviour the gate removes.
+                    storm_unrepresented = event_conversation_scope(event) is not None
+                    log_conversation_scope_error("flap_storm", key, exc, storm_unrepresented)
+                if not storm_unrepresented:
+                    return f"flap_storm_member: {key} consolidated into open flap storm"
+                return None
     stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
@@ -2908,6 +3744,28 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             f"symptom incident {key} suppressed because stronger incident "
             f"{stronger_key} remains open (inhibited_by:{root_source})"
         )
+    # Per-conversation scoping: a conversation this incident does not yet
+    # represent is a DIFFERENT outage, not a duplicate of the one already open.
+    # Placed here so it unmasks both paths that would otherwise silence it —
+    # the open-incident duplicate branch and the post-close cooldown below —
+    # while leaving root-cause inhibition (above) in charge as before. An open
+    # flap storm does NOT consolidate a conversation it has never represented:
+    # that exception lives in the Pattern F block above, because the storm
+    # alert carries a count and a rate, not the identity of a conversation
+    # nobody has been told about.
+    # FAIL TOWARD VISIBILITY: a bookkeeping error produces an extra alert
+    # rather than a silent loss (see the except branches below).
+    if is_incident_alert(event) and not is_incident_clear(event):
+        try:
+            unrepresented = conversation_scope_is_unrepresented(
+                event, incident_state, key, current
+            )
+        except Exception as exc:
+            # Same direction as the storm branch above: fail toward visibility.
+            unrepresented = event_conversation_scope(event) is not None
+            log_conversation_scope_error("open_incident", key, exc, unrepresented)
+        if unrepresented:
+            return None
     if is_incident_alert(event):
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
@@ -3273,6 +4131,12 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
 def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
     key = incident_key(event)
     current = int(time.time())
+    # An operator has now actually been shown this event, on WhatsApp or via
+    # the email fallback, so its conversation is genuinely represented. This is
+    # the ONLY place representation is recorded; the admission predicate is
+    # pure. Recording it pre-delivery meant a dead-lettered alert marked its
+    # conversation covered and silenced the next distinct one.
+    record_conversation_scope_delivered(event, incident_state, key, current)
     if is_incident_alert(event):
         close_superseded_incidents(event, incident_state)
         incident_state.setdefault("lastSentAt", {})[key] = current
@@ -4811,6 +5675,15 @@ def collapse_storm_group(
     incident: IncidentStateCycle | None = None,
 ) -> int:
     _require_incident_cycle_if_adopted(paths, incident, helper="collapse_storm_group")
+    if incident is not None and incident.payload is not incident_state:
+        # The cycle branch below persists incident.payload, so a caller that
+        # hands in a different dict would have its mutations (freshness ledger,
+        # daily-health absorption) silently dropped at commit(). Refuse before
+        # any member publication or manifest write happens.
+        raise ValueError(
+            "collapse_storm_group: incident_state must be incident.payload when an "
+            "IncidentStateCycle is supplied; commit() would persist a different object"
+        )
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -5143,7 +6016,16 @@ def collapse_storm_group(
             )
             prepared.append((path, target, event))
         if state_changed:
-            publications.append(save_incident_state(paths, incident_state))
+            # Route through the cycle exactly as the two sibling branches of
+            # this function already do. Without this gate a caller holding an
+            # IncidentStateCycle still bare-wrote the primary here, destroying
+            # the _controllerState envelope: the sole ungated save_incident_state
+            # of the 12 executable call sites in this file, and the one that took the dispatcher into
+            # a schema_incompatible crash loop on 2026-08-30.
+            if incident:
+                incident.commit()
+            else:
+                publications.append(save_incident_state(paths, incident_state))
         require_all_advance(publications)
         for path, target, event in prepared:
             os.replace(path, target)
@@ -6399,6 +7281,74 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
+    # A reclaimed file whose delivery is ALREADY terminal is the crash window
+    # between the terminal state commit and the archive rename: the operator has
+    # been paged, only the rename was lost. Handle it here, while the record is
+    # still the producer's, because mark_attempt below overwrites the status
+    # with "sending" -- which is why the conversation-scope guard could never
+    # see it and why the replay re-paged.
+    replay_delivery = event.get("delivery")
+    if (
+        isinstance(replay_delivery, dict)
+        and str(replay_delivery.get("status") or "") in TERMINAL_DELIVERY_STATUSES
+    ):
+        terminal_status = str(replay_delivery.get("status"))
+        # incident_state is not bound until after the attempt publication below,
+        # so resolve it here the same way that line does.
+        replay_state = incident.payload if incident else load_incident_state(paths)
+        # Idempotent repair: representation is recorded on delivery, and the
+        # commit that would have recorded it may be exactly what the crash lost.
+        #
+        # Restore the incident marker FIRST. The pre-save normaliser sweeps on
+        # every write and the sweep drops any key absent from openIncidents, so
+        # recording the conversation without the marker meant the repair was
+        # erased by the very commit that persisted it. The marker is precisely
+        # what the crash lost, so re-establishing it here is the repair, not an
+        # extra effect: without it the next event for this conversation pages a
+        # second time for an alert already delivered.
+        replay_key = incident_key(event)
+        # Re-apply the CANONICAL transition for whatever kind reached this
+        # branch. The previous version reimplemented the alert half inline, so a
+        # delivered clear archived with its incident permanently open -- and a
+        # kind-wise patch would have reproduced that enumeration one kind wider.
+        # mark_incident_sent already switches on kind: it records the
+        # conversation for every event, opens for an alert, pops for a clear.
+        #
+        # IDEMPOTENCY: it is NOT idempotent for alerts (renotifyCount increments
+        # and lastSentAt advances whenever a record exists), and this branch also
+        # fires for a crash AFTER the state commit, where the record already
+        # names this event. Skip the transition in exactly that case; the clear
+        # pop and the scope recorder are idempotent and always run.
+        replay_open = replay_state.get("openIncidents")
+        replay_record = replay_open.get(replay_key) if isinstance(replay_open, dict) else None
+        already_committed = (
+            is_incident_alert(event)
+            and not is_incident_clear(event)
+            and isinstance(replay_record, dict)
+            and str(replay_record.get("eventId") or "") == str(event.get("id") or "")
+        )
+        if already_committed:
+            record_conversation_scope_delivered(
+                event, replay_state, replay_key, int(time.time())
+            )
+        else:
+            mark_incident_sent(event, replay_state)
+        if incident:
+            incident.commit()
+        else:
+            require_all_advance([save_incident_state(paths, replay_state)])
+        replay_path = archive_path(paths["sent"], path.name, "sent", event)
+        os.replace(claimed, replay_path)
+        append_dispatch_log(paths, {
+            "type": "terminal_replay_archived",
+            "eventId": event.get("id"),
+            "path": str(replay_path),
+            "deliveryStatus": terminal_status,
+            "restoredFrom": "terminal_replay",
+            "alreadyCommitted": already_committed,
+        })
+        return True, f"terminal_replay_archived; deliveryStatus={terminal_status}"
+
     event = mark_attempt(event)
     attempt_target = _durable_target(claimed)
     attempt_observation = observe_json(attempt_target)
@@ -6589,6 +7539,15 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             # primary-channel sent path. Returning without the archive
             # move would leak the claimed file into processing/, where
             # reclaim_processing would resurrect and re-send it (#2435).
+            #
+            # Email is a real operator-visible route, so it must leave the same
+            # incident state as a primary-route delivery. This branch returns
+            # before the ordinary mark_incident_sent call, so it applies the
+            # CANONICAL transition itself rather than a part of it: recording
+            # only the conversation left an emailed alert with no open incident
+            # and an emailed clear with its incident still open, so the state
+            # depended on which route happened to succeed.
+            mark_incident_sent(event, incident_state)
             if isinstance(delivery, dict):
                 delivery["nextAttemptAtEpoch"] = 0
                 delivery["status"] = "email_delivered"
@@ -6827,6 +7786,29 @@ def run_once(max_events: int) -> dict[str, Any]:
                         "source": "dispatcher",
                     })
 
+            # Retention is a per-CYCLE obligation, not a per-save side effect.
+            # The sweep otherwise rides along on incident-state writes, and a
+            # fully idle cycle performs none: the only other commit in this
+            # function is gated on the test-leak marker above. An orphaned or
+            # expired subtree on a quiet instance was therefore retained
+            # forever, which is precisely what the documented retention window
+            # says cannot happen. Commit only when the sweep actually removed
+            # something, so an idle cycle stays a no-op write-wise.
+            try:
+                if sweep_conversation_scopes(_incident_cycle.payload, int(time.time())):
+                    _incident_cycle.commit()
+            except ControllerStateRequired:
+                # NEVER swallowed. A refused state publication is the fail-closed
+                # path: reporting a completed cycle after it would hide exactly
+                # the condition the controller guard exists to surface.
+                raise
+            except (TypeError, ValueError, KeyError, AttributeError) as exc:
+                # Only bookkeeping-shaped faults are absorbed, and only so that
+                # housekeeping cannot block a state write. A blanket handler here
+                # also swallowed OSError and every other class, so a cycle that
+                # failed for an unrelated reason still reported completion.
+                log_conversation_scope_error("cycle_sweep", "", exc, False)
+
             suppressed_pruned = prune_suppressed(paths)
 
             record_state(
@@ -6894,6 +7876,20 @@ def run_daemon(interval: int, max_events: int) -> None:
                 "exit": STATE_RECOVERY_REQUIRED_EXIT,
             }), flush=True)
             sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
+        except IncidentCycleRequiredError as exc:
+            # A refused post-adoption bare write is a programming error, not a
+            # transient fault. Swallowing it below kept the daemon alive with
+            # every cycle failing while record_state dropped cycleCompletedAt,
+            # which parks the deadman on the cycle_incomplete branch that a 30s
+            # interval never trips. Exit instead: the state file keeps its last
+            # cycleCompletedAt, the unit restarts, and the restart-bounded grace
+            # reports cycle_stale once the staleness outgrows the restart.
+            print(json.dumps({
+                "time": now_iso(),
+                "error": str(exc),
+                "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
             record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
@@ -6920,6 +7916,16 @@ def main() -> int:
 
     try:
         result = run_once(args.max_events)
+    except IncidentCycleRequiredError as exc:
+        # The exit-79 contract holds in --once exactly as in --daemon: a refused
+        # post-adoption bare write is reported as itself, not as a traceback
+        # with exit 1 that a wrapper script would read as an ordinary failure.
+        print(json.dumps({
+            "time": now_iso(),
+            "error": str(exc),
+            "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+        }))
+        return INCIDENT_CYCLE_REQUIRED_EXIT
     except ControllerStateRequired as exc:
         import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)

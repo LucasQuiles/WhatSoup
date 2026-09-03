@@ -135,6 +135,9 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       'Journaled agent turn rejected before dispatch',
       expect.stringContaining('inbound_seq=41 reason=queue_closed automatic_replay=false'),
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: '15550190099' },
     );
   });
 
