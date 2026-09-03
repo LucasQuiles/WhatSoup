@@ -7558,7 +7558,11 @@ def run_once(max_events: int) -> dict[str, Any]:
                 # path: reporting a completed cycle after it would hide exactly
                 # the condition the controller guard exists to surface.
                 raise
-            except Exception as exc:
+            except (TypeError, ValueError, KeyError, AttributeError) as exc:
+                # Only bookkeeping-shaped faults are absorbed, and only so that
+                # housekeeping cannot block a state write. A blanket handler here
+                # also swallowed OSError and every other class, so a cycle that
+                # failed for an unrelated reason still reported completion.
                 log_conversation_scope_error("cycle_sweep", "", exc, False)
 
             suppressed_pruned = prune_suppressed(paths)

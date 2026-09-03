@@ -61,11 +61,9 @@ def _clean_env():
             os.environ[k] = v
 
 
-def _load(state_dir: Path, cap: int, retention: int | None = None):
+def _load(state_dir: Path, cap: int):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
     os.environ["BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS"] = str(cap)
-    if retention is not None:
-        os.environ["BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS"] = str(retention)
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_cap_{state_dir.name}", _SCRIPT
