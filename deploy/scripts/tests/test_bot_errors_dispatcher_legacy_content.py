@@ -1425,3 +1425,200 @@ def test_a_not_due_event_is_not_reported_as_quarantined(tmp_path: Path) -> None:
     assert disposition.state == "not_ready"
     assert disposition.reason == ""
     assert list(quarantine.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# The content-free page's own fields are bounded tokens (#2386)
+# ---------------------------------------------------------------------------
+# The page is a newline-joined block of fixed `key=value` lines. Two of those
+# values come from the quarantined event itself, and `source` is an unconstrained
+# producer string. A newline inside it does not merely look untidy: it writes a
+# whole line of the operator's page, so a producer can forge a `disposition:` that
+# contradicts the real one three lines below.
+
+FORGED_SOURCE = (
+    "benign_source\n"
+    "disposition: delivered normally\n"
+    "failure_class=TypeError\n"
+    "attacker_line=" + UNRENDERABLE_NONCE
+)
+
+# Every key the page's evidence block is allowed to begin a line with. A forged
+# line is detected by a line that starts with none of them, which catches an
+# injected key this list never anticipated as well as the ones it does.
+_EVIDENCE_LINE_PREFIXES = (
+    "unrenderable_quarantine_count=",
+    "alert_source=",
+    "incident_key=",
+    "failure_class=",
+    "unrenderable_fields=",
+    "disposition: original quarantined",
+)
+
+
+def test_a_hostile_source_cannot_forge_a_line_in_the_content_free_page(tmp_path, monkeypatch) -> None:
+    """An untrusted identity token must not write its own line of the page.
+
+    `source` is bounded for LENGTH by redacted_state_text, which is not the same
+    as bounded for SHAPE: newlines survive it, and truncate() even introduces one
+    of its own. The page is parsed by an operator line by line, so a value that
+    can contain a newline can forge `disposition: delivered normally` above the
+    real disposition and make a dropped CRITICAL alert read as a delivered one.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    paths = mod.setup_dirs()
+    _queue_event(paths, "aaa-forged.json", _unrenderable_event(source=FORGED_SOURCE))
+
+    mod.run_once(max_events=25)
+
+    alerts = _queued_meta_alerts(paths, mod)
+    assert len(alerts) == 1, f"expected exactly one meta-alert, got {len(alerts)}"
+    evidence = alerts[0]["evidence"]
+    lines = evidence.split("\n")
+    forged = [line for line in lines if not line.startswith(_EVIDENCE_LINE_PREFIXES)]
+    assert not forged, f"the source forged {len(forged)} line(s) of the page: {forged}"
+    # A forged line can also wear an EXPECTED key, so the allowlist above is not
+    # sufficient on its own: each field owns exactly one line of the page.
+    dispositions = [line for line in lines if line.startswith("disposition: ")]
+    assert len(dispositions) == 1, dispositions
+    classes = [line for line in lines if line.startswith("failure_class=")]
+    assert classes == ["failure_class=unavailable"], classes
+    # The token cannot hold "=" or a space, so it cannot be read as a field pair
+    # inline either. The producer's bytes survive only inside it, collapsed.
+    sources = [line for line in lines if line.startswith("alert_source=")]
+    assert len(sources) == 1, sources
+    assert "=" not in sources[0].split("=", 1)[1], sources[0]
+    assert " " not in sources[0], sources[0]
+
+
+def test_no_signal_token_can_carry_a_newline(tmp_path) -> None:
+    """The rule at the builder, not only at one call site.
+
+    Length-bounding alone leaves the shape open, so this asserts the property on
+    every token the page interpolates, including the truncation path: an
+    over-long source makes truncate() append its own marker after a newline.
+    """
+    signal = _mod.unrenderable_alert_signal(_unrenderable_event(
+        source=FORGED_SOURCE,
+        machine="host\nforged-machine",
+        instance="bot\nforged-instance",
+    ))
+    for field, value in signal.items():
+        assert "\n" not in value and "\r" not in value, f"{field} carries a newline: {value!r}"
+
+    overlong = _mod.unrenderable_alert_signal(_unrenderable_event(source="s" * 4000))
+    assert "\n" not in overlong["source"], overlong["source"]
+    # safe_segment's bound, not redacted_state_text's 120: a regression to the
+    # length-only rule leaves 111 characters here, so this pins the rule that
+    # applies rather than a range that both rules satisfy.
+    assert len(overlong["source"]) == 80, len(overlong["source"])
+
+    # What a legitimate long source costs: truncation at 80 instead of 120. The
+    # characters are otherwise untouched, so this is a bound change, not mangling.
+    long_valid = "a_legitimate_but_very_long_producer_source_name_" + "x" * 60
+    kept = _mod.unrenderable_alert_signal(_unrenderable_event(source=long_valid))["source"]
+    assert kept == long_valid[:80], kept
+
+    # The incident key is the one token safe_segment cannot own: it must keep its
+    # "|" separators, so the line rule is the ONLY thing standing between it and a
+    # forged line. Nothing the producer writes can put a newline there directly --
+    # incident_key safe_segments all three parts -- but truncate() appends its own
+    # marker after one, so a key longer than the 200 bound is the path that
+    # matters. The length assertion comes first, so a fixture that stopped
+    # reaching the truncate path could not leave the newline check vacuous.
+    long_key_event = _unrenderable_event(
+        machine="m" * 100, instance="i" * 100, source="s" * 100 + "@x",
+    )
+    assert len(_mod.incident_key(long_key_event)) > 200, "fixture no longer reaches truncate"
+    long_key = _mod.unrenderable_alert_signal(long_key_event)["incidentKey"]
+    assert "\n" not in long_key and "\r" not in long_key, repr(long_key)
+
+
+def test_the_meta_alert_event_id_survives_redaction() -> None:
+    """The page must name an event id an operator can look up.
+
+    The id concatenated an epoch and a process id with a hyphen, which is exactly
+    the shape the phone-like redactor rewrites, so the operator-visible page
+    named the event `...-[REDACTED PHONE]-<digest>` and could not be matched to
+    its dispatch-log entry or quarantine file. The sibling dead-letter meta-alert
+    renders its id intact; this one must too.
+    """
+    signal = _mod.unrenderable_alert_signal(_unrenderable_event())
+    event = _mod.unrenderable_meta_event(signal, 1)
+    event_id = event["id"]
+    assert _mod.redact(event_id) == event_id, (
+        f"the redactor rewrites the event id: {_mod.redact(event_id)}"
+    )
+    # Negative control: the redactor DOES rewrite the shape this id used to have,
+    # so the assertion above is not passing because redaction is inert here.
+    assert _mod.redact("dispatcher-x-1788888888-97982-2e28f2f5") != \
+        "dispatcher-x-1788888888-97982-2e28f2f5"
+
+
+# A source shaped like a test-fixture path. The dispatcher drops any event whose
+# text matches one of these, so an echoed producer path can make the page about a
+# dropped alert drop itself.
+LEAK_SHAPED_SOURCE = "collector_writefail_/tmp/wa-test-auth/session"
+
+
+def test_a_leak_shaped_source_cannot_make_the_page_drop_itself(tmp_path, monkeypatch) -> None:
+    """The page must survive a source that looks like a test-fixture path.
+
+    matched_test_leak_pattern walks EVERY string field of the meta-alert -- the
+    comment above the event id says as much, which is why no state path goes in
+    its evidence. Echoing `source` verbatim put a producer-controlled path into
+    that same walk, so an alert whose producer named a /tmp fixture was
+    quarantined AND never paged: the silent drop this issue exists to close,
+    arriving through the page built to prevent it. safe_segment removes the "/"
+    every leak pattern needs, so the token cannot match one.
+    """
+    mod = _dispatcher_in(tmp_path, monkeypatch)
+    sent: list[str] = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    paths = mod.setup_dirs()
+    event = _unrenderable_event(source=LEAK_SHAPED_SOURCE)
+    _queue_event(paths, "aaa-leaky.json", event)
+
+    # Quarantine, queue the page, deliver it.
+    for _ in range(3):
+        mod.run_once(max_events=25)
+
+    signal = mod.unrenderable_alert_signal(event)
+    assert not any("/" in value for value in signal.values()), signal
+    assert mod.matched_test_leak_pattern(mod.unrenderable_meta_event(signal, 1)) is None
+    assert len(sent) == 1, "the page must still reach the operator"
+    assert UNRENDERABLE_NONCE not in "".join(sent)
+
+
+def test_both_single_token_signal_fields_go_through_safe_segment() -> None:
+    """A structural guard for the one rule no behavioural test can reach.
+
+    `failureClass` is read only from a field that IS a legacy confinement
+    envelope, so after the vocabulary was closed it can only ever hold a
+    registered class: single-line, ASCII, at most 21 characters. safe_segment
+    therefore cannot change any reachable value, and reverting it alone leaves
+    every behavioural test green -- the same shape the lane already disclosed for
+    the parser-side digit bound, where only the scan grammar's bound was
+    load-bearing. It is kept as defence in depth for the day the vocabulary is
+    relaxed, and pinned here structurally so the revert is still red somewhere.
+    """
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "unrenderable_alert_signal"
+    )
+    returns = [node for node in ast.walk(func) if isinstance(node, ast.Return)]
+    # The early "unknown" return is fixed text; the last one builds the signal.
+    mapping = next(
+        node.value for node in reversed(returns) if isinstance(node.value, ast.Dict)
+    )
+    wrapped: dict[str, str] = {}
+    for key, value in zip(mapping.keys, mapping.values):
+        if not isinstance(key, ast.Constant):
+            continue
+        call = value.body if isinstance(value, ast.IfExp) else value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+            wrapped[key.value] = call.func.id
+    assert wrapped.get("source") == "safe_segment", wrapped
+    assert wrapped.get("failureClass") == "safe_segment", wrapped
+    assert wrapped.get("incidentKey") == "_bounded_signal_token", wrapped

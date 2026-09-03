@@ -705,6 +705,26 @@ UNRENDERABLE_META_ALERT_THROTTLE_SECONDS = DEAD_LETTER_META_ALERT_THROTTLE_SECON
 UNRENDERABLE_SIGNAL_FIELDS = ("summary", "evidence")
 
 
+# Any run of whitespace or C0/C1 control characters. The page below is a
+# newline-joined block of `key=value` lines, so this is the difference between a
+# value and a LINE.
+_SIGNAL_BREAK_RE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
+
+
+def _bounded_signal_token(value: Any, limit: int) -> str:
+    """One bounded, SINGLE-LINE token for the content-free page (#2386).
+
+    Bounding the LENGTH is not bounding the SHAPE. `source` is an unconstrained
+    producer string, and an operator reads the page line by line, so a newline
+    inside it writes a line of the page: a producer that puts
+    "disposition: delivered normally" in its source forges a contradiction of the
+    real disposition three lines below, on a page about an alert that was dropped.
+    The collapse runs AFTER redacted_state_text because truncate() puts a newline
+    before its own marker, so the length bound is itself a newline source.
+    """
+    return _SIGNAL_BREAK_RE.sub(" ", redacted_state_text(value, limit)).strip() or "unknown"
+
+
 def unrenderable_alert_signal(event: Any) -> dict[str, str]:
     """The content-free operator signal a quarantined event still carries.
 
@@ -743,9 +763,18 @@ def unrenderable_alert_signal(event: Any) -> dict[str, str]:
     except Exception:  # noqa: BLE001 -- identity helpers must not break quarantine
         return unknown
     return {
-        "source": redacted_state_text(source or "unknown", 120),
-        "incidentKey": redacted_state_text(key or "unknown", 200),
-        "failureClass": redacted_state_text(failure_class, 64) if failure_class else "unavailable",
+        # safe_segment is this module's strict single-token rule, and it is what
+        # incident_key already applies to this same value. An unconstrained
+        # producer string must not be able to write a line of the page, and a
+        # token that cannot hold "=" or a space cannot be misread as another
+        # field either. The producer's bytes can still appear INSIDE the token,
+        # collapsed exactly as the incident_key line already shows them.
+        "source": safe_segment(redacted_state_text(source or "unknown", 120)),
+        # The key keeps its "|" separators, so it gets the line rule only. Its
+        # three parts are safe_segment'd by incident_key; truncate() is the only
+        # newline that can reach it.
+        "incidentKey": _bounded_signal_token(key or "unknown", 200),
+        "failureClass": safe_segment(redacted_state_text(failure_class, 64)) if failure_class else "unavailable",
         "unrenderableFields": ",".join(unrenderable),
     }
 
@@ -6080,7 +6109,12 @@ def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any
     key_digest = hashlib.sha256(signal.get("incidentKey", "").encode("utf-8")).hexdigest()[:8]
     return {
         **new_event_fields("alert", "critical"),
-        "id": f"dispatcher-unrenderable-alert-content-{now}-{os.getpid()}-{key_digest}",
+        # The process id carries a "p": an epoch joined to a bare number by a
+        # hyphen is 10-15 digits with separator syntax, which is exactly what the
+        # phone-like redactor rewrites, so the page named the event
+        # "...-[REDACTED PHONE]-<digest>" and no operator could match it to its
+        # dispatch-log entry or quarantine file. The letter ends the digit run.
+        "id": f"dispatcher-unrenderable-alert-content-{now}-p{os.getpid()}-{key_digest}",
         "createdAt": now_iso(),
         "machine": socket.gethostname(),
         "platform": sys.platform,
