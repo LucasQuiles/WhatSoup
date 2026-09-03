@@ -281,9 +281,10 @@ export interface LaunchdReconcileResult {
   dryRun: boolean;
   /**
    * Governed-environment comparison between the fresh render and the
-   * previously installed plist (CLAUDE_CONFIG_DIR, PATH — by key and value
-   * digest, never values). Set on every successful reconcile, dry-run
-   * included.
+   * previously installed plist (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND
+   * — by key and value digest, never values). The key set is
+   * GOVERNED_LAUNCHD_ENV_KEYS; keep this list and that constant in step. Set on
+   * every successful reconcile, dry-run included.
    */
   governedEnvDrift?: GovernedEnvComparison;
 }

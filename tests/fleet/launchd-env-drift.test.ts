@@ -1,7 +1,8 @@
 /**
  * Governed-env drift comparator: detects missing/extra/mismatched governed
- * EnvironmentVariables keys (CLAUDE_CONFIG_DIR, PATH) between a freshly
- * rendered plist and the installed one, by key and SHA-256 value digest only.
+ * EnvironmentVariables keys (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND)
+ * between a freshly rendered plist and the installed one, by key and SHA-256
+ * value digest only.
  * Installed bot plists carry live credentials, so no report may ever contain
  * a raw environment value — several tests below assert exactly that.
  */
