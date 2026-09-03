@@ -7870,16 +7870,7 @@ export class AgentRuntime implements Runtime {
     }
     this.ownedSessionManagers.set(managerId, session);
     this.chatSessions.set(mapKey, session);
-    // Rebuilding the chat is the documented repair for an abandoned respawn
-    // ("the next inbound message rebuilds this chat"), so the abandonment stops
-    // counting the moment a new owned session is indexed for it — not an hour
-    // later on a timer. Guarded on an actual removal, so ordinary session
-    // creation is unaffected.
-    if (this.abandonedRespawnOwners.delete(mapKey)) {
-      if (this.exhaustedRespawnOwners.size === 0 && this.perChatRespawnAbandonedCount() === 0) {
-        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
-      }
-    }
+    this.settleAbandonedRespawn(mapKey);
     session.bindGenerationOwnership(() => {
       const currentMapKey = this.findMapKeyForSession(session);
       if (!currentMapKey) return null;
@@ -8170,7 +8161,35 @@ export class AgentRuntime implements Runtime {
     if (owner.state !== 'active') {
       this.sessionOwnership.transition(mapKey, expected.managerId, 'active');
     }
+    // The chat is serving again. This is the OTHER recovery route and the one an
+    // abandoned chat actually takes: because abandonment retains the session
+    // entry, the next inbound turn finds it and respawns IN PLACE, never
+    // reaching `setOwnedPerChatSession`. Settling only there left the
+    // abandonment cleared by neither the repair nor the retention window.
+    this.settleAbandonedRespawn(mapKey);
     return mapKey;
+  }
+
+  /**
+   * Retire an abandonment because its chat is serving again, and clear the
+   * shared alert when nothing is left raising it.
+   *
+   * Called from BOTH recovery choke points — session creation
+   * (`setOwnedPerChatSession`) and in-place re-activation
+   * (`markOwnedPerChatSessionActive`, whose only caller is
+   * `activateSpawnedOwnedPerChatSession`). Together they cover every route back
+   * to service; neither covers it alone.
+   *
+   * The clear is gated on BOTH populations because the alert source is shared
+   * with crash exhaustion, and it is explicit-clear rather than self-expiring,
+   * so clearing early retracts a page that is still true. Guarded on an actual
+   * removal, so ordinary activation costs nothing.
+   */
+  private settleAbandonedRespawn(mapKey: string): void {
+    if (!this.abandonedRespawnOwners.delete(mapKey)) return;
+    if (this.exhaustedRespawnOwners.size === 0 && this.perChatRespawnAbandonedCount() === 0) {
+      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+    }
   }
 
   private async activateSpawnedOwnedPerChatSession(

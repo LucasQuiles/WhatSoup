@@ -262,8 +262,13 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  * narrow class below, and admitting a reason on a looser reading would open a
  * genuine silence hole.
  *
- * The two members clear by different mechanisms, and the distinction is the
- * point:
+ * MEMBERSHIP RULE, restated because it is the thing a future candidate is
+ * judged against: a reason belongs here if and only if its condition is
+ * SETTLED by the repair that fixes it, so the reason disappears on its own once
+ * the system is healthy again. Being a runtime reason is not sufficient.
+ *
+ * The two members satisfy it by different mechanisms, and the distinction is
+ * the point:
  *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
  *     every poll (the runtime walks its session map), so a still-broken map
  *     degrades again immediately.
