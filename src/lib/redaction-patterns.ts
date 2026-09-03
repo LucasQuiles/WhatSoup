@@ -19,3 +19,22 @@
 export function jidPattern(): RegExp {
   return /\b\d{5,}(?:-\d+)?(?::\d+)?@(s\.whatsapp\.net|g\.us|lid)\b/gi;
 }
+
+/**
+ * Canonical home-directory path pattern.
+ *
+ * Matches only the account segment of a POSIX home path — `/Users/<name>` on
+ * macOS, `/home/<name>` on Linux — so a caller can scrub the identity while
+ * keeping the rest of the path diagnostic.
+ *
+ * Node's fs and child-process errors quote absolute paths, so an ENOENT or
+ * EACCES message carries the OS account name into every sink that retains
+ * error text. Log stacks are dropped for exactly this reason; retained error
+ * messages need the same treatment or the class comes back through the message.
+ *
+ * Returns a FRESH RegExp on every call so the global (`/g`) `lastIndex` state is
+ * never shared across call sites.
+ */
+export function homePathPattern(): RegExp {
+  return /(\/(?:Users|home))\/[^/\s'"`]+/gi;
+}
