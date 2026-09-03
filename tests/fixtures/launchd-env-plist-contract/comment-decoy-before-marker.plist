@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.agent-alpha</string>
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+  <!--
+  <key>EnvironmentVariables</key>
+  <dict/>
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/bin:/usr/bin</string>
+    <key>OPERATOR_SECRET</key><string>keep-me</string>
+  </dict>
+</dict>
+</plist>

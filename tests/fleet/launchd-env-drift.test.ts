@@ -7,8 +7,11 @@
  * a raw environment value — several tests below assert exactly that.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { compareGovernedLaunchdEnv } from '../../src/fleet/launchd-env-drift.ts';
+import { GOVERNED_LAUNCHD_ENV_KEYS, compareGovernedLaunchdEnv } from '../../src/fleet/launchd-env-drift.ts';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf-8').digest('hex');
@@ -831,5 +834,218 @@ describe('compareGovernedLaunchdEnv', () => {
     const comparison = compareGovernedLaunchdEnv(expected, nested);
     expect(comparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
     expect(comparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+  });
+});
+
+// --- ONE reader contract, proved against ONE corpus (queue row 129) ---
+//
+// `src/fleet/launchd-env-drift.ts` and `deploy/scripts/bot-errors-health-check.py`
+// are two independently written parsers for the same security-sensitive file.
+// They drifted apart one hand-mirrored fix at a time -- duplicate-key refusal
+// reached both sides months apart, and a missing marker meant "empty" on one
+// side and "unreadable" on the other. The corpus below is plain .plist files in
+// one directory with a manifest naming the required answer, driven by BOTH
+// suites: this file through `compareGovernedLaunchdEnv`, and
+// `deploy/scripts/tests/test_bot_errors_health_check_provider_probe.py` through
+// `instance_plist_environment`. A divergence is then a test failure rather than
+// a discovery. The answers come from
+// docs/runbooks/launchd-governed-env-reader-contract.md.
+interface ContractCase {
+  name: string;
+  fixture: string;
+  answer: 'refuse' | 'empty' | 'map';
+  why: string;
+  environment?: Record<string, string>;
+  /**
+   * A cell deliberately left divergent, carrying the OTHER reader's answer.
+   * `environment` above stays this reader's answer, so fixing only one side
+   * turns that side's row red and forces the decision instead of hiding it.
+   */
+  openDivergence?: { id: string; python: Record<string, string> };
+}
+
+interface ContractManifest {
+  contract: string;
+  instance: string;
+  answers: readonly string[];
+  cases: readonly ContractCase[];
+}
+
+interface CorpusObservation {
+  name: string;
+  declared: ContractCase['answer'];
+  observed: string;
+  /** Serialised comparisons, so the privacy test can read what was reported. */
+  reported: string;
+}
+
+describe('launchd governed-env reader contract corpus', () => {
+  const CORPUS_DIR = fileURLToPath(new URL('../fixtures/launchd-env-plist-contract/', import.meta.url));
+
+  /**
+   * The governed key set OWNED BY THIS TEST, written as a literal.
+   *
+   * The corpus expectations are computed from this constant and never from
+   * GOVERNED_LAUNCHD_ENV_KEYS. Deriving the domain from the value under test
+   * makes the oracle follow the implementation: widen the production set
+   * wrongly and the rows that prove the widening wrong change meaning while the
+   * suite stays green. The equality assertion below pins production to it.
+   */
+  const GOVERNED_KEYS_UNDER_CONTRACT = ['CLAUDE_CONFIG_DIR', 'PATH', 'WHATSOUP_PATH_PREPEND'];
+
+  function readManifest(): ContractManifest {
+    return JSON.parse(readFileSync(path.join(CORPUS_DIR, 'manifest.json'), 'utf-8')) as ContractManifest;
+  }
+
+  /** The generator's escaping, so a declared value round-trips through a render. */
+  function escapeXmlValue(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function renderContractPlist(environment: Record<string, string>): string {
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>Label</key>',
+      '  <string>com.whatsoup.agent-alpha</string>',
+      '  <key>EnvironmentVariables</key>',
+      '  <dict>',
+      ...Object.entries(environment).flatMap(([key, value]) => [
+        `    <key>${key}</key>`,
+        `    <string>${escapeXmlValue(value)}</string>`,
+      ]),
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  /** A render that carries a governed key, for probing a refusal or an empty map. */
+  const PROBE_RENDER = renderContractPlist({ PATH: '/opt/probe-bin:/usr/bin' });
+
+  /**
+   * Arrange, act, and RETURN the observations. Every assertion lives in a named
+   * test below rather than inside this loop, so a case that stops running shows
+   * up as a coverage failure instead of vanishing quietly.
+   */
+  function runContractCorpus(): CorpusObservation[] {
+    const manifest = readManifest();
+    return manifest.cases.map((contractCase) => {
+      const fixture = readFileSync(path.join(CORPUS_DIR, contractCase.fixture), 'utf-8');
+      const environment = contractCase.environment ?? {};
+      const reported: string[] = [];
+      const record = <T>(comparison: T): T => {
+        reported.push(JSON.stringify(comparison));
+        return comparison;
+      };
+
+      if (contractCase.answer === 'refuse') {
+        const comparison = record(compareGovernedLaunchdEnv(PROBE_RENDER, fixture));
+        return {
+          name: contractCase.name,
+          declared: contractCase.answer,
+          observed: comparison.comparable ? 'readable' : 'refuse',
+          reported: reported.join(''),
+        };
+      }
+
+      // Against a render of the DECLARED environment the reader must agree with
+      // it exactly: no governed drift (governed values compare by digest of the
+      // decoded text) and nothing dropped.
+      const mirror = record(compareGovernedLaunchdEnv(renderContractPlist(environment), fixture));
+      // Against a render carrying only the governed subset, the non-governed
+      // names the fixture declares must be the ones an apply would drop.
+      const governedOnly = Object.fromEntries(
+        Object.entries(environment).filter(([key]) => GOVERNED_KEYS_UNDER_CONTRACT.includes(key)),
+      );
+      const stripped = record(compareGovernedLaunchdEnv(renderContractPlist(governedOnly), fixture));
+      const expectedDropped = Object.keys(environment)
+        .filter((key) => !GOVERNED_KEYS_UNDER_CONTRACT.includes(key))
+        .sort();
+
+      let observed: string;
+      if (!mirror.comparable || !stripped.comparable) {
+        observed = 'refuse';
+      } else if (mirror.drift.length > 0 || mirror.droppedNonGovernedKeys.length > 0) {
+        observed = `disagrees(drift=${mirror.drift.map((entry) => `${entry.key}:${entry.state}`).join('|') || 'none'},dropped=${mirror.droppedNonGovernedKeys.join('|') || 'none'})`;
+      } else if (JSON.stringify(stripped.droppedNonGovernedKeys) !== JSON.stringify(expectedDropped)) {
+        observed = `dropped=${stripped.droppedNonGovernedKeys.join('|') || 'none'}`;
+      } else if (contractCase.answer === 'empty') {
+        // An empty map is a CLAIM that the element is there and holds nothing,
+        // so every governed key of a real render must read as missing. Without
+        // this the row would be indistinguishable from a fixture that happens to
+        // match an empty render.
+        const probe = record(compareGovernedLaunchdEnv(PROBE_RENDER, fixture));
+        observed = probe.comparable
+          && probe.drift.length === 1
+          && probe.drift[0]?.key === 'PATH'
+          && probe.drift[0]?.state === 'missing'
+          ? 'empty'
+          : 'not-empty';
+      } else {
+        observed = 'map';
+      }
+
+      return {
+        name: contractCase.name,
+        declared: contractCase.answer,
+        observed,
+        reported: reported.join(''),
+      };
+    });
+  }
+
+  it('answers every corpus fixture exactly as the manifest declares', () => {
+    const observations = runContractCorpus();
+    expect(observations.map((observation) => `${observation.name}=${observation.observed}`))
+      .toEqual(observations.map((observation) => `${observation.name}=${observation.declared}`));
+  });
+
+  it('runs one case for every manifest entry', () => {
+    // COVERAGE ASSERTION, not a positive control. A positive control catches a
+    // corpus that fails to parse; only a count catches a case that silently
+    // stopped running, which is how a table-driven corpus decays into theatre.
+    const manifest = readManifest();
+    expect(manifest.cases.length).toBeGreaterThan(0);
+    expect(runContractCorpus()).toHaveLength(manifest.cases.length);
+  });
+
+  it('names exactly the fixtures the corpus directory holds', () => {
+    // The other half of coverage: a manifest entry count alone stays green when
+    // a fixture file is deleted along with its row. Reading the DIRECTORY makes
+    // an orphaned or an unlisted fixture a failure.
+    const manifest = readManifest();
+    const onDisk = readdirSync(CORPUS_DIR).filter((entry) => entry.endsWith('.plist')).sort();
+    expect(onDisk).toEqual(manifest.cases.map((contractCase) => contractCase.fixture).sort());
+  });
+
+  it('governs exactly the keys the corpus expectations are written against', () => {
+    // Pins production to the test-owned constant above, so widening
+    // GOVERNED_LAUNCHD_ENV_KEYS cannot quietly change what the corpus means.
+    expect([...GOVERNED_LAUNCHD_ENV_KEYS].sort()).toEqual([...GOVERNED_KEYS_UNDER_CONTRACT].sort());
+  });
+
+  it('reports no environment value from any corpus fixture', () => {
+    // The corpus carries a non-governed key on several fixtures. Its VALUE must
+    // never reach a comparison: non-governed keys contribute names only.
+    const reported = runContractCorpus().map((observation) => observation.reported).join('');
+    expect(reported).not.toContain('keep-me');
+  });
+
+  it('states an answer from the contract vocabulary for every case', () => {
+    // "Unspecified" is not a cell. A fixture added without deciding its answer
+    // fails here rather than being carried as an untested file.
+    const manifest = readManifest();
+    for (const contractCase of manifest.cases) {
+      expect(manifest.answers).toContain(contractCase.answer);
+      expect(contractCase.why.length).toBeGreaterThan(0);
+    }
   });
 });

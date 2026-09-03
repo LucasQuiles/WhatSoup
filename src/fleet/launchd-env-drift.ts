@@ -9,6 +9,13 @@
  * keys without exposing a single environment value. Non-governed keys
  * contribute only their NAMES, and only when a re-render would drop them from
  * the job.
+ *
+ * The answer this reader owes for every input shape — refuse, empty or map —
+ * is docs/runbooks/launchd-governed-env-reader-contract.md, and
+ * deploy/scripts/bot-errors-health-check.py reads the same file to the same
+ * contract. Both are held to one corpus at
+ * tests/fixtures/launchd-env-plist-contract/. Change the contract before
+ * changing either reader.
  */
 import { createHash } from 'node:crypto';
 

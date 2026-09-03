@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -3787,3 +3788,185 @@ def test_a_masked_cdata_value_inside_the_block_still_fails_closed(monkeypatch, t
     )
 
     assert _mod.instance_plist_environment("agent-alpha") is None
+
+
+def test_a_plist_value_keeps_the_whitespace_it_was_written_with(monkeypatch, tmp_path):
+    """Divergence 3 (queue row 129). plist(5) <string> content is significant.
+
+    This reader stripped the parsed value while the TypeScript comparator kept
+    it as written, so the two disagreed about one file. The "empty or
+    whitespace-only reads as absent" policy belongs at environment_value(),
+    which is where every consumer of this map reaches its values, and the
+    assertion below pins that the accessor still applies it.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            "    <key>PATH</key><string>/fixture/pin/bin</string>",
+            "    <key>CLAUDE_CONFIG_DIR</key><string> /fixture/roots/agent </string>",
+        ],
+    )
+
+    parsed = _mod.instance_plist_environment("agent-alpha")
+    assert parsed == {
+        "PATH": "/fixture/pin/bin",
+        "CLAUDE_CONFIG_DIR": " /fixture/roots/agent ",
+    }
+    # The accessor still normalises, so no consumer sees the padding.
+    assert _mod.environment_value(parsed, "CLAUDE_CONFIG_DIR") == "/fixture/roots/agent"
+    # And a whitespace-only value still reads as absent there.
+    assert _mod.environment_value({"CLAUDE_CONFIG_DIR": "   "}, "CLAUDE_CONFIG_DIR") is None
+
+
+# --- ONE reader contract, proved against ONE corpus (queue row 129) ---
+#
+# ``src/fleet/launchd-env-drift.ts`` and this script are two independently
+# written parsers for the same security-sensitive file. They drifted apart one
+# hand-mirrored fix at a time -- duplicate-key refusal reached both sides months
+# apart, and a missing marker meant "empty" on one side and "unreadable" on the
+# other. The corpus below is plain .plist files in one directory with a manifest
+# naming the required answer, driven by BOTH suites: this one through
+# ``instance_plist_environment`` (so the Label and size gates run for real), and
+# ``tests/fleet/launchd-env-drift.test.ts`` through ``compareGovernedLaunchdEnv``.
+# A divergence is then a test failure rather than a discovery. The answers come
+# from docs/runbooks/launchd-governed-env-reader-contract.md.
+
+_CONTRACT_CORPUS_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "tests"
+    / "fixtures"
+    / "launchd-env-plist-contract"
+)
+# The three-valued answer vocabulary, OWNED BY THIS TEST as a literal. The
+# manifest's own list is asserted against it rather than trusted, so a fourth
+# answer cannot arrive in the corpus without a decision here.
+_CONTRACT_ANSWERS = ("refuse", "empty", "map")
+
+
+def _read_contract_manifest() -> dict:
+    return json.loads((_CONTRACT_CORPUS_DIR / "manifest.json").read_text())
+
+
+def _run_contract_corpus(monkeypatch, tmp_path) -> list[dict]:
+    """Arrange, act, and RETURN the observations.
+
+    Every assertion lives in a named test below rather than inside this loop, so
+    a case that stops running shows up as a coverage failure instead of
+    vanishing quietly.
+    """
+    manifest = _read_contract_manifest()
+    instance = manifest["instance"]
+    _arm_darwin_host(monkeypatch, tmp_path)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / f"com.whatsoup.{instance}.plist"
+
+    observations: list[dict] = []
+    for case in manifest["cases"]:
+        target.write_text((_CONTRACT_CORPUS_DIR / case["fixture"]).read_text())
+        parsed = _mod.instance_plist_environment(instance)
+        # A cell may be deliberately left divergent; the manifest then carries
+        # this reader's answer explicitly rather than the corpus pretending the
+        # two readers agree.
+        expected_environment = case.get("environment")
+        divergence = case.get("openDivergence")
+        if divergence is not None:
+            expected_environment = divergence["python"]
+
+        if parsed is None:
+            observed = "refuse"
+        elif parsed == {}:
+            observed = "empty"
+        elif parsed == expected_environment:
+            observed = "map"
+        else:
+            observed = f"disagrees({sorted(parsed)})"
+        observations.append(
+            {
+                "name": case["name"],
+                "declared": case["answer"],
+                "observed": observed,
+                "parsed": parsed,
+            }
+        )
+    return observations
+
+
+def test_contract_corpus_answers_every_fixture_as_the_manifest_declares(
+    monkeypatch, tmp_path
+):
+    observations = _run_contract_corpus(monkeypatch, tmp_path)
+    assert [f"{o['name']}={o['observed']}" for o in observations] == [
+        f"{o['name']}={o['declared']}" for o in observations
+    ]
+
+
+def test_contract_corpus_runs_one_case_for_every_manifest_entry(monkeypatch, tmp_path):
+    """COVERAGE ASSERTION, not a positive control.
+
+    A positive control catches a corpus that fails to parse; only a count
+    catches a case that silently stopped running, which is how a table-driven
+    corpus decays into theatre.
+    """
+    manifest = _read_contract_manifest()
+    assert len(manifest["cases"]) > 0
+    assert len(_run_contract_corpus(monkeypatch, tmp_path)) == len(manifest["cases"])
+
+
+def test_contract_corpus_names_exactly_the_fixtures_on_disk():
+    """The other half of coverage.
+
+    A manifest entry count alone stays green when a fixture file is deleted
+    along with its row, and misses a fixture that is never listed. Reading the
+    DIRECTORY makes an orphaned or an unlisted fixture a failure.
+    """
+    manifest = _read_contract_manifest()
+    on_disk = sorted(p.name for p in _CONTRACT_CORPUS_DIR.glob("*.plist"))
+    assert on_disk == sorted(case["fixture"] for case in manifest["cases"])
+
+
+def test_contract_corpus_states_an_answer_from_the_vocabulary_for_every_case():
+    """"Unspecified" is not a cell.
+
+    A fixture added without deciding its answer fails here rather than being
+    carried as an untested file.
+    """
+    manifest = _read_contract_manifest()
+    assert tuple(manifest["answers"]) == _CONTRACT_ANSWERS
+    for case in manifest["cases"]:
+        assert case["answer"] in _CONTRACT_ANSWERS, case["name"]
+        assert case["why"], case["name"]
+
+
+def test_contract_corpus_reaches_this_reader_through_its_own_guards(
+    monkeypatch, tmp_path
+):
+    """Vacuity guard for the corpus run above.
+
+    Every fixture is written to the real LaunchAgent pathname and read back
+    through instance_plist_environment, so the Label match and the size cap run.
+    A fixture whose Label named a different instance would refuse for a reason
+    that has nothing to do with its shape, and every row would pass for free.
+    """
+    manifest = _read_contract_manifest()
+    instance = manifest["instance"]
+    _arm_darwin_host(monkeypatch, tmp_path)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / f"com.whatsoup.{instance}.plist"
+    honest = (_CONTRACT_CORPUS_DIR / "honest-live-dict.plist").read_text()
+
+    target.write_text(honest)
+    assert _mod.instance_plist_environment(instance) is not None
+
+    # Relabelled: the same bytes must now refuse, which proves the guard ran.
+    target.write_text(
+        honest.replace(
+            f"<string>com.whatsoup.{instance}</string>",
+            "<string>com.whatsoup.some-other-instance</string>",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment(instance) is None

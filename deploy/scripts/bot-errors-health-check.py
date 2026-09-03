@@ -4232,6 +4232,11 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return "opencode"
 
 
+# The answer this reader owes for every input shape -- refuse, empty or map --
+# is docs/runbooks/launchd-governed-env-reader-contract.md, and
+# src/fleet/launchd-env-drift.ts reads the same file to the same contract. Both
+# are held to one corpus at tests/fixtures/launchd-env-plist-contract/. Change
+# the contract before changing either reader.
 PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
 # The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
 # `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
@@ -4479,7 +4484,13 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         # against a parser that has its own. Refusing settles it on both sides.
         if key in environment:
             return None
-        environment[key] = html.unescape(match.group(2)).strip()
+        # NOT stripped. plist(5) <string> content is significant, and the
+        # TypeScript comparator keeps the value as written, so stripping here
+        # made the two readers disagree about the same file. Every consumer of
+        # this map reaches values through environment_value(), which applies the
+        # "empty or whitespace-only reads as absent" policy at the accessor
+        # where it belongs.
+        environment[key] = html.unescape(match.group(2))
         consumed = match.end()
     if block[consumed:].strip(PLIST_XML_SPACE):
         return None
