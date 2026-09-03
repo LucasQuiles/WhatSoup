@@ -994,7 +994,7 @@
         "impactTier": "page",
         "notification": "critical",
         "rootOwner": "agent_runtime_supervisor",
-        "clearPredicate": "the abandonment entry is pruned one hour after abandonment, or the chat's next inbound message rebuilds the session; the cause is then absent from the next accepted health body degradation vector",
+        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it is settled when the chat serves again \u2014 either recovery route, in-place re-activation or session creation \u2014 and otherwise expires on age; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned",
         "requiresCorroborationBeforePaging": false
       }
     }
