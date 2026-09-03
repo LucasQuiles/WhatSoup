@@ -273,9 +273,11 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     every poll (the runtime walks its session map), so a still-broken map
  *     degrades again immediately.
  *   - `runtime.per_chat_respawn_abandoned` is NOT re-derived from live state.
- *     It is backed by a retention map emptied when a new owned session is
- *     indexed for the chat or an in-place re-activation completes, and it also
- *     expires on age. Admitted here because it self-clears, not because it is
+ *     It is backed by a retention map emptied when the chat serves again by
+ *     either route — the next inbound message respawns an inactive session in
+ *     place, or is simply served by one that never went inactive — or when a
+ *     new owned session is indexed for it, and it also expires on age.
+ *     Admitted here because it self-clears on repair, not because it is
  *     re-probed.
  *
  * Why either needs it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn

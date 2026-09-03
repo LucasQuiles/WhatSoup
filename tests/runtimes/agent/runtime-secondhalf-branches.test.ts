@@ -264,6 +264,7 @@ import {
 import {
   makeRuntimeTurnContext,
   publishSingletonTestOwner,
+  sendAndDrain,
 } from './lib/runtime-mock-scaffold.ts';
 
 // ─── Local helpers (mirror sibling suite) ───────────────────────────────────
@@ -1303,11 +1304,23 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       abandonedRespawnOwners: Map<string, number>;
       exhaustedRespawnOwners: Set<string>;
       sessionOwnership: {
-        get(mapKey: string): { managerId: string } | undefined;
+        get(mapKey: string): { managerId: string; state: string } | undefined;
         discardIfOwned(mapKey: string, managerId: string): boolean;
       };
+      perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
     };
     const ownedView = (s: PollRuntimeState): OwnedSessionView => s as unknown as OwnedSessionView;
+
+    /**
+     * Read the abandoned gauge from the runtime NOW.
+     *
+     * The helper's returned `abandonedCount` is captured during arrange, so an
+     * assertion on it after the act reads a stale number and cannot fail. Every
+     * post-act assertion goes through this instead.
+     */
+    function liveAbandonedCount(runtime: AgentRuntime): unknown {
+      return (runtime.getHealthSnapshot().details as Record<string, unknown>)['perChatRespawnAbandoned'];
+    }
 
     function seedPerChatSession(state: PollRuntimeState, mapKey: string): void {
       setOwnedTestSession(state as unknown as AgentRuntime, mapKey);
@@ -1621,6 +1634,67 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(details['perChatRespawnAbandoned']).toBe(0);
     });
 
+    it('shape (a): an inactive session respawns in place on the next turn and settles', async () => {
+      // R3-1. Covering test for the settle on the in-place re-activation route:
+      // reverting that call must fail HERE.
+      //
+      // The earlier attempt observed zero spawns and was read as a wedge. It was
+      // not: handleMessage resolves at ENQUEUE, so awaiting it bare observes
+      // nothing. sendAndDrain exists for this, and the per-chat queue needs
+      // draining after it.
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      expect(liveAbandonedCount(observed.runtime), 'abandoned before the turn').toBe(1);
+      mockClearAlertSource.mockClear();
+
+      // Stateful, flipped by the respawn itself: a mockReturnValueOnce chain is
+      // consumed by whichever read comes first and then lies to the wasInactive
+      // check.
+      let respawned = false;
+      mockSession.spawnSession.mockImplementation(async () => { respawned = true; });
+      mockSession.getStatus.mockImplementation(() => (respawned
+        ? { active: true, pid: 909, providerTerminated: false, sessionId: 'sess-recovered', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null }
+        : { active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null }));
+
+      await sendAndDrain(observed.runtime, makeMsg({ messageId: 'msg-recover-a' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await ownedView(state).perChatTurnQueues.get(observed.mapKey)?.idle();
+
+      expect(mockSession.spawnSession, 'the inbound turn respawned in place').toHaveBeenCalled();
+      expect(ownedView(state).sessionOwnership.get(observed.mapKey)?.state).toBe('active');
+      expect(liveAbandonedCount(observed.runtime), 'settled by the in-place respawn').toBe(0);
+      expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('shape (b): a session that never went inactive settles on the served turn', async () => {
+      // The abandon path fires when termination is not PROVED, and an active
+      // session is itself one of the blocking conjuncts — so a chat can be
+      // abandoned while it keeps serving. That turn skips the respawn block
+      // entirely, so the re-activation route never runs. Serving IS the
+      // recovery, so the served-turn route settles it; without that branch the
+      // gauge stays 1 while the chat demonstrably works.
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      expect(liveAbandonedCount(observed.runtime), 'abandoned before the turn').toBe(1);
+      mockClearAlertSource.mockClear();
+      mockSession.spawnSession.mockClear();
+
+      // Active throughout: no respawn can occur.
+      mockSession.getStatus.mockImplementation(() => ({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-serving', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      }));
+
+      await sendAndDrain(observed.runtime, makeMsg({ messageId: 'msg-recover-b' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await ownedView(state).perChatTurnQueues.get(observed.mapKey)?.idle();
+
+      // The discriminator: no respawn happened, and it still settled.
+      expect(mockSession.spawnSession, 'no respawn on this shape').not.toHaveBeenCalled();
+      expect(liveAbandonedCount(observed.runtime), 'settled by the served turn').toBe(0);
+      expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
     it('does not clear the shared alert while another chat is still abandoned', async () => {
       // F2, the two-chat negative. The alert source is shared with crash
       // exhaustion and is explicit-clear, so a recovery on one chat must not
@@ -1640,7 +1714,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       // B recovers through the creation route, settling B while A still stands.
       ownedView(state).setOwnedPerChatSession(otherKey, otherSession);
 
-      expect(observed.abandonedCount, 'chat A is still abandoned').toBe(1);
+      expect(liveAbandonedCount(observed.runtime), 'chat A is still abandoned').toBe(1);
       expect(mockClearAlertSource, 'must not retract a page that is still true')
         .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
@@ -1691,9 +1765,35 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       await vi.advanceTimersByTimeAsync(2_000);
 
       // Chat A is still abandoned, so the shared page must stand.
-      expect(observed.abandonedCount, 'chat A is still abandoned').toBe(1);
+      expect(liveAbandonedCount(observed.runtime), 'chat A is still abandoned').toBe(1);
       expect(mockClearAlertSource, 'a recovery elsewhere must not retract a page that is still true')
         .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('an abandonment that ages out clears the alert exactly once', async () => {
+      // R3-2. A chat that never comes back settles by expiry, and that expiry
+      // must retract the page too: otherwise the gauge reads zero while
+      // agent_respawn_failed stays raised, because the source is explicit-clear.
+      //
+      // "Exactly once" is the whole assertion. Clearing writes a durable outbox
+      // event and the prune runs on EVERY health poll, so an unguarded clear
+      // would emit one write per poll forever. The second read below is what
+      // kills that mutation: the first read expires the entry and clears, the
+      // second must add nothing.
+      const observed = await abandonRespawnAndObserve();
+      expect(liveAbandonedCount(observed.runtime), 'abandoned, nothing else raised').toBe(1);
+      mockClearAlertSource.mockClear();
+
+      await vi.advanceTimersByTimeAsync(61 * 60_000);
+
+      expect(liveAbandonedCount(observed.runtime), 'aged out of the retention window').toBe(0);
+      const clears = () => mockClearAlertSource.mock.calls
+        .filter((c) => c[1] === 'agent_respawn_failed').length;
+      expect(clears(), 'the age-out cleared the page').toBe(1);
+
+      // A later poll with nothing newly expired must not write again.
+      liveAbandonedCount(observed.runtime);
+      expect(clears(), 'one expiry, one durable write').toBe(1);
     });
 
     it('a second abandonment inside the window is not aged out by the first', async () => {

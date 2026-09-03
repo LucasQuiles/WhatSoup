@@ -5233,6 +5233,16 @@ export class AgentRuntime implements Runtime {
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
+    // A chat can be abandoned while its session still reports active: the
+    // abandon path fires when termination is not PROVED, and `status.active`
+    // being true is itself one of the conjuncts that blocks the proof. On that
+    // shape the turn below is served without a respawn, so the re-activation
+    // route never runs and the abandonment would sit raised while the chat is
+    // demonstrably serving. Serving IS the recovery, so settle it here. Cheap:
+    // the size check short-circuits on every ordinary turn.
+    if (!wasInactive && effectiveMapKey !== undefined && this.abandonedRespawnOwners.size > 0) {
+      this.settleAbandonedRespawn(effectiveMapKey);
+    }
     if (wasInactive) {
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
@@ -8077,11 +8087,28 @@ export class AgentRuntime implements Runtime {
    * Deliberately quiet: no log line, no id minted — the health snapshot calls
    * this on every poll.
    */
-  private pruneAbandonedRespawnOwners(): void {
+  private pruneAbandonedRespawnOwners(): boolean {
     const cutoff = systemClock.now() - AgentRuntime.ABANDONED_RESPAWN_RETENTION_MS;
+    let expired = false;
     for (const [mapKey, abandonedAtMs] of this.abandonedRespawnOwners) {
-      if (abandonedAtMs <= cutoff) this.abandonedRespawnOwners.delete(mapKey);
+      if (abandonedAtMs <= cutoff) {
+        this.abandonedRespawnOwners.delete(mapKey);
+        expired = true;
+      }
     }
+    // An age-out that empties both populations must clear the page too, or the
+    // gauge reads zero while `agent_respawn_failed` stays raised — the source is
+    // explicit-clear, and nothing else would retract it for a chat that never
+    // came back.
+    //
+    // Gated on `expired` because this runs on EVERY health poll and clearing
+    // writes a durable outbox event each time: without the flag a permanently
+    // empty map would emit one write per poll. One expiry, one write.
+    if (expired && this.abandonedRespawnOwners.size === 0 && this.exhaustedRespawnOwners.size === 0) {
+      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -8187,7 +8214,11 @@ export class AgentRuntime implements Runtime {
    */
   private settleAbandonedRespawn(mapKey: string): void {
     if (!this.abandonedRespawnOwners.delete(mapKey)) return;
-    if (this.exhaustedRespawnOwners.size === 0 && this.perChatRespawnAbandonedCount() === 0) {
+    // Prune first and read its verdict. Going through the counter instead would
+    // run the same prune and hide whether it already cleared, so one logical
+    // settle could emit TWO durable outbox events: the prune's, then this one's.
+    if (this.pruneAbandonedRespawnOwners()) return;
+    if (this.exhaustedRespawnOwners.size === 0 && this.abandonedRespawnOwners.size === 0) {
       clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
     }
   }
