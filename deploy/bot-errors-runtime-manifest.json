@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "04124e3ebfd1b37e2f3366549c58bede50f2f6fa6983f3575934ca7c21e78f0c",
+      "sha256": "ac1324b75754af3fd369f01f182385d8ab1e78b9ee9415c943ac846f5cac770b",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -76,7 +76,12 @@
         "sweep_conversation_scopes",
         "tombstonesDroppedAt",
         "conversation_scopes_have_overflowed(incident_state, current)",
-        "mark_incident_sent(event, replay_state)"
+        "mark_incident_sent(event, replay_state)",
+        "_reject_bare_write_if_adopted",
+        "_incident_state_is_adopted",
+        "_reject_bare_write_over_envelope",
+        "INCIDENT_CYCLE_REQUIRED_EXIT",
+        "_AdoptionLock"
       ]
     },
     {
@@ -110,7 +115,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "94ed4f0f00318cc3705ac8caaef14e73b8b86a02e65f59eadd53ced7d8d4cd39",
+      "sha256": "8f2f0999c9c17deb7a8fafcbbcbcc4ce0bd4f7c9c2dfba40fc3dcdd9e6d26045",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -180,22 +185,6 @@
         "validate_opencode_functional_jsonl",
         "opencode_functional_probe_env",
         "effective_instance_provider_path",
-        "instance_plist_environment",
-        "instance_plist_governed_environment",
-        "GOVERNED_PLIST_UNREADABLE",
-        "GOVERNED_PLIST_NOT_APPLICABLE",
-        "provider_runtime_plist_unreadable",
-        "governed_child_environment",
-        "environment_value",
-        "environment_provider_path",
-        "generated_provider_path_absence_failure",
-        "reason=generated_path_absent",
-        "governed_prepend_failure_class",
-        "instance_provider_path_prepend_match",
-        "path_starts_with_entries",
-        "WHATSOUP_PATH_PREPEND",
-        "provider_runtime_path_prepend_mismatch",
-        "provider_runtime_path_prepend_inconsistent",
         "advance_deadman_episode",
         "email_fallback_outcome",
         "required_tools_daily_sections",
@@ -205,7 +194,25 @@
         "required_tools_lifecycle",
         "save_tool_inventory_state",
         "MCP_TOOL_INVENTORY_UNOBSERVED",
-        "MCP_REQUIRED_TOOLS_MISSING"
+        "MCP_REQUIRED_TOOLS_MISSING",
+        "_restart_explains_cycle_age",
+        "_cycle_stale_should_report",
+        "_note_grace_streak",
+        "_grace_still_credible",
+        "graceStreakSeenAt",
+        "DEADMAN_CHECK_INTERVAL_SECONDS",
+        "_host_boot_id",
+        "graceStreakBootId",
+        "lastCheckGapSeconds",
+        "_host_monotonic_seconds",
+        "graceStreakSeenMonotonic",
+        "graceStreakAccumulated",
+        "graceStreakGapForgiven",
+        "_grace_streak_record_state",
+        "lastCheckGapAt",
+        "grace_refused",
+        "deadman_observation_gap_line",
+        "deadman_observation_gap_inventory"
       ]
     },
     {
@@ -278,7 +285,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "bac61da4404985a51d192af97ced57c7d1dc917c0ba62394796d640878bc32fe",
+      "sha256": "dd3666fcc979685aacc926f5cd4e62a38268fe0fc8665a37cbcd927ccb853c52",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES",
@@ -288,7 +295,9 @@
         "reconcile_retirement_intents",
         "enforce_retired_host_tombstone_cap",
         "qRemediationDisposition",
-        "episodeSeq"
+        "episodeSeq",
+        "retirement_action_guard_hosts",
+        "require_retirement_binding_match"
       ]
     },
     {

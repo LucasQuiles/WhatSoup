@@ -1906,6 +1906,19 @@ sets `status=degraded`, and includes `durability_evidence_unreadable`. A failed 
 sweep remains degraded with `database_retention_failed` until a later successful sweep
 resets the consecutive-failure count.
 
+### BOT ERRORS dispatcher exit codes
+
+`deploy/bot-errors-dispatcher.service` runs `bot-errors-dispatcher.py --daemon` under
+`Restart=always` / `RestartSec=10` with no `RestartPreventExitStatus`, so every non-zero
+exit below is retried by systemd every 10 seconds until an operator intervenes. Read the
+last JSON line on the unit's journal (`journalctl --user -u bot-errors-dispatcher -n 20`):
+it carries `"exit": <code>` and the reason.
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| exit 78 (`STATE_RECOVERY_REQUIRED_EXIT`) | Controller-state load classified the incident-state primary as unrecoverable (for example `schema_incompatible`, the #3053/#3054 bare-JSON overwrite). The daemon projects the recovery mode and emits the state-recovery fallback before exiting. | Follow the controller-state recovery procedure (`controller-state-recovery-integrity-design.md`); do not hand-edit the primary. |
+| exit 79 (`INCIDENT_CYCLE_REQUIRED_EXIT`) | A post-adoption bare-JSON write was refused by the writer guard: a helper reached `save_incident_state` without its `IncidentStateCycle`, or the adoption lock was unsafe or stayed busy. Nothing was written; the primary keeps its last `cycleCompletedAt`. This is a programming error, not a transient fault, so the unit restarts it every 10 seconds and fails again immediately. | Find the caller in the journal line and route the write through `IncidentStateCycle.commit()`. Until then the deadman reports the loop: `cycle_stale` once the staleness outgrows the restart, or `state_missing` / `cycle_incomplete` once the restart-grace streak outgrows `--max-state-age`. Holding 78 and 79 out of the restart loop (`RestartPreventExitStatus=78 79` plus `StartLimit*`) is a separate, owner-gated unit change. |
+
 ### BOT ERRORS Source Ownership
 
 Treat the source producer, the dispatcher policy, and the probe as separate owners. An alert is

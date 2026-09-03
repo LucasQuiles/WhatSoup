@@ -8114,6 +8114,40 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     )
 
 
+def deadman_observation_gap_line(
+    deadman_state: dict[str, Any], now_epoch: int, window_seconds: int = 86_400
+) -> str | None:
+    """Render the deadman's last observed gap for the daily check.
+
+    ``deadman()`` persists ``lastCheckGapSeconds`` / ``lastCheckGapAt`` when
+    two of its graced checks were further apart than twice the timer cadence
+    (a suspend, a stopped timer, a starved scheduler). Without a reader the
+    record was write-only. It is rendered while younger than ``window_seconds``
+    and omitted once older; an unparseable timestamp, or one from the future
+    (a forward clock step), is rendered rather than hidden. Informational: a
+    late deadman is a scheduler signal, not a fault of the service it watches.
+    """
+    gap = deadman_state.get("lastCheckGapSeconds")
+    at = deadman_state.get("lastCheckGapAt")
+    if isinstance(gap, bool) or not isinstance(gap, int) or gap <= 0 or not isinstance(at, str):
+        return None
+    try:
+        age = int(now_epoch - parse_iso_epoch(at))
+    except Exception:  # noqa: BLE001 - a malformed stamp is reported, not hidden
+        return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds=unparseable"
+    if age > window_seconds:
+        return None
+    return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds={age}"
+
+
+def deadman_observation_gap_inventory() -> list[str]:
+    try:
+        line = deadman_observation_gap_line(load_deadman_state(), current_epoch())
+    except Exception as exc:  # noqa: BLE001 - the daily check must not die on its own record
+        return [f"deadman_last_observation_gap: unreadable ({str(exc)[:120]})"]
+    return [line] if line else []
+
+
 def queue_inventory() -> list[str]:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
@@ -8445,6 +8479,7 @@ def daily() -> int:
         *alert_target_inventory(profile),
         *dns_inventory(profile),
         *boot_inventory(),
+        *deadman_observation_gap_inventory(),
         *rustdesk_inventory(profile),
         *source_update_inventory(profile),
         *runtime_manifest_inventory(profile),
@@ -8575,7 +8610,292 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
+# Cadence the shipped schedulers run the deadman at: deploy/bot-errors-deadman.timer
+# (OnUnitActiveSec=5m) and the deadman agent in deploy/scripts/install-bot-errors-launchd.sh
+# (StartInterval 300). Twice this is both the threshold above which a gap between
+# consecutive graced checks is reported as an observation gap (lastCheckGapSeconds /
+# check_gap_seconds=) and the cap on how much one late interval credits the grace
+# streak, so the default must track those files; test_bot_errors_deadman_grace_attribution.py
+# pins it.
+DEADMAN_CHECK_INTERVAL_SECONDS = 300
+
+_LINUX_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _host_boot_id() -> str | None:
+    """A clock-independent identity for the current host boot, or None if unknown.
+
+    Linux exposes a per-boot UUID; macOS exposes a per-boot session UUID. Neither
+    moves when the wall clock steps, which ``now - uptime`` (and macOS
+    ``kern.boottime``, which tracks the calendar) would.
+    """
+    dry = os.environ.get("BOT_ERRORS_DRY_HOST_BOOT_ID")
+    if dry is not None:
+        return dry or None
+    if HOST_PLATFORM == "darwin":
+        try:
+            proc = subprocess.run(
+                ["sysctl", "-n", "kern.bootsessionuuid"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            value = (proc.stdout or "").strip()
+            return f"bootsession:{value}" if value else None
+        except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
+            return None
+    try:
+        value = _LINUX_BOOT_ID_PATH.read_text(encoding="utf-8").strip()
+        return f"boot_id:{value}" if value else None
+    except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
+        return None
+
+
+def _host_monotonic_seconds() -> int | None:
+    """Seconds since boot on a clock that keeps counting through sleep and never
+    steps: Linux CLOCK_BOOTTIME, macOS CLOCK_MONOTONIC (which continues across
+    sleep on Darwin). Shared by every process on the boot, so consecutive deadman
+    runs can measure the interval between them without trusting the wall clock.
+    None when unavailable; the caller falls back to clamped wall time."""
+    dry = os.environ.get("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS")
+    if dry is not None:
+        # A test knob, so a bad value degrades to the wall-clock fallback and
+        # never crashes the deadman (OverflowError on "inf") or poisons the
+        # record (a negative value would classify the next record corrupt).
+        try:
+            parsed = float(dry)
+        except ValueError:
+            return None
+        if parsed != parsed or parsed in (float("inf"), float("-inf")) or parsed < 0:
+            return None
+        return int(parsed)
+    clock = getattr(time, "CLOCK_MONOTONIC", None) if HOST_PLATFORM == "darwin" else getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        return int(time.clock_gettime(clock))
+    except Exception:  # noqa: BLE001 - unavailable clock is handled by the caller.
+        return None
+
+
+_GRACE_STREAK_FIELDS = (
+    "graceStreakSince",
+    "graceStreakSeenAt",
+    "graceStreakBootId",
+    "graceStreakSeenMonotonic",
+    "graceStreakAccumulated",
+    "graceStreakGapForgiven",
+)
+_UNKNOWN_BOOT = "unknown"
+
+
+def _grace_streak_record_state(deadman_state: dict[str, Any]) -> str:
+    """Classify the persisted grace-streak record before it is consumed.
+
+    ``absent``: no field at all (grace was not active last check, or first
+    run). ``partial``: some fields (an upgrade or an older writer); it re-seeds
+    silently. ``valid``: every field present and usable. ``corrupt``: every
+    field present but at least one unusable (a bool or non-positive epoch, a
+    non-string boot identity, a negative accumulator, a non-bool flag). A
+    corrupt record still re-seeds so the next check is normal, but the check
+    that finds it refuses grace: a continuity record this deadman did not
+    write validly cannot vouch for a fresh restart, and re-seeding to zero
+    would make grace credible again for a whole max_state_age.
+    """
+    present = [f for f in _GRACE_STREAK_FIELDS if f in deadman_state]
+    if not present:
+        return "absent"
+    if len(present) < len(_GRACE_STREAK_FIELDS):
+        return "partial"
+
+    def _int(value: Any, minimum: int) -> bool:
+        return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
+
+    seen_mono = deadman_state.get("graceStreakSeenMonotonic")
+    valid = (
+        _int(deadman_state.get("graceStreakSince"), 1)
+        and _int(deadman_state.get("graceStreakSeenAt"), 1)
+        and isinstance(deadman_state.get("graceStreakBootId"), str)
+        and (seen_mono is None or _int(seen_mono, 0))
+        and _int(deadman_state.get("graceStreakAccumulated"), 0)
+        and isinstance(deadman_state.get("graceStreakGapForgiven"), bool)
+    )
+    return "valid" if valid else "corrupt"
+
+
+def _note_grace_streak(
+    deadman_state: dict[str, Any],
+    grace_active: bool,
+    now_epoch: int,
+    boot_id: str | None,
+    monotonic_now: int | None,
+    gap_cap_seconds: int,
+) -> tuple[int, bool, int | None]:
+    """Track how long restart grace has been continuously active across checks.
+
+    Returns ``(streak_seconds, dirty, observation_gap_seconds)``. A single
+    observation cannot tell a fresh restart from a restart loop when there is no
+    state age to bound grace with; the streak is the deadman's own memory of
+    that, persisted in deadman-state.json.
+
+    The streak is the sum of the intervals the deadman actually observed, on the
+    boot's monotonic clock (wall time, clamped at zero, when that is unavailable),
+    so a wall-clock step in either direction is neither a re-seed nor a corrupt
+    record. An interval longer than ``gap_cap_seconds`` (twice the timer cadence)
+    credits nothing the first time -- a suspend or a stopped timer is not observed
+    grace, and the first check after it must not page a dispatcher that has only
+    had seconds -- but consecutive long intervals each credit the cap, so a deadman
+    that keeps running late still reports a restart loop within a few checks
+    instead of re-seeding forever. Only a different boot identity re-seeds: the
+    boot ended the process the previous grace belonged to. An unknown identity
+    cannot disprove continuity and a missed alarm is the worse error, so it
+    continues. A record missing any field, or carrying a corrupt epoch (bool or
+    non-positive), re-seeds; the caller classifies the record first
+    (``_grace_streak_record_state``) so a corrupt one also refuses grace for
+    the check that found it.
+
+    The interval is returned so the caller can report it: the deadman's own
+    absence is a signal, not something to absorb.
+    """
+    if not grace_active:
+        present = [f for f in _GRACE_STREAK_FIELDS if f in deadman_state]
+        for f in present:
+            deadman_state.pop(f, None)
+        return 0, bool(present), None
+
+    seen = deadman_state.get("graceStreakSeenAt")
+    recorded_boot = deadman_state.get("graceStreakBootId")
+    seen_mono = deadman_state.get("graceStreakSeenMonotonic")
+    accumulated = deadman_state.get("graceStreakAccumulated")
+    forgiven = deadman_state.get("graceStreakGapForgiven")
+    complete = _grace_streak_record_state(deadman_state) == "valid"
+    same_boot = boot_id is None or recorded_boot == _UNKNOWN_BOOT or recorded_boot == boot_id
+    if not complete or not same_boot:
+        deadman_state["graceStreakSince"] = int(now_epoch)
+        deadman_state["graceStreakSeenAt"] = int(now_epoch)
+        deadman_state["graceStreakBootId"] = boot_id if boot_id is not None else _UNKNOWN_BOOT
+        deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+        deadman_state["graceStreakAccumulated"] = 0
+        deadman_state["graceStreakGapForgiven"] = False
+        return 0, True, None
+    if monotonic_now is not None and isinstance(seen_mono, int) and monotonic_now >= seen_mono:
+        interval = int(monotonic_now - seen_mono)
+    else:
+        interval = max(0, int(now_epoch - seen))
+    if interval > gap_cap_seconds:
+        credit = gap_cap_seconds if forgiven else 0
+        forgiven = True
+    else:
+        credit = interval
+        forgiven = False
+    accumulated = int(accumulated) + credit
+    deadman_state["graceStreakSeenAt"] = int(now_epoch)
+    deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+    deadman_state["graceStreakAccumulated"] = accumulated
+    deadman_state["graceStreakGapForgiven"] = forgiven
+    if boot_id is not None and recorded_boot == _UNKNOWN_BOOT:
+        deadman_state["graceStreakBootId"] = boot_id
+    return accumulated, True, interval
+
+
+def _grace_still_credible(
+    grace_reason: str | None,
+    grace_streak_seconds: int,
+    max_state_age: int,
+) -> bool:
+    """Whether an open restart window still excuses a branch with no cycle timestamp.
+
+    ``state_missing`` and ``cycle_incomplete`` cannot be attributed by age the
+    way ``cycle_stale`` is: a restart legitimately follows an arbitrarily old
+    heartbeat (an outage long enough to matter was reported as
+    ``service_inactive`` by the checks that ran during it), and a state file
+    with no ``cycleCompletedAt`` carries
+    no cycle time to compare the restart against. Bounding those branches by
+    the restart age reported every fresh restart whose heartbeat predated it,
+    which ``tests/scripts/bot-errors-health-check.test.ts`` pins as graced.
+
+    The evidence of a restart loop there is grace itself: a unit that keeps
+    restarting has grace active on every check, so the deadman's persisted
+    streak (the observed grace intervals summed on the boot's monotonic clock,
+    see ``_note_grace_streak``) keeps growing. Grace that has been continuously
+    active for longer than ``max_state_age`` is a loop, not a fresh start, and
+    stops excusing anything.
+    """
+    if not grace_reason:
+        return False
+    return grace_streak_seconds <= max_state_age
+
+
+def _restart_explains_cycle_age(
+    cycle_age_seconds: int,
+    restart_age: int | None,
+    restart_grace: int,
+) -> bool:
+    """Whether a recent restart can actually account for this cycle staleness.
+
+    Restart grace exists to cover the window in which a freshly started
+    dispatcher has not yet completed its first cycle. It is keyed on service
+    uptime, but the condition it suppresses is measured on the *state* -- so
+    on its own it says nothing about whether the staleness is attributable to
+    the restart.
+
+    That gap is load-bearing: a dispatcher in a restart loop has
+    ``service_uptime <= restart_grace`` on every check, so grace is always
+    active and ``cycle_stale`` can never be raised. The deadman is then
+    silenced by exactly the symptom it exists to detect, and an indefinitely
+    broken dispatcher reports ``deadman grace ok``.
+
+    A restart that happened ``restart_age`` seconds ago can only explain a
+    cycle that has been stale for about that long (plus the grace window
+    itself). Older staleness predates the restart and must be reported.
+
+    ``restart_age`` must be measured on the clock that granted grace: service
+    uptime for an active unit, state-change age for a unit that is not active.
+    Bounding a state-change grace by uptime silenced a unit that restart-loops
+    without ever re-entering active (uptime stale or unknown, change age
+    always small). ``deadman`` passes the granting age, so ``None`` is not
+    reachable while grace is active; it is kept for direct callers, where
+    unknown age means attribution is impossible and grace stands rather than
+    manufacturing an alert from missing evidence.
+    """
+    if restart_age is None:
+        return True
+    return cycle_age_seconds <= restart_age + restart_grace
+
+
+def _cycle_stale_should_report(
+    cycle_age_seconds: int,
+    max_state_age: int,
+    grace_reason: str | None,
+    restart_age: int | None,
+    restart_grace: int,
+) -> bool:
+    """Whether cycle staleness is reportable: stale, and not excused by a restart.
+
+    The decision is factored out of ``deadman`` so it is directly testable.
+    Leaving it inline meant a test could cover ``_restart_explains_cycle_age``
+    while the call site silently reverted to an unconditional
+    ``if not grace_reason`` and every test still passed -- the same shape as
+    the guard defect this change exists to close, where the check was correct
+    but not in the path that mattered.
+    """
+    if cycle_age_seconds <= max_state_age:
+        return False
+    if not grace_reason:
+        return True
+    return not _restart_explains_cycle_age(
+        cycle_age_seconds, restart_age, restart_grace
+    )
+
+
+def deadman(
+    max_state_age: int,
+    restart_grace: int,
+    cooldown_seconds: int,
+    check_interval: int = DEADMAN_CHECK_INTERVAL_SECONDS,
+) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
     active_members: dict[str, dict[str, Any]] = {}
@@ -8595,30 +8915,76 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     service_status = service_is_active(DISPATCHER_SERVICE)
     service_uptime, service_state_change_age = service_restart_ages(DISPATCHER_SERVICE)
     grace_reason = None
+    # Age of the event that granted grace, on the clock that granted it. The
+    # staleness bound below must use this age, not service_uptime: a unit that
+    # restart-loops without re-entering active keeps its state-change age under
+    # grace on every check while ActiveEnterTimestamp stays stale or unset.
+    grace_age: int | None = None
     if service_status != "active":
         if service_state_change_age is not None and service_state_change_age <= restart_grace:
             grace_reason = f"service_state_change_age_seconds={service_state_change_age}"
+            grace_age = service_state_change_age
         else:
             active_members["service_inactive"] = {"status": _bounded_service_status(service_status)}
     elif service_uptime is not None and service_uptime <= restart_grace:
         grace_reason = f"service_uptime_seconds={service_uptime}"
+        grace_age = service_uptime
+    deadman_state = load_deadman_state()
+    migrate_deadman_state(deadman_state, now_epoch)
+    # Classified before _note_grace_streak re-seeds it: a corrupt continuity
+    # record cannot vouch for this check (see _grace_streak_record_state).
+    streak_record = _grace_streak_record_state(deadman_state)
+    gap_threshold = 2 * (check_interval if check_interval > 0 else DEADMAN_CHECK_INTERVAL_SECONDS)
+    grace_streak_seconds, streak_dirty, observation_gap = _note_grace_streak(
+        deadman_state, grace_reason is not None, now_epoch, _host_boot_id(), _host_monotonic_seconds(), gap_threshold
+    )
+    grace_refused = grace_reason is not None and streak_record == "corrupt"
+    # The deadman's own absence is a signal: a gap between consecutive graced
+    # checks longer than two timer intervals is persisted and printed, never
+    # silently absorbed into the streak. The record is durable (lastCheckGapAt
+    # dates it) and is replaced only by the next gap, so the daily check can
+    # read it; a check at the normal cadence does not erase it.
+    check_gap_note = ""
+    if observation_gap is not None and observation_gap > gap_threshold:
+        deadman_state["lastCheckGapSeconds"] = observation_gap
+        deadman_state["lastCheckGapAt"] = epoch_to_iso(now_epoch)
+        check_gap_note = f" check_gap_seconds={observation_gap}"
+        streak_dirty = True
     if not state.exists():
-        if not grace_reason:
-            active_members["state_missing"] = {}
+        # No state file carries no age to bound grace with, so a restart loop
+        # that never writes state would be excused on every check. The
+        # deadman's own record of how long grace has been continuously active
+        # is the only evidence left: grace that has outlived max_state_age is
+        # a restart loop, not a fresh start.
+        if grace_refused or not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age):
+            detail: dict[str, Any] = {"grace_streak_seconds": grace_streak_seconds} if grace_reason else {}
+            if grace_refused:
+                detail["grace_refused"] = "corrupt_streak_record"
+            active_members["state_missing"] = detail
     elif cycle_completed_at is None:
         # State exists but has no cycleCompletedAt — the last cycle did not
         # complete (crash between start and end). Treat as stale unless the
-        # state file was just written by the crash handler (within grace).
-        if state_age is not None and state_age > restart_grace and not grace_reason:
-            active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
-    elif cycle_completed_at > max_state_age:
-        if not grace_reason:
-            active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
+        # state file was just written by the crash handler (within grace) or a
+        # restart window is open. The heartbeat's age is not attributable to
+        # the restart (a restart legitimately follows an old heartbeat), so the
+        # window is bounded by the grace streak instead: grace that has stayed
+        # open longer than max_state_age is a restart loop that never
+        # completes a cycle.
+        if (
+            state_age is not None
+            and state_age > restart_grace
+            and (grace_refused or not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age))
+        ):
+            detail = {"state_age_seconds": state_age}
+            if grace_refused:
+                detail["grace_refused"] = "corrupt_streak_record"
+            active_members["cycle_incomplete"] = detail
+    elif _cycle_stale_should_report(
+        cycle_completed_at, max_state_age, grace_reason, grace_age, restart_grace
+    ):
+        active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
         active_members["socket_missing"] = {}
-
-    deadman_state = load_deadman_state()
-    migrate_deadman_state(deadman_state, now_epoch)
 
     onset_text = {"value": None}
 
@@ -8646,7 +9012,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         attempt_onset=attempt_onset,
         attempt_recovery=attempt_recovery,
     )
-    if result["dirty"]:
+    if result["dirty"] or streak_dirty:
         save_deadman_state(deadman_state)
     for payload, level in result["logs"]:
         append_deadman_log(payload, level=level)
@@ -8667,7 +9033,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     elif result["exitCode"] == 0:
         if grace_reason:
             state_detail = state_age if state_age is not None else "missing"
-            print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}")
+            print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}{check_gap_note}")
         else:
             print("deadman ok")
     if onset_text["value"]:
@@ -8686,6 +9052,12 @@ def main() -> int:
     parser.add_argument("--verified-at", default=now_iso())
     parser.add_argument("--max-state-age", type=int, default=180)
     parser.add_argument("--restart-grace", type=int, default=30)
+    parser.add_argument(
+        "--check-interval",
+        type=int,
+        default=DEADMAN_CHECK_INTERVAL_SECONDS,
+        help="seconds between deadman timer runs (OnUnitActiveSec); twice this is the observation-gap report threshold (check_gap_seconds / lastCheckGapSeconds) and the cap one late interval credits the restart-grace streak",
+    )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
     args = parser.parse_args()
 
@@ -8709,7 +9081,7 @@ def main() -> int:
     if args.daily:
         return daily()
     if args.deadman:
-        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown)
+        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown, args.check_interval)
     return daily()
 
 

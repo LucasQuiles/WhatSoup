@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import errno
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1201,9 +1203,11 @@ class IncidentStateCycle:
     ``load_incident_state``), then call ``.commit()`` at each semantic
     save barrier.
 
-    ``commit()`` returns the ``PublicationResult`` so callers that batch
-    publication results (e.g. ``collapse_storm_group`` with
-    ``require_all_advance``) can still collect it.
+    ``commit()`` returns the ``StateCommitResult`` from ``session.save()``.
+    Callers do not need to collect it: ``save()`` raises
+    ``ControllerStateRequired`` on any non-advancing outcome, so the three
+    cycle branches in ``collapse_storm_group`` call ``commit()`` bare and
+    rely on that raise rather than on ``require_all_advance``.
     """
 
     def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
@@ -1220,11 +1224,10 @@ class IncidentStateCycle:
     def commit(self) -> Any:
         """Set ``updatedAt``, redact, persist, and advance the capability.
 
-        Returns the ``PublicationResult`` from ``session.save()``.
-        Also writes the raw incident state file so test
-        ``readIncidentState`` surfaces the updated payload
-        (#3053 regression fix — IncidentStateCycle diverts
-        persistence away from save_incident_state).
+        Returns the ``PublicationResult`` from ``session.save()``, which is
+        the only write: the session persists the enveloped primary itself.
+        The raw co-write this once did was removed with the #3053 fix, and
+        the cycle is the supported path away from ``save_incident_state``.
         """
         _normalize_incident_state_for_save(self._payload)
         redacted = redacted_dispatcher_payload(self._payload)
@@ -1528,6 +1531,8 @@ def _normalize_incident_state_for_save(state: dict[str, Any]) -> None:
 def save_incident_state(
     paths: dict[str, Path],
     state: dict[str, Any],
+    *,
+    lock_timeout_seconds: float = 10.0,
 ) -> PublicationResult:
     """RESTORE-COMPAT compat wrapper — uses ``publish_state_json`` directly.
 
@@ -1542,26 +1547,59 @@ def save_incident_state(
     incident_path = paths.get("incident_state")
     if incident_path is None:
         raise ValueError("save_incident_state: paths missing incident_state key")
-    _normalize_incident_state_for_save(state)
-    target = _durable_target(incident_path)
-    observation = observe_json(target)
-    generation = (observation.version.generation or 0) + 1
-    publication_operation = operation_id(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        predecessor=observation.version,
-    )
-    publication = publish_state_json(
-        target,
-        redacted_dispatcher_payload(state),
-        component="dispatcher.incident_state",
-        operation_id=publication_operation,
-        expected=observation.version,
-        generation=generation,
-    )
+    # An adopted store is refused before contending for the adoption lock.
+    # Adoption is irreversible (the marker never goes away), so a marker seen
+    # here is final; and the caller most likely to reach this writer
+    # post-adoption is a helper inside a controller-state session, which
+    # already holds that session's flock in this process. Waiting on it would
+    # stall the full timeout and report lock contention instead of the routing
+    # error the guard exists to name.
+    _reject_bare_write_if_adopted(incident_path)
+    # The whole observe-then-publish sequence runs under the controller-state
+    # adoption lock, so the two refusals below decide against a store that
+    # adoption cannot change underneath them (see _AdoptionLock). The marker
+    # check repeats under the lock for the not-yet-adopted case, where
+    # adoption can still land between the fast check and the lock.
+    with _AdoptionLock(incident_path, lock_timeout_seconds):
+        _reject_bare_write_if_adopted(incident_path)
+        target = _durable_target(incident_path)
+        observation = observe_json(target)
+        _reject_bare_write_over_envelope(incident_path, observation.payload)
+        # Normalised and stamped only once every refusal has passed: a refused
+        # write hands the caller's dict back exactly as given. The normaliser
+        # (shared with IncidentStateCycle.commit) bounds the conversation-scope
+        # sidecar, then stamps updatedAt.
+        _normalize_incident_state_for_save(state)
+        generation = (observation.version.generation or 0) + 1
+        publication_operation = operation_id(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            predecessor=observation.version,
+        )
+        publication = publish_state_json(
+            target,
+            redacted_dispatcher_payload(state),
+            component="dispatcher.incident_state",
+            operation_id=publication_operation,
+            expected=observation.version,
+            generation=generation,
+        )
     require_advance(publication)
     return publication
+
+# Exit status for a refused post-adoption bare write reached in daemon mode.
+# Distinct from STATE_RECOVERY_REQUIRED_EXIT (78): that path carries a
+# controller-state diagnostic and runs the recovery projection. This one is a
+# programming error (a helper reached save_incident_state without its
+# IncidentStateCycle) and must stop the loop loudly rather than fail every
+# cycle in silence. Restart=always brings the unit back; the deadman then
+# reports cycle_stale once the staleness outgrows what the restart explains,
+# or state_missing / cycle_incomplete once its grace streak outgrows
+# max_state_age. Documented for operators in docs/runbook.md ("BOT ERRORS
+# dispatcher exit codes").
+INCIDENT_CYCLE_REQUIRED_EXIT = 79
+
 
 class IncidentCycleRequiredError(RuntimeError):
     """#3054: a cycle-accepting helper was called post-adoption without the
@@ -1577,6 +1615,194 @@ class IncidentCycleRequiredError(RuntimeError):
     silently corrupting state. Pre-adoption (no ``.initialized``) the bare
     write is still the legitimate legacy/compat path, so the guard is inert.
     """
+
+
+def _incident_state_is_adopted(anchor: Path) -> bool:
+    """True when the incident-state dir carries the ``.initialized`` marker.
+
+    Single definition of "adopted" so the helper-boundary guard and the
+    writer-level guard cannot drift apart.
+    """
+    return (anchor.parent / (anchor.name + ".initialized")).exists()
+
+
+def _reject_bare_write_if_adopted(anchor: Path) -> None:
+    """#3054 writer-level guard — refuse a bare-JSON write post-adoption.
+
+    ``_require_incident_cycle_if_adopted`` is a *helper-boundary* check: it
+    is inert whenever a cycle was supplied, because its question is "does a
+    cycle exist?". That is not the same question as "does this write use
+    the cycle?", so a helper could pass the boundary guard with
+    ``incident`` in hand and still reach ``save_incident_state`` on a later
+    branch — overwriting the ``_controllerState`` envelope with bare JSON
+    and producing the ``schema_incompatible`` corruption #3053 fixed.
+
+    Guarding inside the writer closes that gap for every call site at once,
+    including ones added later, because the bare write is never legitimate
+    post-adoption. Pre-adoption (no ``.initialized``) the bare write is
+    still the correct legacy/compat path, so this stays inert there.
+    ``IncidentStateCycle.commit()`` persists through ``session.save()`` and
+    never routes here, so the supported path is unaffected.
+    """
+    if _incident_state_is_adopted(anchor):
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing a post-adoption bare-JSON write to "
+            f"{anchor.name}. The incident-state primary is enveloped "
+            f"(_controllerState); this wrapper would overwrite it and the next "
+            f"validate would reject it as schema_incompatible (#3053/#3054). "
+            f"Route this write through IncidentStateCycle.commit()."
+        )
+
+
+class _AdoptionLock:
+    """Hold the controller-state adoption lock (``<anchor>.lock``) for a bare write.
+
+    Adoption runs inside a controller-state session, which takes an exclusive
+    ``flock`` on ``<anchor>.lock`` in the state directory. The bare publisher
+    only takes ``.durable-json.lock``, so without this a bare write could pass
+    the marker check and the envelope check, and adoption could still replace
+    the primary between the publisher's version compare and its ``os.replace``.
+    Holding the same lock for the whole observe-then-publish sequence
+    serialises the bare writer with adoption; the marker and envelope checks
+    then decide under the lock and cannot be raced.
+
+    Lock order is adoption lock first, ``.durable-json.lock`` second, the same
+    order a session-holding caller uses when it publishes member files.
+    """
+
+    def __init__(self, anchor: Path, timeout_seconds: float) -> None:
+        self._path = anchor.parent / (anchor.name + ".lock")
+        self._timeout = max(0.0, float(timeout_seconds))
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_AdoptionLock":
+        # Every way of failing to acquire the lock is the guard's error: the
+        # bare write must not run without the store's mutual exclusion, and a
+        # bare OSError from here (a symlinked leaf refused by O_NOFOLLOW with
+        # ELOOP, a missing or unopenable directory, a failed fstat) would be
+        # swallowed by --daemon as a failed cycle and retried every interval,
+        # the silent failure mode the exit-79 path exists to prevent. The
+        # original error stays attached as the cause.
+        try:
+            return self._acquire()
+        except IncidentCycleRequiredError:
+            raise
+        except OSError as exc:
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} could not be acquired safely ({type(exc).__name__}: {exc}); "
+                f"a bare write must not run without the store's mutual exclusion"
+            ) from exc
+
+    @staticmethod
+    def _safe_leaf(observed: os.stat_result) -> bool:
+        return (
+            stat.S_ISREG(observed.st_mode)
+            and observed.st_uid == os.getuid()
+            and observed.st_nlink == 1
+            and not (stat.S_IMODE(observed.st_mode) & 0o077)
+        )
+
+    def _acquire(self) -> "_AdoptionLock":
+        # Pin the parent directory first, as the session does, so the lock is
+        # opened relative to the directory we checked rather than by path. The
+        # descriptor stays open through acquisition: after the flock the named
+        # leaf is re-opened relative to it and must still be the locked inode,
+        # the same identity check the canonical controller-state lock makes
+        # (controller_state._open_lock). Without it a same-owner replacement of
+        # the leaf between open and flock lets adoption lock a different inode
+        # while this writer holds the old one.
+        dir_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(self._path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+            try:
+                self._lock_and_verify(fd, dir_fd)
+            except BaseException:
+                os.close(fd)
+                raise
+        finally:
+            os.close(dir_fd)
+        self._fd = fd
+        return self
+
+    def _lock_and_verify(self, fd: int, dir_fd: int) -> None:
+        observed = os.fstat(fd)
+        if not self._safe_leaf(observed):
+            # The guard's own error class, like the timeout below: a bare
+            # OSError here is swallowed by --daemon as a failed cycle and
+            # retried every interval, which is the silent failure mode the
+            # exit-79 path exists to prevent. The EPERM stays attached as
+            # the cause so the refusal still names the unsafe leaf.
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: unsafe adoption lock file "
+                f"{self._path.name} (regular={stat.S_ISREG(observed.st_mode)} "
+                f"owner_matches={observed.st_uid == os.getuid()} nlink={observed.st_nlink} "
+                f"mode={stat.S_IMODE(observed.st_mode):04o}); the store's lock cannot be "
+                f"trusted and a bare write must not run without it"
+            ) from OSError(errno.EPERM, f"unsafe adoption lock file: {self._path.name}")
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    # Either this process already holds the session lock (a
+                    # helper reached the bare writer from inside the cycle,
+                    # the programming error the guard exists for) or an
+                    # adoption is in progress, after which the bare write
+                    # must be refused anyway. Both are the guard's error,
+                    # so the daemon exits 79 instead of swallowing a
+                    # TimeoutError as a failed cycle.
+                    raise IncidentCycleRequiredError(
+                        f"save_incident_state: the incident-state adoption lock stayed busy for "
+                        f"{self._timeout:g}s ({self._path.name}); a bare write must not run "
+                        f"while a controller-state session holds the store"
+                    ) from None
+                time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+        recheck = os.open(self._path.name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            rechecked = os.fstat(recheck)
+        finally:
+            os.close(recheck)
+        if not self._safe_leaf(rechecked) or (rechecked.st_dev, rechecked.st_ino) != (observed.st_dev, observed.st_ino):
+            raise IncidentCycleRequiredError(
+                f"save_incident_state: refusing the bare write: the incident-state adoption lock "
+                f"{self._path.name} was replaced during acquisition (locked inode "
+                f"{observed.st_dev}:{observed.st_ino}, named inode {rechecked.st_dev}:{rechecked.st_ino}); "
+                f"the mutual exclusion this writer holds no longer guards the store"
+            )
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+
+def _reject_bare_write_over_envelope(anchor: Path, observed: Mapping[str, Any] | None) -> None:
+    """Second half of the writer guard: never overwrite an observed envelope.
+
+    ``_reject_bare_write_if_adopted`` reads the ``.initialized`` marker before
+    the write observes the file, and adoption takes a different lock
+    (``incident-state.json.lock``) from the bare publisher
+    (``.durable-json.lock``), so a bare caller can pass the marker check while
+    adoption completes underneath it. The write publishes against
+    ``observation.version``: if adoption landed after the observation the
+    compare-and-swap refuses the write, and if it landed before, the observed
+    payload already carries ``_controllerState`` and this check refuses it.
+    Together the marker check, this check, and the CAS leave no window in
+    which bare JSON can replace the envelope.
+    """
+    if isinstance(observed, Mapping) and "_controllerState" in observed:
+        raise IncidentCycleRequiredError(
+            f"save_incident_state: refusing to overwrite the enveloped incident "
+            f"state at {anchor.name} with bare JSON (observed _controllerState "
+            f"without the adoption marker). Route this write through "
+            f"IncidentStateCycle.commit()."
+        )
 
 
 def _require_incident_cycle_if_adopted(
@@ -1600,7 +1826,7 @@ def _require_incident_cycle_if_adopted(
     anchor = paths.get("incident_state")
     if anchor is None:
         return
-    if (anchor.parent / (anchor.name + ".initialized")).exists():
+    if _incident_state_is_adopted(anchor):
         raise IncidentCycleRequiredError(
             f"{helper}: post-adoption incident-state write requires the "
             f"IncidentStateCycle (incident=None would route through "
@@ -5449,6 +5675,15 @@ def collapse_storm_group(
     incident: IncidentStateCycle | None = None,
 ) -> int:
     _require_incident_cycle_if_adopted(paths, incident, helper="collapse_storm_group")
+    if incident is not None and incident.payload is not incident_state:
+        # The cycle branch below persists incident.payload, so a caller that
+        # hands in a different dict would have its mutations (freshness ledger,
+        # daily-health absorption) silently dropped at commit(). Refuse before
+        # any member publication or manifest write happens.
+        raise ValueError(
+            "collapse_storm_group: incident_state must be incident.payload when an "
+            "IncidentStateCycle is supplied; commit() would persist a different object"
+        )
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -5781,7 +6016,16 @@ def collapse_storm_group(
             )
             prepared.append((path, target, event))
         if state_changed:
-            publications.append(save_incident_state(paths, incident_state))
+            # Route through the cycle exactly as the two sibling branches of
+            # this function already do. Without this gate a caller holding an
+            # IncidentStateCycle still bare-wrote the primary here, destroying
+            # the _controllerState envelope: the sole ungated save_incident_state
+            # of the 12 executable call sites in this file, and the one that took the dispatcher into
+            # a schema_incompatible crash loop on 2026-08-30.
+            if incident:
+                incident.commit()
+            else:
+                publications.append(save_incident_state(paths, incident_state))
         require_all_advance(publications)
         for path, target, event in prepared:
             os.replace(path, target)
@@ -7632,6 +7876,20 @@ def run_daemon(interval: int, max_events: int) -> None:
                 "exit": STATE_RECOVERY_REQUIRED_EXIT,
             }), flush=True)
             sys.exit(STATE_RECOVERY_REQUIRED_EXIT)
+        except IncidentCycleRequiredError as exc:
+            # A refused post-adoption bare write is a programming error, not a
+            # transient fault. Swallowing it below kept the daemon alive with
+            # every cycle failing while record_state dropped cycleCompletedAt,
+            # which parks the deadman on the cycle_incomplete branch that a 30s
+            # interval never trips. Exit instead: the state file keeps its last
+            # cycleCompletedAt, the unit restarts, and the restart-bounded grace
+            # reports cycle_stale once the staleness outgrows the restart.
+            print(json.dumps({
+                "time": now_iso(),
+                "error": str(exc),
+                "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+            }), flush=True)
+            sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
             record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
@@ -7658,6 +7916,16 @@ def main() -> int:
 
     try:
         result = run_once(args.max_events)
+    except IncidentCycleRequiredError as exc:
+        # The exit-79 contract holds in --once exactly as in --daemon: a refused
+        # post-adoption bare write is reported as itself, not as a traceback
+        # with exit 1 that a wrapper script would read as an ordinary failure.
+        print(json.dumps({
+            "time": now_iso(),
+            "error": str(exc),
+            "exit": INCIDENT_CYCLE_REQUIRED_EXIT,
+        }))
+        return INCIDENT_CYCLE_REQUIRED_EXIT
     except ControllerStateRequired as exc:
         import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)
