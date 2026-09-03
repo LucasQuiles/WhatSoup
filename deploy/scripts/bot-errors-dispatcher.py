@@ -37,7 +37,14 @@ from lib.bounded_jsonl import (
     require_bounded_jsonl_commit,
 )
 from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
-from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+from lib.bot_errors_redaction import (
+    LEGACY_FAILURE_CLASSES,
+    alert_text,
+    alert_text_for_fingerprint,
+    alert_text_kind,
+    redact_bot_errors_text,
+    redact_json_value as redact_shared_json_value,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -515,7 +522,7 @@ def degradation_causes_from_event(event: dict[str, Any]) -> list[str] | None:
         ):
             return list(structured)
         return None
-    tokens = _DEGRADATION_CAUSES_EVIDENCE_RE.findall(str(event.get("evidence") or ""))
+    tokens = _DEGRADATION_CAUSES_EVIDENCE_RE.findall(event_text(event, "evidence"))
     if not tokens:
         return None
     causes = [c for c in tokens[-1].split(",") if c]
@@ -726,6 +733,388 @@ def record_test_leak_daily_marker(
 COMMA_TOKEN_LIST = re.compile(r"\b[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)+\b")
 
 
+# ---------------------------------------------------------------------------
+# #2386 -- legacy confined alert-content reader
+# ---------------------------------------------------------------------------
+# `summary` and `evidence` arrive as a plain string from the Python producers and,
+# since the TypeScript producer began confining alert content, as a three-key
+# confinement envelope -- either the live mapping or a baked repr of it, in either
+# key order. Every alert-content read goes through this one funnel so a single
+# rendering rule governs messages, escalation prefixes, persisted incident state,
+# storm fingerprints, and the storm manifest.
+#
+# Deliberately NOT applied to `truncate`/`redact`: those are shared primitives
+# whose callers include a raw exception object, and funnelling them would replace
+# operator-visible error text with the unrenderable sentinel.
+#
+# This restores READABILITY. It does not restore token routing: the producer's
+# confinement destroyed the tokens, and no consumer can recover them.
+
+
+def event_text(event: dict[str, Any], key: str) -> str:
+    """Render one alert-content field of a queue event as operator text."""
+    return alert_text(event.get(key) or "")
+
+
+def event_fingerprint_text(event: dict[str, Any], key: str) -> str:
+    """Render one alert-content field for IDENTITY, carrying the full digest.
+
+    Display truncates the digest to 8 characters because that is what an operator
+    reads. Grouping must not: identity on 32 bits merges distinct incidents.
+    """
+    return alert_text_for_fingerprint(event.get(key) or "")
+
+
+LEGACY_ALERT_CONTENT_KEY = "legacyAlertContent"
+_LEGACY_ALERT_CONTENT_COUNTERS = {
+    "legacy_object": "queueLegacyObject",
+    "baked_repr": "queueBakedRepr",
+    "unrenderable": "queueUnrenderable",
+}
+
+
+# Quarantine happens at LOAD time, inside load_valid_event_or_quarantine, which
+# runs before process_one and before all three pre-loop terminal passes. A
+# quarantined event is therefore already out of the queue by the time any path
+# that holds incident_state runs, so it cannot be counted where the other forms
+# are. Since the shape rule is symmetric, EVERY unrenderable value is quarantined,
+# and without this queueUnrenderable would be structurally unreachable: a
+# permanent zero that reads exactly like "clean".
+_pending_unrenderable_quarantines = 0
+
+# The counter above answers "how many"; the operator also needs "which incident",
+# because a quarantine happens inside ready(), BEFORE process_one, so the alert
+# never reaches a delivery path and nothing else in the cycle would say a word
+# about it. #2386's acceptance is that a malformed schema fails closed WITHOUT
+# suppressing the safe source/class signal, so the signal is captured here and a
+# content-free meta-alert is queued once per cycle from run_once.
+_pending_unrenderable_signals: list[dict[str, str]] = []
+# Monotonic across the process; run_once takes a mark/delta around one cycle so
+# the cycle's quarantine count is independent of the fold/acknowledge protocol.
+_unrenderable_quarantines_total = 0
+# A cycle always drains the signal list, but note_unrenderable_quarantine is also
+# reachable outside one. Bound the list so a pathological caller cannot grow it
+# without limit; the count above is never dropped, only the per-incident detail.
+UNRENDERABLE_SIGNAL_CAP = 512
+UNRENDERABLE_META_ALERT_SOURCE = "meta_alert_unrenderable_alert_content"
+# The fixed EnvelopeError code. It is the only value that ever reaches lastError
+# from this path, so lastError stays bounded and content-free.
+UNRENDERABLE_ALERT_CONTENT_CODE = "unrenderable_alert_content"
+# The same throttle the dead-letter meta-alert uses, applied per incident key.
+UNRENDERABLE_META_ALERT_THROTTLE_SECONDS = DEAD_LETTER_META_ALERT_THROTTLE_SECONDS
+# Read through a VARIABLE field name on purpose: the alert-content coverage scan
+# matches constant reads, and these two reads are content-free by construction.
+UNRENDERABLE_SIGNAL_FIELDS = ("summary", "evidence")
+
+
+UNRENDERABLE_IDENTITY_CHARS = 16
+UNRENDERABLE_IDENTITY_UNAVAILABLE = "0" * UNRENDERABLE_IDENTITY_CHARS
+
+
+def unrenderable_alert_signal(event: Any, *, kind: str = "", severity: str = "") -> dict[str, str]:
+    """The content-free operator signal a quarantined event still carries.
+
+    Every value here comes from a CLOSED set. Earlier versions echoed the event's
+    own `source` and incident key after safe_segment, which bounds shape and
+    length -- it is not a privacy boundary, and `source`, `alertSource` and the
+    diagnostic remote are unvalidated producer text that composed into the key.
+    Those markers reached the page, the throttle map, incident state and the sent
+    record; the page about content the consumer refused to render was carrying
+    that content's neighbours.
+
+    What remains:
+
+    * `reason`, the fixed code;
+    * `kind` and `severity`, canonical values classification had ALREADY
+      validated before it rejected the content, carried on the EnvelopeError;
+    * `failureClass`, read only from a field that IS a valid confinement
+      envelope, so after the vocabulary closed it is one of a known 17 or the
+      fixed "unavailable" -- never a malformed class;
+    * `unrenderableFields`, field names and Python type names, both fixed sets;
+    * `identity`, a bounded non-reversible digest standing in for the incident
+      key so pages still throttle and group per producer without naming one.
+
+    The original is not lost: the quarantine artifact holds the whole event, and
+    it is the durable record an operator with access reads for the detail.
+    """
+    unavailable = {
+        "reason": UNRENDERABLE_ALERT_CONTENT_CODE,
+        "kind": kind or "unknown",
+        "severity": severity or "unknown",
+        "failureClass": "unavailable",
+        "unrenderableFields": "",
+        "identity": UNRENDERABLE_IDENTITY_UNAVAILABLE,
+    }
+    if not isinstance(event, dict):
+        return unavailable
+    failure_class = ""
+    unrenderable: list[str] = []
+    for field in UNRENDERABLE_SIGNAL_FIELDS:
+        value = event.get(field)
+        value_kind = alert_text_kind(value)
+        if value_kind == "unrenderable":
+            unrenderable.append(f"{field}:{type(value).__name__}")
+        elif value_kind == "legacy_object" and not failure_class:
+            # "{failureClass} - {length} chars - digest {digest[:8]}" -- take the
+            # class only, so neither the length nor the digest reaches the alert.
+            # The value classified as a legacy object, so the class passed the
+            # closed vocabulary; a malformed one classifies as unrenderable and
+            # never gets here.
+            failure_class = alert_text(value).split(" - ", 1)[0]
+    try:
+        key = incident_key(event)
+    except Exception:  # noqa: BLE001 -- identity helpers must not break quarantine
+        key = ""
+    identity = (
+        hashlib.sha256(key.encode("utf-8")).hexdigest()[:UNRENDERABLE_IDENTITY_CHARS]
+        if key else UNRENDERABLE_IDENTITY_UNAVAILABLE
+    )
+    return {
+        "reason": UNRENDERABLE_ALERT_CONTENT_CODE,
+        "kind": kind or "unknown",
+        "severity": severity or "unknown",
+        "failureClass": failure_class if failure_class in LEGACY_FAILURE_CLASSES else "unavailable",
+        "unrenderableFields": ",".join(unrenderable),
+        "identity": identity,
+    }
+
+
+def _unrenderable_breadcrumb_id(dest: Path) -> str:
+    """A stable, content-free name for one quarantined event's pending signal.
+
+    Derived from the durable artifact's own name so the same event always maps to
+    the same breadcrumb, and digested because that name embeds the producer's
+    queue filename, which is unvalidated text.
+    """
+    return hashlib.sha256(dest.name.encode("utf-8")).hexdigest()[:32]
+
+
+def write_unrenderable_breadcrumb(paths: dict[str, Path], dest: Path, signal: dict[str, str]) -> str:
+    """Persist the obliged operator signal BEFORE the queue file is moved (#2386).
+
+    The move is durable; the signal was not. Holding it only in module globals
+    until the end-of-cycle fold meant a process that died in between left the
+    event permanently out of the queue with nothing ever paged about it, and no
+    durable key from which a later process could tell that a page was owed. This
+    is the crash-durability of the SIGNAL, which is a different property from the
+    same-process telemetry counter and is not covered by it.
+
+    The breadcrumb holds the canonical signal and nothing else, so the artifact
+    that survives the crash is not itself a content channel.
+    """
+    directory = paths.get("unrenderable_signals")
+    if directory is None:
+        return ""
+    crumb_id = _unrenderable_breadcrumb_id(dest)
+    target = directory / f"{crumb_id}.json"
+    tmp = directory / f".{crumb_id}.tmp"
+    payload = json.dumps({"signal": signal, "breadcrumb": crumb_id}, sort_keys=True)
+    try:
+        ensure_private_dir(directory)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        fsync_parent(target)
+    except Exception:  # noqa: BLE001 -- see below; this must never wedge the queue
+        # FAIL OPEN. This runs inside ready(), above every pre-loop pass, and the
+        # caller has no guard: an exception here escapes to run_once, aborts the
+        # cycle, and leaves the event in the outbox to poison the next one --
+        # exactly the queue wedge this PR exists to remove, reintroduced by the
+        # durability fix. Losing the breadcrumb costs the crash guarantee for one
+        # event; raising costs the whole cycle, so the move and the in-process
+        # page proceed without it.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return ""
+    return crumb_id
+
+
+_UNRENDERABLE_SIGNAL_KEYS = frozenset(
+    {"reason", "kind", "severity", "failureClass", "unrenderableFields", "identity"}
+)
+_UNRENDERABLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_UNRENDERABLE_IDENTITY_RE = re.compile(r"^[0-9a-f]{%d}$" % UNRENDERABLE_IDENTITY_CHARS)
+
+
+def adoptable_unrenderable_signal(signal: Any) -> dict[str, str] | None:
+    """The signal from a breadcrumb this process did not write, or None.
+
+    A breadcrumb is a file under the state root, and the fold subscripts its
+    signal and renders its values into the operator page, so an adopted signal
+    is held to the same closed vocabulary unrenderable_alert_signal() builds
+    from: exact keys, the fixed reason, bounded single-token kind and severity,
+    a failure class from the closed set or "unavailable", unrenderable-field
+    entries naming only the fixed fields, and a digest-shaped identity. Anything
+    else is a damaged breadcrumb and is skipped, never rendered.
+    """
+    if not isinstance(signal, dict) or set(signal) != _UNRENDERABLE_SIGNAL_KEYS:
+        return None
+    if any(not isinstance(value, str) for value in signal.values()):
+        return None
+    if signal["reason"] != UNRENDERABLE_ALERT_CONTENT_CODE:
+        return None
+    if not (_UNRENDERABLE_TOKEN_RE.match(signal["kind"]) and _UNRENDERABLE_TOKEN_RE.match(signal["severity"])):
+        return None
+    if signal["failureClass"] != "unavailable" and signal["failureClass"] not in LEGACY_FAILURE_CLASSES:
+        return None
+    fields = signal["unrenderableFields"]
+    if fields:
+        for item in fields.split(","):
+            field, sep, type_name = item.partition(":")
+            if not sep or field not in UNRENDERABLE_SIGNAL_FIELDS or not _UNRENDERABLE_TOKEN_RE.match(type_name):
+                return None
+    if not _UNRENDERABLE_IDENTITY_RE.match(signal["identity"]):
+        return None
+    return {key: signal[key] for key in sorted(_UNRENDERABLE_SIGNAL_KEYS)}
+
+
+def reconcile_unrenderable_signals(paths: dict[str, Path]) -> int:
+    """Adopt breadcrumbs this process did not write, so a restart still pages.
+
+    Ack-after-publish: a breadcrumb is removed only once its page has been
+    published or deliberately debounced, so a death before publication retries
+    and a death after it is absorbed by the per-identity throttle rather than
+    producing a second page.
+    """
+    directory = paths.get("unrenderable_signals")
+    if directory is None or not directory.is_dir():
+        return 0
+    known = {entry.get("breadcrumb") for entry in _pending_unrenderable_signals}
+    adopted = 0
+    for crumb in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(crumb.read_text(encoding="utf-8"))
+            signal = adoptable_unrenderable_signal(record["signal"])
+            crumb_id = str(record["breadcrumb"])
+        except Exception:  # noqa: BLE001 -- a damaged crumb must not wedge the cycle
+            continue
+        if signal is None or not _UNRENDERABLE_TOKEN_RE.match(crumb_id) or crumb_id in known:
+            continue
+        if len(_pending_unrenderable_signals) >= UNRENDERABLE_SIGNAL_CAP:
+            break
+        _pending_unrenderable_signals.append({"signal": signal, "breadcrumb": crumb_id})
+        known.add(crumb_id)
+        adopted += 1
+    return adopted
+
+
+def drop_unrenderable_breadcrumbs(paths: dict[str, Path], crumb_ids: set[str]) -> None:
+    """Remove the breadcrumbs whose signal is now published or debounced."""
+    directory = paths.get("unrenderable_signals")
+    if directory is None:
+        return
+    for crumb_id in crumb_ids:
+        try:
+            (directory / f"{crumb_id}.json").unlink()
+        except OSError:
+            # already acked, or unreadable/unwritable right now: the fold has
+            # published the page; at worst the crumb is re-adopted next cycle and
+            # absorbed by the per-identity throttle. Never abort the cycle for it.
+            continue
+
+
+def note_unrenderable_quarantine(
+    event: Any = None, *, kind: str = "", severity: str = "", breadcrumb: str = ""
+) -> None:
+    """Record that one event was quarantined for unrenderable alert content."""
+    global _pending_unrenderable_quarantines, _unrenderable_quarantines_total
+    _pending_unrenderable_quarantines += 1
+    _unrenderable_quarantines_total += 1
+    if len(_pending_unrenderable_signals) < UNRENDERABLE_SIGNAL_CAP:
+        _pending_unrenderable_signals.append({
+            "signal": unrenderable_alert_signal(event, kind=kind, severity=severity),
+            "breadcrumb": breadcrumb,
+        })
+
+
+def unrenderable_quarantine_total() -> int:
+    """Every unrenderable quarantine this process has seen, never reset.
+
+    run_once brackets a cycle with two reads of this and reports the difference,
+    so the per-cycle count does not depend on the fold/acknowledge protocol that
+    governs the persisted telemetry counter.
+    """
+    return _unrenderable_quarantines_total
+
+
+def flush_unrenderable_quarantine_telemetry(incident_state: dict[str, Any]) -> int:
+    """Fold pending quarantine counts into incident state; return how many.
+
+    Deliberately does NOT drain. The caller commits AFTER this returns, and a
+    failed durable write would otherwise lose the count from both places at once:
+    zeroed here, and absent from disk because the write failed. The count is only
+    given up once a commit has actually succeeded, via
+    ``ack_unrenderable_quarantine_telemetry``. Folding again into a state object
+    that was never committed is harmless; losing a permanent quarantine is not.
+
+    Returns the number folded, so a caller can skip an otherwise empty commit and
+    knows exactly how much to acknowledge.
+    """
+    pending = _pending_unrenderable_quarantines
+    if not pending:
+        return 0
+    block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
+    if not isinstance(block, dict):
+        block = {}
+    for counter in _LEGACY_ALERT_CONTENT_COUNTERS.values():
+        block.setdefault(counter, 0)
+    block["queueUnrenderable"] = int_field(block, "queueUnrenderable") + pending
+    block["lastLegacyAt"] = int(time.time())
+    block["lastLegacyIso"] = now_iso()
+    block.setdefault("lastLegacySource", "")
+    incident_state[LEGACY_ALERT_CONTENT_KEY] = block
+    return pending
+
+
+def ack_unrenderable_quarantine_telemetry(count: int) -> None:
+    """Give up pending quarantine counts, but only once a commit has succeeded.
+
+    Subtracts rather than zeroing, so a count that arrived between the fold and
+    the commit is not swallowed by an acknowledgement that never covered it.
+    """
+    global _pending_unrenderable_quarantines
+    if count <= 0:
+        return
+    _pending_unrenderable_quarantines = max(0, _pending_unrenderable_quarantines - count)
+
+
+def record_legacy_alert_content(event: dict[str, Any], incident_state: dict[str, Any]) -> bool:
+    """Count the legacy alert-content forms one event carries (#2386).
+
+    Called once per claimed event, never inside ``alert_text`` -- that runs many
+    times per event. One event can carry a different form in each field, so each
+    counter increments AT MOST ONCE per event and the counters must NEVER be
+    summed: adding object to repr double-counts an event carrying both.
+
+    Retirement needs both halves: these counters reading zero for 14 consecutive
+    days AND a direct scan of the incident-state JSON finding neither form. A
+    quiet open incident carrying a legacy ``lastEvidence`` is never rendered, so
+    the counters alone cannot prove the corpus is clean.
+    """
+    changed = False
+    kinds = {alert_text_kind(event.get(field)) for field in ("summary", "evidence")}
+    incremented = {
+        counter for kind, counter in _LEGACY_ALERT_CONTENT_COUNTERS.items() if kind in kinds
+    }
+    if not incremented:
+        return changed
+    block = incident_state.get(LEGACY_ALERT_CONTENT_KEY)
+    if not isinstance(block, dict):
+        block = {}
+    for counter in _LEGACY_ALERT_CONTENT_COUNTERS.values():
+        block[counter] = int_field(block, counter) + (1 if counter in incremented else 0)
+    block["lastLegacyAt"] = int(time.time())
+    block["lastLegacyIso"] = now_iso()
+    block["lastLegacySource"] = safe_segment(str(event.get("source") or "unknown"))
+    incident_state[LEGACY_ALERT_CONTENT_KEY] = block
+    return True
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -754,6 +1143,7 @@ def state_paths() -> dict[str, Path]:
         "storm_manifests": root / "storm-manifests",
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
+        "unrenderable_signals": root / "unrenderable-signals",
         "testleak": root / "testleak",
         "writefail_recovered": root / "writefail-recovered",
         "writefail_quarantine": root / "writefail-quarantine",
@@ -812,6 +1202,11 @@ def setup_dirs() -> dict[str, Path]:
         "dead_letter",
     ):
         ensure_private_dir(paths[key])
+    # "unrenderable_signals" is deliberately NOT ensured here. It is created
+    # lazily inside write_unrenderable_breadcrumb's own fail-open guard, because
+    # every directory in the list above is a cycle-abort cause if it cannot be
+    # made, and the breadcrumb must never be one: it is written from inside
+    # ready(), above every pre-loop pass, on the path this PR exists to unwedge.
     return paths
 
 
@@ -1951,8 +2346,8 @@ def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, 
     if str(record.get("failureCode") or "") == "SOURCE_UPDATE_BLOCKED":
         return True
     evidence = " ".join([
-        str(record.get("lastEvidence") or ""),
-        str(record.get("lastSummary") or ""),
+        alert_text(record.get("lastEvidence")),
+        alert_text(record.get("lastSummary")),
     ]).lower()
     return "source_update" in evidence and (
         "source_update_blocked" in evidence
@@ -2078,7 +2473,7 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     """
     source = str(event.get("source") or "")
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    evidence = str(event.get("evidence") or "")
+    evidence = event_text(event, "evidence")
 
     # SSH timeout to a peer Tailscale still reports online: host is up, the probe
     # timed out — transient.
@@ -2369,7 +2764,7 @@ def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
     the same probe-extraction shape and the same oracle as the recovery path; no
     parallel verification logic. Fail-closed: any parse error -> not verified.
     """
-    for raw_line in str(record.get("lastEvidence") or "").splitlines():
+    for raw_line in alert_text(record.get("lastEvidence")).splitlines():
         line = raw_line.strip()
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
         probe = match.group(2).strip() if match else line
@@ -2389,7 +2784,7 @@ def daily_health_recovered_incident_keys(
     created = event_created_epoch(event)
     recovered: list[str] = []
     seen: set[str] = set()
-    for raw_line in str(event.get("evidence") or "").splitlines():
+    for raw_line in event_text(event, "evidence").splitlines():
         line = raw_line.strip()
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
         if not match:
@@ -2479,6 +2874,11 @@ def absorb_daily_health_signal(event: dict[str, Any], incident_state: dict[str, 
     Closure mirrors process_one's own gate — exact source ``"daily-health"``
     and not a clear-type event — so behavior at each call site matches what
     process_one would have done had the event reached it.
+
+    This helper does NOT count legacy alert content. ``record_legacy_alert_content``
+    owns that, and each terminal path calls it directly, outside any source guard
+    -- counting here would have missed every non-daily-health event, because two
+    of the four paths only reach this helper for daily-health sources.
 
     Also stamps the ``sourceSpecificRecoveredIncidents`` diagnostic onto the
     event itself when incidents were recovered (folded in here from the
@@ -2860,7 +3260,7 @@ def record_autoclose_reopen_if_recent(
         "secondsSinceAutoclose": seconds_since,
         "source": source_from_incident_key(key),
         "eventId": event.get("id"),
-        "summary": redacted_state_text(event.get("summary"), 500),
+        "summary": redacted_state_text(event_text(event, "summary"), 500),
     }
     safety = incident_state.setdefault("promotionSafety", {})
     safety["autoCloseThenReopenCount"] = int_field(safety, "autoCloseThenReopenCount") + 1
@@ -2909,7 +3309,7 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
     if critical_failure_code(event) == "WA_AUTH_BOND_SERVER_REVOKED":
         return True
     source = str(event.get("source") or "")
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return source == "instance_logged_out" and (
         evidence_has_terminal_auth_failure_class(evidence) or (
             "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
@@ -2928,7 +3328,7 @@ def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:
         if kind in {"whatsapp_linked_device", "account_linkage"}:
             return True
     source = str(event.get("source") or "")
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return (
         source == "whatsapp_device_bond_lost"
         and "classification: physical_intervention_required" in evidence
@@ -2947,7 +3347,7 @@ def physical_confirmation_threshold(event: dict[str, Any]) -> int:
 def event_has_awaiting_physical_context(event: dict[str, Any]) -> bool:
     if critical_recoverability(event) == "manual_relink_required":
         return True
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return "incident_status=awaiting_physical" in evidence or "status=awaiting_physical" in evidence
 
 
@@ -2969,7 +3369,7 @@ def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, A
     record["physicalCandidateLastAt"] = current
     record["physicalCandidateLastIso"] = now
     record["physicalCandidateLastEventId"] = event_id
-    record["physicalCandidateLastEvidence"] = str(event.get("evidence") or "")[-1000:]
+    record["physicalCandidateLastEvidence"] = event_text(event, "evidence")[-1000:]
 
     if previous_status != "awaiting_physical" and count >= physical_confirmation_threshold(event):
         record["status"] = "awaiting_physical"
@@ -3001,7 +3401,7 @@ def stale_action_text() -> str:
 
 
 def event_has_stale_context(event: dict[str, Any]) -> bool:
-    evidence = str(event.get("evidence") or "").lower()
+    evidence = event_text(event, "evidence").lower()
     return "incident_stale=true" in evidence or "incident_status=stale" in evidence
 
 
@@ -3037,24 +3437,24 @@ def append_still_open_context(
             f"physical_action={physical_action_text()}",
             f"renotify_cadence_seconds={AWAITING_PHYSICAL_RENOTIFY_SECONDS}",
         ])
-    evidence = str(event.get("evidence") or "").strip()
+    evidence = event_text(event, "evidence").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
-        if "still-open digest" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Still-open digest, awaiting physical action: {event.get('summary') or key}"
+        if "still-open digest" not in event_text(event, "summary").lower():
+            event["summary"] = f"Still-open digest, awaiting physical action: {event_text(event, 'summary') or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
-        if "awaiting physical" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Awaiting physical action: {event.get('summary') or key}"
+        if "awaiting physical" not in event_text(event, "summary").lower():
+            event["summary"] = f"Awaiting physical action: {event_text(event, 'summary') or key}"
     elif escalated:
         event["severity"] = "critical"
-        if "escalated" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"ESCALATED still open: {event.get('summary') or key}"
+        if "escalated" not in event_text(event, "summary").lower():
+            event["summary"] = f"ESCALATED still open: {event_text(event, 'summary') or key}"
     elif digest:
-        if "still-open digest" not in str(event.get("summary") or "").lower():
-            event["summary"] = f"Still-open digest: {event.get('summary') or key}"
-    elif "still open" not in str(event.get("summary") or "").lower():
-        event["summary"] = f"Still open: {event.get('summary') or key}"
+        if "still-open digest" not in event_text(event, "summary").lower():
+            event["summary"] = f"Still-open digest: {event_text(event, 'summary') or key}"
+    elif "still open" not in event_text(event, "summary").lower():
+        event["summary"] = f"Still open: {event_text(event, 'summary') or key}"
 
 
 def truncate(value: Any, limit: int) -> str:
@@ -3300,7 +3700,7 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT WARNING"
     else:
         title = "BOT ERROR"
-    summary = truncate(redact(event.get("summary") or "unspecified bot error").replace("@", " at "), 220)
+    summary = truncate(redact(event_text(event, "summary") or "unspecified bot error").replace("@", " at "), 220)
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
@@ -3384,7 +3784,7 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("queue", diagnostics.get("queue")),
         event_line("dispatch_log", diagnostics.get("dispatchLog")),
         event_line("clear_requirement", clear_requirement, 900),
-        event_line("evidence", event.get("evidence"), 1800),
+        event_line("evidence", event_text(event, "evidence"), 1800),
         requested_action,
     ])
     text = "\n".join(line for line in lines if line)
@@ -3596,7 +3996,9 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
     try:
         oldest_file = min(dl_files, key=lambda f: f.stat().st_mtime)
         crumb = json.loads(oldest_file.read_text(encoding="utf-8"))
-        oldest_summary = str(crumb.get("event", {}).get("summary") or "")
+        # A crumb is a persisted artifact and can carry the legacy confined form;
+        # this text is interpolated into a newly minted meta-alert (#2386).
+        oldest_summary = alert_text(crumb.get("event", {}).get("summary") or "")
     except Exception:  # noqa: BLE001
         oldest_summary = ""
 
@@ -3645,7 +4047,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     if (
         is_incident_alert(event)
         and source == "whatsapp_auth_bond_local_failure"
-        and TEST_FIXTURE_AUTH_BOND.search(str(event.get("evidence") or ""))
+        and TEST_FIXTURE_AUTH_BOND.search(event_text(event, "evidence"))
     ):
         return "test fixture auth-bond event suppressed from live BOT ERRORS"
     if source == "daily-health" and severity == "info" and not is_incident_clear(event):
@@ -3783,8 +4185,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             open_record["lastSeenAt"] = current
             open_record["lastSeenIso"] = now_iso()
             open_record["lastEventId"] = event.get("id")
-            open_record["lastSummary"] = redacted_state_text(event.get("summary"), 500)
-            open_record["lastEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+            open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
+            open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
             suppressed = int_field(open_record, "suppressedCount") + 1
             open_record["suppressedCount"] = suppressed
             became_awaiting_physical = update_awaiting_physical_tracking(event, open_record, current)
@@ -4124,7 +4526,7 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
             )
     if recovered_keys:
         additions.append("recovered_incidents=" + ",".join(recovered_keys))
-    evidence = str(event.get("evidence") or "").strip()
+    evidence = event_text(event, "evidence").strip()
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
 
 
@@ -4168,8 +4570,8 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             "lastSentIso": now_iso(),
             "lastNotifiedAt": current,
             "lastNotifiedIso": now_iso(),
-            "lastSummary": redacted_state_text(event.get("summary"), 500),
-            "lastEvidence": redacted_state_text(event.get("evidence"), 1000, tail=True),
+            "lastSummary": redacted_state_text(event_text(event, "summary"), 500),
+            "lastEvidence": redacted_state_text(event_text(event, "evidence"), 1000, tail=True),
             "suppressedCount": suppressed,
             "renotifyCount": renotify_count,
             "forceNotifyLevels": force_levels,
@@ -4286,15 +4688,15 @@ def mark_suppressed_by_stronger(
         stronger_record["lastSuppressedClearAt"] = current
         stronger_record["lastSuppressedClearIso"] = now_iso()
         stronger_record["lastSuppressedClearSource"] = incident_source(event)
-        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(event.get("summary"), 500)
+        stronger_record["lastSuppressedClearSummary"] = redacted_state_text(event_text(event, "summary"), 500)
         stronger_record["lastSuppressedClearReason"] = f"clear suppressed by stronger open incident {stronger_key}"
         return
 
     stronger_record["lastSeenAt"] = current
     stronger_record["lastSeenIso"] = now_iso()
     stronger_record["lastSuppressedSymptomSource"] = incident_source(event)
-    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event.get("summary"), 500)
-    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event.get("evidence"), 1000, tail=True)
+    stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event_text(event, "summary"), 500)
+    stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
     if critical_failure_code(event):
         stronger_record["lastSuppressedSymptomFailureCode"] = critical_failure_code(event)
     stronger_record["suppressedCount"] = int_field(stronger_record, "suppressedCount") + 1
@@ -4490,7 +4892,7 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     if last_stale_failed and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS:
         return None
 
-    summary = str(record.get("lastSummary") or key)
+    summary = alert_text(record.get("lastSummary")) or key
     if awaiting_physical:
         title = f"Stale incident digest, awaiting physical action: {summary}"
         action = physical_action_text()
@@ -5426,7 +5828,7 @@ def normalize_token_lists(text: str) -> str:
 
 
 def normalized_summary(event: dict[str, Any]) -> str:
-    text = redact(event.get("summary") or "unspecified bot error").lower()
+    text = redact(event_fingerprint_text(event, "summary") or "unspecified bot error").lower()
     host_tokens = set()
     for key in ("machine", "machineName", "host", "hostname", "instance"):
         raw = str(event.get(key) or "").strip().lower()
@@ -5481,7 +5883,7 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
-    text = str(event.get("summary") or "unspecified bot error").strip().lower()
+    text = (event_fingerprint_text(event, "summary") or "unspecified bot error").strip().lower()
     return re.sub(r"\s+", " ", text)
 
 
@@ -5542,8 +5944,8 @@ def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
         "source": event.get("source"),
         "severity": event.get("severity"),
         "createdAt": event.get("createdAt"),
-        "summary": truncate(redact(event.get("summary")), 700),
-        "evidence": truncate(redact(event.get("evidence")), 1800),
+        "summary": truncate(redact(event_text(event, "summary")), 700),
+        "evidence": truncate(redact(event_text(event, "evidence")), 1800),
         "outboxPath": str(path),
         "logHints": [truncate(redact(hint), 900) for hint in log_hints[:10]],
     }
@@ -5784,7 +6186,7 @@ def collapse_storm_group(
             )
             require_all_advance([absorb_manifest_publication])
             publications.append(absorb_manifest_publication)
-            summary_text = str(digest_event.get("summary") or "")
+            summary_text = event_text(digest_event, "summary")
             summary_tail = (
                 summary_text.split(" hosts - ", 1)[1]
                 if " hosts - " in summary_text
@@ -5840,6 +6242,8 @@ def collapse_storm_group(
                     })
                     continue
                 absorb_daily_health_signal(event, incident_state)
+                if record_legacy_alert_content(event, incident_state):
+                    state_changed = True
                 if str(event.get("source") or "").startswith("daily-health"):
                     state_changed = True
                 event = mark_collapsed(event, latest_digest_id, bound_manifest_path)
@@ -5991,6 +6395,8 @@ def collapse_storm_group(
                 })
                 continue
             absorb_daily_health_signal(event, incident_state)
+            if record_legacy_alert_content(event, incident_state):
+                state_changed = True
             if str(event.get("source") or "").startswith("daily-health"):
                 state_changed = True
             event = mark_collapsed(event, superseding_digest_id, superseding_manifest_path)
@@ -6163,6 +6569,8 @@ def collapse_storm_group(
             })
             continue
         absorb_daily_health_signal(event, incident_state)
+        if record_legacy_alert_content(event, incident_state):
+            state_changed = True
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
@@ -6425,11 +6833,18 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
         # retryable in the outbox as a visible failed run.
         state_changed = False
         for _alert_path, alert_event, _alert_epoch, _alert_order in pending_alerts:
+            if record_legacy_alert_content(alert_event, incident_state):
+                state_changed = True
             if str(alert_event.get("source") or "").startswith("daily-health"):
                 absorb_daily_health_signal(alert_event, incident_state)
                 state_changed = True
         migrate_legacy_unqualified_incident(clear_event, incident_state)
         clear_will_dispatch = isinstance(open_incidents.get(key), dict)
+        # Gated exactly like the absorb below, and for the same reason: when the
+        # clear will dispatch it stays in the outbox and process_one counts it.
+        # Counting it here as well double-counted that one event (#2386).
+        if not clear_will_dispatch and record_legacy_alert_content(clear_event, incident_state):
+            state_changed = True
         if not clear_will_dispatch and str(clear_event.get("source") or "").startswith("daily-health"):
             absorb_daily_health_signal(clear_event, incident_state)
             state_changed = True
@@ -6541,6 +6956,8 @@ def suppress_ready_recovery_duplicates(paths: dict[str, Path], incident: Inciden
     state_changed = False
     for _path, event in duplicates:
         absorb_daily_health_signal(event, incident_state)
+        if record_legacy_alert_content(event, incident_state):
+            state_changed = True
         if str(event.get("source") or "").startswith("daily-health"):
             state_changed = True
     if state_changed:
@@ -6710,6 +7127,149 @@ def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> in
     return 1
 
 
+def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any]:
+    """A content-free page for alerts the dispatcher had to quarantine (#2386).
+
+    Every field here is either fixed text or a bounded identity token from
+    ``unrenderable_alert_signal``. No byte of the quarantined ``summary`` or
+    ``evidence`` appears, and neither does the correlation digest -- strictly less
+    than the dead-letter meta-alert, which renders the confined summary through
+    ``alert_text``.
+    """
+    now = int(time.time())
+    key_digest = signal.get("identity", UNRENDERABLE_IDENTITY_UNAVAILABLE)[:8]
+    return {
+        **new_event_fields("alert", "critical"),
+        # The process id carries a "p": an epoch joined to a bare number by a
+        # hyphen is 10-15 digits with separator syntax, which is exactly what the
+        # phone-like redactor rewrites, so the page named the event
+        # "...-[REDACTED PHONE]-<digest>" and no operator could match it to its
+        # dispatch-log entry or quarantine file. The letter ends the digit run.
+        "id": f"dispatcher-unrenderable-alert-content-{now}-p{os.getpid()}-{key_digest}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": UNRENDERABLE_META_ALERT_SOURCE,
+        "summary": "BOT ERRORS quarantined an alert it has no safe way to render",
+        # NOTE: as in dead_letter_meta_event, no absolute state path goes in
+        # evidence -- matched_test_leak_pattern() walks every string field and a
+        # sandbox path would make this meta-alert drop itself. The quarantine
+        # path is recorded in the dispatch log instead.
+        "evidence": "\n".join([
+            f"unrenderable_quarantine_count={count}",
+            f"reason={signal.get('reason', UNRENDERABLE_ALERT_CONTENT_CODE)}",
+            f"alert_kind={signal.get('kind', 'unknown')}",
+            f"alert_severity={signal.get('severity', 'unknown')}",
+            f"failure_class={signal.get('failureClass', 'unavailable')}",
+            f"unrenderable_fields={signal.get('unrenderableFields', '')}",
+            f"producer_identity={signal.get('identity', UNRENDERABLE_IDENTITY_UNAVAILABLE)}",
+            "disposition: original quarantined, not delivered and not retried",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def queue_unrenderable_meta_alerts(paths: dict[str, Path], now: int) -> int:
+    """Page once per incident key for the alerts this cycle quarantined (#2386).
+
+    Quarantine happens inside ``ready()``, before ``process_one``, so the event is
+    already out of the queue by the time any delivery path runs: without this the
+    dispatcher drops a CRITICAL alert, exits 0, and says nothing. The base
+    behaviour paged a sentinel, and #2386's acceptance is that failing closed on a
+    malformed schema must not suppress the safe source/class signal.
+
+    Throttled on the dead-letter meta-alert's window, applied PER INCIDENT KEY, so
+    a storm of unrenderable events from one producer pages once while a second,
+    unrelated producer is still reported. A key is only removed from the pending
+    list once its meta-alert has been published or deliberately debounced, so a
+    failed publication is retried on the next cycle rather than lost.
+    """
+    global _pending_unrenderable_signals
+    if not _pending_unrenderable_signals:
+        return 0
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for pending in _pending_unrenderable_signals:
+        signal = pending["signal"]
+        entry = grouped.setdefault(
+            signal["identity"], {"signal": signal, "count": 0, "breadcrumbs": set()}
+        )
+        entry["count"] = int(entry["count"]) + 1
+        if pending.get("breadcrumb"):
+            entry["breadcrumbs"].add(pending["breadcrumb"])
+
+    state = read_meta_state(paths)
+    seen = state.get("unrenderableMetaAlertAtEpoch")
+    if not isinstance(seen, dict):
+        seen = {}
+
+    queued = 0
+    settled: set[str] = set()
+    for key, entry in sorted(grouped.items()):
+        last = int(seen.get(key) or 0)
+        if last and now - last < UNRENDERABLE_META_ALERT_THROTTLE_SECONDS:
+            append_dispatch_log(paths, {
+                "type": "unrenderable_meta_debounced",
+                "producerIdentity": key,
+                "count": entry["count"],
+                "throttleSeconds": UNRENDERABLE_META_ALERT_THROTTLE_SECONDS,
+            })
+            settled.add(key)
+            continue
+        event = unrenderable_meta_event(entry["signal"], int(entry["count"]))
+        path = outbox_path_for_event(event, paths)
+        target = _durable_target(path)
+        absent = JsonVersion(False, None, None, None)
+        publication_operation = operation_id(
+            target,
+            event,
+            component="dispatcher.unrenderable_meta_alert",
+            predecessor=absent,
+        )
+        event_publication = publish_event_json(
+            target,
+            event,
+            component="dispatcher.unrenderable_meta_alert",
+            operation_id=publication_operation,
+        )
+        require_advance(event_publication)
+        seen[key] = now
+        queued += 1
+        settled.add(key)
+        append_dispatch_log(paths, {
+            "type": "unrenderable_meta_queued",
+            "eventId": event["id"],
+            "producerIdentity": key,
+            "count": entry["count"],
+        })
+
+    # Prune expired keys: the map is keyed by incident key, so without this a
+    # long-lived dispatcher would accumulate one entry per distinct producer.
+    seen = {
+        str(k): int(v or 0)
+        for k, v in seen.items()
+        if now - int(v or 0) < UNRENDERABLE_META_ALERT_THROTTLE_SECONDS
+    }
+    state["unrenderableMetaAlertAtEpoch"] = seen
+    write_meta_state(paths, state)
+    # Ack after publish: a breadcrumb only goes once its page is published or
+    # deliberately debounced, so a death before publication retries next cycle.
+    drop_unrenderable_breadcrumbs(paths, {
+        crumb
+        for identity, entry in grouped.items()
+        if identity in settled
+        for crumb in entry["breadcrumbs"]
+    })
+    _pending_unrenderable_signals = [
+        pending for pending in _pending_unrenderable_signals
+        if pending["signal"]["identity"] not in settled
+    ]
+    return queued
+
+
 def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     suppressed = 0
     for path in sorted(paths["outbox"].glob("*.json")):
@@ -6733,25 +7293,101 @@ def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
     return suppressed, alerted
 
 
+class QueueDisposition:
+    """What the scan decided about one queue entry (#2386, repair contract A).
+
+    A bare bool or a bare event-or-None cannot distinguish "not due yet" from
+    "removed from the queue forever", so the caller had no way to account a
+    terminal drop. ``reason`` is a fixed EnvelopeError code; ``kind`` and
+    ``severity`` are the canonical header values, populated only when
+    classification had already validated them. None of the three is ever raw
+    event text.
+
+    Deliberately NOT a dataclass. Several test modules load this script by file
+    path WITHOUT registering it in ``sys.modules``, and ``@dataclass`` resolves
+    ``cls.__module__`` through ``sys.modules`` while it builds the class, so the
+    decorator raises at import time under exactly that loader. A plain class has
+    no such dependency and this module must stay importable by file path.
+    """
+
+    def __init__(self, state: str, reason: str = "", kind: str = "", severity: str = "") -> None:
+        self.state = state
+        self.reason = reason
+        self.kind = kind
+        self.severity = severity
+
+    def __repr__(self) -> str:
+        return (
+            f"QueueDisposition(state={self.state!r}, reason={self.reason!r}, "
+            f"kind={self.kind!r}, severity={self.severity!r})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, QueueDisposition):
+            return NotImplemented
+        return (
+            self.state == other.state
+            and self.reason == other.reason
+            and self.kind == other.kind
+            and self.severity == other.severity
+        )
+
+
+DISPOSITION_READY = QueueDisposition("ready")
+DISPOSITION_NOT_READY = QueueDisposition("not_ready")
+
+
+def load_event_disposition(
+    path: Path, quarantine_dir: Path
+) -> tuple[dict[str, Any] | None, QueueDisposition]:
+    """Load one queue entry, returning it alongside a tagged disposition."""
+    event = _load_valid_event_or_quarantine_inner(path, quarantine_dir)
+    return event, _LAST_LOAD_DISPOSITION[0]
+
+
 def load_valid_event_or_quarantine(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
+    """Back-compatible view of the loader: the event, or None."""
+    event, _disposition = load_event_disposition(path, quarantine_dir)
+    return event
+
+
+# The disposition of the most recent load, so the tagged result can be returned
+# without changing the signature every existing caller depends on.
+_LAST_LOAD_DISPOSITION: list[QueueDisposition] = [DISPOSITION_NOT_READY]
+
+
+def _load_valid_event_or_quarantine_inner(path: Path, quarantine_dir: Path) -> dict[str, Any] | None:
     # #2484: reject symlink and non-regular leaves before reading.  Quarantine
     # the directory entry itself without dereferencing its target.
+    _LAST_LOAD_DISPOSITION[0] = DISPOSITION_NOT_READY
     if not safe_is_regular_entry(path):
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "untrusted_leaf_entry")
         return None
     try:
         event = safe_read_json(path)
     except UntrustedEntryError:
         quarantine_untrusted_entry(path, quarantine_dir, "untrusted leaf entry after open")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "untrusted_leaf_entry")
         return None
     except Exception as exc:
         quarantine_poison(path, quarantine_dir, f"invalid JSON before claim: {exc}")
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition("quarantined", "poison")
         return None
     try:
         classify_event(event)
     except EnvelopeError as exc:
-        quarantine_invalid_envelope(path, quarantine_dir, exc.code)
+        quarantine_invalid_envelope(
+            path, quarantine_dir, exc.code, event, kind=exc.kind, severity=exc.severity
+        )
+        _LAST_LOAD_DISPOSITION[0] = QueueDisposition(
+            "quarantined",
+            safe_segment(exc.code),
+            getattr(exc, "kind", "") or "",
+            getattr(exc, "severity", "") or "",
+        )
         return None
+    _LAST_LOAD_DISPOSITION[0] = DISPOSITION_READY
     return event
 
 
@@ -6771,9 +7407,14 @@ def delivery_ready(event: dict[str, Any]) -> bool:
 
 
 def ready(path: Path, quarantine_dir: Path) -> bool:
-    event = load_valid_event_or_quarantine(path, quarantine_dir)
+    """Boolean view of ``ready_disposition`` for callers that only branch on it."""
+    return ready_disposition(path, quarantine_dir).state == "ready"
+
+
+def ready_disposition(path: Path, quarantine_dir: Path) -> QueueDisposition:
+    event, disposition = load_event_disposition(path, quarantine_dir)
     if event is None:
-        return False
+        return disposition
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     try:
         int(delivery.get("nextAttemptAtEpoch") or 0)
@@ -6781,7 +7422,7 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
         # #2437: quarantine malformed metadata so a single poison record
         # cannot wedge the queue; the scan continues with the next event.
         quarantine_poison(path, quarantine_dir, f"malformed delivery.nextAttemptAtEpoch: {exc}")
-        return False
+        return QueueDisposition("quarantined", "poison")
     try:
         int(delivery.get("attempts") or 0)
     except (TypeError, ValueError) as exc:
@@ -6792,21 +7433,51 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
         # the record back to outbox, creating an infinite claim-fail loop.
         # Validate here (before claim) so the scan quarantines and continues.
         quarantine_poison(path, quarantine_dir, f"malformed delivery.attempts: {exc}")
-        return False
-    return delivery_ready(event)
+        return QueueDisposition("quarantined", "poison")
+    return DISPOSITION_READY if delivery_ready(event) else DISPOSITION_NOT_READY
 
 
-def quarantine_invalid_envelope(path: Path, quarantine_dir: Path, code: str) -> Path:
-    """Quarantine an invalid envelope without treating it as an alert to send."""
+def quarantine_invalid_envelope(
+    path: Path,
+    quarantine_dir: Path,
+    code: str,
+    event: Any = None,
+    *,
+    kind: str = "",
+    severity: str = "",
+) -> Path:
+    """Quarantine an invalid envelope without treating it as an alert to send.
+
+    ``event`` is the raw record the caller already parsed. It is used only to
+    capture the content-free operator signal (#2386); the value is never rendered
+    and never reaches the quarantined file or the meta-alert body.
+    """
 
     ensure_private_dir(quarantine_dir)
     reason = safe_segment(code)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{reason}.invalid-envelope"
+    if code == UNRENDERABLE_ALERT_CONTENT_CODE:
+        signal = unrenderable_alert_signal(event, kind=kind, severity=severity)
+        # BEFORE the move: after it the queue file is gone and the obligation to
+        # page about it exists only in this process. A crash in that window left
+        # the event permanently dropped and silent.
+        breadcrumb = write_unrenderable_breadcrumb(_state_paths_for(quarantine_dir), dest, signal)
+        note_unrenderable_quarantine(event, kind=kind, severity=severity, breadcrumb=breadcrumb)
     try:
         shutil.move(str(path), str(dest))
     except FileNotFoundError:
         return dest
     return dest
+
+
+def _state_paths_for(quarantine_dir: Path) -> dict[str, Path]:
+    """The breadcrumb directory beside a given quarantine directory.
+
+    quarantine_invalid_envelope takes a directory rather than the paths map --
+    several callers, including tests, pass a bare temporary directory -- so the
+    sibling is derived rather than looked up.
+    """
+    return {"unrenderable_signals": quarantine_dir.parent / "unrenderable-signals"}
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
@@ -7198,7 +7869,12 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     try:
         event = normalize_event(event)
     except EnvelopeError as exc:
-        quarantine_invalid_envelope(claimed, paths["quarantine"], exc.code)
+        # Reachable despite the ready() pre-check: the file can be rewritten
+        # between the scan and the claim. Both sites must page, or the second
+        # one silently drops the alert the first one was fixed to report.
+        quarantine_invalid_envelope(
+            claimed, paths["quarantine"], exc.code, event, kind=exc.kind, severity=exc.severity
+        )
         return False, "invalid_envelope"
     normalize_target = _durable_target(claimed)
     normalize_observation = observe_json(normalize_target)
@@ -7394,6 +8070,18 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             })
             return True, "stale_episode_quarantined"
 
+    # Fail-open: this is telemetry, and it is the per-event caller of the
+    # quarantine fold. A raise here would abort the cycle before the event is
+    # delivered, which is the total-alert-loss class. Record why and continue.
+    try:
+        record_legacy_alert_content(event, incident_state)
+    except Exception as exc:  # noqa: BLE001 - telemetry must never block dispatch.
+        append_dispatch_log(paths, {
+            "type": "legacy_alert_content_telemetry_failed",
+            "eventId": event.get("id"),
+            "source": event.get("source"),
+            "reason": str(exc),
+        })
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
     if suppress_reason:
@@ -7525,7 +8213,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             else:
                 email_status = (
                     "accepted_unconfirmed"
-                    if email_fallback(f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}", text)
+                    if email_fallback(f"BOT ERRORS delivery failing: {event_text(event, 'summary') or 'unknown'}", text)
                     else "failed"
                 )
         if isinstance(delivery, dict):
@@ -7719,6 +8407,14 @@ def run_once(max_events: int) -> dict[str, Any]:
                 session, _load_result.payload, _load_result.capability, paths=paths
             )
 
+            # #2386: mark BEFORE the first pass that can quarantine. Every pre-loop
+            # pass below calls ready(), which is where an unrenderable event is
+            # removed from the queue.
+            quarantine_mark = unrenderable_quarantine_total()
+            # #2386: adopt any signal a previous process owed but died before
+            # publishing. Runs before the passes that can quarantine, so a crumb
+            # this cycle writes is not adopted twice.
+            reconcile_unrenderable_signals(paths)
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
@@ -7733,13 +8429,35 @@ def run_once(max_events: int) -> dict[str, Any]:
             sent = 0
             suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
             failed = 0
+            # #2386: quarantines the LOOP already accounted. The cycle folds a
+            # delta because the pre-loop passes can quarantine before the loop
+            # runs, but process_one's own site fires after `processed` was
+            # incremented and returns a failure, so that event is described by
+            # both mechanisms and must be folded only once.
+            claim_race_quarantines = 0
             test_leak_dropped = 0
             last_error = None
             touched_incident_keys: set[str] = set()
             for path in sorted(paths["outbox"].glob("*.json")):
                 if processed >= max_events:
                     break
-                if not ready(path, paths["quarantine"]):
+                disposition = ready_disposition(path, paths["quarantine"])
+                if disposition.state != "ready":
+                    if (
+                        disposition.state == "quarantined"
+                        and disposition.reason == UNRENDERABLE_ALERT_CONTENT_CODE
+                    ):
+                        # Terminal: the alert left the queue and is never retried.
+                        # Accounted once at the end of the cycle, where the count
+                        # also covers the pre-loop passes that call ready().
+                        # Scanning CONTINUES so one malformed event cannot
+                        # suppress a healthy sibling behind it.
+                        append_dispatch_log(paths, {
+                            "type": "unrenderable_alert_quarantined",
+                            "reason": disposition.reason,
+                            "eventKind": disposition.kind,
+                            "severity": disposition.severity,
+                        })
                     continue
                 try:
                     preview = safe_read_json(path)
@@ -7748,7 +8466,9 @@ def run_once(max_events: int) -> dict[str, Any]:
                 except Exception:
                     pass
                 processed += 1
+                claim_mark = unrenderable_quarantine_total()
                 ok, detail = process_one(path, paths, incident=_incident_cycle)
+                claim_race_quarantines += unrenderable_quarantine_total() - claim_mark
                 if detail == "test_leak":
                     test_leak_dropped += 1
                 elif ok:
@@ -7769,6 +8489,21 @@ def run_once(max_events: int) -> dict[str, Any]:
 
             # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
             dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
+
+            # #2386: page for anything quarantined as unrenderable this cycle.
+            # Runs after the loop so the alert it queues is picked up next cycle
+            # rather than re-entering the scan that is still in progress.
+            unrenderable_meta_alerted = queue_unrenderable_meta_alerts(paths, int(time.time()))
+
+            # #2386: a cycle whose events were ALL quarantined never reaches the
+            # shared telemetry helper, so drain any pending quarantine counts here
+            # before the cycle ends. Commit only when something was folded.
+            folded_quarantines = flush_unrenderable_quarantine_telemetry(_incident_cycle.payload)
+            if folded_quarantines:
+                _incident_cycle.commit()
+                # Only now is the count safe to give up: if the commit above
+                # raises, the pending count survives and the next cycle folds it.
+                ack_unrenderable_quarantine_telemetry(folded_quarantines)
 
             # Daily test-leak summary marker (at most once per UTC date per day).
             if test_leak_dropped > 0:
@@ -7810,6 +8545,28 @@ def run_once(max_events: int) -> dict[str, Any]:
                 log_conversation_scope_error("cycle_sweep", "", exc, False)
 
             suppressed_pruned = prune_suppressed(paths)
+            # Named for exactly what it counts. `record_state` already reports a
+            # `quarantine` key holding the SIZE of the quarantine directory, and
+            # this counts only the unrenderable class within one cycle; a bare
+            # `quarantined` beside it would read as "every quarantine this cycle".
+            unrenderable_quarantined = unrenderable_quarantine_total() - quarantine_mark
+            if unrenderable_quarantined:
+                # #2386: a quarantined alert was NOT delivered and will never be
+                # retried, so it is a terminal failure of this cycle. Accounting it
+                # here rather than in the scan loop is deliberate: the pre-loop
+                # passes (test-provenance suppression, recovery dedup, flap scan,
+                # storm collapse) all call ready() over the same outbox, so one of
+                # them can quarantine an event BEFORE the loop ever sees it. Driving
+                # the count off the cycle delta catches it wherever it happened.
+                # `failed` carries it so existing health inspection and the one-shot
+                # exit status observe the drop with no new predicate.
+                # Only the events the loop did NOT already account for. The
+                # reported count stays the true total: it names the unrenderable
+                # class, not the bookkeeping.
+                unaccounted = unrenderable_quarantined - claim_race_quarantines
+                processed += unaccounted
+                failed += unaccounted
+                last_error = UNRENDERABLE_ALERT_CONTENT_CODE
 
             record_state(
                 paths,
@@ -7834,6 +8591,8 @@ def run_once(max_events: int) -> dict[str, Any]:
                 flapResolveErrors=flap_resolve_errors,
                 suppressedPruned=suppressed_pruned,
                 deadLetterMetaAlerted=dead_letter_meta_alerted,
+                unrenderableQuarantined=unrenderable_quarantined,
+                unrenderableMetaAlerted=unrenderable_meta_alerted,
                 lastError=last_error,
             )
             return {
@@ -7856,6 +8615,8 @@ def run_once(max_events: int) -> dict[str, Any]:
                 "flapResolveErrors": flap_resolve_errors,
                 "suppressedPruned": suppressed_pruned,
                 "deadLetterMetaAlerted": dead_letter_meta_alerted,
+                "unrenderableQuarantined": unrenderable_quarantined,
+                "unrenderableMetaAlerted": unrenderable_meta_alerted,
                 "lastError": last_error,
             }
 
@@ -7937,6 +8698,10 @@ def main() -> int:
         }))
         return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
+    # #2386: a quarantined event is an alert that was NOT delivered, and run_once
+    # folds it into `failed`, so this one predicate covers it. Reporting success
+    # for a cycle that silently dropped a CRITICAL page is the failure this exit
+    # code exists to prevent.
     return 1 if result.get("failed") else 0
 
 

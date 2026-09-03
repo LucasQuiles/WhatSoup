@@ -57,6 +57,9 @@ EXPECTED_DISPOSITIONS = {
     "sent": SCANNED,
     "storm_collapsed": SCANNED,
     "storm_manifests": EXEMPT_NON_RECORD,  # storm manifest indexes, no event id
+    # owed-page breadcrumbs written before a quarantine move: {"signal", "breadcrumb"}
+    # only (a digest id, the canonical signal), never an event record or an event id
+    "unrenderable_signals": EXEMPT_NON_RECORD,
     "suppressed": SCANNED,
     "quarantine": SCANNED,
     "testleak": SCANNED,

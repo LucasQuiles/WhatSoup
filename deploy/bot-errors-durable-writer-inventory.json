@@ -469,6 +469,17 @@
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-unrenderable-meta-alert",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "queue_unrenderable_meta_alerts",
+      "logical_publication": "dispatcher.unrenderable_meta_alert",
+      "kind": "event_create_once",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "queue_unrenderable_meta_alerts",
+      "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
       "site_id": "dispatcher-writefail-recovery-event",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "recover_writefail_breadcrumbs",

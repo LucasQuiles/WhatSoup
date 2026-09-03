@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "ac1324b75754af3fd369f01f182385d8ab1e78b9ee9415c943ac846f5cac770b",
+      "sha256": "b3ccfc334344984a19408244a74a57732f7264752e7889d59905da1f828466bc",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -81,7 +81,20 @@
         "_incident_state_is_adopted",
         "_reject_bare_write_over_envelope",
         "INCIDENT_CYCLE_REQUIRED_EXIT",
-        "_AdoptionLock"
+        "_AdoptionLock",
+        "event_text",
+        "record_legacy_alert_content",
+        "legacyAlertContent",
+        "note_unrenderable_quarantine",
+        "flush_unrenderable_quarantine_telemetry",
+        "event_fingerprint_text",
+        "ack_unrenderable_quarantine_telemetry",
+        "queue_unrenderable_meta_alerts",
+        "unrenderable_alert_signal",
+        "dispatcher.unrenderable_meta_alert",
+        "write_unrenderable_breadcrumb",
+        "reconcile_unrenderable_signals",
+        "drop_unrenderable_breadcrumbs"
       ]
     },
     {
@@ -428,7 +441,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
+      "sha256": "356d0dc9527fb45dd7d42e7bd2033cf4815ce029fd0f397b18d3ff1a9f2a3bdb",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -436,12 +449,14 @@
         "class EventClassification",
         "classify_event",
         "normalize_event",
-        "new_event_fields"
+        "new_event_fields",
+        "_require_renderable_alert_content",
+        "unrenderable_alert_content"
       ]
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
+      "sha256": "b2aebab270d03f6465da1d70283875aad94e8fef24fdf0d209e0b8d8e72255d3",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -449,7 +464,15 @@
         "AUTHORIZATION_BEARER_RE",
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
-        "PEM_PRIVATE_KEY_RE"
+        "PEM_PRIVATE_KEY_RE",
+        "LEGACY_CONFINED_KEYS",
+        "_BAKED_REPR_RE",
+        "legacy_confined_to_text",
+        "alert_text",
+        "alert_text_kind",
+        "alert_text_for_fingerprint",
+        "LEGACY_FULL_DIGEST_CHARS",
+        "has_malformed_legacy_confined_repr"
       ]
     },
     {
