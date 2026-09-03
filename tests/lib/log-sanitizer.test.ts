@@ -1406,7 +1406,7 @@ describe('the value-side guard refuses a nested label that opens its own assignm
 // is narrowed to what they actually show — that credential material after a
 // label word is still masked here.
 
-describe('the bare-label-word narrowing: label words and chains of them are retained', () => {
+describe('the bare-label-word narrowing: bare label words are retained', () => {
   // Cells main masks and this branch retains. Named, not ranged, so the extent
   // of the narrowing is visible in the test rather than implied.
   const RETAINED_BARE_LABEL_WORDS: readonly string[] = [

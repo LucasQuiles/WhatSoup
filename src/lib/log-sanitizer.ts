@@ -194,9 +194,10 @@ const PHONE_RE = /\+?\d{7,}/g;
 // word itself, with nothing after it". That bound is FALSE and the correction
 // matters, because the acceptance decision rests on how wide the residual is.
 // `password=token=secret at gate`, `token=secret=password at gate` and
-// `api_key=token=secret at gate` are all retained here VERBATIM, and main masks
-// the first label's value in each (`password=ToKeN==*** at gate`,
-// `token==***=password at gate`).
+// `api_key=token=secret at gate` are all retained here VERBATIM, while
+// df7ab647 masks the first label's value in each: `password=token==*** at
+// gate` and `token==***=password at gate`. (Comparisons in this block name
+// df7ab647 rather than "main", which moves.)
 //
 // THE TERMINATOR IS PART OF THE SHAPE, and leaving it out inverts the result.
 // The examples above carry a trailing ` at gate` because a BARE chain is
@@ -209,9 +210,9 @@ const PHONE_RE = /\+?\d{7,}/g;
 //   `` (bare)     0 of 128 retained      every chain MASKED
 //   `.` `,` `;`   0 of 128 retained      every chain MASKED
 //
-// Of the 48 cells main masks under the ` at gate` terminator, 42 are retained
-// here. Any count quoted for this residual without its terminator is not
-// checkable, and a bare-chain count would say the residual does not exist.
+// Of the 48 cells df7ab647 masks under the ` at gate` terminator, 42 are
+// retained here. Any count quoted for this residual without its terminator is
+// not checkable, and a bare-chain count would say the residual does not exist.
 //
 // The chain is retained because the guard refuses at each link: every label
 // EXCEPT THE LAST is followed by `=` or `:`, and the last is followed by the
@@ -222,14 +223,32 @@ const PHONE_RE = /\+?\d{7,}/g;
 // floor recorded below: `token=secret abcdefg` is retained at seven characters
 // and `token=secret abcdefgh` masks at eight.
 //
-// What the residual does NOT extend to is credential material. Once a non-label
-// token appears the chain terminates and the value is masked:
-// `token=secret=Abc123XY` reads back as `token=secret ***` and
-// `api_key=token=secret=Cred99XY` as `api_key=token=secret ***`. Main is the
-// weaker side there — it masks only the first value and leaves the credential
-// in the clear (`token==***=Abc123XY`). Single-label forms are unchanged:
+// The residual does not extend to credential material REACHED THROUGH AN
+// EXPLICIT `=` OR `:`. Once a non-label token appears after such a separator
+// the chain terminates and the value is masked: `token=secret=Abc123XY` reads
+// back as `token=secret ***` and `api_key=token=secret=Cred99XY` as
+// `api_key=token=secret ***`. df7ab647 is the weaker side there — it masks only
+// the first value and leaves the credential in the clear
+// (`token==***=Abc123XY`). Single-label forms are unchanged:
 // `token=secretAbc123XY`, `token=secret_Abc123XY`, `api_key=tokenAbc123XY` and
 // `bearer=authorizationAbc123XY` all read back as `<label> ***`.
+//
+// THE QUALIFIER MATTERS: a value reached across WHITESPACE rather than a
+// separator is governed by the eight-character floor, so a short one IS
+// retained. `token=pairing 123456` keeps the code, and `token=secret Ab12345`
+// keeps the value at seven characters. This is a DISCLOSURE, not a regression:
+// df7ab647 retains the same short values, and measured over 180 cells (six
+// labels x three middles x lengths one to ten, predicate "does the value
+// survive") the value survives here and not at df7ab647 in ZERO cells, at
+// df7ab647 and not here in 36, and at both in 84.
+//
+// Stated precisely, because the loose version is wrong: the CODE survives at
+// both, not the whole string. `token=pairing 123456` reads back unchanged here
+// and as `token==*** 123456` at df7ab647 — df7ab647 masks the label word and
+// keeps the code, this pattern keeps both. The two outputs are NOT
+// byte-identical; what is identical is that `123456` reaches the sink either
+// way. Lowering the floor is a contract decision about over-masking prose, not
+// a defect of this pattern.
 //
 // The trailing-separator forms `token=secret:` and `token=secret=` are retained
 // on the same rule and carry nothing either.
