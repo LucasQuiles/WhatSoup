@@ -105,6 +105,23 @@ export class SessionOwnershipRegistry {
     this.records.delete(mapKey);
   }
 
+  /**
+   * Drop a record whose retirement could not complete.
+   *
+   * `release` refuses from a non-terminal state by design, which is right on
+   * the ordinary path but leaves an inverse orphan when retirement throws
+   * midway: the session-map entry is dropped regardless, and the unowned sweep
+   * iterates that very map, so a record stranded in `closing` is invisible to
+   * every detector. This is the fail-safe half of that teardown, not an
+   * ordinary release. No-op unless the record still names `managerId`.
+   */
+  discardIfOwned(mapKey: string, managerId: string): boolean {
+    const owned = this.records.get(mapKey);
+    if (owned?.managerId !== managerId) return false;
+    this.records.delete(mapKey);
+    return true;
+  }
+
   isCurrent(mapKey: string, managerId: string, generation: number): boolean {
     const owned = this.records.get(mapKey);
     return owned?.managerId === managerId && owned.generation === generation;

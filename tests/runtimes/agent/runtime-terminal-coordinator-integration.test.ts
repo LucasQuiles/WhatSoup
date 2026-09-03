@@ -19,6 +19,7 @@ import {
   durabilityMock,
   makeRuntimeState,
   queueStub,
+  registerSessionToolScope,
   replyGuaranteeMock,
   sessionStub,
 } from './lib/runtime-terminal-coordinator-harness.ts';
@@ -567,6 +568,9 @@ describe('runtime terminal coordinator integration', () => {
       state.replyGuarantee = guarantee;
       state.chatQueues.set(mapKey, queue);
       state.sessionOwnership.claim(mapKey, state.managerIdFor(session));
+      // The dispatch target is the session the context was minted from, so it
+      // carries that same scope — the ordinary owned-chat arrangement.
+      registerSessionToolScope(state, session, runtimeContext.toolScopeKey);
       const completion = state.beginPerChatRuntimeTurn(
         session,
         runtimeContext.identity.deliveryJid,
@@ -1447,6 +1451,15 @@ describe('runtime terminal coordinator integration', () => {
       const owner = state.sessionOwnership.claim(mapKey, replacementManagerId);
       state.chatSessions.set(mapKey, replacement);
       state.chatQueues.set(mapKey, queueStub(queuedContext.identity.deliveryJid));
+      // A replacement session gets a fresh incarnation scope, exactly as a real
+      // spawn does — `createToolScopeKey` appends the next ordinal, so the
+      // replacement can never share the queued context's scope.
+      const replacementScope = registerSessionToolScope(
+        state,
+        replacement,
+        state.createToolScopeKey(mapKey),
+      );
+      expect(replacementScope).not.toBe(queuedContext.toolScopeKey);
 
       const completion = state.beginPerChatRuntimeTurn(
         replacement,
@@ -1461,8 +1474,14 @@ describe('runtime terminal coordinator integration', () => {
         managerId: replacementManagerId,
         generation: owner.generation,
       });
+      // The scope must move with the manager. Provider-event admission compares
+      // the FIFO context's scope against the emitting session's, so a rebind
+      // that carries the manager but leaves the predecessor's scope hands the
+      // replacement a context whose own terminal it cannot get admitted.
+      expect(completion?.context.toolScopeKey).toBe(replacementScope);
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]).toBe(completion?.context);
       expect(queuedContext.identity.managerId).toBe('manager-per_chat');
+      expect(queuedContext.toolScopeKey).not.toBe(replacementScope);
     } finally {
       db.close();
     }
