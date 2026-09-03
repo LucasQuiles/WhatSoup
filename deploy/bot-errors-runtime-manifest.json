@@ -425,7 +425,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "356d0dc9527fb45dd7d42e7bd2033cf4815ce029fd0f397b18d3ff1a9f2a3bdb",
+      "sha256": "90d9df751f501ee4582382618f7f769737ae705778173a7db7ed6fe951dbc883",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -440,7 +440,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "b2aebab270d03f6465da1d70283875aad94e8fef24fdf0d209e0b8d8e72255d3",
+      "sha256": "26b1afe5b7f57420bb90b28bf97cbe83168c3402c76d845f8777923f3722548d",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -662,7 +662,7 @@
     },
     {
       "path": "src/lib/alert-evidence.ts",
-      "sha256": "31e0bd7355576f596d0c3cdd477a8735d33f8ee7101270503df52918dea3357e",
+      "sha256": "751cfb1f9bad824edb6353491dfe258735bf3f0ad8b2a3dea9ffe4451ea75bf1",
       "mustContain": [
         "ConfinedAlertContent",
         "confineAlertContent",
