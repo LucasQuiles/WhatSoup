@@ -924,6 +924,14 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
     file_count: authBond.fileCount,
     total_bytes: authBond.totalBytes,
+    // P42 — the tree digest is no longer computed during this request, so say
+    // where it came from. 'live' is the pre-cache behaviour and reports age 0;
+    // 'absent' means no walk has finished yet and the three tree fields above
+    // are null for that reason rather than because the tree is unreadable.
+    digest_source: authBond.treeProvenance?.source ?? 'live',
+    digest_age_ms: authBond.treeProvenance ? authBond.treeProvenance.ageMs : 0,
+    digest_refresh_in_flight: authBond.treeProvenance?.refreshInFlight ?? false,
+    digest_refresh_count: authBond.treeProvenance?.refreshCount ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,

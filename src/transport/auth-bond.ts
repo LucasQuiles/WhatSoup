@@ -63,6 +63,25 @@ export interface AuthBondBackupSnapshot {
   lastSweepError: string | null;
 }
 
+/**
+ * Where the two full-tree walks in a snapshot came from.
+ *
+ * Present only on snapshots served by inspectCached(); inspect() omits it
+ * because its walks are always live. A consumer that must reason about
+ * freshness (the /health projection does) reads `ageMs`; a consumer that needs
+ * a guaranteed-current tree calls inspect() and pays for it.
+ */
+export interface AuthBondTreeProvenance {
+  /** 'absent' means no walk has completed yet, so the tree fields are null. */
+  readonly source: 'cached' | 'absent';
+  /** Age of the cached walk in milliseconds; null when source is 'absent'. */
+  readonly ageMs: number | null;
+  readonly refreshInFlight: boolean;
+  /** Completed refreshes since construction. */
+  readonly refreshCount: number;
+  readonly lastInvalidationReason: string | null;
+}
+
 export interface AuthBondSnapshot {
   status: AuthBondStatus;
   authDir: AuthBondFileSnapshot;
@@ -73,6 +92,7 @@ export interface AuthBondSnapshot {
   totalBytes: number | null;
   backup: AuthBondBackupSnapshot;
   issues: string[];
+  treeProvenance?: AuthBondTreeProvenance;
 }
 
 export interface AuthBondCaptureResult {
@@ -121,12 +141,33 @@ interface AuthBondGuardOptions {
   captureRetryDelayMs?: number;
   captureBlockReason?: () => string | null;
   freshInvalidGraceMs?: number;
+  /** Ceiling on how stale inspectCached() may serve a tree walk. See DEFAULT_TREE_CACHE_MAX_AGE_MS. */
+  treeCacheMaxAgeMs?: number;
+}
+
+/** The two full-tree walks, held apart from the cheap per-request checks. */
+interface AuthBondTreeObservation {
+  readonly hardenIssues: string[];
+  readonly tree: AuthTreeObservation | null;
+  readonly observedAtMs: number;
 }
 
 const DEFAULT_KEEP_BACKUPS = 96;
 const DEFAULT_MAX_HISTORY_FILES = 100_000;
 const DEFAULT_CAPTURE_ATTEMPTS = 3;
 const DEFAULT_CAPTURE_RETRY_DELAY_MS = 75;
+/**
+ * How long inspectCached() may serve a tree walk before starting another.
+ *
+ * This is the worst-case detection latency for anything only the walk can see —
+ * chiefly a symlink planted into the auth tree, which produces no creds-update
+ * or snapshot-capture event and so is never caught by invalidation. Before the
+ * cache the harden walk ran on every health request (~5 s at the fleet poll
+ * cadence), so 30 s is a deliberate and bounded loss of detection speed bought
+ * in exchange for taking two full-tree walks off every request. inspect() is
+ * unaffected and still walks live for every restore, capture and verification.
+ */
+const DEFAULT_TREE_CACHE_MAX_AGE_MS = 30_000;
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 function safeName(value: string): string {
@@ -255,6 +296,54 @@ function errnoCode(err: unknown): string {
   return (err as NodeJS.ErrnoException | null)?.code ?? 'EIO';
 }
 
+export interface AuthTreeObservation {
+  treeHash: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+/**
+ * Entries processed between yields.
+ *
+ * The tree walks exist in exactly one implementation each, written as
+ * generators, because two of the properties they carry are load-bearing and
+ * cannot be allowed to drift between a sync and an async copy: the digest byte
+ * format (a mismatch silently breaks tamper detection against a recorded
+ * baseline) and the `complete: false` fail-closed rule. Driving the same
+ * generator two ways makes divergence impossible rather than merely tested for.
+ *
+ * 64 keeps a slice at roughly a millisecond for Baileys key files, so a
+ * yielding drive of the 17,680-file `personal` tree never holds the loop for
+ * anything close to the 250 ms starvation threshold.
+ */
+const AUTH_TREE_YIELD_EVERY = 64;
+
+type AuthTreeSteps<T> = Generator<void, T, void>;
+
+/** Run a walk to completion inline. Behaviour identical to the pre-generator code. */
+function drainSync<T>(steps: AuthTreeSteps<T>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  // The return value lives on the final {done: true} result, never on the
+  // intermediate ones a plain for..of would surface.
+  return step.value;
+}
+
+/**
+ * Run a walk while handing the event loop back between slices.
+ *
+ * The await comes BEFORE the first next(), so no part of the walk runs in the
+ * caller's synchronous turn — the whole point is that a caller can start a
+ * refresh without paying for any of it.
+ */
+async function drainYielding<T>(steps: AuthTreeSteps<T>): Promise<T> {
+  for (;;) {
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
 /**
  * Enumerate the auth tree.
  *
@@ -262,11 +351,13 @@ function errnoCode(err: unknown): string {
  * SUBSET of what was on disk. Callers must not treat a subset as a description
  * of the tree — see inspectAuthTree.
  */
-function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
+function* walkAuthFilesSteps(root: string): AuthTreeSteps<{ paths: string[]; complete: boolean }> {
   const out: string[] = [];
   const stack = [root];
   let complete = true;
+  let sinceYield = 0;
   while (stack.length > 0) {
+    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
     const current = stack.pop()!;
     let st;
     try {
@@ -306,6 +397,10 @@ function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
   return { paths: out.sort(), complete };
 }
 
+function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
+  return drainSync(walkAuthFilesSteps(root));
+}
+
 /**
  * Hash the auth tree, or return null if it could not be observed completely.
  *
@@ -323,13 +418,15 @@ function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
  * capture path skips on a missing treeHash), whereas the pre-fix throw escaped
  * inspect() on a `void`-ed async path and shut the instance down.
  */
-function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number; totalBytes: number } | null {
+function* inspectAuthTreeSteps(authDir: string): AuthTreeSteps<AuthTreeObservation | null> {
   if (!existsSync(authDir)) return null;
-  const { paths, complete } = walkAuthFiles(authDir);
+  const { paths, complete } = yield* walkAuthFilesSteps(authDir);
   if (!complete) return null;
   const hasher = createHash('sha256');
   let totalBytes = 0;
+  let sinceYield = 0;
   for (const path of paths) {
+    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
     const rel = relative(authDir, path);
     // stat and read together: a file that survived the stat can still be
     // renamed away before the read, so both halves need the same allowance.
@@ -358,6 +455,10 @@ function inspectAuthTree(authDir: string): { treeHash: string; fileCount: number
   return { treeHash: hasher.digest('hex'), fileCount: paths.length, totalBytes };
 }
 
+function inspectAuthTree(authDir: string): AuthTreeObservation | null {
+  return drainSync(inspectAuthTreeSteps(authDir));
+}
+
 function copyPrivateTree(src: string, dst: string): void {
   const st = lstatSync(src);
   if (st.isDirectory()) {
@@ -376,11 +477,13 @@ function copyPrivateTree(src: string, dst: string): void {
   chmodSync(dst, 0o600);
 }
 
-function hardenPrivateTree(root: string): string[] {
+function* hardenPrivateTreeSteps(root: string): AuthTreeSteps<string[]> {
   if (!existsSync(root)) return [];
   const issues: string[] = [];
   const stack = [root];
+  let sinceYield = 0;
   while (stack.length > 0) {
+    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
     const current = stack.pop()!;
     let st;
     try {
@@ -422,6 +525,10 @@ function hardenPrivateTree(root: string): string[] {
     }
   }
   return issues;
+}
+
+function hardenPrivateTree(root: string): string[] {
+  return drainSync(hardenPrivateTreeSteps(root));
 }
 
 function assertPrivateJsonTarget(path: string): void {
@@ -552,6 +659,11 @@ export class AuthBondGuard {
   private readonly historyRoot: string;
   private readonly stagingRoot: string;
   private readonly latestManifestPath: string;
+  private readonly treeCacheMaxAgeMs: number;
+  private treeObservation: AuthBondTreeObservation | null = null;
+  private treeRefresh: Promise<void> | null = null;
+  private treeRefreshCount = 0;
+  private lastTreeInvalidationReason: string | null = null;
   private lastCaptureAt: string | null = null;
   private lastCaptureReason: string | null = null;
   private lastCaptureError: string | null = null;
@@ -582,12 +694,105 @@ export class AuthBondGuard {
     this.historyRoot = join(this.root, 'history');
     this.stagingRoot = join(this.root, 'staging');
     this.latestManifestPath = join(this.root, 'latest.json');
+    this.treeCacheMaxAgeMs = Math.max(0, options.treeCacheMaxAgeMs ?? DEFAULT_TREE_CACHE_MAX_AGE_MS);
   }
 
+  /**
+   * Full live inspection: both tree walks run inline, on this thread, now.
+   *
+   * This is the contract every restore, capture and verification path depends
+   * on, so it is deliberately NOT cached — a stale tree hash there would turn a
+   * fail-closed tamper check into a fail-open one. Observability readers want
+   * inspectCached() instead.
+   */
   inspect(): AuthBondSnapshot {
+    return this.buildSnapshot(hardenPrivateTree(this.authDir), () => inspectAuthTree(this.authDir));
+  }
+
+  /**
+   * Observability read: never walks the tree on the calling thread.
+   *
+   * The cheap half of a snapshot (two lstats and one small creds.json read)
+   * still runs live, so a deleted or corrupted creds.json is reported at once.
+   * Only the two full-tree walks come from cache, because those are the ones
+   * that cost ~400 ms on an instance carrying 17,680 key files, and they were
+   * being paid on every single GET /health.
+   */
+  inspectCached(): AuthBondSnapshot {
+    const observation = this.treeObservation;
+    const ageMs = observation === null ? null : Math.max(0, Date.now() - observation.observedAtMs);
+    if (observation === null || (ageMs !== null && ageMs >= this.treeCacheMaxAgeMs)) {
+      void this.refreshTreeCache();
+    }
+    return this.buildSnapshot(
+      observation?.hardenIssues ?? [],
+      () => observation?.tree ?? null,
+      {
+        source: observation === null ? 'absent' : 'cached',
+        ageMs,
+        // Assigned synchronously by refreshTreeCache, so a refresh started
+        // immediately above is already visible here.
+        refreshInFlight: this.treeRefresh !== null,
+        refreshCount: this.treeRefreshCount,
+        lastInvalidationReason: this.lastTreeInvalidationReason,
+      },
+    );
+  }
+
+  /**
+   * Drop the cached walk so the next read starts a fresh one.
+   *
+   * Called from the events that are known to change the tree — a saved
+   * creds.json and a captured auth-bond snapshot. Events cannot cover every
+   * change (nothing emits when a file is planted by hand), which is what
+   * treeCacheMaxAgeMs is for.
+   */
+  invalidateTreeCache(reason: string): void {
+    this.treeObservation = null;
+    this.lastTreeInvalidationReason = reason;
+  }
+
+  /** Complete a refresh. Callers that need a digest present before proceeding await this. */
+  warmTreeCache(): Promise<void> {
+    return this.refreshTreeCache();
+  }
+
+  private refreshTreeCache(): Promise<void> {
+    const inFlight = this.treeRefresh;
+    if (inFlight !== null) return inFlight;
+    const run = (async (): Promise<void> => {
+      try {
+        const hardenIssues = await drainYielding(hardenPrivateTreeSteps(this.authDir));
+        // walkAuthFilesSteps throws on a symlink rather than reporting it, and
+        // the harden pass has already recorded that same condition as an issue.
+        // Skipping the digest walk here mirrors inspect(), where a symlink
+        // forces status away from 'present' and the tree is never walked.
+        const tree = hardenIssues.some(issue => issue.startsWith('auth_tree_symlink:'))
+          ? null
+          : await drainYielding(inspectAuthTreeSteps(this.authDir));
+        this.treeObservation = { hardenIssues, tree, observedAtMs: Date.now() };
+        this.treeRefreshCount += 1;
+      } catch {
+        // Keep the last known observation and let the next read retry. A failed
+        // refresh must never propagate: its only caller is a fire-and-forget
+        // `void` from a read path, where a rejection becomes an unhandled
+        // rejection and main.ts turns that into an instance shutdown.
+      } finally {
+        this.treeRefresh = null;
+      }
+    })();
+    this.treeRefresh = run;
+    return run;
+  }
+
+  private buildSnapshot(
+    hardenIssues: readonly string[],
+    readTree: () => AuthTreeObservation | null,
+    treeProvenance?: AuthBondTreeProvenance,
+  ): AuthBondSnapshot {
     const credsPath = join(this.authDir, 'creds.json');
     const issues: string[] = [];
-    issues.push(...hardenPrivateTree(this.authDir));
+    issues.push(...hardenIssues);
     const authDir = fileSnapshot(this.authDir);
     const creds = fileSnapshot(credsPath, true);
     let status: AuthBondStatus = 'present';
@@ -643,7 +848,7 @@ export class AuthBondGuard {
       }
     }
 
-    const tree = status === 'present' ? inspectAuthTree(this.authDir) : null;
+    const tree = status === 'present' ? readTree() : null;
     return {
       status,
       authDir,
@@ -654,6 +859,7 @@ export class AuthBondGuard {
       totalBytes: tree?.totalBytes ?? null,
       backup: this.backupSnapshot(),
       issues,
+      ...(treeProvenance ? { treeProvenance } : {}),
     };
   }
 

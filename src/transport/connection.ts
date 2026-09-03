@@ -1537,7 +1537,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   getConnectionState(): ConnectionStateSnapshot {
-    const authBond = this.authBond.inspect();
+    // P42: this is the ONE call that made GET /health expensive. inspect()
+    // walks and SHA-256-hashes the whole Baileys auth tree synchronously —
+    // ~400 ms on the `personal` instance's 17,680 key files — and every health
+    // request landed here. Every caller of getConnectionState is an
+    // observability or readiness reader (health.ts and main.ts's startup
+    // probe), none of which needs a guaranteed-current tree hash, so this path
+    // reads the cached digest and the walk happens off the request.
+    const authBond = this.authBond.inspectCached();
     return {
       state: this.connectionState,
       connected: this.connectionState === 'connected' && this.botJid !== null,
@@ -1740,6 +1747,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (events['creds.update']) {
         try {
           await saveCreds();
+          this.authBond.invalidateTreeCache('creds-update-saved');
           this.clearAuthSnapshotSettledTimer();
           this.lastCredsUpdateAt = Date.now();
           this.credsUpdateCount += 1;
@@ -2187,6 +2195,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.startKeepalive(sock);
       this.captureAuthBondSnapshot('connection-open');
       this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
+      // Start the first off-thread walk now rather than letting the earliest
+      // health poll be the one to find an empty cache.
+      void this.authBond.warmTreeCache();
       this.persistConnectionRuntimeState('connection_open');
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
@@ -2450,6 +2461,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private scheduleSettledAuthBondSnapshot(reason: string): void {
+    // Invalidate ahead of every early return below: the key material on disk
+    // has already changed by the time this is called, whether or not this
+    // particular call goes on to schedule a snapshot.
+    this.authBond.invalidateTreeCache(`settled:${reason}`);
     if (this.authSnapshotSettledTimer !== null) return;
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;
