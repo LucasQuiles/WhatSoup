@@ -54,7 +54,11 @@ export interface GovernedPathPrefixReport {
 }
 
 export interface GovernedEnvComparison {
-  /** False when an EnvironmentVariables dict exists but cannot be parsed — fail-closed, never "no drift". */
+  /**
+   * False whenever the reader cannot enumerate the installed
+   * EnvironmentVariables dict — absent, declared more than once, or present and
+   * unparseable — fail-closed, never "no drift".
+   */
   comparable: boolean;
   reason?: 'environment-variables-unparseable';
   drift: GovernedEnvDriftEntry[];
@@ -125,60 +129,137 @@ const DICT_CLOSE_SOURCE = '</dict[ \\t\\r\\n]*>';
 const XML_SPACE_ONLY = /^[ \t\r\n]*$/;
 
 /**
- * Blank every XML comment, PRESERVING LENGTH, or null if one is unterminated.
+ * The XML region kinds this reader must never read as markup, as
+ * (opener, closer) pairs. A comment, a CDATA section and a processing
+ * instruction are all inert text to the system plist parser: an
+ * EnvironmentVariables marker or a dict spelled inside one is not a marker and
+ * not a dict, however legal the surrounding file is.
  *
- * Comments were invisible to this reader, so a commented-out decoy dict placed
- * before the real one won: `indexOf` found the marker INSIDE the comment, the
- * decoy's body was parsed as the environment, and the live dict was never
- * looked at. Measured against the pre-fix reader, the same file with and
- * without the comment gave droppedNonGovernedKeys [] and ['ANTHROPIC_API_KEY'].
- * The empty one is an apply that deletes a key it never reported.
+ * Comments alone were covered before, and the other two were live text to the
+ * indexOf below: a CDATA section or a processing instruction carrying a decoy
+ * `<key>EnvironmentVariables</key><dict/>` ahead of the live dict won the
+ * lookup, the empty decoy was read as the environment, and an apply then
+ * deleted every non-governed key the installed plist carried while naming none.
+ * Both spellings lint clean and `plutil -extract EnvironmentVariables json`
+ * returns the REAL environment for them, so this reader was disagreeing with
+ * the authoritative parser about a valid file.
+ */
+const INERT_XML_REGIONS: readonly (readonly [string, string])[] = [
+  ['<!--', '-->'],
+  ['<![CDATA[', ']]>'],
+  ['<?', '?>'],
+];
+
+interface MaskedPlist {
+  /** Same length as the input, every inert region replaced by a run of '-'. */
+  masked: string;
+  /** [start, end) of each region blanked, in ascending order. */
+  inertSpans: readonly (readonly [number, number])[];
+}
+
+/**
+ * Blank every inert XML region, PRESERVING LENGTH, or null if one is
+ * unterminated — and REPORT where they were.
  *
  * MASKED, not deleted, and that is the whole design:
  *   - length is preserved, so every offset below still indexes the real file
  *     and the body slice stays byte-aligned with it. No offset map to keep
- *     honest, and the decoy dies because its CONTENT is masked, wherever it
+ *     honest, and a decoy dies because its CONTENT is masked, wherever it
  *     sits — not because it happened to precede the marker.
- *   - '-' is not XML whitespace, so a comment INSIDE the environment body is
- *     still not "fully consumed by the pairs" and the body still fails closed.
- *     That cell is pinned by comment_between_key_and_string and is unchanged
- *     here; making this reader newly accept a plist it used to refuse is a
- *     contract change, and this fix is not the place for one.
+ *   - '-' is not XML whitespace, so an inert region in a whitespace-only GAP
+ *     (between the marker and its dict, or between a key and its string) still
+ *     fails the checks that require XML whitespace there.
  * '-' is also the one filler that carries no ambiguity: `--` cannot occur
  * inside a well-formed XML comment, so a masked run can never be mistaken for
  * planted content, and it starts no token this reader searches for.
  *
- * An unterminated `<!--` is not well-formed XML at all. It used to be ignored
- * outright, so everything after it parsed as live markup; it is now refused.
+ * THE SPANS ARE RETURNED BECAUSE THE FILLER IS NOT ENOUGH ON ITS OWN, and that
+ * is measured rather than reasoned. In a whitespace-only gap '-' is correctly
+ * rejected, but in CHARACTER DATA it is perfectly legal: masking
+ * `<string><![CDATA[/opt/bin]]></string>` yields `<string>--------------------
+ * </string>`, whose value the pair pattern's `[^<]*` group matches happily. A
+ * body that fails closed today — the literal `<` of `<![CDATA[` ends `[^<]*`,
+ * the pair never matches, and the body is not fully consumed — would have
+ * started parsing to a dash-valued key. The caller therefore refuses on span
+ * INTERSECTION with the body, which keeps that cell closed by a rule instead of
+ * by a filler character's side effect.
+ *
+ * The EARLIEST opener wins at each step, not the first kind in the list: a
+ * processing instruction can carry `<!--` as literal text, and a comment can
+ * carry `<?`.
+ *
+ * An unterminated opener is not well-formed XML at all. It used to be ignored
+ * outright, so everything after it parsed as live markup; it is refused.
+ *
+ * A DOCTYPE internal subset is NOT masked here. plist(5) files carry an
+ * external DOCTYPE with no internal subset, and inventing a fourth region kind
+ * for a shape the generator never emits would widen this reader for nothing.
  */
-function maskXmlComments(plist: string): string | null {
+function maskInertXmlRegions(plist: string): MaskedPlist | null {
   let out = '';
   let cursor = 0;
+  const inertSpans: (readonly [number, number])[] = [];
   for (;;) {
-    const open = plist.indexOf('<!--', cursor);
-    if (open === -1) return out + plist.slice(cursor);
-    const close = plist.indexOf('-->', open + 4);
+    let open = -1;
+    let openerLength = 0;
+    let closer = '';
+    for (const [opener, regionCloser] of INERT_XML_REGIONS) {
+      const at = plist.indexOf(opener, cursor);
+      if (at === -1) continue;
+      if (open === -1 || at < open) {
+        open = at;
+        openerLength = opener.length;
+        closer = regionCloser;
+      }
+    }
+    if (open === -1) return { masked: out + plist.slice(cursor), inertSpans };
+    const close = plist.indexOf(closer, open + openerLength);
     if (close === -1) return null;
-    const end = close + 3;
+    const end = close + closer.length;
     out += plist.slice(cursor, open) + '-'.repeat(end - open);
+    inertSpans.push([open, end]);
     cursor = end;
   }
 }
 
+/** True when [start, end) overlaps any masked region by at least one byte. */
+function intersectsInertRegion(
+  spans: readonly (readonly [number, number])[],
+  start: number,
+  end: number,
+): boolean {
+  return spans.some(([spanStart, spanEnd]) => spanStart < end && start < spanEnd);
+}
+
 /**
- * Extract the EnvironmentVariables dict as a key -> value map. Returns an
- * empty map when the plist has no EnvironmentVariables key at all, and null
- * when the dict exists but cannot be parsed — the caller must treat null as
- * drift, never as "no drift". Tolerant of hand-patched whitespace: it matches
- * element structure, not the generator's exact formatting, because the whole
- * point is comparing against plists someone edited by hand.
+ * Extract the EnvironmentVariables dict as a key -> value map, or null when the
+ * reader cannot enumerate it — the caller must treat null as drift, never as
+ * "no drift". `<dict/>` is the one shape that yields an EMPTY map: the element
+ * is there and it genuinely holds nothing. Tolerant of hand-patched whitespace:
+ * it matches element structure, not the generator's exact formatting, because
+ * the whole point is comparing against plists someone edited by hand.
  */
 function parseEnvironmentVariables(source: string): Map<string, string> | null {
-  // Masked FIRST, so no search below can match text inside a comment.
-  const plist = maskXmlComments(source);
-  if (plist === null) return null;
+  // Masked FIRST, so no search below can match text inside an inert region.
+  const maskedPlist = maskInertXmlRegions(source);
+  if (maskedPlist === null) return null;
+  const { masked: plist, inertSpans } = maskedPlist;
   const marker = plist.indexOf(ENV_KEY_MARKER);
-  if (marker === -1) return new Map();
+  // AN ABSENT MARKER IS NOT AN EMPTY ENVIRONMENT. `new Map()` here claimed
+  // "there are genuinely no keys", which is a claim this reader cannot make
+  // about an element it never found: on the apply surface that claim empties
+  // droppedNonGovernedKeys, the gate sees nothing to drop, and the re-render
+  // erases every non-governed key the installed plist carried without naming
+  // one. It also covers a legal-but-unusual spelling of the key element
+  // (`<key >EnvironmentVariables</key >`), which this reader deliberately does
+  // not parse — refusing is the fail-closed answer and it is the answer the
+  // Python reader already gives (`if marker < 0: return None`).
+  if (marker === -1) return null;
+  // "Exactly one top-level EnvironmentVariables dictionary." A second surviving
+  // marker means the file declares the element twice. The system parser has its
+  // own precedence for that; this reader must not invent a different one and
+  // then compare a map the loaded job does not have.
+  if (plist.indexOf(ENV_KEY_MARKER, marker + ENV_KEY_MARKER.length) !== -1) return null;
   const afterMarker = marker + ENV_KEY_MARKER.length;
   const tokenPattern = new RegExp(DICT_OPEN_TOKEN_SOURCE, 'g');
   tokenPattern.lastIndex = afterMarker;
@@ -209,6 +290,13 @@ function parseEnvironmentVariables(source: string): Map<string, string> | null {
   const close = closePattern.exec(plist);
   if (close === null) return null;
 
+  // AN INERT REGION INSIDE THE BODY IS NOT CONTENT THIS READER MAY CONSUME.
+  // The mask blanks it to '-', and '-' is legal character data, so a masked
+  // CDATA value satisfies the pair pattern's `[^<]*` group and a body that fails
+  // closed today would parse to a dash-valued key. Measured on the cdata_value
+  // and cdata_key_name cells. The whitespace checks below still catch a region
+  // in a gap; this catches one in character data, which they cannot.
+  if (intersectsInertRegion(inertSpans, bodyStart, close.index)) return null;
   const body = plist.slice(bodyStart, close.index);
   // Environment values are plain strings; a nested dict inside the body is a
   // shape this comparator does not understand, and the body already truncated at

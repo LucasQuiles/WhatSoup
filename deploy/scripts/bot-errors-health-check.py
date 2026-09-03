@@ -4259,53 +4259,108 @@ PLIST_ENV_PAIR_RE = re.compile(
 )
 
 
-def mask_xml_comments(raw: str) -> str | None:
-    """Blank every XML comment, PRESERVING LENGTH. None if one is unterminated.
+# The XML region kinds this reader must never read as markup, as
+# (opener, closer) pairs. A comment, a CDATA section and a processing
+# instruction are all inert text to the system plist parser: an
+# EnvironmentVariables marker, a Label or a dict spelled inside one is not a
+# marker, a Label or a dict, however legal the surrounding file is.
+PLIST_INERT_XML_REGIONS = (
+    ("<!--", "-->"),
+    ("<![CDATA[", "]]>"),
+    ("<?", "?>"),
+)
 
-    Comments were invisible to this reader, and TWO guards were defeated by
-    that, both measured on the pre-fix code rather than reasoned about:
+
+def mask_inert_xml_regions(raw: str) -> tuple[str, list[tuple[int, int]]] | None:
+    """Blank every inert XML region, PRESERVING LENGTH, and REPORT where.
+
+    None if a region is unterminated. Returns (masked_text, spans).
+
+    Comments alone were covered before, and TWO guards were defeated by that,
+    both measured on the pre-fix code rather than reasoned about:
 
       the Label guard. A commented-out Label naming this instance, above a real
       Label naming a DIFFERENT one, was accepted: the reader returned the other
-      instance's environment ({'PATH': '/planted/bin'}) for agent-alpha. That
-      guard exists precisely so an unrelated or planted plist at the expected
-      pathname is never parsed, and one comment turned it off.
+      instance's environment for agent-alpha. That guard exists precisely so an
+      unrelated or planted plist at the expected pathname is never parsed, and
+      one comment turned it off.
 
       the EnvironmentVariables marker. A commented-out decoy dict before the
-      live one won the `find`, so the decoy's body was read as the environment
-      and the live dict never looked at. The TypeScript comparator has the same
-      shape and the same defect, so both are fixed together.
+      live one won the ``find``, so the decoy's body was read as the environment
+      and the live dict never looked at.
+
+    A CDATA section and a processing instruction are the same defect in two
+    further spellings, and they were still live text here: a decoy
+    ``<key>EnvironmentVariables</key><dict/>`` inside either one, placed ahead
+    of the live dict, was read as an empty environment. Both spellings lint
+    clean and ``plutil -extract EnvironmentVariables json`` returns the REAL
+    environment for them.
 
     MASKED, not deleted: length is preserved, so every offset below still
     indexes the real text and no offset map has to be kept honest. '-' is not
-    XML whitespace, so a comment inside the environment block still fails the
-    "fully consumed by the pairs" rule and that cell -- pinned by
-    comment_between_key_and_string -- keeps refusing exactly as before. Making
-    this reader newly ACCEPT a plist it used to refuse would be a contract
-    change, and this fix is not the place for one. '-' also carries no
-    ambiguity as filler, because `--` cannot appear inside a well-formed XML
-    comment, and it starts no token this reader searches for.
+    XML whitespace, so an inert region in a whitespace-only GAP still fails the
+    checks that require whitespace there. '-' also carries no ambiguity as
+    filler, because ``--`` cannot appear inside a well-formed XML comment, and
+    it starts no token this reader searches for.
 
-    An unterminated `<!--` is not well-formed XML. It used to be ignored, so
+    THE SPANS ARE RETURNED BECAUSE THE FILLER IS NOT ENOUGH ON ITS OWN, and
+    that is measured rather than reasoned. In a whitespace-only gap '-' is
+    correctly rejected, but in CHARACTER DATA it is perfectly legal: masking
+    ``<string><![CDATA[/opt/bin]]></string>`` yields a run of dashes that the
+    pair pattern's ``[^<]*`` group matches happily. A body that fails closed
+    today -- the literal "<" of ``<![CDATA[`` ends ``[^<]*``, the pair never
+    matches, and the body is not fully consumed -- would have started parsing to
+    a dash-valued key. The caller therefore refuses on span INTERSECTION with
+    the block, which keeps the cdata_value and cdata_key_name cells closed by a
+    rule instead of by a filler character's side effect.
+
+    The EARLIEST opener wins at each step, not the first kind in the tuple: a
+    processing instruction can carry ``<!--`` as literal text, and a comment can
+    carry ``<?``.
+
+    An unterminated opener is not well-formed XML. It used to be ignored, so
     everything after it was parsed as live markup; it is refused now.
 
     Applied once, to the whole file, BEFORE the Label search -- not just before
     the marker search. Fixing the marker alone would leave the Label decoy.
+
+    A DOCTYPE internal subset is NOT masked. plist(5) files carry an external
+    DOCTYPE with no internal subset, and inventing a fourth region kind for a
+    shape the generator never emits would widen this reader for nothing.
     """
     out: list[str] = []
+    spans: list[tuple[int, int]] = []
     cursor = 0
     while True:
-        open_at = raw.find("<!--", cursor)
+        open_at = -1
+        opener_length = 0
+        closer = ""
+        for candidate_opener, candidate_closer in PLIST_INERT_XML_REGIONS:
+            at = raw.find(candidate_opener, cursor)
+            if at < 0:
+                continue
+            if open_at < 0 or at < open_at:
+                open_at = at
+                opener_length = len(candidate_opener)
+                closer = candidate_closer
         if open_at < 0:
             out.append(raw[cursor:])
-            return "".join(out)
-        close_at = raw.find("-->", open_at + 4)
+            return ("".join(out), spans)
+        close_at = raw.find(closer, open_at + opener_length)
         if close_at < 0:
             return None
-        end = close_at + 3
+        end = close_at + len(closer)
         out.append(raw[cursor:open_at])
         out.append("-" * (end - open_at))
+        spans.append((open_at, end))
         cursor = end
+
+
+def intersects_inert_region(
+    spans: list[tuple[int, int]], start: int, end: int
+) -> bool:
+    """True when [start, end) overlaps any masked region by at least one byte."""
+    return any(span_start < end and start < span_end for span_start, span_end in spans)
 
 
 def instance_plist_environment(name: str) -> dict[str, str] | None:
@@ -4329,11 +4384,12 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     except (OSError, UnicodeDecodeError):
         return None
     # Masked FIRST: every search below -- Label, marker, dict bounds, body --
-    # must see comments as inert filler rather than as live markup.
-    masked = mask_xml_comments(raw)
+    # must see comments, CDATA sections and processing instructions as inert
+    # filler rather than as live markup.
+    masked = mask_inert_xml_regions(raw)
     if masked is None:
         return None
-    raw = masked
+    raw, inert_spans = masked
     label_match = re.search(
         r"<key>Label</key>\s*<string>(.*?)</string>", raw, re.DOTALL
     )
@@ -4343,6 +4399,13 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     if marker < 0:
         return None
     after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
+    # "Exactly one top-level EnvironmentVariables dictionary." A second surviving
+    # marker means the file declares the element twice. The system parser has its
+    # own precedence for that; this reader must not invent a different one and
+    # then report a map the loaded job does not have. Mirrors the TypeScript
+    # comparator (src/fleet/launchd-env-drift.ts).
+    if raw.find(PLIST_ENVIRONMENT_KEY_MARKER, after_marker) >= 0:
+        return None
     token_match = PLIST_DICT_OPEN_TOKEN_RE.search(raw, after_marker)
     if token_match is None:
         return None
@@ -4370,6 +4433,15 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         return {}
     close_match = PLIST_DICT_CLOSE_RE.search(raw, open_match.end())
     if close_match is None:
+        return None
+    # AN INERT REGION INSIDE THE BLOCK IS NOT CONTENT THIS READER MAY CONSUME.
+    # The mask blanks it to '-', and '-' is legal character data, so a masked
+    # CDATA value satisfies the pair pattern's ``[^<]*`` group and a block that
+    # fails closed today would parse to a dash-valued key. Measured on the
+    # cdata_value and cdata_key_name cells. The whitespace checks below still
+    # catch a region in a gap; this catches one in character data, which they
+    # cannot.
+    if intersects_inert_region(inert_spans, open_match.end(), close_match.start()):
         return None
     block = raw[open_match.end():close_match.start()]
     # The block ends at the FIRST </dict>, so a nested dict truncates the map and

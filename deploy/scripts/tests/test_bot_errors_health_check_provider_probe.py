@@ -3594,3 +3594,196 @@ def test_a_leaked_probe_stub_variable_cannot_disable_the_plist_gate(
     assert not captured, "probe must not run a provider it cannot vouch for"
     assert "failure_class=provider_runtime_plist_unreadable" in lines[0], lines[0]
     _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+# --- Every inert XML region, not only the comment (queue row 130) ---
+#
+# A comment, a CDATA section and a processing instruction are all inert text to
+# the system plist parser. Only the comment was masked here, so a decoy
+# ``<key>EnvironmentVariables</key><dict/>`` written inside either of the other
+# two won the marker search and the reader answered with an EMPTY map -- a map
+# it had no basis for. Every fixture below lints clean and
+# ``plutil -extract EnvironmentVariables json`` returns the REAL environment for
+# it. The scenario is operator-caused, not attacker-caused: someone who can
+# write the LaunchAgent can write an honest dict, so the shape confers nothing
+# on an attacker. What it does is let a hand-edited or hand-migrated plist read
+# as an environment the service does not have.
+
+_LIVE_BODY_WITH_NON_GOVERNED_KEY = [
+    "    <key>PATH</key><string>/fixture/pin/bin:/usr/bin</string>",
+    "    <key>OPERATOR_SECRET</key><string>keep-me</string>",
+]
+_LIVE_ENVIRONMENT = {
+    "PATH": "/fixture/pin/bin:/usr/bin",
+    "OPERATOR_SECRET": "keep-me",
+}
+_INERT_DECOY = "  <key>EnvironmentVariables</key>\n  <dict/>"
+
+
+def _decoyed_plist(target: Path, opener: str, closer: str) -> str:
+    """Return the same plist with an inert decoy dict ahead of the live one."""
+    honest = target.read_text()
+    assert honest.count("  <key>EnvironmentVariables</key>") == 1, "fixture shape changed"
+    return honest.replace(
+        "  <key>EnvironmentVariables</key>",
+        f"  {opener}\n{_INERT_DECOY}\n  {closer}\n  <key>EnvironmentVariables</key>",
+        1,
+    )
+
+
+def test_a_cdata_decoy_dict_cannot_hide_the_live_environment(monkeypatch, tmp_path):
+    """Stated as a DIFFERENTIAL: the decoy must make no difference at all.
+
+    Asserting only the post-fix map would keep passing if the reader started
+    refusing BOTH shapes, which is different behaviour wearing the same green.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    decoyed = _decoyed_plist(target, "<![CDATA[", "]]>")
+    assert "<![CDATA[" in decoyed, "fixture must actually carry the decoy"
+
+    target.write_text(decoyed)
+    from_decoyed = _mod.instance_plist_environment("agent-alpha")
+    target.write_text(honest)
+    from_honest = _mod.instance_plist_environment("agent-alpha")
+
+    assert from_decoyed == from_honest
+    # And the shared value is the LIVE dict's, so neither side is the decoy's.
+    assert from_decoyed == _LIVE_ENVIRONMENT
+
+
+def test_a_processing_instruction_decoy_dict_cannot_hide_the_live_environment(
+    monkeypatch, tmp_path
+):
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    decoyed = _decoyed_plist(target, "<?ide", "?>")
+    assert "<?ide" in decoyed, "fixture must actually carry the decoy"
+
+    target.write_text(decoyed)
+    from_decoyed = _mod.instance_plist_environment("agent-alpha")
+    target.write_text(honest)
+    from_honest = _mod.instance_plist_environment("agent-alpha")
+
+    assert from_decoyed == from_honest
+    assert from_decoyed == _LIVE_ENVIRONMENT
+
+
+def test_a_second_environment_variables_declaration_is_refused(monkeypatch, tmp_path):
+    """Exactly one top-level EnvironmentVariables dictionary.
+
+    This reader took the FIRST declaration, so a decoy dict written above the
+    live one was returned as the service's environment. The system parser has
+    its own precedence for a repeated key and this reader must not invent a
+    different one; refusing is the answer both readers now give.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    # Positive control: one declaration of the same body still parses, so the
+    # refusal below is attributable to the second declaration.
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <key>EnvironmentVariables</key>\n"
+            "  <dict><key>PATH</key><string>/fixture/decoy/bin</string></dict>\n"
+            "  <key>EnvironmentVariables</key>",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_a_marker_spelled_with_tag_whitespace_is_refused_not_read_as_empty(
+    monkeypatch, tmp_path
+):
+    """This reader already refused; the TypeScript comparator answered "empty".
+
+    Pinned here so the two readers cannot drift apart again on this cell. The
+    marker is held as ONE literal spelling on both sides on purpose: parsing
+    ``<key >EnvironmentVariables</key >`` would make both readers newly ACCEPT a
+    file they used to refuse, which is a contract widening, and a refusal is the
+    fail-closed answer to "I could not find the element you are about to
+    overwrite".
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <key >EnvironmentVariables</key >",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+
+
+def test_the_earliest_inert_opener_wins_so_one_region_stays_one_region(
+    monkeypatch, tmp_path
+):
+    """A processing instruction may carry ``<!--`` as literal text.
+
+    Searching one region kind before the others rather than taking the EARLIEST
+    opener splits one region into a mismatched pair: the ``<!--`` below has no
+    ``-->``, so a comment-first scan calls the file unterminated and refuses a
+    plist the system parser loads.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <?ide fold <!-- not a comment ?>\n  <key>EnvironmentVariables</key>",
+            1,
+        )
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+
+def test_a_masked_cdata_value_inside_the_block_still_fails_closed(monkeypatch, tmp_path):
+    """THE CELL THE MASK ALONE WOULD HAVE OPENED, measured rather than reasoned.
+
+    The mask blanks an inert region to '-', and '-' is legal CHARACTER DATA:
+    ``<string><![CDATA[/opt/bin]]></string>`` masks to ``<string>`` plus twenty
+    dashes plus ``</string>``, which the pair pattern's ``[^<]*`` value group
+    matches. The block would then count as fully consumed and parse to a
+    dash-valued key -- a cell that fails closed today turned fail-open by its
+    own fix. The whitespace rules cannot catch it, because the region is not in
+    a whitespace-only gap; the reader refuses on a masked span INTERSECTING the
+    block instead.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            "    <key>PATH</key><string>/fixture/pin/bin</string>",
+            "    <key>WHATSOUP_PATH_PREPEND</key>"
+            "<string><![CDATA[/fixture/pin/bin]]></string>",
+        ],
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") is None
