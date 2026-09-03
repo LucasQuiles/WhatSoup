@@ -6424,6 +6424,17 @@ def provider_probe_target_inventory(
                 command = candidate
                 resolved_on_governed_path = True
 
+    # glm-2. Provenance of argv[0], stated rather than left to be inferred from
+    # a field's absence. Added only in the ungoverned case, so a governed run's
+    # line is byte-identical and no existing reader has to learn a new field.
+    #
+    # Defined HERE, before the try, rather than beside the post-spawn report:
+    # the exception arms below return without reaching that section, and a
+    # timeout or an ENOENT against a binary chosen by the WRONG PATH is exactly
+    # when an operator most needs to know which PATH chose it.
+    resolution_note = (
+        "" if resolved_on_governed_path else " command_resolution=ambient_not_governed"
+    )
     timed_out = False
     try:
         with tempfile.TemporaryDirectory(prefix="whatsoup-provider-probe-") as probe_cwd:
@@ -6478,22 +6489,15 @@ def provider_probe_target_inventory(
                 "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
             )]
         safe_command = redact_evidence_string(command, 120)
-        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}{resolution_note}"]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         safe_command = redact_evidence_string(command, 120)
-        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}{resolution_note}"]
 
     combined = "\n".join(part for part in [stdout, stderr] if part)
     failure_class = classify_provider_probe_failure(combined, rc, timed_out)
     safe_command = redact_evidence_string(command, 120)
     output_excerpt = redact_evidence_string(combined or stdout or stderr, 180)
-    # glm-2. Provenance of argv[0], stated rather than left to be inferred from
-    # a field's absence, and carried by EVERY line emitted after a spawn. It is
-    # added only in the ungoverned case, so a governed run's line is unchanged
-    # and no existing reader has to learn a new field to keep working.
-    resolution_note = (
-        "" if resolved_on_governed_path else " command_resolution=ambient_not_governed"
-    )
     if failure_class:
         credential_fragments = provider_credential_fragments(profile, item, provider, timeout_seconds)
         live_evidence = provider_live_session_evidence(

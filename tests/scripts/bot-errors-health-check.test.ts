@@ -5187,6 +5187,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '0',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: "You've hit your weekly limit · resets Jun 16, 10pm (America/New_York)",
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
@@ -6273,6 +6286,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain: "/Users/testuser/Library/Keychains/login.keychain-db"\\n"svce"<blob>="Claude_Credential-fixture"',
@@ -6690,6 +6716,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6807,6 +6846,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6940,6 +6992,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -7075,6 +7140,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '36',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDERR: 'security: SecKeychainSearchCopyNext: User interaction is not allowed.',

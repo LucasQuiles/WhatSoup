@@ -3115,6 +3115,32 @@ def test_no_ambient_fallback_when_the_effective_path_cannot_be_composed(monkeypa
     assert "UNGOVERNED-BINARY-RAN" not in "\n".join(lines)
 
 
+def test_the_resolution_note_survives_a_failing_spawn(monkeypatch, tmp_path):
+    """glm-2. The provenance must not be a happy-path-only field.
+
+    The exception arms return without reaching the post-spawn report section, so
+    a note defined beside that section would be absent from exactly the lines an
+    operator reads when something went wrong. A timeout or an error against a
+    binary chosen by the WRONG PATH is when the provenance matters most.
+    """
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+
+    def _boom(command, *args, **kwargs):
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr(_mod, "provider_command_output", _boom)
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: {})
+    lines = _mod.provider_probe_target_inventory(
+        {}, {"providerProbeCommand": "bareprobe"}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "claude-cli"}}, "claude-cli", "primary",
+    )
+
+    assert "failure_class=provider_probe_failed" in lines[0], lines[0]
+    assert "command_resolution=ambient_not_governed" in lines[0], lines[0]
+
+
 def test_a_governed_resolution_is_not_labelled_ambient(monkeypatch, tmp_path):
     """Control for the row above, twice over.
 
