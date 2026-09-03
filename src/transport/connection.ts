@@ -140,6 +140,7 @@ export type CredentialLifecycleEventName =
   | 'connect_start'
   | 'auth_restore_succeeded'
   | 'auth_restore_failed'
+  | 'auth_restore_deferred'
   | 'auth_preflight_invalid'
   | 'baileys_version'
   | 'socket_created'
@@ -850,6 +851,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           note: restore.error,
         });
         this.log.error({ error: restore.error, source: restore.source }, 'auth bond restore failed');
+      }
+
+      // A restore withheld on a transient read has to be RETRIED, and this is
+      // the only path that can retry it. The guard refuses to act on a "not
+      // now" read, which is correct, but the activation used to continue
+      // regardless: it loaded the auth state, and the auth-state reader
+      // initialises FRESH CREDENTIALS when the existing ones cannot be read or
+      // parsed, so a credential that was merely unreadable for one open could
+      // be replaced by an empty one and taken to QR — after which nothing
+      // schedules another attempt. A /health read cannot rescue this: it
+      // re-reads the credential but never calls the restore.
+      //
+      // So abort BEFORE the auth state is loaded and put the retry on the
+      // existing reconnect backoff. The retry is bounded by the same
+      // treeStaleRiskMs streak the guard already keeps: once the transient has
+      // outlived it, transientReadPersistent goes true, this branch stops
+      // aborting, and the ordinary definite-read path decides — which reports
+      // the persistent class on /health rather than looping here forever.
+      if (restore.deferred === true && restore.snapshot.transientReadPersistent !== true) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: restore.snapshot,
+          note: restore.error ?? 'auth bond read was transient',
+        });
+        this.log.warn(
+          { error: restore.error },
+          'auth bond read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
       }
 
       const preflight = this.authBond.inspect();

@@ -332,6 +332,13 @@ describe('health snapshot schema fuzz', () => {
     'local_corruption_restorable',
     'local_corruption_unrestorable',
     'auth_bond_at_risk',
+    // Membership in the poller's NON_HEALTHY_AUTH_FAILURE_CLASSES is what puts
+    // a class on this branch. A class the set does not know takes the
+    // `schema_unrecognized_fields` branch instead, which reports the same
+    // degraded status for the wrong reason — the evidence would say the poller
+    // did not recognise the field rather than that the instance is degraded.
+    // Asserting the evidence string below is what separates the two.
+    'auth_bond_read_persistent',
   ])('rejects a healthy body carrying known non-none auth failure %s', async (authFailureClass) => {
     const body = canonicalHealth();
     const whatsapp = body.whatsapp as Record<string, unknown>;

@@ -16,12 +16,17 @@ import {
   renameSync,
   rmSync,
   statSync,
+  type Stats,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathIsInsideRoot } from '../lib/home-confinement.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS, hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
+import {
+  DEFAULT_FRESH_INVALID_GRACE_MS,
+  hasTransientAuthReadIssue,
+  transientAuthReadIssue,
+} from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, fsyncDirectory, privateWriteError } from '../lib/private-fs.ts';
 import { shortHash } from '../lib/short-hash.ts';
 import { errorMessage } from '../lib/error-message.ts';
@@ -150,14 +155,33 @@ export interface AuthBondSnapshot {
   issues: string[];
   treeProvenance?: AuthBondTreeProvenance;
   /**
-   * True once a transient credential read has persisted continuously past
+   * True once ONE transient credential read has persisted continuously past
    * treeStaleRiskMs (the same bound `unknown` uses). Consumed by
-   * classifyAuthFailure to escalate a permanently transient read out of
-   * `auth_bond_at_risk` and onto the local-corruption path, so an outage is
-   * eventually opened. Optional so hand-constructed test snapshots keep
-   * compiling without one; undefined reads as `false`.
+   * classifyAuthFailure, which reports `auth_bond_read_persistent` — a
+   * NON-TERMINAL class. The escalation says the read has been indefinite for
+   * long enough to be worth naming; it does not say the credential is corrupt,
+   * because nothing on this path establishes that.
+   *
+   * PROCESS-LIFETIME ONLY. The streak lives in guard memory and starts over on
+   * every process restart, so an instance that restarts more often than
+   * treeStaleRiskMs never reaches the bound however long the underlying fault
+   * lasts. Persisting the episode start is deliberately out of scope here; the
+   * release note states the limitation.
+   *
+   * Optional so hand-constructed test snapshots keep compiling without one;
+   * undefined reads as `false`.
    */
   transientReadPersistent?: boolean;
+  /**
+   * The transient issue owning the current streak, or null when there is none.
+   *
+   * Serialized onto the health surface next to the age below so the escalated
+   * class can be reconciled with the issue list in one response. The streak is
+   * keyed by this text, so it names the fault the age was accumulated against.
+   */
+  transientReadReason?: string | null;
+  /** Milliseconds the current transient streak has run, or null when none is open. */
+  transientReadAgeMs?: number | null;
 }
 
 export interface AuthBondCaptureResult {
@@ -175,6 +199,13 @@ export interface AuthBondRestoreResult {
   source: string | null;
   snapshot: AuthBondSnapshot;
   error: string | null;
+  /**
+   * The restore was WITHHELD on a transient read, not declined for any other
+   * reason. A machine-readable discriminator because the caller has to act on
+   * it — connection.ts aborts the activation and schedules a retry — and the
+   * only other signal was prose inside `error`.
+   */
+  deferred?: boolean;
 }
 
 interface LatestManifest {
@@ -295,6 +326,30 @@ const MIN_REFRESH_RETRY_INTERVAL_MS = 50;
  * status at connect time as grounds for a destructive quarantine-and-restore.
  */
 export const MAX_CREDS_BYTES = 1_048_576;
+/**
+ * Starting capacity of the credential read buffer, before any growth.
+ *
+ * The cap above is the REFUSAL bound; this is the ALLOCATION the ordinary read
+ * pays. They were the same number, which meant a fixed 1 MiB scratch buffer per
+ * read of a ~150 byte credential — on a path an unauthenticated GET /health
+ * reaches through inspectCached(), on the branch whose purpose is removing
+ * per-request auth cost. The buffer now starts at the observed size and doubles
+ * only when the descriptor actually yields more, so the stat informs the
+ * allocation without ever becoming the bound.
+ */
+const CREDS_READ_INITIAL_BYTES = 4_096;
+/**
+ * Ceiling on readSync calls for one credential read.
+ *
+ * A byte bound is not an operation bound. A descriptor that legally returns one
+ * byte per call reaches MAX_CREDS_BYTES only after a million synchronous reads,
+ * blocking the event loop for all of them on the unauthenticated health path.
+ * Reaching this ceiling is reported as `creds_json_read_incomplete:<ops>`, a
+ * RETRYABLE class in TRANSIENT_AUTH_READ_ISSUE_PREFIXES: the descriptor was
+ * never read to a verdict, so it must not reach the corruption class or the
+ * destructive restore. Also bounds EINTR retries, which share the budget.
+ */
+const MAX_CREDS_READ_OPS = 4_096;
 /**
  * Floor between the STARTS of two tree walks.
  *
@@ -431,6 +486,18 @@ interface CredsRead {
 }
 
 /**
+ * One bounded read attempt: bytes taken, or the issue that stopped the read.
+ *
+ * A union rather than a throw so the two stop conditions the credential reader
+ * must not confuse with a corrupt file — a mid-read transient and an exhausted
+ * operation budget — travel back as data and cannot be caught by the generic
+ * handler that turns throws into `creds_json_unreadable:<errno>`.
+ */
+type BoundedRead =
+  | { readonly ok: true; readonly n: number }
+  | { readonly ok: false; readonly kindIssue: string };
+
+/**
  * O_DIRECTORY is absent on some platforms; 0 is a safe no-op in an OR of flags.
  */
 const O_DIRECTORY_FLAG = fsConstants.O_DIRECTORY ?? 0;
@@ -442,7 +509,7 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
     kindIssue: null,
   });
   const present = (
-    st: ReturnType<typeof fstatSync>,
+    st: Stats,
     sha256: string | null,
     error: string | null,
   ): AuthBondFileSnapshot => ({
@@ -460,9 +527,14 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
   // creds.json exists while carrying null mode, size, mtime and hash is
   // internally inconsistent telemetry. Only a refusal that observed the child
   // AND can still vouch for the root it was resolved through passes true —
-  // `auth_dir_replaced_during_read` and `creds_json_too_large:<bytes>` both
-  // opened the child but cannot vouch for the pathname the descriptor still
-  // names, so they take the false default even though a child was looked at.
+  // `auth_dir_replaced_during_read` opened the child but cannot vouch for the
+  // pathname the descriptor still names, so it takes the false default even
+  // though a child was looked at.
+  //
+  // This describes `refused()` and nothing else. The exits that DID observe
+  // the descriptor and can describe it — both `creds_json_too_large` refusals
+  // and the two bounded-read refusals below — return `present(st, …)` instead,
+  // reporting the real mode, size and mtime they read off it.
   const refused = (kindIssue: string, credsExists = false): CredsRead => ({
     snapshot: { path, exists: credsExists, mode: null, size: null, mtime: null, sha256: null, error: null },
     bytes: null,
@@ -488,7 +560,7 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
     const code = errnoCode(err);
     if (code === 'ELOOP') return refused('auth_dir_symlink');
     if (code === 'ENOTDIR') return refused('auth_dir_not_directory');
-    if (isTransientOpenErrno(code)) return refused(`auth_dir_read_transient:${code}`);
+    if (isTransientIoErrno(code)) return refused(`auth_dir_read_transient:${code}`);
     return absent(code);
   }
 
@@ -524,7 +596,7 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       // A nonblocking open that reports "not now" says nothing about the file's
       // contents. Reported apart from `creds_json_unreadable:` so an operator —
       // and any future classifier — can tell "retry" from "corrupt".
-      if (isTransientOpenErrno(code)) return refused(`creds_json_read_transient:${code}`);
+      if (isTransientIoErrno(code)) return refused(`creds_json_read_transient:${code}`);
       return absent(code);
     }
 
@@ -555,18 +627,81 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       // more bytes past the check than the buffer holds. readFileSync(fd) took
       // its own stat internally, which made the earlier size check informative
       // and not load-bearing. See MAX_CREDS_BYTES.
-      const buf = Buffer.allocUnsafe(MAX_CREDS_BYTES);
+      //
+      // st.size picks the STARTING capacity and nothing else — see
+      // CREDS_READ_INITIAL_BYTES. It is never trusted as the bound: a
+      // descriptor that yields more than the stat promised GROWS the buffer
+      // rather than being refused, so a credential that legitimately grows
+      // while staying under the cap still reads cleanly, and the cap-plus-probe
+      // refusal below stays the only thing that bounds the read.
+      let operations = 0;
+      // One bounded readSync carrying the two errno rules this path needs.
+      // EINTR is a signal landing mid-call and says nothing about the file, so
+      // it is retried against the operation budget rather than surfacing.
+      // EAGAIN/EWOULDBLOCK mid-read is the same "not now" the two opens above
+      // report, so it takes the same transient class: without this it fell
+      // through to the outer catch as `creds_json_unreadable:<errno>`, which is
+      // the input that pages as local corruption and satisfies the destructive
+      // restore's precondition.
+      //
+      // Deliberately NOT readPrivateFileSync (src/lib/private-fs.ts:249), which
+      // reads a capped private file with the same open flags. Two reasons it
+      // cannot serve this path: it THROWS on every refusal, and a throw here
+      // escapes buildSnapshot and inspectCached into the unauthenticated
+      // /health handler; and its `Buffer.alloc(maxBytes + 1)` at :281 is
+      // unconditional, which at a 1 MiB cap is the per-request allocation this
+      // reader exists to avoid. A shared size-informed reader for the three
+      // call sites is tracked as follow-up outside this branch.
+      const readBounded = (target: Buffer, offset: number, length: number): BoundedRead => {
+        while (operations < MAX_CREDS_READ_OPS) {
+          operations += 1;
+          try {
+            return { ok: true, n: readSync(fd, target, offset, length, null) };
+          } catch (err) {
+            const code = errnoCode(err);
+            if (code === 'EINTR') continue;
+            if (isTransientIoErrno(code)) {
+              return { ok: false, kindIssue: `creds_json_read_transient:${code}` };
+            }
+            throw err;
+          }
+        }
+        return { ok: false, kindIssue: `creds_json_read_incomplete:${operations}` };
+      };
+      // Reported through present(), not refused(): the child was opened and
+      // fstat'd, so its mode, size and mtime are real observations of the
+      // object that failed, and a null-everything snapshot would discard them.
+      const incomplete = (kindIssue: string): CredsRead => ({
+        snapshot: present(st, null, null),
+        bytes: null,
+        kindIssue,
+      });
+
+      let capacity = Math.min(Math.max(st.size + 1, CREDS_READ_INITIAL_BYTES), MAX_CREDS_BYTES);
+      let buf = Buffer.allocUnsafe(capacity);
       let filled = 0;
       while (filled < MAX_CREDS_BYTES) {
-        const n = readSync(fd, buf, filled, MAX_CREDS_BYTES - filled, null);
-        if (n === 0) break;
-        filled += n;
+        if (filled === capacity) {
+          capacity = Math.min(capacity * 2, MAX_CREDS_BYTES);
+          const grown = Buffer.allocUnsafe(capacity);
+          buf.copy(grown, 0, 0, filled);
+          buf = grown;
+        }
+        const read = readBounded(buf, filled, capacity - filled);
+        if (!read.ok) return incomplete(read.kindIssue);
+        if (read.n === 0) break;
+        filled += read.n;
       }
-      // The buffer is full and the descriptor still has more to give. Refuse
-      // by kind: reported bytes are the ones observed on the descriptor, which
-      // is the same shape as the fstat-based refusal above.
-      const probe = Buffer.allocUnsafe(1);
-      const overflow = filled === MAX_CREDS_BYTES && readSync(fd, probe, 0, 1, null) > 0;
+      // The read reached the cap and the descriptor still has more to give.
+      // Refuse by kind: reported bytes are the ones observed on the descriptor,
+      // which is the same shape as the fstat-based refusal above. The probe is
+      // allocated only on the one branch that needs it.
+      let overflow = false;
+      if (filled === MAX_CREDS_BYTES) {
+        const probe = readBounded(Buffer.allocUnsafe(1), 0, 1);
+        if (!probe.ok) return incomplete(probe.kindIssue);
+        overflow = probe.n > 0;
+      }
       if (overflow) {
         return {
           snapshot: present(st, null, null),
@@ -574,8 +709,9 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
           kindIssue: `creds_json_too_large:${filled + 1}`,
         };
       }
-      // Copy the filled prefix out; the MAX_CREDS_BYTES scratch buffer stays
-      // local so a ~150 byte credential is not held with a 1 MiB backing.
+      // Copy the filled prefix out so the read buffer — which may have grown
+      // well past the credential — stays local rather than backing the bytes
+      // that are retained and hashed.
       const bytes = Buffer.from(buf.subarray(0, filled));
       return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
     } catch (err) {
@@ -589,7 +725,10 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
         kindIssue: null,
       };
     } finally {
-      // readFileSync(fd) does not close a caller-supplied descriptor.
+      // Every descriptor this function opens is closed by this function. Stated
+      // without reference to how the bytes are taken, so a change of reader
+      // cannot leave the reason stale: the open above is the only thing that
+      // makes this necessary.
       try { closeSync(fd); } catch { /* nothing left to release */ }
     }
   } finally {
@@ -675,7 +814,7 @@ function errnoCode(err: unknown): string {
  * of them; both names are matched because the platform contract does not
  * promise which.
  */
-function isTransientOpenErrno(code: string): boolean {
+function isTransientIoErrno(code: string): boolean {
   return code === 'EAGAIN' || code === 'EWOULDBLOCK';
 }
 
@@ -1072,11 +1211,23 @@ export class AuthBondGuard {
   /**
    * Monotonic timestamp of the first snapshot in the current transient-read
    * streak, cleared as soon as a snapshot no longer carries one. Compared to
-   * treeStaleRiskMs so a permanently transient credential eventually stops
-   * suppressing outage escalation. See the transientReadPersistent field on
+   * treeStaleRiskMs so a permanently transient credential is eventually named
+   * on the health surface. See the transientReadPersistent field on
    * AuthBondSnapshot and classifyAuthFailure in src/core/health.ts.
+   *
+   * PROCESS-LOCAL, and deliberately so this round: a restart starts the streak
+   * over, so an instance restarting faster than treeStaleRiskMs never reaches
+   * the bound. Documented on the snapshot field and in the release note.
    */
   private transientReadStartedAtMs: number | null = null;
+  /**
+   * The transient issue text the open streak belongs to, or null when none is
+   * open. The streak is keyed by it, so a change of reason closes one episode
+   * and starts another rather than accumulating one age across two different
+   * faults — which is what would make the serialized reason and age on the
+   * health surface describe different things.
+   */
+  private transientReadReason: string | null = null;
   /**
    * Monotonic clock for digest age.
    *
@@ -1641,7 +1792,7 @@ export class AuthBondGuard {
       status = 'unknown';
       issues.push(unknownReason);
     }
-    const transientReadPersistent = this.noteTransientReadState(issues);
+    const transientRead = this.noteTransientReadState(issues);
     return {
       status,
       authDir,
@@ -1653,29 +1804,53 @@ export class AuthBondGuard {
       backup: this.backupSnapshot(),
       issues,
       ...(treeProvenance ? { treeProvenance } : {}),
-      transientReadPersistent,
+      transientReadPersistent: transientRead.persistent,
+      transientReadReason: transientRead.reason,
+      transientReadAgeMs: transientRead.ageMs,
     };
   }
 
   /**
-   * Update the transient-read streak and report whether it has persisted past
-   * the stale-risk bound. Called at the tail of every buildSnapshot so live
-   * and cached snapshots share the same accounting: the streak starts on the
-   * first transient-carrying snapshot, is reset by the first snapshot without
-   * one, and flips to persistent at the same age the tree observation would
-   * flip to `unknown`.
+   * Update the transient-read streak and report it.
+   *
+   * Called at the tail of every buildSnapshot so live and cached snapshots
+   * share the same accounting: the streak starts on the first
+   * transient-carrying snapshot, is reset by the first snapshot without one,
+   * and flips to persistent at the same age the tree observation would flip to
+   * `unknown`.
+   *
+   * KEYED BY THE ISSUE TEXT. A snapshot carrying a different transient reason
+   * than the open streak starts a NEW streak rather than continuing the old
+   * one, so the reason and the age reported together always describe the same
+   * fault. The alternative — one streak spanning a root EAGAIN followed by a
+   * child EWOULDBLOCK — reaches the bound sooner and cannot say what the age
+   * was accumulated against.
+   *
+   * The streak also resets whenever the credential is not read at all, which
+   * buildSnapshot skips on a bad root: a symlinked root landing on top of a
+   * persistent transient zeroes the streak. That is the fail-safe direction —
+   * the root fault is the finding — and it is stated here because it is not
+   * obvious from the predicate.
    */
-  private noteTransientReadState(issues: readonly string[]): boolean {
-    if (!hasTransientAuthReadIssue(issues)) {
+  private noteTransientReadState(issues: readonly string[]): {
+    persistent: boolean;
+    reason: string | null;
+    ageMs: number | null;
+  } {
+    const reason = transientAuthReadIssue(issues);
+    if (reason === null) {
       this.transientReadStartedAtMs = null;
-      return false;
+      this.transientReadReason = null;
+      return { persistent: false, reason: null, ageMs: null };
     }
     const nowMs = this.monotonicNow();
-    if (this.transientReadStartedAtMs === null) {
+    if (this.transientReadStartedAtMs === null || this.transientReadReason !== reason) {
       this.transientReadStartedAtMs = nowMs;
-      return false;
+      this.transientReadReason = reason;
+      return { persistent: false, reason, ageMs: 0 };
     }
-    return nowMs - this.transientReadStartedAtMs >= this.treeStaleRiskMs;
+    const ageMs = nowMs - this.transientReadStartedAtMs;
+    return { persistent: ageMs >= this.treeStaleRiskMs, reason, ageMs };
   }
 
   capture(reason: string): AuthBondCaptureResult {
@@ -1830,20 +2005,28 @@ export class AuthBondGuard {
     // delay before a genuine fault reaches the restore, and delay is the safe
     // direction for a destructive path.
     if (hasTransientAuthReadIssue(before.issues)) {
-      // Withheld until the next connect attempt produces a definite read.
+      // Withheld until the NEXT CONNECT ATTEMPT produces a definite read.
+      //
+      // Nothing on the /health path can lift this. A health request re-reads
+      // the credential live through inspectCached(), so it does produce a
+      // definite read — but it never calls this method, and no other path in
+      // this module re-establishes a credential. The connect path is the only
+      // caller, which is why `deferred` is reported: connection.ts aborts the
+      // activation and schedules a bounded retry, so "the next connect
+      // attempt" is something this process arranges rather than waits for.
+      //
       // No tree walk is armed here: restoreLatestIfNeeded reads through
       // inspect() (the live path), which never consults the cached tree, so
       // a tree walk cannot re-establish the credential and would only defer
-      // reader-driven walks in the meantime. The credential is re-read live
-      // on every /health and by every connect attempt, so the definite read
-      // that unblocks this path arrives whenever the transient stops. The
-      // failure streak stays clean deliberately — noteRefreshNeedsRetry() is
-      // for tree walks, and a credential read fault is not a walk fault.
+      // reader-driven walks in the meantime. The failure streak stays clean
+      // deliberately — noteRefreshNeedsRetry() is for tree walks, and a
+      // credential read fault is not a walk fault.
       return {
         attempted: false,
         restored: false,
         source: null,
         snapshot: before,
+        deferred: true,
         error: 'auth bond read was transient; restore withheld pending a definite read',
       };
     }

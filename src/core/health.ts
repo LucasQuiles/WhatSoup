@@ -17,7 +17,11 @@ import { getPendingCount, upsertAccess } from './access-list.ts';
 import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS, hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_BOND_READ_PERSISTENT_CLASS,
+  DEFAULT_FRESH_INVALID_GRACE_MS,
+  hasTransientAuthReadIssue,
+} from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -875,7 +879,14 @@ type AuthFailureClass =
   | 'serverside_logout_irreversible'
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
-  | 'auth_bond_at_risk';
+  | 'auth_bond_at_risk'
+  // A credential that has been UNREADABLE for longer than the stale-risk
+  // bound. Deliberately its own class rather than a local-corruption one:
+  // nothing on this path establishes corruption, and the corruption classes
+  // carry terminal consequences — the unrestorable one takes /health to 503
+  // and tells the watchdog a human relink is required. See
+  // AUTH_BOND_READ_PERSISTENT_CLASS.
+  | typeof AUTH_BOND_READ_PERSISTENT_CLASS;
 
 type DisconnectClass =
   | 'none'
@@ -966,6 +977,18 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     // Walks started, including ones that did not publish. digest_refresh_count
     // counts only publications, so the pair separates cost from progress.
     digest_refresh_attempts: authBond.treeProvenance?.refreshAttemptCount ?? null,
+    // Why auth_failure_class can read 'auth_bond_read_persistent' next to an
+    // issue whose whole meaning is "not right now". Without these three the two
+    // readings contradict each other and the response carries nothing to
+    // reconcile them: the issue list has no age, and the flag that changed the
+    // class was internal. The reason names the ONE transient issue the streak
+    // belongs to — a different reason starts a new streak — and the age is that
+    // streak's, in milliseconds. Both are process-local: a restart starts the
+    // streak over, so a small age on a long-running fault means the process is
+    // young, not that the fault is.
+    transient_read_persistent: authBond.transientReadPersistent ?? false,
+    transient_read_reason: authBond.transientReadReason ?? null,
+    transient_read_age_ms: authBond.transientReadAgeMs ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
@@ -1041,18 +1064,23 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   // that comment gives: degrading costs nothing inside the write window, while
   // a false clean there lands in exactly the window a restore may act on.
   //
-  // Bounded in TIME the same way 'unknown' is: a transient read that has
-  // persisted past the guard's treeStaleRiskMs stops suppressing outage
-  // escalation, so the not-'present' branch below runs and reports
-  // 'local_corruption_*'. The mode-bucket contract then opens an outage on
-  // that class (auth-loss-mode-bucket-contract.ts). The tracking lives on the
-  // guard because a transient prefix is issue text with no age of its own,
-  // and this must be one shared bound across live and cached reads.
-  if (
-    hasTransientAuthReadIssue(authBond.issues)
-    && !authBond.transientReadPersistent
-  ) {
-    return 'auth_bond_at_risk';
+  // Bounded in TIME the same way 'unknown' is, and bounded ONLY in what it
+  // reports. Past the guard's treeStaleRiskMs the class becomes
+  // 'auth_bond_read_persistent', which names the fault instead of leaving it
+  // indistinguishable from a fresh one. It must NOT fall through to the
+  // not-'present' branch below: that reports 'local_corruption_*', and the
+  // unrestorable half takes /health to 503 and matches the watchdog's terminal
+  // set, so a credential nobody could READ would suppress the restart that
+  // might clear the read fault. Both halves stay degraded at HTTP 200; the
+  // difference between them is only that the second one is explainable, which
+  // is what the serialized transient_read_* fields on the auth_bond block are
+  // for. The tracking lives on the guard because a transient prefix is issue
+  // text with no age of its own, and this must be one shared bound across live
+  // and cached reads.
+  if (hasTransientAuthReadIssue(authBond.issues)) {
+    return authBond.transientReadPersistent
+      ? AUTH_BOND_READ_PERSISTENT_CLASS
+      : 'auth_bond_at_risk';
   }
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';

@@ -21,6 +21,7 @@ import {
   type SilenceRegistryEpisodeStorePort,
 } from './silence-registry-episode-store.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
 import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
 import type { StableAuthenticatedOpenSample } from './auth-loss-signal-resolver.ts';
@@ -45,6 +46,12 @@ const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
   'local_corruption_restorable',
   'local_corruption_unrestorable',
   'auth_bond_at_risk',
+  // A class this set does not know is rejected as an unrecognized schema field
+  // rather than read as the degradation it is, so membership here is what makes
+  // the persistent-read signal legible to the poller. Deliberately absent from
+  // TERMINAL_AUTH_FAILURE_CLASSES above: an unreadable credential is not a lost
+  // bond, and a restart may clear it.
+  AUTH_BOND_READ_PERSISTENT_CLASS,
 ]);
 const WEAK_LOGGED_OUT_POLLS = 3;
 const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;

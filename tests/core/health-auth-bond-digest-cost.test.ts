@@ -1506,6 +1506,19 @@ describe('public-surface contract — the three digest refresh-provenance fields
       // projections in health.ts fails here.
       expect(bond.digest_refresh_attempts).toBeGreaterThanOrEqual(bond.digest_refresh_count);
       expect(bond.digest_refresh_attempts).toBeGreaterThanOrEqual(1);
+
+      // The three transient-read fields promoted alongside them, under the
+      // same rule: names as docs/public-surface.md spells them, and the quiet
+      // shape a healthy bond must report — false and two nulls, never absent
+      // members, so a strict decoder sees the same keys in every response.
+      expect(Object.keys(bond)).toEqual(expect.arrayContaining([
+        'transient_read_persistent',
+        'transient_read_reason',
+        'transient_read_age_ms',
+      ]));
+      expect(bond.transient_read_persistent).toBe(false);
+      expect(bond.transient_read_reason).toBeNull();
+      expect(bond.transient_read_age_ms).toBeNull();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();
@@ -1536,85 +1549,219 @@ describe('public-surface contract — the three digest refresh-provenance fields
     // from the field names.
     expect(owning[0]).toContain('MILLISECONDS');
     expect(owning[0]).toContain('Additive only');
+
+    // The transient-read promotion is governed by the same rule, and it adds
+    // a VALUE to an existing enumeration as well as three members — the one
+    // thing a strict decoder of auth_failure_class cannot discover from a
+    // field list, so the note has to say it.
+    const transientOwning = additions.filter((body) => body.includes('transient_read_persistent'));
+    expect(transientOwning).toHaveLength(1);
+    expect(transientOwning[0]).toContain('transient_read_reason');
+    expect(transientOwning[0]).toContain('transient_read_age_ms');
+    expect(transientOwning[0]).toContain('auth_bond_read_persistent');
+    expect(transientOwning[0]).toContain('NON-TERMINAL');
   });
 });
 
-describe('r5 SHOULD-5 follow-up — a permanently transient credential read is bounded in time', () => {
+describe('review finding — a persistently unreadable credential is named, not called corruption', () => {
   /**
-   * Hand-builds a snapshot so the bound is exercised at the classifier, which
-   * is what the fleet outage record actually reads. The guard-side accounting
-   * that flips `transientReadPersistent` is covered separately in
-   * tests/transport/auth-bond-fs-errors.test.ts.
+   * The predecessor of this test hand-built the persistence flag, fed it
+   * through a synthetic snapshot, and then asserted an outage decision by
+   * importing the mode-bucket contract directly. Two review findings closed
+   * here: the flag now comes from the guard's OWN accounting and reaches the
+   * classifier through the production cached-health seam (makeDeps wires
+   * `authBond: guard.inspectCached()`, which is what GET /health reads), and
+   * the outage assertion is gone because no runtime opens one — the
+   * mode-bucket cluster has no runtime importer, as the orphan-reachability
+   * guard records.
+   *
+   * The fixture deliberately has NO auth-bond backup. That is the case the
+   * finding is about: with no backup the old classifier returned
+   * `local_corruption_unrestorable`, which takes /health to 503 and matches
+   * the watchdog's terminal set — so a credential nobody could READ suppressed
+   * the restart that might clear the read fault.
    */
-  async function classifyWithTransient(
-    guard: AuthBondGuard,
-    db: Database,
-    transientReadPersistent: boolean,
-  ): Promise<string> {
-    const base = guard.inspect();
-    const authBond = {
-      ...base,
-      status: 'invalid' as const,
-      creds: { ...base.creds, mtime: '2020-01-01T00:00:00.000Z' },
-      issues: ['creds_json_read_transient:EAGAIN'],
-      transientReadPersistent,
-    };
-    const deps = {
-      ...makeDeps(db, guard),
-      connectionManager: {
-        botJid: '15551230004@s.whatsapp.net',
-        botLid: null,
-        sendMessage: vi.fn(),
-        sendMedia: vi.fn(),
-        connect: vi.fn(),
-        disconnect: vi.fn(),
-        getConnectionState: () => ({
-          ...emptyConnectionStateSnapshot({
-            connected: true, stateChangedAt: '2026-09-03T00:00:00.000Z', lastDisconnectReason: null,
-          }),
-          authBond,
-        }),
-      } as unknown as ConnectionManager,
-    } as HealthDeps;
-    const { server, port } = await buildTestServer(deps);
-    try {
-      const res = await healthReq(port);
-      return (JSON.parse(res.body) as Record<string, any>).whatsapp.connection.auth_failure_class;
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  }
+  it('reports auth_bond_read_persistent at HTTP 200 with the fields that explain it', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const credsPath = join(fx.authDir, 'creds.json');
+    const clock = { value: 0 };
+    const inject = { transient: true };
+    let transientOpens = 0;
 
-  it('escalates a persistent transient to local_corruption_* and opens an outage', async () => {
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        openSync: vi.fn((
+          path: Parameters<typeof actual.openSync>[0],
+          flags: Parameters<typeof actual.openSync>[1],
+          mode?: Parameters<typeof actual.openSync>[2],
+        ) => {
+          if (String(path) === credsPath && inject.transient) {
+            transientOpens += 1;
+            throw Object.assign(
+              new Error('EAGAIN: resource temporarily unavailable, open'),
+              { code: 'EAGAIN' },
+            );
+          }
+          return actual.openSync(path, flags, mode as any);
+        }),
+      };
+    });
+
     const db = new Database(':memory:');
     db.open();
-    const guard = makeGuard();
-    await guard.warmTreeCache();
-
     try {
-      // A short-lived transient stays at-risk — coverage assertion that the
-      // classifier still recognises the transient shape at all, so the change
-      // below is discriminating rather than the reader having stopped working.
-      const shortLived = await classifyWithTransient(guard, db, false);
-      expect(shortLived).toBe('auth_bond_at_risk');
+      const mod = await import('../../src/transport/auth-bond.ts');
+      // treeCacheMaxAgeMs 10 makes treeStaleRiskMs 40 (× 4), the same multiple
+      // production uses, so the bound is exercised without a 120 s wait.
+      const guard = new mod.AuthBondGuard({
+        authDir: fx.authDir,
+        stateRoot: fx.stateRoot,
+        instanceName: 'p42-r7-read-persistent',
+        treeCacheMaxAgeMs: 10,
+        monotonicNow: () => clock.value,
+      }) as unknown as AuthBondGuard;
+      const { server, port } = await buildTestServer(makeDeps(db, guard));
 
-      // Once the transient has persisted past treeStaleRiskMs the class flips
-      // to a definite one. The classifier's not-'present' branch chooses
-      // between local_corruption_restorable and _unrestorable on whether a
-      // backup exists; the guard fixture writes one, so this fixture takes
-      // the restorable path. Removing the persistence-gate from the classifier
-      // makes this assertion red — it would keep returning 'auth_bond_at_risk'.
-      const persistent = await classifyWithTransient(guard, db, true);
-      expect(persistent).toMatch(/^local_corruption_/);
-      expect(persistent).not.toBe('auth_bond_at_risk');
-      // The escalation is what opens the outage in the bucket contract; a
-      // downstream change that maps local_corruption_* off open_outage would
-      // silently break the S5 property.
-      const { decideAuthLossModeEvent } = await import('../../src/fleet/auth-loss-mode-bucket-contract.ts');
-      const decision = decideAuthLossModeEvent({ authFailureClass: persistent as any });
-      expect(decision).toMatchObject({ action: 'open_outage', bucket: 'local_corruption' });
+      try {
+        // First request opens the streak. Coverage assertions: the injected
+        // EAGAIN was really reached, the class is the short-lived one, and the
+        // fixture genuinely carries no backup — without the last one the 200
+        // below could come from the restorable branch instead of from the fix.
+        const firstRes = await healthReq(port);
+        const first = JSON.parse(firstRes.body) as Record<string, any>;
+        expect(transientOpens).toBeGreaterThanOrEqual(1);
+        expect(first.whatsapp.auth_bond.issues).toContain('creds_json_read_transient:EAGAIN');
+        expect(first.whatsapp.auth_bond.backup.latest).toBeNull();
+        expect(first.whatsapp.connection.auth_failure_class).toBe('auth_bond_at_risk');
+        expect(first.whatsapp.auth_bond.transient_read_persistent).toBe(false);
+
+        // Past the bound, on the same guard, with the transient still injected.
+        clock.value = 41;
+        const res = await healthReq(port);
+        const body = JSON.parse(res.body) as Record<string, any>;
+
+        // The class names the read fault. Reverting the classifier to the
+        // not-'present' branch makes this line read local_corruption_*.
+        expect(body.whatsapp.connection.auth_failure_class).toBe('auth_bond_read_persistent');
+        // And it is NOT treated as terminal: 200, degraded, and the only
+        // auth reason in the array is this class. `toContain` could not prove
+        // "sole", so the auth reasons are compared as a whole.
+        expect(res.status).toBe(200);
+        expect(body.status).toBe('degraded');
+        expect(
+          (body.status_reasons as string[]).filter((reason) => reason.startsWith('auth_failure.')),
+        ).toEqual(['auth_failure.auth_bond_read_persistent']);
+
+        // The three fields that make the escalation explainable from one
+        // response, all served from the guard's accounting rather than built
+        // by this test.
+        expect(body.whatsapp.auth_bond.transient_read_persistent).toBe(true);
+        expect(body.whatsapp.auth_bond.transient_read_reason).toBe('creds_json_read_transient:EAGAIN');
+        expect(body.whatsapp.auth_bond.transient_read_age_ms).toBe(41);
+
+        // Recovery closes it out on the same seam: the streak resets, the
+        // fields go quiet, and the class returns to 'none'. Without this the
+        // test could pass on a flag that latches.
+        inject.transient = false;
+        clock.value = 100;
+        const recoveredRes = await healthReq(port);
+        const recovered = JSON.parse(recoveredRes.body) as Record<string, any>;
+        expect(recovered.whatsapp.auth_bond.transient_read_persistent).toBe(false);
+        expect(recovered.whatsapp.auth_bond.transient_read_reason).toBeNull();
+        expect(recovered.whatsapp.auth_bond.transient_read_age_ms).toBeNull();
+        expect(recovered.whatsapp.connection.auth_failure_class).not.toBe('auth_bond_read_persistent');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
     } finally {
       db.close();
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
+  /**
+   * The other half of the finding. With a backup present the old classifier
+   * returned `local_corruption_restorable` — 200 rather than 503, but still a
+   * corruption verdict that opens a local-corruption bucket and tells an
+   * operator the store is damaged. The class must not depend on whether a
+   * backup happens to exist, because the backup says nothing about whether the
+   * credential could be read.
+   */
+  it('reports the same class with a backup present, so the verdict does not depend on one', async () => {
+    const fx = makeOwnFixture();
+    ownFixtureRoots.push(fx.root);
+    const credsPath = join(fx.authDir, 'creds.json');
+    const clock = { value: 0 };
+
+    // Seeded with the statically imported guard, which holds the REAL fs, so
+    // the backup exists on disk before the failing reader is installed.
+    const seeded = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: 'p42-r7-read-persistent-backup',
+      now: () => new Date('2026-09-03T12:00:00Z'),
+    }).capture('seed');
+    expect(seeded).toMatchObject({ ok: true, captured: true });
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        openSync: vi.fn((
+          path: Parameters<typeof actual.openSync>[0],
+          flags: Parameters<typeof actual.openSync>[1],
+          mode?: Parameters<typeof actual.openSync>[2],
+        ) => {
+          if (String(path) === credsPath) {
+            throw Object.assign(
+              new Error('EAGAIN: resource temporarily unavailable, open'),
+              { code: 'EAGAIN' },
+            );
+          }
+          return actual.openSync(path, flags, mode as any);
+        }),
+      };
+    });
+
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const mod = await import('../../src/transport/auth-bond.ts');
+      const guard = new mod.AuthBondGuard({
+        authDir: fx.authDir,
+        stateRoot: fx.stateRoot,
+        instanceName: 'p42-r7-read-persistent-backup',
+        treeCacheMaxAgeMs: 10,
+        monotonicNow: () => clock.value,
+      }) as unknown as AuthBondGuard;
+      const { server, port } = await buildTestServer(makeDeps(db, guard));
+
+      try {
+        await healthReq(port);
+        clock.value = 41;
+        const res = await healthReq(port);
+        const body = JSON.parse(res.body) as Record<string, any>;
+
+        // Coverage assertion: this fixture really does carry a backup, which
+        // is what makes it the other branch of the old classifier's split.
+        expect(body.whatsapp.auth_bond.backup.latest).not.toBeNull();
+        // Same class, same code, same severity as the no-backup case.
+        expect(body.whatsapp.connection.auth_failure_class).toBe('auth_bond_read_persistent');
+        expect(res.status).toBe(200);
+        expect(body.status).toBe('degraded');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    } finally {
+      db.close();
+      vi.doUnmock('node:fs');
+      vi.resetModules();
     }
   });
 });
@@ -1649,6 +1796,7 @@ describe('r5 NIT-4 follow-up — MIN_REFRESH_RETRY_INTERVAL_MS is exercised, not
     // 50 ms clamp × 2^1 (one failure) = 100 ms.
     expect(settled.refreshScheduled).toBe(true);
     expect(settled.nextRefreshEligibleInMs).toBe(100);
+
 
     await advanceQuietly(clock, 10);
     vi.useRealTimers();
