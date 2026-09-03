@@ -864,12 +864,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // re-reads the credential but never calls the restore.
       //
       // So abort BEFORE the auth state is loaded and put the retry on the
-      // existing reconnect backoff. The retry is bounded by the same
-      // treeStaleRiskMs streak the guard already keeps: once the transient has
-      // outlived it, transientReadPersistent goes true, this branch stops
-      // aborting, and the ordinary definite-read path decides — which reports
-      // the persistent class on /health rather than looping here forever.
-      if (restore.deferred === true && restore.snapshot.transientReadPersistent !== true) {
+      // existing reconnect policy. `transientReadPersistent` changes the
+      // health classification only; elapsed time cannot turn an unreadable
+      // credential into a definite absence or corruption verdict. Activation
+      // remains deferred until a later connect attempt gets a definite read.
+      if (restore.deferred === true) {
         this.recordCredentialLifecycle('auth_restore_deferred', {
           authBond: restore.snapshot,
           note: restore.error ?? 'auth bond read was transient',

@@ -912,12 +912,15 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // creds.json is on disk and readable here; the point is that this snapshot
     // never looked, so it reports no existence rather than a `true` it did not
     // establish, alongside the null mode/size/mtime/hash it already reported.
-    expect(snapshot.creds.exists).toBe(false);
-    expect(snapshot.creds.mode).toBeNull();
-    expect(snapshot.creds.size).toBeNull();
-    expect(snapshot.creds.mtime).toBeNull();
-    expect(snapshot.creds.sha256).toBeNull();
-    expect(snapshot.creds.error).toBeNull();
+    expect(snapshot.creds).toEqual({
+      path: join(authDir, 'creds.json'),
+      exists: false,
+      mode: null,
+      size: null,
+      mtime: null,
+      sha256: null,
+      error: null,
+    });
   });
 
   /**
@@ -1240,17 +1243,60 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
    * precondition. A mid-read "not now" says no more about the contents than a
    * mid-open one does.
    */
-  it('translates a mid-read transient into the shared transient class', async () => {
+  it.each(['EAGAIN', 'EWOULDBLOCK'] as const)(
+    'translates a mid-read %s into the shared transient class',
+    async (errno) => {
+      const root = makeRoot();
+      const authDir = join(root, 'auth');
+      const stateRoot = join(root, 'state');
+      writeAuth(authDir);
+
+      const clean = await importGuardWithFsMock(() => ({}));
+      expect(new clean.AuthBondGuard({
+        authDir, stateRoot, instanceName: `creds-midread-${errno.toLowerCase()}-bot`,
+        now: () => new Date('2026-09-03T12:00:00Z'),
+      }).capture('seed')).toMatchObject({ ok: true, captured: true });
+
+      let reads = 0;
+      const mod = await importGuardWithFsMock((actual) => ({
+        readSync: vi.fn((
+          fd: number,
+          buffer: NodeJS.ArrayBufferView,
+          offset: number,
+          length: number,
+          position: number | null,
+        ) => {
+          reads += 1;
+          // Let the first read take a byte, so the failure is genuinely
+          // MID-loop: the descriptor has already produced data.
+          if (reads === 1) return actual.readSync(fd, buffer as any, offset, Math.min(1, length), position);
+          throw Object.assign(new Error(`${errno}: transient read`), { code: errno });
+        }) as unknown as FsModule['readSync'],
+      }));
+
+      const guard = new mod.AuthBondGuard({
+        authDir, stateRoot, instanceName: `creds-midread-${errno.toLowerCase()}-bot`,
+      });
+      const snapshot = guard.inspect();
+
+      // Coverage assertion: the injection was reached mid-loop, after a byte.
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(snapshot.issues).toContain(`creds_json_read_transient:${errno}`);
+      // The regression this closes.
+      expect(snapshot.issues).not.toContain(`creds_json_unreadable:${errno}`);
+      expect(snapshot.creds.exists).toBe(true);
+
+      // And it reaches the shared predicate, so the destructive restore is held.
+      const result = guard.restoreLatestIfNeeded();
+      expect(result.attempted).toBe(false);
+      expect(result.deferred).toBe(true);
+    },
+  );
+
+  it('retries an interrupted credential read to a definite result', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
-    const stateRoot = join(root, 'state');
     writeAuth(authDir);
-
-    const clean = await importGuardWithFsMock(() => ({}));
-    expect(new clean.AuthBondGuard({
-      authDir, stateRoot, instanceName: 'creds-midread-eagain-bot',
-      now: () => new Date('2026-09-03T12:00:00Z'),
-    }).capture('seed')).toMatchObject({ ok: true, captured: true });
 
     let reads = 0;
     const mod = await importGuardWithFsMock((actual) => ({
@@ -1262,32 +1308,22 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
         position: number | null,
       ) => {
         reads += 1;
-        // Let the first read take a byte, so the failure is genuinely
-        // MID-loop: the descriptor has already produced data.
-        if (reads === 1) return actual.readSync(fd, buffer as any, offset, Math.min(1, length), position);
-        throw Object.assign(
-          new Error('EAGAIN: resource temporarily unavailable, read'),
-          { code: 'EAGAIN' },
-        );
+        if (reads === 1) {
+          throw Object.assign(new Error('EINTR: interrupted read'), { code: 'EINTR' });
+        }
+        return actual.readSync(fd, buffer as any, offset, length, position);
       }) as unknown as FsModule['readSync'],
     }));
 
-    const guard = new mod.AuthBondGuard({
-      authDir, stateRoot, instanceName: 'creds-midread-eagain-bot',
-    });
-    const snapshot = guard.inspect();
+    const snapshot = new mod.AuthBondGuard({
+      authDir, stateRoot: join(root, 'state'), instanceName: 'creds-eintr-bot',
+    }).inspect();
 
-    // Coverage assertion: the injection was reached mid-loop, after a byte.
-    expect(reads).toBeGreaterThanOrEqual(2);
-    expect(snapshot.issues).toContain('creds_json_read_transient:EAGAIN');
-    // The regression this closes.
-    expect(snapshot.issues).not.toContain('creds_json_unreadable:EAGAIN');
-    expect(snapshot.creds.exists).toBe(true);
-
-    // And it reaches the shared predicate, so the destructive restore is held.
-    const result = guard.restoreLatestIfNeeded();
-    expect(result.attempted).toBe(false);
-    expect(result.deferred).toBe(true);
+    expect(reads).toBeGreaterThan(1);
+    expect(snapshot.status).toBe('present');
+    expect(snapshot.meHash).not.toBeNull();
+    expect(snapshot.issues.some(issue => issue.includes('EINTR'))).toBe(false);
+    expect(snapshot.issues.some(issue => issue.startsWith('creds_json_read_incomplete:'))).toBe(false);
   });
 
   /**

@@ -780,11 +780,14 @@ describe('HIGH-2 — credential reads refuse to follow a link, cache or no cache
     const linked = guard.inspectCached();
     rmSync(fx.root, { recursive: true, force: true });
 
-    expect(linked.treeProvenance?.source).toBe('cached');
-    expect(linked.issues).toContain('creds_json_symlink');
-    expect(linked.status).toBe('invalid');
-    // And it must not have parsed identity out of the link target.
-    expect(linked.meHash).toBeNull();
+    // The exact terminal shape proves both cache provenance and that no
+    // identity was parsed from the link target.
+    expect(linked).toMatchObject({
+      status: 'invalid',
+      meHash: null,
+      issues: expect.arrayContaining(['creds_json_symlink']),
+      treeProvenance: { source: 'cached' },
+    });
   });
 
   it('rejects a symlinked auth root', () => {
@@ -826,11 +829,14 @@ describe('r3 MUST-1 — a bad auth root is refused before the credential is read
 
     const snap = guard.inspectCached();
 
-    expect(snap.issues).toContain('auth_dir_symlink');
-    expect(snap.status).toBe('invalid');
-    // The load-bearing assertion: no identity was taken from the link target.
-    expect(snap.meHash).toBeNull();
-    expect(snap.creds.sha256).toBeNull();
+    // The load-bearing terminal shape: no identity or credential digest was
+    // taken from the link target.
+    expect(snap).toMatchObject({
+      status: 'invalid',
+      meHash: null,
+      creds: { sha256: null },
+      issues: expect.arrayContaining(['auth_dir_symlink']),
+    });
   });
 });
 
@@ -1099,14 +1105,15 @@ describe('r4 SHOULD-2 — a reader that arrives during or under a walk queues no
     // refreshTreeCache) and the walk did NOT start (so it took the floor
     // branch). Without this pair the assertion below could hold for the wrong
     // reason.
-    expect(blocked.source).toBe('stale');
-    expect(blocked.refreshInFlight).toBe(false);
-
-    // And it queued nothing. Both fields are assigned synchronously inside the
+    // It queued nothing. All four fields are assigned synchronously inside the
     // same inspectCached call, so dropping the guard in the floor branch arms a
-    // successor that is visible right here.
-    expect(blocked.refreshScheduled).toBe(false);
-    expect(blocked.nextRefreshEligibleInMs).toBeNull();
+    // successor that is visible in this exact state shape.
+    expect(blocked).toMatchObject({
+      source: 'stale',
+      refreshInFlight: false,
+      refreshScheduled: false,
+      nextRefreshEligibleInMs: null,
+    });
   });
 });
 

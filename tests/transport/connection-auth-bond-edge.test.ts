@@ -343,25 +343,35 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     }
   });
 
-  it('stops deferring once the transient outlives the bound and lets the definite read decide', async () => {
+  it('keeps activation deferred when the transient read outlives the reporting bound', async () => {
     vi.useFakeTimers();
     try {
-      mockAuth.snapshot = makeSnapshot();
       // Same withheld restore, one field different: the streak has outlived
-      // treeStaleRiskMs. The deferral is bounded by that flag, so this is the
-      // case that must NOT loop — /health reports the persistent class and the
-      // ordinary path runs.
-      mockAuth.restore = deferredRestore(true);
+      // treeStaleRiskMs. That flag changes the health classification, but it
+      // still does not establish that the credential is absent or invalid.
+      // Loading the auth state here would let Baileys replace an unreadable
+      // credential with freshly initialised credentials.
+      const restore = deferredRestore(true);
+      mockAuth.snapshot = restore.snapshot;
+      mockAuth.restore = restore;
 
       const { mockSock } = makeMockSocket();
       vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
       const manager = new ConnectionManager();
       await manager.connect();
 
-      expect(vi.mocked(useMultiFileAuthState)).toHaveBeenCalled();
-      expect(vi.mocked(makeWASocket)).toHaveBeenCalled();
-      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(0);
-      expect(manager.getConnectionState().reconnectAttempts).toBe(0);
+      expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+      expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(0);
+      expect(lifecycleEventCount(manager, 'qr_required')).toBe(0);
+      expect(alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      )).toHaveLength(0);
+      expect(manager.getConnectionState()).toMatchObject({
+        state: 'reconnecting',
+        reconnectAttempts: 1,
+      });
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

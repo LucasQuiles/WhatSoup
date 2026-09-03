@@ -2012,8 +2012,9 @@ export class AuthBondGuard {
       // definite read — but it never calls this method, and no other path in
       // this module re-establishes a credential. The connect path is the only
       // caller, which is why `deferred` is reported: connection.ts aborts the
-      // activation and schedules a bounded retry, so "the next connect
-      // attempt" is something this process arranges rather than waits for.
+      // activation and schedules a retry under the reconnect policy, so "the
+      // next connect attempt" is something this process arranges rather than
+      // waits for.
       //
       // No tree walk is armed here: restoreLatestIfNeeded reads through
       // inspect() (the live path), which never consults the cached tree, so

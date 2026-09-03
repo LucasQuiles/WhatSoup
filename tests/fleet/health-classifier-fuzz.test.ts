@@ -357,6 +357,40 @@ describe('health snapshot schema fuzz', () => {
     );
   });
 
+  it('pages a persistent auth-bond read through the debounced degraded-health source', async () => {
+    alertFns.emitAlert.mockClear();
+    const body = canonicalHealth({ status: 'degraded' });
+    const whatsapp = body.whatsapp as Record<string, unknown>;
+    const connection = whatsapp.connection as Record<string, unknown>;
+    connection.auth_failure_class = 'auth_bond_read_persistent';
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(body),
+    });
+    const poller = new HealthPoller(
+      () => new Map([['remote-1', makeInstance()]]),
+      'self',
+      vi.fn().mockReturnValue({}),
+    );
+
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    expect(alertFns.emitAlert).not.toHaveBeenCalled();
+
+    vi.setSystemTime(NOW_MS + 10_000);
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(alertFns.emitAlert).toHaveBeenCalledTimes(1);
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('health_body_degraded_polls=2'),
+      'critical',
+      undefined,
+    );
+  });
+
   it('classifies missing auth_failure_class as incomplete', async () => {
     const body = canonicalHealth();
     const whatsapp = body.whatsapp as Record<string, unknown>;

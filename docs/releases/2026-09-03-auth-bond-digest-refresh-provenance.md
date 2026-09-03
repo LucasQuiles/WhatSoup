@@ -30,7 +30,9 @@
   than one age accumulated across a succession of different ones.
 - `whatsapp.connection.auth_failure_class` gains the value
   `auth_bond_read_persistent`. Consumers that enumerate the class MUST treat it
-  as NON-TERMINAL and non-paging; it is reported with HTTP 200.
+  as NON-TERMINAL; it is reported with HTTP 200. A persistent episode can use
+  the poller's debounced generic `health_body_degraded` page, but it must never
+  enter the terminal auth-loss or automatic relink path.
 - Additive only: no existing `auth_bond` field changed name, type, or meaning,
   and no field was removed. Strict decoders that reject unknown members will
   see six new members, and one new value in an existing enumeration.
@@ -81,7 +83,8 @@
   them. Reaching the operation ceiling reports
   `creds_json_read_incomplete:<operations>`, which is a RETRYABLE class: it
   withholds the destructive restore exactly as the transient open classes do.
-- A transient credential read degrades rather than pages:
+- A transient credential read takes the degraded path rather than the terminal
+  local-corruption path:
   `whatsapp.connection.auth_failure_class` reports `auth_bond_at_risk` (HTTP
   200) instead of `local_corruption_restorable` / `local_corruption_unrestorable`.
   The auth-bond status itself is unchanged and still fail-closed. Past the
@@ -126,10 +129,17 @@
   parsed, so a credential that was merely unreadable for one open could be
   replaced by an empty one and taken to QR, with nothing scheduling another
   attempt. The activation now returns before the auth state is loaded and
-  schedules a reconnect on the existing backoff, so the retry is arranged
-  rather than hoped for. The retries are bounded by the same stale-risk streak:
-  once the transient outlives it, the attempt proceeds and the definite-read
-  path decides.
+  schedules a reconnect under the existing reconnect policy, so the retry is
+  arranged rather than hoped for. The stale-risk bound changes only the health
+  classification; it cannot turn an unreadable credential into a definite
+  absence or corruption verdict. Activation remains deferred until a later
+  connect attempt gets a definite read.
+- Those retries use the existing single-flight backoff, cooldown, and
+  connection-exhaustion policy. A watchdog or service-manager restart can
+  begin a new process-local streak, so a filesystem fault that never clears
+  can repeat across processes until an operator repairs access. That risk is
+  surfaced through degraded-health paging and connection exhaustion; entering
+  the credential loader on an unreadable tree is not used as a loop breaker.
 - A failed auth-bond restore re-enters the convergence path with reason
   `auth-restore-failed` after the quarantine rollback, so a fresh walk is
   scheduled under the failure back-off instead of waiting for the next reader
