@@ -4348,7 +4348,14 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         return None
     # Only whitespace may separate the key from its value element; anything else
     # means this dict belongs to some later key, not to EnvironmentVariables.
-    if raw[after_marker:token_match.start()].strip():
+    #
+    # PLIST_XML_SPACE, not a bare .strip(). Python's .strip() also removes
+    # U+00A0, form feed and vertical tab, which the system plist parser rejects
+    # -- so this gap was the one place left where this reader could call a plist
+    # well-formed that launchd refuses to load. The body-consumption checks below
+    # already used the XML set; this makes the whole reader agree with itself,
+    # and agree with the TypeScript comparator it mirrors.
+    if raw[after_marker:token_match.start()].strip(PLIST_XML_SPACE):
         return None
     # The token is located broadly and then must match the narrow form EXACTLY
     # where it was found, so an attributed dict is refused here rather than
@@ -4628,6 +4635,31 @@ def generated_provider_path_absence_failure(
         f"FAIL provider_probe {name}: provider={provider} target={target} "
         "failure_class=provider_runtime_path_unavailable "
         "reason=generated_path_absent governed_path_entries=0 "
+        f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+    )
+
+
+def plist_unreadable_failure(name: str, provider: str, target: str) -> str:
+    """Path-free refusal shared by both providers for an unreadable plist.
+
+    A plist is expected here and the parser refused it: missing, planted,
+    wrongly labelled, symlinked, oversized or unreadable.
+
+    SHARED, and that is the point. The two branches described this one state
+    two different ways -- the default provider named the plist, opencode
+    reported provider_runtime_path_mismatch -- so an operator running both on
+    one host was told to regenerate the LaunchAgent for one instance and to
+    repair a PATH for the other, for the same fault. Whichever they did first
+    was wrong for the other. One function means the classes cannot drift apart
+    again without a diff here.
+
+    Path-free like its sibling: the opencode line used to carry the governed
+    PATH's directory, and a refusal an operator cannot act on is not worth a
+    filesystem path in a health report.
+    """
+    return (
+        f"FAIL provider_probe {name}: provider={provider} target={target} "
+        "failure_class=provider_runtime_plist_unreadable "
         f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
     )
 
@@ -4948,7 +4980,13 @@ def opencode_provider_probe_inventory(
         # not applicable; some stubbed Darwin fixtures may still read a plist.
         generated_provider_path = instance_provider_path(name)
     else:
-        generated_provider_path = None
+        # UNREADABLE. This used to fall through with generated_provider_path
+        # None, which reached instance_provider_path_match, compared None
+        # against the loaded PATH and reported provider_runtime_path_mismatch --
+        # a PATH remediation for a plist fault, and a different answer than the
+        # default provider gave for the identical state. Refuse here, in the
+        # same terms, before anything downstream can rename the cause.
+        return [plist_unreadable_failure(name, provider, target)]
     loaded_environment = loaded_instance_environment(name)
     loaded_provider_path = loaded_environment.get("PATH")
     effective_provider_path = effective_instance_provider_path(loaded_environment)
@@ -6288,16 +6326,12 @@ def provider_probe_target_inventory(
 
     prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
     if plist_state == GOVERNED_PLIST_UNREADABLE:
-        # A plist is expected here and the parser refused it: missing, planted,
-        # wrongly labelled, symlinked, oversized or unreadable. Treating that as
-        # "no drift" reported the default provider healthy while opencode failed
-        # closed on the identical state. Fail closed, with its own class so the
-        # operator is told the plist is the problem rather than the PATH.
-        return [(
-            f"FAIL provider_probe {name}: provider={provider} target={target} "
-            "failure_class=provider_runtime_plist_unreadable "
-            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
-        )]
+        # Treating an unreadable plist as "no drift" reported the default
+        # provider healthy while opencode failed closed on the identical state.
+        # Both now fail closed through one shared refusal, so the operator is
+        # told the plist is the problem rather than the PATH, and is told it in
+        # the same words whichever provider the instance runs.
+        return [plist_unreadable_failure(name, provider, target)]
     if prepend_failure or runtime_path_unavailable:
         # These two lines deliberately carry NO command and no PATH element.
         # The command here is either irrelevant to the failure (the prepend
@@ -6364,12 +6398,31 @@ def provider_probe_target_inventory(
     # run an ungoverned binary and report ITS health as the service's. An
     # unresolvable name stays bare and reaches the spawn bare, which fails
     # closed, exactly as it did before this resolution step existed.
-    resolved_on_governed_path = os.path.isabs(command)
-    if not resolved_on_governed_path:
-        candidate = shutil.which(command, path=effective_provider_path)
-        if candidate:
-            command = candidate
-            resolved_on_governed_path = True
+    # glm-2. `resolved_on_governed_path` is PROVENANCE, not a gate, and
+    # os.path.isabs was standing in for "came from the governed PATH". Both ways
+    # argv[0] becomes absolute here can be ungoverned when no governed PATH
+    # composed: the selection above falls back to shutil.which("claude"), which
+    # searches THIS process's PATH, and shutil.which(command, path=None) below
+    # silently does the same for a configured bare command -- path=None does not
+    # mean "no path", it means "the caller's PATH". Neither is a statement about
+    # the SERVICE's PATH, yet both used to record one, so a probe reported an
+    # ungoverned binary's health as the service's under a governed label.
+    #
+    # When no effective PATH composed, nothing resolved here is governed,
+    # whatever shape argv[0] has. The legacy chain still RUNS -- on a host with
+    # no LaunchAgent surface that chain is the contract, and a host that has one
+    # has already refused above with provider_runtime_path_unavailable. What
+    # changes is only that the probe stops claiming governance it does not have,
+    # and says so on the line.
+    if effective_provider_path is None:
+        resolved_on_governed_path = False
+    else:
+        resolved_on_governed_path = os.path.isabs(command)
+        if not resolved_on_governed_path:
+            candidate = shutil.which(command, path=effective_provider_path)
+            if candidate:
+                command = candidate
+                resolved_on_governed_path = True
 
     timed_out = False
     try:
@@ -6434,6 +6487,13 @@ def provider_probe_target_inventory(
     failure_class = classify_provider_probe_failure(combined, rc, timed_out)
     safe_command = redact_evidence_string(command, 120)
     output_excerpt = redact_evidence_string(combined or stdout or stderr, 180)
+    # glm-2. Provenance of argv[0], stated rather than left to be inferred from
+    # a field's absence, and carried by EVERY line emitted after a spawn. It is
+    # added only in the ungoverned case, so a governed run's line is unchanged
+    # and no existing reader has to learn a new field to keep working.
+    resolution_note = (
+        "" if resolved_on_governed_path else " command_resolution=ambient_not_governed"
+    )
     if failure_class:
         credential_fragments = provider_credential_fragments(profile, item, provider, timeout_seconds)
         live_evidence = provider_live_session_evidence(
@@ -6480,11 +6540,11 @@ def provider_probe_target_inventory(
         live_fragments = live_evidence.get("fragments")
         if isinstance(live_fragments, list) and live_fragments:
             line += " " + " ".join(str(fragment) for fragment in live_fragments)
-        return [line]
+        return [line + resolution_note]
     line = f"provider_probe {name}: provider={provider} target={target} command={safe_command} status=ok rc={rc}"
     if output_excerpt:
         line += f" output={output_excerpt}"
-    return [line]
+    return [line + resolution_note]
 
 
 def fleet_api_endpoint(raw_url: str) -> str:

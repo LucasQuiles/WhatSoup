@@ -175,6 +175,15 @@ reject_prepend "a leading tab"                           "$(printf '\t/fixture/p
 reject_prepend "an embedded newline"                     "$(printf '/fixture/pin/bin\n/fixture/other/bin')"
 reject_prepend "a trailing carriage return"              "$(printf '/fixture/pin/bin\r')"
 reject_prepend "an embedded control character"           "$(printf '/fixture/pin\001bin')"
+# glm-6, confirmed rather than assumed. A whitespace-only value is non-empty, so
+# it passes `[ -n "$path_prepend" ]` and the ":$v:" empty-segment test sees no
+# doubled colon -- it used to compose a PATH whose FIRST entry was a single
+# space, a relative directory named " " ahead of every system binary. Covered by
+# the per-segment rules above rather than by a rule of its own; these rows prove
+# the coverage instead of asserting it.
+reject_prepend "a single-space value"                    " "
+reject_prepend "a multi-space value"                     "   "
+reject_prepend "a tab-only value"                        "$(printf '\t')"
 
 # Positive controls. Without these the block above is satisfied by a validator
 # that rejects everything, which would fail every host that configures a prepend.

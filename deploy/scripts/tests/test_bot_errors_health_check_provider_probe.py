@@ -1534,6 +1534,7 @@ def _break_plist(target: Path, state: str, home: Path) -> None:
 
 
 PLIST_BREAKAGE_STATES = ["missing", "wrong_label", "nested_dict", "oversized", "symlinked", "unreadable"]
+REGENERATE_REMEDIATION_FRAGMENT = f"remediation={_mod.REGENERATE_LAUNCHAGENT_REMEDIATION}"
 
 
 def _matrix_environment(tmp_path: Path) -> dict[str, str]:
@@ -2189,13 +2190,62 @@ def test_opencode_probe_also_fails_closed_on_every_unreadable_plist_state(monkey
         "opencode-cli",
     )
     assert lines[0].startswith("FAIL provider_probe"), f"{state}: {lines[0]}"
-    # The EXACT class, not the provider_runtime_path_ prefix. All six states
-    # leave the generated PATH unresolved, so instance_provider_path_match
-    # compares None against the loaded PATH and fails, and every state lands on
-    # provider_runtime_path_mismatch. Measured for each of the six rather than
-    # inferred. A prefix assertion would keep passing if a state silently
-    # migrated to a different provider_runtime_path_* class.
-    assert "failure_class=provider_runtime_path_mismatch" in lines[0], f"{state}: {lines[0]}"
+    # The EXACT class, not the provider_runtime_path_ prefix, so a silent
+    # migration to a neighbouring class cannot pass here.
+    #
+    # This row asserted provider_runtime_path_mismatch until glm-1. All six
+    # states left the generated PATH unresolved, so instance_provider_path_match
+    # compared None against the loaded PATH and failed, and every state landed
+    # on a PATH class -- measured for each of the six at the time, and correct
+    # as a description of what the code did. It was the wrong ANSWER: the plist
+    # is the fault, and the default provider said so for the identical state.
+    # Naming the PATH sent an operator to repair something that was not broken.
+    # Both branches now refuse through one shared function.
+    assert "failure_class=provider_runtime_plist_unreadable" in lines[0], f"{state}: {lines[0]}"
+    # The old line carried the governed PATH's directory. The shared refusal is
+    # path-free like its sibling, so assert that too rather than only the class.
+    _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+@pytest.mark.parametrize("state", PLIST_BREAKAGE_STATES)
+def test_both_providers_name_the_same_cause_for_an_unreadable_plist(monkeypatch, tmp_path, state):
+    """glm-1. One plist state must not produce two different remediations.
+
+    Both classes are new in this PR, which is what makes this introduced rather
+    than inherited. For the SAME unreadable plist the default provider reported
+    `provider_runtime_plist_unreadable` and told the operator to regenerate the
+    LaunchAgent, while opencode reported `provider_runtime_path_mismatch` and
+    sent them to repair a PATH that is not the problem. An operator running both
+    providers on one host got two contradictory instructions for one fault, and
+    whichever they followed first was the wrong one for the other instance.
+
+    Asserted as a PARITY property over the shared state rather than as two
+    independent expectations, so the two branches cannot drift apart again by
+    one of them changing class.
+    """
+    environment = _matrix_environment(tmp_path)
+    target_plist = _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    _break_plist(target_plist, state, tmp_path)
+    # Vacuity guard: both branches must be looking at a genuinely unreadable
+    # plist, or the parity below is between two irrelevant answers.
+    assert _mod.instance_plist_environment("agent-alpha") is None, f"{state}: fixture must be unreadable"
+
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    opencode_lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+    captured, claude_lines = _claude_probe(monkeypatch, {}, dict(environment))
+
+    assert not captured, f"{state}: neither provider may run on a plist it cannot read"
+    for label, lines in (("opencode", opencode_lines), ("claude-cli", claude_lines)):
+        assert "failure_class=provider_runtime_plist_unreadable" in lines[0], f"{state}/{label}: {lines[0]}"
+        assert "provider_runtime_path_mismatch" not in lines[0], f"{state}/{label}: {lines[0]}"
+        assert REGENERATE_REMEDIATION_FRAGMENT in lines[0], f"{state}/{label}: {lines[0]}"
 
 
 def test_default_provider_probe_stays_benign_when_there_is_no_launchagent_surface(monkeypatch, tmp_path):
@@ -3015,6 +3065,82 @@ def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypat
         assert row["path"] == _mod.effective_instance_provider_path(environment), label
 
 
+def test_no_ambient_fallback_when_the_effective_path_cannot_be_composed(monkeypatch, tmp_path):
+    """glm-2. The comment says there is deliberately NO ambient fallback.
+
+    `shutil.which(command, path=None)` searches the CALLING process's PATH --
+    path=None does not mean "no path". So when no effective provider PATH
+    composed, a bare configured command was resolved out of the health check's
+    own environment into an ABSOLUTE argv[0], and absolute argv[0] executes
+    regardless of the child environment's PATH, so the child allowlist did not
+    contain it. `resolved_on_governed_path` was then set True on that
+    resolution and the binary's health was reported as the service's.
+
+    Reachable in production: on a systemd host the plist state is
+    `not_applicable`, and an instance whose loaded environment is missing HOME
+    or PATH composes no effective PATH and lands exactly here.
+
+    The probe is NOT made to refuse. On a host with no LaunchAgent surface the
+    legacy chain is the contract, and a host that HAS one already refuses above
+    with `provider_runtime_path_unavailable`. What must stop is the claim of
+    governance: argv[0] stays as the caller gave it, and the line says the
+    resolution was not governed.
+    """
+    monkeypatch.delenv("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH", raising=False)
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "linux")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    ambient_bin = tmp_path / "ambient-only" / "bin"
+    ungoverned = _write_marker_binary(ambient_bin, "bareprobe", "UNGOVERNED-BINARY-RAN")
+    monkeypatch.setenv("PATH", f"{ambient_bin}:/usr/bin:/bin")
+
+    # Preconditions, so a pass cannot come from a fixture that never reached the
+    # branch: the state really is not_applicable, no effective PATH composes,
+    # and the bare name really IS resolvable from the probe's own PATH -- which
+    # is what the fix must decline to do.
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_NOT_APPLICABLE,
+        None,
+    )
+    assert _mod.effective_instance_provider_path({}) is None
+    assert _mod.shutil.which("bareprobe") == str(ungoverned)
+
+    captured, lines = _claude_probe(monkeypatch, {"providerProbeCommand": "bareprobe"}, {})
+
+    assert captured, "the legacy chain still runs where there is no governed surface"
+    assert captured[0][0] == "bareprobe", (
+        "argv[0] must stay as configured, not be resolved off the probe's own PATH"
+    )
+    assert captured[0][0] != str(ungoverned)
+    assert "command_resolution=ambient_not_governed" in lines[0], lines[0]
+    assert "UNGOVERNED-BINARY-RAN" not in "\n".join(lines)
+
+
+def test_a_governed_resolution_is_not_labelled_ambient(monkeypatch, tmp_path):
+    """Control for the row above, twice over.
+
+    Without it, hard-coding the note onto every line would satisfy the
+    assertion above, and so would a fix that stopped resolving anything at all.
+    Here the governed PATH does supply the binary: argv[0] must be the governed
+    absolute path AND the line must carry no resolution note, because absence of
+    the note is what now means "governed".
+    """
+    environment = _prepend_fixture(tmp_path)
+    governed_bin = tmp_path / "pin" / "bin"
+    _write_shadow(governed_bin, "claude")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+
+    assert _mod.effective_instance_provider_path(dict(environment)) is not None
+
+    captured, lines = _claude_probe(monkeypatch, {}, dict(environment))
+
+    assert captured, "a governed host must still probe"
+    assert captured[0][0] == str(governed_bin / "claude")
+    assert "command_resolution" not in "\n".join(lines), lines[0]
+
+
 def test_an_unwritable_temp_root_is_a_probe_environment_failure_not_a_compatibility_one(
     monkeypatch, tmp_path
 ):
@@ -3255,6 +3381,46 @@ def test_an_unterminated_comment_is_refused_rather_than_ignored(monkeypatch, tmp
 
     target.write_text(target.read_text() + "<!-- never closed\n")
     assert _mod.instance_plist_environment("agent-alpha") is None
+
+
+@pytest.mark.parametrize(
+    "label,filler",
+    [("non-breaking space", "\u00a0"), ("form feed", "\x0c"), ("vertical tab", "\x0b")],
+)
+def test_the_marker_to_dict_gap_uses_the_xml_whitespace_set(monkeypatch, tmp_path, label, filler):
+    """glm-3. One gap in this reader still used a Unicode-wide strip.
+
+    Body consumption was tightened to the four XML whitespace characters, but
+    the check that only whitespace separates the EnvironmentVariables key from
+    its dict kept `.strip()`, which also removes U+00A0, form feed and vertical
+    tab. The system plist parser rejects all three, so this reader called a
+    plist well-formed that launchd refuses to load, and then reported its
+    contents as the service's governed environment.
+
+    Pre-existing on main; taken here only because this reader is already open.
+    """
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / "com.whatsoup.agent-alpha.plist"
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod.Path, "home", classmethod(lambda cls: tmp_path))
+
+    def _plist(gap: str) -> str:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n'
+            "  <key>Label</key>\n  <string>com.whatsoup.agent-alpha</string>\n"
+            f"  <key>EnvironmentVariables</key>{gap}<dict>\n"
+            "    <key>PATH</key><string>/fixture/pin/bin</string>\n"
+            "  </dict>\n</dict>\n</plist>\n"
+        )
+
+    # Positive control: the same fixture with a LEGAL XML-whitespace gap parses,
+    # so the refusal below is attributable to the filler and to nothing else.
+    target.write_text(_plist("\n  "))
+    assert _mod.instance_plist_environment("agent-alpha") == {"PATH": "/fixture/pin/bin"}
+
+    target.write_text(_plist(f"\n {filler} "))
+    assert _mod.instance_plist_environment("agent-alpha") is None, label
 
 
 def test_only_the_dry_path_override_marks_the_governed_surfaces_not_applicable(

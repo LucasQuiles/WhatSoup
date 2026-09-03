@@ -607,6 +607,34 @@ describe('compareGovernedLaunchdEnv', () => {
     expect(compareGovernedLaunchdEnv(expected, observed).comparable).toBe(false);
   });
 
+  it.each([
+    ['non-breaking space', '\u00a0'],
+    ['form feed', '\f'],
+    ['vertical tab', '\v'],
+  ])('refuses %s in the gap between the marker and its dict', (_label, filler) => {
+    // glm-3. Body consumption uses the four XML whitespace characters; this one
+    // gap still used String.trim(), which also removes these three. The system
+    // plist parser rejects them, so the comparator called a plist well-formed
+    // that launchd refuses to load. Pre-existing on main.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const build = (gap: string) => [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      `  <key>EnvironmentVariables</key>${gap}<dict>`,
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+
+    // Positive control: a legal XML-whitespace gap parses, so the refusal is
+    // attributable to the filler.
+    expect(compareGovernedLaunchdEnv(expected, build('\n  ')).comparable).toBe(true);
+    expect(compareGovernedLaunchdEnv(expected, build(`\n ${filler} `)).comparable).toBe(false);
+  });
+
   it('still parses the generator-escaped form, which is not CDATA', () => {
     // Positive control for the refusal: without it, refusing every plist that
     // mentions a '<' would satisfy the rows above and break the shipped form.

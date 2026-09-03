@@ -186,7 +186,13 @@ function parseEnvironmentVariables(source: string): Map<string, string> | null {
   if (token === null) return null;
   // Only whitespace may separate the key from its value element; anything else
   // means this dict belongs to a later key, not to EnvironmentVariables.
-  if (plist.slice(afterMarker, token.index).trim() !== '') return null;
+  //
+  // XML_SPACE_ONLY, not String.trim(). trim() also removes U+00A0, form feed
+  // and vertical tab, which the system plist parser rejects -- so this gap was
+  // the one place left where this comparator could call a plist well-formed
+  // that launchd refuses to load. The body-consumption checks below already
+  // used the XML set; this makes the whole reader agree with itself.
+  if (!XML_SPACE_ONLY.test(plist.slice(afterMarker, token.index))) return null;
   // Sticky: the narrow form must match EXACTLY where the token was found, so an
   // attributed dict is refused here rather than skipped over for a later one.
   const openPattern = new RegExp(DICT_OPEN_SOURCE, 'y');
