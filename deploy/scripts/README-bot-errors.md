@@ -350,6 +350,64 @@ means the notification count for a single dead host is 2, not 1; don't
 read the second page as a different host.
 
 
+## Per-conversation incident scoping
+
+The dispatcher keys incidents on `machine|instance|source`. For a fault that
+belongs to ONE conversation that key is too coarse: the first conversation to
+fail opens the incident, and every later conversation failing under the same
+instance matches the same key and is suppressed as a duplicate. A chat that
+goes permanently dead then produces no operator signal at all, because a
+different chat already holds the incident open.
+
+An alert naming a conversation the open incident does not yet represent
+therefore forces one notification. The incident key is unchanged, so recovery
+still matches and existing incident-state files need no migration.
+
+**How the conversation travels.** The producer emits `conversationScope`: the
+version tag `cs1_` followed by 16 lowercase hex characters, a bounded
+non-reversible digest minted at the emission boundary
+(`src/lib/alert-evidence.ts`). A raw conversation identifier is never emitted
+and never enters incident state. Untagged values are rejected outright, with
+no legacy form accepted. The tag exists because bare hex is ambiguous: decimal
+digits are hex digits, so a raw conversation local part satisfies any plain
+hex test.
+
+**Privacy.** The digest is not a secret. It is PBKDF2 with a fixed public salt
+at 1,000 iterations truncated to 64 bits, so offline enumeration of a numeric
+conversation-key space stays tractable, and because the digest input carries
+no instance context the same conversation yields the same token across
+instances and is correlatable by anyone who can read BOT ERRORS output. Treat
+it as a routing and de-duplication token, never as a confidentiality boundary.
+
+**Representation means delivered.** A conversation is recorded as represented
+only after a successful send, alongside `mark_incident_sent`. An alert that
+fails every route and dead-letters does not mark its conversation covered, so
+that conversation's next distinct alert is still forced.
+
+**Overflow.** Past the per-key cap the sidecar records an overflow marker and
+stops treating untracked conversations as new. Without it, eviction recycles
+conversations into "new" status and one large incident becomes a permanent
+alert loop. Past the cap an operator already knows the incident is large.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` | `agent_turn_admission_rejected` | Comma-separated sources this gate applies to. A source not listed behaves exactly as before. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` | `604800` (7d) | How long a conversation stays represented. Past it the conversation can force again. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY` | `256` | Conversations tracked per incident key, and event ids per conversation. Exceeding it sets the overflow marker. |
+| `BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS` | `128` | Incident keys carrying a scope sidecar at once. Bounds the state file against a long tail of historical keys. Eviction past the cap tombstones each evicted key in `conversationScopesEvicted` for one retention window; the gate treats an absent key as represented only for a key with a live tombstone, so a never-evicted key still pages once. |
+
+**Rollback.** Setting `BOT_ERRORS_CONVERSATION_SCOPED_SOURCES` to an empty
+value disables the gate entirely: every event behaves as it did before this
+change, and the sidecar is swept away by the normal state lifecycle -- the
+sweep runs on both incident-state save paths, the controller-backed
+`IncidentStateCycle.commit()` that production takes and the RESTORE-COMPAT
+`save_incident_state` wrapper. `conversationScopesEvicted` tombstones expire on their own retention window
+rather than with the sidecar, and the `conversationScopesOverflow` telemetry
+record is never swept at all: it is a cumulative count that survives an empty
+sidecar by design. No state migration is
+needed in either direction.
+
+
 ## NORMATIVE — Alert source and ownership index
 
 This table is the canonical index for the in-repository BOT ERRORS runtime.
