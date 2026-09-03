@@ -5023,6 +5023,25 @@ def opencode_provider_probe_inventory(
                 child_env=diagnostic_env,
                 child_cwd=diagnostic_cwd,
             )
+    except FileNotFoundError as exc:
+        # Same discrimination as the default provider's arm. ENOENT here means
+        # either the binary itself is gone or unrunnable -- which the compatibility
+        # class and its upgrade remediation describe correctly -- or something the
+        # probe brought with it is missing, such as the temporary directory this
+        # range added. Reporting the second as provider_compatibility_unsupported
+        # tells an operator to upgrade opencode when opencode is fine, so the two
+        # are separated by whether the missing file IS the command.
+        if exc.filename == command:
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+                f"failure_class=provider_compatibility_unsupported error={redact_evidence_string(str(exc), 180)} "
+                "remediation=install_or_upgrade_opencode_modern_run_cli"
+            )]
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            f"failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)} "
+            "remediation=repair_the_probe_environment_and_retry"
+        )]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         return [(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "

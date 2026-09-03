@@ -2863,6 +2863,101 @@ def test_probe_refuses_when_the_temp_directory_sits_inside_the_workspace(
     _assert_fail_line_is_path_free(lines[0], tmp_path)
 
 
+def _opencode_probe_with_env(monkeypatch, tmp_path, *, break_temp_root):
+    """Drive the opencode inventory to the capability probes, optionally with a
+    temporary root that does not exist."""
+    environment = _prepend_fixture(tmp_path)
+    governed_bin = tmp_path / "pin" / "bin"
+    _write_marker_binary(governed_bin, "opencode", "opencode 1.0.0")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    service_environment = dict(environment)
+    service_environment["XAI_API_KEY"] = "fixture-not-a-real-key"
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(service_environment))
+
+    run_help = "Usage: opencode run [options]\n  --format json\n  --pure\n  -m, --model <model>\n"
+
+    def _fake_output(command, *args, **kwargs):
+        if command[1:3] == ["run", "--help"]:
+            return (run_help, "", 0, False)
+        if command[1:2] == ["run"]:
+            return ('{"type":"step_finish","part":{"reason":"stop"}}', "", 0, False)
+        return ("opencode 1.0.0", "", 0, False)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _fake_output)
+    if break_temp_root:
+        monkeypatch.setattr(_mod.tempfile, "tempdir", str(tmp_path / "no-such-temp-root"))
+    return _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+
+def test_opencode_probe_does_not_blame_the_cli_for_a_missing_temp_root(monkeypatch, tmp_path):
+    """B7-1. A broken probe environment must not read as a broken opencode.
+
+    The diagnostic temporary directory is this range's addition, so its failure
+    mode is too. Routed through the blanket handler it surfaced as
+    provider_compatibility_unsupported with remediation
+    install_or_upgrade_opencode_modern_run_cli, which sends an operator to
+    upgrade a CLI that is working. The default provider already discriminates
+    ENOENT by whether the missing file is the command; this applies the same rule
+    on the opencode path.
+    """
+    lines = _opencode_probe_with_env(monkeypatch, tmp_path, break_temp_root=True)
+
+    assert "failure_class=provider_probe_failed" in lines[0], lines[0]
+    assert "provider_compatibility_unsupported" not in lines[0], lines[0]
+    assert "install_or_upgrade_opencode_modern_run_cli" not in lines[0], lines[0]
+    # Still fails closed: the probe did not report a healthy provider.
+    assert lines[0].startswith("FAIL provider_probe"), lines[0]
+
+
+def test_opencode_probe_still_reports_a_missing_cli_as_unsupported(monkeypatch, tmp_path):
+    """Control: when the missing file IS the command, the upgrade guidance stays.
+
+    Without this the row above could be satisfied by removing the compatibility
+    class altogether.
+    """
+    environment = _prepend_fixture(tmp_path)
+    governed_bin = tmp_path / "pin" / "bin"
+    _write_marker_binary(governed_bin, "opencode", "opencode 1.0.0")
+    _arm_darwin_plist(
+        monkeypatch, tmp_path, "agent-alpha",
+        {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
+    )
+    service_environment = dict(environment)
+    service_environment["XAI_API_KEY"] = "fixture-not-a-real-key"
+    monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(service_environment))
+
+    resolved = str(governed_bin / "opencode")
+
+    def _vanished(command, *args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", resolved)
+
+    monkeypatch.setattr(_mod, "provider_command_output", _vanished)
+
+    lines = _mod.opencode_provider_probe_inventory(
+        {}, {}, "agent-alpha",
+        {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}},
+        "opencode-cli",
+    )
+
+    assert "failure_class=provider_compatibility_unsupported" in lines[0], lines[0]
+    assert "remediation=install_or_upgrade_opencode_modern_run_cli" in lines[0], lines[0]
+
+
+def test_opencode_probe_is_unaffected_when_the_temp_root_is_sound(monkeypatch, tmp_path):
+    """Second control: the ordinary path is untouched by the discrimination."""
+    lines = _opencode_probe_with_env(monkeypatch, tmp_path, break_temp_root=False)
+
+    assert not lines[0].startswith("FAIL provider_probe"), lines[0]
+    assert "detected_mode=modern-run" in lines[0], lines[0]
+
+
 def test_opencode_capability_probes_run_outside_the_instance_workspace(monkeypatch, tmp_path):
     """SHOULD-4. The three capability probes are not the functional probe.
 
