@@ -2534,7 +2534,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     // Never let observability break a key write. Mirrors the credential saver's
     // commit hook, which is the same hazard on the same change.
     const mark = (seam: string): void => {
-      try { guard.invalidateTreeCache(`key-store-${seam}`); } catch { /* observers must not break a key write */ }
+      try {
+        guard.invalidateTreeCache(`key-store-${seam}`);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest invalidation failed after key-store write',
+        );
+      }
     };
     const wrap = (fn: (...args: unknown[]) => unknown, seam: string) =>
       function (this: unknown, ...args: unknown[]): unknown {

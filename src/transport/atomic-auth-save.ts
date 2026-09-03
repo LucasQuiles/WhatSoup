@@ -82,7 +82,10 @@ export async function writeAtomicBaileysJson(
         if (settled && typeof (settled as PromiseLike<unknown>).then === 'function') {
           void Promise.resolve(settled).catch(() => { /* observers must not break the save */ });
         }
-      } catch { /* observers must not break the save */ }
+      } catch {
+        // Intentional: the rename already committed, so observer failure cannot
+        // be allowed to turn a durable credential save into an apparent failure.
+      }
     }
     await chmod(path, 0o600);
 

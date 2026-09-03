@@ -716,7 +716,12 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       return { snapshot: present(st, hashBuffer(bytes), null), bytes, kindIssue: null };
     } catch (err) {
       let st = null;
-      try { st = fstatSync(fd); } catch { /* descriptor already unusable */ }
+      try {
+        st = fstatSync(fd);
+      } catch {
+        // Intentional: the original read failure remains the reported evidence
+        // when the already-failing descriptor cannot be inspected again.
+      }
       return {
         snapshot: st
           ? present(st, null, errnoCode(err))
@@ -729,10 +734,20 @@ function readCredsThroughNoFollow(authDir: string, path: string): CredsRead {
       // without reference to how the bytes are taken, so a change of reader
       // cannot leave the reason stale: the open above is the only thing that
       // makes this necessary.
-      try { closeSync(fd); } catch { /* nothing left to release */ }
+      try {
+        closeSync(fd);
+      } catch {
+        // Intentional: cleanup follows a completed observation, and a close
+        // failure cannot improve or invalidate the evidence already produced.
+      }
     }
   } finally {
-    try { closeSync(rootFd); } catch { /* nothing left to release */ }
+    try {
+      closeSync(rootFd);
+    } catch {
+      // Intentional: cleanup follows a completed observation, and a close
+      // failure cannot improve or invalidate the evidence already produced.
+    }
   }
 }
 
