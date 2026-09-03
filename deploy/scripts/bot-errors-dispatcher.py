@@ -1319,10 +1319,30 @@ def _mark_conversation_scope_evicted(
     ]:
         stones.pop(stale, None)
     if len(stones) > CONVERSATION_SCOPE_MAX_KEYS:
+        dropped = 0
         for oldest in sorted(stones, key=lambda k: stones[k])[
             : len(stones) - CONVERSATION_SCOPE_MAX_KEYS
         ]:
             stones.pop(oldest, None)
+            dropped += 1
+        if dropped:
+            # SATURATION. This is the one point where the gate loses information
+            # it cannot recover: a key evicted for capacity whose tombstone is
+            # then itself dropped for capacity is in neither map, so the gate
+            # can no longer tell it from a conversation nobody has been told
+            # about. Record WHEN, so the rule below is time-bounded rather than
+            # a latch, and HOW MANY, so an operator reading the state file can
+            # see how far past capacity this instance is running.
+            marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+            if not isinstance(marker, dict):
+                marker = {}
+            marker["tombstonesDroppedAt"] = max(
+                int_field(marker, "tombstonesDroppedAt"), current
+            )
+            marker["tombstonesDroppedCount"] = (
+                int_field(marker, "tombstonesDroppedCount") + dropped
+            )
+            incident_state[CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD] = marker
     if stones:
         incident_state[CONVERSATION_SCOPE_EVICTED_FIELD] = stones
     else:
@@ -1342,11 +1362,27 @@ def conversation_scope_key_was_evicted(
     return current - at <= CONVERSATION_SCOPE_RETENTION_SECONDS
 
 
-def conversation_scopes_have_overflowed(incident_state: dict[str, Any]) -> bool:
-    """True once the top-level scope map has evicted a key for capacity."""
-    return isinstance(
-        incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD), dict
-    )
+def conversation_scopes_have_overflowed(
+    incident_state: dict[str, Any], current: int | None = None
+) -> bool:
+    """True while the gate is SATURATED: a tombstone was dropped recently.
+
+    Deliberately not "has anything ever evicted". That latches forever and
+    silences every later conversation, which is the defect this gate exists to
+    remove. Saturation is the narrower condition -- a tombstone dropped for
+    capacity inside the retention window -- because that is the only point at
+    which an absent key stops being distinguishable from a new one. It expires
+    with the window, so an instance that drops back under capacity recovers
+    exactness on its own.
+    """
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if not isinstance(marker, dict):
+        return False
+    dropped_at = marker.get("tombstonesDroppedAt")
+    if not isinstance(dropped_at, (int, float)):
+        return False
+    now = int(time.time()) if current is None else current
+    return now - dropped_at <= CONVERSATION_SCOPE_RETENTION_SECONDS
 
 
 def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> int:
@@ -1431,6 +1467,19 @@ def sweep_conversation_scopes(incident_state: dict[str, Any], current: int) -> i
             # rejection, force-notifies, re-adds its key and evicts another --
             # a rotation that pages forever above the cap.
             _mark_conversation_scope_overflow(incident_state, current, evicted)
+
+    marker = incident_state.get(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD)
+    if isinstance(marker, dict):
+        dropped_at = marker.get("tombstonesDroppedAt")
+        if isinstance(dropped_at, (int, float)) and (
+            current - dropped_at > CONVERSATION_SCOPE_RETENTION_SECONDS
+        ):
+            # The saturation window has passed; drop the fields that assert it
+            # so the gate returns to exact per-key behaviour on its own.
+            marker.pop("tombstonesDroppedAt", None)
+            marker.pop("tombstonesDroppedCount", None)
+            if not marker:
+                incident_state.pop(CONVERSATION_SCOPE_GLOBAL_OVERFLOW_FIELD, None)
 
     if not scopes:
         incident_state.pop("conversationScopes", None)
@@ -2366,6 +2415,15 @@ def conversation_scope_is_unrepresented(
         if seen is None and conversation_scope_key_was_evicted(
             incident_state, key, current
         ):
+            return False
+        # Saturated: more distinct keys are cycling than the scope map and the
+        # tombstone map can name together, so an absent key may be one whose
+        # tombstone was dropped. Exactness is not available here -- "every new
+        # conversation pages" and "every evicted one stays suppressed" cannot
+        # both hold in finite exact state -- and the contract picks bounded
+        # volume, because an operator paged once per conversation per cycle
+        # sees nothing at all. Time-bounded, so exactness returns by itself.
+        if seen is None and conversation_scopes_have_overflowed(incident_state, current):
             return False
         return True
     if current - _conversation_scope_last_seen(record) > CONVERSATION_SCOPE_RETENTION_SECONDS:
@@ -7005,26 +7063,32 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # extra effect: without it the next event for this conversation pages a
         # second time for an alert already delivered.
         replay_key = incident_key(event)
-        if is_incident_alert(event) and not is_incident_clear(event):
-            open_incidents = replay_state.setdefault("openIncidents", {})
-            if not isinstance(open_incidents, dict):
-                open_incidents = {}
-                replay_state["openIncidents"] = open_incidents
-            existing = open_incidents.get(replay_key)
-            if not isinstance(existing, dict):
-                open_incidents[replay_key] = {
-                    "status": "open",
-                    "openedAt": int(time.time()),
-                    "openedIso": now_iso(),
-                    "eventId": event.get("id"),
-                    "restoredFrom": "terminal_replay",
-                }
-            replay_sent = replay_state.setdefault("lastSentAt", {})
-            if isinstance(replay_sent, dict):
-                replay_sent.setdefault(replay_key, int(time.time()))
-        record_conversation_scope_delivered(
-            event, replay_state, replay_key, int(time.time())
+        # Re-apply the CANONICAL transition for whatever kind reached this
+        # branch. The previous version reimplemented the alert half inline, so a
+        # delivered clear archived with its incident permanently open -- and a
+        # kind-wise patch would have reproduced that enumeration one kind wider.
+        # mark_incident_sent already switches on kind: it records the
+        # conversation for every event, opens for an alert, pops for a clear.
+        #
+        # IDEMPOTENCY: it is NOT idempotent for alerts (renotifyCount increments
+        # and lastSentAt advances whenever a record exists), and this branch also
+        # fires for a crash AFTER the state commit, where the record already
+        # names this event. Skip the transition in exactly that case; the clear
+        # pop and the scope recorder are idempotent and always run.
+        replay_open = replay_state.get("openIncidents")
+        replay_record = replay_open.get(replay_key) if isinstance(replay_open, dict) else None
+        already_committed = (
+            is_incident_alert(event)
+            and not is_incident_clear(event)
+            and isinstance(replay_record, dict)
+            and str(replay_record.get("eventId") or "") == str(event.get("id") or "")
         )
+        if already_committed:
+            record_conversation_scope_delivered(
+                event, replay_state, replay_key, int(time.time())
+            )
+        else:
+            mark_incident_sent(event, replay_state)
         if incident:
             incident.commit()
         else:
@@ -7036,6 +7100,8 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             "eventId": event.get("id"),
             "path": str(replay_path),
             "deliveryStatus": terminal_status,
+            "restoredFrom": "terminal_replay",
+            "alreadyCommitted": already_committed,
         })
         return True, f"terminal_replay_archived; deliveryStatus={terminal_status}"
 
@@ -7230,14 +7296,14 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             # move would leak the claimed file into processing/, where
             # reclaim_processing would resurrect and re-send it (#2435).
             #
-            # Email is a real operator-visible route, so a conversation
-            # delivered this way IS represented. This branch returns before
-            # mark_incident_sent, so it has to record that itself — otherwise
-            # an emailed forced alert would be shown to an operator and then
-            # forced again on the conversation's next event.
-            record_conversation_scope_delivered(
-                event, incident_state, incident_key(event), int(time.time())
-            )
+            # Email is a real operator-visible route, so it must leave the same
+            # incident state as a primary-route delivery. This branch returns
+            # before the ordinary mark_incident_sent call, so it applies the
+            # CANONICAL transition itself rather than a part of it: recording
+            # only the conversation left an emailed alert with no open incident
+            # and an emailed clear with its incident still open, so the state
+            # depended on which route happened to succeed.
+            mark_incident_sent(event, incident_state)
             if isinstance(delivery, dict):
                 delivery["nextAttemptAtEpoch"] = 0
                 delivery["status"] = "email_delivered"

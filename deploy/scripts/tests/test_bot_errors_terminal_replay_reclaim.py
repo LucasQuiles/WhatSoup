@@ -63,6 +63,19 @@ def _load(state_dir: Path):
     return mod
 
 
+def _clear_event(event_id: str, status: str) -> dict:
+    """A delivered RECOVERY, in the shape the envelope classifier accepts.
+
+    The kind is "incident_recovery" with eventType "clear" and severity "info";
+    an "incident_clear" kind is rejected as unknown_event_kind.
+    """
+    event = _event(event_id, status)
+    event["eventKind"] = "incident_recovery"
+    event["eventType"] = "clear"
+    event["severity"] = "info"
+    return event
+
+
 def _event(event_id: str, status: str) -> dict:
     return {
         "schemaVersion": 2,
@@ -230,9 +243,13 @@ def test_the_replay_repair_survives_its_own_commit(tmp_path):
     sweep drops any key that is not in openIncidents. In the pre-commit crash
     window the incident marker is exactly what was lost, so the terminal-replay
     repair recorded the conversation and then its own commit swept the record
-    straight back out: openIncidents stayed empty, the next event for that
-    conversation paged a second time for an alert already delivered, and a
-    delivered clear archived with the incident still open.
+    straight back out: openIncidents stayed empty and the next event for that
+    conversation paged a second time for an alert already delivered.
+
+    SCOPE: this drives the ALERT path only. The clear half -- a delivered clear
+    archiving with its incident still open -- is a different defect on the same
+    branch and is pinned separately in
+    test_a_delivered_clear_in_the_crash_window_closes_its_incident below.
     """
     mod = _load(tmp_path / "replay-survives")
     paths = mod.setup_dirs()
@@ -269,4 +286,161 @@ def test_the_replay_repair_survives_its_own_commit(tmp_path):
             mod.process_one(repeat_path, paths)
     assert again == [], (
         f"a repeat of an already-delivered conversation must stay suppressed: {len(again)}"
+    )
+
+
+def test_a_delivered_clear_in_the_crash_window_closes_its_incident(tmp_path):
+    """MUST-1: the replay branch must apply the transition for ANY kind.
+
+    The branch repaired only the alert half, so a clear caught in the crash
+    window archived with its incident permanently open. Nothing reopened it:
+    the clear had been delivered, so no later event closes it either. The fix
+    is to re-apply the canonical transition rather than to add a clear branch
+    beside the alert one, because the enumeration is the defect.
+    """
+    mod = _load(tmp_path / "clear-crash")
+    paths = mod.setup_dirs()
+    event = _clear_event("evt-clear-crash", "sent")
+    key = mod.incident_key(event)
+    assert mod.is_incident_clear(event), "the fixture must be a recovery"
+
+    now = int(time.time())
+    mod.save_incident_state(paths, {
+        "version": 1,
+        "openIncidents": {key: {"status": "open", "openedAt": now - 600}},
+        "lastSentAt": {key: now - 60},
+        "conversationScopes": {},
+    })
+    claimed = paths["processing"] / f"20260903.{INSTANCE}.{SOURCE}.{event['id']}.json.999.processing"
+    claimed.write_text(json.dumps(event, indent=2))
+    claimed.chmod(0o600)
+
+    calls = _cycle(mod, paths)
+
+    # CONTROL, not the red: an already-delivered clear is not re-sent either
+    # way, so this passes on both sides of the fix.
+    assert calls == [], f"a delivered clear must not be re-sent: {len(calls)}"
+
+    persisted = mod.load_incident_state(paths)
+    assert key not in (persisted.get("openIncidents") or {}), (
+        "a delivered clear must close its incident even when the crash window "
+        f"cost the commit: {persisted.get('openIncidents')!r}"
+    )
+    assert key not in (persisted.get("lastSentAt") or {}), (
+        f"and must clear its lastSentAt: {persisted.get('lastSentAt')!r}"
+    )
+
+
+def test_replaying_an_already_committed_alert_changes_nothing(tmp_path):
+    """A1: the replay branch must be idempotent for an alert already recorded.
+
+    mark_incident_sent is not idempotent -- it increments renotifyCount and
+    advances lastSentAt whenever a record exists -- and the replay branch fires
+    for any terminal file left in processing/, including a crash AFTER the
+    state commit. Applying the transition again there would inflate the
+    renotify cadence for an alert nobody re-sent.
+    """
+    mod = _load(tmp_path / "already-committed")
+    paths = mod.setup_dirs()
+    event = _event("evt-already-committed", "sent")
+    key = mod.incident_key(event)
+
+    now = int(time.time())
+    committed = {
+        "status": "open",
+        "openedAt": now - 600,
+        "eventId": event["id"],
+        "renotifyCount": 3,
+    }
+    mod.save_incident_state(paths, {
+        "version": 1,
+        "openIncidents": {key: dict(committed)},
+        "lastSentAt": {key: now - 600},
+        "conversationScopes": {},
+    })
+    claimed = paths["processing"] / f"20260903.{INSTANCE}.{SOURCE}.{event['id']}.json.999.processing"
+    claimed.write_text(json.dumps(event, indent=2))
+    claimed.chmod(0o600)
+
+    _cycle(mod, paths)
+
+    persisted = mod.load_incident_state(paths)
+    record = (persisted.get("openIncidents") or {}).get(key) or {}
+    assert record.get("renotifyCount") == 3, (
+        f"replaying a committed alert must not advance the renotify cadence: {record!r}"
+    )
+    assert (persisted.get("lastSentAt") or {}).get(key) == now - 600, (
+        f"nor advance lastSentAt: {persisted.get('lastSentAt')!r}"
+    )
+
+
+def _email_delivered(mod, paths, event, tmp_path) -> tuple:
+    """Drive process_one down the accepted-email route for `event`."""
+    queued = paths["outbox"] / f"20260903.{INSTANCE}.{SOURCE}.{event['id']}.json"
+    event = dict(event)
+    event["delivery"] = {"attempts": 3, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+    queued.write_text(json.dumps(event, indent=2))
+    queued.chmod(0o600)
+    fallback = tmp_path / "fake-fallback.sh"
+    fallback.write_text("#!/bin/sh\nexit 0\n")
+    fallback.chmod(0o755)
+    with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("transport down")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
+         patch.object(mod, "EMAIL_FALLBACK", str(fallback)), \
+         patch.object(mod, "email_fallback", return_value=True):
+        return mod.process_one(queued, paths)
+
+
+def test_an_email_delivered_alert_opens_its_incident(tmp_path):
+    """SHOULD-6: email is a delivery, so it must leave the same incident state.
+
+    The email branch returned before mark_incident_sent and opened neither
+    openIncidents nor lastSentAt, while the replay branch treats
+    email_delivered as terminal and opens both. Incident state therefore
+    depended on whether a crash happened to intervene. Email is a real
+    operator-visible route, so the email branch is the side that was wrong.
+    """
+    mod = _load(tmp_path / "email-alert")
+    paths = mod.setup_dirs()
+    event = _event("evt-email-alert", "queued")
+    key = mod.incident_key(event)
+    mod.save_incident_state(paths, {"version": 1, "openIncidents": {}, "lastSentAt": {}})
+
+    ok, detail = _email_delivered(mod, paths, event, tmp_path)
+    assert (ok, detail) == (True, "email_delivered"), (ok, detail)
+
+    persisted = mod.load_incident_state(paths)
+    assert key in (persisted.get("openIncidents") or {}), (
+        f"an email-delivered alert must open its incident: {persisted.get('openIncidents')!r}"
+    )
+    assert key in (persisted.get("lastSentAt") or {}), (
+        f"and set lastSentAt so same-key events dedupe: {persisted.get('lastSentAt')!r}"
+    )
+
+
+def test_an_email_delivered_clear_closes_its_incident(tmp_path):
+    """SHOULD-6, the clear half: it is MUST-1's defect on a second path.
+
+    Nothing on the path from process_one to the email branch checks kind -- the
+    gate keys on attempts and the provenance veto -- so a clear reaches it and
+    used to archive with its incident still open, exactly as in the crash
+    window.
+    """
+    mod = _load(tmp_path / "email-clear")
+    paths = mod.setup_dirs()
+    event = _clear_event("evt-email-clear", "queued")
+    key = mod.incident_key(event)
+    now = int(time.time())
+    mod.save_incident_state(paths, {
+        "version": 1,
+        "openIncidents": {key: {"status": "open", "openedAt": now - 600}},
+        "lastSentAt": {key: now - 60},
+    })
+
+    ok, detail = _email_delivered(mod, paths, event, tmp_path)
+    assert (ok, detail) == (True, "email_delivered"), (ok, detail)
+
+    persisted = mod.load_incident_state(paths)
+    assert key not in (persisted.get("openIncidents") or {}), (
+        f"an email-delivered clear must close its incident: {persisted.get('openIncidents')!r}"
     )
