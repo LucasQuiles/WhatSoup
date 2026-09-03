@@ -816,6 +816,7 @@ def write_unrenderable_breadcrumb(paths: dict[str, Path], dest: Path, signal: di
             os.fsync(handle.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, target)
+        fsync_parent(target)
     except Exception:  # noqa: BLE001 -- see below; this must never wedge the queue
         # FAIL OPEN. This runs inside ready(), above every pre-loop pass, and the
         # caller has no guard: an exception here escapes to run_once, aborts the
@@ -830,6 +831,45 @@ def write_unrenderable_breadcrumb(paths: dict[str, Path], dest: Path, signal: di
             pass
         return ""
     return crumb_id
+
+
+_UNRENDERABLE_SIGNAL_KEYS = frozenset(
+    {"reason", "kind", "severity", "failureClass", "unrenderableFields", "identity"}
+)
+_UNRENDERABLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_UNRENDERABLE_IDENTITY_RE = re.compile(r"^[0-9a-f]{%d}$" % UNRENDERABLE_IDENTITY_CHARS)
+
+
+def adoptable_unrenderable_signal(signal: Any) -> dict[str, str] | None:
+    """The signal from a breadcrumb this process did not write, or None.
+
+    A breadcrumb is a file under the state root, and the fold subscripts its
+    signal and renders its values into the operator page, so an adopted signal
+    is held to the same closed vocabulary unrenderable_alert_signal() builds
+    from: exact keys, the fixed reason, bounded single-token kind and severity,
+    a failure class from the closed set or "unavailable", unrenderable-field
+    entries naming only the fixed fields, and a digest-shaped identity. Anything
+    else is a damaged breadcrumb and is skipped, never rendered.
+    """
+    if not isinstance(signal, dict) or set(signal) != _UNRENDERABLE_SIGNAL_KEYS:
+        return None
+    if any(not isinstance(value, str) for value in signal.values()):
+        return None
+    if signal["reason"] != UNRENDERABLE_ALERT_CONTENT_CODE:
+        return None
+    if not (_UNRENDERABLE_TOKEN_RE.match(signal["kind"]) and _UNRENDERABLE_TOKEN_RE.match(signal["severity"])):
+        return None
+    if signal["failureClass"] != "unavailable" and signal["failureClass"] not in LEGACY_FAILURE_CLASSES:
+        return None
+    fields = signal["unrenderableFields"]
+    if fields:
+        for item in fields.split(","):
+            field, sep, type_name = item.partition(":")
+            if not sep or field not in UNRENDERABLE_SIGNAL_FIELDS or not _UNRENDERABLE_TOKEN_RE.match(type_name):
+                return None
+    if not _UNRENDERABLE_IDENTITY_RE.match(signal["identity"]):
+        return None
+    return {key: signal[key] for key in sorted(_UNRENDERABLE_SIGNAL_KEYS)}
 
 
 def reconcile_unrenderable_signals(paths: dict[str, Path]) -> int:
@@ -848,11 +888,11 @@ def reconcile_unrenderable_signals(paths: dict[str, Path]) -> int:
     for crumb in sorted(directory.glob("*.json")):
         try:
             record = json.loads(crumb.read_text(encoding="utf-8"))
-            signal = record["signal"]
+            signal = adoptable_unrenderable_signal(record["signal"])
             crumb_id = str(record["breadcrumb"])
         except Exception:  # noqa: BLE001 -- a damaged crumb must not wedge the cycle
             continue
-        if crumb_id in known:
+        if signal is None or not _UNRENDERABLE_TOKEN_RE.match(crumb_id) or crumb_id in known:
             continue
         if len(_pending_unrenderable_signals) >= UNRENDERABLE_SIGNAL_CAP:
             break
@@ -870,7 +910,10 @@ def drop_unrenderable_breadcrumbs(paths: dict[str, Path], crumb_ids: set[str]) -
     for crumb_id in crumb_ids:
         try:
             (directory / f"{crumb_id}.json").unlink()
-        except FileNotFoundError:
+        except OSError:
+            # already acked, or unreadable/unwritable right now: the fold has
+            # published the page; at worst the crumb is re-adopted next cycle and
+            # absorbed by the per-identity throttle. Never abort the cycle for it.
             continue
 
 

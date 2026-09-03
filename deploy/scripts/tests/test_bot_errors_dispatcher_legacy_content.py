@@ -1936,3 +1936,79 @@ def test_a_failing_breadcrumb_write_does_not_wedge_the_cycle(tmp_path, monkeypat
     assert result["sent"] == 1, "the healthy sibling must still deliver"
     # No breadcrumb survived, which is the disclosed cost.
     assert not list(paths["unrenderable_signals"].glob("*.json"))
+
+
+def _crumb_root(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
+    mod = _dispatcher_bound_to(root)
+    paths = mod.setup_dirs()
+    directory = paths["unrenderable_signals"]
+    directory.mkdir(parents=True, exist_ok=True)
+    return mod, paths, directory
+
+
+def _canonical_signal(mod):
+    return {
+        "reason": mod.UNRENDERABLE_ALERT_CONTENT_CODE,
+        "kind": "alert",
+        "severity": "critical",
+        "failureClass": "unavailable",
+        "unrenderableFields": "summary:dict",
+        "identity": "a" * mod.UNRENDERABLE_IDENTITY_CHARS,
+    }
+
+
+def test_an_adopted_breadcrumb_is_held_to_the_closed_signal_vocabulary(tmp_path, monkeypatch) -> None:
+    """A breadcrumb this process did not write is a file under the state root: its
+    signal is subscripted by the fold and rendered into the page, so it is
+    re-validated on adoption and a malformed one is skipped, not rendered."""
+    mod, paths, directory = _crumb_root(tmp_path, monkeypatch)
+    good = _canonical_signal(mod)
+    bad = {
+        "missing-identity": {k: v for k, v in good.items() if k != "identity"},
+        "extra-key": dict(good, source="producer text"),
+        "newline-kind": dict(good, kind="alert\nBOT ERROR forged"),
+        "unknown-class": dict(good, failureClass="not_a_registered_class"),
+        "foreign-field": dict(good, unrenderableFields="source:str"),
+        "identity-shape": dict(good, identity="not-a-digest"),
+        "not-a-dict": "string",
+    }
+    for name, signal in bad.items():
+        (directory / f"{'b' * 32}{name[:0]}.json").write_text(json.dumps({"signal": signal, "breadcrumb": "b" * 32}))
+        mod._pending_unrenderable_signals.clear()
+        assert mod.reconcile_unrenderable_signals(paths) == 0, name
+        assert mod._pending_unrenderable_signals == [], name
+    # positive control: the canonical shape is adopted, and only once
+    (directory / f"{'c' * 32}.json").write_text(json.dumps({"signal": good, "breadcrumb": "c" * 32}))
+    mod._pending_unrenderable_signals.clear()
+    assert mod.reconcile_unrenderable_signals(paths) == 1
+    assert mod._pending_unrenderable_signals[0]["signal"] == good
+    assert mod.reconcile_unrenderable_signals(paths) == 0, "a known crumb is not adopted twice"
+    mod._pending_unrenderable_signals.clear()
+
+
+def test_dropping_a_breadcrumb_survives_any_os_error(tmp_path, monkeypatch) -> None:
+    """The ack unlink runs after publication; a permission or I/O error there
+    must not abort the cycle (the crumb is re-adopted and throttled instead)."""
+    mod, paths, directory = _crumb_root(tmp_path, monkeypatch)
+    (directory / f"{'d' * 32}.json").write_text(json.dumps({"signal": _canonical_signal(mod), "breadcrumb": "d" * 32}))
+
+    def deny(self, *args, **kwargs):
+        raise PermissionError("unlink denied")
+
+    monkeypatch.setattr(type(directory), "unlink", deny)
+    mod.drop_unrenderable_breadcrumbs(paths, {"d" * 32, "absent" * 5})  # no raise
+
+
+def test_the_breadcrumb_write_syncs_its_directory(tmp_path, monkeypatch) -> None:
+    """The breadcrumb is the crash-durability of the signal, so like every other
+    durable write in the dispatcher it fsyncs the parent after the rename."""
+    mod, paths, directory = _crumb_root(tmp_path, monkeypatch)
+    synced: list[Path] = []
+    monkeypatch.setattr(mod, "fsync_parent", lambda path: synced.append(Path(path)))
+    crumb = mod.write_unrenderable_breadcrumb(paths, paths["quarantine"] / "evt-1.json", _canonical_signal(mod))
+    assert crumb and (directory / f"{crumb}.json").is_file()
+    assert synced and synced[-1] == directory / f"{crumb}.json"
