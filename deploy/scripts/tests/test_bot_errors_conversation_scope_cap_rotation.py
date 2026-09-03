@@ -108,6 +108,39 @@ def _round(mod, paths, keys: int, rnd: int) -> int:
     return len(calls)
 
 
+def _age_state_past_retention(mod, paths, margin: int = 60) -> None:
+    """Push every scope record and tombstone past the retention window.
+
+    Deterministic by construction: the code under test compares stored
+    timestamps against `time.time()`, so moving the stored values backwards is
+    the same input a real wait would eventually produce, without the wait. A
+    wall-clock sleep would also couple the test to whatever retention value the
+    module happened to load.
+    """
+    from lib.controller_state import open_controller_state
+
+    session = open_controller_state(
+        paths["incident_state"],
+        component="dispatcher-incident",
+        bootstrap=mod.dispatcher_bootstrap_state,
+        validate_payload=mod.validate_dispatcher_state,
+        lock_timeout_seconds=10,
+    )
+    stale = int(time.time()) - mod.CONVERSATION_SCOPE_RETENTION_SECONDS - margin
+    with session:
+        result = session.load()
+        payload = dict(result.payload or {})
+        for records in (payload.get("conversationScopes") or {}).values():
+            if isinstance(records, dict):
+                for record in records.values():
+                    if isinstance(record, dict):
+                        record["lastSeenAt"] = stale
+        stones = payload.get(mod.CONVERSATION_SCOPE_EVICTED_FIELD)
+        if isinstance(stones, dict):
+            payload[mod.CONVERSATION_SCOPE_EVICTED_FIELD] = {k: stale for k in stones}
+        session.save(payload, result.capability)
+
+
 def test_above_the_cap_repeats_stay_suppressed_across_cycles(tmp_path):
     """cap+1 conversations, three cycles: only the first round may page."""
     cap = 8
@@ -245,7 +278,7 @@ def test_a_new_conversation_on_a_never_evicted_key_still_pages(tmp_path):
     the gate exists to deliver exactly that.
     """
     cap = 8
-    mod = _load(tmp_path / "never-evicted", cap, retention=1)
+    mod = _load(tmp_path / "never-evicted", cap)
     paths = _dirs(mod)
 
     first = _round(mod, paths, cap + 1, 1)
@@ -257,7 +290,7 @@ def test_a_new_conversation_on_a_never_evicted_key_still_pages(tmp_path):
     key_index = int(survivor.split("|")[1].split("-")[1])
 
     # Age every record out, then let an idle cycle sweep the emptied keys.
-    time.sleep(2)
+    _age_state_past_retention(mod, paths)
     with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: None):
         mod.run_once(8)
     state = mod.load_incident_state(paths)
@@ -275,7 +308,7 @@ def test_a_new_conversation_on_a_never_evicted_key_still_pages(tmp_path):
 def test_an_evicted_keys_conversation_is_suppressed_then_pages_after_the_ttl(tmp_path):
     """Leg (b): the tombstone is bounded, not permanent."""
     cap = 8
-    mod = _load(tmp_path / "tombstone-ttl", cap, retention=2)
+    mod = _load(tmp_path / "tombstone-ttl", cap)
     paths = _dirs(mod)
 
     _round(mod, paths, cap + 1, 1)
@@ -293,7 +326,8 @@ def test_an_evicted_keys_conversation_is_suppressed_then_pages_after_the_ttl(tmp
         f"suppressed: pages = {inside}"
     )
 
-    time.sleep(3)  # past the 2s retention window
+    # Expire the tombstone by moving its stamp back, not by waiting for it.
+    _age_state_past_retention(mod, paths)
     after = _fresh_conversation(mod, paths, evicted[0], 9003, 3)
     assert after == 1, (
         f"once the tombstone has expired the key must page again: pages = {after}"
