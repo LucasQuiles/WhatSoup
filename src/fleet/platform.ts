@@ -164,6 +164,12 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
   ? '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
   : '/usr/local/bin:/usr/bin:/bin');
   const servicePath = [...(renderOptions.pathPrepend ?? []), envPath].join(':');
+  // The launcher composes its effective PATH from an already-joined string and
+  // cannot tell a governed prefix from an ambient entry, so the governed prepend
+  // is rendered a second time under its own key. Gated on the JOINED value being
+  // non-empty: launchctl drops empty-valued keys, so an empty rendered value
+  // would read back as absent and report as permanent drift.
+  const governedPathPrepend = (renderOptions.pathPrepend ?? []).join(':');
   // env-allowed: host-level generating-shell platform detection; pre-instance by design
   const whatsoupNode = process.env.WHATSOUP_NODE;
 
@@ -223,6 +229,12 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
           `    <string>${escapeXml(whatsoupNode)}</string>`,
         ]
       : []),
+    ...(governedPathPrepend
+      ? [
+          '    <key>WHATSOUP_PATH_PREPEND</key>',
+          `    <string>${escapeXml(governedPathPrepend)}</string>`,
+        ]
+      : []),
     '  </dict>',
     '</dict>',
     '</plist>',
@@ -269,9 +281,10 @@ export interface LaunchdReconcileResult {
   dryRun: boolean;
   /**
    * Governed-environment comparison between the fresh render and the
-   * previously installed plist (CLAUDE_CONFIG_DIR, PATH — by key and value
-   * digest, never values). Set on every successful reconcile, dry-run
-   * included.
+   * previously installed plist (CLAUDE_CONFIG_DIR, PATH, WHATSOUP_PATH_PREPEND
+   * — by key and value digest, never values). The key set is
+   * GOVERNED_LAUNCHD_ENV_KEYS; keep this list and that constant in step. Set on
+   * every successful reconcile, dry-run included.
    */
   governedEnvDrift?: GovernedEnvComparison;
 }
