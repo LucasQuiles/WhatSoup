@@ -17,6 +17,39 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 
+// This suite owns budget behavior and uses a synthetic child. Process-tree
+// authority and reaping have dedicated safety and real-process suites.
+vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+  captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
+    pid: target.pid ?? 0,
+    parentPid: process.pid,
+    birthToken: `birth:${target.pid ?? 0}`,
+  })),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
+  killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+    target.kill(signal);
+    return {
+      outcome: 'terminated' as const,
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete' as const,
+      diagnosticCodes: [],
+    };
+  }),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {},
+}));
+
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
 }));

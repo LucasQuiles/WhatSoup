@@ -706,10 +706,10 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
       session_shutdown: 1,
       stale_session_sweep: 1,
     });
-    // This non-vacuous live-tree scan takes about 7s in isolation and exceeded
-    // the 10s suite default under the four-worker curated gate. Three times the
-    // default preserves a finite hang detector without weakening any assertion.
-  }, 30_000);
+    // This non-vacuous live-tree scan takes about 7s in isolation and 39.5s in
+    // the four-worker hosted full suite. A finite 120s local bound keeps a hang
+    // detector with measured contention headroom; assertions remain unchanged.
+  }, 120_000);
 
   it('emits one schema-valid JSON document with effect metadata in verbose mode', () => {
     const output = execFileSync(

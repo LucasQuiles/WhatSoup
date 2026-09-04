@@ -40,7 +40,9 @@ describe('SIGNAL constants', () => {
     const processTree = readFileSync('src/runtimes/agent/process-tree.ts', 'utf8');
     expect(processTree).toContain("import { SIGNAL } from '../../lib/signals.ts';");
     expect(processTree).toContain('signal === SIGNAL.TERM');
-    expect(processTree).toContain("signalOwned(target, rootPid, kill.rows, kill.survivors, SIGNAL.KILL,");
+    expect(processTree).toMatch(
+      /signalOwned\(\s*target,\s*rootPid,\s*kill\.survivors,\s*SIGNAL\.KILL,/,
+    );
     expect(bareLiteral.test(processTree)).toBe(false);
   });
 });

@@ -513,7 +513,7 @@ function parseProcessCensus(output: string): ProcessCensusRow[] {
     if (
       !Number.isSafeInteger(pid) || pid <= 0
       || !Number.isSafeInteger(ppid) || ppid < 0
-      || !Number.isSafeInteger(pgid) || pgid <= 0
+      || !Number.isSafeInteger(pgid) || pgid < 0
     ) {
       throw new ProcessTreeTerminationError(
         'PROCESS_TREE_CENSUS_MALFORMED',

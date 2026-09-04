@@ -1671,6 +1671,7 @@ describe('typed process-tree outcome contract', () => {
   it.each([
     '',
     'not a process census header\n',
+    `PID PPID PGID STARTED COMMAND\n2 0 -1 ${START} invalid-negative-group`,
   ])('classifies a structurally invalid census as malformed', async (output) => {
     execFileSyncMock.mockReturnValueOnce(output);
     await expectTerminationCode(
