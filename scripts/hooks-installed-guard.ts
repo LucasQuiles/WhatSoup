@@ -505,6 +505,40 @@ export function interpretSymbolicHeadAttempt(
   return { ok: true, symbolicRef: value };
 }
 
+/**
+ * Ref-format evidence resolution for hook-lineage capture.
+ *
+ * `git rev-parse --show-ref-format` landed in Git 2.45 alongside reftable
+ * repository support. On older Git the flag does not exist; rev-parse treats
+ * it as a literal argument and echoes it back with exit 0 (observed on
+ * 2.43.0), which is not usable ref-format evidence and degraded EVERY
+ * inspection to `ci.hooks.evidence-unavailable` on pre-2.45 hosts — the
+ * entire hooks-installed suite fails red there.
+ *
+ * Capability-derived fallback, not an assumption: a Git older than 2.45
+ * physically cannot open or create a reftable repository, so for it 'files'
+ * is the only ref format that can exist and is returned as derived fact.
+ * A Git >= 2.45 that produces anything other than 'files' | 'reftable' is
+ * ambiguous evidence and fails closed (null), exactly as before. A
+ * pre-2.45 Git reporting 'reftable' is contradictory evidence and also
+ * fails closed. Unparsable versions never earn the fallback.
+ */
+export function deriveHookLineageRefFormat(
+  gitVersion: string,
+  refFormatOutput: string,
+): 'files' | 'reftable' | null {
+  if (refFormatOutput === 'files') return 'files';
+  const versionMatch = /^git version (\d+)\.(\d+)(?:[. (]|$)/.exec(gitVersion);
+  if (versionMatch === null) return null;
+  const major = Number(versionMatch[1]);
+  const minor = Number(versionMatch[2]);
+  if (major !== 2) return null;
+  const reftableCapable = minor >= 45;
+  if (refFormatOutput === 'reftable') return reftableCapable ? 'reftable' : null;
+  if (reftableCapable) return null;
+  return 'files';
+}
+
 function captureHookLineage(git: TrustedGitExecutable, cwd: string): HookLineageSnapshot | null {
   try {
     const headOid = safeHead(git, cwd);
@@ -526,8 +560,9 @@ function captureHookLineage(git: TrustedGitExecutable, cwd: string): HookLineage
     });
     if (!symbolic.ok) return null;
     const symbolicRef = symbolic.symbolicRef;
-    const refFormat = gitText(git, cwd, ['rev-parse', '--show-ref-format']);
-    if (!/^[a-z][a-z0-9-]{0,31}$/.test(refFormat)) return null;
+    const refFormatOutput = gitText(git, cwd, ['rev-parse', '--show-ref-format']);
+    const refFormat = deriveHookLineageRefFormat(git.identity.version, refFormatOutput);
+    if (refFormat === null) return null;
     const refs = symbolicRef === null ? ['HEAD'] : ['HEAD', symbolicRef];
     const reflogs: Array<{ ref: string; digest: string }> = [];
     for (const ref of refs) {

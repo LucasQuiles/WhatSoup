@@ -27,6 +27,7 @@ import {
   HOOK_ENTRYPOINTS,
   HOOK_HELPERS,
   MAX_HOOK_RECEIPT_BYTES,
+  deriveHookLineageRefFormat,
   interpretSymbolicHeadAttempt,
   parseHookIdentityReceiptBytes,
   readBoundDirectoryNames,
@@ -67,7 +68,12 @@ function git(cwd: string, args: string[]): string {
 }
 
 function writeExecutable(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  // Pin the parent directory mode: hosts with umask 002 (dev workstations)
+  // otherwise leak a group-writable 0775 hooks directory into the fixture,
+  // and the guard correctly fails closed on exactly that. CI's umask 022
+  // masked this seam. mkdir applies umask by clearing bits only, so an
+  // explicit 0o755 is deterministic under any umask.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
   writeFileSync(path, text);
   chmodSync(path, 0o755);
 }
@@ -90,6 +96,35 @@ function repoFixture(): string {
 // spawnSync fixture repos, ACL ops, and the pinned-npm guard run can exceed
 // the 10s default (observed as pure timeouts with every assertion green);
 // 30s keeps the local workflow fast while accommodating the subprocess overhead.
+describe('ref-format evidence capability detection', () => {
+  it('passes through files and reftable evidence from a reftable-capable Git', () => {
+    expect(deriveHookLineageRefFormat('git version 2.45.0', 'files')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.49.1', 'reftable')).toBe('reftable');
+    expect(deriveHookLineageRefFormat('git version 2.45.0-rc0', 'reftable')).toBe('reftable');
+  });
+
+  it('derives files on pre-2.45 Git whose --show-ref-format echoes the unknown flag', () => {
+    // Observed 2.43.0 behavior: exit 0, stdout is the flag echoed back.
+    expect(deriveHookLineageRefFormat('git version 2.43.0', '--show-ref-format')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.44.5', '--show-ref-format')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.39.2 (Apple Git-143)', '')).toBe('files');
+  });
+
+  it('fails closed on ambiguous or contradictory evidence from a capable Git', () => {
+    expect(deriveHookLineageRefFormat('git version 2.45.0', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2.47.0', 'FILES')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2.45.0', '')).toBeNull();
+    // A pre-2.45 Git claiming reftable is lying — contradictory, fail closed.
+    expect(deriveHookLineageRefFormat('git version 2.43.0', 'reftable')).toBeNull();
+  });
+
+  it('never earns the fallback from an unparsable or out-of-scope version', () => {
+    expect(deriveHookLineageRefFormat('not a version', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 3.0.1', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2', '--show-ref-format')).toBeNull();
+  });
+});
+
 describe('repository hook installation identity', { timeout: 30_000 }, () => {
   it('passes only for canonical relative hooks whose complete closure matches HEAD', () => {
     const root = repoFixture();
