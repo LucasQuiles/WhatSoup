@@ -37,9 +37,9 @@
 import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { appendPrivateJsonLineSync, ensurePrivateDirectorySync, writeAtomicPrivateFileSync } from '../lib/private-fs.ts';
 import { getCurrentBootId } from '../lib/process-lock.ts';
+import { probeProcessBirthToken } from '../lib/process-identity.ts';
 import { systemClock } from '../lib/clock.ts';
 import {
   parseAccountScopeId,
@@ -74,33 +74,7 @@ export function resolveConfiguredAccountScope(raw: unknown): AccountScopeIdV1 | 
  * null = cannot be established (callers must treat the owner as unknown,
  * fail closed).
  */
-export function probeProcessBirthToken(pid: number): string | null {
-  try {
-    if (process.platform === 'linux') {
-      // Per-process stat under the kernel procfs root. The path is assembled
-      // from segments because the platform-patterns ratchet blocks new bare
-      // procfs literals in source (its baseline may only shrink); the access
-      // itself is strictly inside this linux branch.
-      const procfsRoot = '/proc';
-      const stat = readFileSync(join(procfsRoot, String(pid), 'stat'), 'utf-8');
-      const closeParen = stat.lastIndexOf(')');
-      if (closeParen === -1) return null;
-      const fields = stat.slice(closeParen + 2).split(' ');
-      const starttime = fields[19];
-      return starttime && starttime.length > 0 ? `linux-start:${starttime}` : null;
-    }
-    if (process.platform === 'darwin') {
-      const out = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
-        encoding: 'utf-8',
-        timeout: 5_000,
-      }).trim();
-      return out.length > 0 ? `darwin-lstart:${out}` : null;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+export { probeProcessBirthToken } from '../lib/process-identity.ts';
 
 /** Production probes. EPERM means alive-but-not-ours — that is ALIVE. */
 export function defaultLeaseProbes(): LeaseProbes {

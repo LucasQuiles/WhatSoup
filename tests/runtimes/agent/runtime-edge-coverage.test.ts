@@ -735,6 +735,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 42, sessionId: 'ses-resident', claudePid: 0,
       chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      provider: 'claude-cli',
       classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 1,
     }]);
 

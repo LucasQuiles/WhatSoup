@@ -1259,6 +1259,31 @@ checkpoint still proves the exact workspace and provider-session identity; persi
 providers must also match the resident process ID. It does not manufacture checkpoint
 authority and refuses suspended, ended, completed, crashed, or resume-failed rows.
 
+Process-tree termination authority is process-local and is minted from the exact spawned
+child handle, then bound to the durable row and provider. Persisted PID, parent PID, command,
+or start-time fields cannot recreate that capability after restart. Descendants are retained
+as bounded birth-identity records and a still-verified retained child remains a discovery
+anchor after the root exits. Darwin birth checks use one 250 ms batch observation for at most
+4,096 PIDs. The root is signaled through its captured child handle. Numeric descendant signaling
+requires a high-resolution birth-token source and is currently enabled only for Linux procfs
+start ticks. Darwin's second-resolution `lstart` remains observation evidence, but it cannot
+authorize numeric descendant signaling; a descendant that remains after the root-handle signal
+therefore yields a survivor or inconclusive outcome. Linux still has a documented final
+revalidation-to-signal interval because Node does not expose a pidfd-style atomic signal handle.
+Cgroup membership remains bounded
+telemetry and never grants signal authority; a fully reparented process with no retained live
+anchor is reported as divergence rather than reclaimed. Inconclusive cleanup preserves the
+active row and schedules a bounded same-generation retry while its in-memory lease is valid.
+Same-generation callers coalesce only when they present the same handle-bound authority and exact
+target. Retained cleanup leases are capped at 64; at capacity, one bounded census and one batched
+birth-identity observation reclaim only inactive leases whose complete frozen identity set is
+conclusively gone. A failed initialization with no frozen descendants remains fenced by its
+spawn-time root authority until a complete census proves that root absent or a birth observation
+proves a different incarnation. Leases with no census matches are reclaimed before the shared
+birth observation, so one unrelated unreadable identity cannot retain already-proven-gone leases.
+Census loss, duplicate rows, a missing required birth observation, or any survivor keeps only the
+affected lease fenced; active attempts are never capacity-reclaimed.
+
 At runtime shutdown, every session is attempted even if an earlier one fails. Successfully
 closed managers release their ownership; a failed singleton or per-chat manager remains attached
 to its session/owner so a later shutdown call can retry it. Queue and auxiliary cleanup still

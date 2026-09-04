@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { KillSessionOutcome } from '../../../src/runtimes/agent/process-tree-contract.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import { createOpenCodeParser } from '../../../src/runtimes/agent/providers/opencode-parser.ts';
@@ -133,7 +134,15 @@ const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
 hoistedLoggerMock(mockRuntimeLogger);
 
 const { mockKillSessionTree } = vi.hoisted(() => ({
-  mockKillSessionTree: vi.fn(async () => {}),
+  mockKillSessionTree: vi.fn<(...args: unknown[]) => Promise<KillSessionOutcome>>(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
 }));
 
 const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
@@ -712,6 +721,15 @@ describe('AgentRuntime', () => {
     mockSession.isEvidenceBindingCurrent.mockReset().mockReturnValue(true);
     mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
     mockSession.getDbRowId.mockReset().mockReturnValue(null);
+    mockKillSessionTree.mockReset().mockResolvedValue({
+      outcome: 'terminated',
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    });
     mockQueue.flushTurnEvidence.mockReset().mockImplementation(async (turnId: string) => ({
       turnId,
       answerOpIds: [],
@@ -9730,199 +9748,32 @@ describe('AgentRuntime', () => {
     expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 42);
   });
 
-  it('sandboxPerChat: stale_live sessions are terminated and marked orphaned during start()', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
-    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
-    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
-      id: 43,
-      sessionId: 'ses-live-stale',
-      claudePid: 4321,
-      chatJid: 'stale-live@s.whatsapp.net',
-      conversationKey: 'stale-live',
-      status: 'active',
-      classification: 'stale_live',
-      reason: 'superseded by checkpoint',
-    }]);
-
-    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
-    const runtime = new AgentRuntime(db, messenger, 'test', {
-      sessionScope: 'per_chat',
-      sandboxPerChat: true,
-      sandbox,
-      cwd: tmpdir(),
-    });
-    runtime.setDurability({} as any);
-
-    await runtime.start();
-    expect(mockKillSessionTree).toHaveBeenCalledWith(4321, 'SIGTERM', {
-      generationMarker: 'stale:43:ses-live-stale:4321',
-      diagnosticSource: 'stale_session_sweep',
-      diagnosticSessionRowId: 43,
-      onOutcome: expect.any(Function),
-      onCgroupDivergence: expect.any(Function),
-    });
-    expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 43);
-    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      {
-        id: 43,
-        pid: 4321,
-        conversationKey: 'stale-live',
-        reason: 'superseded by checkpoint',
-      },
-      'reaping stale session',
-    );
-  });
-
-  it('blocks proactive resume and preserves the row when stale tree cleanup is inconclusive', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
-    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
-    const { SessionManager: MockSessionManager } = await import('../../../src/runtimes/agent/session.ts');
-    mockKillSessionTree.mockRejectedValueOnce(new Error('tree census inconclusive'));
-    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
-      id: 45,
-      sessionId: 'ses-stale-inconclusive',
-      claudePid: 4545,
-      chatJid: 'stale-inconclusive@s.whatsapp.net',
-      conversationKey: 'stale-inconclusive',
-      status: 'active',
-      classification: 'stale_live',
-      reason: 'superseded by checkpoint',
-    }]);
-    const durability = {
-      getResumableCheckpoints: vi.fn(() => [{ conversation_key: 'stale-inconclusive' }]),
-      getSessionCheckpoint: vi.fn(() => ({
-        session_id: 'ses-current',
-        updated_at: new Date().toISOString().replace(/Z$/, ''),
-      })),
-    };
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    runtime.setDurability(durability as any);
-
-    await runtime.start();
-
-    expect(mockMarkOrphaned).not.toHaveBeenCalledWith(db, 45);
-    expect(MockSessionManager).not.toHaveBeenCalled();
-    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
-      { conversationKey: 'stale-inconclusive' },
-      'skipping proactive resume — live/ambiguous session already present',
-    );
-  });
-
-  it('does not treat an absent known root PID as proved-empty cleanup', async () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
-    const terminateKnownProcess = (runtime as unknown as {
-      terminateKnownProcess(pid: number): Promise<void>;
-    }).terminateKnownProcess.bind(runtime);
-    mockKillSessionTree.mockRejectedValueOnce(new Error('root row missing or ambiguous'));
-
-    await expect(terminateKnownProcess(98_765)).rejects.toThrow('root row missing or ambiguous');
-    expect(mockKillSessionTree).toHaveBeenCalledWith(98_765, 'SIGTERM', {
-      generationMarker: expect.stringMatching(/^ownership-loss:98765:/),
-      diagnosticSource: 'ownership_loss_cleanup',
-      onOutcome: expect.any(Function),
-      onCgroupDivergence: expect.any(Function),
-    });
-  });
-
-  it('does not mark a stale session orphaned when cleanup reports unresolved ambiguity', async () => {
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
-    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
-    const { SessionManager: MockSessionManager } = await import('../../../src/runtimes/agent/session.ts');
-    mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
-      const options = args[2] as {
-        onOutcome?: (outcome: {
-          outcome: 'unresolved_ambiguous';
-          generationMarker: string;
-          durationMs: number;
-          escalated: boolean;
-          ambiguousPids: readonly number[];
-        }) => void;
-      };
-      options.onOutcome?.({
-        outcome: 'unresolved_ambiguous',
-        generationMarker: 'stale:46:ses-stale-ambiguous:4646',
-        durationMs: 1,
-        escalated: false,
-        ambiguousPids: [4_647],
-      });
-    });
-    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
-      id: 46,
-      sessionId: 'ses-stale-ambiguous',
-      claudePid: 4646,
-      chatJid: 'stale-ambiguous@s.whatsapp.net',
-      conversationKey: 'stale-ambiguous',
-      status: 'active',
-      classification: 'stale_live',
-      reason: 'superseded by checkpoint',
-    }]);
-    const durability = {
-      getResumableCheckpoints: vi.fn(() => [{ conversation_key: 'stale-ambiguous' }]),
-      getSessionCheckpoint: vi.fn(() => ({
-        session_id: 'ses-current',
-        updated_at: new Date().toISOString().replace(/Z$/, ''),
-      })),
-    };
-    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    runtime.setDurability(durability as any);
-
-    await runtime.start();
-
-    expect(mockMarkOrphaned).not.toHaveBeenCalledWith(db, 46);
-    expect(MockSessionManager).not.toHaveBeenCalled();
-  });
-
-  it('rejects ownership-loss cleanup when termination reports unresolved ambiguity', async () => {
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
-    const terminateKnownProcess = (runtime as unknown as {
-      terminateKnownProcess(pid: number): Promise<void>;
-    }).terminateKnownProcess.bind(runtime);
-    mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
-      const options = args[2] as {
-        onOutcome?: (outcome: {
-          outcome: 'unresolved_ambiguous';
-          generationMarker: string;
-          durationMs: number;
-          escalated: boolean;
-          ambiguousPids: readonly number[];
-        }) => void;
-      };
-      options.onOutcome?.({
-        outcome: 'unresolved_ambiguous',
-        generationMarker: 'ownership-loss:98766:test',
-        durationMs: 1,
-        escalated: false,
-        ambiguousPids: [98_767],
-      });
-    });
-
-    await expect(terminateKnownProcess(98_766)).rejects.toMatchObject({
-      code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
-      retryClass: 'census_retryable',
-    });
-  });
-
   it('keeps health and client output unchanged while ownership diagnostics fire', async () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(makeDb(), messenger);
-    const terminateKnownProcess = (runtime as unknown as {
-      terminateKnownProcess(pid: number): Promise<void>;
-    }).terminateKnownProcess.bind(runtime);
+    const target = { pid: 98_768, exitCode: null, signalCode: null, kill: vi.fn(() => true) };
+    const session = {
+      getProcessTreeTerminationLease: () => ({
+        target,
+        generationMarker: 'ownership-loss-existing-98768',
+        rootAuthority: { pid: 98_768, parentPid: process.pid, birthToken: 'birth:98768' },
+      }),
+      getStatus: () => ({ pid: 98_768 }),
+    };
+    const terminateOwnedSessionProcessTree = (runtime as unknown as {
+      terminateOwnedSessionProcessTree(session: unknown): Promise<void>;
+    }).terminateOwnedSessionProcessTree.bind(runtime);
     const before = JSON.stringify(runtime.getHealthSnapshot());
     mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
       const options = args[2] as {
         onOutcome?: (outcome: {
           outcome: 'terminated';
-          generationMarker: string;
           durationMs: number;
-          escalated: boolean;
-          ambiguousPids: readonly number[];
+          ownedProcessCount: number;
+          signaledProcessCount: number;
+          ambiguousProcessCount: number;
+          diagnosticState: 'complete';
+          diagnosticCodes: readonly [];
         }) => void;
         onCgroupDivergence?: (info: {
           cgroupMemberCount: number;
@@ -9930,17 +9781,21 @@ describe('AgentRuntime', () => {
           offTreeCount: number;
         }) => void;
       };
-      options.onOutcome?.({
+      const outcome = {
         outcome: 'terminated',
-        generationMarker: 'private-generation-marker',
         durationMs: 2,
-        escalated: false,
-        ambiguousPids: [],
-      });
+        ownedProcessCount: 2,
+        signaledProcessCount: 2,
+        ambiguousProcessCount: 0,
+        diagnosticState: 'complete',
+        diagnosticCodes: [] as const,
+      } as const;
+      options.onOutcome?.(outcome);
       options.onCgroupDivergence?.({ cgroupMemberCount: 4, ownedCount: 2, offTreeCount: 1 });
+      return outcome;
     });
 
-    await terminateKnownProcess(98_768);
+    await terminateOwnedSessionProcessTree(session);
 
     expect(JSON.stringify(runtime.getHealthSnapshot())).toBe(before);
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -10002,7 +9857,9 @@ describe('AgentRuntime', () => {
     const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
     const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
-      throw new Error('ESRCH: no such process');
+      const error = new Error('private kernel text') as NodeJS.ErrnoException;
+      error.code = 'ESRCH';
+      throw error;
     });
 
     const staleStartedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
@@ -10012,6 +9869,7 @@ describe('AgentRuntime', () => {
       claudePid: 555555,
       chatJid: 'zombie@s.whatsapp.net',
       conversationKey: 'zombie',
+      provider: 'claude-cli',
       status: 'active',
       classification: 'ambiguous',
       reason: 'no session_checkpoint for this conversation',

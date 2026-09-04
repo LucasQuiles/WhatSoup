@@ -3,7 +3,11 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import {
+  captureProcessTreeRootAuthority,
+  killSessionTree,
+  type ProcessTreeTarget,
+} from '../../../src/runtimes/agent/process-tree.ts';
 import {
   FAKE_PROVIDER,
   buildManager,
@@ -18,6 +22,12 @@ interface ProviderTreePids {
   provider: number;
   g1: number;
   g2: number;
+}
+
+function rootAuthority(target: ProcessTreeTarget) {
+  const authority = captureProcessTreeRootAuthority(target);
+  if (authority === null) throw new Error(`Unable to capture process-tree authority for ${target.pid}`);
+  return authority;
 }
 
 async function assertManagerPathReapsTree(
@@ -72,19 +82,22 @@ async function assertManagerPathReapsTree(
 }
 
 describe('provider process-tree reaping', () => {
-  it('reaps normal and detached grandchildren on shutdown(false) without killing the parent', async () => {
+  // @skip-env Exact numeric descendant authority currently requires Linux procfs start ticks.
+  it.runIf(process.platform === 'linux')('reaps normal and detached grandchildren on shutdown(false) without killing the parent', async () => {
     await assertManagerPathReapsTree('shutdown', async (manager) => {
       await (manager as { shutdown(suspend: boolean): Promise<void> }).shutdown(false);
     });
   }, 20_000);
 
-  it('reaps normal and detached grandchildren on the hard watchdog path', async () => {
+  // @skip-env Exact numeric descendant authority currently requires Linux procfs start ticks.
+  it.runIf(process.platform === 'linux')('reaps normal and detached grandchildren on the hard watchdog path', async () => {
     await assertManagerPathReapsTree('watchdog', (manager) => {
       (manager as { handleWatchdogHard(): void }).handleWatchdogHard();
     });
   }, 20_000);
 
-  it('reaps a numeric stale-session root without killing the parent', async () => {
+  // @skip-env Exact numeric descendant authority currently requires Linux procfs start ticks.
+  it.runIf(process.platform === 'linux')('reaps a numeric stale-session root without killing the parent', async () => {
     const runId = `l7-numeric-${process.pid}-${Date.now()}`;
     const pidFile = join(tmpdir(), `${runId}.json`);
     const child = spawn(
@@ -106,8 +119,9 @@ describe('provider process-tree reaping', () => {
       pids = JSON.parse(readFileSync(pidFile, 'utf8')) as ProviderTreePids;
       expect(await waitUntil(() => isAlive(pids?.g1) && isAlive(pids?.g2), 4_000)).toBe(true);
 
-      await killSessionTree(pids.provider, 'SIGTERM', {
+      await killSessionTree(child, 'SIGTERM', {
         generationMarker: `stale-test:${runId}`,
+        rootAuthority: rootAuthority(child),
         termGraceMs: 1_000,
         killGraceMs: 1_000,
       });
@@ -118,6 +132,48 @@ describe('provider process-tree reaping', () => {
         false,
         false,
       ]);
+    } finally {
+      killPid(pids?.g1);
+      killPid(pids?.g2);
+      killPid(pids?.provider ?? child.pid);
+      rmSync(pidFile, { force: true });
+    }
+  }, 20_000);
+
+  // @skip-env Darwin's second-resolution process start observation cannot authorize a PID signal.
+  it.runIf(process.platform === 'darwin')('reports surviving descendants rather than signaling from weak Darwin identity', async () => {
+    const runId = `l7-darwin-weak-${process.pid}-${Date.now()}`;
+    const pidFile = join(tmpdir(), `${runId}.json`);
+    const child = spawn(
+      process.execPath,
+      [FAKE_PROVIDER, JSON.stringify({
+        runId,
+        pidFile,
+        sessionId: runId,
+        graceMs: 100,
+        spawnGrandchildren: true,
+        grandchildrenIgnoreSigterm: true,
+      })],
+      { detached: true, stdio: 'ignore' },
+    );
+    let pids: ProviderTreePids | null = null;
+
+    try {
+      expect(await waitUntil(() => existsSync(pidFile), 8_000)).toBe(true);
+      pids = JSON.parse(readFileSync(pidFile, 'utf8')) as ProviderTreePids;
+      expect(await waitUntil(() => isAlive(pids?.g1) && isAlive(pids?.g2), 4_000)).toBe(true);
+
+      await expect(killSessionTree(child, 'SIGTERM', {
+        generationMarker: `darwin-weak-test:${runId}`,
+        rootAuthority: rootAuthority(child),
+        termGraceMs: 100,
+        killGraceMs: 100,
+      })).rejects.toMatchObject({ code: 'PROCESS_TREE_SURVIVORS_REMAIN' });
+
+      expect(await waitUntil(() => !isAlive(pids?.provider), 2_000)).toBe(true);
+      expect(isAlive(pids.g1)).toBe(true);
+      expect(isAlive(pids.g2)).toBe(true);
+      expect(isAlive(process.pid)).toBe(true);
     } finally {
       killPid(pids?.g1);
       killPid(pids?.g2);
@@ -149,8 +205,9 @@ describe('provider process-tree reaping', () => {
         4_000,
       )).toBe(true);
 
-      await killSessionTree(target.pid as number, 'SIGKILL', {
+      await killSessionTree(target, 'SIGKILL', {
         generationMarker: `cgroup-sibling-test:${runId}`,
+        rootAuthority: rootAuthority(target),
         killGraceMs: 1_000,
         onCgroupDivergence: (info) => {
           observedOffTreeCount = info.offTreeCount;

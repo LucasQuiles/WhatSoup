@@ -15,7 +15,39 @@ vi.mock('node:fs', async (importOriginal) => ({
 }));
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
-  killSessionTree: vi.fn(async () => undefined),
+  captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
+    pid: target.pid ?? 0,
+    parentPid: process.pid,
+    birthToken: `birth:${target.pid ?? 0}`,
+  })),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
+  killSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {
+    readonly code: string;
+    readonly retryClass: string;
+    constructor(code: string, message: string) {
+      super(message);
+      this.code = code;
+      this.retryClass = code.includes('PERMISSION') ? 'permission_denied' : 'census_retryable';
+    }
+  },
 }));
 
 import { spawn } from 'node:child_process';
@@ -24,7 +56,11 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
-import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import {
+  killSessionTree,
+  retryKillSessionTree,
+  type KillSessionOutcome,
+} from '../../../src/runtimes/agent/process-tree.ts';
 
 const CHAT_JID = '15550171@s.whatsapp.net';
 const CONVERSATION_KEY = '15550171';
@@ -33,6 +69,18 @@ function makeMessenger(): Messenger {
   return {
     sendMessage: vi.fn(async () => ({ waMessageId: null })),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
+  };
+}
+
+function terminatedOutcome(): KillSessionOutcome {
+  return {
+    outcome: 'terminated',
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete',
+    diagnosticCodes: [],
   };
 }
 
@@ -306,6 +354,7 @@ describe('SessionManager durable error lifecycle', () => {
     vi.mocked(killSessionTree).mockImplementationOnce(async () => {
       child.exitCode = 1;
       child.emit('exit', 1, 'SIGKILL');
+      return terminatedOutcome();
     });
     db.raw.exec(`
       CREATE TRIGGER deny_session_begin
@@ -425,8 +474,8 @@ describe('SessionManager durable error lifecycle', () => {
   it('does not persist graceful state until child termination succeeds', async () => {
     const child = makeChild(17109);
     vi.mocked(spawn).mockReturnValue(child as never);
-    let finishTermination: (() => void) | null = null;
-    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<void>((resolve) => {
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
       finishTermination = resolve;
     }));
     const sm = new SessionManager({
@@ -446,13 +495,56 @@ describe('SessionManager durable error lifecycle', () => {
     expect(rowStatus(db, rowId)).toBe('active');
     expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
 
-    const release = finishTermination as (() => void) | null;
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
     if (release === null) throw new Error('termination was not started');
-    release();
+    release(terminatedOutcome());
     await shuttingDown;
 
     expect(rowStatus(db, rowId)).toBe('suspended');
     expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('suspended');
+  });
+
+  it('retains the child and active lifecycle after bounded ambiguous cleanup retries', async () => {
+    const child = makeChild(17111);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const unresolved: KillSessionOutcome = {
+      outcome: 'unresolved_ambiguous',
+      durationMs: 1,
+      ownedProcessCount: 2,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 1,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    vi.mocked(killSessionTree).mockResolvedValueOnce(unresolved);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      vi.mocked(retryKillSessionTree).mockResolvedValueOnce(unresolved);
+    }
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    await expect(sm.shutdown(true)).rejects.toMatchObject({
+      code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+    });
+
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+    expect(retryKillSessionTree).toHaveBeenCalledTimes(4);
+    expect(rowStatus(db, rowId)).toBe('active');
+    expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: 17111,
+      durableFailureInconclusive: true,
+      providerTerminated: false,
+    });
   });
 
   it('rolls back graceful state atomically after termination when checkpoint closure fails', async () => {
@@ -684,6 +776,7 @@ describe('SessionManager durable error lifecycle', () => {
     vi.mocked(killSessionTree).mockImplementationOnce(async () => {
       child.exitCode = 1;
       child.emit('exit', 1, 'SIGKILL');
+      return terminatedOutcome();
     });
     const sm = new SessionManager({
       db,

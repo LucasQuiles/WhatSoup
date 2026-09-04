@@ -246,7 +246,14 @@ import {
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { SessionOwnershipRegistry } from './session-ownership.ts';
-import { killSessionTree, ProcessTreeTerminationError } from './process-tree.ts';
+import {
+  getRegisteredProcessTreeTerminationLease,
+  killSessionTree,
+  ProcessTreeTerminationError,
+  processTreeFailureDiagnostic,
+  retryKillSessionTree,
+  type KillSessionOutcome,
+} from './process-tree.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { FallbackWindowState } from './fallback-window-state.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
@@ -407,6 +414,17 @@ interface OwnedPerChatRespawnArgs {
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
 const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
+const STALE_PROCESS_TREE_RETRY_DELAY_MS = MS_PER_SECOND;
+
+function staleProcessTreeErrorAllowsAutomaticRetry(error: unknown): boolean {
+  if (!(error instanceof ProcessTreeTerminationError)) return true;
+  if (error.retryClass === 'permission_denied' || error.retryClass === 'invalid_request') {
+    return false;
+  }
+  return error.code !== 'PROCESS_TREE_RETRY_LEASE_EXPIRED'
+    && error.code !== 'PROCESS_TREE_RETRY_ATTEMPTS_EXHAUSTED'
+    && error.code !== 'PROCESS_TREE_RETRY_NOT_ALLOWED';
+}
 // Single-sourced from conversation-key.ts so the tool/crash scope keys and the
 // tool_calls telemetry sentinel can never drift apart.
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
@@ -887,6 +905,18 @@ export class AgentRuntime implements Runtime {
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSweepTimer: ReturnType<typeof setInterval> | null = null;
   private zombieSessionSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly staleProcessTreeRetries = new Map<
+    number,
+    { pid: number; generationMarker: string; birthToken: string }
+  >();
+  private readonly staleProcessTreePermissionBlocks = new Map<
+    number,
+    { pid: number; birthToken: string }
+  >();
+  private readonly staleProcessTreeRetryTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
   // Background handoff distiller (flag-gated). The coordinator owns the timer +
   // runner lifecycle; it stays inert when the flag is off OR the model/key fails
   // to resolve. Initialized in the constructor (needs db + instanceName + the
@@ -1579,10 +1609,41 @@ export class AgentRuntime implements Runtime {
     if (!(this.sessionScope === 'per_chat' || this.sandboxPerChat) || this.zombieSessionSweepTimer) return;
     this.zombieSessionSweepTimer = setInterval(() => {
       this.sweepStaleAgentSessions().catch((err) => {
-        log.warn({ err, instanceName: this.instanceName }, 'interval zombie-session sweep failed');
+        log.warn({
+          ...processTreeFailureDiagnostic(err),
+          instanceName: this.instanceName,
+        }, 'interval zombie-session sweep failed');
       });
     }, ZOMBIE_SESSION_SWEEP_INTERVAL_MS);
     this.zombieSessionSweepTimer.unref?.();
+  }
+
+  private clearStaleProcessTreeRetryTimer(rowId: number): void {
+    const timer = this.staleProcessTreeRetryTimers.get(rowId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.staleProcessTreeRetryTimers.delete(rowId);
+  }
+
+  private scheduleStaleProcessTreeRetry(rowId: number): void {
+    if (
+      this.shutdownRequested
+      || this.staleProcessTreeRetryTimers.has(rowId)
+      || this.staleProcessTreeRetryTimers.size >= 64
+    ) return;
+    const timer = setTimeout(() => {
+      if (this.staleProcessTreeRetryTimers.get(rowId) !== timer) return;
+      this.staleProcessTreeRetryTimers.delete(rowId);
+      if (this.shutdownRequested) return;
+      void this.sweepStaleAgentSessions().catch(() => {
+        log.warn(
+          { instanceName: this.instanceName, rowId },
+          'scheduled stale-session process-tree retry failed',
+        );
+      });
+    }, STALE_PROCESS_TREE_RETRY_DELAY_MS);
+    timer.unref?.();
+    this.staleProcessTreeRetryTimers.set(rowId, timer);
   }
 
   /**
@@ -1649,14 +1710,30 @@ export class AgentRuntime implements Runtime {
 
     const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
     const classified = classifyActiveSessions(this.db, this.durability);
+    const classifiedRowIds = new Set(classified.map((session) => session.id));
+    for (const rowId of this.staleProcessTreeRetries.keys()) {
+      if (!classifiedRowIds.has(rowId)) this.staleProcessTreeRetries.delete(rowId);
+    }
+    for (const rowId of this.staleProcessTreePermissionBlocks.keys()) {
+      if (!classifiedRowIds.has(rowId)) this.staleProcessTreePermissionBlocks.delete(rowId);
+    }
+    for (const rowId of this.staleProcessTreeRetryTimers.keys()) {
+      if (!classifiedRowIds.has(rowId)) this.clearStaleProcessTreeRetryTimer(rowId);
+    }
     for (const session of classified) {
       if (residentRowIds.has(session.id)) {
+        this.clearStaleProcessTreeRetryTimer(session.id);
         log.warn(
           { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
             reason: session.reason, providerSessionId: session.sessionId },
           'skipping zombie-session disposition for current-process resident manager');
         if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
         continue;
+      }
+      if (session.classification !== 'stale_live') {
+        this.clearStaleProcessTreeRetryTimer(session.id);
+        this.staleProcessTreeRetries.delete(session.id);
+        this.staleProcessTreePermissionBlocks.delete(session.id);
       }
       switch (session.classification) {
         case 'stale_dead':
@@ -1669,30 +1746,96 @@ export class AgentRuntime implements Runtime {
             conversationKey: session.conversationKey,
             reason: session.reason,
           }, 'reaping stale session');
-          const cleanupObservation: {
-            outcome: 'terminated' | 'escalated' | 'unresolved_ambiguous' | null;
-            ambiguousCount: number;
-          } = { outcome: null, ambiguousCount: 0 };
-          try {
-            await killSessionTree(session.claudePid, 'SIGTERM', {
-              generationMarker:
-                `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
-              diagnosticSource: 'stale_session_sweep',
-              diagnosticSessionRowId: session.id,
-              onOutcome: (outcome) => {
-                cleanupObservation.outcome = outcome.outcome;
-                cleanupObservation.ambiguousCount = outcome.ambiguousPids.length;
-              },
-              onCgroupDivergence: (info) => {
-                log.debug(
-                  { id: session.id, conversationKey: session.conversationKey, ...info },
-                  'stale session cgroup divergence',
-                );
-              },
-            });
-          } catch (err) {
+          const registeredLease = getRegisteredProcessTreeTerminationLease(
+            session.id,
+            session.claudePid,
+            session.provider,
+          );
+          if (registeredLease === null) {
+            this.clearStaleProcessTreeRetryTimer(session.id);
             log.error({
-              err,
+              id: session.id,
+              pid: session.claudePid,
+              conversationKey: session.conversationKey,
+            }, 'stale session spawn authority unavailable — blocking proactive resume');
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+            }
+            break;
+          }
+          const generationMarker =
+            `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`;
+          const permissionBlock = this.staleProcessTreePermissionBlocks.get(session.id);
+          if (
+            permissionBlock?.pid === session.claudePid
+            && permissionBlock.birthToken === registeredLease.rootAuthority.birthToken
+          ) {
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+            }
+            break;
+          }
+          if (permissionBlock !== undefined) {
+            this.staleProcessTreePermissionBlocks.delete(session.id);
+          }
+          const retained = this.staleProcessTreeRetries.get(session.id);
+          const retryRetainedLease = retained?.pid === session.claudePid
+            && retained.generationMarker === generationMarker
+            && retained.birthToken === registeredLease.rootAuthority.birthToken;
+          if (retained !== undefined && !retryRetainedLease) {
+            this.staleProcessTreeRetries.delete(session.id);
+          }
+          let cleanupOutcome: KillSessionOutcome;
+          try {
+            cleanupOutcome = retryRetainedLease
+              ? await retryKillSessionTree(session.claudePid, generationMarker)
+              : await killSessionTree(registeredLease.target, 'SIGTERM', {
+                  generationMarker,
+                  rootAuthority: registeredLease.rootAuthority,
+                  diagnosticSource: 'stale_session_sweep',
+                  diagnosticSessionRowId: session.id,
+                  onOutcome: (outcome) => {
+                    log.debug(
+                      {
+                        id: session.id,
+                        outcome: outcome.outcome,
+                        ambiguousProcessCount: outcome.ambiguousProcessCount,
+                        diagnosticState: outcome.diagnosticState,
+                        diagnosticCodes: outcome.diagnosticCodes,
+                      },
+                      'stale session process-tree outcome',
+                    );
+                  },
+                  onCgroupDivergence: (info) => {
+                    log.debug(
+                      { id: session.id, conversationKey: session.conversationKey, ...info },
+                      'stale session cgroup divergence',
+                    );
+                  },
+                });
+          } catch (err) {
+            if (err instanceof ProcessTreeTerminationError && err.retryClass === 'permission_denied') {
+              this.staleProcessTreePermissionBlocks.set(session.id, {
+                pid: session.claudePid,
+                birthToken: registeredLease.rootAuthority.birthToken,
+              });
+              this.staleProcessTreeRetries.delete(session.id);
+              this.clearStaleProcessTreeRetryTimer(session.id);
+            } else if (
+              staleProcessTreeErrorAllowsAutomaticRetry(err)
+              && this.staleProcessTreeRetries.size < 64
+            ) {
+              this.staleProcessTreeRetries.set(session.id, {
+                pid: session.claudePid,
+                generationMarker,
+                birthToken: registeredLease.rootAuthority.birthToken,
+              });
+              this.scheduleStaleProcessTreeRetry(session.id);
+            } else {
+              this.clearStaleProcessTreeRetryTimer(session.id);
+            }
+            log.error({
+              ...processTreeFailureDiagnostic(err),
               id: session.id,
               pid: session.claudePid,
               conversationKey: session.conversationKey,
@@ -1703,12 +1846,20 @@ export class AgentRuntime implements Runtime {
             }
             throw err;
           }
-          if (cleanupObservation.outcome === 'unresolved_ambiguous') {
+          if (cleanupOutcome.outcome === 'unresolved_ambiguous') {
+            if (this.staleProcessTreeRetries.size < 64) {
+              this.staleProcessTreeRetries.set(session.id, {
+                pid: session.claudePid,
+                generationMarker,
+                birthToken: registeredLease.rootAuthority.birthToken,
+              });
+              this.scheduleStaleProcessTreeRetry(session.id);
+            }
             log.warn(
               {
                 id: session.id,
                 conversationKey: session.conversationKey,
-                ambiguousCount: cleanupObservation.ambiguousCount,
+                ambiguousCount: cleanupOutcome.ambiguousProcessCount,
               },
               'stale session tree cleanup unresolved — preserving active row',
             );
@@ -1717,6 +1868,9 @@ export class AgentRuntime implements Runtime {
             }
             break;
           }
+          this.staleProcessTreeRetries.delete(session.id);
+          this.staleProcessTreePermissionBlocks.delete(session.id);
+          this.clearStaleProcessTreeRetryTimer(session.id);
           markOrphaned(this.db, session.id);
           break;
         case 'ambiguous': {
@@ -1726,6 +1880,7 @@ export class AgentRuntime implements Runtime {
               claudePid: session.claudePid,
               startedAt: session.startedAt,
               messageCount: session.messageCount,
+              provider: session.provider,
             },
             Date.now(),
             AMBIGUOUS_SESSION_MAX_AGE_MS,
@@ -7417,6 +7572,9 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.zombieSessionSweepTimer);
       this.zombieSessionSweepTimer = null;
     }
+    for (const rowId of this.staleProcessTreeRetryTimers.keys()) {
+      this.clearStaleProcessTreeRetryTimer(rowId);
+    }
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -8258,23 +8416,18 @@ export class AgentRuntime implements Runtime {
     session: SessionManager,
     expected: { managerId: string; generation: number },
   ): Promise<string> {
-    const spawnedPid = session.getStatus().pid;
     try {
       return this.markOwnedPerChatSessionActive(mapKey, session, expected);
     } catch (err) {
       const cleanupFailures: unknown[] = [];
-      let shutdownProvedTreeEmpty = false;
       try {
         await session.shutdown(false);
-        shutdownProvedTreeEmpty = true;
       } catch (cleanupErr) {
         cleanupFailures.push(cleanupErr);
-      }
-      if (!shutdownProvedTreeEmpty) {
         try {
-          await this.terminateKnownProcesses([spawnedPid, session.getStatus().pid]);
-        } catch (cleanupErr) {
-          cleanupFailures.push(cleanupErr);
+          await this.terminateOwnedSessionProcessTree(session);
+        } catch (retryErr) {
+          cleanupFailures.push(retryErr);
         }
       }
       if (cleanupFailures.length > 0) {
@@ -8308,43 +8461,39 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async terminateKnownProcess(pid: number): Promise<void> {
-    const observation: {
-      outcome: 'terminated' | 'escalated' | 'unresolved_ambiguous' | null;
-      ambiguousCount: number;
-    } = { outcome: null, ambiguousCount: 0 };
-    await killSessionTree(pid, 'SIGTERM', {
-      generationMarker: `ownership-loss:${pid}:${randomUUID()}`,
-      diagnosticSource: 'ownership_loss_cleanup',
-      onOutcome: (outcome) => {
-        observation.outcome = outcome.outcome;
-        observation.ambiguousCount = outcome.ambiguousPids.length;
-      },
-      onCgroupDivergence: (info) => {
-        log.debug({ pid, ...info }, 'ownership-loss cleanup cgroup divergence');
-      },
-    });
-    if (observation.outcome === 'unresolved_ambiguous') {
+  private async terminateOwnedSessionProcessTree(session: SessionManager): Promise<void> {
+    const lease = session.getProcessTreeTerminationLease();
+    if (lease === null) {
+      if (session.getStatus().pid === null) return;
       throw new ProcessTreeTerminationError(
-        'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
-        `Ownership-loss cleanup retained ${observation.ambiguousCount} ambiguous process identities`,
+        'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED',
+        'Ownership-loss cleanup has no captured process-tree authority',
       );
     }
-  }
-
-  private async terminateKnownProcesses(pids: Array<number | null>): Promise<void> {
-    const failures: unknown[] = [];
-    for (const pid of new Set(pids.filter((value): value is number => value !== null))) {
-      try {
-        if (!this.isProcessAlive(pid)) continue;
-        await this.terminateKnownProcess(pid);
-      } catch (err) {
-        failures.push(err);
-      }
-    }
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1) {
-      throw new AggregateError(failures, 'Unable to prove all session processes terminated');
+    const outcome = await killSessionTree(lease.target, 'SIGTERM', {
+      generationMarker: lease.generationMarker,
+      rootAuthority: lease.rootAuthority,
+      diagnosticSource: 'ownership_loss_cleanup',
+      onOutcome: (observed) => {
+        log.debug(
+          {
+            outcome: observed.outcome,
+            ambiguousProcessCount: observed.ambiguousProcessCount,
+            diagnosticState: observed.diagnosticState,
+            diagnosticCodes: observed.diagnosticCodes,
+          },
+          'ownership-loss process-tree outcome',
+        );
+      },
+      onCgroupDivergence: (info) => {
+        log.debug({ pid: lease.rootAuthority.pid, ...info }, 'ownership-loss cleanup cgroup divergence');
+      },
+    });
+    if (outcome.outcome === 'unresolved_ambiguous') {
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+        `Ownership-loss cleanup retained ${outcome.ambiguousProcessCount} ambiguous process identities`,
+      );
     }
   }
 
@@ -8366,9 +8515,11 @@ export class AgentRuntime implements Runtime {
     const generation = this.sessionOwnership.advanceGeneration(mapKey, managerId);
     let replacementPid: number | null = null;
     let oldTreeProvedEmpty = false;
+    let cleanupReentryAllowed = false;
 
     try {
       await this.waitForRejectedTerminalTeardown(session);
+      cleanupReentryAllowed = true;
       await session.shutdown(false);
       this.rejectedTerminalTeardowns.delete(session);
       oldTreeProvedEmpty = true;
@@ -8403,10 +8554,19 @@ export class AgentRuntime implements Runtime {
         session.getStatus().pid,
       ];
       let cleanupError: unknown = null;
-      try {
-        await this.terminateKnownProcesses(knownPids);
-      } catch (cleanupErr) {
-        cleanupError = cleanupErr;
+      if (cleanupReentryAllowed) {
+        try {
+          await session.shutdown(false);
+        } catch (cleanupErr) {
+          try {
+            await this.terminateOwnedSessionProcessTree(session);
+          } catch (retryErr) {
+            cleanupError = new AggregateError(
+              [cleanupErr, retryErr],
+              'Session shutdown and ownership-loss process-tree cleanup both failed',
+            );
+          }
+        }
       }
 
       let allKnownProcessesDead = cleanupError === null;

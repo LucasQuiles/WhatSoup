@@ -158,7 +158,7 @@ interprocedural analysis; the rule does not claim to cover them.
 | id | detect | severity | rings | purpose |
 |----|--------|----------|-------|---------|
 | `portability.no-hardcoded-platform-binaries` | mechanical | block | guard, ci | Hardcoded `/usr/bin/python`, `/usr/bin/git`, etc. break on macOS and NixOS where binaries live elsewhere. Must use env-resolved lookups. |
-| `portability.platform-paths-guarded` | mechanical | block | guard, ci | `/proc/`, `/sys/`, `/run/` paths are Linux-only and must be behind a `process.platform === "linux"` guard or equivalent. |
+| `portability.platform-paths-guarded` | mechanical | block | guard, ci | `/proc/`, `/sys/`, `/run/` paths are Linux-only. TypeScript string/template occurrences pass only when a same-function, unshadowed `process.platform !== "linux"` early return dominates every matching occurrence on the line; other occurrences remain ratcheted. |
 | `portability.systemctl-guarded` | mechanical | block | guard, ci | `systemctl` is Linux-only; callers must have a macOS `launchctl` fallback or platform guard. |
 | `portability.gnu-bsd-shell-flags` | mechanical | block | guard, ci | GNU-only shell flags (`readlink -f`, `sha256sum`, `stat -c`, `grep -P`, `mktemp --directory`) fail on BSD/macOS. Must use portable alternatives or platform branches. |
 | `portability.editorconfig-present` | mechanical | advisory | guard | Repository must maintain `.editorconfig` for cross-platform editor consistency (LF line endings, indentation). |
@@ -281,12 +281,12 @@ disagree (`| rule | count |` rows below are machine-checked):
 | `arch.ssot-phone-shape` | 4 | `scripts/ssot-pattern-guard.ts` |
 | `arch.ssot-presentation-literals` | 0 | `scripts/ssot-pattern-guard.ts` (pure block) |
 | `arch.ring-boundaries` | 46 | `scripts/ring-boundary-guard.ts` (ratchet, not yet a pure block) |
-| `portability.no-hardcoded-platform-binaries` | 3 | `scripts/platform-pattern-check.ts` |
-| `portability.platform-paths-guarded` | 24 | `scripts/platform-pattern-check.ts` |
+| `portability.no-hardcoded-platform-binaries` | 1 | `scripts/platform-pattern-check.ts` |
+| `portability.platform-paths-guarded` | 19 | `scripts/platform-pattern-check.ts` |
 | `portability.systemctl-guarded` | 11 | `scripts/platform-pattern-check.ts` |
 | `portability.gnu-bsd-shell-flags` | 7 | `scripts/platform-pattern-check.ts` |
 | `portability.arch-blind-path-fallback` | 1 | `scripts/platform-pattern-check.ts` |
-| `portability.hardcoded-signal-name` | 20 | `scripts/platform-pattern-check.ts` |
+| `portability.hardcoded-signal-name` | 27 | `scripts/platform-pattern-check.ts` |
 
 ## ESLint Ring (live)
 

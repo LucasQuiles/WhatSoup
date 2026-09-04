@@ -307,6 +307,9 @@ jobs:
       - name: Instance config integrity guard
         run: npm run guard:instance-config
 
+      - name: Process-tree diagnostic adoption guard
+        run: npm run guard:process-tree-diagnostics
+
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 

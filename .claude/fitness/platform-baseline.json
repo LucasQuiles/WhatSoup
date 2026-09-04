@@ -169,41 +169,6 @@
   },
   {
     "ruleId": "portability.platform-paths-guarded",
-    "file": "src/runtimes/agent/process-tree.ts",
-    "line": 476,
-    "pattern": "/proc/",
-    "lineText": "* Linux systemd). Reads `/proc/self/cgroup` for the unified path, then reads"
-  },
-  {
-    "ruleId": "portability.platform-paths-guarded",
-    "file": "src/runtimes/agent/process-tree.ts",
-    "line": 484,
-    "pattern": "/proc/",
-    "lineText": "const selfCgroup = readFileSync('/proc/self/cgroup', 'utf8');"
-  },
-  {
-    "ruleId": "portability.platform-paths-guarded",
-    "file": "src/runtimes/agent/process-tree.ts",
-    "line": 477,
-    "pattern": "/sys/",
-    "lineText": "* `cgroup.procs` recursively under `/sys/fs/cgroup<path>`. Returns `null` on any"
-  },
-  {
-    "ruleId": "portability.platform-paths-guarded",
-    "file": "src/runtimes/agent/process-tree.ts",
-    "line": 489,
-    "pattern": "/sys/",
-    "lineText": "const base = join('/sys/fs/cgroup', rel);"
-  },
-  {
-    "ruleId": "portability.platform-paths-guarded",
-    "file": "src/runtimes/agent/runtime.ts",
-    "line": 1433,
-    "pattern": "/proc/",
-    "lineText": "return readdirSync('/proc/self/fd').length;"
-  },
-  {
-    "ruleId": "portability.platform-paths-guarded",
     "file": "src/runtimes/agent/session-classifier.ts",
     "line": 109,
     "pattern": "/proc/",

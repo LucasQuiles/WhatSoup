@@ -21,7 +21,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import { fitnessRules } from './lib/fitness/registry.ts';
+import { readTaxonomyDocCount } from './ssot-pattern-guard.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,6 +110,176 @@ function isAllowlisted(relFile: string, allowlistPaths: string[]): boolean {
   return allowlistPaths.some((allowed) => norm === allowed || norm.startsWith(allowed));
 }
 
+const PLATFORM_PATH_RULE_ID = 'portability.platform-paths-guarded';
+
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function bindingContainsName(name: ts.BindingName, expected: string): boolean {
+  if (ts.isIdentifier(name)) return name.text === expected;
+  return name.elements.some((element) =>
+    !ts.isOmittedExpression(element) && bindingContainsName(element.name, expected));
+}
+
+function sourceShadowsGlobalProcess(sourceFile: ts.SourceFile): boolean {
+  let shadows = false;
+  const visit = (node: ts.Node): void => {
+    if (shadows) return;
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node))
+      && bindingContainsName(node.name, 'process')
+    ) {
+      shadows = true;
+      return;
+    }
+    if (
+      (ts.isFunctionDeclaration(node)
+        || ts.isFunctionExpression(node)
+        || ts.isClassDeclaration(node)
+        || ts.isClassExpression(node)
+        || ts.isEnumDeclaration(node))
+      && node.name?.text === 'process'
+    ) {
+      shadows = true;
+      return;
+    }
+    if (
+      ts.isModuleDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'process'
+    ) {
+      shadows = true;
+      return;
+    }
+    if (ts.isImportEqualsDeclaration(node) && node.name.text === 'process') {
+      shadows = true;
+      return;
+    }
+    if (ts.isImportClause(node) && node.name?.text === 'process') {
+      shadows = true;
+      return;
+    }
+    if (
+      (ts.isImportSpecifier(node) || ts.isNamespaceImport(node))
+      && node.name.text === 'process'
+    ) {
+      shadows = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return shadows;
+}
+
+function isGlobalProcessPlatform(expression: ts.Expression): boolean {
+  const current = unwrapExpression(expression);
+  return ts.isPropertyAccessExpression(current)
+    && ts.isIdentifier(current.expression)
+    && current.expression.text === 'process'
+    && current.name.text === 'platform';
+}
+
+function isLinuxLiteral(expression: ts.Expression): boolean {
+  const current = unwrapExpression(expression);
+  return (ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current))
+    && current.text === 'linux';
+}
+
+function isNonLinuxCondition(expression: ts.Expression): boolean {
+  const current = unwrapExpression(expression);
+  if (!ts.isBinaryExpression(current)) return false;
+  if (
+    current.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsEqualsToken
+    && current.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsToken
+  ) return false;
+  return (
+    isGlobalProcessPlatform(current.left) && isLinuxLiteral(current.right)
+  ) || (
+    isLinuxLiteral(current.left) && isGlobalProcessPlatform(current.right)
+  );
+}
+
+function definitelyReturns(statement: ts.Statement): boolean {
+  if (ts.isReturnStatement(statement)) return true;
+  if (!ts.isBlock(statement) || statement.statements.length === 0) return false;
+  return definitelyReturns(statement.statements[statement.statements.length - 1]!);
+}
+
+function isNonLinuxEarlyReturn(statement: ts.Statement): boolean {
+  return ts.isIfStatement(statement)
+    && isNonLinuxCondition(statement.expression)
+    && definitelyReturns(statement.thenStatement);
+}
+
+function isFunctionBoundary(node: ts.Node): boolean {
+  return ts.isFunctionDeclaration(node)
+    || ts.isFunctionExpression(node)
+    || ts.isArrowFunction(node)
+    || ts.isMethodDeclaration(node)
+    || ts.isConstructorDeclaration(node)
+    || ts.isGetAccessorDeclaration(node)
+    || ts.isSetAccessorDeclaration(node);
+}
+
+function pathExpressionAt(
+  sourceFile: ts.SourceFile,
+  position: number,
+): ts.Expression | null {
+  let found: ts.Expression | null = null;
+  const visit = (node: ts.Node): void => {
+    if (position < node.getStart(sourceFile) || position >= node.end) return;
+    if (
+      ts.isStringLiteral(node)
+      || ts.isNoSubstitutionTemplateLiteral(node)
+      || ts.isTemplateExpression(node)
+    ) found = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+function isDominatedByNonLinuxReturn(node: ts.Node): boolean {
+  let descendant = node;
+  for (let parent = node.parent; parent; descendant = parent, parent = parent.parent) {
+    if (isFunctionBoundary(parent)) return false;
+    if (!ts.isBlock(parent)) continue;
+    const containingStatement = parent.statements.find((statement) =>
+      statement.pos <= descendant.pos && descendant.end <= statement.end);
+    if (containingStatement) {
+      const statementIndex = parent.statements.indexOf(containingStatement);
+      if (parent.statements.slice(0, statementIndex).some(isNonLinuxEarlyReturn)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isGuardedPlatformPath(
+  sourceFile: ts.SourceFile,
+  line: number,
+  column: number,
+): boolean {
+  if (sourceShadowsGlobalProcess(sourceFile)) return false;
+  const expression = pathExpressionAt(
+    sourceFile,
+    sourceFile.getPositionOfLineAndCharacter(line, column),
+  );
+  return expression !== null && isDominatedByNonLinuxReturn(expression);
+}
+
 // ---------------------------------------------------------------------------
 // Scanning
 // ---------------------------------------------------------------------------
@@ -122,10 +294,23 @@ export function scanRule(repoRoot: string, spec: RuleSpec): PlatformViolation[] 
       if (isAllowlisted(relFile, spec.params.allowlistPaths)) continue;
       const source = readFileSync(absFile, 'utf8');
       const lines = source.split('\n');
+      const syntax = spec.id === PLATFORM_PATH_RULE_ID && relFile.endsWith('.ts')
+        ? ts.createSourceFile(relFile, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+        : null;
       for (let i = 0; i < lines.length; i += 1) {
         const lineText = lines[i]!;
         for (const pattern of spec.params.patterns) {
-          if (lineText.includes(pattern)) {
+          const columns: number[] = [];
+          for (
+            let column = lineText.indexOf(pattern);
+            column >= 0;
+            column = lineText.indexOf(pattern, column + pattern.length)
+          ) columns.push(column);
+          if (columns.length > 0) {
+            if (
+              syntax
+              && columns.every((column) => isGuardedPlatformPath(syntax, i, column))
+            ) continue;
             violations.push({
               ruleId: spec.id,
               file: relFile,
@@ -189,6 +374,26 @@ function saveBaseline(repoRoot: string, violations: PlatformViolation[]): void {
   mkdirSync(path.dirname(bp), { recursive: true });
   const sorted = [...violations].sort((a, b) => violationKey(a).localeCompare(violationKey(b)));
   writeFileSync(bp, JSON.stringify(sorted, null, 2) + '\n', 'utf8');
+}
+
+function taxonomyDocMismatches(
+  repoRoot: string,
+  baseline: PlatformViolation[],
+  ruleIds: readonly string[] = ENFORCED_RULE_IDS,
+): string[] {
+  const baselineCounts = new Map<string, number>();
+  for (const violation of baseline) {
+    baselineCounts.set(violation.ruleId, (baselineCounts.get(violation.ruleId) ?? 0) + 1);
+  }
+  return ruleIds.flatMap((ruleId) => {
+    const baselineCount = baselineCounts.get(ruleId) ?? 0;
+    const docCount = readTaxonomyDocCount(repoRoot, ruleId);
+    if (docCount === baselineCount) return [];
+    return [
+      `${ruleId}: twin-doc mismatch — platform-baseline.json has ${baselineCount} record(s), `
+      + `fitness-taxonomy.md count row says ${docCount ?? 'MISSING'}; the two must move together`,
+    ];
+  });
 }
 
 export interface PartitionResult {
@@ -318,7 +523,7 @@ or only baselined debt; 2 on infrastructure failure.
   try {
     specs = loadRuleSpecs();
   } catch (err) {
-    console.error(`platform-pattern check FAILED closed: ${(err as Error).message}`);
+    console.error(`platform-pattern check: INCONCLUSIVE — rule specifications unavailable: ${(err as Error).message}`);
     return 2;
   }
 
@@ -336,6 +541,20 @@ or only baselined debt; 2 on infrastructure failure.
   } catch (err) {
     console.error(`platform-pattern check FAILED closed: corrupt baseline at ${baselinePath(args.root)}: ${(err as Error).message}`);
     return 2;
+  }
+
+  let twinDocMismatches: string[];
+  try {
+    twinDocMismatches = taxonomyDocMismatches(args.root, baseline);
+  } catch (err) {
+    console.error(`platform-pattern check: INCONCLUSIVE — taxonomy documentation unavailable: ${(err as Error).message}`);
+    return 2;
+  }
+  if (twinDocMismatches.length > 0) {
+    for (const mismatch of twinDocMismatches) {
+      console.error(`platform-pattern check: ${mismatch}`);
+    }
+    return 1;
   }
 
   if (args.mode === 'report') {
