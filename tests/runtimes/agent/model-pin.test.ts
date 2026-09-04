@@ -165,6 +165,8 @@ vi.mock('../../../src/logger.ts', async () => {
 
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   killSessionTree: mockKillSessionTree,
+  retryKillSessionTree: mockKillSessionTree,
+  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {},
 }));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({

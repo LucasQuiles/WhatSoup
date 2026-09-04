@@ -54,6 +54,11 @@ import {
   providerTurnControlCapabilities,
   type ProviderTurnControlCapabilities,
 } from './providers/turn-control-capabilities.ts';
+import {
+  getProviderBinary,
+  resolveProviderBinary,
+} from './providers/provider-binary.ts';
+export { getProviderBinary } from './providers/provider-binary.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
 import {
   appendProviderCrashPreview,
@@ -62,7 +67,17 @@ import {
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
-import { killSessionTree } from './process-tree.ts';
+import {
+  bindProcessTreeRootAuthority,
+  captureProcessTreeRootAuthority,
+  killSessionTree,
+  ProcessTreeTerminationError,
+  retryKillSessionTree,
+  type KillSessionOutcome,
+  type ProcessTreeTarget,
+  type ProcessTreeRootAuthority,
+} from './process-tree.ts';
+import { processTreeFailureDiagnostic } from './process-tree-contract.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
 import {
   buildOpenCodeRunArgs,
@@ -90,6 +105,12 @@ const OPENCODE_COMPACTION_CONTINUITY_GUIDANCE =
  * large no-newline blob would grow `stdoutBufferStr` unbounded → parent OOM. The
  * MCP socket MAX_BUF analogue; 16 MiB >> any real event line. */
 export const MAX_STDOUT_LINE_BYTES = 16 * 1024 * 1024;
+
+export interface SessionProcessTreeTerminationLease {
+  readonly target: ProcessTreeTarget;
+  readonly generationMarker: string;
+  readonly rootAuthority: ProcessTreeRootAuthority;
+}
 
 function isOpenCodeDiagnosticLogLine(line: string): boolean {
   if (/^(?:\^D\x08\x08)?timestamp=\S+\s+level=(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(line)) {
@@ -233,11 +254,6 @@ export interface ActiveProviderTurn {
   readonly identity: ProviderTurnIdentity;
   readonly generation: SessionGenerationIdentity;
   readonly providerTurnToken: number;
-}
-
-interface ShutdownKillTimerEntry {
-  readonly generation: SessionGenerationIdentity | null;
-  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 export interface SessionManagerOptions {
@@ -419,46 +435,6 @@ export function buildChildEnv(
 // a new provider in providers/index.ts surfaces a TS compile error here
 // until every switch is updated, eliminating the silent-Claude-alias bug
 // closed by #447.
-
-/** Resolve the executable name for a CLI-backed provider. */
-function resolveProviderBinary(provider: ProviderId): string {
-  switch (provider) {
-    case 'claude-cli': return 'claude';
-    case 'codex-cli': return 'codex';
-    case 'gemini-cli': return 'gemini';
-    case 'opencode-cli': return 'opencode';
-    case 'openai-api':
-    case 'anthropic-api':
-      // Managed-loop providers do not spawn a subprocess. Reaching this
-      // branch indicates a logic error in the caller (it should have
-      // routed via createManagedProviderSession).
-      throw new Error(
-        `[session-manager:resolveProviderBinary] ${provider} is a managed-loop provider and does not spawn a binary`,
-      );
-    default:
-      return assertNeverProvider(provider, 'session-manager:resolveProviderBinary');
-  }
-}
-
-/**
- * Return the CLI binary name for `provider`, or `null` for managed-loop
- * providers that do not spawn a child process (`openai-api`, `anthropic-api`).
- *
- * Exported for use by the binary pre-flight in
- * `src/runtimes/agent/providers/binary-preflight.ts`. Unknown provider IDs
- * throw (defence in depth — callers should validate with `isProviderId` first).
- */
-export function getProviderBinary(provider: string): string | null {
-  if (!isProviderId(provider)) {
-    throw new Error(
-      `[session-manager:getProviderBinary] unknown provider id: ${JSON.stringify(provider)}. ` +
-        `Valid: ${PROVIDER_IDS.join(', ')}.`,
-    );
-  }
-  // Managed-loop providers have no binary.
-  if (provider === 'openai-api' || provider === 'anthropic-api') return null;
-  return resolveProviderBinary(provider);
-}
 
 /**
  * Whether an opencode-cli session routes through a custom endpoint configured
@@ -811,12 +787,17 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  private readonly childTreeTerminationStarted = new WeakSet<ReturnType<typeof spawn>>();
+  private readonly childTreeCleanupPromises = new WeakMap<
+    ReturnType<typeof spawn>,
+    Promise<KillSessionOutcome>
+  >();
+  private readonly childTreeAuthorities = new WeakMap<
+    ReturnType<typeof spawn>,
+    ProcessTreeRootAuthority | null
+  >();
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
   private providerExecutionWaitAbort: AbortController | null = null;
-  private readonly shutdownKillTimers = new Map<
-    ReturnType<typeof spawn>,
-    ShutdownKillTimerEntry
-  >();
   private crashStderrPreview = '';
   private resolveGenerationOwnership: (() => SessionGenerationIdentity | null) | null = null;
   private managedProviderGeneration: SessionGenerationIdentity | null = null;
@@ -1072,40 +1053,12 @@ export class SessionManager {
     return this.localGenerationIdentity;
   }
 
-  private clearShutdownKillTimer(
-    child: ReturnType<typeof spawn>,
-    generation: SessionGenerationIdentity | null,
-  ): void {
-    const entry = this.shutdownKillTimers.get(child);
-    if (!entry || !this.sameGeneration(entry.generation, generation)) return;
-    clearTimeout(entry.timer);
-    this.shutdownKillTimers.delete(child);
-  }
-
-  private armShutdownKillTimer(child: ReturnType<typeof spawn>): void {
-    const generation = this.childGenerations.get(child) ?? null;
-    const timer = setTimeout(() => {
-      const entry = this.shutdownKillTimers.get(child);
-      if (
-        !entry ||
-        entry.timer !== timer ||
-        !this.sameGeneration(entry.generation, generation)
-      ) return;
-
-      this.shutdownKillTimers.delete(child);
-      void this.killChildTree(child, 'SIGKILL').then(() => {
-        log.warn({ pid: child.pid ?? null, chatJid: this.chatJid }, 'child did not exit after SIGTERM, sent SIGKILL');
-      }).catch((err) => {
-        log.debug({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'child exited before SIGKILL escalation');
-      });
-    }, SessionManager.SHUTDOWN_GRACE_MS);
-    this.shutdownKillTimers.set(child, { generation, timer });
-  }
-
   private killChildTree(
     child: ReturnType<typeof spawn>,
     signal: NodeJS.Signals,
-  ): Promise<void> {
+  ): Promise<KillSessionOutcome> {
+    const activeCleanup = this.childTreeCleanupPromises.get(child);
+    if (activeCleanup !== undefined) return activeCleanup;
     let generationMarker = this.childTreeMarkers.get(child);
     if (generationMarker === undefined) {
       const generation = this.childGenerations.get(child) ?? null;
@@ -1114,41 +1067,114 @@ export class SessionManager {
         : `${generation.managerId}:${generation.generation}:${randomUUID()}`;
       this.childTreeMarkers.set(child, generationMarker);
     }
-    return killSessionTree(child, signal, {
+    const rootAuthority = this.childTreeAuthorities.get(child) ?? null;
+    const cleanup = this.runChildTreeCleanup(
+      child,
+      signal,
       generationMarker,
-      termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
-      // #1755: surface the per-tree kill outcome so a residual ambiguous tree
-      // (never signaled — a `ps` census race or same-pid/different-command
-      // reading) is attributable on the shutdown path instead of silently
-      // invisible. Warn on unresolved ambiguity; debug on clean/escalated.
-      onOutcome: (outcome) => {
-        const record = {
-          chatJid: this.chatJid,
-          sessionId: this.sessionId,
-          signal,
-          outcome: outcome.outcome,
-          escalated: outcome.escalated,
-          durationMs: outcome.durationMs,
-          ambiguousPids: outcome.ambiguousPids,
-        };
-        if (outcome.outcome === 'unresolved_ambiguous') {
-          log.warn(record, 'kill-tree outcome: unresolved ambiguous identity');
-        } else {
-          log.debug(record, 'kill-tree outcome');
-        }
-      },
-      // #1869: surface the cgroup-vs-PPID divergence gauge (PR #1960) at the one
-      // call site that reaches killSessionTree; it was landed telemetry-only with
-      // no sink ever wired, so it emitted nothing in production. Best-effort by
-      // construction (never throws, never affects termination) — see
-      // process-tree.ts's emitCgroupDivergence/KillSessionTreeOptions doc comments.
-      onCgroupDivergence: (info) => {
-        log.debug(
-          { ...info, chatJid: this.chatJid, sessionId: this.sessionId },
-          'cgroup divergence',
-        );
-      },
+      rootAuthority ?? { pid: 0, parentPid: 0, birthToken: '' },
+    ).finally(() => {
+      if (this.childTreeCleanupPromises.get(child) === cleanup) {
+        this.childTreeCleanupPromises.delete(child);
+      }
     });
+    this.childTreeCleanupPromises.set(child, cleanup);
+    return cleanup;
+  }
+
+  private async runChildTreeCleanup(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+    generationMarker: string,
+    rootAuthority: ProcessTreeRootAuthority,
+  ): Promise<KillSessionOutcome> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      try {
+        const outcome = this.childTreeTerminationStarted.has(child)
+          ? await retryKillSessionTree(rootAuthority.pid, generationMarker)
+          : await (() => {
+              this.childTreeTerminationStarted.add(child);
+              return killSessionTree(child, signal, {
+                generationMarker,
+                rootAuthority,
+                diagnosticSource: 'session_shutdown',
+                termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
+                onOutcome: (observed) => {
+                  const record = {
+                    chatJid: this.chatJid,
+                    sessionId: this.sessionId,
+                    signal,
+                    outcome: observed.outcome,
+                    durationMs: observed.durationMs,
+                    ownedProcessCount: observed.ownedProcessCount,
+                    signaledProcessCount: observed.signaledProcessCount,
+                    ambiguousCount: observed.ambiguousProcessCount,
+                    diagnosticState: observed.diagnosticState,
+                    diagnosticCodes: observed.diagnosticCodes,
+                  };
+                  if (observed.outcome === 'unresolved_ambiguous') {
+                    log.warn(record, 'kill-tree outcome: unresolved ambiguous identity');
+                  } else {
+                    log.debug(record, 'kill-tree outcome');
+                  }
+                },
+                onCgroupDivergence: (info) => {
+                  log.debug(
+                    { ...info, chatJid: this.chatJid, sessionId: this.sessionId },
+                    'cgroup divergence',
+                  );
+                },
+              });
+            })();
+        if (outcome.outcome !== 'unresolved_ambiguous') return outcome;
+        lastError = new ProcessTreeTerminationError(
+          'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+          `Session cleanup retained ${outcome.ambiguousProcessCount} ambiguous process identities`,
+        );
+      } catch (error) {
+        lastError = error;
+        if (
+          !(error instanceof ProcessTreeTerminationError)
+          || error.retryClass === 'permission_denied'
+          || error.retryClass === 'invalid_request'
+        ) throw error;
+      }
+      if (attempt < 5) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+      }
+    }
+    throw lastError;
+  }
+
+  private captureChildTreeAuthority(child: ReturnType<typeof spawn>): void {
+    this.childTreeAuthorities.set(child, captureProcessTreeRootAuthority(child));
+  }
+
+  private bindChildTreeAuthorityToRow(
+    child: ReturnType<typeof spawn>,
+    sessionRowId: number,
+  ): void {
+    const authority = this.childTreeAuthorities.get(child) ?? null;
+    if (
+      authority === null
+      || !bindProcessTreeRootAuthority(authority, sessionRowId, this.provider)
+    ) {
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED',
+        'Spawned child authority could not be bound to its durable session row',
+      );
+    }
+  }
+
+  getProcessTreeTerminationLease(): SessionProcessTreeTerminationLease | null {
+    const child = this.child;
+    if (child === null) return null;
+    const generationMarker = this.childTreeMarkers.get(child);
+    const rootAuthority = this.childTreeAuthorities.get(child);
+    return generationMarker === undefined || rootAuthority === undefined || rootAuthority === null
+      ? null
+      : { target: child, generationMarker, rootAuthority };
   }
 
   private materializeStdoutChunks(): void {
@@ -1390,7 +1416,7 @@ export class SessionManager {
     }, message);
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
       log.error({
-        err,
+        ...processTreeFailureDiagnostic(err),
         chatJid: this.chatJid,
         pid: child.pid ?? null,
       }, 'failed to quarantine provider after native turn identity violation');
@@ -2481,6 +2507,7 @@ export class SessionManager {
         this.providerConfig,
       ),
     });
+    this.captureChildTreeAuthority(child);
 
     const childGeneration = this.currentGenerationIdentity();
     this.childGenerations.set(child, childGeneration);
@@ -2510,6 +2537,7 @@ export class SessionManager {
         resolvedRowId,
         admissionWatchdogState,
       );
+      this.bindChildTreeAuthorityToRow(child, this.dbRowId);
       this.persistRoutePolicyCheckpointWithCompensation(
         existingCheckpoint,
         resumeSessionId ?? null,
@@ -2524,7 +2552,11 @@ export class SessionManager {
         await this.killFailedSpawnAndWait(child);
       } catch (killErr) {
         cleanupError = killErr;
-        log.warn({ err: killErr, pid, chatJid: this.chatJid }, 'session: failed to kill child after db persistence error');
+        log.warn({
+          ...processTreeFailureDiagnostic(killErr),
+          pid,
+          chatJid: this.chatJid,
+        }, 'session: failed to kill child after db persistence error');
       }
       this.resetFailedSessionStart(cleanupError === null ? null : child);
       if (cleanupError !== null) {
@@ -2727,7 +2759,6 @@ export class SessionManager {
       // This prevents a race where /new kills P1 and spawns P2, then P1's
       // delayed SIGTERM exit fires against P2's active state.
       const superseded = this.child !== child;
-      this.clearShutdownKillTimer(child, childGeneration);
       if (superseded) return;
 
       // Consume the marker for this child even on the clean-shutdown path below, so a
@@ -2967,7 +2998,11 @@ export class SessionManager {
     );
     this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
     void this.killChildTree(child, 'SIGKILL').catch((err) => {
-      log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap wedged provider process tree');
+      log.error({
+        ...processTreeFailureDiagnostic(err),
+        pid: child.pid ?? null,
+        chatJid: this.chatJid,
+      }, 'failed to reap wedged provider process tree');
     });
     return true;
   }
@@ -3021,7 +3056,11 @@ export class SessionManager {
         this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
         this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
-          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
+          log.error({
+            ...processTreeFailureDiagnostic(err),
+            pid: child.pid ?? null,
+            chatJid: this.chatJid,
+          }, 'failed to reap stalled provider process tree');
         });
       },
     });
@@ -3214,7 +3253,11 @@ export class SessionManager {
         this.notifyUser?.(terminationNotice);
         this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
-          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
+          log.error({
+            ...processTreeFailureDiagnostic(err),
+            pid: child.pid ?? null,
+            chatJid: this.chatJid,
+          }, 'failed to reap watchdog provider process tree');
         });
       },
     });
@@ -3460,10 +3503,12 @@ export class SessionManager {
           await this.killChildTree(child, 'SIGTERM');
         } catch (err) {
           this.completeProviderTurn(providerTurnToken);
-          log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap replaced provider process tree');
-          throw new Error('Cannot replace provider while prior process-tree cleanup is inconclusive', {
-            cause: err,
-          });
+          log.error({
+            ...processTreeFailureDiagnostic(err),
+            pid: child.pid ?? null,
+            chatJid: this.chatJid,
+          }, 'failed to reap replaced provider process tree');
+          throw err;
         }
         this.releaseProviderExecutionLease(child);
         if (this.child === child) this.child = null;
@@ -3590,6 +3635,7 @@ export class SessionManager {
           throw err;
         }
       })();
+      this.captureChildTreeAuthority(child);
 
       if (executionLease) {
         this.childExecutionLeases.set(child, executionLease);
@@ -3735,7 +3781,6 @@ export class SessionManager {
         flushOpenCodeStderr();
         this.releaseProviderExecutionLease(child);
         const superseded = this.child !== child;
-        this.clearShutdownKillTimer(child, childGeneration);
         if (superseded) return;
         if (
           this.activeProviderTurnToken !== null
@@ -4171,10 +4216,13 @@ export class SessionManager {
       // self-exit (code 143, signal null) then read as an unexpected crash.
       this.markIntentionalKill(child, 'SIGTERM', suspend ? 'suspend' : 'ended');
       try {
-        const treeCleanup = this.killChildTree(child, 'SIGTERM');
-        this.armShutdownKillTimer(child);
-        await treeCleanup;
+        await this.killChildTree(child, 'SIGTERM');
       } catch (err) {
+        if (err instanceof ProcessTreeTerminationError) {
+          this.durableFailureInconclusive = true;
+          this.durableFailureError = err;
+          throw err;
+        }
         try {
           this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
         } catch (persistenceErr) {

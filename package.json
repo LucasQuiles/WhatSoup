@@ -81,6 +81,7 @@
     "guard:deployer-static": "bash deploy/scripts/whatsoup-bot-errors-deploy.sh verify \"$PWD\"",
     "guard:node-pin-consistency": "bash scripts/run-with-pinned-node.sh scripts/check-node-pin-consistency.ts",
     "guard:instance-config": "bash scripts/run-with-pinned-node.sh scripts/check-instance-config.ts",
+    "guard:process-tree-diagnostics": "bash scripts/run-with-pinned-node.sh scripts/process-tree-diagnostic-adoption-guard.ts",
     "guard:fail-closed-gate": "bash scripts/run-with-pinned-node.sh scripts/fail-closed-gate-guard.ts",
     "guard:durability-writer": "bash scripts/run-with-pinned-node.sh scripts/durability-writer-guard.ts",
     "guard:service-units": "bash scripts/run-with-pinned-node.sh scripts/check-service-units.ts",

@@ -115,6 +115,27 @@ describe('push-gate manifest registry (#2224)', () => {
     expect([...CURATED_TEST_PATHS]).toContain('tests/scripts/push-gate-manifest.test.ts');
   });
 
+  it('keeps process-tree caller adoption in both gates and their curated falsifier set', () => {
+    expect(BRANCH_STEPS.map((step) => step.name)).toContain(
+      'guard:process-tree-diagnostics',
+    );
+    expect(RELEASE_STEPS.map((step) => step.name)).toContain(
+      'guard:process-tree-diagnostics',
+    );
+    expect([...CURATED_TEST_PATHS]).toContain(
+      'tests/scripts/process-tree-diagnostic-adoption-guard.test.ts',
+    );
+    expect([...CURATED_TEST_PATHS]).toContain(
+      'tests/scripts/process-tree-diagnostic-adoption-guard-flow.test.ts',
+    );
+    expect([...CURATED_TEST_PATHS]).toContain(
+      'tests/runtimes/agent/runtime-process-tree-diagnostics.test.ts',
+    );
+    expect([...CURATED_TEST_PATHS]).toContain(
+      'tests/runtimes/agent/providers/conformance.test.ts',
+    );
+  });
+
   it('curated list has no duplicates and no flags masquerading as paths', () => {
     expect(new Set(CURATED_TEST_PATHS).size).toBe(CURATED_TEST_PATHS.length);
     for (const path of CURATED_TEST_PATHS) {

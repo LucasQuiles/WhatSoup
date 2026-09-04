@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
@@ -99,6 +99,45 @@ describe('classifyActiveSessions', () => {
     expect(stale?.classification).toBe('stale_live');
   });
 
+  it('makes duplicate live PIDs ambiguous across conversations before any stale cleanup', () => {
+    insertSession({ claudePid: 4242, sessionId: 'old-a', chatJid: '11111@s.whatsapp.net' });
+    insertSession({ claudePid: 4242, sessionId: 'live-b', chatJid: '22222@s.whatsapp.net' });
+    durability.upsertSessionCheckpoint('11111', {
+      claudePid: 9001, sessionId: 'new-a', sessionStatus: 'active',
+    });
+    durability.upsertSessionCheckpoint('22222', {
+      claudePid: 4242, sessionId: 'live-b', sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, allOwned);
+    expect(results.filter((row) => row.claudePid === 4242)).toHaveLength(2);
+    expect(results.filter((row) => row.claudePid === 4242).every(
+      (row) => row.classification === 'ambiguous',
+    )).toBe(true);
+    expect(results.filter((row) => row.claudePid === 4242).every(
+      (row) => row.reason.includes('duplicate live PID'),
+    )).toBe(true);
+  });
+
+  it('passes each row provider to the ownership checker', () => {
+    insertSession({
+      claudePid: 1000,
+      sessionId: 'old',
+      chatJid: '12345@s.whatsapp.net',
+      provider: 'codex-cli',
+    });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 2000,
+      sessionId: 'new',
+      sessionStatus: 'active',
+    });
+    const checker = vi.fn<PidOwnershipChecker>(() => ({ alive: true, owned: false }));
+
+    classifyActiveSessions(db, durability, checker);
+
+    expect(checker).toHaveBeenCalledWith(1000, 'codex-cli');
+  });
+
   it('classifies stale session with dead PID as stale_dead', () => {
     insertSession({ claudePid: 1000, sessionId: 'old', chatJid: '12345@s.whatsapp.net' });
     insertSession({ claudePid: 2000, sessionId: 'new', chatJid: '12345@s.whatsapp.net' });
@@ -140,9 +179,8 @@ describe('classifyActiveSessions', () => {
   });
 
   it('QR-101: matching checkpoint with ALIVE-but-unowned pid stays authoritative_live (non-claude provider not regressed)', () => {
-    // A live codex/opencode session reports alive:true, owned:false (the ownership
-    // check is claude-substring-only — QR-101 axis 2). The liveness gate keys on
-    // `alive` ONLY, so a live session of any provider stays authoritative_live.
+    // The liveness gate keys on `alive` only, so a live session remains
+    // authoritative even when ownership evidence is unavailable.
     insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: '12345@s.whatsapp.net' });
     durability.upsertSessionCheckpoint('12345', {
       claudePid: 1000, sessionId: 'ses-1', sessionStatus: 'active',
@@ -420,14 +458,14 @@ describe('resolveAmbiguousAgeFallback', () => {
     expect(verdict).toBe('orphan');
   });
 
-  it('orphans a zero-message session past the age threshold whose PID is alive but unowned', () => {
+  it('leaves a zero-message session blocked when its PID is alive but unowned', () => {
     const verdict = resolveAmbiguousAgeFallback(
       { id: 2, claudePid: 12345, startedAt: oldEnough, messageCount: 0 },
       Date.now(),
       24 * HOUR,
       allAliveNotOwned,
     );
-    expect(verdict).toBe('orphan');
+    expect(verdict).toBe('leave');
   });
 
   it('DESIGN CARE: never touches a session whose PID is alive AND owned, at any age', () => {

@@ -492,13 +492,21 @@ export function readBaselineCount(cwd: string, ruleId: string): number | undefin
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
-/** Read a rule's twin count row from docs/architecture/fitness-taxonomy.md
- *  (`| \`<id>\` | <count> | …`). Returns undefined when the row is absent. */
-export function readTaxonomyDocCount(cwd: string, ruleId: string): number | undefined {
+/** Read a rule's sole twin count row from docs/architecture/fitness-taxonomy.md
+ *  (`| \`<id>\` | <count> | …`). Missing or duplicate rows are ambiguous and
+ *  fail closed instead of allowing the first matching row to win. */
+export function readTaxonomyDocCount(cwd: string, ruleId: string): number {
   const doc = readFileSync(path.join(cwd, TAXONOMY_DOC_PATH), 'utf8');
   const escaped = ruleId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const row = doc.match(new RegExp(`^\\|\\s*\`${escaped}\`\\s*\\|\\s*(\\d+)\\s*\\|`, 'm'));
-  return row?.[1] !== undefined ? Number(row[1]) : undefined;
+  const rows = [...doc.matchAll(
+    new RegExp(`^\\|\\s*\`${escaped}\`\\s*\\|\\s*(\\d+)\\s*\\|`, 'gm'),
+  )];
+  if (rows.length !== 1) {
+    throw new Error(
+      `expected exactly one taxonomy count row for ${ruleId}; found ${rows.length}`,
+    );
+  }
+  return Number(rows[0]![1]);
 }
 
 export function evaluateRatchet(

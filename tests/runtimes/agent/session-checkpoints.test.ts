@@ -23,9 +23,34 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+  captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
+    pid: target.pid ?? 0,
+    parentPid: process.pid,
+    birthToken: `birth:${target.pid ?? 0}`,
+  })),
+  bindProcessTreeRootAuthority: vi.fn(() => true),
   killSessionTree: vi.fn(async (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
     target.kill(signal);
+    return {
+      outcome: 'terminated' as const,
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete' as const,
+      diagnosticCodes: [],
+    };
   }),
+  retryKillSessionTree: vi.fn(async () => ({
+    outcome: 'terminated' as const,
+    durationMs: 0,
+    ownedProcessCount: 1,
+    signaledProcessCount: 1,
+    ambiguousProcessCount: 0,
+    diagnosticState: 'complete' as const,
+    diagnosticCodes: [],
+  })),
+  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {},
 }));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 
@@ -39,6 +64,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 }));
 
 import { spawn } from 'node:child_process';
+import { bindProcessTreeRootAuthority } from '../../../src/runtimes/agent/process-tree.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -134,6 +160,11 @@ describe('SessionManager — durability checkpoints', () => {
 
     expect(beginFreshCalls).toStrictEqual([[CONVERSATION_KEY, 12345]]);
     expect(upsertCalls).toStrictEqual([]);
+    expect(bindProcessTreeRootAuthority).toHaveBeenCalledWith(
+      { pid: 12345, parentPid: process.pid, birthToken: 'birth:12345' },
+      42,
+      'claude-cli',
+    );
   });
 
   it('works fine without durability set (no crash)', async () => {
