@@ -267,9 +267,10 @@ function makeWrapperFixture(): WrapperFixture {
   const bootstrap = join(src, 'database-compatibility-bootstrap.ts');
   const trustChecker = join(scripts, 'source-runtime-drift-check.ts');
   const fakeNode = join(root, 'fake-node');
+  const sbin = join(root, 'sbin');
   const trace = join(root, 'trace.log');
 
-  for (const path of [lib, scriptsLib, srcLib, home, configHome, dataHome]) {
+  for (const path of [lib, scriptsLib, srcLib, home, configHome, dataHome, sbin]) {
     mkdirSync(path, { recursive: true });
   }
   copyFileSync(WRAPPER, wrapper);
@@ -286,9 +287,19 @@ function makeWrapperFixture(): WrapperFixture {
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
-    JSON.stringify({ name: 'wrapper-fixture', engines: { node: FIXTURE_NODE_RANGE } }),
+    JSON.stringify({ name: 'wrapper-fixture', type: 'module', engines: { node: FIXTURE_NODE_RANGE } }),
     'utf8',
   );
+  // Credential-store sandbox: without an explicit PATH the wrapper's
+  // `secret-tool` lookups resolve through bash's compiled-in default PATH and
+  // can reach the HOST session keyring — on a developer machine with real
+  // secrets stored (service openai/pinecone/whatsoup-health-token) the
+  // fixture then exports REAL production credentials into its children, and
+  // the protected-env assertion correctly fails. Shadow `secret-tool` with
+  // a failing stub and pin a minimal PATH so the fixture is hermetic on
+  // every host, matching keyring-less CI.
+  writeFileSync(join(sbin, 'secret-tool'), '#!/usr/bin/env bash\nexit 1\n', 'utf8');
+  chmodSync(join(sbin, 'secret-tool'), 0o755);
   writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
   writeFileSync(join(scripts, 'restart-safety-preflight.ts'), 'process.exit(0);\n', 'utf8');
@@ -419,6 +430,7 @@ function runWrapper(
     timeout: SPAWN_TIMEOUT_MS,
     env: {
       ...cleanGitEnv(),
+      PATH: [join(dirname(fixture.wrapper), '..', 'sbin'), '/usr/bin:/bin'].join(':'),
       HOME: fixture.home,
       USER: 'test-user',
       XDG_CONFIG_HOME: fixture.configHome,
