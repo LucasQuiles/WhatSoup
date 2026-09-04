@@ -66,6 +66,22 @@ Groups whose source inbounds span multiple `chat_jid`s cannot be covered by a
 single catch-up (the trigger requires `target.chat_jid = source.chat_jid` for
 every source); those fail closed as `closure_rejected` and remain pending.
 
+### Test coverage of the fail-closed path
+
+The safety claim above is exercised, not just asserted
+(`tests/core/recovery-catchup-reconciler.test.ts`):
+
+- **Trigger fail-close → `closure_rejected`:** a group whose two sources sit on
+  different `chat_jid`s under one `conversation_key` attempts a closure (a
+  candidate proof exists for the target's own chat), the DB trigger
+  `RAISE(ABORT)`s the mismatched row, the whole transaction rolls back, and the
+  reconciler records a bounded `closure_rejected` skip — **neither** source is
+  closed (no partial close) and both stay pending.
+- **Lock contention → `busy`:** with a competing writer holding
+  `BEGIN IMMEDIATE` on a second connection and `busy_timeout = 0`, the per-group
+  closure loses the write lock and is classified `busy`; a retry after the lock
+  releases closes the group, proving the skip is transient, not terminal.
+
 ### Report shape
 
 `{ attempted, closed, linksClosed, skipped, skips[] }` where each skip is

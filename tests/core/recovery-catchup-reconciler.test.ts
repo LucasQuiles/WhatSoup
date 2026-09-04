@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../../src/core/database.ts';
 import { reconcileOperatorCatchupRecoveries } from '../../src/core/recovery-catchup-closure.ts';
 
@@ -76,6 +80,73 @@ describe('automatic operator catch-up reconciler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Fail-closed skip classification. These exercise the try/catch path around
+  // closeOperatorCatchupRecoveryRaw — the reconciler's core safety claim that a
+  // bad or blocked selection records a bounded skip instead of corrupting state.
+  // -------------------------------------------------------------------------
+
+  it('fails a mixed-chat_jid group closed at the DB trigger and records a bounded closure_rejected skip', () => {
+    // Two source inbounds share one conversation_key but sit on different
+    // chat_jids; a single catch-up target can only carry a delivery proof for
+    // its own chat_jid, so the trigger RAISE(ABORT)s the mismatched row. The
+    // whole closure rolls back — no partial close — and is classified benign.
+    installFixture({ echoed: true, sourceChats: ['reconciler@g.us', 'other@g.us'] });
+
+    const report = reconcileOperatorCatchupRecoveries(db.raw);
+
+    // A candidate proof exists (for the target's own chat_jid), so a closure IS
+    // attempted — this reaches the catch block, unlike no_catchup_candidate.
+    expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+    expect(report.skips).toEqual([
+      expect.objectContaining({ reason: 'closure_rejected', nSourceSeqs: 2 }),
+    ]);
+    // Fail-closed: the whole transaction rolled back, so NEITHER source closed.
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+    // And both remain pending for a (correct) future manual disposition.
+    expect(linkRows('recovery_pending_operator_catchup')).toHaveLength(2);
+  });
+
+  it('classifies a write-locked database as a benign busy skip and closes nothing', () => {
+    // The reconciler's plain-read enumeration succeeds under WAL, but the
+    // per-group closure opens BEGIN IMMEDIATE — which loses to a competing
+    // writer and returns SQLITE_BUSY. With busy_timeout=0 this is immediate and
+    // deterministic. Requires a file DB: two connections cannot share :memory:.
+    const dir = mkdtempSync(join(tmpdir(), 'reconciler-busy-'));
+    const dbPath = join(dir, 'bot.db');
+    const fileDb = new Database(dbPath);
+    fileDb.open();
+    let blocker: DatabaseSync | undefined;
+    try {
+      installFixture({ echoed: true, into: fileDb });
+
+      // Hold the write lock on a second connection.
+      blocker = new DatabaseSync(dbPath);
+      blocker.exec('PRAGMA busy_timeout = 0');
+      blocker.exec('BEGIN IMMEDIATE');
+
+      // Fail fast instead of waiting out the 5s default busy_timeout.
+      fileDb.raw.exec('PRAGMA busy_timeout = 0');
+      const report = reconcileOperatorCatchupRecoveries(fileDb.raw);
+
+      expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+      expect(report.skips).toEqual([
+        expect.objectContaining({ reason: 'busy', nSourceSeqs: 2 }),
+      ]);
+
+      // Release the lock; a retry now succeeds — the skip was transient, not terminal.
+      blocker.exec('ROLLBACK');
+      blocker.close();
+      blocker = undefined;
+      const retry = reconcileOperatorCatchupRecoveries(fileDb.raw);
+      expect(retry).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 0 });
+    } finally {
+      try { blocker?.close(); } catch { /* already closed */ }
+      fileDb.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // Fixture: two crash-failed source inbounds pending catch-up, plus a later
   // catch-up inbound whose terminal reply is (optionally) echoed — mirrors
   // tests/core/recovery-catchup-closure.test.ts installFixture.
@@ -85,21 +156,31 @@ describe('automatic operator catch-up reconciler', () => {
     planId?: string;
     conversationKey?: string;
     chat?: string;
+    /**
+     * Per-source chat_jid override. Length must match the two source inbounds.
+     * When a source's chat_jid differs from the catch-up target's chat_jid the
+     * closure trigger fails that row closed (see the multi-chat_jid test).
+     */
+    sourceChats?: [string, string];
+    /** Target database. Defaults to the in-memory `db`; a file DB is used for lock tests. */
+    into?: Database;
   }): { planId: string; conversationKey: string; sourceSeqs: number[]; catchupSeq: number } {
+    const raw = (options.into ?? db).raw;
     const planId = options.planId ?? 'pcr-reconciler';
     const conversationKey = options.conversationKey ?? 'reconciler-conversation';
     const chat = options.chat ?? 'reconciler@g.us';
-    db.raw.prepare(`
+    const sourceChats = options.sourceChats ?? [chat, chat];
+    raw.prepare(`
       INSERT INTO recovery_plans (plan_id, origin, actor, summary, evidence_ref)
       VALUES (?, 'pre_connect_recovery', 'system:test', 'fixture', 'test://fixture')
     `).run(planId);
-    const sourceSeqs = ['source-one', 'source-two'].map((messageId) => Number(db.raw.prepare(`
+    const sourceSeqs = ['source-one', 'source-two'].map((messageId, index) => Number(raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, processing_status, completed_at,
         terminal_reason, failure_class
       ) VALUES (?, ?, ?, 'failed', datetime('now'), 'error', 'crash_recovery')
-    `).run(`${planId}-${messageId}`, conversationKey, chat).lastInsertRowid));
-    const insertPending = db.raw.prepare(`
+    `).run(`${planId}-${messageId}`, conversationKey, sourceChats[index]).lastInsertRowid));
+    const insertPending = raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
         reason, evidence_ref, actor
@@ -108,13 +189,13 @@ describe('automatic operator catch-up reconciler', () => {
     `);
     for (const seq of sourceSeqs) insertPending.run(seq, planId);
 
-    const catchupSeq = Number(db.raw.prepare(`
+    const catchupSeq = Number(raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, processing_status, completed_at,
         terminal_reason
       ) VALUES (?, ?, ?, 'complete', datetime('now'), 'response_sent')
     `).run(`${planId}-catchup`, conversationKey, chat).lastInsertRowid);
-    const opId = Number(db.raw.prepare(`
+    const opId = Number(raw.prepare(`
       INSERT INTO outbound_ops (
         conversation_key, chat_jid, op_type, payload, status, source_inbound_seq,
         is_terminal, replay_policy, echoed_at
@@ -127,7 +208,7 @@ describe('automatic operator catch-up reconciler', () => {
       catchupSeq,
       options.echoed ? 'echoed' : 'submitted',
     ).lastInsertRowid);
-    db.raw.prepare(`
+    raw.prepare(`
       INSERT INTO turn_terminal_records (
         scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
         logical_turn_id, manager_id, generation, attempt_kind,
