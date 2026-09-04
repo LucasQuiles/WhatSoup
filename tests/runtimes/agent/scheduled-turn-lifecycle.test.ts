@@ -938,8 +938,10 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     });
 
     // OPEN GAP (#3374): single mode has NO scheduled/interactive isolation on
-    // main (same shape as shared mode — proven above). This probe asserts the
-    // DESIRED isolation; it.fails keeps it green only while the gap exists.
+    // main — the #3341 port routes scheduled jobs to an isolated session/queue
+    // only in non-sandbox per_chat mode, the same shape as shared mode (proven
+    // above). This probe asserts the DESIRED isolation; it.fails keeps it green
+    // only while the gap exists.
     it.fails('cell 7 isolation gap probe: interactive turn completes while a scheduled terminal is withheld (no single-mode isolation on main)', async () => {
       dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
