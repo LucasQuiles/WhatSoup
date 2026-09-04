@@ -1,0 +1,146 @@
+{
+  "schema_version": "forensic.state.v1",
+  "observation_timestamp": "2026-09-04T10:04:18Z",
+  "conclusions": [
+    {
+      "id": "C01",
+      "confidence": "high",
+      "statement": {
+        "text": "The process-ownership branch was recorded at the exact published revision while its terminal local release proof was still unresolved.",
+        "redactions": []
+      },
+      "harness_evidence_ids": [
+        "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+        "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b"
+      ],
+      "independent_sources": [
+        {
+          "kind": "git",
+          "reference": "commit:88d00a34691880cb17e4b742447f2175350e37c0",
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "C02",
+      "confidence": "high",
+      "statement": {
+        "text": "The process-lifecycle diagnostics work introduced typed termination outcomes and a dedicated caller-adoption guard.",
+        "redactions": []
+      },
+      "harness_evidence_ids": [
+        "evidence-bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a"
+      ],
+      "independent_sources": [
+        {
+          "kind": "git",
+          "reference": "commit:4130ffe6e32fd034072fb121a5170ed37dde4726",
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "C03",
+      "confidence": "high",
+      "statement": {
+        "text": "The source-inventory work centralized traversal and represented scan loss as a typed inconclusive outcome instead of silently dropping subtrees.",
+        "redactions": []
+      },
+      "harness_evidence_ids": [
+        "evidence-6c5c60f3bd432eae97d7c2d656fc6ecfaa2c315befd72fb856b0fb3e2957cb14"
+      ],
+      "independent_sources": [
+        {
+          "kind": "git",
+          "reference": "commit:9d47a0474e7748314a1ee59cd717de8bb7484a0c",
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "C04",
+      "confidence": "medium",
+      "statement": {
+        "text": "All three harness adapters completed two hash-bound passes without source failures; marginal new evidence was three, two hundred twenty-nine, and one respectively.",
+        "redactions": []
+      },
+      "harness_evidence_ids": [],
+      "independent_sources": []
+    },
+    {
+      "id": "C05",
+      "confidence": "medium",
+      "statement": {
+        "text": "Source inspection rejected at least two lexical candidates as unrelated, demonstrating that candidate retrieval alone is not evidence promotion.",
+        "redactions": []
+      },
+      "harness_evidence_ids": [
+        "evidence-305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624",
+        "evidence-3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125"
+      ],
+      "independent_sources": []
+    }
+  ],
+  "decisions": [
+    {
+      "id": "K01",
+      "statement": {
+        "text": "Evidence, narrative, and state remain separate output planes.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "K02",
+      "statement": {
+        "text": "The public projection contains metadata and aggregate findings, not raw conversation content.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "K03",
+      "statement": {
+        "text": "Private identifier terms are supplied at build time and are not embedded in the package or its errors.",
+        "redactions": []
+      }
+    }
+  ],
+  "unknowns": [
+    {
+      "id": "U01",
+      "statement": {
+        "text": "The second harness has not reached diminishing returns because its second pass found two hundred twenty-nine distinct records.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "U02",
+      "statement": {
+        "text": "The content relevance of the two second-pass third-harness candidates remains unreviewed.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "U03",
+      "statement": {
+        "text": "The terminal local release outcome was outside the frozen source window.",
+        "redactions": []
+      }
+    }
+  ],
+  "falsified_hypotheses": [
+    {
+      "id": "F01",
+      "statement": {
+        "text": "The third harness was not unavailable: a read-only, hash-bound snapshot supported two complete passes.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "F02",
+      "statement": {
+        "text": "A lexical match was not sufficient for promotion: source inspection rejected unrelated candidates.",
+        "redactions": []
+      }
+    }
+  ]
+}

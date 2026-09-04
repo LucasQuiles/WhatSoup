@@ -117,19 +117,54 @@ export interface ForensicFinding {
   readonly byteEnd: number;
 }
 
-const DEFAULT_NGRAM_WEIGHTS: NgramWeights = Object.freeze({
-  unigram: 0.15,
-  bigram: 0.25,
-  trigram: 0.3,
-  character: 0.3,
+export const FORENSIC_RETRIEVAL_CONFIGURATION = Object.freeze({
+  normalization: Object.freeze({
+    unicode: 'NFKC',
+    locale: 'en-US',
+    pathSeparators: 'posix',
+    identifierSplitting: true,
+    punctuationCollapsed: true,
+  }),
+  ngram: Object.freeze({
+    tokenOrders: Object.freeze([1, 2, 3]),
+    characterOrders: Object.freeze([3, 4, 5]),
+    weights: Object.freeze({
+      unigram: 0.15,
+      bigram: 0.25,
+      trigram: 0.3,
+      character: 0.3,
+    }),
+  }),
+  fuzzy: Object.freeze({
+    metrics: Object.freeze([
+      'damerau-levenshtein',
+      'jaro-winkler',
+      'token-sort',
+      'token-set',
+    ]),
+    combination: 'equal-mean',
+    proof: false,
+  }),
+  ranking: Object.freeze({
+    bm25: 0.4,
+    tfidf: 0.2,
+    lexical: 0.15,
+    fuzzy: 0.05,
+    exactEntity: 0.15,
+    temporal: 0.05,
+    titleBoost: 0.05,
+    exactFieldBoosts: Object.freeze({ path: 5, commit: 5, symbol: 4, error: 4 }),
+  }),
+  nearDuplicate: Object.freeze({
+    weights: Object.freeze({ unigram: 1, character: 1, tokenSort: 1, tokenSet: 1 }),
+    proof: false,
+  }),
 });
 
-const DEFAULT_NEAR_DUPLICATE_WEIGHTS: NearDuplicateWeights = Object.freeze({
-  unigram: 1,
-  character: 1,
-  tokenSort: 1,
-  tokenSet: 1,
-});
+const DEFAULT_NGRAM_WEIGHTS: NgramWeights = FORENSIC_RETRIEVAL_CONFIGURATION.ngram.weights;
+
+const DEFAULT_NEAR_DUPLICATE_WEIGHTS: NearDuplicateWeights =
+  FORENSIC_RETRIEVAL_CONFIGURATION.nearDuplicate.weights;
 
 const ENTITY_KINDS: readonly EntityKind[] = Object.freeze([
   'commit',
@@ -514,8 +549,10 @@ export function rankDocuments(
     const titleBoost = normalizeRetrievalText(document.title).tokens.some((token) => queryTokens.includes(token))
       ? 2
       : 0;
-    const score = 0.4 * bm25 + 0.2 * tfidf + 0.15 * lexical + 0.05 * fuzzy +
-      0.15 * exact.score + 0.05 * temporal + 0.05 * titleBoost;
+    const weights = FORENSIC_RETRIEVAL_CONFIGURATION.ranking;
+    const score = weights.bm25 * bm25 + weights.tfidf * tfidf + weights.lexical * lexical +
+      weights.fuzzy * fuzzy + weights.exactEntity * exact.score + weights.temporal * temporal +
+      weights.titleBoost * titleBoost;
     return {
       id: document.id,
       score: round(score),
