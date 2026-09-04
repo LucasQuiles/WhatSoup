@@ -87,6 +87,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/grant-resolver-inventory-guard.test.ts',
   'tests/scripts/resolved-override-inventory-guard.test.ts',
   'tests/scripts/source-inventory-enforcement.test.ts',
+  'tests/scripts/source-inventory-native-read.test.ts',
   'tests/scripts/ssot-pattern-guard.test.ts',
   'tests/scripts/ring-boundary-guard.test.ts',
   'tests/scripts/check-service-units.test.ts',

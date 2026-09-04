@@ -98,6 +98,13 @@ export interface SourceInventoryFileSystem {
   readFileSync(file: string, expectedStat: SourceInventoryStat, boundFile?: string): string;
 }
 
+export interface SourceInventoryNativeFileSystemOptions {
+  /** Narrow syscall seam used to verify the flags on the descriptor-bound open. */
+  openFile?: (file: string, flags: number) => number;
+  /** `null` models a platform without a usable no-follow flag. */
+  noFollowFlag?: number | null;
+}
+
 export interface SourceInventoryOptions {
   repoRoot: string;
   roots: readonly string[];
@@ -301,46 +308,73 @@ function replacementPathFailure(error: unknown): boolean {
   return ['ELOOP', 'ENOENT', 'ENOTDIR'].includes(String((error as { code?: unknown }).code));
 }
 
-const nativeSourceInventoryFileSystem: SourceInventoryFileSystem = {
-  readdirSync: (directory, boundDirectory = directory) => readdirSync(boundDirectory),
-  lstatSync: (entry, boundEntry = entry) => lstatSync(boundEntry),
-  readFileSync: (file, expectedStat, boundFile = file) => {
-    let descriptor: number;
-    try {
-      descriptor = openSync(boundFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    } catch (error) {
-      if (replacementPathFailure(error)) throw replacementError();
-      throw error;
-    }
-    try {
-      const opened = fstatSync(descriptor);
-      if (!opened.isFile() || !sameSourceIdentity(opened, expectedStat)) {
-        throw replacementError();
+function noFollowUnavailableError(): NodeJS.ErrnoException {
+  return Object.assign(
+    new Error('source inventory no-follow protection is unavailable'),
+    { code: 'ENOSYS' },
+  );
+}
+
+/** Build the native adapter while keeping the descriptor-open contract directly testable. */
+export function createNativeSourceInventoryFileSystem(
+  options: SourceInventoryNativeFileSystemOptions = {},
+): SourceInventoryFileSystem {
+  const openFile = options.openFile ?? openSync;
+  const noFollowFlag = options.noFollowFlag === undefined
+    ? constants.O_NOFOLLOW
+    : options.noFollowFlag;
+
+  return {
+    readdirSync: (directory, boundDirectory = directory) => readdirSync(boundDirectory),
+    lstatSync: (entry, boundEntry = entry) => lstatSync(boundEntry),
+    readFileSync: (file, expectedStat, boundFile = file) => {
+      if (
+        typeof noFollowFlag !== 'number'
+        || !Number.isSafeInteger(noFollowFlag)
+        || noFollowFlag <= 0
+      ) {
+        throw noFollowUnavailableError();
       }
-      const content = readFileSync(descriptor, 'utf8');
-      const afterRead = fstatSync(descriptor);
-      let currentPath: SourceInventoryStat;
+
+      let descriptor: number;
       try {
-        currentPath = lstatSync(boundFile);
+        descriptor = openFile(boundFile, constants.O_RDONLY | noFollowFlag);
       } catch (error) {
         if (replacementPathFailure(error)) throw replacementError();
         throw error;
       }
-      if (
-        !afterRead.isFile()
-        || !currentPath.isFile()
-        || currentPath.isSymbolicLink()
-        || !sameSourceIdentity(opened, afterRead)
-        || !sameSourceIdentity(opened, currentPath)
-      ) {
-        throw replacementError();
+      try {
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile() || !sameSourceIdentity(opened, expectedStat)) {
+          throw replacementError();
+        }
+        const content = readFileSync(descriptor, 'utf8');
+        const afterRead = fstatSync(descriptor);
+        let currentPath: SourceInventoryStat;
+        try {
+          currentPath = lstatSync(boundFile);
+        } catch (error) {
+          if (replacementPathFailure(error)) throw replacementError();
+          throw error;
+        }
+        if (
+          !afterRead.isFile()
+          || !currentPath.isFile()
+          || currentPath.isSymbolicLink()
+          || !sameSourceIdentity(opened, afterRead)
+          || !sameSourceIdentity(opened, currentPath)
+        ) {
+          throw replacementError();
+        }
+        return content;
+      } finally {
+        closeSync(descriptor);
       }
-      return content;
-    } finally {
-      closeSync(descriptor);
-    }
-  },
-};
+    },
+  };
+}
+
+const nativeSourceInventoryFileSystem = createNativeSourceInventoryFileSystem();
 
 function inventoryRoot(root: string): string {
   if (path.isAbsolute(root)) {

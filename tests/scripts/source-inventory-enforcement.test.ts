@@ -1982,7 +1982,7 @@ describe('shared source inventory AST adoption ratchet', () => {
     expect(inspectAdoption('planted.ts', source).privateFsImports).toContain('loader-shadow');
   });
 
-  it.each(GUARDS)('$tag uses the shared primitive and owns no private walker', ({ script }) => {
+  it.each(GUARDS)('$tag uses the shared primitive and owns no direct private walker', ({ script }) => {
     const source = readFileSync(script, 'utf8');
     const adoption = inspectAdoption(script, source);
 
