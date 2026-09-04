@@ -220,6 +220,20 @@ export interface TurnRecoverySupervisorCounts {
   echoConflicts: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
+  /**
+   * Actionability split of `blockedUnsafe` (② of the continuity work,
+   * docs/turn-recovery-continuity-reconciler.md). Synthetic self-turns
+   * (`agentjob-%` source IDs) owe no user a reply — a parked synthetic job is
+   * expected residue, never an incident. Real-source jobs split by whether
+   * their conversation has ANY newer inbound (the same newer-activity signal
+   * the safe-replay fence uses): newer activity means the thread moved on and
+   * the parked replay is correctly superseded; no newer activity means a real
+   * user turn may still be owed a reply — the only class that should page an
+   * operator. `synthetic + superseded + stranded === blockedUnsafe` always.
+   */
+  blockedUnsafeSynthetic: number;
+  blockedUnsafeSuperseded: number;
+  blockedUnsafeStranded: number;
 }
 
 export function validatePositiveSafeInteger(value: number, label: string): void {
@@ -912,7 +926,31 @@ export class TurnRecoveryStore {
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
           COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
             AS echo_conflicts,
-          (SELECT count FROM open_recoveries) AS open_recoveries
+          (SELECT count FROM open_recoveries) AS open_recoveries,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_synthetic,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_superseded,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND NOT EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_stranded
         FROM turn_recovery_jobs j
         LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
@@ -1738,6 +1776,9 @@ export class TurnRecoveryStore {
       orphan_transfers: number;
       echo_conflicts: number;
       open_recoveries: number;
+      blocked_unsafe_synthetic: number;
+      blocked_unsafe_superseded: number;
+      blocked_unsafe_stranded: number;
     };
     return {
       outstanding: row.outstanding,
@@ -1751,6 +1792,9 @@ export class TurnRecoveryStore {
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
       openRecoveries: row.open_recoveries,
+      blockedUnsafeSynthetic: row.blocked_unsafe_synthetic,
+      blockedUnsafeSuperseded: row.blocked_unsafe_superseded,
+      blockedUnsafeStranded: row.blocked_unsafe_stranded,
     };
   }
 
