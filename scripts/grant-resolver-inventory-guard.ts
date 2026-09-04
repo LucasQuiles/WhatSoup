@@ -149,11 +149,6 @@ export function scanRepoGrantResolversCounted(
   };
 }
 
-/** Back-compat: findings only. Prefer `scanRepoGrantResolversCounted` for the vacuity check. */
-export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
-  return scanRepoGrantResolversCounted(cwd).findings;
-}
-
 export interface GrantResolverGuardEvaluation {
   status: 'pass' | 'block' | 'inconclusive';
   exitCode: 0 | 1 | 2;

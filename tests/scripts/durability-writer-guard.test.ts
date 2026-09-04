@@ -554,7 +554,7 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     }
   });
 
-  it('(ii) a throw inside the scan maps to INCONCLUSIVE, never a silent pass', () => {
+  it('(ii) a throw inside the scan maps to a privacy-safe INCONCLUSIVE code, never a silent pass', () => {
     // A snapshot whose .keys() throws forces an exception at the very first
     // line of scanDurabilityWriterInvariant's check (1) — proving the wrapper
     // catches a throw from *inside* the scan, not just the async load.
@@ -567,8 +567,8 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     const outcome = evaluateDurabilityWriterInvariant(throwingSnapshot, repoRoot);
     expect(outcome.status).toBe('inconclusive');
     if (outcome.status === 'inconclusive') {
-      expect(outcome.reason).toMatch(/scan threw/i);
-      expect(outcome.reason).toMatch(/boom: simulated scan-time failure/);
+      expect(outcome.reason).toBe('guard.durability.scan-inconclusive');
+      expect(outcome.reason).not.toContain('boom: simulated scan-time failure');
     }
   });
 

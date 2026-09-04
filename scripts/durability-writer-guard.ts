@@ -92,21 +92,19 @@
 //   (4) NON-VACUITY. An empty schema snapshot, a scan that discovered ZERO
 //       `CREATE TABLE` occurrences under src/ (check 1b never actually ran —
 //       see `discoveredTableCount` on `DurabilityWriterScanResult`), or a
-//       THROW anywhere inside the scan itself (not just the async load), all
-//       map to INCONCLUSIVE (exit 2) — never 0, and never an uncaught
-//       exception falling through to Node's default exit 1. Only the schema
+//       failure inside the schema/policy scan all map to INCONCLUSIVE (exit 2)
+//       — never 0, and never an uncaught exception falling through to Node's
+//       default exit 1. Only the schema
 //       snapshot's non-vacuity was originally floored here; the discovery
 //       half of check (1b) was not, so a missing/unreadable `src/` used to
 //       make check 1b pass vacuously (zero discovered, zero unregistered)
 //       instead of reporting that it never scanned anything.
-//       `evaluateDurabilityWriterInvariant` wraps the empty-snapshot check,
-//       the discovered-count floor, and the call to
-//       `scanDurabilityWriterInvariant` in ONE try/catch and returns a
-//       discriminated `{status:'pass'|'violation'|'inconclusive', ...}`
-//       result — the same function `main()` calls and tests call directly,
-//       so the exit-2 contract is unit-testable without spawning a CLI
-//       subprocess. `main()` additionally carries a `.catch()` on its own
-//       invocation as a second, belt-and-braces layer.
+//       `evaluateDurabilityWriterInvariant` returns a discriminated
+//       `{status:'pass'|'violation'|'inconclusive', ...}` result. Operational
+//       source-inventory failures retain bounded counts; unexpected adapter
+//       programming errors propagate to callers unchanged. The CLI has a
+//       final `.catch()` that maps any such unexpected error to a stable,
+//       privacy-safe exit-2 diagnostic.
 //
 // Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty/discovery-scan-empty/scan threw).
 
@@ -212,9 +210,9 @@ export interface DurabilityWriterScanResult {
 
 /**
  * Discriminated outcome of the injectable evaluation path (see
- * `evaluateDurabilityWriterInvariant`). `'inconclusive'` carries a `reason`
- * instead of a `result` — there is no scan result to report when the scan
- * itself never completed.
+ * `evaluateDurabilityWriterInvariant`). An inconclusive result carries a
+ * stable reason code and includes partial counters when source discovery
+ * completed far enough to produce them.
  */
 export type DurabilityWriterOutcome =
   | { status: 'pass'; result: DurabilityWriterScanResult }
@@ -661,6 +659,23 @@ function resolveCreateTableDiscovery(
       };
 }
 
+function resultFromDiscovery(
+  snapshot: SchemaSnapshot,
+  discovery: CreateTableDiscovery,
+): DurabilityWriterScanResult {
+  return {
+    findings: [],
+    tablesScanned: snapshot.size,
+    registryTablesChecked: 0,
+    discoveredTableCount: discovery.tables.size,
+    filesExamined: discovery.inventoryCounts.filesRead,
+    scanIssues: discovery.scanIssues,
+    scanIssueCount: discovery.inventoryCounts.issuesTotal,
+    scanIssuesOmitted: discovery.inventoryCounts.issuesOmitted,
+    inventoryCounts: discovery.inventoryCounts,
+  };
+}
+
 export function scanDurabilityWriterInvariant(
   snapshot: SchemaSnapshot,
   repoRoot: string,
@@ -687,29 +702,20 @@ export function evaluateDurabilityWriterInvariant(
   repoRoot: string,
   input: DurabilityWriterRegistryInput = {},
 ): DurabilityWriterOutcome {
-  if (snapshot.size === 0) {
-    return {
-      status: 'inconclusive',
-      reason: 'migratedSchemaSnapshot() returned zero tables; nothing was scanned',
-    };
-  }
-
   const discovery = resolveCreateTableDiscovery(repoRoot, input);
+  const incompleteResult = resultFromDiscovery(snapshot, discovery);
   if (discovery.inventoryCounts.issuesTotal > 0) {
     return {
       status: 'inconclusive',
       reason: 'source inventory reported one or more scan issues',
-      result: {
-        findings: [],
-        tablesScanned: snapshot.size,
-        registryTablesChecked: 0,
-        discoveredTableCount: discovery.tables.size,
-        filesExamined: discovery.inventoryCounts.filesRead,
-        scanIssues: discovery.scanIssues,
-        scanIssueCount: discovery.inventoryCounts.issuesTotal,
-        scanIssuesOmitted: discovery.inventoryCounts.issuesOmitted,
-        inventoryCounts: discovery.inventoryCounts,
-      },
+      result: incompleteResult,
+    };
+  }
+  if (snapshot.size === 0) {
+    return {
+      status: 'inconclusive',
+      reason: 'migratedSchemaSnapshot() returned zero tables; nothing was scanned',
+      result: incompleteResult,
     };
   }
 
@@ -730,10 +736,10 @@ export function evaluateDurabilityWriterInvariant(
       };
     }
     return result.findings.length === 0 ? { status: 'pass', result } : { status: 'violation', result };
-  } catch (err) {
+  } catch {
     return {
       status: 'inconclusive',
-      reason: `scan threw: ${err instanceof Error ? err.message : String(err)}`,
+      reason: 'guard.durability.scan-inconclusive',
     };
   }
 }
