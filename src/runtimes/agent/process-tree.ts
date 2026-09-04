@@ -2,10 +2,74 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { SIGNAL } from '../../lib/signals.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { createChildLogger } from '../../logger.ts';
 import { bfsFromRoot, buildChildrenIndex, parsePsLines } from './process-tree-parse.ts';
 
 const log = createChildLogger('process-tree');
+
+export type ProcessTreeTerminationErrorCode =
+  | 'PROCESS_TREE_INVALID_TARGET'
+  | 'PROCESS_TREE_INVALID_GENERATION'
+  | 'PROCESS_TREE_LEASE_CONFLICT'
+  | 'PROCESS_TREE_INITIAL_CENSUS_UNAVAILABLE'
+  | 'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED'
+  | 'PROCESS_TREE_PRE_SIGNAL_CENSUS_UNAVAILABLE'
+  | 'PROCESS_TREE_ESCALATION_CENSUS_UNAVAILABLE'
+  | 'PROCESS_TREE_FINAL_CENSUS_UNAVAILABLE'
+  | 'PROCESS_TREE_SIGNAL_FAILED'
+  | 'PROCESS_TREE_SURVIVORS_REMAIN'
+  | 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED'
+  | 'PROCESS_TREE_UNEXPECTED_FAILURE';
+
+export type ProcessTreeTerminationRetryClass =
+  | 'invalid_request'
+  | 'active_lease'
+  | 'census_retryable'
+  | 'signal_retryable'
+  | 'survivor_unresolved'
+  | 'unknown';
+
+const RETRY_CLASS_BY_ERROR_CODE: Readonly<
+  Record<ProcessTreeTerminationErrorCode, ProcessTreeTerminationRetryClass>
+> = {
+  PROCESS_TREE_INVALID_TARGET: 'invalid_request',
+  PROCESS_TREE_INVALID_GENERATION: 'invalid_request',
+  PROCESS_TREE_LEASE_CONFLICT: 'active_lease',
+  PROCESS_TREE_INITIAL_CENSUS_UNAVAILABLE: 'census_retryable',
+  PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED: 'census_retryable',
+  PROCESS_TREE_PRE_SIGNAL_CENSUS_UNAVAILABLE: 'census_retryable',
+  PROCESS_TREE_ESCALATION_CENSUS_UNAVAILABLE: 'census_retryable',
+  PROCESS_TREE_FINAL_CENSUS_UNAVAILABLE: 'census_retryable',
+  PROCESS_TREE_SIGNAL_FAILED: 'signal_retryable',
+  PROCESS_TREE_SURVIVORS_REMAIN: 'survivor_unresolved',
+  PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED: 'census_retryable',
+  PROCESS_TREE_UNEXPECTED_FAILURE: 'unknown',
+};
+
+export class ProcessTreeTerminationError extends Error {
+  readonly code: ProcessTreeTerminationErrorCode;
+  readonly retryClass: ProcessTreeTerminationRetryClass;
+
+  constructor(
+    code: ProcessTreeTerminationErrorCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'ProcessTreeTerminationError';
+    this.code = code;
+    this.retryClass = RETRY_CLASS_BY_ERROR_CODE[code];
+  }
+}
+
+export const PROCESS_TREE_DIAGNOSTIC_SOURCES = [
+  'session_shutdown',
+  'stale_session_sweep',
+  'ownership_loss_cleanup',
+] as const;
+
+export type ProcessTreeDiagnosticSource = typeof PROCESS_TREE_DIAGNOSTIC_SOURCES[number];
 
 export interface ProcessTreeTarget {
   readonly pid?: number;
@@ -33,6 +97,14 @@ export interface KillSessionOutcome {
 
 export interface KillSessionTreeOptions {
   readonly generationMarker: string;
+  /**
+   * Stable production owner used by the central diagnostic emitter. Tests and
+   * library consumers may omit it; the release guard requires it at every
+   * production call site. It never changes signal authority.
+   */
+  readonly diagnosticSource?: ProcessTreeDiagnosticSource;
+  /** Numeric durable row reference when one already exists; never synthesize it. */
+  readonly diagnosticSessionRowId?: number;
   readonly termGraceMs?: number;
   readonly killGraceMs?: number;
   /**
@@ -94,6 +166,19 @@ interface OwnedProcessIdentity extends ProcessCensusRow {
 interface TerminationContext {
   readonly generationMarker: string;
   readonly promise: Promise<void>;
+  readonly telemetry: TerminationTelemetry;
+}
+
+interface TelemetryObserver<T> {
+  readonly sink: (value: T) => void;
+  readonly options: KillSessionTreeOptions;
+}
+
+interface TerminationTelemetry {
+  readonly outcomeObservers: Set<TelemetryObserver<KillSessionOutcome>>;
+  readonly divergenceObservers: Set<TelemetryObserver<CgroupDivergenceInfo>>;
+  lastOutcome: KillSessionOutcome | null;
+  lastDivergence: CgroupDivergenceInfo | null;
 }
 
 interface OwnedExitCheck {
@@ -203,7 +288,10 @@ function inspectOwned(
 function targetPid(target: number | ProcessTreeTarget): number {
   const pid = typeof target === 'number' ? target : target.pid;
   if (!Number.isSafeInteger(pid) || (pid ?? 0) <= 1) {
-    throw new Error(`Cannot reap invalid session process PID ${String(pid)}`);
+    throw new ProcessTreeTerminationError(
+      'PROCESS_TREE_INVALID_TARGET',
+      `Cannot reap invalid session process PID ${String(pid)}`,
+    );
   }
   return pid as number;
 }
@@ -221,7 +309,13 @@ function signalPid(
       process.kill(pid, signal);
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_SIGNAL_FAILED',
+        `Unable to signal owned session process with ${signal}`,
+        { cause: error },
+      );
+    }
   }
 }
 
@@ -344,7 +438,7 @@ async function runTermination(
   target: number | ProcessTreeTarget,
   rootPid: number,
   owned: readonly OwnedProcessIdentity[],
-  preCensusAvailable: boolean,
+  preCensusError: unknown | null,
   signal: NodeJS.Signals,
   options: KillSessionTreeOptions,
 ): Promise<void> {
@@ -354,9 +448,14 @@ async function runTermination(
   let escalated = false;
 
   if (owned.length === 0) {
-    const reason = preCensusAvailable ? 'root row missing or ambiguous' : 'census unavailable';
-    throw new Error(
+    const censusUnavailable = preCensusError !== null;
+    const reason = censusUnavailable ? 'census unavailable' : 'root row missing or ambiguous';
+    throw new ProcessTreeTerminationError(
+      censusUnavailable
+        ? 'PROCESS_TREE_INITIAL_CENSUS_UNAVAILABLE'
+        : 'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED',
       `Refusing to signal session process tree ${generationMarker}: pre-signal ${reason}`,
+      censusUnavailable ? { cause: preCensusError } : undefined,
     );
   }
 
@@ -369,7 +468,8 @@ async function runTermination(
   try {
     first = await resolveOwnedInspection(owned, generationMarker, resolveMs);
   } catch (error) {
-    throw new Error(
+    throw new ProcessTreeTerminationError(
+      'PROCESS_TREE_PRE_SIGNAL_CENSUS_UNAVAILABLE',
       `Refusing to signal session process tree ${generationMarker}: pre-signal recensus unavailable`,
       { cause: error },
     );
@@ -392,7 +492,8 @@ async function runTermination(
       try {
         kill = await resolveOwnedInspection(pending, generationMarker, resolveMs);
       } catch (error) {
-        throw new Error(
+        throw new ProcessTreeTerminationError(
+          'PROCESS_TREE_ESCALATION_CENSUS_UNAVAILABLE',
           `Refusing to escalate session process tree ${generationMarker}: recensus unavailable`,
           { cause: error },
         );
@@ -410,7 +511,8 @@ async function runTermination(
     options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
   );
   if (!finalCheck.verified) {
-    throw new Error(
+    throw new ProcessTreeTerminationError(
+      'PROCESS_TREE_FINAL_CENSUS_UNAVAILABLE',
       `Unable to prove session process tree ${generationMarker} empty: final census unavailable`,
       { cause: finalCheck.censusError },
     );
@@ -420,7 +522,8 @@ async function runTermination(
   // signaled, so recording it (below) and letting shutdown proceed is strictly
   // better than burning the full grace and being SIGKILLed by the service manager.
   if (finalCheck.survivors.length > 0) {
-    throw new Error(
+    throw new ProcessTreeTerminationError(
+      'PROCESS_TREE_SURVIVORS_REMAIN',
       `Session process tree ${generationMarker} still has live PIDs: ` +
         finalCheck.survivors.map((row) => row.pid).join(', '),
     );
@@ -429,6 +532,22 @@ async function runTermination(
   const ambiguousPids = finalCheck.ambiguous.map((identity) => identity.pid);
   const outcome: KillSessionOutcome['outcome'] =
     ambiguousPids.length > 0 ? 'unresolved_ambiguous' : escalated ? 'escalated' : 'terminated';
+  const diagnostic = diagnosticContext(options);
+  if (diagnostic) {
+    const record = {
+      ...diagnostic,
+      signal,
+      outcome,
+      escalated,
+      durationMs: Date.now() - startedAt,
+      ambiguousCount: ambiguousPids.length,
+    };
+    if (outcome === 'unresolved_ambiguous') {
+      log.warn(record, 'process-tree termination outcome');
+    } else {
+      log.debug(record, 'process-tree termination outcome');
+    }
+  }
   try {
     options.onOutcome?.({
       outcome,
@@ -437,8 +556,12 @@ async function runTermination(
       escalated,
       ambiguousPids,
     });
-  } catch {
+  } catch (err) {
     // Telemetry is best-effort — never let an outcome sink failure break shutdown.
+    log.warn(
+      { ...diagnosticContext(options), sink: 'outcome', err },
+      'process-tree telemetry sink failed',
+    );
   }
 }
 
@@ -518,17 +641,145 @@ export function emitCgroupDivergence(
   options: KillSessionTreeOptions,
 ): void {
   const sink = options.onCgroupDivergence;
-  if (!sink) return;
+  const diagnostic = diagnosticContext(options);
+  if (!sink && !diagnostic) return;
   try {
     const reader = options.readCgroupMemberPids ?? readServiceCgroupMemberPids;
     const cgroupPids = reader();
     if (cgroupPids === null) return;
     const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
-    sink(divergence);
+    if (diagnostic) {
+      log.debug(
+        {
+          ...diagnostic,
+          ...divergence,
+        },
+        'process-tree cgroup divergence',
+      );
+    }
+    sink?.(divergence);
   } catch (err) {
     // Best-effort telemetry must never affect termination, but failures stay visible.
     log.warn({ err }, 'cgroup divergence telemetry failed');
   }
+}
+
+function normalizeTerminationError(error: unknown): ProcessTreeTerminationError {
+  return error instanceof ProcessTreeTerminationError
+    ? error
+    : new ProcessTreeTerminationError(
+        'PROCESS_TREE_UNEXPECTED_FAILURE',
+        'Unexpected process-tree termination failure',
+        { cause: error },
+      );
+}
+
+function diagnosticContext(
+  options: KillSessionTreeOptions,
+): { source: ProcessTreeDiagnosticSource; sessionRowId?: number } | null {
+  const source = options.diagnosticSource;
+  if (!PROCESS_TREE_DIAGNOSTIC_SOURCES.includes(source as ProcessTreeDiagnosticSource)) {
+    return null;
+  }
+  const sessionRowId = options.diagnosticSessionRowId;
+  return Number.isSafeInteger(sessionRowId) && (sessionRowId ?? 0) > 0
+    ? { source: source as ProcessTreeDiagnosticSource, sessionRowId }
+    : { source: source as ProcessTreeDiagnosticSource };
+}
+
+function reportTelemetrySinkFailure(
+  options: KillSessionTreeOptions,
+  sink: 'outcome' | 'cgroup_divergence',
+  err: unknown,
+): void {
+  log.warn(
+    { ...diagnosticContext(options), sink, err },
+    'process-tree telemetry sink failed',
+  );
+}
+
+function notifyTelemetryObserver<T>(
+  observer: TelemetryObserver<T>,
+  value: T,
+  sink: 'outcome' | 'cgroup_divergence',
+): void {
+  try {
+    observer.sink(value);
+  } catch (err) {
+    reportTelemetrySinkFailure(observer.options, sink, err);
+  }
+}
+
+function addTerminationObservers(
+  telemetry: TerminationTelemetry,
+  options: KillSessionTreeOptions,
+  replay: boolean,
+): void {
+  if (options.onOutcome) {
+    const observer = { sink: options.onOutcome, options };
+    telemetry.outcomeObservers.add(observer);
+    if (replay && telemetry.lastOutcome) {
+      notifyTelemetryObserver(observer, telemetry.lastOutcome, 'outcome');
+    }
+  }
+  if (options.onCgroupDivergence) {
+    const observer = { sink: options.onCgroupDivergence, options };
+    telemetry.divergenceObservers.add(observer);
+    if (replay && telemetry.lastDivergence) {
+      notifyTelemetryObserver(observer, telemetry.lastDivergence, 'cgroup_divergence');
+    }
+  }
+}
+
+function broadcastOutcome(telemetry: TerminationTelemetry, outcome: KillSessionOutcome): void {
+  telemetry.lastOutcome = outcome;
+  for (const observer of telemetry.outcomeObservers) {
+    notifyTelemetryObserver(observer, outcome, 'outcome');
+  }
+}
+
+function broadcastDivergence(
+  telemetry: TerminationTelemetry,
+  divergence: CgroupDivergenceInfo,
+): void {
+  telemetry.lastDivergence = divergence;
+  for (const observer of telemetry.divergenceObservers) {
+    notifyTelemetryObserver(observer, divergence, 'cgroup_divergence');
+  }
+}
+
+function boundedSystemErrorCode(error: ProcessTreeTerminationError): string | undefined {
+  const cause = error.cause as { code?: unknown } | undefined;
+  const code = cause?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code)
+    ? code
+    : undefined;
+}
+
+function emitTerminationFailure(
+  options: KillSessionTreeOptions,
+  error: ProcessTreeTerminationError,
+): void {
+  const diagnostic = diagnosticContext(options);
+  if (!diagnostic) return;
+  const causeCode = boundedSystemErrorCode(error);
+  log.warn(
+    {
+      ...diagnostic,
+      errorCode: error.code,
+      retryClass: error.retryClass,
+      ...(causeCode === undefined ? {} : { causeCode }),
+    },
+    'process-tree termination failed',
+  );
+}
+
+function rejectTermination(
+  options: KillSessionTreeOptions,
+  error: ProcessTreeTerminationError,
+): Promise<never> {
+  emitTerminationFailure(options, error);
+  return Promise.reject(error);
 }
 
 export function killSessionTree(
@@ -536,47 +787,78 @@ export function killSessionTree(
   signal: NodeJS.Signals,
   options: KillSessionTreeOptions,
 ): Promise<void> {
-  if (options.generationMarker.trim() === '') {
-    return Promise.reject(new Error('Session process-tree generation marker must be non-empty'));
+  if (!isNonEmptyString(options.generationMarker)) {
+    return rejectTermination(
+      options,
+      new ProcessTreeTerminationError(
+        'PROCESS_TREE_INVALID_GENERATION',
+        'Session process-tree generation marker must be non-empty',
+      ),
+    );
   }
   let rootPid: number;
   try {
     rootPid = targetPid(target);
   } catch (error) {
-    return Promise.reject(error);
+    const normalized = normalizeTerminationError(error);
+    return rejectTermination(options, normalized);
   }
   const existing = activeTerminations.get(rootPid);
   if (existing) {
     if (existing.generationMarker !== options.generationMarker) {
-      return Promise.reject(new Error(
-        `Refusing process-tree lease change for active PID ${rootPid}: ` +
-          `${existing.generationMarker} -> ${options.generationMarker}`,
-      ));
+      return rejectTermination(
+        options,
+        new ProcessTreeTerminationError(
+          'PROCESS_TREE_LEASE_CONFLICT',
+          `Refusing process-tree lease change for active PID ${rootPid}: ` +
+            `${existing.generationMarker} -> ${options.generationMarker}`,
+        ),
+      );
     }
+    addTerminationObservers(existing.telemetry, options, true);
     return existing.promise;
   }
 
+  const telemetry: TerminationTelemetry = {
+    outcomeObservers: new Set(),
+    divergenceObservers: new Set(),
+    lastOutcome: null,
+    lastDivergence: null,
+  };
+  addTerminationObservers(telemetry, options, false);
+  const multiplexedOptions: KillSessionTreeOptions = {
+    ...options,
+    onOutcome: (outcome) => broadcastOutcome(telemetry, outcome),
+    onCgroupDivergence: (divergence) => broadcastDivergence(telemetry, divergence),
+  };
+
   let owned: OwnedProcessIdentity[];
-  let preCensusAvailable = false;
+  let preCensusError: unknown | null = null;
   try {
     owned = snapshotOwnedTree(readProcessCensus(), rootPid, options.generationMarker);
-    preCensusAvailable = true;
   } catch (error) {
     owned = [];
+    preCensusError = error;
   }
 
   // Cgroup membership proves only service-unit co-location, not ownership by
   // this provider session. Keep it observational until per-session attribution exists.
-  emitCgroupDivergence(owned, rootPid, options);
+  emitCgroupDivergence(owned, rootPid, multiplexedOptions);
 
   let context: TerminationContext;
-  const promise = runTermination(target, rootPid, owned, preCensusAvailable, signal, options)
+  const promise = runTermination(target, rootPid, owned, preCensusError, signal, multiplexedOptions)
+    .catch((error: unknown) => {
+      const normalized = normalizeTerminationError(error);
+      emitTerminationFailure(multiplexedOptions, normalized);
+      throw normalized;
+    })
     .finally(() => {
       if (activeTerminations.get(rootPid) === context) activeTerminations.delete(rootPid);
     });
   context = {
     generationMarker: options.generationMarker,
     promise,
+    telemetry,
   };
   activeTerminations.set(rootPid, context);
   return promise;

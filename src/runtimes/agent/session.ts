@@ -1116,11 +1116,8 @@ export class SessionManager {
     }
     return killSessionTree(child, signal, {
       generationMarker,
+      diagnosticSource: 'session_shutdown',
       termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
-      // #1755: surface the per-tree kill outcome so a residual ambiguous tree
-      // (never signaled — a `ps` census race or same-pid/different-command
-      // reading) is attributable on the shutdown path instead of silently
-      // invisible. Warn on unresolved ambiguity; debug on clean/escalated.
       onOutcome: (outcome) => {
         const record = {
           chatJid: this.chatJid,
@@ -1129,7 +1126,7 @@ export class SessionManager {
           outcome: outcome.outcome,
           escalated: outcome.escalated,
           durationMs: outcome.durationMs,
-          ambiguousPids: outcome.ambiguousPids,
+          ambiguousCount: outcome.ambiguousPids.length,
         };
         if (outcome.outcome === 'unresolved_ambiguous') {
           log.warn(record, 'kill-tree outcome: unresolved ambiguous identity');
@@ -1137,11 +1134,6 @@ export class SessionManager {
           log.debug(record, 'kill-tree outcome');
         }
       },
-      // #1869: surface the cgroup-vs-PPID divergence gauge (PR #1960) at the one
-      // call site that reaches killSessionTree; it was landed telemetry-only with
-      // no sink ever wired, so it emitted nothing in production. Best-effort by
-      // construction (never throws, never affects termination) — see
-      // process-tree.ts's emitCgroupDivergence/KillSessionTreeOptions doc comments.
       onCgroupDivergence: (info) => {
         log.debug(
           { ...info, chatJid: this.chatJid, sessionId: this.sessionId },

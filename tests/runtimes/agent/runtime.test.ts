@@ -163,7 +163,8 @@ vi.mock('../../../src/logger.ts', () => ({
   createChildLogger: () => mockRuntimeLogger,
 }));
 
-vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+vi.mock('../../../src/runtimes/agent/process-tree.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/process-tree.ts')>(),
   killSessionTree: mockKillSessionTree,
 }));
 
@@ -9757,6 +9758,10 @@ describe('AgentRuntime', () => {
     await runtime.start();
     expect(mockKillSessionTree).toHaveBeenCalledWith(4321, 'SIGTERM', {
       generationMarker: 'stale:43:ses-live-stale:4321',
+      diagnosticSource: 'stale_session_sweep',
+      diagnosticSessionRowId: 43,
+      onOutcome: expect.any(Function),
+      onCgroupDivergence: expect.any(Function),
     });
     expect(mockMarkOrphaned).toHaveBeenCalledWith(db, 43);
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
@@ -9817,7 +9822,128 @@ describe('AgentRuntime', () => {
     await expect(terminateKnownProcess(98_765)).rejects.toThrow('root row missing or ambiguous');
     expect(mockKillSessionTree).toHaveBeenCalledWith(98_765, 'SIGTERM', {
       generationMarker: expect.stringMatching(/^ownership-loss:98765:/),
+      diagnosticSource: 'ownership_loss_cleanup',
+      onOutcome: expect.any(Function),
+      onCgroupDivergence: expect.any(Function),
     });
+  });
+
+  it('does not mark a stale session orphaned when cleanup reports unresolved ambiguity', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const { markOrphaned: mockMarkOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions: mockClassify } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    const { SessionManager: MockSessionManager } = await import('../../../src/runtimes/agent/session.ts');
+    mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[2] as {
+        onOutcome?: (outcome: {
+          outcome: 'unresolved_ambiguous';
+          generationMarker: string;
+          durationMs: number;
+          escalated: boolean;
+          ambiguousPids: readonly number[];
+        }) => void;
+      };
+      options.onOutcome?.({
+        outcome: 'unresolved_ambiguous',
+        generationMarker: 'stale:46:ses-stale-ambiguous:4646',
+        durationMs: 1,
+        escalated: false,
+        ambiguousPids: [4_647],
+      });
+    });
+    (mockClassify as ReturnType<typeof vi.fn>).mockReturnValue([{
+      id: 46,
+      sessionId: 'ses-stale-ambiguous',
+      claudePid: 4646,
+      chatJid: 'stale-ambiguous@s.whatsapp.net',
+      conversationKey: 'stale-ambiguous',
+      status: 'active',
+      classification: 'stale_live',
+      reason: 'superseded by checkpoint',
+    }]);
+    const durability = {
+      getResumableCheckpoints: vi.fn(() => [{ conversation_key: 'stale-ambiguous' }]),
+      getSessionCheckpoint: vi.fn(() => ({
+        session_id: 'ses-current',
+        updated_at: new Date().toISOString().replace(/Z$/, ''),
+      })),
+    };
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    runtime.setDurability(durability as any);
+
+    await runtime.start();
+
+    expect(mockMarkOrphaned).not.toHaveBeenCalledWith(db, 46);
+    expect(MockSessionManager).not.toHaveBeenCalled();
+  });
+
+  it('rejects ownership-loss cleanup when termination reports unresolved ambiguity', async () => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger);
+    const terminateKnownProcess = (runtime as unknown as {
+      terminateKnownProcess(pid: number): Promise<void>;
+    }).terminateKnownProcess.bind(runtime);
+    mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[2] as {
+        onOutcome?: (outcome: {
+          outcome: 'unresolved_ambiguous';
+          generationMarker: string;
+          durationMs: number;
+          escalated: boolean;
+          ambiguousPids: readonly number[];
+        }) => void;
+      };
+      options.onOutcome?.({
+        outcome: 'unresolved_ambiguous',
+        generationMarker: 'ownership-loss:98766:test',
+        durationMs: 1,
+        escalated: false,
+        ambiguousPids: [98_767],
+      });
+    });
+
+    await expect(terminateKnownProcess(98_766)).rejects.toMatchObject({
+      code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+      retryClass: 'census_retryable',
+    });
+  });
+
+  it('keeps health and client output unchanged while ownership diagnostics fire', async () => {
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(makeDb(), messenger);
+    const terminateKnownProcess = (runtime as unknown as {
+      terminateKnownProcess(pid: number): Promise<void>;
+    }).terminateKnownProcess.bind(runtime);
+    const before = JSON.stringify(runtime.getHealthSnapshot());
+    mockKillSessionTree.mockImplementationOnce(async (...args: unknown[]) => {
+      const options = args[2] as {
+        onOutcome?: (outcome: {
+          outcome: 'terminated';
+          generationMarker: string;
+          durationMs: number;
+          escalated: boolean;
+          ambiguousPids: readonly number[];
+        }) => void;
+        onCgroupDivergence?: (info: {
+          cgroupMemberCount: number;
+          ownedCount: number;
+          offTreeCount: number;
+        }) => void;
+      };
+      options.onOutcome?.({
+        outcome: 'terminated',
+        generationMarker: 'private-generation-marker',
+        durationMs: 2,
+        escalated: false,
+        ambiguousPids: [],
+      });
+      options.onCgroupDivergence?.({ cgroupMemberCount: 4, ownedCount: 2, offTreeCount: 1 });
+    });
+
+    await terminateKnownProcess(98_768);
+
+    expect(JSON.stringify(runtime.getHealthSnapshot())).toBe(before);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
   });
 
   it('sandboxPerChat: ambiguous startup sessions warn without terminating or orphaning', async () => {

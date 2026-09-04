@@ -7371,16 +7371,17 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
-  it('#1869: wires onCgroupDivergence into killSessionTree and logs when the sink fires', async () => {
+  it('#1755/#1869: wires bounded outcome and cgroup observers for session shutdown', async () => {
     const firstChild = makeMockChild(12007);
     const secondChild = makeMockChild(12008);
     vi.mocked(spawn)
       .mockReturnValueOnce(firstChild as never)
       .mockReturnValueOnce(secondChild as never);
     const gate = new ProviderExecutionGate();
+    const { messenger } = makeMessenger();
     const session = new SessionManager({
       db: makeDb(),
-      messenger: makeMessenger().messenger,
+      messenger,
       chatJid: 'cgroup-divergence@s.whatsapp.net',
       onEvent: vi.fn(),
       provider: 'opencode-cli',
@@ -7397,30 +7398,56 @@ describe('session.ts uncovered-branch coverage', () => {
       expect(killSessionTree).toHaveBeenCalledWith(
         firstChild,
         'SIGTERM',
-        expect.objectContaining({ onCgroupDivergence: expect.any(Function) }),
+        expect.objectContaining({
+          diagnosticSource: 'session_shutdown',
+          onOutcome: expect.any(Function),
+          onCgroupDivergence: expect.any(Function),
+        }),
       );
     });
     await secondTurn;
 
-    // The dormant #1869 telemetry (PR #1960) is wired at the killChildTree call
-    // site: killSessionTree must receive a sink, and firing it must log — proving
-    // the sink is not merely present but observable.
     const [, , options] = vi.mocked(killSessionTree).mock.calls[0];
-    const onCgroupDivergence = (options as { onCgroupDivergence?: (info: unknown) => void }).onCgroupDivergence;
-    expect(onCgroupDivergence).toBeInstanceOf(Function);
-
+    const observers = options as {
+      onOutcome?: (outcome: {
+        outcome: 'unresolved_ambiguous';
+        generationMarker: string;
+        durationMs: number;
+        escalated: boolean;
+        ambiguousPids: readonly number[];
+      }) => void;
+      onCgroupDivergence?: (info: {
+        cgroupMemberCount: number;
+        ownedCount: number;
+        offTreeCount: number;
+      }) => void;
+    };
+    mockLogger.warn.mockClear();
     mockLogger.debug.mockClear();
-    onCgroupDivergence?.({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 });
+    observers.onOutcome?.({
+      outcome: 'unresolved_ambiguous',
+      generationMarker: 'private-generation-marker',
+      durationMs: 7,
+      escalated: false,
+      ambiguousPids: [999_001],
+    });
+    observers.onCgroupDivergence?.({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 });
 
-    expect(mockLogger.debug).toHaveBeenCalledWith(
+    expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
-        cgroupMemberCount: 5,
-        ownedCount: 2,
-        offTreeCount: 3,
-        chatJid: 'cgroup-divergence@s.whatsapp.net',
+        outcome: 'unresolved_ambiguous',
+        ambiguousCount: 1,
+        durationMs: 7,
       }),
-      expect.stringContaining('cgroup divergence'),
+      'kill-tree outcome: unresolved ambiguous identity',
     );
+    expect(mockLogger.warn.mock.calls[0]?.[0]).not.toHaveProperty('ambiguousPids');
+    expect(mockLogger.warn.mock.calls[0]?.[0]).not.toHaveProperty('generationMarker');
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ cgroupMemberCount: 5, ownedCount: 2, offTreeCount: 3 }),
+      'cgroup divergence',
+    );
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
 
     secondChild._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });

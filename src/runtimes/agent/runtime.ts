@@ -246,7 +246,7 @@ import {
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { SessionOwnershipRegistry } from './session-ownership.ts';
-import { killSessionTree } from './process-tree.ts';
+import { killSessionTree, ProcessTreeTerminationError } from './process-tree.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { FallbackWindowState } from './fallback-window-state.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
@@ -1669,10 +1669,26 @@ export class AgentRuntime implements Runtime {
             conversationKey: session.conversationKey,
             reason: session.reason,
           }, 'reaping stale session');
+          const cleanupObservation: {
+            outcome: 'terminated' | 'escalated' | 'unresolved_ambiguous' | null;
+            ambiguousCount: number;
+          } = { outcome: null, ambiguousCount: 0 };
           try {
             await killSessionTree(session.claudePid, 'SIGTERM', {
               generationMarker:
                 `stale:${session.id}:${session.sessionId ?? 'unknown'}:${session.claudePid}`,
+              diagnosticSource: 'stale_session_sweep',
+              diagnosticSessionRowId: session.id,
+              onOutcome: (outcome) => {
+                cleanupObservation.outcome = outcome.outcome;
+                cleanupObservation.ambiguousCount = outcome.ambiguousPids.length;
+              },
+              onCgroupDivergence: (info) => {
+                log.debug(
+                  { id: session.id, conversationKey: session.conversationKey, ...info },
+                  'stale session cgroup divergence',
+                );
+              },
             });
           } catch (err) {
             log.error({
@@ -1686,6 +1702,20 @@ export class AgentRuntime implements Runtime {
               break;
             }
             throw err;
+          }
+          if (cleanupObservation.outcome === 'unresolved_ambiguous') {
+            log.warn(
+              {
+                id: session.id,
+                conversationKey: session.conversationKey,
+                ambiguousCount: cleanupObservation.ambiguousCount,
+              },
+              'stale session tree cleanup unresolved — preserving active row',
+            );
+            if (session.conversationKey) {
+              proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+            }
+            break;
           }
           markOrphaned(this.db, session.id);
           break;
@@ -8279,9 +8309,27 @@ export class AgentRuntime implements Runtime {
   }
 
   private async terminateKnownProcess(pid: number): Promise<void> {
+    const observation: {
+      outcome: 'terminated' | 'escalated' | 'unresolved_ambiguous' | null;
+      ambiguousCount: number;
+    } = { outcome: null, ambiguousCount: 0 };
     await killSessionTree(pid, 'SIGTERM', {
       generationMarker: `ownership-loss:${pid}:${randomUUID()}`,
+      diagnosticSource: 'ownership_loss_cleanup',
+      onOutcome: (outcome) => {
+        observation.outcome = outcome.outcome;
+        observation.ambiguousCount = outcome.ambiguousPids.length;
+      },
+      onCgroupDivergence: (info) => {
+        log.debug({ pid, ...info }, 'ownership-loss cleanup cgroup divergence');
+      },
     });
+    if (observation.outcome === 'unresolved_ambiguous') {
+      throw new ProcessTreeTerminationError(
+        'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+        `Ownership-loss cleanup retained ${observation.ambiguousCount} ambiguous process identities`,
+      );
+    }
   }
 
   private async terminateKnownProcesses(pids: Array<number | null>): Promise<void> {
