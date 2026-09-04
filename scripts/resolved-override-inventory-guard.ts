@@ -80,7 +80,9 @@ import {
   inventoryGuardCliFailure,
   inventorySourceFiles,
   parseInventoryGuardArgs,
+  runInventoryGuardCliBoundary,
   sourceInventoryDiagnostics,
+  type InventoryGuardExitCode,
   type InventoryGuardReport,
   type SourceInventoryCounts,
   type SourceInventoryFileSystem,
@@ -665,7 +667,7 @@ function humanLines(evaluation: ResolvedOverrideGuardEvaluation): string[] {
   ];
 }
 
-function main(argv: readonly string[] = process.argv.slice(2)): number {
+function main(argv: readonly string[] = process.argv.slice(2)): InventoryGuardExitCode {
   const parsed = parseInventoryGuardArgs(argv);
   if (!parsed.ok) {
     const report = inventoryGuardCliFailure(TAG, parsed.code);
@@ -676,5 +678,6 @@ function main(argv: readonly string[] = process.argv.slice(2)): number {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exit(main());
+  const argv = process.argv.slice(2);
+  process.exitCode = runInventoryGuardCliBoundary(TAG, argv, () => main(argv));
 }

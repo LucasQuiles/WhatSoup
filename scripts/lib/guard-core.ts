@@ -93,9 +93,9 @@ export type SourceInventoryStat = Pick<
 >;
 
 export interface SourceInventoryFileSystem {
-  readdirSync(directory: string): readonly string[];
-  lstatSync(entry: string): SourceInventoryStat;
-  readFileSync(file: string, expectedStat: SourceInventoryStat): string;
+  readdirSync(directory: string, boundDirectory?: string): readonly string[];
+  lstatSync(entry: string, boundEntry?: string): SourceInventoryStat;
+  readFileSync(file: string, expectedStat: SourceInventoryStat, boundFile?: string): string;
 }
 
 export interface SourceInventoryOptions {
@@ -133,6 +133,11 @@ export interface InventoryGuardReport {
   exitCode: InventoryGuardExitCode;
   counts: Readonly<Record<string, number>>;
   diagnostics: readonly InventoryGuardDiagnostic[];
+}
+
+export interface InventoryGuardStreams {
+  stdout: { write(chunk: string): unknown };
+  stderr: { write(chunk: string): unknown };
 }
 
 export type InventoryGuardArgs =
@@ -214,17 +219,63 @@ export function emitInventoryGuardReport(
   report: InventoryGuardReport,
   mode: InventoryGuardOutputMode,
   humanLines: readonly string[],
+  streams: InventoryGuardStreams = process,
 ): InventoryGuardExitCode {
   if (mode === 'json') {
-    process.stdout.write(`${JSON.stringify(report)}\n`);
+    streams.stdout.write(`${JSON.stringify(report)}\n`);
     return report.exitCode;
   }
   const lines = mode === 'verbose'
     ? [...humanLines, ...verboseInventoryGuardLines(report)]
     : [...humanLines];
-  const stream = report.exitCode === 0 ? process.stdout : process.stderr;
+  const stream = report.exitCode === 0 ? streams.stdout : streams.stderr;
   stream.write(`${lines.join('\n')}\n`);
   return report.exitCode;
+}
+
+export function emitInventoryGuardUnexpectedFailure(
+  guard: string,
+  argv: readonly string[],
+  streams: InventoryGuardStreams = process,
+): InventoryGuardExitCode {
+  const mode: 'human' | 'json' = argv.includes('--json') ? 'json' : 'human';
+  const report: InventoryGuardReport = {
+    schemaVersion: 1,
+    guard,
+    status: 'inconclusive',
+    exitCode: 2,
+    counts: {
+      filesExamined: 0,
+      findings: 0,
+      scanIssues: 0,
+      scanIssuesOmitted: 0,
+    },
+    diagnostics: [{ code: 'guard.internal.unexpected' }],
+  };
+  return emitInventoryGuardReport(
+    report,
+    mode,
+    [`${guard}: INCONCLUSIVE — guard.internal.unexpected`],
+    streams,
+  );
+}
+
+/**
+ * Final privacy boundary for synchronous inventory CLIs. Library-level
+ * programming errors still propagate to callers; executable entry points map
+ * them to one stable, non-sensitive inconclusive receipt.
+ */
+export function runInventoryGuardCliBoundary(
+  guard: string,
+  argv: readonly string[],
+  action: () => InventoryGuardExitCode,
+  streams: InventoryGuardStreams = process,
+): InventoryGuardExitCode {
+  try {
+    return action();
+  } catch {
+    return emitInventoryGuardUnexpectedFailure(guard, argv, streams);
+  }
 }
 
 class SourceInventoryReplacementError extends Error {}
@@ -237,6 +288,10 @@ function sameSourceIdentity(left: SourceInventoryStat, right: SourceInventorySta
     && left.ctimeMs === right.ctimeMs;
 }
 
+function sameSourceNode(left: SourceInventoryStat, right: SourceInventoryStat): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function replacementError(): SourceInventoryReplacementError {
   return new SourceInventoryReplacementError('source inventory entry changed during read');
 }
@@ -247,12 +302,12 @@ function replacementPathFailure(error: unknown): boolean {
 }
 
 const nativeSourceInventoryFileSystem: SourceInventoryFileSystem = {
-  readdirSync: (directory) => readdirSync(directory),
-  lstatSync: (entry) => lstatSync(entry),
-  readFileSync: (file, expectedStat) => {
+  readdirSync: (directory, boundDirectory = directory) => readdirSync(boundDirectory),
+  lstatSync: (entry, boundEntry = entry) => lstatSync(boundEntry),
+  readFileSync: (file, expectedStat, boundFile = file) => {
     let descriptor: number;
     try {
-      descriptor = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      descriptor = openSync(boundFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     } catch (error) {
       if (replacementPathFailure(error)) throw replacementError();
       throw error;
@@ -266,7 +321,7 @@ const nativeSourceInventoryFileSystem: SourceInventoryFileSystem = {
       const afterRead = fstatSync(descriptor);
       let currentPath: SourceInventoryStat;
       try {
-        currentPath = lstatSync(file);
+        currentPath = lstatSync(boundFile);
       } catch (error) {
         if (replacementPathFailure(error)) throw replacementError();
         throw error;
@@ -310,11 +365,17 @@ function systemErrorCode(error: unknown): { operational: boolean; systemCode?: s
 
 /**
  * Deterministically inventory and read selected source files without following
- * symlinks. Operational filesystem failures become bounded, privacy-safe
- * issues; exceptions without a Node-style system `code` propagate unchanged.
+ * symlinks. Each synchronous traversal is rooted in the entered directory's
+ * kernel-held working-directory identity, so swapping an absolute ancestor
+ * cannot redirect later child lookups. Operational filesystem failures become
+ * bounded, privacy-safe issues; exceptions without a Node-style system `code`
+ * propagate unchanged.
  */
 export function inventorySourceFiles(options: SourceInventoryOptions): SourceInventoryResult {
   const fileSystem = options.fileSystem ?? nativeSourceInventoryFileSystem;
+  const repoRoot = path.resolve(options.repoRoot);
+  const startingCwd = process.cwd();
+  const startingCwdStat = lstatSync('.');
   const issueLimit = options.issueLimit ?? SOURCE_INVENTORY_DEFAULT_ISSUE_LIMIT;
   if (!Number.isSafeInteger(issueLimit) || issueLimit < 0) {
     throw new RangeError('source inventory issueLimit must be a non-negative safe integer');
@@ -328,6 +389,7 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
   let entriesInspected = 0;
   let candidatesFound = 0;
   let issuesTotal = 0;
+  let cwdDepth = 0;
 
   const recordIssue = (issue: SourceInventoryIssue): void => {
     issuesTotal += 1;
@@ -355,11 +417,11 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
     relativeDirectory: string,
     absoluteDirectory: string,
     expectedDirectoryStat: SourceInventoryStat,
-  ): void => {
+  ): boolean => {
     const fileCheckpoint = files.length;
     let entries: readonly string[];
     try {
-      entries = fileSystem.readdirSync(absoluteDirectory);
+      entries = fileSystem.readdirSync(absoluteDirectory, '.');
     } catch (error) {
       classifyFailure(
         error,
@@ -369,7 +431,7 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
         'readdir',
         relativeDirectory,
       );
-      return;
+      return true;
     }
     directoriesScanned += 1;
     if (relativeDirectory === root) rootsScanned += 1;
@@ -389,7 +451,7 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
       entriesInspected += 1;
       let stat: SourceInventoryStat;
       try {
-        stat = fileSystem.lstatSync(absoluteEntry);
+        stat = fileSystem.lstatSync(absoluteEntry, entry);
       } catch (error) {
         classifyFailure(error, 'guard.scan.entry-unreadable', 'lstat', relativeEntry);
         continue;
@@ -404,18 +466,105 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
       }
       if (stat.isDirectory()) {
         if (!options.excludeDirectory?.(relativeEntry)) {
-          walk(root, relativeEntry, absoluteEntry, stat);
+          try {
+            process.chdir(entry);
+            cwdDepth += 1;
+          } catch (error) {
+            if (replacementPathFailure(error)) {
+              recordIssue({
+                code: 'guard.scan.entry-replaced',
+                operation: 'readdir',
+                path: relativeEntry,
+              });
+            } else {
+              classifyFailure(error, 'guard.scan.entry-unreadable', 'readdir', relativeEntry);
+            }
+            continue;
+          }
+
+          let enteredStat: SourceInventoryStat;
+          try {
+            enteredStat = fileSystem.lstatSync(absoluteEntry, '.');
+          } catch (error) {
+            files.splice(fileCheckpoint);
+            if (replacementPathFailure(error)) {
+              recordIssue({
+                code: 'guard.scan.entry-replaced',
+                operation: 'readdir',
+                path: relativeEntry,
+              });
+            } else {
+              classifyFailure(error, 'guard.scan.directory-unreadable', 'lstat', relativeEntry);
+            }
+            return false;
+          }
+          if (
+            !enteredStat.isDirectory()
+            || enteredStat.isSymbolicLink()
+            || !sameSourceIdentity(stat, enteredStat)
+          ) {
+            files.splice(fileCheckpoint);
+            recordIssue({
+              code: 'guard.scan.entry-replaced',
+              operation: 'readdir',
+              path: relativeEntry,
+            });
+            return false;
+          }
+
+          if (!walk(root, relativeEntry, absoluteEntry, enteredStat)) {
+            files.splice(fileCheckpoint);
+            return false;
+          }
+
+          try {
+            process.chdir('..');
+            cwdDepth -= 1;
+          } catch (error) {
+            files.splice(fileCheckpoint);
+            classifyFailure(error, 'guard.scan.directory-unreadable', 'readdir', relativeDirectory);
+            return false;
+          }
+          let returnedStat: SourceInventoryStat;
+          try {
+            returnedStat = fileSystem.lstatSync(absoluteDirectory, '.');
+          } catch (error) {
+            files.splice(fileCheckpoint);
+            if (replacementPathFailure(error)) {
+              recordIssue({
+                code: 'guard.scan.entry-replaced',
+                operation: 'readdir',
+                path: relativeDirectory,
+              });
+            } else {
+              classifyFailure(error, 'guard.scan.directory-unreadable', 'lstat', relativeDirectory);
+            }
+            return false;
+          }
+          if (
+            !returnedStat.isDirectory()
+            || returnedStat.isSymbolicLink()
+            || !sameSourceIdentity(expectedDirectoryStat, returnedStat)
+          ) {
+            files.splice(fileCheckpoint);
+            recordIssue({
+              code: 'guard.scan.entry-replaced',
+              operation: 'readdir',
+              path: relativeDirectory,
+            });
+            return false;
+          }
         }
         continue;
       }
       if (!stat.isFile() || !options.includeFile(relativeEntry)) continue;
       candidatesFound += 1;
       try {
-        const content = fileSystem.readFileSync(absoluteEntry, stat);
+        const content = fileSystem.readFileSync(absoluteEntry, stat, entry);
         if (typeof content !== 'string') {
           throw new TypeError('source inventory adapter returned non-text content');
         }
-        const afterRead = fileSystem.lstatSync(absoluteEntry);
+        const afterRead = fileSystem.lstatSync(absoluteEntry, entry);
         if (
           !afterRead.isFile()
           || afterRead.isSymbolicLink()
@@ -444,7 +593,7 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
 
     let currentDirectoryStat: SourceInventoryStat;
     try {
-      currentDirectoryStat = fileSystem.lstatSync(absoluteDirectory);
+      currentDirectoryStat = fileSystem.lstatSync(absoluteDirectory, '.');
     } catch (error) {
       files.splice(fileCheckpoint);
       if (replacementPathFailure(error)) {
@@ -463,7 +612,7 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
           relativeDirectory,
         );
       }
-      return;
+      return true;
     }
     if (
       !currentDirectoryStat.isDirectory()
@@ -476,35 +625,234 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
         operation: 'readdir',
         path: relativeDirectory,
       });
+      return false;
     }
+    return true;
   };
 
-  for (const root of roots) {
-    const absoluteRoot = path.join(options.repoRoot, root);
-    let stat: SourceInventoryStat;
-    try {
-      stat = fileSystem.lstatSync(absoluteRoot);
-    } catch (error) {
+  let repositoryStat: SourceInventoryStat | null = null;
+  try {
+    repositoryStat = fileSystem.lstatSync(repoRoot, repoRoot);
+  } catch (error) {
+    for (const root of roots) {
       classifyFailure(error, 'guard.scan.root-unreadable', 'lstat', root);
-      continue;
     }
-    if (stat.isSymbolicLink()) {
-      recordIssue({
-        code: 'guard.scan.symlink-refused',
-        operation: 'lstat',
-        path: root,
-      });
-      continue;
+  }
+
+  let enteredRepository = false;
+  if (repositoryStat !== null) {
+    if (repositoryStat.isSymbolicLink() || !repositoryStat.isDirectory()) {
+      for (const root of roots) {
+        recordIssue({
+          code: repositoryStat.isSymbolicLink()
+            ? 'guard.scan.symlink-refused'
+            : 'guard.scan.root-unreadable',
+          operation: 'lstat',
+          path: root,
+        });
+      }
+      repositoryStat = null;
+    } else if (sameSourceNode(repositoryStat, startingCwdStat)) {
+      enteredRepository = true;
+    } else if (path.resolve(startingCwd) === repoRoot) {
+      for (const root of roots) {
+        recordIssue({
+          code: 'guard.scan.entry-replaced',
+          operation: 'readdir',
+          path: root,
+        });
+      }
+      repositoryStat = null;
+    } else {
+      try {
+        process.chdir(repoRoot);
+        enteredRepository = true;
+      } catch (error) {
+        for (const root of roots) {
+          if (replacementPathFailure(error)) {
+            recordIssue({
+              code: 'guard.scan.entry-replaced',
+              operation: 'readdir',
+              path: root,
+            });
+          } else {
+            classifyFailure(error, 'guard.scan.root-unreadable', 'readdir', root);
+          }
+        }
+        repositoryStat = null;
+      }
     }
-    if (!stat.isDirectory()) {
-      recordIssue({
-        code: 'guard.scan.root-unreadable',
-        operation: 'lstat',
-        path: root,
-      });
-      continue;
+  }
+
+  try {
+    if (repositoryStat !== null && enteredRepository) {
+      let enteredRepositoryStat: SourceInventoryStat | null = null;
+      try {
+        enteredRepositoryStat = fileSystem.lstatSync(repoRoot, '.');
+      } catch (error) {
+        for (const root of roots) {
+          if (replacementPathFailure(error)) {
+            recordIssue({
+              code: 'guard.scan.entry-replaced',
+              operation: 'readdir',
+              path: root,
+            });
+          } else {
+            classifyFailure(error, 'guard.scan.root-unreadable', 'lstat', root);
+          }
+        }
+        repositoryStat = null;
+      }
+      if (
+        repositoryStat !== null
+        && enteredRepositoryStat !== null
+        && (
+          !enteredRepositoryStat.isDirectory()
+          || enteredRepositoryStat.isSymbolicLink()
+          || !sameSourceIdentity(repositoryStat, enteredRepositoryStat)
+        )
+      ) {
+        for (const root of roots) {
+          recordIssue({
+            code: 'guard.scan.entry-replaced',
+            operation: 'readdir',
+            path: root,
+          });
+        }
+        repositoryStat = null;
+      }
     }
-    walk(root, root, absoluteRoot, stat);
+
+    rootLoop: for (const root of repositoryStat === null ? [] : roots) {
+      const absoluteRoot = path.join(repoRoot, root);
+      const rootFileCheckpoint = files.length;
+      let repositoryNavigationValid = true;
+      try {
+        let enteredStat: SourceInventoryStat | null = null;
+        let traversedRoot = '';
+        for (const segment of root.split('/')) {
+          traversedRoot = traversedRoot === '' ? segment : `${traversedRoot}/${segment}`;
+          const absoluteSegment = path.join(repoRoot, traversedRoot);
+          let segmentStat: SourceInventoryStat;
+          try {
+            segmentStat = fileSystem.lstatSync(absoluteSegment, segment);
+          } catch (error) {
+            classifyFailure(error, 'guard.scan.root-unreadable', 'lstat', root);
+            continue rootLoop;
+          }
+          if (segmentStat.isSymbolicLink()) {
+            recordIssue({
+              code: 'guard.scan.symlink-refused',
+              operation: 'lstat',
+              path: root,
+            });
+            continue rootLoop;
+          }
+          if (!segmentStat.isDirectory()) {
+            recordIssue({
+              code: 'guard.scan.root-unreadable',
+              operation: 'lstat',
+              path: root,
+            });
+            continue rootLoop;
+          }
+          try {
+            process.chdir(segment);
+            cwdDepth += 1;
+          } catch (error) {
+            if (replacementPathFailure(error)) {
+              recordIssue({
+                code: 'guard.scan.entry-replaced',
+                operation: 'readdir',
+                path: root,
+              });
+            } else {
+              classifyFailure(error, 'guard.scan.root-unreadable', 'readdir', root);
+            }
+            continue rootLoop;
+          }
+          try {
+            enteredStat = fileSystem.lstatSync(absoluteSegment, '.');
+          } catch (error) {
+            if (replacementPathFailure(error)) {
+              recordIssue({
+                code: 'guard.scan.entry-replaced',
+                operation: 'readdir',
+                path: root,
+              });
+            } else {
+              classifyFailure(error, 'guard.scan.root-unreadable', 'lstat', root);
+            }
+            continue rootLoop;
+          }
+          if (
+            !enteredStat.isDirectory()
+            || enteredStat.isSymbolicLink()
+            || !sameSourceIdentity(segmentStat, enteredStat)
+          ) {
+            recordIssue({
+              code: 'guard.scan.entry-replaced',
+              operation: 'readdir',
+              path: root,
+            });
+            files.splice(rootFileCheckpoint);
+            continue rootLoop;
+          }
+        }
+        if (enteredStat === null) throw new RangeError('source inventory root had no path segments');
+        if (!walk(root, root, absoluteRoot, enteredStat)) {
+          files.splice(rootFileCheckpoint);
+        }
+      } finally {
+        while (cwdDepth > 0) {
+          try {
+            process.chdir('..');
+            cwdDepth -= 1;
+          } catch {
+            repositoryNavigationValid = false;
+            break;
+          }
+        }
+        let currentRepositoryStat: SourceInventoryStat | null = null;
+        let currentRepositoryPathStat: SourceInventoryStat | null = null;
+        if (repositoryNavigationValid) {
+          try {
+            currentRepositoryStat = fileSystem.lstatSync(repoRoot, '.');
+            currentRepositoryPathStat = fileSystem.lstatSync(repoRoot, repoRoot);
+          } catch {
+            repositoryNavigationValid = false;
+          }
+        }
+        if (
+          !repositoryNavigationValid
+          || currentRepositoryStat === null
+          || currentRepositoryPathStat === null
+          || repositoryStat === null
+          || !currentRepositoryStat.isDirectory()
+          || !currentRepositoryPathStat.isDirectory()
+          || currentRepositoryStat.isSymbolicLink()
+          || currentRepositoryPathStat.isSymbolicLink()
+          || !sameSourceIdentity(repositoryStat, currentRepositoryStat)
+          || !sameSourceIdentity(repositoryStat, currentRepositoryPathStat)
+        ) {
+          files.length = 0;
+          recordIssue({
+            code: 'guard.scan.entry-replaced',
+            operation: 'readdir',
+            path: root,
+          });
+          repositoryNavigationValid = false;
+        }
+      }
+      if (!repositoryNavigationValid) break;
+    }
+  } finally {
+    const currentCwdStat = lstatSync('.');
+    if (!sameSourceNode(startingCwdStat, currentCwdStat)) {
+      process.chdir(startingCwd);
+      const restoredCwdStat = lstatSync('.');
+      if (!sameSourceNode(startingCwdStat, restoredCwdStat)) throw replacementError();
+    }
   }
 
   files.sort((left, right) => compareText(left.path, right.path) || compareText(left.root, right.root));

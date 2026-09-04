@@ -23,10 +23,10 @@
 //       a table in more than one set is a registry bug in its own right.
 //
 //   (1b) SELF-PROVISIONED DISCOVERY. Check (1)'s completeness claim is scoped
-//        to `migratedSchemaSnapshot()` — but six real, live tables are created
+//        to `migratedSchemaSnapshot()` — but real, live tables are created
 //        OUTSIDE that migration registry by their own self-managed
 //        `ensureXSchema(db)` functions and are invisible to it. This check
-//        closes that blind spot: a cheap, bounded static scan finds every
+//        closes that blind spot: the shared source inventory finds every
 //        `CREATE TABLE (IF NOT EXISTS)? <name>` text occurrence under
 //        `src/**/*.ts` (discovery, not parsing — comments stripped, no SQL
 //        parser), and every discovered name must be in the snapshot,
@@ -108,7 +108,6 @@
 //
 // Exit codes: 0 pass, 1 violation, 2 inconclusive (schema unreadable/empty/discovery-scan-empty/scan threw).
 
-import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -116,11 +115,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isNonEmptyString } from '../src/lib/type-guards.ts';
 import {
   emitInventoryGuardReport,
+  emitInventoryGuardUnexpectedFailure,
   inventoryGuardCliFailure,
   inventorySourceFiles,
   parseInventoryGuardArgs,
   sourceInventoryDiagnostics,
   type InventoryGuardReport,
+  type InventoryGuardOutputMode,
+  type InventoryGuardExitCode,
+  type InventoryGuardStreams,
   type SourceInventoryCounts,
   type SourceInventoryFileSystem,
   type SourceInventoryIssue,
@@ -158,7 +161,9 @@ export interface DurabilityWriterFinding {
     | 'unwired-terminal-missing-metadata'
     | 'unregistered-self-provisioned-table'
     | 'self-provisioned-missing-metadata'
+    | 'self-provisioned-module-not-src'
     | 'self-provisioned-module-missing'
+    | 'self-provisioned-discovery-mismatch'
     | 'self-provisioned-anti-dodge-unjustified'
     | 'discovery-exclusion-missing-metadata';
   table: string;
@@ -173,11 +178,9 @@ export interface DurabilityWriterRegistryInput {
   discoveryExclusions?: readonly DiscoveryExclusionEntry[];
   /**
    * Precomputed `CREATE TABLE` name -> discovering-file(s) map, for tests.
-   * Defaults to a real scan of `repoRoot/src`. Production (`main()`) always
-   * uses the default; a test overriding OTHER inputs with a small synthetic
-   * `snapshot` should pass `discovered: new Map()` too, or the real scan
-   * (against the real repo's `src/`) will report those real tables as
-   * uncovered by the test's tiny synthetic snapshot.
+   * The source inventory still runs so counters and descriptor-bound file
+   * contents remain real; this seam replaces only the discovered table map.
+   * Production (`main()`) never supplies it.
    */
   discovered?: ReadonlyMap<string, readonly string[]>;
   knownStatusTables?: ReadonlySet<string>;
@@ -217,7 +220,15 @@ export interface DurabilityWriterScanResult {
 export type DurabilityWriterOutcome =
   | { status: 'pass'; result: DurabilityWriterScanResult }
   | { status: 'violation'; result: DurabilityWriterScanResult }
-  | { status: 'inconclusive'; reason: string; result?: DurabilityWriterScanResult };
+  | {
+      status: 'inconclusive';
+      reason:
+        | 'guard.durability.source-inventory-inconclusive'
+        | 'guard.durability.snapshot-empty'
+        | 'guard.durability.discovery-empty'
+        | 'guard.durability.scan-inconclusive';
+      result?: DurabilityWriterScanResult;
+    };
 
 const STATUS_LIKE_COLUMN_RE = /status|state|error|outcome|failed/i;
 
@@ -283,13 +294,14 @@ function hasReasonAndIssue(entry: { reason: string; issue: string }): boolean {
   return Boolean(entry.reason?.trim()) && Boolean(entry.issue?.trim());
 }
 
-/** A writer site must be a non-test path under `src/` — the invariant is about production writers. */
-function isNonTestSrcFile(relPath: string): boolean {
-  const normalized = relPath.split(path.sep).join('/');
-  if (!normalized.startsWith('src/')) return false;
-  if (normalized.endsWith('.test.ts')) return false;
-  if (normalized.split('/').includes('tests')) return false;
-  return true;
+/** Return one canonical production source path, or null for any ambiguous/escaping spelling. */
+function canonicalNonTestSrcFile(relPath: string): string | null {
+  if (!isNonEmptyString(relPath) || path.isAbsolute(relPath) || relPath.includes('\\')) return null;
+  const segments = relPath.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return null;
+  if (path.posix.normalize(relPath) !== relPath || segments[0] !== 'src') return null;
+  if (relPath.endsWith('.test.ts') || segments.includes('tests')) return null;
+  return relPath;
 }
 
 /**
@@ -309,20 +321,10 @@ const CREATE_TABLE_RE = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?([A-Za-
 
 interface CreateTableDiscovery {
   tables: ReadonlyMap<string, readonly string[]>;
+  sourceContents: ReadonlyMap<string, string>;
   inventoryCounts: SourceInventoryCounts;
   scanIssues: SourceInventoryIssue[];
 }
-
-const EMPTY_INVENTORY_COUNTS: SourceInventoryCounts = {
-  rootsRequested: 0,
-  rootsScanned: 0,
-  directoriesScanned: 0,
-  entriesInspected: 0,
-  candidatesFound: 0,
-  filesRead: 0,
-  issuesTotal: 0,
-  issuesOmitted: 0,
-};
 
 /**
  * Cheap, bounded discovery (check 1b): every `CREATE TABLE (IF NOT EXISTS)?
@@ -345,7 +347,9 @@ function discoverCreateTableNames(
     fileSystem,
   });
   const discovered = new Map<string, string[]>();
+  const sourceContents = new Map<string, string>();
   for (const file of inventory.files) {
+    sourceContents.set(file.path, file.content);
     const content = stripComments(file.content);
     CREATE_TABLE_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -360,6 +364,7 @@ function discoverCreateTableNames(
   }
   return {
     tables: discovered,
+    sourceContents,
     inventoryCounts: inventory.counts,
     scanIssues: inventory.issues,
   };
@@ -398,7 +403,6 @@ function extractCreateTableDdl(strippedContent: string, table: string): string |
  */
 function scanDurabilityWriterInvariantWithDiscovery(
   snapshot: SchemaSnapshot,
-  repoRoot: string,
   input: DurabilityWriterRegistryInput,
   discovery: CreateTableDiscovery,
 ): DurabilityWriterScanResult {
@@ -455,7 +459,8 @@ function scanDurabilityWriterInvariantWithDiscovery(
   }
 
   // self-provisioned entry metadata + anti-dodge DDL scan: every entry needs
-  // a non-empty table/module/reason, its module must exist under repoRoot,
+  // a non-empty table/module/reason, its module must exist in the same
+  // descriptor-bound inventory that supplied discovery evidence,
   // and its DDL text must not match the status-shaped-column regex without
   // an explicit justification — the same anti-dodge rule (2b) applies to
   // NON_STATUS_TABLES, applied here to self-provisioned ones.
@@ -468,14 +473,29 @@ function scanDurabilityWriterInvariantWithDiscovery(
       });
       continue;
     }
-    let moduleContent: string;
-    try {
-      moduleContent = readFileSync(path.join(repoRoot, entry.module), 'utf8');
-    } catch {
+    const canonicalModule = canonicalNonTestSrcFile(entry.module);
+    if (canonicalModule === null) {
+      findings.push({
+        kind: 'self-provisioned-module-not-src',
+        table: entry.table,
+        detail: `SELF_PROVISIONED module for '${entry.table}' is not a canonical non-test path under src/`,
+      });
+      continue;
+    }
+    const moduleContent = discovery.sourceContents.get(canonicalModule);
+    if (moduleContent === undefined) {
       findings.push({
         kind: 'self-provisioned-module-missing',
         table: entry.table,
-        detail: `SELF_PROVISIONED module '${entry.module}' for '${entry.table}' does not exist under ${repoRoot}`,
+        detail: `SELF_PROVISIONED module '${canonicalModule}' for '${entry.table}' was not present in the source inventory`,
+      });
+      continue;
+    }
+    if (!(discovered.get(entry.table) ?? []).includes(canonicalModule)) {
+      findings.push({
+        kind: 'self-provisioned-discovery-mismatch',
+        table: entry.table,
+        detail: `SELF_PROVISIONED module '${canonicalModule}' did not supply the discovered CREATE TABLE text for '${entry.table}'`,
       });
       continue;
     }
@@ -588,22 +608,21 @@ function scanDurabilityWriterInvariantWithDiscovery(
 
     const foundValues = new Set<string>();
     for (const site of entry.writerSites ?? []) {
-      if (!isNonTestSrcFile(site)) {
+      const canonicalSite = canonicalNonTestSrcFile(site);
+      if (canonicalSite === null) {
         findings.push({
           kind: 'writer-site-not-src',
           table: entry.table,
-          detail: `writer site '${site}' for '${entry.table}' is not a non-test path under src/`,
+          detail: `a writer site for '${entry.table}' is not a canonical non-test path under src/`,
         });
         continue;
       }
-      let content: string;
-      try {
-        content = readFileSync(path.join(repoRoot, site), 'utf8');
-      } catch {
+      const content = discovery.sourceContents.get(canonicalSite);
+      if (content === undefined) {
         findings.push({
           kind: 'writer-site-missing',
           table: entry.table,
-          detail: `writer site '${site}' for '${entry.table}' does not exist under ${repoRoot}`,
+          detail: `writer site '${canonicalSite}' for '${entry.table}' was not present in the source inventory`,
         });
         continue;
       }
@@ -628,7 +647,7 @@ function scanDurabilityWriterInvariantWithDiscovery(
       findings.push({
         kind: 'writer-literal-not-found',
         table: entry.table,
-        detail: `terminal-failure value(s) [${uncovered.join(', ')}] for '${entry.table}' do not appear as text in any declared writer site (${entry.writerSites.join(', ')}) and have no declared TRACKED_UNWIRED_TERMINAL exception`,
+        detail: `terminal-failure value(s) [${uncovered.join(', ')}] for '${entry.table}' do not appear as text in any valid declared writer site and have no declared TRACKED_UNWIRED_TERMINAL exception`,
       });
     }
   }
@@ -650,22 +669,19 @@ function resolveCreateTableDiscovery(
   repoRoot: string,
   input: DurabilityWriterRegistryInput,
 ): CreateTableDiscovery {
+  const inventory = discoverCreateTableNames(repoRoot, input.sourceInventoryFileSystem);
   return input.discovered === undefined
-    ? discoverCreateTableNames(repoRoot, input.sourceInventoryFileSystem)
-    : {
-        tables: new Map(input.discovered),
-        inventoryCounts: EMPTY_INVENTORY_COUNTS,
-        scanIssues: [],
-      };
+    ? inventory
+    : { ...inventory, tables: new Map(input.discovered) };
 }
 
 function resultFromDiscovery(
-  snapshot: SchemaSnapshot,
   discovery: CreateTableDiscovery,
+  tablesScanned: number,
 ): DurabilityWriterScanResult {
   return {
     findings: [],
-    tablesScanned: snapshot.size,
+    tablesScanned,
     registryTablesChecked: 0,
     discoveredTableCount: discovery.tables.size,
     filesExamined: discovery.inventoryCounts.filesRead,
@@ -683,7 +699,6 @@ export function scanDurabilityWriterInvariant(
 ): DurabilityWriterScanResult {
   return scanDurabilityWriterInvariantWithDiscovery(
     snapshot,
-    repoRoot,
     input,
     resolveCreateTableDiscovery(repoRoot, input),
   );
@@ -703,24 +718,37 @@ export function evaluateDurabilityWriterInvariant(
   input: DurabilityWriterRegistryInput = {},
 ): DurabilityWriterOutcome {
   const discovery = resolveCreateTableDiscovery(repoRoot, input);
-  const incompleteResult = resultFromDiscovery(snapshot, discovery);
+  let snapshotSize: number;
+  try {
+    snapshotSize = snapshot.size;
+    if (!Number.isSafeInteger(snapshotSize) || snapshotSize < 0) {
+      throw new TypeError('schema snapshot size must be a non-negative safe integer');
+    }
+  } catch {
+    return {
+      status: 'inconclusive',
+      reason: 'guard.durability.scan-inconclusive',
+      result: resultFromDiscovery(discovery, 0),
+    };
+  }
+  const incompleteResult = resultFromDiscovery(discovery, snapshotSize);
   if (discovery.inventoryCounts.issuesTotal > 0) {
     return {
       status: 'inconclusive',
-      reason: 'source inventory reported one or more scan issues',
+      reason: 'guard.durability.source-inventory-inconclusive',
       result: incompleteResult,
     };
   }
-  if (snapshot.size === 0) {
+  if (snapshotSize === 0) {
     return {
       status: 'inconclusive',
-      reason: 'migratedSchemaSnapshot() returned zero tables; nothing was scanned',
+      reason: 'guard.durability.snapshot-empty',
       result: incompleteResult,
     };
   }
 
   try {
-    const result = scanDurabilityWriterInvariantWithDiscovery(snapshot, repoRoot, input, discovery);
+    const result = scanDurabilityWriterInvariantWithDiscovery(snapshot, input, discovery);
     if (result.discoveredTableCount === 0) {
       // Same non-vacuity doctrine as the empty-snapshot floor above, applied
       // to check (1b)'s discovery half: a real checkout always has dozens of
@@ -731,8 +759,8 @@ export function evaluateDurabilityWriterInvariant(
       // completeness, and must not read as pass.
       return {
         status: 'inconclusive',
-        reason:
-          'discoverCreateTableNames() found zero CREATE TABLE occurrences under src/; check (1b) did not actually scan anything',
+        reason: 'guard.durability.discovery-empty',
+        result,
       };
     }
     return result.findings.length === 0 ? { status: 'pass', result } : { status: 'violation', result };
@@ -740,6 +768,7 @@ export function evaluateDurabilityWriterInvariant(
     return {
       status: 'inconclusive',
       reason: 'guard.durability.scan-inconclusive',
+      result: incompleteResult,
     };
   }
 }
@@ -783,8 +812,8 @@ function reportFor(outcome: DurabilityWriterOutcome): InventoryGuardReport {
         code: `guard.durability.${finding.kind}`,
         subject: finding.table,
       })),
-      ...(outcome.status === 'inconclusive' && !outcome.result
-        ? [{ code: 'guard.durability.scan-inconclusive' }]
+      ...(outcome.status === 'inconclusive'
+        ? [{ code: outcome.reason }]
         : []),
     ],
   };
@@ -798,7 +827,13 @@ function humanLines(outcome: DurabilityWriterOutcome): string[] {
           'use --verbose or --json for bounded diagnostics.',
       ];
     }
-    return [`${TAG}: INCONCLUSIVE — ${outcome.reason}`];
+    const reason = {
+      'guard.durability.source-inventory-inconclusive': 'source inventory was incomplete',
+      'guard.durability.snapshot-empty': 'schema snapshot contained no tables',
+      'guard.durability.discovery-empty': 'source inventory found no CREATE TABLE declarations',
+      'guard.durability.scan-inconclusive': 'schema or policy evaluation did not complete',
+    }[outcome.reason];
+    return [`${TAG}: INCONCLUSIVE — ${reason}`];
   }
   if (outcome.status === 'pass') {
     return [
@@ -810,6 +845,35 @@ function humanLines(outcome: DurabilityWriterOutcome): string[] {
     lines.push(`  [${finding.kind}] ${finding.table}: ${finding.detail}`);
   }
   return lines;
+}
+
+export function emitDurabilityWriterOutcome(
+  outcome: DurabilityWriterOutcome,
+  mode: InventoryGuardOutputMode,
+  streams: InventoryGuardStreams = process,
+): 0 | 1 | 2 {
+  return emitInventoryGuardReport(reportFor(outcome), mode, humanLines(outcome), streams);
+}
+
+export function runDurabilityWriterGuard(
+  snapshot: SchemaSnapshot,
+  repoRoot: string,
+  argv: readonly string[],
+  input: DurabilityWriterRegistryInput = {},
+  streams: InventoryGuardStreams = process,
+): InventoryGuardExitCode {
+  const parsed = parseInventoryGuardArgs(argv);
+  if (!parsed.ok) {
+    const report = inventoryGuardCliFailure(TAG, parsed.code);
+    return emitInventoryGuardReport(
+      report,
+      parsed.mode,
+      [`${TAG}: INCONCLUSIVE — ${parsed.code}`],
+      streams,
+    );
+  }
+  const outcome = evaluateDurabilityWriterInvariant(snapshot, repoRoot, input);
+  return emitDurabilityWriterOutcome(outcome, parsed.mode, streams);
 }
 
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -839,8 +903,7 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
     return;
   }
 
-  const outcome = evaluateDurabilityWriterInvariant(snapshot, REPO_ROOT);
-  process.exitCode = emitInventoryGuardReport(reportFor(outcome), parsed.mode, humanLines(outcome));
+  process.exitCode = runDurabilityWriterGuard(snapshot, REPO_ROOT, argv);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -848,8 +911,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // evaluateDurabilityWriterInvariant both catch internally), but a bare,
   // uncaught rejection here would hit Node's unhandled-rejection default
   // (exit 1) instead of the contracted exit 2 — so catch defensively too.
-  main().catch(() => {
-    console.error(`${TAG}: INCONCLUSIVE — guard.internal.unexpected`);
-    process.exitCode = 2;
+  const argv = process.argv.slice(2);
+  main(argv).catch(() => {
+    process.exitCode = emitInventoryGuardUnexpectedFailure(TAG, argv);
   });
 }
