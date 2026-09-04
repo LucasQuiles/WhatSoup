@@ -6,11 +6,14 @@ import TagInput from '../TagInput'
 import { Field, TextInput, NumberInput, SelectInput, FileInput, TextArea, CheckboxField } from '../primitives'
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
-import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
 import { Tabs, Tab } from '../primitives/Tabs'
 import { Button } from '../primitives/Button'
+import ProviderModelInput from '../ProviderModelInput'
+import ProviderSelect from '../ProviderSelect'
+import { useProviders } from '../../hooks/use-fleet'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -128,6 +131,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const tokenBudget = (data.tokenBudget as number) ?? 50000
   const name = (data.name as string) ?? ''
   const defaultWorkspace = defaultAgentWorkspacePath(name)
+  const { data: providerCatalogue } = useProviders()
 
   // Pre-fill system prompt and claudeMd with sensible defaults (once only on mount)
   const prefilled = useRef(false)
@@ -248,8 +252,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   )
 
   const providerConfigFields = useMemo(
-    () => getProviderConfigFields(agentOptions.provider ?? DEFAULT_PROVIDER_ID),
-    [agentOptions.provider],
+    () => {
+      const providerId = agentOptions.provider ?? DEFAULT_PROVIDER_ID
+      const advertisedFields = providerCatalogue?.find((provider) => provider.id === providerId)?.providerConfig
+      return getProviderConfigFields(providerId, advertisedFields)
+    },
+    [agentOptions.provider, providerCatalogue],
   )
 
   // Fallback provider/model — optional secondary backend the runtime switches to
@@ -452,16 +460,12 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
           <Field label="Provider" helper="AI backend for this agent instance" confirmed>
             {(id) => (
-              <SelectInput
+              <ProviderSelect
                 id={id}
                 value={agentOptions.provider ?? DEFAULT_PROVIDER_ID}
-                onChange={(e) => handleProviderChange(e.target.value)}
+                onChange={handleProviderChange}
                 confirmed
-              >
-                {PROVIDERS.map(p => (
-                  <option key={p.id} value={p.id}>{p.displayName}</option>
-                ))}
-              </SelectInput>
+              />
             )}
           </Field>
 
@@ -484,6 +488,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       const n = Number(raw)
                       handleProviderConfigOption(field.key, Number.isNaN(n) ? undefined : n)
                     }}
+                    placeholder={field.placeholder}
+                    confirmed={hasValue}
+                  />
+                ) : field.key === 'model' ? (
+                  <ProviderModelInput
+                    id={id}
+                    provider={agentOptions.provider ?? DEFAULT_PROVIDER_ID}
+                    value={(fieldValue as string) ?? ''}
+                    onChange={(value) => handleProviderConfigOption(field.key, value || undefined)}
                     placeholder={field.placeholder}
                     confirmed={hasValue}
                   />
@@ -514,28 +527,27 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             <>
               <Field label="Fallback Provider" helper="Backup AI backend for this agent instance" confirmed={(agentOptions.fallbackProvider ?? '').length > 0}>
                 {(id) => (
-                  <SelectInput
+                  <ProviderSelect
                     id={id}
                     value={agentOptions.fallbackProvider ?? ''}
-                    onChange={(e) => handleFallbackProvider(e.target.value)}
+                    onChange={handleFallbackProvider}
+                    allowEmpty
+                    emptyLabel="Select fallback provider"
+                    showStatus={false}
                     confirmed={(agentOptions.fallbackProvider ?? '').length > 0}
-                  >
-                    <option value="">Select fallback provider</option>
-                    {PROVIDERS.map(p => (
-                      <option key={p.id} value={p.id}>{p.displayName}</option>
-                    ))}
-                  </SelectInput>
+                  />
                 )}
               </Field>
               <Field label="Fallback Model" confirmed={fallbackProviderSelected && (agentOptions.fallbackModel ?? '').length > 0}>
                 {(id) => (
-                  <TextInput
+                  <ProviderModelInput
                     id={id}
+                    provider={agentOptions.fallbackProvider ?? ''}
                     value={fallbackProviderSelected ? (agentOptions.fallbackModel ?? '') : ''}
-                    onChange={(e) => {
-                      if (fallbackProviderSelected) handleFallbackOption('fallbackModel', e.target.value)
+                    onChange={(value) => {
+                      if (fallbackProviderSelected) handleFallbackOption('fallbackModel', value)
                     }}
-                    placeholder={fallbackProviderSelected ? 'claude-sonnet-4-6' : 'Select a fallback provider first'}
+                    placeholder={fallbackProviderSelected ? 'Runtime default, or type a model ID' : 'Select a fallback provider first'}
                     disabled={!fallbackProviderSelected}
                     confirmed={fallbackProviderSelected && (agentOptions.fallbackModel ?? '').length > 0}
                   />

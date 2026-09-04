@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 
@@ -62,6 +62,8 @@ vi.mock('../../console/src/components/TagInput', () => ({
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     updateConfig: vi.fn(),
+    getProviders: vi.fn(),
+    getProviderModels: vi.fn(),
   },
 }))
 
@@ -69,6 +71,8 @@ import { ConfigEditDialog } from '../../console/src/components/line-detail/Confi
 import { api } from '../../console/src/lib/api'
 
 const updateConfigMock = api.updateConfig as unknown as ReturnType<typeof vi.fn>
+const getProvidersMock = api.getProviders as unknown as ReturnType<typeof vi.fn>
+const getProviderModelsMock = api.getProviderModels as unknown as ReturnType<typeof vi.fn>
 
 let toastValue: ToastContextValue
 
@@ -125,6 +129,19 @@ const BASE_CONFIG: Record<string, unknown> = {
 
 beforeEach(() => {
   updateConfigMock.mockReset()
+  getProvidersMock.mockReset()
+  getProvidersMock.mockResolvedValue([
+    { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+    { id: 'opencode-cli', displayName: 'OpenCode', type: 'cli', needsApiKey: true, credentialService: null, providerConfig: ['model'] },
+    { id: 'new-adapter', displayName: 'New Adapter', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: ['model'] },
+  ])
+  getProviderModelsMock.mockReset()
+  getProviderModelsMock.mockResolvedValue({
+    status: 'ok',
+    ids: ['new-provider/frontier-1', 'future/new-model'],
+    sourceLabel: 'opencode CLI',
+    asOfLabel: 'just now',
+  })
   toastValue = makeToast()
 })
 
@@ -891,55 +908,44 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
     expect(screen.getByText('modified')).toBeDefined()
   })
 
-  it('renders the Custom… option for CUSTOMIZABLE_ENUM_KEYS (model)', () => {
-    // SOURCE SURPRISE: only 'model' is in CUSTOMIZABLE_ENUM_KEYS, not 'accessMode'.
+  it('renders live provider-native model suggestions in an editable input', async () => {
     const configWithModel: Record<string, unknown> = {
-      model: 'claude-sonnet-4-6',
+      model: 'private/existing-model',
+      agentOptions: { provider: 'opencode-cli' },
     }
 
     render(withProviders(
       <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
     ))
 
-    const selects = screen.getAllByRole('combobox')
-    const modelSelect = selects.find(s => (s as HTMLSelectElement).value === 'claude-sonnet-4-6')
-    expect(modelSelect).toBeDefined()
+    const modelInput = screen.getByDisplayValue('private/existing-model') as HTMLInputElement
+    await waitFor(() => expect(getProviderModelsMock).toHaveBeenCalledWith('opencode-cli'))
+    await waitFor(() => expect(modelInput.getAttribute('list')).not.toBeNull())
+    const list = document.getElementById(modelInput.getAttribute('list')!)!
+    expect(Array.from(list.querySelectorAll('option')).map((option) => option.value))
+      .toEqual(['new-provider/frontier-1', 'future/new-model'])
 
-    const options = Array.from((modelSelect as HTMLSelectElement).options).map(o => o.value)
-    expect(options).toContain('__custom__')
+    fireEvent.change(modelInput, { target: { value: 'private/not-in-catalogue' } })
+    expect(screen.getByText('modified')).toBeDefined()
   })
 
-  it('shows a custom text input when Custom… is selected for model', () => {
-    const configWithModel: Record<string, unknown> = {
-      model: 'claude-sonnet-4-6',
+  it('renders fallback-provider choices from the server catalogue', async () => {
+    const configWithFallback: Record<string, unknown> = {
+      ...BASE_CONFIG,
+      agentOptions: {
+        sessionScope: 'single',
+        cwd: '/home/user',
+        fallbackProvider: 'opencode-cli',
+      },
     }
 
     render(withProviders(
-      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={configWithFallback} lineName={LINE} onClose={() => {}} />,
     ))
 
-    const selects = screen.getAllByRole('combobox')
-    const modelSelect = selects.find(s => (s as HTMLSelectElement).value === 'claude-sonnet-4-6')
-    fireEvent.change(modelSelect as Element, { target: { value: '__custom__' } })
-
-    expect(screen.getByPlaceholderText('Enter custom model ID')).toBeDefined()
-  })
-
-  it('gives the custom model text input an explicit accessible name', () => {
-    const configWithModel: Record<string, unknown> = {
-      model: 'claude-sonnet-4-6',
-    }
-
-    render(withProviders(
-      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
-    ))
-
-    const selects = screen.getAllByRole('combobox')
-    const modelSelect = selects.find(s => (s as HTMLSelectElement).value === 'claude-sonnet-4-6')
-    fireEvent.change(modelSelect as Element, { target: { value: '__custom__' } })
-
-    const customInput = screen.getByRole('textbox', { name: 'Custom model ID' })
-    expect(customInput).toBe(screen.getByPlaceholderText('Enter custom model ID'))
+    const select = screen.getByLabelText('agentOptions.fallbackProvider') as HTMLSelectElement
+    await waitFor(() => expect(Array.from(select.options).map((option) => option.value))
+      .toEqual(['claude-cli', 'opencode-cli', 'new-adapter']))
   })
 })
 

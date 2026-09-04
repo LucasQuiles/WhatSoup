@@ -261,3 +261,72 @@ upstream age from the command result:
 - <https://github.com/openai/codex/blob/rust-v0.153.1/codex-rs/cli/src/main.rs#L2292-L2319>
 - <https://github.com/openai/codex/blob/rust-v0.153.1/codex-rs/models-manager/src/manager.rs#L340-L408>
 - <https://github.com/openai/codex/blob/rust-v0.139.0/codex-rs/protocol/src/openai_models.rs#L237-L246>
+
+## Console selection boundary
+
+The operator-facing catalogue had drifted from the runtime design. The fallback engine and
+`/model` command already resolved provider-native catalogues, but the onboarding and edit
+surfaces still embedded curated model arrays, default model IDs, and model-shaped
+placeholders. Those arrays made a repository release—not the installed runtime, account,
+project, or provider—the discovery boundary.
+
+The console now asks `GET /api/providers/:name/models`, which is a thin fleet adapter over
+the existing `resolveModelCatalogue` policy. One shared `ProviderModelInput` renders the
+returned IDs as suggestions while remaining editable. An empty value means "use the
+runtime's current default"; neither the first catalogue result nor an old repository default
+is silently selected. An unavailable or failed catalogue remains visible and preserves a
+manual provider-native entry path.
+
+Catalogue identity follows execution identity. A managed API adapter lists with its API-key
+credential, while an agent using an existing CLI session lists with that CLI's OAuth
+credential. They share response classification and rendering but cannot borrow one another's
+account catalogue. The review step renders the configured keys themselves, so fields accepted
+for a newly reported adapter do not disappear merely because the browser bundle lacks local
+metadata for that adapter.
+
+Execution-provider choices use a separate boundary. `ProviderSelect` asks the server's
+`GET /api/providers` registry, so a newly supported WhatSoup adapter appears in onboarding,
+configuration, fallback configuration, and editing without another console option-list
+change. An already configured provider omitted by the current server is preserved and
+labeled rather than replaced. The browser does not fall back to its compiled provider list
+when the request returns no entries.
+
+This does not pretend that an arbitrary executable or upstream API is a valid WhatSoup
+execution provider. A new execution provider needs lifecycle, parser, checkpoint, MCP,
+watchdog, and credential semantics before the server may advertise it. Providers discovered
+inside OpenCode require no new WhatSoup execution adapter: they arrive immediately as
+provider-qualified model IDs such as `provider/model` in OpenCode's live catalogue. This is
+the intentional distinction between dynamic upstream inventory and supported execution
+adapters.
+
+| Field | Console decision |
+|---|---|
+| Governing objective | User-visible choices reflect the current provider surface and preserve operator intent without a release-maintained model menu. |
+| Observed failure | Multiple onboarding and edit paths embedded dated model arrays, defaults, or placeholders; two configuration paths rendered provider choices from the browser bundle instead of the server response. |
+| Evidence | Source archaeology, a live 73-model/six-prefix fleet catalogue, a separate 114-model/eight-prefix capture, and tests that injected a newly reported adapter and previously unknown model IDs. |
+| Operational impact | New models/providers remained invisible, stale defaults were persisted, and different screens represented different capability sets. |
+| Root cause | Runtime discovery existed but stopped at the agent formatter; console forms independently curated the same changing inventory. |
+| Required invariant | Model suggestions come only from the selected runtime catalogue; execution-provider options come only from the current server registry; blank remains runtime default; existing/manual values survive degraded discovery. |
+| Existing control | Shared runtime resolver, server provider registry, browser query cache, and backend provider validation. |
+| Remaining gap | No fleet model endpoint, no shared dynamic inputs, compiled provider option rendering, and no regression check against model literals. |
+| Proposed mechanism | One model route, one editable model input, one server-backed provider selector, and one AST drift test. |
+| Enforcement point | Fleet read API, shared console components, and the repository's normal test/pre-push/CI path. |
+| Platforms | Shared WhatSoup surface; supported CLI harnesses and managed APIs retain platform-specific catalogue adapters. |
+| Trigger | Form render/provider change for discovery; every test gate for drift detection. |
+| Response | Render exact reported options, disclose provenance/failure, preserve current/manual values, and fail tests on production-console model-shaped literals. |
+| Valid exception | `console/src/mock-data.ts` contains persisted demo/log fixtures, not selectable options; it is the only AST-scan exception. |
+| Positive control | A newly reported execution adapter and previously unknown provider-native IDs appear without editing console option lists; generic runtime-default copy passes. |
+| Negative control | A model-shaped production literal fails the AST guard; empty/failed provider discovery does not substitute compiled choices; an unreported configured provider is not silently changed; managed API listing cannot borrow a CLI OAuth catalogue. |
+| Bypass analysis | Runtime/API output can still be stale or incomplete, so provenance is shown and manual model entry stays available; unsupported execution-provider IDs remain backend-rejected. |
+| Proof | 3,845 console/API tests, including component, transport-failure, exact-option, manual-entry, unknown-provider, positive-control, and negative-control cases; source/test/script typechecks; production build; production-source scans. |
+| SSOT | `resolveModelCatalogue` for models, the backend provider registry for execution adapters, and the declaration-only fleet/browser wire contract; shared console components are transport adapters rather than new catalogues. |
+| Status | Required controls implemented; arbitrary execution-provider entry and another catalogue service rejected. |
+
+### Live failover observation
+
+A live fleet exercise discovered 73 model IDs and derived a three-entry provider-diverse
+fallback chain. When the primary reported a quota limit, the first alternate-provider turn
+could not continue. A later alternate-provider turn completed its assigned validation with
+23/23 and 13/13 tests passing and an unchanged protected working set. Catalogue membership
+and route selection therefore remain inventory evidence, not proof of first-turn continuity;
+only a completed-turn receipt can support that claim.

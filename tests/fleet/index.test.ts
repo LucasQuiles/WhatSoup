@@ -601,6 +601,22 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     expect(claude?.displayName).toBe('Claude CLI');
   });
 
+  it('GET /api/providers/:name/models dispatches without fabricating an empty catalogue', async () => {
+    const res = await fetch(`${baseUrl}/api/providers/gemini-cli/models`, { headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'gemini-cli' },
+      asOfLabel: 'just now',
+    });
+  });
+
+  it('GET /api/providers/:name/models rejects unknown execution providers', async () => {
+    const res = await fetch(`${baseUrl}/api/providers/invented-provider/models`, { headers: auth });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "unknown provider 'invented-provider'" });
+  });
+
   it('GET /api/lines/:name/provider-status dispatches with the extracted param', async () => {
     const res = await fetch(`${baseUrl}/api/lines/${INST_A}/provider-status`, { headers: auth });
     expect(res.status).toBe(200);

@@ -2,6 +2,11 @@
 //  WhatSoup Console — Shared Type Definitions
 // ---------------------------------------------------------------------------
 
+export type {
+  ProviderCatalogEntry,
+  ProviderModelsListing,
+} from '../../src/lib/provider-catalogue-contract.d.ts';
+
 export type Mode = 'passive' | 'chat' | 'agent';
 export type Status = 'online' | 'degraded' | 'unreachable' | 'logged_out' | 'config_error' | 'unknown';
 export type StatusConfidence = 'confirmed' | 'inferred' | 'ambiguous';
@@ -329,14 +334,6 @@ export interface ContactResult {
 //  Mirrors GET /api/providers and GET /api/lines/:name/provider-status
 //  (src/fleet/routes/providers.ts, src/fleet/routes/lines.ts).
 // ---------------------------------------------------------------------------
-
-export interface ProviderCatalogEntry {
-  id: string;
-  displayName: string;
-  type: 'cli' | 'api';
-  needsApiKey: boolean;
-  providerConfig: string[];
-}
 
 /** One provider slot (primary or fallback) in the provider-status response. */
 /** Windowed per-sender throttle aggregate for one line (D-5) —

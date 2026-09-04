@@ -761,7 +761,7 @@ type CatalogProbeOutcome =
  *  - `{ ok: false, reason }` — `'timeout'` (kill-timer fired), `'spawn-error'`
  *    (synchronous throw or 'error' event), or `'empty'` (clean close, no
  *    non-blank lines). The distinct reason lets the resolver label a timeout
- *    apart from an empty catalogue (Q 2b#3).
+ *    apart from an empty catalogue (reason-specific degradation contract).
  * Never throws. `killTimer` is declared before `settle` captures it so a
  * synchronous spawn throw cannot hit a TDZ (same hazard as probeFallbackBinary).
  */

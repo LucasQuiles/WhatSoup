@@ -22,10 +22,20 @@ vi.mock('../../console/src/hooks/toast-context', () => ({
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     getProviders: vi.fn().mockResolvedValue([
-      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, providerConfig: [] },
-      { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, providerConfig: [] },
-      { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, providerConfig: [] },
+      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+      { id: 'opencode-cli', displayName: 'OpenCode', type: 'cli', needsApiKey: true, credentialService: null, providerConfig: [] },
+      { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, credentialService: 'anthropic', providerConfig: [] },
+      { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: [] },
+      { id: 'new-adapter', displayName: 'New Adapter', type: 'api', needsApiKey: true, credentialService: null, providerConfig: [] },
     ]),
+    getProviderModels: vi.fn(async (provider: string) => ({
+      status: 'ok',
+      ids: provider === 'opencode-cli'
+        ? ['new-provider/frontier-1', 'future/new-model']
+        : ['future/default-model'],
+      sourceLabel: `${provider} live test catalogue`,
+      asOfLabel: 'just now',
+    })),
     createLine: vi.fn().mockResolvedValue({ name: 'quinn', healthPort: 9096 }),
     updateConfig: vi.fn().mockResolvedValue({}),
     setCredential: vi.fn().mockResolvedValue({ ok: true }),
@@ -52,6 +62,7 @@ import { api } from '../../console/src/lib/api'
 
 const createLineMock = api.createLine as unknown as ReturnType<typeof vi.fn>
 const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
+const getProviderModelsMock = api.getProviderModels as unknown as ReturnType<typeof vi.fn>
 
 function renderHatch() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -69,11 +80,47 @@ beforeEach(() => {
   navigateMock.mockClear()
   createLineMock.mockClear().mockResolvedValue({ name: 'quinn', healthPort: 9096 })
   sendMessageMock.mockClear().mockResolvedValue({ sent: true })
+  getProviderModelsMock.mockClear()
 })
 
 afterEach(cleanup)
 
 describe('hatch flow — step discipline (14-onboarding §1, wave-4 law)', () => {
+  it('uses live provider-native model suggestions while preserving manual entry', async () => {
+    const { container } = renderHatch()
+    await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue'))!)
+    await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue with WhatsApp'))!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+
+    const input = container.querySelector('#hatch-model') as HTMLInputElement
+    await waitFor(() => expect(getProviderModelsMock).toHaveBeenCalledWith('claude-cli'))
+    await waitFor(() => expect(input.getAttribute('list')).toBe('hatch-model-catalogue'))
+    expect(Array.from(container.querySelectorAll('#hatch-model-catalogue option')).map((option) => option.getAttribute('value')))
+      .toEqual(['future/default-model'])
+
+    fireEvent.change(input, { target: { value: 'private/manual-model' } })
+    expect(input.value).toBe('private/manual-model')
+
+    fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'opencode-cli' } })
+    expect(input.value).toBe('')
+    await waitFor(() => expect(getProviderModelsMock).toHaveBeenCalledWith('opencode-cli'))
+  })
+
+  it('describes an unfixed credential route without naming a compiled provider', async () => {
+    const { container } = renderHatch()
+    await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue'))!)
+    await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue with WhatsApp'))!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+
+    fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'new-adapter' } })
+    expect(container.textContent).toContain('does not advertise a fixed credential service')
+    expect(container.textContent).not.toContain('OpenCode resolves its key service')
+  })
+
   it('renders exactly one step at a time with the rail tracking state', async () => {
     const { container } = renderHatch()
     await waitFor(() => expect(container.querySelector('.journey-card')).not.toBeNull())

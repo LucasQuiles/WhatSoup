@@ -140,6 +140,15 @@ describe('resolveModelCatalogue — claude-cli', () => {
     const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });
     expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' });
   });
+
+  it('also resolves via the anthropic-api provider id used by the managed adapter', async () => {
+    const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['wrong-account-model'] });
+    const anthropicApiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['vendor-model-1'] });
+    const out = await resolveModelCatalogue('anthropic-api', '', { nowMs: T0, anthropicFn, anthropicApiFn });
+    expect(out).toMatchObject({ status: 'ok', ids: ['vendor-model-1'] });
+    expect(anthropicApiFn).toHaveBeenCalledTimes(1);
+    expect(anthropicFn).not.toHaveBeenCalled();
+  });
 });
 
 describe('resolveModelCatalogue — unadapted harness', () => {

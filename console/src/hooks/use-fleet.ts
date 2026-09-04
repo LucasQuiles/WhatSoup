@@ -19,7 +19,13 @@ import {
   shareMessagesByPk,
 } from '../lib/structural-sharing.js';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../../src/lib/time-units.ts';
-import type { ChatItem, LineInstance, Message } from '../types.js';
+import type {
+  ChatItem,
+  LineInstance,
+  Message,
+  ProviderCatalogEntry,
+  ProviderModelsListing,
+} from '../types.js';
 import { useRealtime } from './use-websocket.js';
 export { computeKpis };
 
@@ -210,13 +216,60 @@ export function useFeed() {
   };
 }
 
-/** Provider catalog (display names + capability flags). Static — long stale time. */
+export async function fetchProviders(
+  fetcher: () => Promise<ProviderCatalogEntry[]> = () => api.getProviders(),
+): Promise<{ status: 'ok'; providers: ProviderCatalogEntry[] } | { status: 'request-failed' }> {
+  try {
+    return { status: 'ok', providers: await fetcher() };
+  } catch {
+    return { status: 'request-failed' };
+  }
+}
+
+/** Server-reported execution-provider catalogue with explicit transport state. */
 export function useProviders() {
-  return useQuery({
+  const query = useQuery({
     queryKey: ['providers'],
-    queryFn: () => api.getProviders(),
-    staleTime: 5 * MS_PER_MINUTE,
+    queryFn: () => fetchProviders(),
+    staleTime: MS_PER_MINUTE,
   });
+  const receipt = query.data;
+  return {
+    ...query,
+    data: receipt?.status === 'ok' ? receipt.providers : undefined,
+    catalogueStatus: receipt?.status,
+  };
+}
+
+/** Provider-native model catalogue. The server owns probing, cache age, and
+ * provenance; the browser only caches the typed receipt for one minute. */
+export async function fetchProviderModels(
+  provider: string,
+  fetcher: (provider: string) => Promise<ProviderModelsListing> = (id) => api.getProviderModels(id),
+): Promise<ProviderModelsListing | { status: 'request-failed' }> {
+  try {
+    return await fetcher(provider);
+  } catch {
+    // Keep transport failure distinct from a provider-produced `unavailable`
+    // receipt without exposing raw transport errors in the UI.
+    return { status: 'request-failed' };
+  }
+}
+
+export function useProviderModels(provider: string) {
+  const query = useQuery({
+    queryKey: ['provider-models', provider],
+    queryFn: () => fetchProviderModels(provider),
+    staleTime: MS_PER_MINUTE,
+    enabled: provider.length > 0,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
 }
 
 /** Per-instance provider / key / fallback status. */

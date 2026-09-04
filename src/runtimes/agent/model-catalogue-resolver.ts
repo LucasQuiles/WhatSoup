@@ -7,7 +7,8 @@
 //   - opencode-cli            → refreshed verbose catalogue, explicitly
 //                               labeled cache/legacy degradation, then a
 //                               short-lived resolver cache for render traffic,
-//   - claude-cli              → anthropic /v1/models ORG catalogue (classified failures),
+//   - claude-cli              → anthropic /v1/models with the CLI OAuth identity,
+//   - anthropic-api           → anthropic /v1/models with the managed API-key identity,
 //   - openai / openai-api     → openai /v1/models, keyed (Task B; both provider
 //                               strings route here — see resolveModelCatalogue),
 //   - codex-cli               → native `debug models` runtime catalogue,
@@ -27,8 +28,10 @@ import {
   type ModelCatalogUnavailableReason,
 } from './providers/binary-preflight.ts';
 import {
+  fetchAnthropicApiModelIdsWithStatus,
   fetchAnthropicModelIdsWithStatus,
   fetchOpenAIModelIdsWithStatus,
+  type AnthropicModelsResult,
   type ModelFetchFailureCategory,
   type OpenAIModelsResult,
 } from '../../lib/model-advisor.ts';
@@ -118,6 +121,7 @@ export interface CatalogueResolveDeps {
   listFn?: typeof listModelCatalog;
   codexFn?: typeof listCodexModelCatalog;
   anthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
+  anthropicApiFn?: typeof fetchAnthropicApiModelIdsWithStatus;
   /** openai adapter (keyed, HTTP `/v1/models`). */
   openaiFn?: typeof fetchOpenAIModelIdsWithStatus;
   // gemini-cli has no dep slot until a confirmed standalone source exists.
@@ -137,6 +141,7 @@ export async function resolveModelCatalogue(
 ): Promise<AvailableModelsListing> {
   if (provider === 'opencode-cli') return resolveOpencode(binary, deps);
   if (provider === 'claude-cli') return resolveClaude(deps);
+  if (provider === 'anthropic-api') return resolveAnthropicApi(deps);
   // Both strings route to the same adapter: 'openai' is the harness id the
   // formatter/tests use, 'openai-api' is the actual provider-ids.json id the
   // live call site (runtime.ts `this.agentProvider`) passes — matching only
@@ -197,7 +202,15 @@ async function resolveCachedCliCatalogue(
 
 async function resolveClaude(deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
   const anthropicFn = deps.anthropicFn ?? fetchAnthropicModelIdsWithStatus;
-  const result = await anthropicFn();
+  return resolveAnthropicResult(await anthropicFn());
+}
+
+async function resolveAnthropicApi(deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
+  const anthropicApiFn = deps.anthropicApiFn ?? fetchAnthropicApiModelIdsWithStatus;
+  return resolveAnthropicResult(await anthropicApiFn());
+}
+
+function resolveAnthropicResult(result: AnthropicModelsResult): AvailableModelsListing {
   if (result.status === 'no-key') {
     return { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' };
   }
