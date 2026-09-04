@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
-import type { RecoveryOwnerIdentity } from '../../src/core/durability.ts';
+import type { TurnRecoveryOwnerIdentity } from '../../src/core/durability.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
+  type TurnIdentity,
   type TurnRecoveryReplayEnvelope,
   type TurnTerminalResult,
 } from '../../src/runtimes/agent/turn-terminal.ts';
@@ -21,7 +22,7 @@ describe('turn-recovery blocked-unsafe actionability split', () => {
   let db: Database;
   let durability: DurabilityEngine;
 
-  const OWNER: RecoveryOwnerIdentity = {
+  const OWNER: TurnRecoveryOwnerIdentity = {
     logicalTurnId: 'split-owner-turn',
     managerId: 'split-manager',
     generation: 1,
@@ -42,7 +43,7 @@ describe('turn-recovery blocked-unsafe actionability split', () => {
   ): { params: Parameters<DurabilityEngine['finalizeTurnTerminal']>[0]; inboundSeq: number } {
     const deliveryJid = `${conversationKey}:1@g.us`;
     const inboundSeq = durability.journalInbound(messageId, conversationKey, deliveryJid, 'agent');
-    const identity = {
+    const identity: TurnIdentity = {
       scope: 'per_chat',
       conversationKey,
       deliveryJid,
