@@ -6,6 +6,7 @@ import {
   readdirSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,6 +14,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  parseForensicHarnessSearchResult,
   parseForensicPackageSpec,
   scanJsonlHarnessSource,
   scanJsonlHarnessSources,
@@ -431,6 +433,23 @@ describe('forensic package source adapters', () => {
 });
 
 describe('forensic package contract', () => {
+  it('rejects search receipts that searched no query or no source', () => {
+    const noQueries = searchResult('claude', 1, 'no-queries') as Mutable<ForensicHarnessSearchResult>;
+    noQueries.queries = [];
+    noQueries.sources[0]!.matches_observed = 0;
+    noQueries.sources[0]!.hits = [];
+    noQueries.metrics.candidates = 0;
+    noQueries.metrics.new_evidence = 0;
+    expect(() => parseForensicHarnessSearchResult(noQueries)).toThrow('queries must not be empty');
+
+    const noSources = searchResult('claude', 1, 'no-sources') as Mutable<ForensicHarnessSearchResult>;
+    noSources.sources = [];
+    noSources.metrics.sources_examined = 0;
+    noSources.metrics.candidates = 0;
+    noSources.metrics.new_evidence = 0;
+    expect(() => parseForensicHarnessSearchResult(noSources)).toThrow('sources must not be empty');
+  });
+
   it('rejects unknown schema keys and missing two-pass coverage for every harness family', () => {
     const extra = validSpec() as Record<string, unknown>;
     extra.unreviewed = true;
@@ -500,6 +519,37 @@ describe('forensic package contract', () => {
     };
     unboundSource.conclusions[0]!.independent_sources[0]!.sha256 = null;
     expect(() => parseForensicPackageSpec(unboundSource)).toThrow('content-bound independent source');
+
+    const unreviewedEvidence = validSpec() as {
+      analysis: { query_assessments: Array<{ useful_evidence_ids: string[] }> };
+    };
+    unreviewedEvidence.analysis.query_assessments[0]!.useful_evidence_ids = [];
+    expect(() => parseForensicPackageSpec(unreviewedEvidence)).toThrow('not adjudicated useful');
+
+    const falsePositiveEvidence = validSpec() as {
+      analysis: {
+        query_assessments: Array<{
+          useful_evidence_ids: string[];
+          false_positive_evidence_ids: string[];
+        }>;
+      };
+    };
+    const citedEvidence = falsePositiveEvidence.analysis.query_assessments[0]!.useful_evidence_ids[0]!;
+    falsePositiveEvidence.analysis.query_assessments[0]!.useful_evidence_ids = [];
+    falsePositiveEvidence.analysis.query_assessments[0]!.false_positive_evidence_ids = [citedEvidence];
+    expect(() => parseForensicPackageSpec(falsePositiveEvidence)).toThrow('adjudicated false positive');
+
+    const crossQueryContradiction = validSpec() as {
+      analysis: {
+        query_assessments: Array<{
+          useful_evidence_ids: string[];
+          false_positive_evidence_ids: string[];
+        }>;
+      };
+    };
+    const usefulInFirstPass = crossQueryContradiction.analysis.query_assessments[0]!.useful_evidence_ids[0]!;
+    crossQueryContradiction.analysis.query_assessments[1]!.false_positive_evidence_ids = [usefulInFirstPass];
+    expect(() => parseForensicPackageSpec(crossQueryContradiction)).toThrow('adjudicated false positive');
   });
 
   it('binds evidence IDs, source aliases, query IDs, and completeness to their measured rows', () => {
@@ -735,6 +785,24 @@ describe('forensic package contract', () => {
       findings: expect.arrayContaining(['manifest-hash-mismatch']),
     });
     expect(existsSync(output)).toBe(true);
+  });
+
+  it('verification refuses a symlinked manifest even when its target bytes match the expected digest', () => {
+    const root = tmp.make('verify-manifest-symlink');
+    const output = path.join(root, 'package');
+    const externalManifest = path.join(root, 'external-manifest.json');
+    writeForensicPackage(validSpec(), output);
+    const manifest = path.join(output, 'manifest.json');
+    const manifestContent = readFileSync(manifest);
+    const expectedManifestSha256 = sha256(manifestContent);
+    writeFileSync(externalManifest, manifestContent);
+    unlinkSync(manifest);
+    symlinkSync(externalManifest, manifest);
+
+    expect(verifyForensicPackage(output, expectedManifestSha256)).toEqual({
+      valid: false,
+      findings: ['manifest-invalid'],
+    });
   });
 
   // @skip-env Windows does not expose the POSIX directory mode used to force this write failure.

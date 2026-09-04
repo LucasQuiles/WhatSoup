@@ -209,6 +209,7 @@ const PACKAGE_DATA_FILES = [
   'state.json',
 ] as const;
 const PACKAGE_FILES = [...PACKAGE_DATA_FILES, 'manifest.json'].sort();
+const MAX_PACKAGE_MANIFEST_BYTES = 64 * 1024;
 const SQLITE_TABLES = ['session', 'message', 'part', 'session_message'] as const;
 type SqliteTable = typeof SQLITE_TABLES[number];
 
@@ -881,6 +882,7 @@ export function parseForensicHarnessSearchResult(
       mode: requireEnum(query.mode, ['substring', 'all_tokens'], `${label}.queries[${index}].mode`),
     };
   });
+  if (queries.length === 0) throw new TypeError(`${label}.queries must not be empty`);
   requireUnique(queries.map((query) => query.id), `${label} query ids`);
   const knownQueryIds = new Set(queries.map((query) => query.id));
   const sources = requireArray(result.sources, `${label}.sources`).map((value, index) => {
@@ -1006,6 +1008,7 @@ export function parseForensicHarnessSearchResult(
       hits,
     };
   });
+  if (sources.length === 0) throw new TypeError(`${label}.sources must not be empty`);
   requireUnique(sources.map((source) => source.source_alias), `${label} source aliases`);
   const metricsRecord = asRecord(result.metrics, `${label}.metrics`);
   exactKeys(metricsRecord, ['sources_examined', 'failed_sources', 'candidates', 'new_evidence'], `${label}.metrics`);
@@ -1286,6 +1289,19 @@ export function parseForensicPackageSpec(value: unknown): ForensicPackageSpec {
   requireUnique(queryAssessmentKeys, 'query assessment keys');
   for (const key of queryEvidenceByKey.keys()) {
     if (!queryAssessmentKeys.includes(key)) throw new TypeError(`missing query assessment for ${key}`);
+  }
+  const usefulEvidenceIds = new Set(queryAssessments.flatMap((row) => row.useful_evidence_ids));
+  const falsePositiveEvidenceIds = new Set(queryAssessments.flatMap((row) => row.false_positive_evidence_ids));
+  for (const [index, conclusion] of conclusions.entries()) {
+    if (conclusion.confidence !== 'high') continue;
+    for (const evidenceId of conclusion.harness_evidence_ids) {
+      if (falsePositiveEvidenceIds.has(evidenceId)) {
+        throw new TypeError(`spec.conclusions[${index}] high-confidence harness evidence is adjudicated false positive: ${evidenceId}`);
+      }
+      if (!usefulEvidenceIds.has(evidenceId)) {
+        throw new TypeError(`spec.conclusions[${index}] high-confidence harness evidence is not adjudicated useful: ${evidenceId}`);
+      }
+    }
   }
   const entityAliases = requireArray(analysisRecord.entity_aliases, 'spec.analysis.entity_aliases')
     .map((item, index) => {
@@ -1789,7 +1805,10 @@ export function verifyForensicPackage(
   if (!actualFiles.includes('manifest.json')) return { valid: false, findings };
   let manifest: Record<string, unknown>;
   try {
-    const manifestContent = readFileSync(path.join(outputDirectory, 'manifest.json'));
+    const manifestContent = readStableBoundedFile(
+      path.join(outputDirectory, 'manifest.json'),
+      MAX_PACKAGE_MANIFEST_BYTES,
+    );
     try {
       assertPublicContent(manifestContent.toString('utf8'), 'manifest.json', forbiddenTerms);
     } catch {
