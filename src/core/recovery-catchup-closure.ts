@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import { assertCanonicalSchema43 } from './database-migration-43.ts';
 import { withTransaction } from './db-tx.ts';
+import { allFromStatement } from '../lib/db-query.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
   planId: string;
@@ -123,7 +124,7 @@ export function inspectOperatorCatchupRecovery(
   `).get(planId);
   if (!plan) throw new Error('Recovery plan does not exist');
 
-  const pending = raw.prepare(`
+  const pending = allFromStatement<DispositionRow>(raw.prepare(`
     SELECT links.inbound_seq, links.superseded_by_seq, links.actor, links.evidence_ref
     FROM inbound_disposition_links links
     JOIN inbound_events source ON source.seq = links.inbound_seq
@@ -131,7 +132,7 @@ export function inspectOperatorCatchupRecovery(
       AND links.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
     ORDER BY links.inbound_seq
-  `).all(planId, conversationKey) as unknown as DispositionRow[];
+  `), planId, conversationKey);
   const pendingSeqs = pending.map((row) => row.inbound_seq);
   if (!sameNumbers(pendingSeqs, expectedSourceSeqs)) {
     throw new Error('Expected source sequences must exactly match the pending recovery set');
@@ -140,7 +141,7 @@ export function inspectOperatorCatchupRecovery(
     throw new Error('Catch-up sequence must be later than every source sequence');
   }
 
-  const closed = raw.prepare(`
+  const closed = allFromStatement<DispositionRow>(raw.prepare(`
     SELECT links.inbound_seq, links.superseded_by_seq, links.actor, links.evidence_ref
     FROM inbound_disposition_links links
     JOIN inbound_events source ON source.seq = links.inbound_seq
@@ -148,7 +149,7 @@ export function inspectOperatorCatchupRecovery(
       AND links.disposition = 'superseded_by_operator_catchup'
       AND source.conversation_key = ?
     ORDER BY links.inbound_seq
-  `).all(planId, conversationKey) as unknown as DispositionRow[];
+  `), planId, conversationKey);
   if (closed.length > 0) {
     const closedSeqs = closed.map((row) => row.inbound_seq);
     const exactReplay = closed.every((row) => (
@@ -465,7 +466,7 @@ export function reconcileOperatorCatchupRecoveries(
 
   // Plain autocommit read; the per-group closure below opens its own
   // BEGIN IMMEDIATE single-writer reservation.
-  const rows = raw.prepare(`
+  const rows = allFromStatement<PendingGroupRow>(raw.prepare(`
     SELECT links.recovery_plan_id AS plan_id,
            source.conversation_key AS conversation_key,
            links.inbound_seq AS inbound_seq
@@ -481,7 +482,7 @@ export function reconcileOperatorCatchupRecoveries(
           AND closed.disposition = 'superseded_by_operator_catchup'
       )
     ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
-  `).all() as unknown as PendingGroupRow[];
+  `));
 
   const groups = new Map<string, { planId: string; conversationKey: string; seqs: number[] }>();
   for (const row of rows) {
