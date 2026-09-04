@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import {
   constants,
   closeSync,
-  copyFileSync,
   existsSync,
   fstatSync,
   fsyncSync,
@@ -16,6 +15,7 @@ import {
   rmSync,
   type BigIntStats,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -274,7 +274,7 @@ function sha256File(file: string, maximumBytes = Number.MAX_SAFE_INTEGER): strin
   return digest.digest('hex');
 }
 
-function readStableBoundedFile(file: string, maximumBytes: number): Buffer {
+export function readStableBoundedFile(file: string, maximumBytes: number): Buffer {
   const { descriptor, metadata } = openStableBoundedFile(file, maximumBytes);
   const bytes = Buffer.allocUnsafe(metadata.bytes + 1);
   let total = 0;
@@ -604,35 +604,56 @@ function sqliteFamilyMetadataRows(databasePath: string): Array<{
   }));
 }
 
-function sqliteFamilyIdentity(databasePath: string, maximumBytes: number): {
-  primary: FileIdentity;
-  members: Array<{ name: 'database' | 'wal' | 'shm'; bytes: number; sha256: string }>;
-  metadataFingerprint: string;
-} {
-  const metadataRows = sqliteFamilyMetadataRows(databasePath);
-  const totalBytes = metadataRows.reduce((sum, row) => sum + row.metadata.bytes, 0);
-  if (totalBytes > maximumBytes) {
-    throw new Error(`SQLite source family exceeds maxSourceBytes before identity: ${totalBytes} > ${maximumBytes}`);
+interface SqliteFamilyIdentity {
+  readonly primary: FileIdentity;
+  readonly members: Array<{ name: 'database' | 'wal' | 'shm'; bytes: number; sha256: string }>;
+  readonly metadataFingerprint: string;
+}
+
+function copyStableBoundedFile(
+  source: string,
+  destination: string,
+  expectedMetadata: FileMetadata,
+): FileIdentity {
+  const opened = openStableBoundedFile(source, expectedMetadata.bytes);
+  let output: number | null = null;
+  const digest = createHash('sha256');
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  let total = 0;
+  try {
+    assertSameMetadata(expectedMetadata, opened.metadata, 'SQLite source member');
+    output = openSync(destination, 'wx', 0o600);
+    let bytesRead = 0;
+    do {
+      const remaining = expectedMetadata.bytes - total;
+      bytesRead = readSync(opened.descriptor, chunk, 0, Math.min(chunk.length, remaining + 1), null);
+      total += bytesRead;
+      if (total > expectedMetadata.bytes) throw new Error('SQLite source member changed during copy');
+      if (bytesRead > 0) {
+        digest.update(chunk.subarray(0, bytesRead));
+        let written = 0;
+        while (written < bytesRead) {
+          const bytesWritten = writeSync(output, chunk, written, bytesRead - written);
+          if (bytesWritten === 0) throw new Error('SQLite working-copy write made no progress');
+          written += bytesWritten;
+        }
+      }
+    } while (bytesRead > 0);
+    if (total !== expectedMetadata.bytes) throw new Error('SQLite source member changed during copy');
+    assertStableBoundedFile(source, opened.descriptor, expectedMetadata);
+    fsyncSync(output);
+    return { ...expectedMetadata, sha256: digest.digest('hex') };
+  } finally {
+    if (output !== null) closeSync(output);
+    closeSync(opened.descriptor);
   }
-  const identities = metadataRows.map(({ name, file, metadata }) => ({
-    name,
-    identity: { ...metadata, sha256: sha256File(file, metadata.bytes) },
-  }));
-  const primary = identities[0]?.identity;
-  if (!primary) throw new Error('SQLite database source is missing');
-  const members = identities.map(({ name, identity }) => ({
-    name,
-    bytes: identity.bytes,
-    sha256: identity.sha256,
-  }));
-  const metadataFingerprint = sha256(JSON.stringify(identities.map(({ name, identity }) => ({
-    name,
-    bytes: identity.bytes,
-    mtimeNs: identity.mtimeNs,
-    device: identity.device,
-    inode: identity.inode,
-  }))));
-  return { primary, members, metadataFingerprint };
+}
+
+function identifyStableBoundedFile(source: string, expectedMetadata: FileMetadata): FileIdentity {
+  assertSameMetadata(expectedMetadata, fileMetadata(source), 'SQLite source member');
+  const digest = sha256File(source, expectedMetadata.bytes);
+  assertSameMetadata(expectedMetadata, fileMetadata(source), 'SQLite source member');
+  return { ...expectedMetadata, sha256: digest };
 }
 
 function sqliteFamilyMetadata(databasePath: string): {
@@ -653,15 +674,55 @@ function sqliteContentColumns(table: SqliteTable, columns: ReadonlySet<string>):
   return candidates[table].filter((column) => columns.has(column));
 }
 
-function createSqliteWorkingCopy(databasePath: string): { root: string; databasePath: string } {
+function createSqliteWorkingCopy(
+  databasePath: string,
+  maximumBytes: number,
+  expectedSha256: string,
+  expectedMembers: readonly {
+    readonly name: 'database' | 'wal' | 'shm';
+    readonly bytes: number;
+    readonly sha256: string;
+  }[] | undefined,
+): { root: string; databasePath: string; identity: SqliteFamilyIdentity } {
+  // This is an evidence copy of a caller-frozen snapshot, not a live SQLite backup.
+  // A live writer must be captured through SQLite's backup API before this adapter runs.
+  const metadataRows = sqliteFamilyMetadataRows(databasePath);
+  const totalBytes = metadataRows.reduce((sum, row) => sum + row.metadata.bytes, 0);
+  if (totalBytes > maximumBytes) {
+    throw new Error(`SQLite source family exceeds maxSourceBytes before identity: ${totalBytes} > ${maximumBytes}`);
+  }
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-opencode-forensic-'));
   const copy = path.join(root, 'opencode.db');
   try {
-    copyFileSync(databasePath, copy, constants.COPYFILE_FICLONE);
-    if (existsSync(`${databasePath}-wal`)) {
-      copyFileSync(`${databasePath}-wal`, `${copy}-wal`, constants.COPYFILE_FICLONE);
+    const identities = metadataRows.map(({ name, file, metadata }) => ({
+      name,
+      identity: name === 'shm'
+        ? identifyStableBoundedFile(file, metadata)
+        : copyStableBoundedFile(file, name === 'database' ? copy : `${copy}-${name}`, metadata),
+    }));
+    const primary = identities[0]?.identity;
+    if (!primary) throw new Error('SQLite database source is missing');
+    const members = identities.map(({ name, identity }) => ({
+      name,
+      bytes: identity.bytes,
+      sha256: identity.sha256,
+    }));
+    const metadataFingerprint = sha256(JSON.stringify(identities.map(({ name, identity }) => ({
+      name,
+      bytes: identity.bytes,
+      mtimeNs: identity.mtimeNs,
+      device: identity.device,
+      inode: identity.inode,
+    }))));
+    const identity = { primary, members, metadataFingerprint };
+    if (members.some(({ name }) => name !== 'database') && expectedMembers === undefined) {
+      throw new Error('expectedMembers is required when SQLite sidecars are present');
     }
-    return { root, databasePath: copy };
+    if (primary.sha256 !== expectedSha256) throw new Error('source identity mismatch before read');
+    if (expectedMembers && JSON.stringify(members) !== JSON.stringify(expectedMembers)) {
+      throw new Error('SQLite snapshot family identity mismatch before read');
+    }
+    return { root, databasePath: copy, identity };
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
     throw error;
@@ -693,21 +754,24 @@ export function scanOpenCodeSnapshot(options: {
   requireInteger(options.limits.maxSourceBytes, 'maxSourceBytes', 1);
   requireInteger(options.limits.maxRows, 'maxRows', 1);
   requireInteger(options.limits.maxHits, 'maxHits');
-  const before = sqliteFamilyIdentity(options.databasePath, options.limits.maxSourceBytes);
-  if (before.primary.sha256 !== options.expectedSha256) {
-    throw new Error('source identity mismatch before read');
-  }
-  if (options.expectedMembers && JSON.stringify(before.members) !== JSON.stringify(options.expectedMembers)) {
-    throw new Error('SQLite snapshot family identity mismatch before read');
+  const previewMembers = sqliteFamilyMetadataRows(options.databasePath);
+  if (previewMembers.some(({ name }) => name !== 'database') && options.expectedMembers === undefined) {
+    throw new Error('expectedMembers is required when SQLite sidecars are present');
   }
 
+  const working = createSqliteWorkingCopy(
+    options.databasePath,
+    options.limits.maxSourceBytes,
+    options.expectedSha256,
+    options.expectedMembers,
+  );
+  const before = working.identity;
   const hits: ForensicEvidenceHit[] = [];
   const findings: ForensicSearchFinding[] = [];
   let matchesObserved = 0;
   let recordsExamined = 0;
   let rowLimit = false;
   let hitLimit = false;
-  const working = createSqliteWorkingCopy(options.databasePath);
   let database: DatabaseSync | null = null;
   try {
     database = new DatabaseSync(working.databasePath, { readOnly: true });
@@ -1695,7 +1759,8 @@ export function writeForensicPackage(
     if (!created && (error as NodeJS.ErrnoException).code === 'EEXIST') {
       throw new Error(`output directory already exists: ${outputDirectory}`);
     }
-    if (created && existsSync(outputDirectory)) rmSync(outputDirectory, { recursive: true, force: true });
+    // A manifest-incomplete directory fails verification. Retaining it is safer than
+    // recursively deleting a pathname that another writer may have replaced.
     throw error;
   }
 }

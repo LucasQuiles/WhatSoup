@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -364,6 +365,69 @@ describe('forensic package source adapters', () => {
       limits: { maxSourceBytes: sourceBytes - 1, maxRows: 100, maxHits: 10 },
     })).toThrow('SQLite source family exceeds maxSourceBytes before identity');
   });
+
+  it('requires caller-bound member identities when a SQLite sidecar is present', () => {
+    const root = tmp.make('opencode-sidecar-binding');
+    const databasePath = path.join(root, 'opencode.db');
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA wal_autocheckpoint = 0;
+      CREATE TABLE session (title TEXT);
+      CREATE TABLE message (data TEXT);
+      CREATE TABLE part (data TEXT);
+      INSERT INTO message VALUES ('needle');
+    `);
+    expect(existsSync(`${databasePath}-wal`)).toBe(true);
+
+    expect(() => scanOpenCodeSnapshot({
+      pass: 1,
+      sourceAlias: 'opencode-snapshot-01',
+      databasePath,
+      expectedSha256: sha256(readFileSync(databasePath)),
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: 10_000_000, maxRows: 100, maxHits: 10 },
+    })).toThrow('expectedMembers is required when SQLite sidecars are present');
+
+    const expectedMembers = [
+      { name: 'database' as const, file: databasePath },
+      { name: 'wal' as const, file: `${databasePath}-wal` },
+      { name: 'shm' as const, file: `${databasePath}-shm` },
+    ].filter(({ file }) => existsSync(file)).map(({ name, file }) => ({
+      name,
+      bytes: statSync(file).size,
+      sha256: sha256(readFileSync(file)),
+    }));
+    const mismatchedMembers = expectedMembers.map((member) => member.name === 'wal'
+      ? { ...member, sha256: '0'.repeat(64) }
+      : member);
+    expect(() => scanOpenCodeSnapshot({
+      pass: 1,
+      sourceAlias: 'opencode-snapshot-01',
+      databasePath,
+      expectedSha256: sha256(readFileSync(databasePath)),
+      expectedMembers: mismatchedMembers,
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: 10_000_000, maxRows: 100, maxHits: 10 },
+    })).toThrow('SQLite snapshot family identity mismatch before read');
+
+    const expectedSha256 = sha256(readFileSync(databasePath));
+    const result = scanOpenCodeSnapshot({
+      pass: 1,
+      sourceAlias: 'opencode-snapshot-01',
+      databasePath,
+      expectedSha256,
+      expectedMembers,
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: 10_000_000, maxRows: 100, maxHits: 10 },
+    });
+    expect(result.sources[0]?.identity).toEqual({
+      bytes: statSync(databasePath).size,
+      sha256: expectedSha256,
+      members: expectedMembers,
+    });
+    database.close();
+  });
 });
 
 describe('forensic package contract', () => {
@@ -673,6 +737,24 @@ describe('forensic package contract', () => {
     expect(existsSync(output)).toBe(true);
   });
 
+  // @skip-env Windows does not expose the POSIX directory mode used to force this write failure.
+  it.skipIf(process.platform === 'win32')(
+    'retains a manifest-incomplete claimed directory after a post-claim write failure',
+    () => {
+      const root = tmp.make('failed-package-publication');
+      const output = path.join(root, 'package');
+      const previousUmask = process.umask(0o777);
+      try {
+        expect(() => writeForensicPackage(validSpec(), output)).toThrow();
+      } finally {
+        process.umask(previousUmask);
+      }
+      expect(existsSync(output)).toBe(true);
+      expect(existsSync(path.join(output, 'manifest.json'))).toBe(false);
+      chmodSync(output, 0o700);
+    },
+  );
+
   it('rechecks publication policy even when a changed file is re-manifested', () => {
     const root = tmp.make('verify-publication-policy');
     const output = path.join(root, 'package');
@@ -851,4 +933,78 @@ describe('forensic reconstruction CLI', () => {
     expect(error).not.toHaveBeenCalledWith(expect.stringContaining('private-node-canary'));
     error.mockRestore();
   });
+
+  it('rejects an empty private forbidden-term policy', async () => {
+    const root = tmp.make('cli-empty-private-policy');
+    const specFile = path.join(root, 'private-spec.json');
+    const forbiddenTerms = path.join(root, 'forbidden-terms.json');
+    const output = path.join(root, 'public-package');
+    writeFileSync(specFile, `${JSON.stringify(validSpec(), null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(forbiddenTerms, `${JSON.stringify({
+      schema_version: 'forensic.forbidden-terms.v1',
+      terms: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(await runForensicReconstruction([
+      'build', '--spec', specFile, '--output', output, '--forbidden-terms', forbiddenTerms,
+    ], root)).toBe(2);
+    expect(existsSync(output)).toBe(false);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(
+      'forbidden terms file must contain at least one private term',
+    ));
+    error.mockRestore();
+  });
+
+  it('refuses a symlinked private forbidden-term policy without revealing its target', async () => {
+    const root = tmp.make('cli-symlinked-private-policy');
+    const specFile = path.join(root, 'private-spec.json');
+    const privateTarget = path.join(root, 'private-policy-target.json');
+    const forbiddenTerms = path.join(root, 'forbidden-terms.json');
+    const output = path.join(root, 'public-package');
+    writeFileSync(specFile, `${JSON.stringify(validSpec(), null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(privateTarget, `${JSON.stringify({
+      schema_version: 'forensic.forbidden-terms.v1',
+      terms: ['private-node-canary'],
+    }, null, 2)}\n`, { mode: 0o600 });
+    symlinkSync(privateTarget, forbiddenTerms);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(await runForensicReconstruction([
+      'build', '--spec', specFile, '--output', output, '--forbidden-terms', forbiddenTerms,
+    ], root)).toBe(2);
+    expect(existsSync(output)).toBe(false);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining(
+      'forbidden terms file could not be read as bounded regular JSON',
+    ));
+    expect(error).not.toHaveBeenCalledWith(expect.stringContaining(privateTarget));
+    error.mockRestore();
+  });
+
+  // @skip-env Windows does not enforce the POSIX group-read permission this policy rejects.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a group-readable private forbidden-term policy',
+    async () => {
+      const root = tmp.make('cli-readable-private-policy');
+      const specFile = path.join(root, 'private-spec.json');
+      const forbiddenTerms = path.join(root, 'forbidden-terms.json');
+      const output = path.join(root, 'public-package');
+      writeFileSync(specFile, `${JSON.stringify(validSpec(), null, 2)}\n`, { mode: 0o600 });
+      writeFileSync(forbiddenTerms, `${JSON.stringify({
+        schema_version: 'forensic.forbidden-terms.v1',
+        terms: ['private-node-canary'],
+      }, null, 2)}\n`, { mode: 0o640 });
+      chmodSync(forbiddenTerms, 0o640);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      expect(await runForensicReconstruction([
+        'build', '--spec', specFile, '--output', output, '--forbidden-terms', forbiddenTerms,
+      ], root)).toBe(2);
+      expect(existsSync(output)).toBe(false);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining(
+        'forbidden terms file could not be read as bounded regular JSON',
+      ));
+      error.mockRestore();
+    },
+  );
 });

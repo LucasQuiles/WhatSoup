@@ -4,8 +4,8 @@ import {
   existsSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   openSync,
-  readFileSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 
 import {
   parseForensicHarnessSearchResult,
+  readStableBoundedFile,
   scanJsonlHarnessSource,
   scanJsonlHarnessSources,
   scanOpenCodeSnapshot,
@@ -23,6 +24,9 @@ import {
 } from './lib/forensic-package.ts';
 
 type Command = 'schema' | 'scan-jsonl' | 'scan-jsonl-set' | 'scan-opencode' | 'build' | 'verify';
+
+const MAX_JSON_INPUT_BYTES = 268_435_456;
+const MAX_FORBIDDEN_TERMS_BYTES = 65_536;
 
 const CLI_SCHEMA = Object.freeze({
   schema_version: 'forensic.reconstruction-cli.v1',
@@ -110,11 +114,11 @@ function integerOption(
   return value;
 }
 
-function readJson(file: string, label: string): unknown {
+function readJson(file: string, label: string, maximumBytes = MAX_JSON_INPUT_BYTES): unknown {
   try {
-    return JSON.parse(readFileSync(file, 'utf8')) as unknown;
-  } catch (error) {
-    throw new Error(`${label} could not be read as JSON: ${(error as Error).message}`);
+    return JSON.parse(readStableBoundedFile(file, maximumBytes).toString('utf8')) as unknown;
+  } catch {
+    throw new Error(`${label} could not be read as bounded regular JSON`);
   }
 }
 
@@ -140,14 +144,45 @@ function readQueries(file: string): ForensicQuery[] {
   });
 }
 
+function privateInputIdentity(file: string): string {
+  try {
+    const metadata = lstatSync(file);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) throw new Error('unsafe private policy type');
+    if (typeof process.getuid === 'function' && metadata.uid !== process.getuid()) {
+      throw new Error('private policy owner mismatch');
+    }
+    if ((metadata.mode & 0o077) !== 0) throw new Error('private policy permissions are too broad');
+    return [
+      metadata.dev,
+      metadata.ino,
+      metadata.size,
+      metadata.mtimeMs,
+      metadata.mode,
+      metadata.uid,
+    ].join(':');
+  } catch {
+    throw new Error('forbidden terms file could not be read as bounded regular JSON');
+  }
+}
+
 function readForbiddenTerms(file: string | undefined): readonly string[] {
   if (file === undefined) return [];
-  const input = asRecord(readJson(file, 'forbidden terms file'), 'forbidden terms file');
+  const before = privateInputIdentity(file);
+  const input = asRecord(
+    readJson(file, 'forbidden terms file', MAX_FORBIDDEN_TERMS_BYTES),
+    'forbidden terms file',
+  );
+  if (privateInputIdentity(file) !== before) {
+    throw new Error('forbidden terms file changed during read');
+  }
   exactKeys(input, ['schema_version', 'terms'], 'forbidden terms file');
   if (input.schema_version !== 'forensic.forbidden-terms.v1') {
     throw new TypeError('forbidden terms file schema_version must be forensic.forbidden-terms.v1');
   }
   if (!Array.isArray(input.terms)) throw new TypeError('forbidden terms file terms must be an array');
+  if (input.terms.length === 0) {
+    throw new TypeError('forbidden terms file must contain at least one private term');
+  }
   return input.terms.map((term, index) => {
     if (typeof term !== 'string') throw new TypeError(`forbidden terms file terms[${index}] must be a string`);
     return term;
