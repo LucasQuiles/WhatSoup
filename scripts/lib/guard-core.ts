@@ -1,7 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  type Stats,
+} from 'node:fs';
 import path from 'node:path';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import { isNonEmptyString } from '../../src/lib/type-guards.ts';
+import { parseClosedOptions } from './cli-args.ts';
 
 export { cleanGitEnv } from '../../src/lib/git-env.ts';
 
@@ -25,6 +33,362 @@ const textExtensions = new Set([
 ]);
 
 export type GitBlobReadResult = { ok: true; content?: string } | { ok: false; error: string };
+
+export type SourceInventoryIssueCode =
+  | 'guard.scan.root-unreadable'
+  | 'guard.scan.directory-unreadable'
+  | 'guard.scan.entry-unreadable'
+  | 'guard.scan.symlink-refused';
+
+export type SourceInventoryOperation = 'lstat' | 'readdir' | 'read';
+
+export interface SourceInventoryIssue {
+  code: SourceInventoryIssueCode;
+  operation: SourceInventoryOperation;
+  path: string;
+  /** Null only for a policy or filesystem-shape refusal, not an OS failure. */
+  systemCode: string | null;
+}
+
+export interface SourceInventoryFile {
+  /** Normalized repository-relative path. */
+  path: string;
+  /** Normalized scan root that selected this file. */
+  root: string;
+  content: string;
+}
+
+export interface SourceInventoryCounts {
+  rootsRequested: number;
+  rootsScanned: number;
+  directoriesScanned: number;
+  entriesInspected: number;
+  candidatesFound: number;
+  filesRead: number;
+  issuesTotal: number;
+  issuesOmitted: number;
+}
+
+export interface SourceInventoryResult {
+  files: SourceInventoryFile[];
+  issues: SourceInventoryIssue[];
+  counts: SourceInventoryCounts;
+}
+
+export interface SourceInventoryFileSystem {
+  readdirSync(directory: string): readonly string[];
+  lstatSync(entry: string): Pick<Stats, 'isDirectory' | 'isFile' | 'isSymbolicLink'>;
+  readFileSync(file: string): string;
+}
+
+export interface SourceInventoryOptions {
+  repoRoot: string;
+  roots: readonly string[];
+  includeFile(file: string): boolean;
+  excludeDirectory?(directory: string): boolean;
+  fileSystem?: SourceInventoryFileSystem;
+  issueLimit?: number;
+}
+
+export const SOURCE_INVENTORY_DEFAULT_ISSUE_LIMIT = 20;
+
+export type InventoryGuardStatus = 'pass' | 'block' | 'inconclusive';
+export type InventoryGuardExitCode = 0 | 1 | 2;
+export type InventoryGuardOutputMode = 'human' | 'verbose' | 'json';
+export type InventoryGuardCliIssueCode =
+  | 'guard.cli.unknown-option'
+  | 'guard.cli.duplicate-option'
+  | 'guard.cli.conflicting-option';
+
+export interface InventoryGuardDiagnostic {
+  code: string;
+  path?: string;
+  line?: number;
+  subject?: string;
+  operation?: SourceInventoryOperation;
+  systemCode?: string | null;
+}
+
+export interface InventoryGuardReport {
+  schemaVersion: 1;
+  guard: string;
+  status: InventoryGuardStatus;
+  exitCode: InventoryGuardExitCode;
+  counts: Readonly<Record<string, number>>;
+  diagnostics: readonly InventoryGuardDiagnostic[];
+}
+
+export type InventoryGuardArgs =
+  | { ok: true; mode: InventoryGuardOutputMode }
+  | { ok: false; mode: 'human' | 'json'; code: InventoryGuardCliIssueCode };
+
+/** Closed, TTY-independent output-mode parsing shared by source inventory guards. */
+export function parseInventoryGuardArgs(argv: readonly string[]): InventoryGuardArgs {
+  const parsed = parseClosedOptions(argv, {
+    booleanOptions: ['--json', '--verbose'],
+    valueOptions: [],
+  });
+  const failureMode = argv.includes('--json') ? 'json' : 'human';
+  if (parsed.error === 'ci.input.option-unknown') {
+    return { ok: false, mode: failureMode, code: 'guard.cli.unknown-option' };
+  }
+  if (parsed.error === 'ci.input.duplicate-option') {
+    return { ok: false, mode: failureMode, code: 'guard.cli.duplicate-option' };
+  }
+  if (parsed.error !== null) {
+    return { ok: false, mode: failureMode, code: 'guard.cli.unknown-option' };
+  }
+  if (parsed.flags.has('--json') && parsed.flags.has('--verbose')) {
+    return { ok: false, mode: 'json', code: 'guard.cli.conflicting-option' };
+  }
+  if (parsed.flags.has('--json')) return { ok: true, mode: 'json' };
+  if (parsed.flags.has('--verbose')) return { ok: true, mode: 'verbose' };
+  return { ok: true, mode: 'human' };
+}
+
+export function inventoryGuardCliFailure(
+  guard: string,
+  code: InventoryGuardCliIssueCode,
+): InventoryGuardReport {
+  return {
+    schemaVersion: 1,
+    guard,
+    status: 'inconclusive',
+    exitCode: 2,
+    counts: {
+      filesExamined: 0,
+      findings: 0,
+      scanIssues: 0,
+      scanIssuesOmitted: 0,
+    },
+    diagnostics: [{ code }],
+  };
+}
+
+export function sourceInventoryDiagnostics(
+  inventory: Pick<SourceInventoryResult, 'issues'>,
+): InventoryGuardDiagnostic[] {
+  return inventory.issues.map((issue) => ({ ...issue }));
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function verboseInventoryGuardLines(report: InventoryGuardReport): string[] {
+  const counts = Object.entries(report.counts)
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  const lines = [`guard-report: status=${report.status} exitCode=${report.exitCode} ${counts}`.trimEnd()];
+  for (const diagnostic of report.diagnostics) {
+    const fields = Object.entries(diagnostic)
+      .filter(([key]) => key !== 'code')
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(' ');
+    lines.push(`  [${diagnostic.code}]${fields === '' ? '' : ` ${fields}`}`);
+  }
+  return lines;
+}
+
+/** Emit exactly one JSON document in JSON mode; human modes retain their guard prefix. */
+export function emitInventoryGuardReport(
+  report: InventoryGuardReport,
+  mode: InventoryGuardOutputMode,
+  humanLines: readonly string[],
+): InventoryGuardExitCode {
+  if (mode === 'json') {
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return report.exitCode;
+  }
+  const lines = mode === 'verbose'
+    ? [...humanLines, ...verboseInventoryGuardLines(report)]
+    : [...humanLines];
+  const stream = report.exitCode === 0 ? process.stdout : process.stderr;
+  stream.write(`${lines.join('\n')}\n`);
+  return report.exitCode;
+}
+
+const nativeSourceInventoryFileSystem: SourceInventoryFileSystem = {
+  readdirSync: (directory) => readdirSync(directory),
+  lstatSync: (entry) => lstatSync(entry),
+  readFileSync: (file) => readFileSync(file, 'utf8'),
+};
+
+function inventoryRoot(root: string): string {
+  if (path.isAbsolute(root)) {
+    throw new RangeError('source inventory roots must be repository-relative');
+  }
+  const normalized = normalizeRepoPath(path.normalize(root)).replace(/\/$/, '');
+  if (normalized === '' || normalized === '.' || normalized === '..' || normalized.startsWith('../')) {
+    throw new RangeError('source inventory roots must stay inside the repository');
+  }
+  return normalized;
+}
+
+function systemErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  if (!isNonEmptyString(code)) return null;
+  return /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'UNKNOWN';
+}
+
+/**
+ * Deterministically inventory and read selected source files without following
+ * symlinks. Operational filesystem failures become bounded, privacy-safe
+ * issues; exceptions without a Node-style system `code` propagate unchanged.
+ */
+export function inventorySourceFiles(options: SourceInventoryOptions): SourceInventoryResult {
+  const fileSystem = options.fileSystem ?? nativeSourceInventoryFileSystem;
+  const issueLimit = options.issueLimit ?? SOURCE_INVENTORY_DEFAULT_ISSUE_LIMIT;
+  if (!Number.isSafeInteger(issueLimit) || issueLimit < 0) {
+    throw new RangeError('source inventory issueLimit must be a non-negative safe integer');
+  }
+
+  const roots = [...new Set(options.roots.map(inventoryRoot))].sort(compareText);
+  const files: SourceInventoryFile[] = [];
+  const issues: SourceInventoryIssue[] = [];
+  let rootsScanned = 0;
+  let directoriesScanned = 0;
+  let entriesInspected = 0;
+  let candidatesFound = 0;
+  let issuesTotal = 0;
+
+  const recordIssue = (issue: SourceInventoryIssue): void => {
+    issuesTotal += 1;
+    if (issues.length < issueLimit) issues.push(issue);
+  };
+
+  const classifyFailure = (
+    error: unknown,
+    code: SourceInventoryIssueCode,
+    operation: SourceInventoryOperation,
+    relativePath: string,
+  ): void => {
+    const codeValue = systemErrorCode(error);
+    if (codeValue === null) throw error;
+    recordIssue({ code, operation, path: normalizeRepoPath(relativePath), systemCode: codeValue });
+  };
+
+  const walk = (root: string, relativeDirectory: string, absoluteDirectory: string): void => {
+    let entries: readonly string[];
+    try {
+      entries = fileSystem.readdirSync(absoluteDirectory);
+    } catch (error) {
+      classifyFailure(
+        error,
+        relativeDirectory === root
+          ? 'guard.scan.root-unreadable'
+          : 'guard.scan.directory-unreadable',
+        'readdir',
+        relativeDirectory,
+      );
+      return;
+    }
+    directoriesScanned += 1;
+    if (relativeDirectory === root) rootsScanned += 1;
+
+    for (const entry of [...entries].sort(compareText)) {
+      if (
+        entry === ''
+        || entry === '.'
+        || entry === '..'
+        || path.isAbsolute(entry)
+        || path.basename(entry) !== entry
+      ) {
+        throw new RangeError('source inventory adapter returned a non-basename entry');
+      }
+      const relativeEntry = normalizeRepoPath(path.join(relativeDirectory, entry));
+      const absoluteEntry = path.join(absoluteDirectory, entry);
+      entriesInspected += 1;
+      let stat: Pick<Stats, 'isDirectory' | 'isFile' | 'isSymbolicLink'>;
+      try {
+        stat = fileSystem.lstatSync(absoluteEntry);
+      } catch (error) {
+        classifyFailure(error, 'guard.scan.entry-unreadable', 'lstat', relativeEntry);
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        recordIssue({
+          code: 'guard.scan.symlink-refused',
+          operation: 'lstat',
+          path: relativeEntry,
+          systemCode: null,
+        });
+        continue;
+      }
+      if (stat.isDirectory()) {
+        if (!options.excludeDirectory?.(relativeEntry)) {
+          walk(root, relativeEntry, absoluteEntry);
+        }
+        continue;
+      }
+      if (!stat.isFile() || !options.includeFile(relativeEntry)) continue;
+      candidatesFound += 1;
+      try {
+        const content = fileSystem.readFileSync(absoluteEntry);
+        if (typeof content !== 'string') {
+          throw new TypeError('source inventory adapter returned non-text content');
+        }
+        files.push({ path: relativeEntry, root, content });
+      } catch (error) {
+        classifyFailure(error, 'guard.scan.entry-unreadable', 'read', relativeEntry);
+      }
+    }
+  };
+
+  for (const root of roots) {
+    const absoluteRoot = path.join(options.repoRoot, root);
+    let stat: Pick<Stats, 'isDirectory' | 'isFile' | 'isSymbolicLink'>;
+    try {
+      stat = fileSystem.lstatSync(absoluteRoot);
+    } catch (error) {
+      classifyFailure(error, 'guard.scan.root-unreadable', 'lstat', root);
+      continue;
+    }
+    if (stat.isSymbolicLink()) {
+      recordIssue({
+        code: 'guard.scan.symlink-refused',
+        operation: 'lstat',
+        path: root,
+        systemCode: null,
+      });
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      recordIssue({
+        code: 'guard.scan.root-unreadable',
+        operation: 'lstat',
+        path: root,
+        systemCode: null,
+      });
+      continue;
+    }
+    walk(root, root, absoluteRoot);
+  }
+
+  files.sort((left, right) => compareText(left.path, right.path) || compareText(left.root, right.root));
+  issues.sort((left, right) =>
+    compareText(left.path, right.path)
+    || compareText(left.code, right.code)
+    || compareText(left.operation, right.operation)
+    || compareText(left.systemCode ?? '', right.systemCode ?? ''));
+  return {
+    files,
+    issues,
+    counts: {
+      rootsRequested: roots.length,
+      rootsScanned,
+      directoriesScanned,
+      entriesInspected,
+      candidatesFound,
+      filesRead: files.length,
+      issuesTotal,
+      issuesOmitted: issuesTotal - issues.length,
+    },
+  };
+}
 
 export function normalizeRepoPath(filePath: string): string {
   return filePath.split(path.sep).join('/').replace(/^\.\//, '');
