@@ -64,6 +64,22 @@ const PROTECTED_ENV_NAMES = [...new Set([
   'GEMINI_API_KEY',
 ])];
 
+/**
+ * The credential store `deploy/whatsoup` reaches on THIS host, and the fixture
+ * call log its fail-closed stub writes there.
+ *
+ * The wrapper selects the store by `uname -s` (deploy/whatsoup:69-79): Darwin
+ * reads the Keychain through `deploy/lib/read-keychain-secret.mjs`, every other
+ * platform shells out to `secret-tool`. The fixture stubs both arms, so exactly
+ * one log is produced per host — the one belonging to the arm the wrapper took.
+ * Tests read that log unconditionally, which keeps "the stub answered every
+ * lookup" falsifiable on both platforms instead of passing where the file that
+ * should exist does not.
+ */
+const HOST_CREDENTIAL_STORE = process.platform === 'darwin'
+  ? { log: 'keychain-calls.log', callPrefix: 'read-keychain-secret.mjs ' }
+  : { log: 'secret-tool-calls.log', callPrefix: 'lookup service ' };
+
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
 // fleet hosts instead of depending on a host nvm install.
@@ -300,6 +316,12 @@ function makeWrapperFixture(): WrapperFixture {
   // every host, matching keyring-less CI.
   // The stub also records every lookup it denied so tests can prove the
   // fixture's only credential-store path is this fail-closed stub.
+  // `deploy/whatsoup` selects its credential store by `uname -s`, so this stub
+  // only ever runs on the non-Darwin arm. The Darwin arm reaches the Keychain
+  // through `deploy/lib/read-keychain-secret.mjs`, which the fake Node above
+  // shadows with an equally fail-closed branch recording its own call log
+  // (WHATSOUP_TEST_KEYCHAIN_CALLS). Exactly one of the two logs is produced on
+  // any given host, and the arm the host actually takes always produces one.
   writeFileSync(
     join(sbin, 'secret-tool'),
     '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${WHATSOUP_TEST_STUB_CALLS:-/dev/null}"\nexit 1\n',
@@ -332,6 +354,10 @@ if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
       exit 91
     fi
   done
+fi
+if [[ "\${1:-}" == */lib/read-keychain-secret.mjs ]]; then
+  printf '%s %s\\n' "$(basename "$1")" "\${*:2}" >> "\${WHATSOUP_TEST_KEYCHAIN_CALLS:-/dev/null}"
+  exit 1
 fi
 if [ "\${1:-}" = "-e" ]; then
   if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
@@ -447,6 +473,7 @@ function runWrapper(
       WHATSOUP_TEST_PREFLIGHT_RC: '0',
       WHATSOUP_SKIP_PREFLIGHT: '',
       WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
+      WHATSOUP_TEST_KEYCHAIN_CALLS: join(fixture.root, 'keychain-calls.log'),
       WHATSOUP_HEALTH_TOKEN: 'test-health-token',
       OPENAI_API_KEY: 'test-openai-key',
       PINECONE_API_KEY: 'test-pinecone-key',
@@ -845,11 +872,16 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(observed).not.toMatch(/sk-proj-/);
     expect(observed).not.toMatch(/pcsk_/);
     expect(observed).not.toMatch(/canary-/);
-    // Every denied lookup was answered by the stub, fail-closed, and only
-    // with lookup semantics — the fixture has no other store path.
-    const stubCalls = readFileSync(join(fixture.root, 'secret-tool-calls.log'), 'utf8');
-    for (const line of stubCalls.split('\n').filter((line) => line !== '')) {
-      expect(line.startsWith('lookup service ')).toBe(true);
+    // Every denied lookup was answered by the fixture's fail-closed stub, and
+    // only through the read-only entry point of the store this host actually
+    // uses — the fixture has no other store path. The read is unconditional on
+    // both platforms: an absent log means the stub that was supposed to answer
+    // never ran, which is a fixture regression and must fail here.
+    const storeCalls = readFileSync(join(fixture.root, HOST_CREDENTIAL_STORE.log), 'utf8');
+    const storeCallLines = storeCalls.split('\n').filter((line) => line !== '');
+    expect(storeCallLines.length).toBeGreaterThan(0);
+    for (const line of storeCallLines) {
+      expect(line.startsWith(HOST_CREDENTIAL_STORE.callPrefix), line).toBe(true);
     }
     // And in the wrapper's pinned PATH, secret-tool resolves to the stub.
     const resolved = spawnSync('bash', ['-c', 'command -v secret-tool'], {
