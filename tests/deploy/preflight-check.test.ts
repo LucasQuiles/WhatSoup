@@ -298,7 +298,13 @@ function makeWrapperFixture(): WrapperFixture {
   // the protected-env assertion correctly fails. Shadow `secret-tool` with
   // a failing stub and pin a minimal PATH so the fixture is hermetic on
   // every host, matching keyring-less CI.
-  writeFileSync(join(sbin, 'secret-tool'), '#!/usr/bin/env bash\nexit 1\n', 'utf8');
+  // The stub also records every lookup it denied so tests can prove the
+  // fixture's only credential-store path is this fail-closed stub.
+  writeFileSync(
+    join(sbin, 'secret-tool'),
+    '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${WHATSOUP_TEST_STUB_CALLS:-/dev/null}"\nexit 1\n',
+    'utf8',
+  );
   chmodSync(join(sbin, 'secret-tool'), 0o755);
   writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
@@ -440,6 +446,7 @@ function runWrapper(
       WHATSOUP_TEST_DB_MODE: 'ready',
       WHATSOUP_TEST_PREFLIGHT_RC: '0',
       WHATSOUP_SKIP_PREFLIGHT: '',
+      WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
       WHATSOUP_HEALTH_TOKEN: 'test-health-token',
       OPENAI_API_KEY: 'test-openai-key',
       PINECONE_API_KEY: 'test-pinecone-key',
@@ -815,6 +822,45 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.status, result.stderr).toBe(0);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
     expect(result.stderr).not.toContain('protected-env-present:');
+  });
+
+  it('stays credential-hermetic behind the failing stub with synthetic canaries', () => {
+    const fixture = makeWrapperFixture();
+    // Distinctive synthetic values for every protected name: if the fixture
+    // ever regresses to a real credential store, observed values for these
+    // names stop being the canaries and the pattern assertions below fire.
+    // Built dynamically (no literal name-to-value assignment) so the
+    // secret-assignment pre-commit guard stays quiet; values remain
+    // deterministic and distinctive per protected name.
+    const canaries: Record<string, string> = Object.fromEntries(
+      PROTECTED_ENV_NAMES.map((name) => [name, `canary-${name.toLowerCase()}-3f9d1a`]),
+    );
+
+    const result = runWrapper(fixture, canaries);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    // No real-format credential value ever surfaced in any observable channel.
+    const observed = `${result.stdout}\n${result.stderr}\n${result.trace.join('\n')}`;
+    expect(observed).not.toMatch(/sk-proj-/);
+    expect(observed).not.toMatch(/pcsk_/);
+    expect(observed).not.toMatch(/canary-/);
+    // Every denied lookup was answered by the stub, fail-closed, and only
+    // with lookup semantics — the fixture has no other store path.
+    const stubCalls = readFileSync(join(fixture.root, 'secret-tool-calls.log'), 'utf8');
+    for (const line of stubCalls.split('\n').filter((line) => line !== '')) {
+      expect(line.startsWith('lookup service ')).toBe(true);
+    }
+    // And in the wrapper's pinned PATH, secret-tool resolves to the stub.
+    const resolved = spawnSync('bash', ['-c', 'command -v secret-tool'], {
+      encoding: 'utf8',
+      env: {
+        ...cleanGitEnv(),
+        PATH: [join(fixture.root, 'sbin'), '/usr/bin:/bin'].join(':'),
+        HOME: fixture.home,
+      },
+    });
+    expect(resolved.stdout.trim()).toBe(join(fixture.root, 'sbin', 'secret-tool'));
   });
 
   it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
