@@ -348,6 +348,9 @@ const SCHEDULED_PROMPT_MARK = '[isolated scheduled background turn]';
 // long enough for the runtime to settle if the property held, short enough to
 // keep the suite well under the 10s per-test budget.
 const GAP_PROBE_BOUND_MS = 1_500;
+// The user-facing notice handleMessage's turn-chain catch sends on a genuine
+// processing failure (runtime.ts). A wedged-lane release is not one.
+const PROCESSING_FAILURE_NOTICE = 'Something went wrong processing that message. Try again?';
 
 function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
   const sentMessages: Array<{ jid: string; text: string }> = [];
@@ -407,10 +410,27 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   let runtime: AgentRuntime;
   let messenger: Messenger;
 
+  /**
+   * Text the runtime pushed through sendDirect. chat-transport.ts routes a
+   * direct send to the chat's outbound queue (enqueueText) whenever one exists,
+   * which it always does here, so the queue doubles — not the messenger — are
+   * where a direct send is observable.
+   */
+  function directSendTexts(): string[] {
+    return queueDoubles.flatMap((q) => q.enqueueText.mock.calls.map((call) => call[0] as string));
+  }
+
   function status(seq: number): string {
     return (db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as {
       processing_status: string;
     }).processing_status;
+  }
+
+  /** Who owns the durable terminal: the sweep writes 'stale_reclaim'. */
+  function failureClass(seq: number): string | null {
+    return (db.raw.prepare('SELECT failure_class FROM inbound_events WHERE seq = ?').get(seq) as {
+      failure_class: string | null;
+    }).failure_class;
   }
 
   function backdate(seq: number, interval: string): void {
@@ -712,12 +732,17 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
 
-    // OPEN GAP (#3374 ask 2): the stale-reclaim release iterates only
-    // perChatTurnQueues — shared mode's single global TurnQueue is never
-    // matched, so durable reclamation still leaves the runtime lane wedged.
-    // This probe asserts the DESIRED coupling; it.fails keeps it green only
-    // while the gap exists.
-    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the
+    // stale-reclaim release no longer iterates only perChatTurnQueues. shared
+    // mode's wedged turn pins the ONE global TurnQueue, and the release now
+    // reaches it through the lane's own observable — the published
+    // currentRuntimeTurnContext, matched to the reclaimed row by inboundSeq —
+    // rejecting that turn's runtime completion and settling the session's
+    // provider-turn promise. The queue's ordinary processor-error finalization
+    // then recognizes the sweep-owned durable terminal (reclaimed_by_sweep)
+    // and advances, so the wedge ends without a restart and afterEach's normal
+    // shutdown still succeeds.
+    it('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
@@ -727,6 +752,37 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(globalQueue().activeTurn ?? null).toBeNull();
       }, { timeout: GAP_PROBE_BOUND_MS });
+    });
+
+    // NEGATIVE CONTROL for the release above. The 24h grace is NOT the
+    // discriminator — a grace-bounded test passes even against a release that
+    // fires on any non-empty reclaim batch. So the sweep genuinely reclaims a
+    // row (failedStale: 1, the listener runs with a non-empty set) while the
+    // wedged scheduled turn stays INSIDE its grace: only the identity match
+    // (reclaimed seq === the lane context's inboundSeq) can keep the live turn
+    // pinned here.
+    it('cell 7 reclamation NEGATIVE: a reclaimed row for a DIFFERENT turn leaves the live shared lane pinned', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      // An unrelated stale open inbound in another conversation — never
+      // dispatched, so it pins no lane.
+      const strangerSeq = engine.journalInbound(
+        'msg-unrelated-stale', toConversationKey(otherChatJid), otherChatJid, 'agent',
+      );
+      backdate(strangerSeq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+      expect(status(strangerSeq)).toBe('failed');
+
+      // The live turn is untouched: still pinned, still open, provider promise
+      // never force-settled.
+      expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      expect(session.turnInFlight).toBe(true);
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(status(seq)).toBe('processing');
     });
   });
 
@@ -800,12 +856,16 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
 
-    // OPEN GAP (#3374 ask 2): single mode has no TurnQueue — the wedged turn
-    // pins this.turnChain, and the stale-reclaim release has no lane to
-    // match. This probe asserts the DESIRED coupling (the chain settles once
-    // the durable row is reclaimed); it.fails keeps it green only while the
-    // gap exists.
-    it.fails('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: single
+    // mode still has no TurnQueue, so the release reaches the lane through the
+    // published currentRuntimeTurnContext instead, matched to the reclaimed row
+    // by inboundSeq. Rejecting that turn's runtime completion unpins
+    // sendTurnNonShared, and handleMessage's turn-chain catch settles the
+    // chain. That catch recognizes the release as a DESIGNED settlement: the
+    // sweep keeps durable ownership (failure_class stays 'stale_reclaim', so no
+    // second terminal was written) and no user-facing failure notice is sent —
+    // for a scheduled job that notice would land in the report chat a day late.
+    it('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
@@ -813,6 +873,29 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
       expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('settled');
+      expect(failureClass(seq)).toBe('stale_reclaim');
+      expect(directSendTexts()).not.toContain(PROCESSING_FAILURE_NOTICE);
+    });
+
+    // NEGATIVE CONTROL for the release above — same shape as shared's: the
+    // sweep genuinely reclaims a row (so the release listener runs with a
+    // non-empty set) while the wedged turn stays inside its grace. Only the
+    // identity match keeps the live turn pinned.
+    it('cell 7 reclamation NEGATIVE: a reclaimed row for a DIFFERENT turn leaves the live turn chain pinned', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      const strangerSeq = engine.journalInbound(
+        'msg-unrelated-stale-single', toConversationKey(otherChatJid), otherChatJid, 'agent',
+      );
+      backdate(strangerSeq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+      expect(status(strangerSeq)).toBe('failed');
+
+      expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('pending');
+      expect(session.turnInFlight).toBe(true);
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(status(seq)).toBe('processing');
     });
   });
 
