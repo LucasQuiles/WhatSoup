@@ -9,6 +9,7 @@
 
 import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { SIGNAL } from '../../../lib/signals.ts';
+import { isNonEmptyString, isRecord } from '../../../lib/type-guards.ts';
 
 export interface BinaryPreflightResult {
   status: 'present' | 'missing' | 'unknown' | 'incompatible';
@@ -17,6 +18,10 @@ export interface BinaryPreflightResult {
 }
 
 const PROBE_TIMEOUT_MS = 5_000;
+/** Hard ceiling for model-catalogue stdout. The configured-provider verbose
+ *  catalogue is normally well below this; a larger stream is treated as an
+ *  untrusted shape change instead of growing memory without bound. */
+const MODEL_CATALOG_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 
 /**
  * Probe whether `binary` is spawnable on this host.
@@ -336,35 +341,346 @@ export async function probeModelCatalog(
 /** Why `<binary> models` produced no usable catalogue. The catalogue resolver
  *  maps each to a distinct render reason (Q 2b#3): a timeout must not read as an
  *  empty catalogue, and a spawn failure (binary not runnable) is its own fix. */
-export type ModelCatalogUnavailableReason = 'spawn-error' | 'timeout' | 'empty';
+export type ModelCatalogUnavailableReason =
+  | 'spawn-error'
+  | 'timeout'
+  | 'empty'
+  | 'command-error'
+  | 'unparseable'
+  | 'output-limit';
+
+export type ModelCatalogCaptureMode = 'refreshed' | 'cached' | 'legacy';
+
+/** Normalized subset of OpenCode's verbose model record used by fallback
+ *  discovery. Missing fields are UNKNOWN, never inferred. */
+export interface ModelCatalogMetadata {
+  status?: string;
+  releaseDate?: string;
+  textOutput?: boolean;
+  toolCall?: boolean;
+  zeroCost?: boolean;
+}
 
 /** Result of {@link listModelCatalog}: the harness's dynamic model catalogue.
  *  Discriminated so the resolver can label a timeout distinctly from an empty
  *  catalogue rather than collapse both to a bare "unavailable". */
 export type ModelCatalogListing =
-  | { status: 'ok'; ids: string[] }
+  | {
+      status: 'ok';
+      ids: string[];
+      /** Optional for injected/legacy adapters; real captures always provide it. */
+      metadata?: Record<string, ModelCatalogMetadata>;
+      /** Optional for injected/legacy adapters; absence is treated as legacy. */
+      captureMode?: ModelCatalogCaptureMode;
+      /** Why the refreshed capture was unavailable when cached/legacy data won. */
+      refreshFailure?: ModelCatalogUnavailableReason;
+    }
   | { status: 'unavailable'; reason: ModelCatalogUnavailableReason };
 
 /**
- * List the model catalogue a provider binary self-reports via `<binary> models`
- * — the dynamic, PER-HARNESS source for the `/config model` catalogue render
- * (owner ask 2026-07-19). Same spawn + 5 s kill-timer discipline as
- * probeModelCatalog, but returns the full id list instead of a match verdict.
+ * List the dynamic, per-harness model catalogue used by `/config model` and
+ * fallback discovery. OpenCode is queried pure/refreshed/verbose first, then
+ * pure/cached/verbose, then through the legacy ID-only command for older
+ * gateways. Every successful path discloses its capture mode.
  *
  * Honest-degrade contract: anything that is not a clean close with ≥1 id →
- * `{ status: 'unavailable', reason }` (reason distinguishes spawn-error /
- * timeout / empty) so the resolver renders a reason-specific, actionable line
- * rather than an empty or fake list. Never throws.
+ * `{ status: 'unavailable', reason }` so the resolver renders a reason-specific,
+ * actionable line rather than an empty or fake list. Never throws.
  */
 export async function listModelCatalog(
   binary: string,
   spawnImpl: typeof spawn = spawn,
 ): Promise<ModelCatalogListing> {
-  const outcome = await collectModelCatalogIds(binary, spawnImpl);
-  if (!outcome.ok) {
-    return { status: 'unavailable', reason: outcome.reason };
+  const refreshed = await collectModelCatalogOutput(
+    binary,
+    ['models', '--pure', '--refresh', '--verbose'],
+    spawnImpl,
+  );
+  if (refreshed.ok) {
+    const parsed = parseVerboseModelCatalog(refreshed.output, true);
+    if (parsed) {
+      return { status: 'ok', ...parsed, captureMode: 'refreshed' };
+    }
+  } else if (refreshed.reason === 'spawn-error') {
+    return { status: 'unavailable', reason: 'spawn-error' };
   }
-  return { status: 'ok', ids: outcome.ids };
+  const refreshFailure: ModelCatalogUnavailableReason = refreshed.ok
+    ? 'unparseable'
+    : refreshed.reason;
+
+  // A failed upstream refresh does not erase a usable on-disk models.dev
+  // cache. Read it explicitly and label the result CACHED.
+  const cached = await collectModelCatalogOutput(
+    binary,
+    ['models', '--pure', '--verbose'],
+    spawnImpl,
+  );
+  if (cached.ok) {
+    const parsed = parseVerboseModelCatalog(cached.output);
+    if (parsed) {
+      return { status: 'ok', ...parsed, captureMode: 'cached', refreshFailure };
+    }
+  } else if (cached.reason === 'spawn-error') {
+    return { status: 'unavailable', reason: 'spawn-error' };
+  } else if (cached.reason === 'timeout') {
+    // A second PURE invocation wedged. A non-pure compatibility retry would
+    // load more startup surfaces and extend boot delay without useful evidence.
+    return { status: 'unavailable', reason: 'timeout' };
+  }
+
+  // Compatibility path for older/custom gateways that do not support pure or
+  // verbose model listing. It preserves IDs but exposes no capability claims.
+  const legacy = await collectModelCatalogOutput(binary, ['models'], spawnImpl);
+  if (!legacy.ok) {
+    return { status: 'unavailable', reason: legacy.reason };
+  }
+  const ids = parseLegacyModelCatalog(legacy.output);
+  if (!ids) {
+    return {
+      status: 'unavailable',
+      reason: isNonEmptyString(legacy.output) ? 'unparseable' : 'empty',
+    };
+  }
+  return { status: 'ok', ids, metadata: {}, captureMode: 'legacy', refreshFailure };
+}
+
+type CatalogCommandOutcome =
+  | { ok: true; output: string }
+  | { ok: false; reason: ModelCatalogUnavailableReason };
+
+function collectModelCatalogOutput(
+  binary: string,
+  args: string[],
+  spawnImpl: typeof spawn,
+  env?: NodeJS.ProcessEnv,
+): Promise<CatalogCommandOutcome> {
+  return new Promise<CatalogCommandOutcome>((resolve) => {
+    let settled = false;
+    let stdoutBuffer = '';
+    let stdoutBytes = 0;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const settle = (result: CatalogCommandOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      resolve(result);
+    };
+
+    let child: ReturnType<typeof spawnImpl>;
+    try {
+      child = spawnImpl(binary, args, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env,
+        windowsHide: true,
+      } as SpawnOptionsWithoutStdio);
+    } catch {
+      settle({ ok: false, reason: 'spawn-error' });
+      return;
+    }
+
+    const terminate = (): void => {
+      try { child.kill(); } catch { /* ignore kill errors */ }
+      killEscalationTimer = setTimeout(() => {
+        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the catalogue process may finish during the grace period, so a failed escalation is expected and safe to ignore. */ }
+      }, KILL_ESCALATION_GRACE_MS);
+      killEscalationTimer.unref?.();
+    };
+
+    killTimer = setTimeout(() => {
+      terminate();
+      settle({ ok: false, reason: 'timeout' });
+    }, PROBE_TIMEOUT_MS);
+    killTimer.unref?.();
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      stdoutBytes += chunk.byteLength;
+      if (stdoutBytes > MODEL_CATALOG_OUTPUT_LIMIT_BYTES) {
+        terminate();
+        settle({ ok: false, reason: 'output-limit' });
+        return;
+      }
+      stdoutBuffer += chunk.toString('utf8');
+    });
+
+    child.on('error', () => {
+      settle({ ok: false, reason: 'spawn-error' });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(killEscalationTimer);
+      if (settled) return;
+      if (code !== 0) {
+        settle({ ok: false, reason: 'command-error' });
+        return;
+      }
+      settle(
+        isNonEmptyString(stdoutBuffer)
+          ? { ok: true, output: stdoutBuffer }
+          : { ok: false, reason: 'empty' },
+      );
+    });
+  });
+}
+
+function looksLikeCatalogModelId(id: string): boolean {
+  const slash = id.indexOf('/');
+  return slash > 0
+    && slash < id.length - 1
+    && !/[\s{}\[\]",]/.test(id);
+}
+
+function parseLegacyModelCatalog(output: string): string[] | null {
+  const ids = output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (ids.length === 0 || ids.some((id) => !looksLikeCatalogModelId(id))) return null;
+  return ids;
+}
+
+/** Return a sortable lower-bound day for a models.dev release date. The
+ *  upstream schema permits both YYYY-MM and YYYY-MM-DD; month precision maps
+ *  to its first day for ordering without inventing day precision in health. */
+export function modelCatalogReleaseDateSortKey(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}(?:-\d{2})?$/.test(value)) return null;
+  const candidate = value.length === 7 ? `${value}-01` : value;
+  const parsed = new Date(`${candidate}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === candidate
+    ? candidate
+    : null;
+}
+
+/** Parse the `model-id` + pretty-printed JSON record stream emitted by
+ *  `opencode models --verbose`. Any framing/id mismatch rejects the verbose
+ *  attempt; individual optional fields are retained only when type-valid. */
+function parseVerboseModelCatalog(
+  output: string,
+  allowRefreshBanner = false,
+): { ids: string[]; metadata: Record<string, ModelCatalogMetadata> } | null {
+  const lines = output.split(/\r?\n/);
+  const ids: string[] = [];
+  const metadata: Record<string, ModelCatalogMetadata> = {};
+  let index = 0;
+
+  while (index < lines.length && !isNonEmptyString(lines[index])) index += 1;
+  if (
+    allowRefreshBanner
+    && index < lines.length
+    && /^(?:\u001b\[[0-9;]*m)*Models cache refreshed(?:\u001b\[[0-9;]*m)*$/.test(lines[index]!)
+  ) {
+    index += 1;
+  }
+
+  while (index < lines.length) {
+    while (index < lines.length && !isNonEmptyString(lines[index])) index += 1;
+    if (index >= lines.length) break;
+
+    const modelId = lines[index]!.trim();
+    if (!looksLikeCatalogModelId(modelId)) return null;
+    if (Object.prototype.hasOwnProperty.call(metadata, modelId)) return null;
+    index += 1;
+    while (index < lines.length && !isNonEmptyString(lines[index])) index += 1;
+    if (index >= lines.length || lines[index]!.trim() !== '{') return null;
+
+    const jsonLines: string[] = [];
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let completed = false;
+    for (; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      jsonLines.push(line);
+      for (const char of line) {
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') inString = false;
+          continue;
+        }
+        if (char === '"') inString = true;
+        else if (char === '{') depth += 1;
+        else if (char === '}') depth -= 1;
+        if (depth < 0) return null;
+      }
+      if (depth === 0) {
+        completed = true;
+        index += 1;
+        break;
+      }
+    }
+    if (!completed || inString) return null;
+
+    let record: unknown;
+    try {
+      record = JSON.parse(jsonLines.join('\n'));
+    } catch {
+      return null;
+    }
+    if (!isRecord(record)) return null;
+
+    const slash = modelId.indexOf('/');
+    if (record['providerID'] !== modelId.slice(0, slash) || record['id'] !== modelId.slice(slash + 1)) {
+      return null;
+    }
+
+    const normalized: ModelCatalogMetadata = {};
+    if (isNonEmptyString(record['status'])) {
+      normalized.status = record['status'].trim().toLowerCase();
+    }
+    const releaseDate = record['release_date'];
+    if (typeof releaseDate === 'string' && modelCatalogReleaseDateSortKey(releaseDate) !== null) {
+      normalized.releaseDate = releaseDate;
+    }
+    const cost = record['cost'];
+    if (isRecord(cost)) {
+      const numericCosts = finiteNumericLeaves(cost);
+      if (
+        typeof cost['input'] === 'number'
+        && Number.isFinite(cost['input'])
+        && typeof cost['output'] === 'number'
+        && Number.isFinite(cost['output'])
+        && numericCosts !== null
+      ) {
+        normalized.zeroCost = numericCosts.every((price) => price === 0);
+      }
+    }
+    const capabilities = record['capabilities'];
+    if (isRecord(capabilities)) {
+      if (typeof capabilities['toolcall'] === 'boolean') {
+        normalized.toolCall = capabilities['toolcall'];
+      }
+      const outputCapabilities = capabilities['output'];
+      if (isRecord(outputCapabilities) && typeof outputCapabilities['text'] === 'boolean') {
+        normalized.textOutput = outputCapabilities['text'];
+      }
+    }
+
+    ids.push(modelId);
+    metadata[modelId] = normalized;
+  }
+
+  return ids.length > 0 ? { ids, metadata } : null;
+}
+
+/** Every model-catalogue cost leaf must be a finite number before we make a
+ *  zero-cost claim. This includes nested cache prices and fails closed when a
+ *  gateway adds an unrecognized non-numeric charge field. */
+function finiteNumericLeaves(value: Record<string, unknown>): number[] | null {
+  const values: number[] = [];
+  for (const nested of Object.values(value)) {
+    if (typeof nested === 'number' && Number.isFinite(nested)) {
+      values.push(nested);
+      continue;
+    }
+    if (!isRecord(nested)) return null;
+    const leaves = finiteNumericLeaves(nested);
+    if (leaves === null) return null;
+    values.push(...leaves);
+  }
+  return values;
 }
 
 /** Discriminated outcome of the shared `<binary> models` probe. */
@@ -390,52 +706,11 @@ function collectModelCatalogIds(
   spawnImpl: typeof spawn,
   env?: NodeJS.ProcessEnv,
 ): Promise<CatalogProbeOutcome> {
-  return new Promise<CatalogProbeOutcome>((resolve) => {
-    let settled = false;
-    let stdoutBuffer = '';
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const settle = (result: CatalogProbeOutcome): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(killTimer);
-      resolve(result);
-    };
-
-    let child: ReturnType<typeof spawnImpl>;
-    try {
-      child = spawnImpl(binary, ['models'], {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        // probeModelCatalog threads its explicit (egress-scrubbed) env so the
-        // catalog probe routes like a real turn (exec-profile egress coverage);
-        // listModelCatalog passes none, leaving env undefined → the child
-        // inherits process.env, i.e. main's prior no-env behavior on that path.
-        env,
-      } as SpawnOptionsWithoutStdio);
-    } catch {
-      settle({ ok: false, reason: 'spawn-error' });
-      return;
-    }
-
-    killTimer = setTimeout(() => {
-      try { child.kill(); } catch { /* ignore kill errors */ }
-      settle({ ok: false, reason: 'timeout' });
-    }, PROBE_TIMEOUT_MS);
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString('utf8');
-    });
-
-    child.on('error', () => {
-      settle({ ok: false, reason: 'spawn-error' });
-    });
-
-    child.on('close', () => {
-      const ids = stdoutBuffer
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      settle(ids.length > 0 ? { ok: true, ids } : { ok: false, reason: 'empty' });
-    });
+  return collectModelCatalogOutput(binary, ['models'], spawnImpl, env).then((outcome) => {
+    if (!outcome.ok) return outcome;
+    const ids = parseLegacyModelCatalog(outcome.output);
+    return ids
+      ? { ok: true, ids }
+      : { ok: false, reason: isNonEmptyString(outcome.output) ? 'unparseable' : 'empty' };
   });
 }

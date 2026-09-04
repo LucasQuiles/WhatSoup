@@ -4,7 +4,9 @@
 // (CONFIG-MODEL-RENDER-SPEC.md; Q rulings 2026-07-19/20). Produces the
 // AvailableModelsListing the formatter renders — the harness's OWN catalogue
 // source, never a static/stale stand-in:
-//   - opencode-cli            → `<binary> models` (cached, capture-stamped, shape-checked),
+//   - opencode-cli            → refreshed verbose catalogue, explicitly
+//                               labeled cache/legacy degradation, then a
+//                               short-lived resolver cache for render traffic,
 //   - claude-cli              → anthropic /v1/models ORG catalogue (classified failures),
 //   - openai / openai-api     → openai /v1/models, keyed (Task B; both provider
 //                               strings route here — see resolveModelCatalogue),
@@ -31,8 +33,10 @@ import {
 } from '../../lib/model-advisor.ts';
 import type { AvailableModelsListing, UnavailableReason } from './owner-render-format.ts';
 
-/** How long a captured opencode catalogue stays fresh. A cache is what keeps the
- *  in-thread render off a live `<binary> models` spawn per turn (Q 2b#1/#3). */
+/** How long a resolved OpenCode catalogue stays fresh for command rendering.
+ *  This is distinct from the CLI's models.dev cache: it keeps repeated renders
+ *  off a child-process spawn, while listModelCatalog records whether its own
+ *  upstream refresh succeeded or degraded. */
 const OPENCODE_CACHE_TTL_MS = 60_000;
 /** Same TTL discipline for the openai adapter (Task B) — one constant per
  *  source so a tune to one harness never silently retunes another. codex-cli /
@@ -93,9 +97,13 @@ function probeReasonToReason(reason: ModelCatalogUnavailableReason): Unavailable
     case 'timeout':
       return { kind: 'timeout' };
     case 'spawn-error':
+    case 'command-error':
       return { kind: 'probe-failed' };
     case 'empty':
       return { kind: 'empty' };
+    case 'unparseable':
+    case 'output-limit':
+      return { kind: 'unparseable' };
   }
 }
 
