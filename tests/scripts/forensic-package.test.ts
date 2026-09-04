@@ -39,6 +39,10 @@ function sha256(value: Buffer | string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function manifestSha256(packageDirectory: string): string {
+  return sha256(readFileSync(path.join(packageDirectory, 'manifest.json')));
+}
+
 function searchResult(
   family: 'claude' | 'codex' | 'opencode',
   pass: number,
@@ -96,7 +100,7 @@ function validSpec(): unknown {
       independent_sources: [{
         kind: 'git',
         reference: 'commit:0123456789abcdef0123456789abcdef01234567',
-        sha256: null,
+        sha256: sha256('git-commit-object'),
       }],
     }],
     narrative: [{
@@ -293,7 +297,7 @@ describe('forensic package source adapters', () => {
       databasePath,
       expectedSha256,
       queries: [{ id: 'Q01', mode: 'substring', text: 'killSessionTree' }],
-      limits: { maxRows: 100, maxHits: 10 },
+      limits: { maxSourceBytes: 10_000_000, maxRows: 100, maxHits: 10 },
     });
 
     expect(result.metrics).toEqual({
@@ -333,7 +337,7 @@ describe('forensic package source adapters', () => {
       databasePath,
       expectedSha256: sha256(readFileSync(databasePath)),
       queries: [{ id: 'Q01', mode: 'substring', text: 'first' }],
-      limits: { maxRows: 1, maxHits: 10 },
+      limits: { maxSourceBytes: 10_000_000, maxRows: 1, maxHits: 10 },
     });
 
     expect(result.metrics.failed_sources).toBe(1);
@@ -341,6 +345,24 @@ describe('forensic package source adapters', () => {
       'FORENSIC_SQLITE_REQUIRED_TABLE_MISSING:part',
       'FORENSIC_SQLITE_ROW_LIMIT',
     ]));
+  });
+
+  it('rejects an OpenCode source family above its byte budget before scanning', () => {
+    const root = tmp.make('opencode-byte-bound');
+    const databasePath = path.join(root, 'opencode.db');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE session (title TEXT); CREATE TABLE message (data TEXT); CREATE TABLE part (data TEXT);');
+    database.close();
+    const sourceBytes = statSync(databasePath).size;
+
+    expect(() => scanOpenCodeSnapshot({
+      pass: 1,
+      sourceAlias: 'opencode-snapshot-01',
+      databasePath,
+      expectedSha256: sha256(readFileSync(databasePath)),
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: sourceBytes - 1, maxRows: 100, maxHits: 10 },
+    })).toThrow('SQLite source family exceeds maxSourceBytes before identity');
   });
 });
 
@@ -408,6 +430,12 @@ describe('forensic package contract', () => {
       sha256: null,
     }];
     expect(() => parseForensicPackageSpec(copiedSummary)).toThrow('independent_sources');
+
+    const unboundSource = validSpec() as {
+      conclusions: Array<{ independent_sources: Array<{ sha256: string | null }> }>;
+    };
+    unboundSource.conclusions[0]!.independent_sources[0]!.sha256 = null;
+    expect(() => parseForensicPackageSpec(unboundSource)).toThrow('content-bound independent source');
   });
 
   it('binds evidence IDs, source aliases, query IDs, and completeness to their measured rows', () => {
@@ -525,7 +553,7 @@ describe('forensic package contract', () => {
     expect(analysis.entity_graph.nodes.length).toBeGreaterThan(0);
     expect(analysis.findings.contradictions).toHaveLength(1);
     expect(analysis.findings.negative_space).toHaveLength(1);
-    expect(verifyForensicPackage(first)).toEqual({ valid: true, findings: [] });
+    expect(verifyForensicPackage(first, manifestSha256(first))).toEqual({ valid: true, findings: [] });
   });
 
   it('fails closed when sanitized package text contains a configured private term', () => {
@@ -545,7 +573,7 @@ describe('forensic package contract', () => {
     writeForensicPackage(validSpec(), allowed, {
       forbiddenTerms: ['private-node-canary'],
     });
-    expect(verifyForensicPackage(allowed)).toEqual({ valid: true, findings: [] });
+    expect(verifyForensicPackage(allowed, manifestSha256(allowed))).toEqual({ valid: true, findings: [] });
   });
 
   it('preserves large byte counts without publishing phone-shaped digit runs', () => {
@@ -582,7 +610,7 @@ describe('forensic package contract', () => {
     expect(openCode?.identity?.bytes).toBe('10_813_071_360');
     expect(openCode?.identity?.members?.[0]?.bytes).toBe('10_813_071_360');
     expect(inventoryText).not.toContain('10813071360');
-    expect(verifyForensicPackage(output)).toEqual({ valid: true, findings: [] });
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
   });
 
   it('publishes only adjudication-referenced evidence instead of the full candidate corpus', () => {
@@ -621,12 +649,12 @@ describe('forensic package contract', () => {
 
     expect(() => writeForensicPackage(validSpec(), output)).toThrow('already exists');
     writeFileSync(path.join(output, 'state.json'), '{}\n');
-    expect(verifyForensicPackage(output)).toMatchObject({
+    expect(verifyForensicPackage(output, expectedManifestSha256)).toMatchObject({
       valid: false,
       findings: expect.arrayContaining(['hash-mismatch:state.json']),
     });
     writeFileSync(path.join(output, 'unexpected.txt'), 'not manifest-bound\n');
-    expect(verifyForensicPackage(output)).toMatchObject({
+    expect(verifyForensicPackage(output, expectedManifestSha256)).toMatchObject({
       valid: false,
       findings: expect.arrayContaining(['unexpected-file:unexpected.txt']),
     });
@@ -660,7 +688,7 @@ describe('forensic package contract', () => {
     reportRow.sha256 = sha256(unsafeReport);
     writeFileSync(path.join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
-    expect(verifyForensicPackage(output, undefined, {
+    expect(verifyForensicPackage(output, manifestSha256(output), {
       forbiddenTerms: ['private-node-canary'],
     })).toEqual({
       valid: false,
@@ -678,7 +706,16 @@ describe('forensic reconstruction CLI', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('forensic.reconstruction-cli.v1'));
     const schemaOutput = log.mock.calls[0]?.[0];
     expect(typeof schemaOutput).toBe('string');
-    expect(Object.keys(JSON.parse(String(schemaOutput)).exit_codes)).toEqual(['0', '2']);
+    const schema = JSON.parse(String(schemaOutput)) as {
+      commands: Record<string, { required: string[] }>;
+      exit_codes: Record<string, string>;
+    };
+    expect(Object.keys(schema.exit_codes)).toEqual(['0', '2']);
+    expect(schema.commands.build?.required).toContain('forbidden-terms');
+    expect(schema.commands.verify?.required).toEqual(expect.arrayContaining([
+      'expected-manifest-sha256',
+      'forbidden-terms',
+    ]));
     expect(await runForensicReconstruction(['schema', '--surprise'])).toBe(2);
     expect(error).toHaveBeenCalledWith(expect.stringContaining('does not accept arguments'));
     log.mockRestore();
@@ -782,6 +819,12 @@ describe('forensic reconstruction CLI', () => {
     ], root)).toBe(0);
     expect(await runForensicReconstruction([
       'verify', '--package', output,
+    ], root)).toBe(2);
+    const expectedManifestSha256 = sha256(readFileSync(path.join(output, 'manifest.json')));
+    expect(await runForensicReconstruction([
+      'verify', '--package', output,
+      '--expected-manifest-sha256', expectedManifestSha256,
+      '--forbidden-terms', forbiddenTerms,
     ], root)).toBe(0);
     expect(readFileSync(path.join(output, 'report.md'), 'utf8')).not.toContain(spec);
   });

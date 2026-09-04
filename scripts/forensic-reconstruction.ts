@@ -1,4 +1,14 @@
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -30,13 +40,13 @@ const CLI_SCHEMA = Object.freeze({
     },
     'scan-opencode': {
       required: ['pass', 'source-alias', 'database', 'expected-sha256', 'queries', 'output'],
-      optional: ['prior', 'expected-members', 'max-rows', 'max-hits'],
+      optional: ['prior', 'expected-members', 'max-source-bytes', 'max-rows', 'max-hits'],
     },
-    build: { required: ['spec', 'output'], optional: ['forbidden-terms'] },
-    verify: { required: ['package'], optional: ['expected-manifest-sha256', 'forbidden-terms'] },
+    build: { required: ['spec', 'output', 'forbidden-terms'], optional: [] },
+    verify: { required: ['package', 'expected-manifest-sha256', 'forbidden-terms'], optional: [] },
   },
   exit_codes: {
-    0: 'complete and valid',
+    0: 'operation complete and output structurally valid; investigation saturation is reported in the package',
     2: 'inconclusive, invalid input, source failure, or tool failure',
   },
 });
@@ -151,16 +161,31 @@ function priorEvidenceIds(file: string | undefined): Set<string> {
 }
 
 function writeJsonNoClobber(file: string, value: unknown): void {
-  if (existsSync(file)) throw new Error(`output path already exists: ${file}`);
-  const temporary = `${file}.partial-${process.pid}`;
+  const temporary = `${file}.partial-${process.pid}-${randomUUID()}`;
   if (existsSync(temporary)) throw new Error(`temporary output path already exists: ${temporary}`);
   const content = `${JSON.stringify(value, null, 2)}\n`;
+  let descriptor: number | null = null;
   try {
-    writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
-    renameSync(temporary, file);
+    descriptor = openSync(temporary, 'wx', 0o600);
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    linkSync(temporary, file);
+    const parent = openSync(path.dirname(file), 'r');
+    try {
+      fsyncSync(parent);
+    } finally {
+      closeSync(parent);
+    }
   } catch (error) {
-    if (existsSync(temporary)) unlinkSync(temporary);
+    if (descriptor !== null) closeSync(descriptor);
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`output path already exists: ${file}`);
+    }
     throw error;
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
 
@@ -278,6 +303,7 @@ function scanOpenCode(options: ReadonlyMap<string, string>, cwd: string): number
       ? undefined
       : path.resolve(cwd, option(options, 'prior'))),
     limits: {
+      maxSourceBytes: integerOption(options, 'max-source-bytes', 17_179_869_184, 1),
       maxRows: integerOption(options, 'max-rows', 1_000_000, 1),
       maxHits: integerOption(options, 'max-hits', 1_000, 0),
     },
@@ -308,21 +334,16 @@ export async function runForensicReconstruction(
     if (command === 'scan-opencode') return scanOpenCode(options, cwd);
     if (command === 'build') {
       const spec = readJson(path.resolve(cwd, option(options, 'spec')), 'package spec');
-      const forbiddenTerms = options.get('forbidden-terms');
       writeForensicPackage(spec, path.resolve(cwd, option(options, 'output')), {
-        forbiddenTerms: readForbiddenTerms(forbiddenTerms === undefined
-          ? undefined
-          : path.resolve(cwd, forbiddenTerms)),
+        forbiddenTerms: readForbiddenTerms(path.resolve(cwd, option(options, 'forbidden-terms'))),
       });
       return 0;
     }
     const result = verifyForensicPackage(
       path.resolve(cwd, option(options, 'package')),
-      options.get('expected-manifest-sha256'),
+      option(options, 'expected-manifest-sha256'),
       {
-        forbiddenTerms: readForbiddenTerms(options.get('forbidden-terms') === undefined
-          ? undefined
-          : path.resolve(cwd, option(options, 'forbidden-terms'))),
+        forbiddenTerms: readForbiddenTerms(path.resolve(cwd, option(options, 'forbidden-terms'))),
       },
     );
     console.log(JSON.stringify(result, null, 2));

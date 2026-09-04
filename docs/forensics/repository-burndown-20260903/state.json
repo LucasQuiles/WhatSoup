@@ -17,7 +17,7 @@
         {
           "kind": "git",
           "reference": "commit:88d00a34691880cb17e4b742447f2175350e37c0",
-          "sha256": null
+          "sha256": "0e9681d234e4579c76808458eced020dd577b6d0feabb07e528d7ae5a7fac610"
         }
       ]
     },
@@ -35,7 +35,7 @@
         {
           "kind": "git",
           "reference": "commit:4130ffe6e32fd034072fb121a5170ed37dde4726",
-          "sha256": null
+          "sha256": "5ed096b63c7d682c5e0740087bb4a7d2446465f419f105cf24e7e97bac731d3d"
         }
       ]
     },
@@ -53,7 +53,7 @@
         {
           "kind": "git",
           "reference": "commit:9d47a0474e7748314a1ee59cd717de8bb7484a0c",
-          "sha256": null
+          "sha256": "f75eb2e5c5147b7c22529b319836c1581b2394789901da9e10a364fea45620c9"
         }
       ]
     },

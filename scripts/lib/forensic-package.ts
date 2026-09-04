@@ -4,6 +4,8 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
@@ -11,8 +13,8 @@ import {
   readFileSync,
   readSync,
   readdirSync,
-  renameSync,
   rmSync,
+  type BigIntStats,
   writeFileSync,
 } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -214,20 +216,80 @@ function sha256(value: Buffer | string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function sha256File(file: string): string {
+function metadataFromStat(stat: BigIntStats): FileMetadata {
+  return {
+    bytes: Number(stat.size),
+    mtimeNs: stat.mtimeNs.toString(),
+    device: stat.dev.toString(),
+    inode: stat.ino.toString(),
+  };
+}
+
+function openStableBoundedFile(file: string, maximumBytes: number): {
+  descriptor: number;
+  metadata: FileMetadata;
+} {
+  const metadata = fileMetadata(file);
+  if (metadata.bytes > maximumBytes) {
+    throw new Error(`source exceeds maximum bytes before read: ${metadata.bytes} > ${maximumBytes}`);
+  }
+  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    assertSameMetadata(metadata, metadataFromStat(fstatSync(descriptor, { bigint: true })), 'source');
+    return { descriptor, metadata };
+  } catch (error) {
+    closeSync(descriptor);
+    throw error;
+  }
+}
+
+function assertStableBoundedFile(
+  file: string,
+  descriptor: number,
+  metadata: FileMetadata,
+): void {
+  assertSameMetadata(metadata, metadataFromStat(fstatSync(descriptor, { bigint: true })), 'source');
+  assertSameMetadata(metadata, fileMetadata(file), 'source');
+}
+
+function sha256File(file: string, maximumBytes = Number.MAX_SAFE_INTEGER): string {
   const digest = createHash('sha256');
   const chunk = Buffer.allocUnsafe(1024 * 1024);
-  const descriptor = openSync(file, 'r');
+  const { descriptor, metadata } = openStableBoundedFile(file, maximumBytes);
+  let total = 0;
   try {
     let bytesRead = 0;
     do {
-      bytesRead = readSync(descriptor, chunk, 0, chunk.length, null);
+      const remaining = metadata.bytes - total;
+      bytesRead = readSync(descriptor, chunk, 0, Math.min(chunk.length, remaining + 1), null);
+      total += bytesRead;
+      if (total > metadata.bytes) throw new Error('source changed during read');
       if (bytesRead > 0) digest.update(chunk.subarray(0, bytesRead));
     } while (bytesRead > 0);
+    if (total !== metadata.bytes) throw new Error('source changed during read');
+    assertStableBoundedFile(file, descriptor, metadata);
   } finally {
     closeSync(descriptor);
   }
   return digest.digest('hex');
+}
+
+function readStableBoundedFile(file: string, maximumBytes: number): Buffer {
+  const { descriptor, metadata } = openStableBoundedFile(file, maximumBytes);
+  const bytes = Buffer.allocUnsafe(metadata.bytes + 1);
+  let total = 0;
+  try {
+    while (total < bytes.length) {
+      const bytesRead = readSync(descriptor, bytes, total, bytes.length - total, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total !== metadata.bytes) throw new Error('source changed during read');
+    assertStableBoundedFile(file, descriptor, metadata);
+    return bytes.subarray(0, total);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function compareText(left: string, right: string): number {
@@ -328,10 +390,6 @@ function fileMetadata(file: string): FileMetadata {
   };
 }
 
-function fileIdentity(file: string): FileIdentity {
-  return { ...fileMetadata(file), sha256: sha256File(file) };
-}
-
 function assertSameMetadata(before: FileMetadata, after: FileMetadata, label: string): void {
   if (
     before.bytes !== after.bytes
@@ -415,7 +473,7 @@ export async function scanJsonlHarnessSource(options: {
   if (before.bytes > options.limits.maxSourceBytes) {
     throw new Error(`source exceeds maxSourceBytes before read: ${before.bytes} > ${options.limits.maxSourceBytes}`);
   }
-  const input = readFileSync(options.sourcePath);
+  const input = readStableBoundedFile(options.sourcePath, options.limits.maxSourceBytes);
   const observedSha256 = sha256(input);
   if (observedSha256 !== options.expectedSha256 || input.length !== before.bytes) {
     throw new Error('source identity mismatch before read');
@@ -529,19 +587,36 @@ export async function scanJsonlHarnessSources(options: {
   };
 }
 
-function sqliteFamilyIdentity(databasePath: string): {
-  primary: FileIdentity;
-  members: Array<{ name: 'database' | 'wal' | 'shm'; bytes: number; sha256: string }>;
-  metadataFingerprint: string;
-} {
+function sqliteFamilyMetadataRows(databasePath: string): Array<{
+  name: 'database' | 'wal' | 'shm';
+  file: string;
+  metadata: FileMetadata;
+}> {
   const candidates = [
     { name: 'database' as const, file: databasePath },
     { name: 'wal' as const, file: `${databasePath}-wal` },
     { name: 'shm' as const, file: `${databasePath}-shm` },
   ];
-  const identities = candidates.filter(({ file }) => existsSync(file)).map(({ name, file }) => ({
+  return candidates.filter(({ file }) => existsSync(file)).map(({ name, file }) => ({
     name,
-    identity: fileIdentity(file),
+    file,
+    metadata: fileMetadata(file),
+  }));
+}
+
+function sqliteFamilyIdentity(databasePath: string, maximumBytes: number): {
+  primary: FileIdentity;
+  members: Array<{ name: 'database' | 'wal' | 'shm'; bytes: number; sha256: string }>;
+  metadataFingerprint: string;
+} {
+  const metadataRows = sqliteFamilyMetadataRows(databasePath);
+  const totalBytes = metadataRows.reduce((sum, row) => sum + row.metadata.bytes, 0);
+  if (totalBytes > maximumBytes) {
+    throw new Error(`SQLite source family exceeds maxSourceBytes before identity: ${totalBytes} > ${maximumBytes}`);
+  }
+  const identities = metadataRows.map(({ name, file, metadata }) => ({
+    name,
+    identity: { ...metadata, sha256: sha256File(file, metadata.bytes) },
   }));
   const primary = identities[0]?.identity;
   if (!primary) throw new Error('SQLite database source is missing');
@@ -564,15 +639,7 @@ function sqliteFamilyMetadata(databasePath: string): {
   readonly primary: FileMetadata;
   readonly fingerprint: string;
 } {
-  const candidates = [
-    { name: 'database' as const, file: databasePath },
-    { name: 'wal' as const, file: `${databasePath}-wal` },
-    { name: 'shm' as const, file: `${databasePath}-shm` },
-  ];
-  const members = candidates.filter(({ file }) => existsSync(file)).map(({ name, file }) => ({
-    name,
-    ...fileMetadata(file),
-  }));
+  const members = sqliteFamilyMetadataRows(databasePath).map(({ name, metadata }) => ({ name, ...metadata }));
   return { primary: members[0]!, fingerprint: sha256(JSON.stringify(members)) };
 }
 
@@ -613,15 +680,20 @@ export function scanOpenCodeSnapshot(options: {
   }[];
   readonly queries: readonly ForensicQuery[];
   readonly priorEvidenceIds?: ReadonlySet<string>;
-  readonly limits: { readonly maxRows: number; readonly maxHits: number };
+  readonly limits: {
+    readonly maxSourceBytes: number;
+    readonly maxRows: number;
+    readonly maxHits: number;
+  };
 }): ForensicHarnessSearchResult {
   requireInteger(options.pass, 'pass', 1);
   requireId(options.sourceAlias, 'sourceAlias');
   requireSha256(options.expectedSha256, 'expectedSha256');
   validateQueries(options.queries);
+  requireInteger(options.limits.maxSourceBytes, 'maxSourceBytes', 1);
   requireInteger(options.limits.maxRows, 'maxRows', 1);
   requireInteger(options.limits.maxHits, 'maxHits');
-  const before = sqliteFamilyIdentity(options.databasePath);
+  const before = sqliteFamilyIdentity(options.databasePath, options.limits.maxSourceBytes);
   if (before.primary.sha256 !== options.expectedSha256) {
     throw new Error('source identity mismatch before read');
   }
@@ -995,8 +1067,12 @@ export function parseForensicPackageSpec(value: unknown): ForensicPackageSpec {
         sha256: source.sha256 === null ? null : requireSha256(source.sha256, `${sourceLabel}.sha256`),
       };
     });
-    if (confidence === 'high' && (harnessEvidenceIds.length === 0 || independentSources.length === 0)) {
-      throw new TypeError(`${label} high confidence requires harness evidence and an independent source`);
+    if (confidence === 'high' && (
+      harnessEvidenceIds.length === 0
+      || independentSources.length === 0
+      || !independentSources.some((source) => source.sha256 !== null)
+    )) {
+      throw new TypeError(`${label} high confidence requires harness evidence and a content-bound independent source`);
     }
     return {
       id: requireId(conclusion.id, `${label}.id`),
@@ -1573,15 +1649,20 @@ export function writeForensicPackage(
 ): void {
   const spec = parseForensicPackageSpec(value);
   const forbiddenTerms = normalizeForbiddenTerms(options.forbiddenTerms);
-  if (existsSync(outputDirectory)) throw new Error(`output directory already exists: ${outputDirectory}`);
   const parent = path.dirname(outputDirectory);
-  const temporary = path.join(parent, `.${path.basename(outputDirectory)}.partial-${process.pid}`);
-  if (existsSync(temporary)) throw new Error(`temporary output directory already exists: ${temporary}`);
   const payloads = packagePayloads(spec, forbiddenTerms);
-  mkdirSync(temporary, { mode: 0o700 });
+  let created = false;
   try {
+    mkdirSync(outputDirectory, { mode: 0o700 });
+    created = true;
     for (const name of PACKAGE_DATA_FILES) {
-      writeFileSync(path.join(temporary, name), payloads[name], { flag: 'wx', mode: 0o600 });
+      const descriptor = openSync(path.join(outputDirectory, name), 'wx', 0o600);
+      try {
+        writeFileSync(descriptor, payloads[name]);
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
     }
     const manifest = {
       schema_version: 'forensic.package-manifest.v1',
@@ -1591,17 +1672,37 @@ export function writeForensicPackage(
         sha256: sha256(payloads[name]),
       })),
     };
-    writeFileSync(path.join(temporary, 'manifest.json'), json(manifest), { flag: 'wx', mode: 0o600 });
-    renameSync(temporary, outputDirectory);
+    const manifestDescriptor = openSync(path.join(outputDirectory, 'manifest.json'), 'wx', 0o600);
+    try {
+      writeFileSync(manifestDescriptor, json(manifest));
+      fsyncSync(manifestDescriptor);
+    } finally {
+      closeSync(manifestDescriptor);
+    }
+    const directoryDescriptor = openSync(outputDirectory, 'r');
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+    const parentDescriptor = openSync(parent, 'r');
+    try {
+      fsyncSync(parentDescriptor);
+    } finally {
+      closeSync(parentDescriptor);
+    }
   } catch (error) {
-    if (existsSync(temporary)) rmSync(temporary, { recursive: true, force: true });
+    if (!created && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`output directory already exists: ${outputDirectory}`);
+    }
+    if (created && existsSync(outputDirectory)) rmSync(outputDirectory, { recursive: true, force: true });
     throw error;
   }
 }
 
 export function verifyForensicPackage(
   outputDirectory: string,
-  expectedManifestSha256?: string,
+  expectedManifestSha256: string,
   options: ForensicPackageWriteOptions = {},
 ): {
   readonly valid: boolean;
@@ -1629,10 +1730,8 @@ export function verifyForensicPackage(
     } catch {
       findings.push('redaction-violation:manifest.json');
     }
-    if (expectedManifestSha256 !== undefined) {
-      requireSha256(expectedManifestSha256, 'expectedManifestSha256');
-      if (sha256(manifestContent) !== expectedManifestSha256) findings.push('manifest-hash-mismatch');
-    }
+    requireSha256(expectedManifestSha256, 'expectedManifestSha256');
+    if (sha256(manifestContent) !== expectedManifestSha256) findings.push('manifest-hash-mismatch');
     manifest = asRecord(JSON.parse(manifestContent.toString('utf8')), 'manifest');
     exactKeys(manifest, ['schema_version', 'files'], 'manifest');
     if (manifest.schema_version !== 'forensic.package-manifest.v1') throw new Error('manifest schema mismatch');
