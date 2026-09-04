@@ -665,10 +665,10 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
+      "sha256": "e8ded92d38ca3c5544812cfa3b5e0276ed410b79f52f5258f05fffb4fbafe66b",
       "mustContain": [
-        "AUTHORIZATION_BEARER",
-        "WHATSAPP_SERVICE_UNIT",
+        "import { redactText } from './redaction-text.ts';",
+        "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail",
@@ -700,6 +700,17 @@
       "sha256": "dc4910405e7cf44b597cea67411f45bbc06487b37c679fff8e0ad00c75f583c1",
       "mustContain": [
         "jidPattern"
+      ]
+    },
+    {
+      "path": "src/lib/redaction-text.ts",
+      "sha256": "533e750ddc54d94a4180c25c6a3bdf587176f88b4300d531d7626ab6fc0f32f6",
+      "mustContain": [
+        "AUTHORIZATION_BEARER",
+        "WHATSAPP_SERVICE_UNIT",
+        "export function redactText",
+        "jidPattern()",
+        "safeShapeCredPathEnabled"
       ]
     },
     {
