@@ -145,7 +145,11 @@ function runScript(fixture: Fixture, extraArgs: string[] = []) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('design-metrics.mjs', () => {
+// Spawned design-metrics runs include a live eslint shadow pass; under the
+// pre-push gate's parallel battery that exceeds vitest's 10s default on dev
+// workstations (observed as a pure timeout with the standalone suite green —
+// same class as the hooks-installed fixtures). 30s matches that precedent.
+describe('design-metrics.mjs', { timeout: 30_000 }, () => {
   describe('valid fixture', () => {
     it('exits 0 when all inputs are valid and no waivers expired', () => {
       const fixture = makeFixture();
