@@ -10,21 +10,22 @@
 //   - claude-cli              → anthropic /v1/models ORG catalogue (classified failures),
 //   - openai / openai-api     → openai /v1/models, keyed (Task B; both provider
 //                               strings route here — see resolveModelCatalogue),
-//   - codex-cli / gemini-cli  → no confirmed `<binary> models`-shaped listing
-//                               surface exists today (verified 2026-07-20 —
-//                               see resolveCodex/resolveGemini) → always
-//                               no-adapter; no cache/fn plumbing until a real
-//                               surface is confirmed (see the seam comment on
-//                               each resolver),
+//   - codex-cli               → native `debug models` runtime catalogue,
+//                               labeled with its undisclosed upstream age,
+//   - gemini-cli              → no confirmed standalone listing surface,
 //   - anything else           → no-adapter (named harness).
 //
 // Two DRY invariants Q pressed on (each mapping lives in exactly ONE place, so
 // no second call site can translate the same signal into a different reason):
 //   - the vendor fetch-failure CATEGORY comes from model-advisor's shared
 //     classifier; categoryToReason is the sole category→render-reason map;
-//   - probeReasonToReason is the sole opencode-probe-reason→render-reason map.
+//   - probeReasonToReason is the sole CLI-probe-reason→render-reason map.
 
-import { listModelCatalog, type ModelCatalogUnavailableReason } from './providers/binary-preflight.ts';
+import {
+  listCodexModelCatalog,
+  listModelCatalog,
+  type ModelCatalogUnavailableReason,
+} from './providers/binary-preflight.ts';
 import {
   fetchAnthropicModelIdsWithStatus,
   fetchOpenAIModelIdsWithStatus,
@@ -38,10 +39,11 @@ import type { AvailableModelsListing, UnavailableReason } from './owner-render-f
  *  off a child-process spawn, while listModelCatalog records whether its own
  *  upstream refresh succeeded or degraded. */
 const OPENCODE_CACHE_TTL_MS = 60_000;
+/** The native Codex command has its own opaque cache; this cache only avoids
+ * repeatedly spawning the command while preserving a capture timestamp. */
+const CODEX_CACHE_TTL_MS = 60_000;
 /** Same TTL discipline for the openai adapter (Task B) — one constant per
- *  source so a tune to one harness never silently retunes another. codex-cli /
- *  gemini-cli have no cache: both are always no-adapter in production today
- *  (see the seam comment on resolveCodex/resolveGemini below). */
+ *  source so a tune to one harness never silently retunes another. */
 const OPENAI_CACHE_TTL_MS = 60_000;
 
 interface CacheEntry {
@@ -50,12 +52,14 @@ interface CacheEntry {
 }
 
 const opencodeCache = new Map<string, CacheEntry>();
+const codexCache = new Map<string, CacheEntry>();
 // openai is keyed (HTTP, no per-binary variance) — a single entry, not a Map.
 let openaiCache: CacheEntry | null = null;
 
 /** Test-only: clear every per-harness catalogue cache between cases. */
 export function __resetModelCatalogueCacheForTest(): void {
   opencodeCache.clear();
+  codexCache.clear();
   openaiCache = null;
 }
 
@@ -91,7 +95,7 @@ function categoryToReason(category: ModelFetchFailureCategory): UnavailableReaso
   }
 }
 
-/** SOLE opencode-probe-reason → render-reason map. */
+/** SOLE CLI-probe-reason → render-reason map. */
 function probeReasonToReason(reason: ModelCatalogUnavailableReason): UnavailableReason {
   switch (reason) {
     case 'timeout':
@@ -112,14 +116,11 @@ export interface CatalogueResolveDeps {
   nowMs: number;
   /** Injectable for tests; defaults to the real per-harness probes. */
   listFn?: typeof listModelCatalog;
+  codexFn?: typeof listCodexModelCatalog;
   anthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
   /** openai adapter (keyed, HTTP `/v1/models`). */
   openaiFn?: typeof fetchOpenAIModelIdsWithStatus;
-  // codex-cli / gemini-cli have no dep slot: no confirmed `<binary> models`-
-  // shaped listing surface exists for either (verified 2026-07-20, see the
-  // seam comment on resolveCodex/resolveGemini below), so both are always
-  // design-time no-adapter. Add a fn slot here (mirroring openaiFn/listFn)
-  // when a real surface is confirmed.
+  // gemini-cli has no dep slot until a confirmed standalone source exists.
 }
 
 /**
@@ -148,24 +149,45 @@ export async function resolveModelCatalogue(
 
 async function resolveOpencode(binary: string, deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
   const listFn = deps.listFn ?? listModelCatalog;
-  const cached = opencodeCache.get(binary);
+  return resolveCachedCliCatalogue(
+    binary,
+    deps,
+    listFn,
+    opencodeCache,
+    OPENCODE_CACHE_TTL_MS,
+    'opencode CLI',
+  );
+}
+
+/** Shared capture-cache policy for native CLI catalogues. Parsing and command
+ * selection stay in the harness adapters; freshness, stale serve, and reason
+ * mapping stay canonical here. */
+async function resolveCachedCliCatalogue(
+  binary: string,
+  deps: CatalogueResolveDeps,
+  listFn: typeof listModelCatalog,
+  cache: Map<string, CacheEntry>,
+  ttlMs: number,
+  sourceLabel: string,
+): Promise<AvailableModelsListing> {
+  const cached = cache.get(binary);
 
   // Fresh cache → serve without spawning (capture-stamped as-of).
-  if (cached && deps.nowMs - cached.capturedAtMs < OPENCODE_CACHE_TTL_MS) {
-    return { status: 'ok', ids: cached.ids, sourceLabel: 'opencode CLI', asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
+  if (cached && deps.nowMs - cached.capturedAtMs < ttlMs) {
+    return { status: 'ok', ids: cached.ids, sourceLabel, asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
   }
 
   const result = await listFn(binary);
   if (result.status === 'ok' && looksLikeModelIds(result.ids)) {
-    opencodeCache.set(binary, { ids: [...result.ids], capturedAtMs: deps.nowMs });
-    return { status: 'ok', ids: result.ids, sourceLabel: 'opencode CLI', asOfLabel: 'just now' };
+    cache.set(binary, { ids: [...result.ids], capturedAtMs: deps.nowMs });
+    return { status: 'ok', ids: result.ids, sourceLabel, asOfLabel: 'just now' };
   }
 
   // Re-probe failed (or output looked unparseable). If we have any prior capture,
   // serve it STALE with a disclosed age rather than blank the catalogue on a
   // transient failure (Q 2b#1: staleness said out loud, not silent).
   if (cached) {
-    return { status: 'ok', ids: cached.ids, sourceLabel: 'opencode CLI', asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
+    return { status: 'ok', ids: cached.ids, sourceLabel, asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
   }
 
   const reason: UnavailableReason =
@@ -270,28 +292,22 @@ async function resolveOpenai(deps: CatalogueResolveDeps): Promise<AvailableModel
 /**
  * codex-cli adapter — Task B.
  *
- * VERIFIED 2026-07-20 (live host probe, not assumed): `codex --help`'s
- * top-level Commands list has no `models` entry, and `codex models` (no TTY)
- * exits with "stdin is not a terminal" — the string is parsed as the
- * `[PROMPT]` positional and forwarded to the interactive CLI, not read as a
- * subcommand. There is no `<binary> models`-shaped listing surface today.
- * Spawning it for real would therefore capture the codex binary's chat-prompt
- * error output as if it were a model catalogue, and an empty/failed capture
- * would render `empty` or `probe-failed` — both of which claim "we asked and
- * got nothing/broke", when the true state is "this was never wired". That is
- * exactly the misreport the brief calls out: DESIGN-TIME no-adapter is the
- * honest default here (Q 2b), not a runtime probe that can't tell the
- * difference — and since no call site ever supplies a codex fn, that's the
- * ONLY reachable behavior, so this stays a lean early return rather than
- * carrying cache/stale-serve plumbing nothing exercises.
- *
- * SEAM: if a confirmed `codex models`-shaped listing surface is ever wired,
- * add an adapter here shaped like {@link resolveOpenai} — an injectable fn on
- * `CatalogueResolveDeps` plus its own capture-stamped TTL cache — rather than
- * reviving this dead plumbing wholesale.
+ * Codex gained a native JSON catalogue after the 2026-07-20 no-adapter
+ * decision. `debug models` uses the installed binary's online-if-uncached
+ * policy, but its JSON omits cache age/source and upstream suppresses refresh
+ * errors. The source label therefore identifies the runtime capture while
+ * explicitly leaving upstream freshness unknown.
  */
-async function resolveCodex(_binary: string, _deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
-  return { status: 'unavailable', reason: { kind: 'no-adapter', harness: 'codex-cli' }, asOfLabel: 'just now' };
+async function resolveCodex(binary: string, deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {
+  const listFn = deps.codexFn ?? listCodexModelCatalog;
+  return resolveCachedCliCatalogue(
+    binary,
+    deps,
+    listFn,
+    codexCache,
+    CODEX_CACHE_TTL_MS,
+    'codex CLI runtime catalogue (upstream freshness unreported)',
+  );
 }
 
 /**

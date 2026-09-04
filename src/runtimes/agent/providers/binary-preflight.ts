@@ -22,6 +22,8 @@ const PROBE_TIMEOUT_MS = 5_000;
  *  catalogue is normally well below this; a larger stream is treated as an
  *  untrusted shape change instead of growing memory without bound. */
 const MODEL_CATALOG_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+/** Defensive ceiling for the native Codex JSON catalogue. */
+const CODEX_MODEL_CATALOG_MAX_ENTRIES = 4_096;
 
 /**
  * Probe whether `binary` is spawnable on this host.
@@ -444,6 +446,38 @@ export async function listModelCatalog(
   return { status: 'ok', ids, metadata: {}, captureMode: 'legacy', refreshFailure };
 }
 
+/**
+ * List picker-visible models from Codex's native runtime catalogue.
+ *
+ * Modern Codex releases expose `debug models` as JSON. Without `--bundled`,
+ * Codex uses its own online-if-uncached policy; that policy may return a cache
+ * or bundled fallback without disclosing which source won. This adapter only
+ * claims what the command proves: the catalogue captured from this binary on
+ * this host. Freshness provenance is disclosed by the resolver, not invented
+ * here.
+ *
+ * The parser accepts the official visibility enum (`list`, `hide`, `none`),
+ * returns only picker-visible slugs, and rejects the entire capture on a shape
+ * change, unsafe slug, duplicate, oversized list, or command failure. Never
+ * throws.
+ */
+export async function listCodexModelCatalog(
+  binary: string,
+  spawnImpl: typeof spawn = spawn,
+): Promise<ModelCatalogListing> {
+  const outcome = await collectModelCatalogOutput(
+    binary,
+    ['debug', 'models', '--disable', 'multi_agent'],
+    spawnImpl,
+  );
+  if (!outcome.ok) return { status: 'unavailable', reason: outcome.reason };
+
+  const ids = parseCodexModelCatalog(outcome.output);
+  if (ids === null) return { status: 'unavailable', reason: 'unparseable' };
+  if (ids.length === 0) return { status: 'unavailable', reason: 'empty' };
+  return { status: 'ok', ids };
+}
+
 type CatalogCommandOutcome =
   | { ok: true; output: string }
   | { ok: false; reason: ModelCatalogUnavailableReason };
@@ -530,6 +564,36 @@ function looksLikeCatalogModelId(id: string): boolean {
   return slash > 0
     && slash < id.length - 1
     && !/[\s{}\[\]",]/.test(id);
+}
+
+function looksLikeCodexModelSlug(value: unknown): value is string {
+  return isNonEmptyString(value)
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value);
+}
+
+function parseCodexModelCatalog(output: string): string[] | null {
+  let root: unknown;
+  try {
+    root = JSON.parse(output);
+  } catch {
+    return null;
+  }
+  if (!isRecord(root) || !Array.isArray(root.models)) return null;
+  if (root.models.length > CODEX_MODEL_CATALOG_MAX_ENTRIES) return null;
+
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of root.models) {
+    if (!isRecord(entry) || !looksLikeCodexModelSlug(entry.slug)) return null;
+    if (entry.visibility !== 'list' && entry.visibility !== 'hide' && entry.visibility !== 'none') {
+      return null;
+    }
+    if (seen.has(entry.slug)) return null;
+    seen.add(entry.slug);
+    if (entry.visibility === 'list') ids.push(entry.slug);
+  }
+  return ids;
 }
 
 function parseLegacyModelCatalog(output: string): string[] | null {

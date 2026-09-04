@@ -214,3 +214,50 @@ Provider/model identity in a turn result is currently a requested route label, n
 independent provider receipt. This design forbids treating that label as observed identity.
 Adding a receipt requires a separate parser/result contract and should not be smuggled into
 catalogue ranking. It remains required before cross-harness identity parity can be claimed.
+
+## Codex runtime-catalogue addendum
+
+The 2026-07-20 repository decision to report `codex-cli` as `no-adapter` was correct
+when made: that installed release had no non-interactive listing command. It is no longer
+current. On 2026-09-04, the installed binaries on two fleet hosts independently exposed
+`codex debug models` as a JSON catalogue. The hosts returned different visible sets, and
+each default-command result differed from its own `--bundled` result. A shared static list
+would therefore erase both runtime version and account/cache differences.
+
+This is adjacent to, but not part of, automatic fallback discovery. Discovery still asks
+the configured OpenCode gateway because its job is to derive cross-provider fallback
+candidates. The Codex adapter supplies the existing `/model` catalogue and pin-verification
+surface when the selected harness is `codex-cli`; it does not introduce another selector.
+
+| Field | Codex decision |
+|---|---|
+| Governing objective | Make the model-selection surface reflect the exact installed Codex runtime without inventing a fleet-global list or overstating freshness. |
+| Observed failure | WhatSoup always reported `no-adapter` even though both inspected Codex releases now expose a native JSON catalogue; the two hosts returned different visible models. |
+| Evidence | Live probes of Codex 0.153.1 and 0.139.0, default-versus-`--bundled` comparisons, repository history for the July add/remove attempt, and upstream command/model-manager source. |
+| Operational impact | Operators cannot inspect or deterministically verify Codex model pins and are pushed toward dated, hand-maintained assumptions. |
+| Root cause | The July capability observation became stale after Codex added `debug models`; no capability probe or adapter replaced the deliberate early return. |
+| Required invariant | Resolve the exact configured binary, accept only shape-valid picker-visible slugs, preserve command order, and make cache/source uncertainty explicit. |
+| Existing control | One per-harness resolver, one bounded child-process collector, reason-specific degradation, stable-number rendering, and capture-stamped resolver caching. |
+| Remaining gap | No Codex parser or resolver adapter; the native JSON omits cache age/source and upstream suppresses refresh errors. |
+| Proposed mechanism | A thin strict parser over `codex debug models --disable multi_agent`, plugged into the existing shared CLI cache/reason policy. |
+| Enforcement point | Existing binary preflight module and `resolveModelCatalogue`; the test-only CLI lister seam is reused by pin and drill paths. |
+| Platforms | Shared WhatSoup behavior with a Codex-specific adapter; Claude, OpenCode, and Gemini behavior is unchanged. |
+| Trigger | `/model` catalogue rendering and pin-time catalogue verification for a `codex-cli` route. |
+| Response | Return `visibility=list` slugs; fail closed on malformed/duplicate/oversized output; disclose command failure, timeout, empty, or parser failure through existing reasons. |
+| Valid exception | A previously captured non-empty list may be served after a transient re-probe failure, with its actual WhatSoup capture age disclosed. |
+| Positive control | Mixed `list`/`hide`/`none` JSON returns only visible slugs in source order and uses the resolved binary path. |
+| Negative control | Malformed root, missing array, unknown visibility, unsafe/duplicate slug, hidden-only list, oversized output, non-zero exit, and timeout cannot become a trusted list. |
+| Bypass analysis | The native command can silently use its own cache or bundled fallback, so the UI labels upstream freshness unreported rather than calling the capture live or fresh. |
+| Proof | Parser falsifiers, command/timeout/output-bound tests, resolver cache/degradation tests, typecheck, live two-host comparison, and the repository gates. |
+| SSOT | `providers/binary-preflight.ts` parses the native output; `model-catalogue-resolver.ts` owns cache and render-reason policy. |
+| Status | Modify the existing controls; reject a static table, a second catalogue service, and provider-wide fallback rewrites. |
+
+Upstream source confirms the limitation behind the label. The debug command uses
+`RefreshStrategy::OnlineIfUncached`, while the model manager first accepts a fresh cache,
+falls back to the network only on cache miss, and logs rather than propagates refresh
+failure. Its serialized response contains only `models`, so WhatSoup cannot prove source or
+upstream age from the command result:
+
+- <https://github.com/openai/codex/blob/rust-v0.153.1/codex-rs/cli/src/main.rs#L2292-L2319>
+- <https://github.com/openai/codex/blob/rust-v0.153.1/codex-rs/models-manager/src/manager.rs#L340-L408>
+- <https://github.com/openai/codex/blob/rust-v0.139.0/codex-rs/protocol/src/openai_models.rs#L237-L246>

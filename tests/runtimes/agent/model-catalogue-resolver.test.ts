@@ -259,17 +259,47 @@ describe('resolveModelCatalogue — openai', () => {
 });
 
 describe('resolveModelCatalogue — codex-cli', () => {
-  // VERIFIED 2026-07-20 (live `codex --help` on this host): no `models`
-  // subcommand exists — `codex models` is parsed as a chat PROMPT, not a
-  // listing command. No call site injects a codex fn (there is no dep slot
-  // for one — see the seam comment on resolveCodex), so this no-adapter
-  // reason is the ONLY reachable production behavior, not one branch of a
-  // probe/cache path.
-  it('names codex-cli in a no-adapter reason (the only reachable production behavior)', async () => {
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 });
+  it('returns the native runtime catalogue with an honest freshness label and caches the capture', async () => {
+    const codexFn = vi.fn().mockResolvedValue({
+      status: 'ok',
+      ids: ['gpt-5.6-sol', 'gpt-5.5'],
+    });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)',
+      asOfLabel: 'just now',
+    });
+    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 + 30_000, codexFn });
+    expect(codexFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a stale capture with disclosed age after a later diagnostic failure', async () => {
+    const codexFn = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-5.6-sol'] })
+      .mockResolvedValueOnce({ status: 'unavailable', reason: 'command-error' });
+
+    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', {
+      nowMs: T0 + 5 * 60_000,
+      codexFn,
+    });
+
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-5.6-sol'],
+      sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)',
+      asOfLabel: '5m ago',
+    });
+  });
+
+  it('maps a hidden-only catalogue to unavailable/empty when no capture exists', async () => {
+    const codexFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'empty' });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
     expect(out).toStrictEqual({
       status: 'unavailable',
-      reason: { kind: 'no-adapter', harness: 'codex-cli' },
+      reason: { kind: 'empty' },
       asOfLabel: 'just now',
     });
   });

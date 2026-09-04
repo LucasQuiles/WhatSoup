@@ -21,7 +21,11 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { probeModelCatalog, listModelCatalog } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
+import {
+  probeModelCatalog,
+  listModelCatalog,
+  listCodexModelCatalog,
+} from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 
 // ─── Fake child process builder ───────────────────────────────────────────────
 
@@ -527,5 +531,101 @@ describe('listModelCatalog', () => {
       status: 'unavailable',
       reason: 'spawn-error',
     });
+  });
+});
+
+describe('listCodexModelCatalog', () => {
+  it('runs the native diagnostic command and returns only picker-visible slugs in catalogue order', async () => {
+    const output = JSON.stringify({
+      models: [
+        { slug: 'gpt-reserve', visibility: 'hide' },
+        { slug: 'gpt-5.6-sol', visibility: 'list' },
+        { slug: 'gpt-internal', visibility: 'none' },
+        { slug: 'gpt-5.5', visibility: 'list' },
+      ],
+    });
+    const spawnSpy = vi.fn((_binary: string, _args: string[]) =>
+      makeFakeChild({ stdoutChunks: [output] }));
+
+    await expect(
+      listCodexModelCatalog('/opt/codex', spawnSpy as unknown as SpawnImpl),
+    ).resolves.toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-5.6-sol', 'gpt-5.5'],
+    });
+    expect(spawnSpy).toHaveBeenCalledWith(
+      '/opt/codex',
+      ['debug', 'models', '--disable', 'multi_agent'],
+      {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: undefined,
+        windowsHide: true,
+      },
+    );
+  });
+
+  it.each([
+    ['non-object root', '[]'],
+    ['missing models array', JSON.stringify({ model: [] })],
+    ['unknown visibility', JSON.stringify({ models: [{ slug: 'gpt-5.6-sol', visibility: 'preview' }] })],
+    ['unsafe slug', JSON.stringify({ models: [{ slug: 'gpt 5.6', visibility: 'list' }] })],
+    ['duplicate slug', JSON.stringify({ models: [
+      { slug: 'gpt-5.6-sol', visibility: 'list' },
+      { slug: 'gpt-5.6-sol', visibility: 'hide' },
+    ] })],
+  ])('rejects %s instead of trusting a partial catalogue', async (_name, output) => {
+    await expect(
+      listCodexModelCatalog('codex', makeSpawnImpl({ stdoutChunks: [output] })),
+    ).resolves.toStrictEqual({ status: 'unavailable', reason: 'unparseable' });
+  });
+
+  it('rejects a shape-valid catalogue above the defensive entry ceiling', async () => {
+    const output = JSON.stringify({
+      models: Array.from({ length: 4_097 }, (_, index) => ({
+        slug: `gpt-catalogue-${index}`,
+        visibility: 'list',
+      })),
+    });
+
+    await expect(
+      listCodexModelCatalog('codex', makeSpawnImpl({ stdoutChunks: [output] })),
+    ).resolves.toStrictEqual({ status: 'unavailable', reason: 'unparseable' });
+  });
+
+  it('treats a valid hidden-only catalogue as unavailable/empty', async () => {
+    const output = JSON.stringify({
+      models: [{ slug: 'gpt-reserve', visibility: 'hide' }],
+    });
+    await expect(
+      listCodexModelCatalog('codex', makeSpawnImpl({ stdoutChunks: [output] })),
+    ).resolves.toStrictEqual({ status: 'unavailable', reason: 'empty' });
+  });
+
+  it('preserves command failure classification', async () => {
+    await expect(
+      listCodexModelCatalog('codex', makeSpawnImpl({ exitCode: 2 })),
+    ).resolves.toStrictEqual({ status: 'unavailable', reason: 'command-error' });
+  });
+
+  it('bounds output and terminates the child', async () => {
+    const child = makeFakeChild({ stdoutChunks: ['x'.repeat(8 * 1024 * 1024 + 1)] });
+    const spawnImpl = (() => child) as unknown as SpawnImpl;
+
+    await expect(listCodexModelCatalog('codex', spawnImpl)).resolves.toStrictEqual({
+      status: 'unavailable',
+      reason: 'output-limit',
+    });
+    expect(child.kill).toHaveBeenCalled();
+  });
+
+  it('times out and terminates a wedged diagnostic command', async () => {
+    vi.useFakeTimers();
+    const child = makeFakeChild({ neverCloses: true });
+    const promise = listCodexModelCatalog('codex', (() => child) as unknown as SpawnImpl);
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    await expect(promise).resolves.toStrictEqual({ status: 'unavailable', reason: 'timeout' });
+    expect(child.kill).toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });
