@@ -25,6 +25,16 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const tmp = trackTmpDirs('whatsoup-forensic-package-');
 
+type Mutable<T> = T extends readonly (infer Item)[]
+  ? Mutable<Item>[]
+  : T extends object
+    ? { -readonly [Key in keyof T]: Mutable<T[Key]> }
+    : T;
+
+type MutableSearchSpec = {
+  searches: Mutable<ForensicHarnessSearchResult>[];
+};
+
 function sha256(value: Buffer | string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -401,52 +411,49 @@ describe('forensic package contract', () => {
   });
 
   it('binds evidence IDs, source aliases, query IDs, and completeness to their measured rows', () => {
-    const mismatchedId = validSpec() as { searches: ForensicHarnessSearchResult[] };
-    const idHit = mismatchedId.searches[0]!.sources[0]!.hits[0] as { evidence_id: string };
+    const mismatchedId = validSpec() as MutableSearchSpec;
+    const idHit = mismatchedId.searches[0]!.sources[0]!.hits[0]!;
     idHit.evidence_id = 'evidence-not-the-record-hash';
     expect(() => parseForensicPackageSpec(mismatchedId)).toThrow('does not match record_sha256');
 
-    const mismatchedAlias = validSpec() as { searches: ForensicHarnessSearchResult[] };
-    const aliasHit = mismatchedAlias.searches[0]!.sources[0]!.hits[0] as { source_alias: string };
+    const mismatchedAlias = validSpec() as MutableSearchSpec;
+    const aliasHit = mismatchedAlias.searches[0]!.sources[0]!.hits[0]!;
     aliasHit.source_alias = 'different-source';
     expect(() => parseForensicPackageSpec(mismatchedAlias)).toThrow('source_alias mismatch');
 
-    const unknownQuery = validSpec() as { searches: ForensicHarnessSearchResult[] };
-    const queryHit = unknownQuery.searches[0]!.sources[0]!.hits[0] as { matched_query_ids: string[] };
+    const unknownQuery = validSpec() as MutableSearchSpec;
+    const queryHit = unknownQuery.searches[0]!.sources[0]!.hits[0]!;
     queryHit.matched_query_ids = ['unknown-query'];
     expect(() => parseForensicPackageSpec(unknownQuery)).toThrow('unknown matched query');
 
-    const falseComplete = validSpec() as { searches: ForensicHarnessSearchResult[] };
-    const source = falseComplete.searches[0]!.sources[0] as {
-      complete: boolean;
-      findings: Array<{ code: string }>;
-    };
+    const falseComplete = validSpec() as MutableSearchSpec;
+    const source = falseComplete.searches[0]!.sources[0]!;
     source.findings = [{ code: 'FORENSIC_HIT_LIMIT' }];
     expect(() => parseForensicPackageSpec(falseComplete)).toThrow('complete source has findings');
 
-    const falseYield = validSpec() as { searches: ForensicHarnessSearchResult[] };
+    const falseYield = validSpec() as MutableSearchSpec;
     const secondPass = falseYield.searches.find((row) => row.family === 'claude' && row.pass === 2);
     if (!secondPass) throw new Error('missing fixture pass');
-    (secondPass.metrics as { new_evidence: number }).new_evidence = 1;
+    secondPass.metrics.new_evidence = 1;
     expect(() => parseForensicPackageSpec(falseYield)).toThrow('new_evidence mismatch');
   });
 
   it('binds source aliases and adapters to their harness family', () => {
-    const wrongAdapter = validSpec() as { searches: ForensicHarnessSearchResult[] };
+    const wrongAdapter = validSpec() as MutableSearchSpec;
     wrongAdapter.searches[0]!.sources[0] = {
       ...wrongAdapter.searches[0]!.sources[0]!,
       adapter: 'codex-jsonl',
     };
     expect(() => parseForensicPackageSpec(wrongAdapter)).toThrow('adapter mismatch');
 
-    const wrongLocator = validSpec() as { searches: ForensicHarnessSearchResult[] };
+    const wrongLocator = validSpec() as MutableSearchSpec;
     wrongLocator.searches[0]!.sources[0]!.hits[0] = {
       ...wrongLocator.searches[0]!.sources[0]!.hits[0]!,
       locator: { kind: 'sqlite-row', table: 'message', row_hash: sha256('wrong-family') },
     };
     expect(() => parseForensicPackageSpec(wrongLocator)).toThrow('locator mismatch');
 
-    const reusedAlias = validSpec() as { searches: ForensicHarnessSearchResult[] };
+    const reusedAlias = validSpec() as MutableSearchSpec;
     for (const search of reusedAlias.searches.filter((row) => row.family === 'opencode')) {
       search.sources[0] = { ...search.sources[0]!, source_alias: 'claude-source' };
       search.sources[0]!.hits[0] = {
