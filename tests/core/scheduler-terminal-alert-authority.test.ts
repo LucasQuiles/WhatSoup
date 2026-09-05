@@ -293,6 +293,18 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
   }
 
   /**
+   * Warn events with their `reason`. The two unusable-marker branches share an
+   * event name and differ only here, so asserting the name alone cannot tell
+   * "bytes I could not read" from "bytes I read and cannot use".
+   */
+  function warnReasons(event: string): string[] {
+    return schedulerLog['warn']!.mock.calls
+      .map((call) => call[0] as Record<string, unknown> | undefined)
+      .filter((first) => first?.['event'] === event)
+      .map((first) => String(first?.['reason'] ?? ''));
+  }
+
+  /**
    * The durable records themselves, read as files rather than via the producer.
    *
    * `body` is null for bytes that are not parseable JSON — a corrupt record is a
@@ -644,7 +656,101 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
 
     expect(alertsOf('scheduler_send_failed').length).toBe(0);
     expect(terminalMarkers()).toEqual([]);
-    expect(warnEvents()).toContain('scheduler_terminal_alert_marker_unusable');
+    // `invalid`, not `unparseable`: the bytes never became an object at all.
+    expect(warnReasons('scheduler_terminal_alert_marker_unusable')).toEqual(['invalid']);
+  });
+
+  it('C1: an alert delivered but whose marker cannot be cleared pages once, not once per tick', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await scheduler.tick();
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+
+    // 0500 leaves readdir and read working and makes unlink fail: the alert
+    // lands, the marker survives, and the per-tick re-derivation keeps handing
+    // the key back. Without a bound that is one page every tick, forever.
+    acceptEnqueue();
+    chmodSync(markerDirPath(), 0o500);
+    try {
+      await scheduler.tick();
+      await scheduler.tick();
+      await scheduler.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+    // Said once, on entry — a warn per tick is the same spam in another channel.
+    expect(warnEvents().filter((e) => e === 'scheduler_terminal_alert_marker_unclearable')).toEqual([
+      'scheduler_terminal_alert_marker_unclearable',
+    ]);
+
+    // The clear is still retried every tick, so a store that heals resolves it
+    // with no further page.
+    await scheduler.tick();
+    expect(retainedKeys()).toEqual([]);
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+  });
+
+  it('C2 (documented): a restart over a marker whose clear never landed re-emits exactly once', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    const first = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await first.tick();
+    acceptEnqueue();
+    chmodSync(markerDirPath(), 0o500);
+    try {
+      await first.tick();
+      await first.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+
+    // The suppression is process-local ON PURPOSE. Disk still says the alert was
+    // never cleared, and a new process has no standing to disbelieve it — one
+    // duplicate page is the honest reading of a marker that is still there.
+    chmodSync(markerDirPath(), 0o500);
+    let restarted: MessageScheduler;
+    try {
+      restarted = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+      await restarted.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+    expect(alertsOf('scheduler_send_failed').length).toBe(2);
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+  });
+
+  it('C3: a record whose bytes cannot be READ is kept, and says so with reason unreadable', async () => {
+    const key = `${MARKER_PREFIX}55`;
+    const path = markerPathOf(key);
+    setRecoveryMarker(key, { kind: 'retry_exhausted', scheduledId: 55, error: 'boom', attempts: 3 });
+    chmodSync(path, 0o000);
+
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+    try {
+      await scheduler.tick();
+      // Kept, not discarded: bytes nobody could interpret must not be deleted.
+      expect(existsSync(path)).toBe(true);
+      expect(alertsOf('scheduler_send_failed').length).toBe(0);
+      expect(warnReasons('scheduler_terminal_alert_marker_unusable')).toEqual(['unreadable']);
+    } finally {
+      chmodSync(path, 0o600);
+    }
+
+    // And a later tick, once the file is readable, delivers the alert it held.
+    resetLoggerMock(schedulerLog);
+    await scheduler.tick();
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+    expect(retainedKeys()).toEqual([]);
   });
 
   it('B4 (control): a record another process already discharged is dropped without a word', async () => {
@@ -711,6 +817,9 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
 
     expect(alertsOf('scheduler_send_failed').length).toBe(0);
     expect(retainedKeys()).toEqual([]);
+    // `unparseable`, not `invalid`: the bytes parsed into an object that no
+    // alert can be rendered from. Same event, opposite diagnosis.
+    expect(warnReasons('scheduler_terminal_alert_marker_unusable')).toEqual(['unparseable']);
   });
 
   it('A9 (control): a de-linked instance still holds its rows and alerts on its own source, untouched by this path', async () => {

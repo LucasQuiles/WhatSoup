@@ -269,6 +269,20 @@ export class MessageScheduler {
    */
   private readonly pendingTerminalAlerts = new Set<string>();
 
+  /**
+   * #2387: keys whose alert this process DELIVERED but whose marker it could
+   * not clear. The marker is still on disk and the per-tick re-derivation keeps
+   * handing the key back, so without this the operator is paged once a tick
+   * until the store heals.
+   *
+   * Membership suppresses only the RE-EMISSION; the clear is retried on every
+   * tick and the key leaves on success. It is not a claim about what is owed —
+   * disk still holds that — only a record that this process already delivered
+   * this one. A restart therefore re-emits once, which is the honest reading of
+   * a marker that is still on disk saying the alert was never cleared.
+   */
+  private readonly deliveredUnclearable = new Set<string>();
+
   constructor(
     db: Database,
     connection: SchedulerConnection,
@@ -779,6 +793,19 @@ export class MessageScheduler {
     if (!instance) return;
 
     for (const key of this.retainedTerminalAlertKeys()) {
+      if (this.deliveredUnclearable.has(key)) {
+        // Delivered already; only the clear is still owed. Retry it and say
+        // nothing further — the entry warned once when it was recorded.
+        if (this.discardTerminalAlertMarker(key)) {
+          this.deliveredUnclearable.delete(key);
+          log.info(
+            { event: 'scheduler_terminal_alert_marker_cleared_late', key },
+            'scheduler: previously unclearable terminal send alert marker cleared',
+          );
+        }
+        continue;
+      }
+
       const stored = readRecoveryMarkerState(key);
 
       if (stored.state === 'missing') {
@@ -818,7 +845,7 @@ export class MessageScheduler {
         continue; // still owed; the next tick retries
       }
       this.pendingTerminalAlerts.delete(key);
-      this.discardTerminalAlertMarker(key);
+      if (!this.discardTerminalAlertMarker(key)) this.noteUnclearable(key);
       log.info(
         { event: 'scheduler_terminal_alert_drained', id: failure.scheduledId },
         'scheduler: retained terminal send alert delivered',
@@ -851,15 +878,38 @@ export class MessageScheduler {
     return [...keys];
   }
 
-  private discardTerminalAlertMarker(key: string): void {
+  /** Clear one marker. False means the bytes are still on disk. */
+  private discardTerminalAlertMarker(key: string): boolean {
     try {
       clearRecoveryMarker(key);
+      return true;
     } catch (err) {
-      // intentional: the alert is already delivered, so this only risks one
-      // duplicate page after a future restart — strictly better than dropping a
-      // notification, which is the failure this whole path exists to prevent.
-      log.warn({ err, key }, 'scheduler: terminal send alert marker clear failed');
+      // Quiet here on purpose: this runs on every tick while the store is
+      // faulted, and the loud line belongs at the moment the condition STARTS
+      // (noteUnclearable), not once per retry.
+      log.debug({ err, key }, 'scheduler: terminal send alert marker clear failed');
+      return false;
     }
+  }
+
+  /**
+   * Record that a delivered alert's marker could not be cleared, once (#2387).
+   *
+   * Before this, a failed clear left the marker on disk and the per-tick
+   * re-derivation re-emitted the alert every tick for as long as the store
+   * stayed faulted — over-notification with no restart involved. Suppressing the
+   * re-emission is process-local, which is the correct scope: it says only
+   * "I already sent this", never "nothing is owed". Disk keeps the obligation,
+   * so a restart re-emits once and a healed store clears on the next tick.
+   */
+  private noteUnclearable(key: string): void {
+    if (this.deliveredUnclearable.has(key)) return;
+    this.deliveredUnclearable.add(key);
+    log.warn(
+      { event: 'scheduler_terminal_alert_marker_unclearable', key },
+      'scheduler: terminal send alert delivered but its marker could not be cleared; '
+      + 'suppressing re-emission in this process and retrying the clear each tick',
+    );
   }
 
   private handleSendFailure(row: ScheduledRow, err: unknown): void {

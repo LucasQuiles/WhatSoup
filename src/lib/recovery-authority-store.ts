@@ -369,7 +369,7 @@ function logMutationFailure(operation: 'set' | 'clear', startedAtMs: number, err
  * Write a marker indicating *source* has an active alert.
  *
  * *detail* is optional producer state stored alongside the marker and read back
- * with `readRecoveryMarker`. Presence remains the truth for `loadRecoveryMarkers`,
+ * with `readRecoveryMarkerState`. Presence remains the truth for `loadRecoveryMarkers`,
  * which never interprets values; detail exists for the producer that must
  * RE-EMIT the alert it could not enqueue and therefore needs more than "an alert
  * was owed" (#2387). Keep it small and free of message content — these files are
