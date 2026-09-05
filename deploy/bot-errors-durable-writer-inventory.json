@@ -590,6 +590,28 @@
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-send-issued-state",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.process_send_issued_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-process-held-state",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "hold_ambiguous_send",
+      "logical_publication": "dispatcher.process_held_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "hold_ambiguous_send",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "dispatcher-process-testleak-move",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "process_one",

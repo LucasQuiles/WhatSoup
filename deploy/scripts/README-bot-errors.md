@@ -520,6 +520,66 @@ The registry is both deployer-managed and SHA-pinned in
 `deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
 shipping the matching registry fails the local manifest and deployer guards.
 
+## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
+
+The dispatcher sends to the chat transport before it can record that the send
+succeeded. If the process dies in that window, or the response is lost, nothing
+on disk proves whether the operator was paged. The transport supplies no
+idempotency key, so a resend cannot be deduplicated remotely and would page a
+second time for one incident.
+
+Such an event is **held** rather than resent: its durable `delivery.status`
+becomes `outcome_unknown`, it stays in `processing/`, and it is exempt from the
+reclaim pass that returns other claimed files to `outbox/`. A held event is
+never archived under `sent/` and is never dropped.
+
+**How a held event surfaces.** Three signals fire, none of which names the
+event:
+
+- one record in `logs/dispatch.jsonl` with record kind
+  `delivery_outcome_unknown_held`. It is written before the durable record is
+  published, so a hold whose publication does not reach disk is retried and
+  logs the line again: expect at most one duplicate line per retried hold, and
+  never a duplicate send. Once the record is on disk the line is not repeated,
+  including across restarts. It is deliberately anonymous: the controller log
+  projects unlisted strings away, so it carries bounded metadata (`attempts`,
+  `held`) and no event id. Read `processing/` to find out which item is held;
+- the health check's `processing` queue line, which warns at 1 entry for 60 s
+  and goes critical at 10 entries for 300 s, and stays critical for as long as
+  the file is parked;
+- the heartbeat watchdog's `queue:processing` alert.
+
+**Inspect.** Held events are the files in `processing/` whose
+`delivery.status` reads `outcome_unknown`. Each also carries
+`delivery.outcomeUnknownAt` and a redacted, truncated
+`delivery.outcomeUnknownReason`.
+
+The dispatcher writes these records as compact JSON, so the pattern must not
+assume a space after the colon:
+
+```bash
+grep -lE '"status": ?"outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
+```
+
+**Release for a re-send.** Only after confirming from the BOT ERRORS chat that
+the alert never arrived. Set `delivery.status` back to `"queued"` and move the
+file into `outbox/` under its original name (the `.json.<pid>.processing`
+suffix drops back to `.json`). The next cycle treats it as an ordinary queued
+event. Its attempt counter is kept, but the backoff is **reset**: recording the
+hold clears `nextAttemptAtEpoch`, so a released item is retried on the next
+cycle rather than waiting out the delay its attempt count would otherwise
+impose. Status is the only field to edit — the dispatcher clears its internal
+send marker on the next attempt.
+
+**Dead-letter.** If the alert did arrive, or is no longer actionable, move the
+file into `dead-letter/` with the `.dead_letter.json` suffix the exhausted-retry
+path uses. It leaves `processing/` and is not delivered.
+
+A held event occupies a `processing/` slot until an operator acts, which is why
+the queue signals above stay raised. They report that the queue is not draining;
+they do not distinguish a held item from a backlog, so read `processing/` to
+tell which it is.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
