@@ -281,3 +281,47 @@ curated exclusions remain owned by their separate coverage gate. Test Integrity
 reports no findings in the changed file or private proof. Full release checks,
 published-head CI and required review still determine integration readiness;
 this result alone does not authorize a push, merge or deployment.
+
+### Release-drill evidence gap
+
+At local commit `5e6a92a8`, the full release runner stopped at step 34 of 44:
+the failure drills reported 144 passing assertions and three D22c failures.
+Ten later steps did not run. The first 33 steps passing is not a full-release
+result: the protocol content cross-check was skipped because its sibling
+repository was unavailable, 81 Test Integrity baseline findings remained,
+lint reported 417 warnings, and two guard-test semantic gaps remained advisory.
+No timeout, assertion, threshold, exclusion or baseline was weakened.
+
+A separate synthetic stage capture explains one concrete failure mechanism.
+For both 0644 and 0666 files, the real health producer queued the correct
+permission classification and the dispatcher exited zero with one dry-run send.
+The evidence field's 1,768-character prefix cutoff split the required basename:
+its end was at character 1,773 or 1,776. The complete message was only 3,065
+characters, below its unchanged 5,500-character cap. A valid 0600 file produced
+an informational clear; dispatch recorded one suppression, no send and no failure.
+
+Five checks against the real formatter confirmed the exact inner cutoff,
+the valid-file result, and an order-only contrast: moving the same existing
+failure line earlier preserved it without increasing either limit. This is
+diagnostic evidence, not an implemented fix. The original release run discarded
+the intermediate payload; its precise cause remains inferred. The replay used
+synthetic homes and a sanitized environment; its explicit temporary-directory
+path also contributes to evidence length. It is not live-service proof.
+The first observer run mishandled a legitimately absent capture file; that
+observer error was corrected and the fresh three-case run retained two evidence
+mismatches and the passing valid-file control.
+
+The governing objective is to retain an actionable failure reason and affected
+asset within bounded alert output. Design review must compare producer-side
+prioritization with the existing structured alert projection, account for
+multiple failures and overflow, and preserve backend redaction and authored
+chat fidelity as distinct contracts. Enlarging limits or weakening D22c does
+not establish that invariant. No new production repair is selected; the
+existing receipt-mode issue has a different causal path.
+
+The five complete messaging/routing files were also rerun at `5e6a92a8`:
+all 284 tests passed. Their logs retained 117 in-memory journal-mode warnings,
+three failed-elevation diagnostics and the transformer-precedence warning.
+The private lane ledger retains raw stage receipts, exact source identities,
+proof scripts and intentional diagnostic-artifact dispositions. These local
+results do not supersede the failed release gate or establish merge readiness.
