@@ -267,7 +267,7 @@ describe('classifier sets derive from COMMAND_REGISTRY (W1-T2)', () => {
   // them exactly, or classifier behavior changed.
   it('LOCAL_COMMANDS membership is unchanged (non-routing-alias names)', () => {
     const derived = REGISTRY.filter((c) => !c.routingAlias).map((c) => c.name).sort();
-    expect(derived).toEqual(['help', 'kill-session', 'new', 'sessions', 'status']);
+    expect(derived).toEqual(['help', 'kill-session', 'new', 'sessions', 'status', 'stop']);
   });
   it('ROUTING_ALIAS_COMMANDS membership no longer includes why (D11)', () => {
     const derived = REGISTRY.filter((c) => c.routingAlias).map((c) => c.name).sort();
