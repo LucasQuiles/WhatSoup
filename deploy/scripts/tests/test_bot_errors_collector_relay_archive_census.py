@@ -407,9 +407,63 @@ def test_census_counts_entries_it_could_not_stat_as_unusable_not_absent(collecto
     assert report["total"]["status"] == "partial"
     assert report["total"]["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
     assert report["total"]["artifactCount"] == 0
+    # Nothing was stat-ed, so there is no age to report. Zero here would be a
+    # claim about artifacts the census never reached, the same way a zero
+    # count would be.
+    assert block["oldestAgeSeconds"] is None
+    assert block["newestAgeSeconds"] is None
+    assert report["total"]["oldestAgeSeconds"] is None
+    assert report["total"]["newestAgeSeconds"] is None
     # Still nothing identifying on the wire.
     assert str(root) not in stdout
     assert "Errno" not in stdout
+
+
+def test_census_total_sums_a_partial_directory_beside_a_complete_one(collector, tmp_path):
+    """A partial block still carries numbers, so it still contributes them.
+
+    This is the shape a retention consumer actually meets: one archive
+    directory readable, the other listable but not searchable. The total has
+    to sum what the readable side found, carry the unreadable side's gap as a
+    count rather than dropping it, and say `partial` either way. Ages and
+    source kinds come only from entries that were actually reached.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    writefail = root / "writefail-relayed"
+    _write_artifact(writefail, "d.json.1.relayed", _event(source="dispatcher_delivery"), age_seconds=_DAY)
+    _write_artifact(writefail, "e.json.2.relayed", "{not json", age_seconds=2 * _DAY)
+    os.chmod(relayed, 0o444)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+
+    blocked = report["archives"]["relayed"]
+    assert blocked["status"] == "partial"
+    assert blocked["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    assert blocked["artifactCount"] == 0
+    assert blocked["sourceKindCardinality"] == 0
+
+    readable = report["archives"]["writefailRelayed"]
+    assert readable["status"] == "ok"
+    assert readable["unusableEntryCount"] == 0
+    assert readable["artifactCount"] == 2
+    assert readable["parseFailureCount"] == 1
+    assert readable["sourceKindCardinality"] == 1
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    # The readable side is summed rather than discarded ...
+    assert total["artifactCount"] == 2
+    assert total["parseFailureCount"] == 1
+    assert total["sourceKindCardinality"] == 1
+    assert total["oldestAgeSeconds"] == 2 * _DAY
+    assert total["newestAgeSeconds"] == _DAY
+    # ... and the unreadable side is reported as a size, not dropped.
+    assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
 
 
 def test_census_counts_an_unreadable_file_as_present_and_unparseable(collector, tmp_path):
