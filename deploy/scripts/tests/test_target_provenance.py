@@ -31,6 +31,9 @@ _TARGET_CWD = "/srv/release"
 # Shapes a corrupted or hand-edited envelope can present where a provenance
 # block belongs. Named so the probe below is not a bare literal sweep.
 _NON_MAPPING_BLOCKS = ([], "not-a-block", 7)
+# Blocks reaching the classifier from outside this repo need not use the
+# spelling the local resolver emits.
+_SHA_A_UPPERCASE = _SHA_A.upper()
 
 
 def probes(**overrides) -> TargetProbes:
@@ -323,6 +326,32 @@ class TestReleaseDivergence:
         assert verdict["classification"] == "not_comparable"
         assert verdict["divergentParty"] is None
         assert verdict["notes"] == ["classifier_error"]
+
+    def test_release_commit_case_does_not_decide_the_verdict(self):
+        # The local resolver only ever writes lowercase, but a block read back
+        # from an envelope or produced elsewhere may not. Case is a spelling of
+        # the same commit, never evidence of a different release.
+        observer = {"release": {"sourceCommit": _SHA_A_UPPERCASE, "agreement": "agree"}}
+        target = {
+            "resolution": "resolved",
+            "release": {"sourceCommit": _SHA_A, "agreement": "agree"},
+        }
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "aligned"
+        assert verdict["divergentParty"] is None
+        assert verdict["notes"] == []
+
+    def test_uppercase_commits_still_diverge_when_they_differ(self):
+        observer = {"release": {"sourceCommit": _SHA_A_UPPERCASE, "agreement": "agree"}}
+        target = {
+            "resolution": "resolved",
+            "release": {"sourceCommit": _SHA_B, "agreement": "agree"},
+        }
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "diverged"
+        assert verdict["divergentParty"] == "target"
 
 
 class TestSafeWrappers:

@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c76c718ed01900922aac5c1a27b49c2d65f2cf436e2646fec239099afbaf9960",
+      "sha256": "000ae75c796d672d292f01a987404f2144fc10b1438a03ac9039190fa3a64721",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -610,7 +610,7 @@
     },
     {
       "path": "deploy/scripts/lib/target_provenance.py",
-      "sha256": "3cbb529eaf77c0d7d9c90a03ec909b7921e144b1c1914535abe409f76af167cf",
+      "sha256": "a70157970a058ce06a7959e453aa24bfb5868e871843cc3c3bb5337e8dc89ebe",
       "mustContain": [
         "TARGET_PROVENANCE_SCHEMA_VERSION",
         "class TargetProbes:",

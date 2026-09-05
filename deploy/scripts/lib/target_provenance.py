@@ -259,13 +259,23 @@ def observer_provenance_block(
 
 
 def _release_source_commit(block: Mapping[str, Any] | None) -> str | None:
-    """The release commit a provenance block actually proved, or None."""
+    """The release commit a provenance block actually proved, or None.
+
+    Case-normalised before the digest test. The local resolver only ever
+    writes lowercase, but a block reaching the classifier from an envelope
+    read back as JSON, or from a producer this module did not build, need not
+    use that spelling -- and case is a spelling of the same commit, never
+    evidence of a different release. Normalising here keeps that scoped to the
+    comparison: what a block reports is left exactly as it arrived.
+    """
     if not isinstance(block, Mapping):
         return None
     release = block.get("release")
     if not isinstance(release, Mapping):
         return None
     commit = release.get("sourceCommit")
+    if isinstance(commit, str):
+        commit = commit.lower()
     return commit if _is_hex_digest(commit) else None
 
 

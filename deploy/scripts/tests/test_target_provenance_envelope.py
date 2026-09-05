@@ -52,6 +52,9 @@ _OBSERVER_RELEASE_SHA = "1450192837" * 4
 _TARGET_RELEASE_SHA = "8675309124" * 4
 _TARGET_MANIFEST_DIGEST = "9078451236" * 6 + "abcd"
 _TARGET_CWD = "/srv/release"
+# A redactor that maps distinct commits onto one still-valid digest is the only
+# shape that can manufacture a false agreement, so it is the shape to pin.
+_COLLAPSED_RELEASE_SHA = "5150867530" * 4
 
 
 def _new_block_keys() -> set[str]:
@@ -280,6 +283,84 @@ def test_health_outbox_event_survives_a_classifier_defect(tmp_path, monkeypatch)
     divergence = event["releaseDivergence"]
     assert divergence["classification"] == "not_comparable"
     assert divergence["notes"] == ["classifier_error"]
+
+
+def _diverging_probes(tp):
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    return lambda platform: tp.TargetProbes(
+        platform=platform,
+        service_state=lambda unit: "active",
+        service_pids=lambda unit: [4242],
+        process_started_epoch=lambda pid: 1_750_000_000,
+        process_cwd=lambda pid: _TARGET_CWD,
+        release_receipt=lambda cwd: {
+            "manifestDigest": _TARGET_MANIFEST_DIGEST,
+            "sourceCommit": commit_for(cwd),
+        },
+        git_head=commit_for,
+        now_iso=lambda: "2026-08-26T00:00:00Z",
+    )
+
+
+def _collapse_release_commits(value):
+    """Stand-in for a future redaction rule that rewrites commit-shaped text."""
+    if isinstance(value, dict):
+        return {k: _collapse_release_commits(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_collapse_release_commits(v) for v in value]
+    if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value):
+        return _COLLAPSED_RELEASE_SHA
+    return value
+
+
+def _install_collapsing_redactor(monkeypatch, module):
+    original = module.redact_json_value
+    monkeypatch.setattr(
+        module, "redact_json_value", lambda value: _collapse_release_commits(original(value))
+    )
+
+
+def test_both_producers_classify_the_same_inputs_under_a_redaction_rule_change(tmp_path, monkeypatch):
+    """The two producers must classify the same thing.
+
+    One site redacted its blocks before classifying and the other did not, so a
+    redaction rule that rewrote commit-shaped text would move one verdict and
+    not the other. Today every rule is the identity on a hex digest, which is
+    why the asymmetry was invisible. This installs a rule that is not, and
+    requires the two verdicts to stay equal.
+    """
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+
+    runner = _load("bot_errors_runner_2358_redaction", _RUNNER)
+    tp = sys.modules["lib.target_provenance"]
+    monkeypatch.setattr(tp, "default_probes", _diverging_probes(tp))
+    _install_collapsing_redactor(monkeypatch, runner)
+    runner_event = runner.build_failure_event(
+        _runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit"
+    )
+
+    health = _load("bot_errors_health_2358_redaction", _HEALTH)
+    monkeypatch.setattr(tp, "default_probes", _diverging_probes(tp))
+    _install_collapsing_redactor(monkeypatch, health)
+    path = health.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    health_event = json.loads(Path(path).read_text())
+
+    # Positive control: the rule really fired on the health envelope, so a
+    # verdict computed from those blocks would have read agreement.
+    assert health_event["observerProvenance"]["release"]["sourceCommit"] == _COLLAPSED_RELEASE_SHA
+    assert health_event["targetProvenance"]["release"]["sourceCommit"] == _COLLAPSED_RELEASE_SHA
+
+    assert runner_event["releaseDivergence"] == health_event["releaseDivergence"]
+    assert health_event["releaseDivergence"]["classification"] == "diverged"
+    assert health_event["releaseDivergence"]["divergentParty"] == "target"
 
 
 def test_new_blocks_are_content_free(tmp_path, monkeypatch):
