@@ -3547,6 +3547,27 @@ class ProvenRemoteRejection(RuntimeError):
 # have been accepted" after the tool call was flushed.
 JSON_RPC_HANDSHAKE_PHASE = "phase=handshake"
 JSON_RPC_POST_REQUEST_PHASE = "phase=post_request"
+# Seam prefix that makes BOT_ERRORS_DRY_SEND_FAIL raise the typed outcome.
+DRY_SEND_AMBIGUOUS_PREFIX = "ambiguous:"
+
+
+class AmbiguousSendOutcome(RuntimeError):
+    """A send whose outcome could not be established, tagged with its phase.
+
+    The phase travels on the EXCEPTION, never in the message text. A parsed
+    rejection embeds the remote's own error field, so with a text classifier a
+    remote could end its error string with the phase literal and turn its own
+    proven rejection into a hold -- the alert would then wait for an operator
+    instead of taking retry, email fallback and dead-letter. Nothing the remote
+    controls can forge a type.
+
+    The message still carries a human-readable "(phase=...)" label, for logs and
+    for the operator, and nothing on the decision path reads it.
+    """
+
+    def __init__(self, message: str, *, phase: str):
+        super().__init__(f"{message} ({phase})")
+        self.phase = phase
 
 
 def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -3634,8 +3655,8 @@ def wait_for_response(
     except ProvenRemoteRejection:
         raise
     except Exception as exc:
-        raise RuntimeError(
-            f"{str(exc) or exc.__class__.__name__} ({phase})"
+        raise AmbiguousSendOutcome(
+            str(exc) or exc.__class__.__name__, phase=phase
         ) from exc
 
 
@@ -3656,6 +3677,17 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
     # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
     dry_fail = os.environ.get("BOT_ERRORS_DRY_SEND_FAIL")
     if dry_fail:
+        # Seam contract. A value prefixed with DRY_SEND_AMBIGUOUS_PREFIX raises
+        # the TYPED post-request outcome, so a subprocess test can drive a hold
+        # deterministically now that the decision reads the type and not the
+        # text. Any other value raises a plain RuntimeError, which is a pre-send
+        # failure taking the retry path -- unchanged, so existing seam users
+        # keep the behaviour they were written against.
+        if dry_fail.startswith(DRY_SEND_AMBIGUOUS_PREFIX):
+            raise AmbiguousSendOutcome(
+                dry_fail[len(DRY_SEND_AMBIGUOUS_PREFIX):] or "injected ambiguous outcome",
+                phase=JSON_RPC_POST_REQUEST_PHASE,
+            )
         raise RuntimeError(dry_fail)
     dry_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE")
     if dry_capture:
@@ -3907,18 +3939,20 @@ def is_transient_transport_failure(error: str) -> bool:
 # A transport failure carries NO proof of the outcome when the tools/call
 # request had already been flushed and no readable reply naming the outcome came
 # back -- including a reply that arrived but could not be read, decoded or
-# parsed. Everything else keeps the ordinary bounded-retry, email-fallback and
-# dead-letter path:
-#   - connect errors, a missing socket, and any handshake-phase failure are
-#     PRE-SEND: nothing was asked of the remote. Holding these would turn a
-#     transient MCP outage into a queue of held alerts needing operator action.
-#   - a PARSED reply naming error / isError is a ProvenRemoteRejection, and
-#     "send_message returned error: ..." is built from a parsed result, so both
-#     stay unlabelled whichever phase produced them.
+# parsed. wait_for_response raises AmbiguousSendOutcome for exactly those, with
+# the phase on the exception, and process_one decides on the TYPE and the phase.
+# Nothing on the decision path reads message text, so a remote cannot influence
+# the classification with the contents of its own error field.
 #
-# The label is a SUFFIX written by wait_for_response, and the match is anchored
-# to the end of the message: a remote error payload that happens to contain the
-# literal must not be able to force a hold.
+# Everything else keeps the ordinary bounded-retry, email-fallback and
+# dead-letter path:
+#   - connect errors and a missing socket raise before the protocol is entered,
+#     and every handshake-phase failure carries phase=handshake: nothing was
+#     asked of the remote. Holding these would turn a transient MCP outage into
+#     a queue of held alerts needing operator action.
+#   - a PARSED reply naming error / isError is a ProvenRemoteRejection, and
+#     "send_message returned error: ..." is built from a parsed result, so
+#     neither is ever ambiguous whichever phase produced it.
 #
 # LIMIT: a missing or unreadable reply after the flush is ambiguous by
 # construction. The protocol carries no delivery identity and no idempotency
@@ -3927,11 +3961,6 @@ def is_transient_transport_failure(error: str) -> bool:
 # WRITING or flushing the request is treated as PRE-SEND: replies are
 # newline-framed, so a partially written request is not a parseable message and
 # the remote cannot have acted on it.
-_AMBIGUOUS_SEND_SUFFIX = f"({JSON_RPC_POST_REQUEST_PHASE})"
-
-
-def is_ambiguous_send_outcome(error: str) -> bool:
-    return (error or "").rstrip().endswith(_AMBIGUOUS_SEND_SUFFIX)
 
 
 def delivery_status_of(event: dict[str, Any]) -> str:
@@ -8446,7 +8475,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # requeues and resends -- exactly the duplicate operator page this
         # branch exists to prevent. A response that NAMED an error is not
         # ambiguous and still takes the bounded-retry path.
-        if is_ambiguous_send_outcome(str(exc)):
+        if (
+            isinstance(exc, AmbiguousSendOutcome)
+            and exc.phase == JSON_RPC_POST_REQUEST_PHASE
+        ):
             return False, hold_ambiguous_send(paths, claimed, event, str(exc))
         event = mark_failure(event, str(exc))
         attempts = int(event.get("delivery", {}).get("attempts") or 0)
