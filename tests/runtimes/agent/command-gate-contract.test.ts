@@ -816,6 +816,37 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     }
   });
 
+  it('#2949 N1 positive control: an unfenced compound /new still dispatches its body', async () => {
+    // The fence and its body refusal must fire ONLY while a /stop teardown is
+    // unsettled. Without this, a condition that refused every compound /new
+    // would keep the whole suite green while silently dropping user text.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    // Premise of the control: nothing is fenced right now.
+    expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false);
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'm-new-compound-unfenced',
+      content: '/new\ndo this instead',
+      senderJid: ADMIN_WA,
+    }));
+
+    // #2357 B1 intact: the command ran and its body became a turn.
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    expect(mockSession.handleNew).toHaveBeenCalledOnce();
+    expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(false);
+    expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(false);
+  });
+
   it('#2949 N1 positive control: a compound body on another command still dispatches', async () => {
     // Falsifies "the refusal disabled compound bodies": /status keeps the
     // #2357 B1 behaviour, so only /stop is narrowed.
