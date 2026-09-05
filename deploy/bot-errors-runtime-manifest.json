@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "02d296b6865c665dd8400d3310aae07d320b8636655254d42a449eaafca899ac",
+      "sha256": "e2fb98c8a9d9fa15d205167cf59853331f02660ce583ebc079fde73615523d1b",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
