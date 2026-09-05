@@ -36,6 +36,16 @@ from lib.durable_json import DurableWriteError  # noqa: E402
 _READER_FORBIDDEN_MODE_BITS = 0o077
 _EXPECTED_SUCCESSOR_MODE = 0o600
 
+# The acceptance matrix from the issue intake: the exact leaf modes the strict
+# reader was observed to reject. Enumerated, not sampled, because the point is
+# that 0640 and 0604 fail the reader just as 0644 does, so a repair that
+# special-cases 0644 must not pass.
+_FORBIDDEN_LEGACY_MODES = (0o644, 0o640, 0o604, 0o660, 0o606, 0o601, 0o610)
+
+# The acceptance matrix for the parent guard: group-writable and world-writable
+# state roots, again enumerated from the intake rather than sampled.
+_WRITABLE_PARENT_MODES = (0o777, 0o720, 0o702)
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("bot_errors_health_check", _SCRIPT)
@@ -225,7 +235,7 @@ def test_repaired_receipt_is_readable_as_the_predecessor(tmp_path):
     assert observation.version.generation is None
 
 
-@pytest.mark.parametrize("legacy_mode", [0o644, 0o640, 0o604, 0o660, 0o606, 0o601, 0o610])
+@pytest.mark.parametrize("legacy_mode", _FORBIDDEN_LEGACY_MODES)
 def test_repair_clears_every_forbidden_bit(tmp_path, legacy_mode):
     """The repair must not special-case 0644; 0640 and 0604 fail the reader too."""
     receipt_path, _raw = _write_legacy_receipt(tmp_path, legacy_mode)
@@ -298,7 +308,7 @@ def test_repair_refuses_a_multiply_linked_leaf(tmp_path):
     assert _mode_of(receipt_path) == 0o644, "a multiply-linked leaf must be left unmodified"
 
 
-@pytest.mark.parametrize("parent_mode", [0o777, 0o720, 0o702])
+@pytest.mark.parametrize("parent_mode", _WRITABLE_PARENT_MODES)
 def test_repair_refuses_a_group_or_world_writable_parent(tmp_path, parent_mode):
     root = tmp_path / "state"
     root.mkdir(mode=0o700)
