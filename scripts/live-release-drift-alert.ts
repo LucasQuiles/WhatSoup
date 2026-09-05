@@ -278,21 +278,39 @@ export type DriftKindMember = LiveReleaseDriftIssue['kind'];
 
 /**
  * The `drift_kind` field: `none`, one kind, or a comma-joined ascending join of
- * kinds. Typed as a join of the closed union so a newly added issue kind cannot
- * flow through as a bare `string`.
+ * kinds.
+ *
+ * What this type guarantees: the value is `none`, or it BEGINS with a member of
+ * the closed kind union. What it does NOT guarantee: the tail after the first
+ * comma. TypeScript rejects a recursive template literal (TS2456) and the
+ * non-recursive expansion of nine kinds exceeds the union size limit, so the
+ * tail is `${string}` and the type cannot reject `file-sha256-drift,anything`.
+ * Boundedness of the tail is a RUNTIME property, asserted on the emitted value
+ * in the two-kind test rather than claimed here.
  */
 export type DriftKindField = 'none' | DriftKindMember | `${DriftKindMember},${string}`;
 
 /**
- * The two manifest-derived facts this invocation needs, read ONCE. Splitting
- * them across two reads would let the manifest change between them and let the
- * log record and the event disagree about the same release.
+ * The manifest-derived facts this invocation needs, taken from ONE read of the
+ * manifest. Deriving them from two reads would let the manifest change between
+ * them and let the log record and the event disagree about the same release.
+ *
+ * The drift report performs its own read of the same file. That second read is
+ * kept separate BY CHOICE, not by contract necessity: reusing the report's
+ * parse would mean rebuilding the report here, and one duplicated read is a
+ * smaller cost than a duplicated report builder.
  */
 interface ReleaseManifestFacts {
   /** sha256 over the manifest FILE bytes — the pre-existing #2458 semantics. */
   desiredDigest: string;
   /** Path-free identity over the PARSED manifest, or the unknown sentinel. */
   identity: string;
+  /**
+   * Class name of an unexpected error raised while computing the identity, or
+   * null. The class name only — a message could carry a path or file content
+   * into the event.
+   */
+  identityErrorClass: string | null;
 }
 
 /**
@@ -358,12 +376,33 @@ function readManifestFacts(manifestPath: string): ReleaseManifestFacts {
   try {
     manifestText = readFileSync(manifestPath, 'utf8');
   } catch {
-    return { desiredDigest: UNKNOWN_RELEASE_IDENTITY, identity: UNKNOWN_RELEASE_IDENTITY };
+    return { desiredDigest: UNKNOWN_RELEASE_IDENTITY, identity: UNKNOWN_RELEASE_IDENTITY, identityErrorClass: null };
   }
+  const identity = containedReleaseIdentity(() => releaseIdentityFromManifestText(manifestText));
   return {
     desiredDigest: domainDigest(MANIFEST_DIGEST_DOMAIN, manifestText),
-    identity: releaseIdentityFromManifestText(manifestText),
+    identity: identity.identity,
+    identityErrorClass: identity.errorClass,
   };
+}
+
+/**
+ * Containment boundary for the identity computation. The identity is a side
+ * fact; the drift alert is the product. `releaseIdentityFromManifestText`
+ * deliberately re-throws anything that is not a parse or schema failure, so
+ * without this boundary an unexpected error there would propagate out of
+ * `checkLiveReleaseDrift` and suppress the alert the check exists to raise.
+ *
+ * Any unexpected error therefore degrades to the sentinel identity plus the
+ * error's class name, and the alert still goes out.
+ */
+export function containedReleaseIdentity(compute: () => string): { identity: string; errorClass: string | null } {
+  try {
+    return { identity: compute(), errorClass: null };
+  } catch (error) {
+    const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    return { identity: UNKNOWN_RELEASE_IDENTITY, errorClass };
+  }
 }
 
 /**
@@ -395,11 +434,17 @@ function typedDriftDiagnostics(assessment: DriftAssessment, facts: ReleaseManife
   const observed = assessment.ok && facts.identity !== UNKNOWN_RELEASE_IDENTITY
     ? facts.identity
     : UNKNOWN_RELEASE_IDENTITY;
-  return [
-    `drift_kind=${driftKind(assessment.issues)}`,
+  // Annotated, not inferred: if driftKind is ever retyped to return a bare
+  // `string`, this assignment stops compiling. It is the only type-level guard
+  // on the field, so it is deliberately a declaration and not an inline call.
+  const kindField: DriftKindField = driftKind(assessment.issues);
+  const diagnostics = [
+    `drift_kind=${kindField}`,
     `desired_release_identity=${facts.identity}`,
     `observed_release_identity=${observed}`,
   ];
+  if (facts.identityErrorClass !== null) diagnostics.push(`release_identity_error=${facts.identityErrorClass}`);
+  return diagnostics;
 }
 
 function runEmit(

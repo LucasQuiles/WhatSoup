@@ -3,15 +3,38 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createReleaseSnapshotPlan } from '../../scripts/release-snapshot-plan.ts';
 import {
   checkLiveReleaseDrift,
+  containedReleaseIdentity,
   releaseIdentityFromManifestText,
   resolveReleasePathFromLaunchdPlist,
   type DriftKindField,
+  type DriftKindMember,
 } from '../../scripts/live-release-drift-alert.ts';
+
+/**
+ * Control for the poisoned-parser test below. `vi.mock` is hoisted above the
+ * imports, so the control object must be hoisted with it. While failFromCall is
+ * 0 the mock is a pass-through and every other test sees the real parser.
+ */
+const parseControl = vi.hoisted(() => ({ calls: 0, failFromCall: 0 }));
+
+vi.mock('../../scripts/release-snapshot-plan.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scripts/release-snapshot-plan.ts')>();
+  return {
+    ...actual,
+    parseReleaseSnapshotManifest: (payload: unknown) => {
+      parseControl.calls += 1;
+      if (parseControl.failFromCall > 0 && parseControl.calls >= parseControl.failFromCall) {
+        throw new TypeError('poisoned identity parse');
+      }
+      return actual.parseReleaseSnapshotManifest(payload);
+    },
+  };
+});
 
 const CORRELATION_DIGEST_DOMAIN = 'whatsoup-release-drift-correlation-v1';
 
@@ -859,12 +882,39 @@ describe('live release drift alert #2385: typed drift identity on the emitted ev
 });
 
 /**
- * Compile-time exhaustiveness for the drift-kind field. These are `DriftKindField`
- * annotations, not runtime string checks: if a new issue kind is added to
- * `LiveReleaseDriftIssue` without widening the field type, or if the field is
- * ever retyped as a bare `string`, the typecheck fails here. They double as the
- * exact expected values, so neither constant is decorative.
+ * Type-level checks on the drift-kind types. An annotation on a constant is
+ * only an assignability check, which widening never breaks, so the two checks
+ * below are a mutual-assignability conditional and a rejection probe instead.
+ *
+ * What they catch: adding or removing a member of the issue-kind union without
+ * updating this list; retyping `DriftKindField` to `string`. What they do NOT
+ * catch: free text after the first comma in a joined value, which the field
+ * type cannot express (see its doc comment) and which the two-kind test below
+ * asserts on the emitted value instead.
  */
+type ExpectedDriftKinds =
+  | 'release-missing'
+  | 'manifest-missing'
+  | 'manifest-release-path-mismatch'
+  | 'file-missing'
+  | 'file-type-drift'
+  | 'file-sha256-drift'
+  | 'extra-file'
+  | 'required-output-missing'
+  | 'launchd-working-directory-mismatch';
+
+type MutuallyAssignable<Left, Right> = [Left] extends [Right]
+  ? ([Right] extends [Left] ? true : never)
+  : never;
+
+const DRIFT_KINDS_ARE_EXACTLY_EXPECTED: MutuallyAssignable<DriftKindMember, ExpectedDriftKinds> = true;
+
+// A rejection probe, not an assignability check: if the field type is widened
+// to `string` this assignment compiles, the directive goes unused, and the
+// typecheck fails. It is permanent, so the expiry is a far date by convention.
+// @ts-expect-error -- DriftKindField must reject a non-member; expires 2099-12-31
+const DRIFT_KIND_FIELD_REJECTS_FREE_TEXT: DriftKindField = 'not-a-drift-kind';
+
 const DRIFT_KIND_SINGLE: DriftKindField = 'file-sha256-drift';
 const DRIFT_KIND_JOINED: DriftKindField = 'extra-file,file-sha256-drift';
 const DRIFT_KIND_MANIFEST_MISSING: DriftKindField = 'manifest-missing';
@@ -878,18 +928,33 @@ describe('live release drift alert #2385: drift_kind set and order', () => {
     // first element, nor a sorted join from an unsorted one.
     writeFileSync(path.join(a, 'unmanifested-extra.txt'), 'extra\n', 'utf8');
 
+    // Coverage assertion: the order the checker reports these kinds in is NOT
+    // already alphabetical, so sorting is observable. Without this, dropping the
+    // sort could pass by accident.
+    const naturalOrder = checkLiveReleaseDrift({
+      repoRoot: process.cwd(),
+      releasePath: a,
+      instance: 'release-bot',
+      source: 'release-drift',
+      emit: false,
+      emitHelper: path.join(process.cwd(), 'deploy/scripts/bot-errors-emit.py'),
+      python: 'python3',
+      clearOnOk: false,
+    }).issues.map((issue) => issue.kind);
+    expect(new Set(naturalOrder).size).toBe(2);
+    expect(naturalOrder).not.toEqual([...naturalOrder].sort());
+
     const stateDir = path.join(tmpRoot, 'state-two-kind');
     const proc = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDir });
     expect(proc.status, proc.stderr).toBe(1);
 
+    // Assertions on the EMITTED value, not on the expectation.
     const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
-    // Coverage assertion: the fixture really produces two distinct kinds, so the
-    // joined expectation cannot be met by a single-kind fixture.
-    expect(DRIFT_KIND_JOINED.split(',')).toHaveLength(2);
+    const emittedMembers = String(diagnostics.drift_kind).split(',');
+    expect(emittedMembers).toHaveLength(2);
+    expect(emittedMembers).toEqual(['extra-file', 'file-sha256-drift']);
+    expect(emittedMembers).toEqual([...new Set(naturalOrder)].sort());
     expect(diagnostics.drift_kind).toBe(DRIFT_KIND_JOINED);
-    // Ascending order, stated separately from the value so an unsorted join is
-    // attributable rather than just "not equal".
-    expect(DRIFT_KIND_JOINED.split(',')).toEqual([...DRIFT_KIND_JOINED.split(',')].sort());
   });
 });
 
@@ -998,5 +1063,68 @@ describe('live release drift alert #2385: fail-open branches stay pinned', () =>
     expect(diagnostics.drift_kind).toBe(DRIFT_KIND_NONE);
     expect(diagnostics.desired_release_identity).toBe(expectedIdentity);
     expect(diagnostics.observed_release_identity).toBe(expectedIdentity);
+  });
+});
+
+describe('live release drift alert #2385: an identity failure never costs the alert', () => {
+  it('degrades to the sentinel and names the error class instead of propagating', () => {
+    // The identity code re-throws anything that is not a parse or schema
+    // failure. Without the boundary that error would escape checkLiveReleaseDrift
+    // and the drift alert would never be enqueued.
+    for (const thrown of [new TypeError('boom'), new RangeError('boom')]) {
+      const contained = containedReleaseIdentity(() => {
+        throw thrown;
+      });
+      expect(contained.identity).toBe('unknown');
+      expect(contained.errorClass).toBe(thrown.constructor.name);
+      // The class name only: a message can carry a path or file content.
+      expect(contained.errorClass).not.toContain('boom');
+    }
+
+    // Positive control: the boundary is transparent when nothing throws, so the
+    // assertions above cannot pass because it always reports failure.
+    const computed = 'a'.repeat(64);
+    expect(containedReleaseIdentity(() => computed)).toEqual({ identity: computed, errorClass: null });
+  });
+
+  it('still emits the drift alert when the identity computation throws', () => {
+    const { a } = writeTwinReleases({ drift: true });
+    const stateDir = path.join(tmpRoot, 'state-identity-throws');
+    process.env.BOT_ERRORS_STATE_DIR = stateDir;
+
+    // Poison the identity path only. The drift report calls the parser through
+    // release-snapshot-plan's own internal binding, which the module mock does
+    // not intercept, so the report still succeeds on the real parser and the
+    // only intercepted call is this script's identity parse.
+    parseControl.calls = 0;
+    parseControl.failFromCall = 1;
+    let result;
+    try {
+      result = checkLiveReleaseDrift({
+        repoRoot: process.cwd(),
+        releasePath: a,
+        instance: 'release-bot',
+        source: 'release-drift',
+        emit: true,
+        emitHelper: path.join(process.cwd(), 'deploy/scripts/bot-errors-emit.py'),
+        python: 'python3',
+        clearOnOk: false,
+      });
+    } finally {
+      parseControl.failFromCall = 0;
+    }
+
+    // Coverage assertion: the poisoned call really fired, so the test cannot
+    // pass by never reaching the identity path.
+    expect(parseControl.calls, 'the identity parse must have been reached').toBe(1);
+    expect(result.alert).toMatchObject({ required: true, attempted: true, kind: 'alert', status: 0 });
+
+    const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
+    // The alert survives, the drift kind is intact, the identity degrades.
+    expect(diagnostics.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagnostics.desired_release_identity).toBe('unknown');
+    expect(diagnostics.observed_release_identity).toBe('unknown');
+    expect(diagnostics.release_identity_error).toBe('TypeError');
+    expect(diagnostics.release_identity_error).not.toContain('poisoned');
   });
 });
