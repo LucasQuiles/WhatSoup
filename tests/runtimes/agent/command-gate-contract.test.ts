@@ -342,6 +342,11 @@ vi.mock('node:fs', async (importOriginal) => {
 // ─── Imports after mocks ─────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+} from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import { GLOBAL_CONVERSATION_KEY } from '../../../src/core/conversation-key.ts';
 import { COMMAND_REGISTRY } from '../../../src/runtimes/agent/command-registry.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
@@ -724,16 +729,28 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       releaseTurn();
       await compoundStop;
 
-      // The body never became a turn: still exactly the one long-running turn.
-      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
-      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
-      expect(directTexts()).not.toContain('run this other thing instead');
       // handleMessage returns once the per-chat turn is queued, so the
-      // acknowledgements land after it resolves; wait for the refusal itself.
+      // acknowledgements land after it resolves; wait for the refusal FIRST.
+      // Asserting non-dispatch before this point would pass against a mutant
+      // that emits the refusal and forwards the body anyway (codex MED-3).
       await vi.waitFor(
         () => expect(directTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(true),
         { timeout: 4_000 },
       );
+      // Settle on ORDERING, not on a sleep: a later message's turn cannot reach
+      // the provider before an earlier forwarded body would have (per-chat
+      // FIFO), so once the probe has dispatched, a forwarded body would already
+      // be visible in the same mock.
+      await runtime.handleMessage(makeMsg({
+        messageId: 'msg-settle-probe', content: 'settle probe', senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('settle probe'));
+
+      // The body never became a turn, asserted AFTER the refusal was delivered
+      // and after a later turn overtook it.
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
+      expect(directTexts()).not.toContain('run this other thing instead');
     } finally {
       releaseTurn();
     }
@@ -793,6 +810,106 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
 
     await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
     expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(false);
+  });
+
+  it('#2949 N1: a mid-turn /stop in SHARED scope reaches the teardown path', async () => {
+    // Pins the claim the single-only wording rests on: shared enqueues the
+    // provider turn without awaiting it, so turnChain is free and the control
+    // is handled WHILE the task runs, exactly as in per_chat.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = makeRuntime('shared', db, messenger);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    try {
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+      void runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop-shared', content: '/stop', senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/stop');
+    } finally {
+      releaseTurn();
+      // The stop guard is module state keyed by scopeKey, and shared scope uses
+      // the same global key as single: leaving it held would fence the /new
+      // refusal case below. Wait it out here rather than depending on order.
+      await vi.waitFor(
+        () => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false),
+        { timeout: 4_000 },
+      );
+    }
+  });
+
+  it('#2949 N1: /new is refused while a /stop teardown for the scope is unsettled', async () => {
+    // The state N1 itself created: the bounded wait returns while the teardown
+    // runs on. /new would tear down again and RESET, spawning a replacement for
+    // an unproven cancellation. The scope is put into that state through the
+    // stop command's own entry point rather than by poking module state; a
+    // runtime-driven /stop cannot be used here, because while its teardown
+    // hangs the next inbound never reaches the command switch in this harness.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stopOutcome = await runStopCommand({
+      chatJid: DM_CHAT,
+      sessionScope: 'single',
+      scopeKey: GLOBAL_CONVERSATION_KEY,
+      perChatMapKey: null,
+      teardownTimeoutMs: 5,
+      isTurnInFlight: () => true,
+      isOutboundQueuePoisoned: () => false,
+      isSessionProvablyTerminated: () => true,
+      getPerChatSession: () => undefined,
+      abortPerChatQueue: () => {},
+      disposePerChatSession: async () => {},
+      getSingleSession: () => null,
+      abortActiveQueue: () => {},
+      terminalizeTurnForInterrupt: async () => { await gate; return {}; },
+      retireTurnQueueAfterInterrupt: async () => {},
+      shutdownOperationTracker: () => {},
+      cleanupGlobalAutoCompactState: () => {},
+      shutdownSingleSession: async () => {},
+      clearSingleScopeRefs: () => {},
+      clearTurnHadVisibleOutput: () => {},
+      sendDirect: () => {},
+    });
+
+    try {
+      // The bounded wait elapsed; the teardown is detached and still unsettled.
+      expect(stopOutcome).toBe('uncertain');
+      expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(true);
+
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'msg-new-during-stop', content: '/new', senderJid: ADMIN_WA,
+      }));
+
+      expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(true);
+      // Not a silent skip: /new never ran its reset epilogue.
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await vi.waitFor(() => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false));
+    }
   });
 
   it('a FUTURE registry entry with no switch case warns and forwards to the agent (B21-A F4b)', async () => {

@@ -40,43 +40,62 @@
 //
 // WHY THE TERMINATION PROOF IS A SEPARATE CONJUNCT: `isTurnInFlight` is a
 // runtime BOOKKEEPING reading, not a provider-process reading. In single/shared
-// scope it is a disjunction of eight markers (runtime.ts:1447-1456) and
+// scope it is a disjunction of eight markers (runtime.ts:1447-1456 at
+// b65984f0) and
 // `clearSingleScopeRefs` clears exactly two of them (`currentInboundSeq`,
 // `currentTurnChatJid`); the other six — the runtime turn context, the pending
 // singleton context, the turn completion, `turnQueue.isProcessing`,
 // `turnQueue.pending` and `hasGlobalTeardownPending` — are cleared by the
 // coordinator's own finalization, so the re-read is PARTIALLY self-fulfilling
 // rather than trivially false. In per_chat scope the same holds for the six
-// markers at runtime.ts:1436-1445: `disposePerChatSession` runs
+// markers at runtime.ts:1436-1445 at b65984f0: `disposePerChatSession` runs
 // `cleanupPerChatState`, which deletes this chat's `perChatInboundSeqQueue`
-// entry (runtime.ts:2024) among others. Either way the teardown clears part of
+// entry (runtime.ts:2024 at b65984f0) among others. Either way the teardown clears part of
 // what the proof reads, which is why `stopped` also requires the
-// provider-independent predicate at runtime.ts:8098.
+// provider-independent predicate `isSessionProvablyTerminated`
+// (runtime.ts:8121 at b65984f0).
 //
-// RESIDUAL, DISCLOSED: when the scope holds no session object to prove
-// (single/shared with a null session ref, per_chat with no mapped session) the
-// torn-down set is empty and the predicate is vacuously satisfied, so 'stopped'
-// is reachable without a positive termination proof. That is the state where
-// the runtime has nothing left to interrogate; it is not evidence of
-// termination and is recorded here rather than hidden.
+// RESIDUAL, DISCLOSED (three, none closed by this leaf):
+// (1) Empty torn-down set. When the scope holds no session object to prove
+//     (single/shared with a null session ref, per_chat with no mapped session)
+//     the set is empty and the predicate is vacuously satisfied, so 'stopped'
+//     is reachable without a positive termination proof. That is the state
+//     where the runtime has nothing left to interrogate; it is not evidence of
+//     termination. Pinned by the RESIDUAL tests in runtime-stop-command.test.ts
+//     so a later change to it is deliberate.
+// (2) Ambiguous kill census. `SessionManager.shutdown` nulls `child` after
+//     `killSessionTree` returns normally even when PIDs stayed ambiguous and
+//     were never signalled (session.ts:4165-4188 and process-tree.ts:428-442 at
+//     b65984f0; the outcome sink at session.ts:1134-1138 only logs). The status
+//     this command reads then reports `providerTerminated` true, so 'stopped'
+//     stays reachable with a surviving provider descendant. The route is
+//     outside this leaf's paths; owner is the follow-up draft on #2949.
+// (3) Containment, not detection. The seam clears the scope refs before the
+//     proof runs (the ordering /new established), so after an 'uncertain'
+//     outcome the next inbound can still spawn a replacement session while the
+//     first teardown is unproven. N1 adds detection and an honest
+//     acknowledgement; fencing admission behind an unproven proof is a
+//     coordinator and session-manager change. Reported, follow-up on #2949.
 //
 // TURN RECOVERY (#2949 N1 review item D, report-only): the cancelled turn is
 // finalized `{ kind: 'failed', class: 'crash' }` by the SAME coordinator
 // methods /new's interrupt branch binds. When that turn already had answer
 // delivery evidence in a non-terminal state, `deriveInboundDisposition`
-// (turn-finalizer.ts:180-196) returns 'transferred_to_recovery_owner', which
-// enqueues a replay-safe turn-recovery job (turn-finalizer.ts:391-393 →
-// turn-recovery-store.ts:975) that the recovery supervisor can later replay
+// (`deriveInboundDisposition`, turn-finalizer.ts:180-196 at b65984f0) returns
+// 'transferred_to_recovery_owner', which enqueues a replay-safe turn-recovery
+// job (turn-finalizer.ts:391-393 at b65984f0 into
+// src/core/turn-recovery-store.ts:975) that the recovery supervisor can replay
 // with the ORIGINAL user text. /stop cannot narrow that without changing /new:
 // both bind the same `terminalizeTurnForInterrupt` /
-// `retireTurnQueueAfterInterrupt` closures (runtime.ts:4637-4642 and
-// :4700-4705). Left as-is deliberately.
+// `retireTurnQueueAfterInterrupt` closures (runtime.ts:4637-4642 for /new and
+// :4704-4709 for /stop, both at b65984f0). Left as-is deliberately.
 //
 // ACKNOWLEDGEMENT DELIVERY, RECORDED LIMIT: every acknowledgement here goes
 // through `runtime.sendDirect`, which passes `bypassEchoGuard = false` and
-// discards the promise (runtime.ts:8579-8580). `sendDirectWithReceipt` returns
-// `{ accepted: false }` without sending when the chat's outbound queue is
-// poisoned (chat-transport.ts:211-217), so STOP_ACK_UNCERTAIN_DELIVERY is
+// discards the promise (runtime.ts:8598-8600 at b65984f0).
+// `sendDirectWithReceipt` returns `{ accepted: false }` without sending when
+// the chat's outbound queue is poisoned (chat-transport.ts:215-216), so
+// STOP_ACK_UNCERTAIN_DELIVERY is
 // dropped in exactly the case it describes. The bypass path exists but no
 // production call site uses it, so introducing one here would be a new
 // precedent rather than a fix; it is filed as a follow-up on #2949 instead.
@@ -91,6 +110,16 @@
 // (STOP_ACK_COMPOUND_BODY_REFUSED, runtime.ts's compound-forwarding site); the
 // inbound still completes as 'local_command_handled'. Every other command keeps
 // the #2357 B1 behaviour.
+//
+// /new WHILE A /stop TEARDOWN IS IN FLIGHT: /new re-runs this same interrupt
+// seam and then RESETS, spawning a replacement session. Running it against a
+// scope whose /stop teardown has not settled would create exactly the
+// replacement an unproven cancellation must not authorize, so runtime.ts's
+// `case 'new'` refuses with NEW_ACK_REFUSED_STOP_IN_PROGRESS while
+// `isStopTeardownInFlight(scopeKey)` holds. This state exists only because THIS
+// leaf introduced a bounded wait: before it, /new awaited the teardown
+// unboundedly and no teardown ever outlived its command, so the guard changes
+// no pre-existing behaviour.
 //
 // WHY NOT `teardown.disposition`: the coordinator assigns it unconditionally
 // from WHICH method ran — 'interruption' in terminalizeGlobalTurnForReset,
@@ -109,10 +138,15 @@ export const DEFAULT_STOP_TEARDOWN_TIMEOUT_MS = 30_000;
 
 export const STOP_ACK_STOPPED = '*Stopped the running task* ✓';
 export const STOP_ACK_NOTHING_TO_STOP = '*Nothing to stop — no task is running*';
-/** single/shared only. /stop runs inside turnChain, so in these scopes a /stop
- *  sent DURING a task is only handled once that task finishes — at which point
+/** SINGLE scope only. Only single runs the provider turn inline inside
+ *  _handleMessageInner (runtime.ts:5063 onward at b65984f0), so there a /stop
+ *  sent DURING a task is handled only once that task finishes — at which point
  *  the scope reads idle and the plain wording above would tell the user nothing
- *  was running. Say what actually happened instead. */
+ *  was running. Shared does NOT belong here: it enqueues the provider turn
+ *  through `enqueueSharedRuntimeTurn` without awaiting it (runtime.ts:4970-5012
+ *  at b65984f0; the coordinator method returns a boolean), so turnChain stays
+ *  free and a mid-turn /stop reaches the teardown path there as it does in
+ *  per_chat. */
 export const STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE =
   '*Nothing to stop — no task is running now. In this session mode a /stop sent during a task is only seen after that task finishes; it cannot interrupt a task already in progress.*';
 export const STOP_ACK_UNCERTAIN_TIMEOUT =
@@ -126,7 +160,11 @@ export const STOP_ACK_UNCERTAIN_DELIVERY =
 export const STOP_ACK_UNCERTAIN_NOT_PROVEN =
   '*Stop requested — the task process could not be proven terminated, outcome uncertain; operator reconciliation required*';
 export const STOP_ACK_ALREADY_STOPPING =
-  '*Stop already in progress — waiting for the current teardown to settle*';
+  '*Stop already in progress — waiting for the current teardown to settle; if it never settles, operator reconciliation is required*';
+/** Refusal for /new while a /stop teardown for the same scope is unsettled. See
+ *  the /new note in the header. */
+export const NEW_ACK_REFUSED_STOP_IN_PROGRESS =
+  '*A stop for this task is still in progress and its outcome is not yet proven; /new is refused until it settles. If it never settles, operator reconciliation is required.*';
 /** Compound `/stop\n<body>` refusal. See the COMPOUND BODY note in the header. */
 export const STOP_ACK_COMPOUND_BODY_REFUSED =
   '*/stop does not take a follow-up message; send it on its own after the stop acknowledgement*';
@@ -254,8 +292,21 @@ async function tearDownActiveTurn<TSession, TTeardown>(
  * gets STOP_ACK_ALREADY_STOPPING. The cost is that a teardown which never
  * settles holds its scope's guard for the life of the process — deliberate, and
  * consistent with the poisoned-lane rule above.
+ *
+ * Being module state, this map is shared by every AgentRuntime in the process:
+ * production constructs one, and tests that drive several must namespace their
+ * scopeKeys or a held guard leaks from one case into the next.
  */
 const teardownsInFlight = new Map<string, Promise<unknown>>();
+
+/**
+ * True while a /stop teardown for this scopeKey has not settled. Exported for
+ * the ONE other command that re-enters the same seam: runtime.ts's `case 'new'`
+ * refuses rather than tearing down and resetting against an unproven teardown.
+ */
+export function isStopTeardownInFlight(scopeKey: string): boolean {
+  return teardownsInFlight.has(scopeKey);
+}
 
 /**
  * Execute /stop: tear down the active provider turn for this chat, then report
@@ -276,9 +327,9 @@ export async function runStopCommand<TSession, TTeardown>(
   if (!host.isTurnInFlight()) {
     log.info(scope, '/stop received with no active turn — nothing to stop');
     host.sendDirect(
-      host.sessionScope === 'per_chat'
-        ? STOP_ACK_NOTHING_TO_STOP
-        : STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE,
+      host.sessionScope === 'single'
+        ? STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE
+        : STOP_ACK_NOTHING_TO_STOP,
     );
     return 'nothing-to-stop';
   }

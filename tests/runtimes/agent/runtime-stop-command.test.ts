@@ -19,7 +19,11 @@
 // function of scope while claiming to report proof.
 
 import { describe, expect, it, vi } from 'vitest';
-import { runStopCommand, type StopOutcome } from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+  type StopOutcome,
+} from '../../../src/runtimes/agent/runtime-stop-command.ts';
 import { classifyInput } from '../../../src/runtimes/agent/commands.ts';
 import { COMMAND_REGISTRY, getCommandSpec } from '../../../src/runtimes/agent/command-registry.ts';
 
@@ -51,6 +55,8 @@ function makeStopHarness(options: {
   terminalizeGate?: Promise<unknown>;
   /** The runtime's termination proof for every torn-down session. */
   sessionProvablyTerminated?: boolean;
+  /** Scope holds no session object to prove: the disclosed vacuous path. */
+  noSessionToProve?: boolean;
   teardownTimeoutMs?: number;
 }) {
   const sentTexts: string[] = [];
@@ -77,14 +83,18 @@ function makeStopHarness(options: {
     isTurnInFlight: inFlight,
     isOutboundQueuePoisoned: vi.fn(() => options.poisoned ?? false),
     isSessionProvablyTerminated,
-    getPerChatSession: vi.fn(() => (sessionScope === 'per_chat' ? perChatSession : undefined)),
+    getPerChatSession: vi.fn(() => (
+      sessionScope === 'per_chat' && options.noSessionToProve !== true ? perChatSession : undefined
+    )),
     abortPerChatQueue: vi.fn(),
     disposePerChatSession: vi.fn(async () => {}),
     // Mirrors the runtime binding: `getSingleSession` reads `this.session`,
     // which `clearSingleScopeRefs` nulls. A proof read AFTER the teardown would
     // therefore be handed null and pass vacuously.
     getSingleSession: vi.fn(() => (
-      sessionScope === 'per_chat' || scopeRefsCleared ? null : singleSession
+      sessionScope === 'per_chat' || scopeRefsCleared || options.noSessionToProve === true
+        ? null
+        : singleSession
     )),
     abortActiveQueue: vi.fn(),
     terminalizeTurnForInterrupt,
@@ -270,28 +280,35 @@ describe("#2949 N1: 'stopped' requires every torn-down session to be provably te
 // ─── B: the nothing-to-stop acknowledgement is scope-honest ──────────────────
 
 describe('#2949 N1: nothing-to-stop tells the truth about the scope it ran in', () => {
-  it.each(['single', 'shared'] as const)(
-    'in %s scope it discloses that a mid-task /stop is only seen afterwards',
+  it('in SINGLE scope it discloses that a mid-task /stop is only seen afterwards', async () => {
+    const harness = makeStopHarness({ inFlight: false, sessionScope: 'single' });
+    await expect(run(harness)).resolves.toBe('nothing-to-stop');
+
+    expect(harness.sentTexts).toHaveLength(1);
+    // The discriminating clause — 'Nothing to stop' alone is in BOTH wordings,
+    // so asserting only that would survive deleting this disclosure.
+    expect(harness.sentTexts[0]).toContain('only seen after that task finishes');
+    expect(harness.sentTexts[0]).toContain('cannot interrupt a task already in progress');
+    expect(harness.terminalizeTurnForInterrupt).not.toHaveBeenCalled();
+  });
+
+  it.each(['per_chat', 'shared'] as const)(
+    '%s keeps the plain wording — a mid-turn /stop reaches the teardown there',
     async (sessionScope) => {
+      // shared enqueues the provider turn through enqueueSharedRuntimeTurn
+      // without awaiting it (runtime.ts:4970-5012 at b65984f0), so turnChain is
+      // free and a mid-turn /stop is handled while the task runs. Only single
+      // runs the turn inline. Telling a shared user their /stop cannot interrupt
+      // a running task would be false.
       const harness = makeStopHarness({ inFlight: false, sessionScope });
       await expect(run(harness)).resolves.toBe('nothing-to-stop');
 
       expect(harness.sentTexts).toHaveLength(1);
-      // The discriminating clause — 'Nothing to stop' alone is in BOTH wordings,
-      // so asserting only that would survive deleting this disclosure.
-      expect(harness.sentTexts[0]).toContain('only seen after that task finishes');
-      expect(harness.sentTexts[0]).toContain('cannot interrupt a task already in progress');
-      expect(harness.terminalizeTurnForInterrupt).not.toHaveBeenCalled();
+      expect(harness.sentTexts[0]).toContain('Nothing to stop');
+      expect(harness.sentTexts[0]).not.toContain('only seen after that task finishes');
+      expect(harness.sentTexts[0]).not.toContain('cannot interrupt a task already in progress');
     },
   );
-
-  it('per_chat keeps the plain wording — a mid-turn /stop is handled there', async () => {
-    const harness = makeStopHarness({ inFlight: false, sessionScope: 'per_chat' });
-    await expect(run(harness)).resolves.toBe('nothing-to-stop');
-
-    expect(harness.sentTexts[0]).toContain('Nothing to stop');
-    expect(harness.sentTexts[0]).not.toContain('only seen after that task finishes');
-  });
 });
 
 // ─── C: a second /stop never re-enters a teardown in flight ──────────────────
@@ -360,6 +377,63 @@ describe('#2949 N1: the re-entrancy guard is per scopeKey', () => {
     const second = makeStopHarness({ inFlight: true, scopeKey });
     await expect(run(second)).resolves.toBe('already-stopping');
     expect(second.terminalizeTurnForInterrupt).not.toHaveBeenCalled();
+
+    release();
+  });
+});
+
+// ─── L: the disclosed RESIDUAL, pinned so a change to it is deliberate ───────
+
+describe('#2949 N1 RESIDUAL: an empty torn-down set satisfies the proof vacuously', () => {
+  it.each(['single', 'per_chat'] as const)(
+    'in %s scope with no session to prove, /stop reports stopped and never calls the proof',
+    async (sessionScope) => {
+      // Disclosed in the module header: the scope holds no session object to
+      // interrogate, so the torn-down set is empty and the predicate is
+      // vacuously satisfied. This is the CURRENT behaviour, pinned; changing it
+      // must be a deliberate edit to this test, not a silent drift.
+      const harness = makeStopHarness({ inFlight: true, sessionScope, noSessionToProve: true });
+      await expect(run(harness)).resolves.toBe('stopped');
+
+      expect(harness.terminalizeTurnForInterrupt).toHaveBeenCalledOnce();
+      expect(harness.isSessionProvablyTerminated).not.toHaveBeenCalled();
+      expect(harness.sentTexts[0]).toContain('Stopped the running task');
+    },
+  );
+});
+
+// ─── J: the guard state the /new refusal reads ──────────────────────────────
+
+describe('#2949 N1: isStopTeardownInFlight fences the other command that re-enters the seam', () => {
+  it('reads true while the teardown is unsettled, including past the bounded wait, and false after', async () => {
+    const scopeKey = 'guard-query-scope';
+    expect(isStopTeardownInFlight(scopeKey)).toBe(false);
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = makeStopHarness({
+      inFlight: true, scopeKey, terminalizeGate: gate, teardownTimeoutMs: 5,
+    });
+    await expect(run(held)).resolves.toBe('uncertain');
+
+    // The bounded wait elapsed and the teardown detached — this is exactly the
+    // window in which /new must not run the seam again.
+    expect(isStopTeardownInFlight(scopeKey)).toBe(true);
+
+    release();
+    await vi.waitFor(() => expect(isStopTeardownInFlight(scopeKey)).toBe(false));
+  });
+
+  it('is scope-local: a teardown on one scope does not fence another', async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = makeStopHarness({
+      inFlight: true, scopeKey: 'guard-query-a', terminalizeGate: gate, teardownTimeoutMs: 5,
+    });
+    await expect(run(held)).resolves.toBe('uncertain');
+
+    expect(isStopTeardownInFlight('guard-query-a')).toBe(true);
+    expect(isStopTeardownInFlight('guard-query-b')).toBe(false);
 
     release();
   });

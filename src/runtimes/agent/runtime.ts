@@ -655,7 +655,12 @@ import {
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 import { runNewCommand } from './runtime-new-command.ts';
-import { runStopCommand, STOP_ACK_COMPOUND_BODY_REFUSED } from './runtime-stop-command.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+  NEW_ACK_REFUSED_STOP_IN_PROGRESS,
+  STOP_ACK_COMPOUND_BODY_REFUSED,
+} from './runtime-stop-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -4609,6 +4614,13 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
+            // #2949 N1: /new re-runs this seam and then RESETS. Against a scope
+            // whose /stop teardown has not settled that spawns a replacement
+            // for an unproven cancellation, so refuse until the guard clears.
+            if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              break;
+            }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
             await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
@@ -8117,6 +8129,11 @@ export class AgentRuntime implements Runtime {
    * the latch away and lets a replacement spawn as if the write had settled,
    * so treat it as work that may still be outstanding rather than as a
    * terminated generation.
+   *
+   * The guarantee is bounded by what the status reports: a kill-tree census
+   * that left descendant PIDs unsignalled still returns normally and clears the
+   * handle, and this predicate cannot see that, so it proves the manager's own
+   * generation is finished rather than that no provider descendant survives.
    */
   private isSessionProvablyTerminated(session: SessionManager): boolean {
     const status = session.getStatus();
