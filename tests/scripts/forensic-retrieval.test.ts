@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildArtifactGraph,
@@ -14,6 +14,27 @@ import {
   weightedNgramSimilarity,
   type ForensicDocument,
 } from '../../scripts/lib/forensic-retrieval.ts';
+
+describe('forensic privacy and lifecycle regression boundaries', () => {
+  it.each(['0', '1'])('redacts credential leaves before home normalization with safe shape=%s', (safeShape) => {
+    vi.stubEnv('BOT_ERRORS_SAFE_SHAPE_CRED_PATH', safeShape);
+    try {
+      const value = sanitizeEvidenceText('/home/testuser/.config/secrets/fixture-private-leaf.env');
+      expect(value.text).not.toContain('fixture-private-leaf');
+      expect(value.text).not.toContain('testuser');
+      expect(value.text).toContain('[REDACTED');
+      expect(value.categories).toContain('home_path');
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('preserves an unclosed test-change anomaly across another failure', () => {
+    const kinds = ['test_failed', 'test_changed', 'test_failed', 'test_passed', 'test_failed', 'test_passed'] as const;
+    const events = kinds.map((kind, index) => ({ workstream: 'repeated-failure', kind, atMs: index + 1 }));
+    expect(detectLifecycleAnomalies(events)).toEqual([
+      { code: 'FORENSIC_TEST_CHANGED_AFTER_FAILURE', workstream: 'repeated-failure', atMs: 2 },
+    ]);
+  });
+});
 
 describe('forensic retrieval normalization', () => {
   it('retains raw text while normalizing Unicode, identifiers, separators, and whitespace', () => {

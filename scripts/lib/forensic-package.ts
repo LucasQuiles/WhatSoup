@@ -9,11 +9,11 @@ import {
   mkdtempSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readSync,
   readdirSync,
   rmSync,
   type BigIntStats,
+  type Stats,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { assertNoSecretLike } from '../artifact-redaction.ts';
+import { redactText } from '../../src/lib/redaction-text.ts';
 import { isNonEmptyString } from '../../src/lib/type-guards.ts';
 import {
   buildArtifactGraph,
@@ -410,6 +411,9 @@ function validateQueries(queries: readonly ForensicQuery[]): void {
     requireEnum(query.mode, ['substring', 'all_tokens'], `queries[${index}].mode`);
     if (query.text.length === 0 || query.text.length > 2_000) {
       throw new TypeError(`queries[${index}].text must be non-empty and bounded`);
+    }
+    if (query.mode === 'all_tokens' && normalizeRetrievalText(query.text).tokens.length === 0) {
+      throw new TypeError(`queries[${index}].text must contain normalized tokens`);
     }
   }
   requireUnique(ids, 'query ids');
@@ -804,10 +808,24 @@ export function scanOpenCodeSnapshot(options: {
           break outer;
         }
         recordsExamined += 1;
+        let contentInvalid = false;
         const raw = contentColumns.map((column) => {
           const value = row[column];
-          return typeof value === 'string' ? value : Buffer.isBuffer(value) ? value.toString('utf8') : '';
+          if (typeof value === 'string') return value;
+          if (value === null) return '';
+          if (value instanceof Uint8Array) {
+            try {
+              return new TextDecoder('utf-8', { fatal: true }).decode(value);
+            } catch {
+              findings.push({ code: `FORENSIC_SQLITE_INVALID_UTF8:${table}:${column}` });
+            }
+          } else {
+            findings.push({ code: `FORENSIC_SQLITE_CONTENT_TYPE_UNSUPPORTED:${table}:${column}` });
+          }
+          contentInvalid = true;
+          return '';
         }).join('\n');
+        if (contentInvalid) continue;
         const matched = options.queries.filter((query) => queryMatches(raw, query));
         if (matched.length === 0) continue;
         matchesObserved += 1;
@@ -939,6 +957,9 @@ export function parseForensicHarnessSearchResult(
           byte_start: requireInteger(locator.byte_start, `${hitLabel}.locator.byte_start`),
           byte_end: requireInteger(locator.byte_end, `${hitLabel}.locator.byte_end`),
         };
+        if (parsedLocator.byte_start >= parsedLocator.byte_end || parsedLocator.byte_end > parsedIdentity.bytes) {
+          throw new TypeError(`${hitLabel}.locator range must be non-empty and within source bytes`);
+        }
       } else if (locator.kind === 'sqlite-row') {
         exactKeys(locator, ['kind', 'table', 'row_hash'], `${hitLabel}.locator`);
         parsedLocator = {
@@ -980,6 +1001,9 @@ export function parseForensicHarnessSearchResult(
     if (complete && findings.length > 0) throw new TypeError(`${sourceLabel} complete source has findings`);
     if (matchesObserved > recordsExamined) throw new TypeError(`${sourceLabel}.matches_observed exceeds records_examined`);
     if (hits.length > matchesObserved) throw new TypeError(`${sourceLabel}.hits exceeds matches_observed`);
+    if (complete && hits.length !== matchesObserved) {
+      throw new TypeError(`${sourceLabel} complete source must retain all observed matches`);
+    }
     for (const [hitIndex, hit] of hits.entries()) {
       if (hit.evidence_id !== `evidence-${hit.record_sha256}`) {
         throw new TypeError(`${sourceLabel}.hits[${hitIndex}].evidence_id does not match record_sha256`);
@@ -1424,6 +1448,9 @@ function assertPublicContent(
   forbiddenTerms: readonly string[],
 ): void {
   assertNoSecretLike(content, name);
+  if (redactText(content) !== content) {
+    throw new Error(`redaction_violation: ${name} contains a credential or private value recognized by the shared redactor`);
+  }
   if (/\/(?:Users|home)\//u.test(content)) {
     throw new Error(`redaction_violation: ${name} contains a private home path`);
   }
@@ -1469,7 +1496,10 @@ function packagePayloads(
           source_alias: hit.source_alias,
           locator: hit.locator,
           matched_query_ids: hit.matched_query_ids,
-          envelope: hit.envelope,
+          envelope: {
+            type: hit.envelope.type === null ? null : sanitizeEvidenceText(hit.envelope.type).text,
+            role: hit.envelope.role === null ? null : sanitizeEvidenceText(hit.envelope.role).text,
+          },
         });
         evidenceByHash.set(hit.record_sha256, evidence);
       }
@@ -1815,7 +1845,10 @@ export function verifyForensicPackage(
       findings.push('redaction-violation:manifest.json');
     }
     requireSha256(expectedManifestSha256, 'expectedManifestSha256');
-    if (sha256(manifestContent) !== expectedManifestSha256) findings.push('manifest-hash-mismatch');
+    if (sha256(manifestContent) !== expectedManifestSha256) {
+      findings.push('manifest-hash-mismatch');
+      return { valid: false, findings: [...new Set(findings)].sort() };
+    }
     manifest = asRecord(JSON.parse(manifestContent.toString('utf8')), 'manifest');
     exactKeys(manifest, ['schema_version', 'files'], 'manifest');
     if (manifest.schema_version !== 'forensic.package-manifest.v1') throw new Error('manifest schema mismatch');
@@ -1835,23 +1868,41 @@ export function verifyForensicPackage(
     }
     if (seen.has(name)) findings.push(`manifest-path-duplicate:${name}`);
     seen.add(name);
+    const expectedBytes = requireInteger(row.bytes, `manifest.files[${index}].bytes`);
+    const expectedSha256 = requireSha256(row.sha256, `manifest.files[${index}].sha256`);
     const file = path.join(outputDirectory, name);
-    if (!existsSync(file)) continue;
-    const fileLink = lstatSync(file);
+    let fileLink: Stats;
+    try {
+      fileLink = lstatSync(file);
+    } catch (error) {
+      findings.push((error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? `missing-file:${name}` : `file-not-stable:${name}`);
+      continue;
+    }
     if (fileLink.isSymbolicLink() || !fileLink.isFile()) {
       findings.push(`file-not-regular:${name}`);
       continue;
     }
-    const content = readFileSync(file);
+    if (fileLink.size > expectedBytes) {
+      findings.push(`size-mismatch:${name}`);
+      continue;
+    }
+    let content: Buffer;
+    try {
+      content = readStableBoundedFile(file, expectedBytes);
+    } catch {
+      findings.push(`file-not-stable:${name}`);
+      continue;
+    }
     try {
       assertPublicContent(content.toString('utf8'), name, forbiddenTerms);
     } catch {
       findings.push(`redaction-violation:${name}`);
     }
-    if (content.length !== requireInteger(row.bytes, `manifest.files[${index}].bytes`)) {
+    if (content.length !== expectedBytes) {
       findings.push(`size-mismatch:${name}`);
     }
-    if (sha256(content) !== requireSha256(row.sha256, `manifest.files[${index}].sha256`)) {
+    if (sha256(content) !== expectedSha256) {
       findings.push(`hash-mismatch:${name}`);
     }
   }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import {
   chmodSync,
   existsSync,
@@ -10,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -170,6 +172,181 @@ function validSpec(): unknown {
     },
   };
 }
+
+describe('forensic evidence failure boundaries', () => {
+  it('rejects a shared credential shape in re-manifested public metadata', () => {
+    const output = path.join(tmp.make('envelope-reverification'), 'package');
+    writeForensicPackage(validSpec(), output);
+    const member = path.join(output, 'evidence.json');
+    const evidence = JSON.parse(readFileSync(member, 'utf8'));
+    evidence.evidence[0].occurrences[0].envelope.type = 'ghp_' + 'A'.repeat(24);
+    const bytes = Buffer.from(JSON.stringify(evidence));
+    writeFileSync(member, bytes);
+    const manifestPath = path.join(output, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<{ path: string; bytes: number; sha256: string }> };
+    const row = manifest.files.find((file) => file.path === 'evidence.json');
+    expect(row).toBeDefined();
+    row!.bytes = bytes.length;
+    row!.sha256 = sha256(bytes);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    expect(verifyForensicPackage(output, manifestSha256(output), { forbiddenTerms: ['unrelated-fixture-term'] })).toEqual({
+      valid: false, findings: ['redaction-violation:evidence.json'],
+    });
+  });
+
+  it.each(['type', 'role'] as const)('redacts synthetic credentials in public envelope %s', (field) => {
+    const spec = validSpec() as MutableSearchSpec;
+    const syntheticToken = 'ghp_' + 'A'.repeat(24);
+    spec.searches[0]!.sources[0]!.hits[0]!.envelope[field] = syntheticToken;
+    const output = path.join(tmp.make('envelope'), 'package');
+    writeForensicPackage(spec, output, { forbiddenTerms: ['unrelated-fixture-term'] });
+    expect(readFileSync(path.join(output, 'evidence.json'), 'utf8')).not.toContain(syntheticToken);
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
+  });
+
+  it('rejects a normalized empty all_tokens query while preserving ordinary query behavior', async () => {
+    const source = path.join(tmp.make('all-tokens'), 'source.jsonl');
+    writeFileSync(source, '{"type":"message","text":"ordinary content"}\n');
+    const scan = (text: string) => scanJsonlHarnessSource({
+      family: 'codex', pass: 1, sourceAlias: 'query-fixture', sourcePath: source,
+      expectedSha256: sha256(readFileSync(source)),
+      queries: [{ id: 'Q01', mode: 'all_tokens', text }],
+      limits: { maxSourceBytes: 10000, maxRecordBytes: 1000, maxHits: 10 },
+    });
+    expect((await scan('ordinary')).metrics.candidates).toBe(1);
+    expect((await scan('absentword')).metrics.candidates).toBe(0);
+    await expect(scan('---')).rejects.toThrow(/tokens/);
+  });
+
+  it.each([[12, 11], [5, 5], [0, 11]])('rejects impossible JSONL byte range %i..%i', (start, end) => {
+    const receipt = searchResult('codex', 1, 'range') as Mutable<ForensicHarnessSearchResult>;
+    receipt.sources[0]!.hits[0]!.locator = { kind: 'jsonl', line: 1, byte_start: start, byte_end: end };
+    expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/locator.*range/);
+  });
+
+  it('refuses a complete receipt that omitted an observed match', () => {
+    const receipt = searchResult('codex', 1, 'omitted') as Mutable<ForensicHarnessSearchResult>;
+    receipt.sources[0]!.hits = [];
+    receipt.metrics.candidates = 0;
+    receipt.metrics.new_evidence = 0;
+    expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/complete.*matches/);
+    receipt.sources[0]!.complete = false;
+    receipt.sources[0]!.findings = [{ code: 'FORENSIC_HIT_LIMIT' }];
+    receipt.metrics.failed_sources = 1;
+    expect(parseForensicHarnessSearchResult(receipt).sources[0]!.complete).toBe(false);
+  });
+
+  it.each([false, true])('accounts for SQLite content when BLOB=%s', (blob) => {
+    const databasePath = path.join(tmp.make('sqlite-content'), 'source.db');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE session (title TEXT); CREATE TABLE message (data TEXT); CREATE TABLE part (data TEXT)');
+    database.prepare('INSERT INTO message VALUES (?)').run(blob ? Buffer.from('needle') : 'needle');
+    database.close();
+    const result = scanOpenCodeSnapshot({
+      pass: 1, sourceAlias: 'sqlite-content', databasePath,
+      expectedSha256: sha256(readFileSync(databasePath)),
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: 1000000, maxRows: 100, maxHits: 10 },
+    });
+    expect(result.sources[0]!.findings).toEqual([]);
+    expect(result.sources[0]!.complete).toBe(true);
+    expect(result.metrics.candidates).toBe(1);
+  });
+
+  it('marks invalid UTF-8 SQLite content incomplete instead of silently dropping it', () => {
+    const databasePath = path.join(tmp.make('sqlite-invalid-content'), 'source.db');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE session (title TEXT); CREATE TABLE message (data TEXT); CREATE TABLE part (data TEXT)');
+    database.prepare('INSERT INTO message VALUES (?)').run(Buffer.from([0xff]));
+    database.close();
+    const result = scanOpenCodeSnapshot({
+      pass: 1, sourceAlias: 'sqlite-content', databasePath,
+      expectedSha256: sha256(readFileSync(databasePath)),
+      queries: [{ id: 'Q01', mode: 'substring', text: 'needle' }],
+      limits: { maxSourceBytes: 1000000, maxRows: 100, maxHits: 10 },
+    });
+    expect(result.sources[0]!.complete).toBe(false);
+    expect(result.sources[0]!.findings).toEqual([{ code: 'FORENSIC_SQLITE_INVALID_UTF8:message:data' }]);
+    expect(result.metrics.failed_sources).toBe(1);
+  });
+
+  it('refuses an oversized package member before allocating its content', () => {
+    const output = path.join(tmp.make('oversized-member'), 'package');
+    writeForensicPackage(validSpec(), output);
+    const expected = manifestSha256(output);
+    const member = path.join(output, 'analysis.json');
+    const originalRead = fs.readFileSync;
+    const originalOpen = fs.openSync;
+    const reads: string[] = [];
+    let rejectContentAccess = false;
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation((...args: Parameters<typeof fs.readFileSync>) => {
+      if (args[0] === member) {
+        reads.push('readFileSync');
+        if (rejectContentAccess) throw new Error('synthetic-allocation-stop');
+      }
+      return Reflect.apply(originalRead, fs, args);
+    });
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+      if (args[0] === member) {
+        reads.push('openSync');
+        if (rejectContentAccess) throw new Error('synthetic-allocation-stop');
+      }
+      return Reflect.apply(originalOpen, fs, args);
+    });
+    syncBuiltinESMExports();
+    try {
+      expect(verifyForensicPackage(output, expected)).toEqual({ valid: true, findings: [] });
+      expect(reads.length).toBeGreaterThan(0);
+      fs.truncateSync(member, statSync(member).size + 1048576);
+      reads.length = 0;
+      rejectContentAccess = true;
+      expect(verifyForensicPackage(output, expected)).toMatchObject({
+        valid: false, findings: expect.arrayContaining(['size-mismatch:analysis.json']),
+      });
+      expect(reads).toEqual([]);
+    } finally { spy.mockRestore(); openSpy.mockRestore(); syncBuiltinESMExports(); }
+  });
+
+  it('refuses a dangling member symlink listed by the pinned manifest', () => {
+    const root = tmp.make('dangling-member');
+    const output = path.join(root, 'package');
+    writeForensicPackage(validSpec(), output);
+    const expected = manifestSha256(output);
+    const member = path.join(output, 'analysis.json');
+    unlinkSync(member);
+    symlinkSync(path.join(root, 'nonexistent.json'), member);
+    expect(verifyForensicPackage(output, expected)).toEqual({
+      valid: false, findings: ['file-not-regular:analysis.json'],
+    });
+  });
+
+  it('refuses a member changed to a symlink after metadata inspection', () => {
+    const root = tmp.make('member-replacement');
+    const output = path.join(root, 'package');
+    writeForensicPackage(validSpec(), output);
+    const expected = manifestSha256(output);
+    const member = path.join(output, 'analysis.json');
+    const target = path.join(root, 'same-bytes.json');
+    writeFileSync(target, readFileSync(member));
+    const originalStat = fs.lstatSync;
+    let replaced = false;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation((...args: Parameters<typeof fs.lstatSync>) => {
+      const result = Reflect.apply(originalStat, fs, args);
+      if (args[0] === member && !replaced) {
+        replaced = true;
+        unlinkSync(member);
+        symlinkSync(target, member);
+      }
+      return result;
+    });
+    syncBuiltinESMExports();
+    try {
+      const result = verifyForensicPackage(output, expected);
+      expect(replaced).toBe(true);
+      expect(result).toMatchObject({ valid: false });
+    } finally { spy.mockRestore(); syncBuiltinESMExports(); }
+  });
+});
 
 describe('forensic package source adapters', () => {
   it('scans JSONL with stable source identity and emits only hashed evidence locators', async () => {

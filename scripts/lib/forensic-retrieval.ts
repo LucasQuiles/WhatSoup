@@ -762,11 +762,9 @@ export function sanitizeEvidenceText(raw: string): {
   readonly categories: readonly string[];
 } {
   const categories = new Set<string>();
+  const homePathPattern = /\/(?:Users|home)\/[^/\s]+(?=\/)/gu;
+  if (raw.match(homePathPattern)) categories.add('home_path');
   let text = raw;
-  text = text.replace(/\/(?:Users|home)\/[^/\s]+(?=\/)/gu, () => {
-    categories.add('home_path');
-    return '$HOME';
-  });
   text = text.replace(/\/(?:private\/tmp|tmp|var\/folders)\/[^\s"'`]+/gu, () => {
     categories.add('local_path');
     return '[REDACTED_LOCAL_PATH]';
@@ -802,6 +800,8 @@ export function sanitizeEvidenceText(raw: string): {
     categories.add('opaque_secret');
   }
   text = redactText(text);
+  // Keep credential paths recognizable by the shared redactor before changing their prefix.
+  text = text.replace(homePathPattern, '$HOME');
   return { text, categories: uniqueSorted(categories) };
 }
 
@@ -967,7 +967,6 @@ export function detectLifecycleAnomalies(events: readonly {
           break;
         case 'test_failed':
           failedTestOpen = true;
-          changedAfterFailureAt = null;
           verifiedSinceChange = false;
           break;
         case 'test_changed':
