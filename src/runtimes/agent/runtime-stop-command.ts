@@ -22,14 +22,55 @@
 // requested,' 'stopped,' and 'outcome uncertain'. Do not say a message was seen
 // by the agent without protocol evidence."):
 //   'nothing-to-stop' — no active turn at entry; no teardown is attempted.
-//   'stopped'         — the teardown sequence completed AND the runtime's own
-//                       in-flight resolver reports the scope idle afterwards.
+//   'stopped'         — the teardown sequence completed, the runtime's own
+//                       in-flight resolver reports the scope idle afterwards,
+//                       AND every session torn down passes the runtime's
+//                       termination proof (isSessionProvablyTerminated).
 //   'uncertain'       — teardown was requested but NOT proven: a step threw, the
-//                       bounded wait elapsed, the scope still reads in flight, or
+//                       bounded wait elapsed, the scope still reads in flight, a
+//                       torn-down session is not provably terminated, or
 //                       delivery is poisoned.
-// There is no fourth outcome and no optimistic success. A bounded wait that
-// elapses poisons the lane rather than authorizing a replacement, per the same
-// owner comment's cancellation-containment rule.
+//   'already-stopping' — a teardown for this scopeKey is still in flight, so
+//                       this /stop did not re-enter it. NOT a claim about the
+//                       task: it reports what this invocation did, and the
+//                       in-flight teardown still owns the outcome.
+// No optimistic success. A bounded wait that elapses poisons the lane rather
+// than authorizing a replacement, per the same owner comment's
+// cancellation-containment rule.
+//
+// WHY THE TERMINATION PROOF IS A SEPARATE CONJUNCT: `isTurnInFlight` is a
+// runtime BOOKKEEPING reading, not a provider-process reading. In single/shared
+// scope it is a disjunction of eight markers (runtime.ts:1447-1456) and
+// `clearSingleScopeRefs` clears exactly two of them (`currentInboundSeq`,
+// `currentTurnChatJid`); the other six — the runtime turn context, the pending
+// singleton context, the turn completion, `turnQueue.isProcessing`,
+// `turnQueue.pending` and `hasGlobalTeardownPending` — are cleared by the
+// coordinator's own finalization, so the re-read is PARTIALLY self-fulfilling
+// rather than trivially false. In per_chat scope the same holds for the six
+// markers at runtime.ts:1436-1445: `disposePerChatSession` runs
+// `cleanupPerChatState`, which deletes this chat's `perChatInboundSeqQueue`
+// entry (runtime.ts:2024) among others. Either way the teardown clears part of
+// what the proof reads, which is why `stopped` also requires the
+// provider-independent predicate at runtime.ts:8098.
+//
+// RESIDUAL, DISCLOSED: when the scope holds no session object to prove
+// (single/shared with a null session ref, per_chat with no mapped session) the
+// torn-down set is empty and the predicate is vacuously satisfied, so 'stopped'
+// is reachable without a positive termination proof. That is the state where
+// the runtime has nothing left to interrogate; it is not evidence of
+// termination and is recorded here rather than hidden.
+//
+// TURN RECOVERY (#2949 N1 review item D, report-only): the cancelled turn is
+// finalized `{ kind: 'failed', class: 'crash' }` by the SAME coordinator
+// methods /new's interrupt branch binds. When that turn already had answer
+// delivery evidence in a non-terminal state, `deriveInboundDisposition`
+// (turn-finalizer.ts:180-196) returns 'transferred_to_recovery_owner', which
+// enqueues a replay-safe turn-recovery job (turn-finalizer.ts:391-393 →
+// turn-recovery-store.ts:975) that the recovery supervisor can later replay
+// with the ORIGINAL user text. /stop cannot narrow that without changing /new:
+// both bind the same `terminalizeTurnForInterrupt` /
+// `retireTurnQueueAfterInterrupt` closures (runtime.ts:4637-4642 and
+// :4700-4705). Left as-is deliberately.
 //
 // WHY NOT `teardown.disposition`: the coordinator assigns it unconditionally
 // from WHICH method ran — 'interruption' in terminalizeGlobalTurnForReset,
@@ -48,6 +89,12 @@ export const DEFAULT_STOP_TEARDOWN_TIMEOUT_MS = 30_000;
 
 export const STOP_ACK_STOPPED = '*Stopped the running task* ✓';
 export const STOP_ACK_NOTHING_TO_STOP = '*Nothing to stop — no task is running*';
+/** single/shared only. /stop runs inside turnChain, so in these scopes a /stop
+ *  sent DURING a task is only handled once that task finishes — at which point
+ *  the scope reads idle and the plain wording above would tell the user nothing
+ *  was running. Say what actually happened instead. */
+export const STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE =
+  '*Nothing to stop — no task is running now. In this session mode a /stop sent during a task is only seen after that task finishes; it cannot interrupt a task already in progress.*';
 export const STOP_ACK_UNCERTAIN_TIMEOUT =
   '*Stop requested — teardown did not complete in time, outcome uncertain; operator reconciliation required*';
 export const STOP_ACK_UNCERTAIN_FAILED =
@@ -56,9 +103,13 @@ export const STOP_ACK_UNCERTAIN_STILL_ACTIVE =
   '*Stop requested — the task still reports as running, outcome uncertain; operator reconciliation required*';
 export const STOP_ACK_UNCERTAIN_DELIVERY =
   '*Stop requested — delivery remains blocked, outcome uncertain; operator reconciliation required*';
+export const STOP_ACK_UNCERTAIN_NOT_PROVEN =
+  '*Stop requested — the task process could not be proven terminated, outcome uncertain; operator reconciliation required*';
+export const STOP_ACK_ALREADY_STOPPING =
+  '*Stop already in progress — waiting for the current teardown to settle*';
 
-/** The three durable outcomes. Never a false success. */
-export type StopOutcome = 'stopped' | 'nothing-to-stop' | 'uncertain';
+/** The durable outcomes. Never a false success. */
+export type StopOutcome = 'stopped' | 'nothing-to-stop' | 'uncertain' | 'already-stopping';
 
 /**
  * Closure-backed surface the runtime hands to {@link runStopCommand}. Every
@@ -80,6 +131,10 @@ export interface StopCommandHost<TSession, TTeardown> {
    *  teardown as the completion proof. */
   isTurnInFlight(): boolean;
   isOutboundQueuePoisoned(): boolean;
+  /** The runtime's OWN termination proof (runtime.ts:8098) — provider-independent
+   *  and the same predicate the respawn and turn-recovery abort paths already
+   *  require. Read for every session this command tore down. */
+  isSessionProvablyTerminated(session: TSession): boolean;
   // per_chat scope surface
   getPerChatSession(): TSession | undefined;
   abortPerChatQueue(): void;
@@ -130,20 +185,26 @@ async function boundedWait<T>(work: Promise<T>, timeoutMs: number): Promise<Boun
 /**
  * /new's interrupt branch, verbatim in ordering, with the reset epilogue
  * removed. Scope-ref and map cleanup are TEARDOWN, not reset, so they stay.
+ *
+ * Returns the sessions it tore down, each captured BEFORE the cleanup that
+ * unmaps it (`clearSingleScopeRefs`, `disposePerChatSession`). Reading them
+ * back from the host afterwards would hand the caller null/undefined and make
+ * the termination proof vacuous — the proof must run against the object that
+ * was actually torn down.
  */
 async function tearDownActiveTurn<TSession, TTeardown>(
   host: StopCommandHost<TSession, TTeardown>,
-): Promise<void> {
+): Promise<readonly TSession[]> {
   if (host.sessionScope === 'per_chat') {
     const interruptedSession = host.getPerChatSession();
     host.abortPerChatQueue();
     const teardown = await host.terminalizeTurnForInterrupt();
     if (interruptedSession !== undefined) {
       await host.disposePerChatSession(interruptedSession, teardown);
-    } else {
-      await host.retireTurnQueueAfterInterrupt(teardown);
+      return [interruptedSession];
     }
-    return;
+    await host.retireTurnQueueAfterInterrupt(teardown);
+    return [];
   }
   host.abortActiveQueue();
   const teardown = await host.terminalizeTurnForInterrupt();
@@ -155,29 +216,68 @@ async function tearDownActiveTurn<TSession, TTeardown>(
   }
   await host.retireTurnQueueAfterInterrupt(teardown);
   host.clearSingleScopeRefs();
+  return singleSession !== null ? [singleSession] : [];
 }
 
 /**
+ * Teardowns in flight, keyed by scopeKey (item C). Module state because the
+ * runtime builds a fresh host per /stop, so the guard cannot live on the host.
+ *
+ * HELD UNTIL THE TEARDOWN PROMISE SETTLES, not merely until the bounded wait
+ * elapses. On timeout the teardown is detached and still owns the coordinator
+ * state for that scope, and a second teardown running concurrently against it
+ * is exactly the un-contained duplicate this command's outcome contract
+ * forbids. The user is never left silent: a /stop that hits the guard still
+ * gets STOP_ACK_ALREADY_STOPPING. The cost is that a teardown which never
+ * settles holds its scope's guard for the life of the process — deliberate, and
+ * consistent with the poisoned-lane rule above.
+ */
+const teardownsInFlight = new Map<string, Promise<unknown>>();
+
+/**
  * Execute /stop: tear down the active provider turn for this chat, then report
- * one of three durable outcomes. Returns the outcome so the call site and tests
- * can assert it without parsing the acknowledgement text.
+ * one durable outcome. Returns the outcome so the call site and tests can
+ * assert it without parsing the acknowledgement text.
  */
 export async function runStopCommand<TSession, TTeardown>(
   host: StopCommandHost<TSession, TTeardown>,
 ): Promise<StopOutcome> {
   const scope = { chatJid: host.chatJid, sessionScope: host.sessionScope, scopeKey: host.scopeKey };
 
+  if (teardownsInFlight.has(host.scopeKey)) {
+    log.warn(scope, '/stop received while a teardown for this scope is still in flight — not re-entering');
+    host.sendDirect(STOP_ACK_ALREADY_STOPPING);
+    return 'already-stopping';
+  }
+
   if (!host.isTurnInFlight()) {
     log.info(scope, '/stop received with no active turn — nothing to stop');
-    host.sendDirect(STOP_ACK_NOTHING_TO_STOP);
+    host.sendDirect(
+      host.sessionScope === 'per_chat'
+        ? STOP_ACK_NOTHING_TO_STOP
+        : STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE,
+    );
     return 'nothing-to-stop';
   }
 
   log.warn(scope, '/stop received mid-turn — tearing down the active turn via the /new interrupt seam');
+  // Registered synchronously, before the first await: a second /stop that
+  // arrives while this one is suspended must see the guard already set.
+  const teardown = tearDownActiveTurn(host);
+  teardownsInFlight.set(host.scopeKey, teardown);
+  const releaseGuard = (): void => {
+    if (teardownsInFlight.get(host.scopeKey) === teardown) teardownsInFlight.delete(host.scopeKey);
+  };
+  // The release for the TIMEOUT path, where the detached teardown outlives this
+  // call. Pre-caught so a late rejection cannot surface as an unhandled one.
+  void teardown.then(() => {}, () => {}).finally(releaseGuard);
   const result = await boundedWait(
-    tearDownActiveTurn(host),
+    teardown,
     host.teardownTimeoutMs ?? DEFAULT_STOP_TEARDOWN_TIMEOUT_MS,
   );
+  // Released here too, so it is gone by the time this call returns rather than
+  // a microtask later; both releases are identity-checked and idempotent.
+  if (result.kind !== 'timeout') releaseGuard();
 
   if (result.kind === 'timeout') {
     // The lane stays poisoned deliberately: an unproven cancellation must never
@@ -196,6 +296,19 @@ export async function runStopCommand<TSession, TTeardown>(
   if (host.isTurnInFlight()) {
     log.error(scope, '/stop teardown returned but the scope still reports a turn in flight — outcome uncertain');
     host.sendDirect(STOP_ACK_UNCERTAIN_STILL_ACTIVE);
+    return 'uncertain';
+  }
+  // The in-flight resolver reads runtime bookkeeping the teardown itself
+  // partly clears (see the module header). Termination of the provider work is
+  // a separate question, answered by the runtime's own predicate against the
+  // sessions this teardown actually disposed of.
+  const unproven = result.value.filter((session) => !host.isSessionProvablyTerminated(session));
+  if (unproven.length > 0) {
+    log.error(
+      { ...scope, unprovenSessions: unproven.length },
+      '/stop tore the turn down but the session could not be proven terminated — outcome uncertain',
+    );
+    host.sendDirect(STOP_ACK_UNCERTAIN_NOT_PROVEN);
     return 'uncertain';
   }
   // The flag belongs to the turn just torn down; a stale `true` would suppress

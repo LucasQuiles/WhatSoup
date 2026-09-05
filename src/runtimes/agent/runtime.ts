@@ -4684,6 +4684,10 @@ export class AgentRuntime implements Runtime {
               isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
               isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
                 .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              // The runtime's OWN termination proof — the same predicate the
+              // respawn and turn-recovery abort paths require. /stop's
+              // 'stopped' is not authorized without it.
+              isSessionProvablyTerminated: (session) => this.isSessionProvablyTerminated(session),
               getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
               abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
                 ?.abortTurn({ preserveEvidence: true }),
