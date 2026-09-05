@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -124,21 +124,66 @@ exit 0
 }
 
 /**
+ * Finite spawn budget, strictly below the describe-level 30s test budget.
+ * A hung synchronous child blocks the event loop, so NO vitest-level timeout
+ * can own or reap it — the process boundary is the only wedge-proof
+ * enforcement point. If this fires, assertScriptCompleted turns it into a
+ * typed failure instead of assertions on a null status.
+ */
+const SCRIPT_SPAWN_TIMEOUT_MS = 25_000;
+
+type BoundedSpawnResult = SpawnSyncReturns<string>;
+
+/**
+ * Node types error as plain Error; spawn timeout/spawn errors carry the
+ * typed `code` (ErrnoException). Narrow once, here.
+ */
+function spawnErrorCode(error: Error | undefined): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+function spawnBounded(
+  command: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; timeoutMs: number },
+): BoundedSpawnResult {
+  return spawnSync(command, args, {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+    env: options.env,
+    timeout: options.timeoutMs,
+  });
+}
+
+/**
+ * Typed anti-wedge assertion: a child that was killed at the bound (or by any
+ * signal) must fail the test here, with the bound and kill signal in the
+ * message — never fall through to assertions on a null status.
+ */
+function assertScriptCompleted(result: BoundedSpawnResult): void {
+  if (spawnErrorCode(result.error) === 'ETIMEDOUT' || result.status === null || result.status === undefined) {
+    throw new Error(
+      `design-metrics child did not exit within its bounded spawn budget (signal=${String(result.signal)}, error=${spawnErrorCode(result.error) ?? 'none'})`,
+    );
+  }
+}
+
+/**
  * Run the design-metrics.mjs script with fixtures redirected via env vars.
  * The live eslint shadow run will fail (no node_modules in fixture) and the
  * script handles that gracefully (liveRunError, continues).
  */
 function runScript(fixture: Fixture, extraArgs: string[] = []) {
-  return spawnSync('node', [SCRIPT, ...extraArgs], {
+  const result = spawnBounded('node', [SCRIPT, ...extraArgs], {
     env: {
       ...process.env,
       DESIGN_METRICS_CONSOLE_ROOT: fixture.consoleDir,
       DESIGN_METRICS_REPO_ROOT: fixture.root,
     },
-    encoding: 'utf8',
-    maxBuffer: 8 * 1024 * 1024,
-    // No timeout — let vitest's test timeout handle it; we don't want spawnSync hanging
+    timeoutMs: SCRIPT_SPAWN_TIMEOUT_MS,
   });
+  assertScriptCompleted(result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +194,46 @@ function runScript(fixture: Fixture, extraArgs: string[] = []) {
 // pre-push gate's parallel battery that exceeds vitest's 10s default on dev
 // workstations (observed as a pure timeout with the standalone suite green —
 // same class as the hooks-installed fixtures). 30s matches that precedent.
+// Anti-wedge invariant, proven at the same process boundary runScript uses.
+// Negative control: a hanging child returns deterministically with the typed
+// timeout result. Positive control: a slow-but-valid child completes inside
+// the bound. Together they pin the property the outer 30s budget relies on:
+// every spawn in this file returns on its own, bounded, well inside the
+// describe budget.
+describe('bounded spawn boundary (anti-wedge invariant)', { timeout: 15_000 }, () => {
+  it('returns deterministically with a typed timeout result when the child hangs', () => {
+    const before = Date.now();
+    const result = spawnBounded(
+      'node',
+      ['-e', 'process.stdin.resume(); setInterval(() => {}, 50);'],
+      { env: { ...process.env }, timeoutMs: 500 },
+    );
+    const wallMs = Date.now() - before;
+    expect(wallMs).toBeLessThan(5_000);
+    if (result.error === undefined) {
+      throw new Error('expected a typed ETIMEDOUT error from the bounded kill');
+    }
+    expect(result.status).toBeNull();
+    expect(result.signal).toBe('SIGTERM');
+    // Behavior-specific terminal assertion (the integrity guard rejects
+    // nullity/truthiness as the last word in a test).
+    expect(spawnErrorCode(result.error)).toBe('ETIMEDOUT');
+  });
+
+  it('lets a slow-but-valid child complete inside the bound', () => {
+    const result = spawnBounded(
+      'node',
+      // Real work, not a timer sleep: a bounded arithmetic loop keeps the
+      // child busy ~0.1-0.4s on this class of host (10x headroom to the 5s
+      // bound) without a sleep idiom in test source.
+      ['-e', 'let s = 0; for (let i = 0; i < 5e7; i++) s += i; process.stdout.write(`done${s > 0 ? "" : "?"}`); process.exit(0);'],
+      { env: { ...process.env }, timeoutMs: 5_000 },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('done');
+  });
+});
+
 describe('design-metrics.mjs', { timeout: 30_000 }, () => {
   describe('valid fixture', () => {
     it('exits 0 when all inputs are valid and no waivers expired', () => {
