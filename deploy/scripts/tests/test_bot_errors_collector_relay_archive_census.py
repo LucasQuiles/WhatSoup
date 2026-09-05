@@ -583,6 +583,69 @@ def test_census_classifies_a_vanished_entry_the_same_in_both_windows(
     assert block["unusableEntryCount"] == 0
     assert block["artifactCount"] == 1
     assert report["total"]["vanishedEntryCount"] == 2
+    # And the aggregates beside them are incomplete, so the block says so:
+    # two artifacts that were in the listing are missing from the count, and
+    # a consumer reading `status` as completeness would otherwise treat a
+    # shrunken census as a whole one.
+    assert block["status"] == "partial"
+    assert report["total"]["status"] == "partial"
+
+
+def test_census_completes_when_closing_an_entry_descriptor_fails(
+    collector, tmp_path, monkeypatch
+):
+    """A failed close costs nothing; it must not cost the report.
+
+    The close of each entry descriptor ran in a `finally` with no handler, so
+    an OSError there escaped the per-entry loop and discarded the accumulated
+    report for BOTH archives -- the same class already contained for the entry
+    stat. The descriptor is released by the kernel either way, so there is
+    nothing to record per entry and nothing to reclassify: every artifact was
+    already measured before the close was attempted."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(3):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
+
+    real_open = os.open
+    real_close = os.close
+    entry_descriptors: set[int] = set()
+    refused: list[int] = []
+
+    def recording_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            # Opened relative to the archive descriptor: an ENTRY, not the
+            # archive directory itself, whose close is not under test.
+            entry_descriptors.add(descriptor)
+        return descriptor
+
+    def failing_close(descriptor):
+        if descriptor in entry_descriptors:
+            entry_descriptors.discard(descriptor)
+            # Release it for real, then report the failure the census has to
+            # survive -- injecting a leak instead would test something else.
+            real_close(descriptor)
+            refused.append(descriptor)
+            raise OSError(errno.EIO, "injected close failure")
+        return real_close(descriptor)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "close", failing_close)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert len(refused) == 4, f"expected one refused close per entry, got {refused!r}"
+
+    assert report["censusStatus"] == "ok"
+    block = report["archives"]["relayed"]
+    assert block["status"] == "ok"
+    assert block["artifactCount"] == 3
+    assert block["unusableEntryCount"] == 0
+    # The neighbouring archive is reported too: the failure cost no entry at
+    # all, let alone the whole census.
+    assert report["archives"]["writefailRelayed"]["artifactCount"] == 1
+    assert report["total"]["artifactCount"] == 4
 
 
 def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector, tmp_path):

@@ -329,11 +329,14 @@ descriptor, so a directory that measured nothing reports null aggregates and
 `partial` rather than a zero. The archive directory is opened once with
 `O_DIRECTORY|O_NOFOLLOW` so every listing, stat and read is addressed to that
 descriptor rather than to a name that could be repointed between the check
-and the use. Whenever any directory is not `ok`, the combined total carries
-status `partial` and sums only the directories that measured at least one
-entry, so an incomplete answer cannot be mistaken for a complete one; when
-none did, the total's aggregates are null rather than zero, beside the counts
-of what could not be looked at and what was gone.
+and the use. A non-zero count in either column makes the block `partial`,
+including one that is only `vanishedEntryCount`: entries that were in the
+listing are missing from the aggregates beside it, so the block cannot call
+itself complete. Whenever any directory is not `ok`, the combined total
+carries status `partial` and sums only the directories that produced a count,
+including a zero, so an incomplete answer cannot be mistaken for a complete
+one; when none produced one, the total's aggregates are null rather than
+zero, beside the counts of what could not be looked at and what was gone.
 The output carries no host, account, instance, user, message text, path,
 errno message or identifier, and the failure path is deliberately quiet for
 the same reason — a census whose traceback prints the remote root would
