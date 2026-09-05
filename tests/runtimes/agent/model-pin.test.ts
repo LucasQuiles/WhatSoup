@@ -28,6 +28,11 @@ import type {
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
+
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
   type CapturedCrashInfo = {
     exitCode: number | null;
@@ -3007,9 +3012,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // credential): `/model <provider>` already rejects it at SET time (F07,
       // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
       // the direct selector could pin a route that hard-fails or silently falls
-      // back. `absentService` mirrors the provider-id F07 test — no keychain
-      // dependency (the service is absent from every store → credential null).
-      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      // back. The shared process mock supplies an empty keyring result; the
+      // isolated file stores and unknown service keep other sources absent.
+      const absentService = 'wa-test-absent-model-pin';
       cfgAny().agentProviderConfig = { apiKeyService: absentService };
       cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });

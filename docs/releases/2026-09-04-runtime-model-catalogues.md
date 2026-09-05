@@ -62,11 +62,30 @@ This does not uniquely attribute both earlier diagnostics or prove whole-suite
 isolation. The initial diagnostic failed during setup with zero tests collected;
 only the corrected, nonzero runs support the finding.
 
-Owner: this lane. Required follow-up: reuse the existing child-process fixture
-at the unintended boundary, then validate the whole affected suite and retain
-independent credential-resolution tests. A global hook or new guard framework
-is not justified. The repair is pending design approval; neither production nor
-test source changed during the diagnostic.
+The owner-approved test-only repair now reuses that existing process fixture
+in the model-pin test file. The real credential classification, route decisions,
+SQLite writes and all original assertions remain in place. No production code,
+global hook, credential configuration or new guard framework changed.
+
+Before the repair, a synthetic credential-present host caused the existing
+non-routable selector assertion to fail: one unwanted preference row was written.
+All three credential lookups were intercepted before reaching the operating
+system. After the repair, the same case passed without reaching that diagnostic
+boundary; the entire affected file passed all 106 tests. Nine independent
+credential, process-helper and catalogue files passed 205 tests under the same
+protective diagnostic. Those suites retain their explicit failure-path checks;
+their expected error logs are not evidence of a host credential-store failure.
+These are local fixture and routing results, not live-adapter or whole-suite
+credential-isolation proof. Process-local diagnostic counters are not a
+process-tree-wide credential census. Independent static review found no
+code blocker and retained that evidence limitation.
+
+Source/test type checking passed. Required Test Integrity passed with zero new
+findings, retaining 81 baseline findings and three existing location drifts;
+the baseline was unchanged. These bounded checks used pinned Node 24.15.0,
+one test worker and the installed strict governor's default capacity. Earlier
+single-slot refusals reflected this lane's narrower override, not a mandatory
+global unit-test restriction. The separate full-release contract is unchanged.
 
 The sentinel gap was also reproduced locally: 170 tests passed at 97.78%
 coverage with exit zero. Explicit precision made that same suite exit one;
@@ -112,13 +131,13 @@ curated-file exclusion list; no test selection or threshold was changed.
 These results cover the integrated Python changes, not a full application
 release. Canonical follow-ups under #2459 and #3501 remain open.
 
-The standalone runtime-manifest check passed at 49 entries. The separately
-requested manifest/integrity sequence was refused single-slot admission after
-120 seconds and ran neither command; current-revision Test Integrity remains
-pending. Documentation and source-runtime trust checks passed.
+The standalone runtime-manifest check passed at 49 entries. An earlier combined
+manifest/integrity request ran neither command after a single-slot refusal;
+the later required Test Integrity result is recorded above. Documentation and
+source-runtime trust checks passed at the canonical integration.
 
 The resumed Git-estate gate returned zero against its current baseline, with
-count-growth warnings: 31 branches, 31 worktrees and zero stashes. Foreign
+count-growth warnings: 32 branches, 32 worktrees and zero stashes. Foreign
 detached, locked and dirty work remains. The baseline was not changed by this
 lane; its acceptance does not establish repository convergence or authorize
 deletion. The published head is still `d3764288`, so neither the integrated
