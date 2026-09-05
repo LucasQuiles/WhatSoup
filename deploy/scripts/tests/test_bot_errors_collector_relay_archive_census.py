@@ -41,6 +41,7 @@ Deploy Python tests run in Linux CI; a local macOS run is an indicator only.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -348,6 +349,283 @@ def test_census_counts_a_json_non_object_as_a_parse_failure(collector, tmp_path)
     assert relayed["artifactCount"] == 2
     assert relayed["parseFailureCount"] == 2
     assert relayed["sourceKindCardinality"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 1b. Entry-level failures are counted, not swallowed, and the archive
+#     directory is pinned by descriptor so the check and the use address the
+#     same inode. Both defects were adjudicated on the L2459-A head 0a0c0697
+#     (adv-med-adjudication: MED-1 lstat/listdir TOCTOU, MED-2 entry-level
+#     fail-open) and neither is reachable from production yet -- the census
+#     has no caller outside tests, which is why they land as their own leaf.
+# ---------------------------------------------------------------------------
+
+# The adjudication fixture: a directory that can be LISTED but whose entries
+# cannot be STAT-ed (mode 0444 -- read, no execute/search). Before this
+# change the census reported all seven of these as a healthy zero.
+_UNUSABLE_FIXTURE_ARTIFACTS = 7
+
+
+def test_census_counts_entries_it_could_not_stat_as_unusable_not_absent(collector, tmp_path):
+    """MED-2: an entry-level failure is missing information, not absence.
+
+    `except OSError: continue` swallowed every entry-level error, not just
+    the ENOENT its comment described. A mode-0444 archive directory holding
+    seven real artifacts therefore reported `status: ok`, `artifactCount: 0`
+    and `total.status: ok` -- the same "unreadable is empty" conflation the
+    directory level already refuses, surviving one level down. The count of
+    entries the census could not look at has to reach the payload, and the
+    block has to stop calling itself `ok`.
+
+    Not skipped for root: the archive census suite already relies on an
+    unprivileged runner (`test_census_reports_an_unreadable_archive_directory
+    _as_unavailable_permission` chmods 0o000 and asserts the refusal), so a
+    root runner would already be failing this file before reaching here.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    os.chmod(relayed, 0o444)
+    try:
+        returncode, stdout, stderr = _run_census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+
+    assert returncode == 0, stderr
+    report = json.loads(stdout)
+    block = report["archives"]["relayed"]
+    # Never `ok` with a lower count: the block says outright that it is
+    # incomplete, and says by how much.
+    assert block["status"] == "partial"
+    assert block["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    assert block["artifactCount"] == 0
+    # The gap has to survive aggregation too. A consumer that reads only
+    # `total` would otherwise see a silently lower sum with no quantified
+    # gap -- exactly what this test exists to remove.
+    assert report["total"]["status"] == "partial"
+    assert report["total"]["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    assert report["total"]["artifactCount"] == 0
+    # Still nothing identifying on the wire.
+    assert str(root) not in stdout
+    assert "Errno" not in stdout
+
+
+def test_census_counts_an_unreadable_file_as_present_and_unparseable(collector, tmp_path):
+    """Positive control for the counter above: an entry the census can STAT
+    but cannot OPEN keeps the classification it has today.
+
+    Mode-000 FILE inside a normal directory: its bytes and its age ARE known,
+    only its content is not, so it stays a counted artifact plus a parse
+    failure and must NOT be reclassified as unusable. If this test moves when
+    the one above goes green, the new counter has swallowed a case it should
+    not own."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    path = _write_artifact(relayed, "unreadable.json.1.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    os.chmod(path, 0o000)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(path, 0o644)
+
+    block = report["archives"]["relayed"]
+    assert block["status"] == "ok"
+    assert block["artifactCount"] == 1
+    assert block["parseFailureCount"] == 1
+    assert block["oldestAgeSeconds"] == _HOUR
+
+
+def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector, tmp_path):
+    """Review MED #2: the null-not-zero promise stopped at the directory level.
+
+    With both directories unavailable the combined block summed an empty list
+    and reported `artifactCount: 0` beside `status: partial`. A retention pass
+    keyed on the number would conclude "nothing to retain" over an archive it
+    never managed to look at -- the promise the per-directory blocks make and
+    the total did not keep."""
+    root = tmp_path / "bot-errors"
+    root.mkdir(parents=True)  # neither archive directory exists
+
+    report = _census(collector, root)
+    assert report["archives"]["relayed"]["status"] == "unavailable"
+    assert report["archives"]["writefailRelayed"]["status"] == "unavailable"
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["parseFailureCount"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["unusableEntryCount"] is None
+    assert total["oldestAgeSeconds"] is None
+    assert total["newestAgeSeconds"] is None
+
+
+# MED-1 is a race, and a race is not a deterministic pytest. What IS
+# deterministic is the property that removes it: after the archive directory
+# is opened, every listing, stat and read is addressed to that DESCRIPTOR, so
+# there is no second resolution of the name for a swap to land in. The check
+# below is a static walk of the shipped script text in the same shape
+# test_bot_errors_remote_command_readonly.py uses on these constants, with
+# negative controls underneath so it cannot pass by construction.
+#
+# Scope, stated so it is not read as more than it is: this proves no LISTING,
+# no aggregate STAT and no READ is addressed by path. It does not prove the
+# absence of every path resolution -- the refusal-label lstat is one, and is
+# budgeted below by name.
+_MAX_LABEL_ONLY_PATH_LSTAT_CALLS = 1
+_DIR_OPEN_FLAGS_NAME = "DIR_OPEN_FLAGS"
+_ENTRY_OPEN_FLAGS_NAME = "ENTRY_OPEN_FLAGS"
+_REQUIRED_DIR_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+_REQUIRED_ENTRY_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_NOFOLLOW")
+
+
+def _descriptor_names(tree: ast.AST) -> set[str]:
+    """Names bound directly to an `os.open(...)` result.
+
+    Derived from the script, not named by this test, so the check is about
+    where the descriptor came from rather than what someone called it.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if not (isinstance(value.func, ast.Attribute) and value.func.attr == "open"):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _flag_expression_source(tree: ast.AST, source: str, name: str) -> str:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return ast.get_source_segment(source, node.value) or ""
+    return ""
+
+
+def _descriptor_pinning_violations(source: str) -> list[str]:
+    """Return a list of violation descriptions; an empty list means pinned."""
+    tree = ast.parse(source)
+    descriptors = _descriptor_names(tree)
+    violations: list[str] = []
+
+    for flag_name, required in (
+        (_DIR_OPEN_FLAGS_NAME, _REQUIRED_DIR_OPEN_FLAG_TOKENS),
+        (_ENTRY_OPEN_FLAGS_NAME, _REQUIRED_ENTRY_OPEN_FLAG_TOKENS),
+    ):
+        expression = _flag_expression_source(tree, source, flag_name)
+        if not expression:
+            violations.append(f"no module-level {flag_name} assignment")
+            continue
+        missing = [token for token in required if token not in expression]
+        if missing:
+            violations.append(f"{flag_name} is missing {missing}")
+
+    path_lstat_calls = 0
+    pinned_lstat_calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            rendered = ast.get_source_segment(source, node) or "open(...)"
+            violations.append(f"builtin open() reads by path: {rendered}")
+            continue
+        if not isinstance(func, ast.Attribute):
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        pinned_to = keywords.get("dir_fd")
+        if pinned_to is not None and not (
+            isinstance(pinned_to, ast.Name) and pinned_to.id in descriptors
+        ):
+            rendered = ast.get_source_segment(source, node) or "os.*(dir_fd=...)"
+            violations.append(f"dir_fd is not an os.open() descriptor: {rendered}")
+        if func.attr == "listdir":
+            argument = node.args[0] if node.args else None
+            if not (isinstance(argument, ast.Name) and argument.id in descriptors):
+                rendered = ast.get_source_segment(source, node) or "os.listdir(...)"
+                violations.append(f"listing is not addressed to an os.open() descriptor: {rendered}")
+        elif func.attr == "lstat":
+            if "dir_fd" in keywords:
+                pinned_lstat_calls += 1
+            else:
+                path_lstat_calls += 1
+        elif func.attr == "open" and "dir_fd" not in keywords:
+            flags = node.args[1] if len(node.args) > 1 else None
+            if not (isinstance(flags, ast.Name) and flags.id == _DIR_OPEN_FLAGS_NAME):
+                rendered = ast.get_source_segment(source, node) or "os.open(...)"
+                violations.append(
+                    f"os.open() without dir_fd does not use {_DIR_OPEN_FLAGS_NAME}: {rendered}"
+                )
+
+    if pinned_lstat_calls < 1:
+        violations.append("no os.lstat(..., dir_fd=...): archive entries are stat-ed by path")
+    if path_lstat_calls > _MAX_LABEL_ONLY_PATH_LSTAT_CALLS:
+        violations.append(
+            f"{path_lstat_calls} os.lstat() calls resolve a path; at most "
+            f"{_MAX_LABEL_ONLY_PATH_LSTAT_CALLS} (the refusal label) is allowed"
+        )
+    return violations
+
+
+# Each control is a script fragment that MUST be rejected, paired with the
+# substring of the rejection that names why. Without these the walk above
+# would pass on anything that merely lacked the shapes it looks for.
+_PINNING_NEGATIVE_CONTROLS = (
+    (
+        "listing resolved from a path",
+        "import os\nnames = sorted(os.listdir(os.path.join(root, 'relayed')))\n",
+        "listing is not addressed",
+    ),
+    (
+        "entry read through the builtin open",
+        "with open(entry, 'rb') as handle:\n    body = handle.read()\n",
+        "builtin open()",
+    ),
+    (
+        "check and use as two path lstats",
+        "import os\nfirst = os.lstat(directory)\nsecond = os.lstat(entry)\n",
+        "resolve a path",
+    ),
+    (
+        "entry stat pinned to something that is not a descriptor",
+        "import os\ninfo = os.lstat(name, dir_fd=some_other_value)\n",
+        "dir_fd is not an os.open() descriptor",
+    ),
+)
+
+
+def test_census_addresses_every_read_to_a_pinned_directory_descriptor(collector):
+    """MED-1: `os.lstat(directory)` then `os.listdir(directory)` were two
+    independent resolutions of the same name with nothing pinning the inode,
+    so whoever can write the archive parent could swap the directory for a
+    symlink in the window and redirect every aggregate. Opening the directory
+    once and addressing the listing, the entry stats and the entry reads to
+    that descriptor removes the window rather than narrowing it."""
+    violations = _descriptor_pinning_violations(collector.REMOTE_ARCHIVE_CENSUS_SCRIPT)
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.parametrize(
+    "label, fragment, expected",
+    _PINNING_NEGATIVE_CONTROLS,
+    ids=[control[0] for control in _PINNING_NEGATIVE_CONTROLS],
+)
+def test_descriptor_pinning_walk_is_not_vacuous(label, fragment, expected):
+    """Falsifier: prove the walk goes RED on each unpinned shape it claims to
+    catch, so a green run above is evidence and not an absence of triggers."""
+    violations = _descriptor_pinning_violations(fragment)
+    assert any(expected in violation for violation in violations), f"{label}: {violations!r}"
 
 
 # ---------------------------------------------------------------------------
