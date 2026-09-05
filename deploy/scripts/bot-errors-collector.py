@@ -2948,7 +2948,8 @@ def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
 
 REMOTE_ARCHIVE_CENSUS_SCRIPT = r"""
 import json, os, sys, time
-from stat import S_ISREG
+import errno
+from stat import S_ISDIR, S_ISLNK, S_ISREG
 
 # #2459 C3: read-only census of the terminal relay archive.
 #
@@ -2969,17 +2970,62 @@ from stat import S_ISREG
 # writefail script falls back to (home, TMPDIR, /tmp) are deliberately NOT
 # scanned: they are outside the root the caller named.
 #
+# UNAVAILABLE IS NOT EMPTY. A directory the census could not list reports
+# status "unavailable" with an errno CLASS, never a count of zero: "nothing
+# to retain" and "I cannot see what is there" drive opposite decisions, and a
+# later retention pass leans on this instrument. A directory that is itself a
+# symlink is refused outright ("refused_symlink") rather than followed, which
+# would walk the census out of the root entirely. Any directory that is not
+# ok makes the combined total "partial", so an incomplete answer can never be
+# mistaken for a complete one.
+#
 # `now` (argv[2], optional) makes ages deterministic for a caller that needs
 # a fixed clock; empty or absent means "read the clock here".
 
-root = os.path.expanduser(sys.argv[1])
-now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
-
 ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"))
+
+PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
+MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
+
+
+def errno_class(exc):
+    # An errno CLASS, never the errno message: strerror can embed the path.
+    code = getattr(exc, "errno", None)
+    if code in PERMISSION_ERRNOS:
+        return "permission"
+    if code in MISSING_ERRNOS:
+        return "missing"
+    return "other"
+
+
+def blank_report(status, errno_name=None):
+    # Every aggregate is null, not zero. A zero here would be a claim about
+    # content the census never managed to look at.
+    return {
+        "status": status,
+        "errnoClass": errno_name,
+        "artifactCount": None,
+        "totalBytes": None,
+        "oldestAgeSeconds": None,
+        "newestAgeSeconds": None,
+        "parseFailureCount": None,
+        "sourceKindCardinality": None,
+    }
 
 
 def census(directory):
     # Aggregate one archive directory. Returns (report, source_kinds).
+    # The directory ITSELF is lstat-ed first: if it is a symlink, following it
+    # would let whoever controls the remote root redirect the census at any
+    # directory on the host.
+    try:
+        dir_info = os.lstat(directory)
+    except OSError as exc:
+        return blank_report("unavailable", errno_class(exc)), set()
+    if S_ISLNK(dir_info.st_mode):
+        return blank_report("refused_symlink"), set()
+    if not S_ISDIR(dir_info.st_mode):
+        return blank_report("unavailable", "other"), set()
     count = 0
     total_bytes = 0
     oldest = None
@@ -2988,10 +3034,9 @@ def census(directory):
     source_kinds = set()
     try:
         names = sorted(os.listdir(directory))
-    except OSError:
-        # A host that has never relayed has no such directory. That is a zero
-        # census, not a fault.
-        names = []
+    except OSError as exc:
+        # Unreadable is NOT empty.
+        return blank_report("unavailable", errno_class(exc)), set()
     for name in names:
         entry = os.path.join(directory, name)
         try:
@@ -3025,6 +3070,8 @@ def census(directory):
         if isinstance(kind, str) and kind:
             source_kinds.add(kind)
     report = {
+        "status": "ok",
+        "errnoClass": None,
         "artifactCount": count,
         "totalBytes": total_bytes,
         "oldestAgeSeconds": oldest,
@@ -3038,23 +3085,34 @@ def census(directory):
 
 
 def combine(reports, kind_sets):
-    oldest_values = [r["oldestAgeSeconds"] for r in reports if r["oldestAgeSeconds"] is not None]
-    newest_values = [r["newestAgeSeconds"] for r in reports if r["newestAgeSeconds"] is not None]
+    # Only directories that were actually read contribute numbers. If any
+    # directory is not ok the total is "partial", so a caller can never read
+    # an incomplete sum as a complete one.
+    readable = [r for r in reports if r["status"] == "ok"]
+    oldest_values = [r["oldestAgeSeconds"] for r in readable if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in readable if r["newestAgeSeconds"] is not None]
     union = set()
-    for kinds in kind_sets:
-        union |= kinds
+    for report, kinds in zip(reports, kind_sets):
+        if report["status"] == "ok":
+            union |= kinds
     return {
-        "artifactCount": sum(r["artifactCount"] for r in reports),
-        "totalBytes": sum(r["totalBytes"] for r in reports),
+        "status": "ok" if len(readable) == len(reports) else "partial",
+        "artifactCount": sum(r["artifactCount"] for r in readable),
+        "totalBytes": sum(r["totalBytes"] for r in readable),
         "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
         "newestAgeSeconds": min(newest_values) if newest_values else None,
-        "parseFailureCount": sum(r["parseFailureCount"] for r in reports),
+        "parseFailureCount": sum(r["parseFailureCount"] for r in readable),
         # Union, not a sum: a producer present in both archives is one kind.
         "sourceKindCardinality": len(union),
     }
 
 
 try:
+    # argv is read INSIDE the guard. A bad clock argument or a missing root
+    # raises here, and an escaping traceback would echo argv -- which carries
+    # the remote root -- onto stderr.
+    root = os.path.expanduser(sys.argv[1])
+    now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
     archives = {}
     reports = []
     kind_sets = []
@@ -3070,14 +3128,12 @@ try:
         "archives": archives,
         "total": combine(reports, kind_sets),
     }
+    print(json.dumps(payload, sort_keys=True))
 except Exception:
-    # Fail closed and fail QUIET: an escaping traceback would print argv,
-    # which carries the remote root. The caller sees a non-zero exit and an
-    # explicit failed status, never a path.
+    # Fail closed and fail QUIET: the caller sees a non-zero exit and an
+    # explicit failed status, never a path, an argument or an exception string.
     print(json.dumps({"schemaVersion": 1, "censusStatus": "failed"}, sort_keys=True))
     sys.exit(3)
-
-print(json.dumps(payload, sort_keys=True))
 """
 
 

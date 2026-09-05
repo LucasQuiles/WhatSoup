@@ -148,6 +148,8 @@ def test_census_reports_labelled_aggregates_for_both_archive_directories(collect
     assert set(report["archives"]) == {"relayed", "writefailRelayed"}
 
     relayed = report["archives"]["relayed"]
+    assert relayed["status"] == "ok"
+    assert relayed["errnoClass"] is None
     assert relayed["artifactCount"] == 3
     assert relayed["parseFailureCount"] == 1
     assert relayed["sourceKindCardinality"] == 2
@@ -156,6 +158,7 @@ def test_census_reports_labelled_aggregates_for_both_archive_directories(collect
     assert relayed["totalBytes"] == _dir_bytes(populated_root / "relayed")
 
     writefail = report["archives"]["writefailRelayed"]
+    assert writefail["status"] == "ok"
     assert writefail["artifactCount"] == 2
     assert writefail["parseFailureCount"] == 1
     assert writefail["sourceKindCardinality"] == 1
@@ -168,6 +171,7 @@ def test_census_total_is_the_combination_of_both_archives(collector, populated_r
     report = _census(collector, populated_root)
     total = report["total"]
 
+    assert total["status"] == "ok"
     assert total["artifactCount"] == 5
     assert total["parseFailureCount"] == 2
     assert total["totalBytes"] == (
@@ -196,20 +200,127 @@ def test_census_reports_null_ages_for_an_empty_archive(collector, tmp_path):
         assert block["totalBytes"] == 0
         assert block["parseFailureCount"] == 0
         assert block["sourceKindCardinality"] == 0
+        assert block["status"] == "ok", "an empty directory that WAS read is ok, not unavailable"
         assert block["oldestAgeSeconds"] is None
         assert block["newestAgeSeconds"] is None
+    assert report["total"]["status"] == "ok"
     assert report["total"]["oldestAgeSeconds"] is None
     assert report["total"]["newestAgeSeconds"] is None
     assert report["censusStatus"] == "ok"
 
 
-def test_census_reports_a_missing_archive_root_as_empty_not_an_error(collector, tmp_path):
-    """A host that has never relayed has no archive directories at all. That
-    is a zero census, not a failure -- otherwise the first run on a fresh
-    host reads as a fault."""
+def test_census_reports_a_missing_archive_directory_as_unavailable_not_empty(collector, tmp_path):
+    """UNAVAILABLE IS NOT EMPTY.
+
+    A directory the census could not list must never be reported as a
+    directory holding nothing. The two readings drive opposite operator
+    decisions -- "nothing to retain" versus "I cannot see what is there" --
+    and the census is the instrument a later retention pass is meant to lean
+    on, so an absent directory reading as a zero count is the failure mode
+    that matters most here.
+    """
     report = _census(collector, tmp_path / "nonexistent-root")
-    assert report["censusStatus"] == "ok"
+
+    for label in ("relayed", "writefailRelayed"):
+        block = report["archives"][label]
+        assert block["status"] == "unavailable"
+        assert block["errnoClass"] == "missing"
+        # Not 0. A count of zero would be a claim about content the census
+        # never got to look at.
+        assert block["artifactCount"] is None
+        assert block["totalBytes"] is None
+        assert block["parseFailureCount"] is None
+        assert block["sourceKindCardinality"] is None
+    assert report["total"]["status"] == "partial"
+
+
+def test_census_reports_an_unreadable_archive_directory_as_unavailable_permission(collector, tmp_path):
+    """chmod 000: listable-by-name but not readable. Before this, the census
+    swallowed the OSError and reported a healthy zero."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.json.1.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    os.chmod(relayed, 0o000)
+    try:
+        returncode, stdout, stderr = _run_census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+
+    assert returncode == 0, stderr
+    report = json.loads(stdout)
+    block = report["archives"]["relayed"]
+    assert block["status"] == "unavailable"
+    assert block["errnoClass"] == "permission"
+    assert block["artifactCount"] is None
+    # The readable sibling still reports normally -- one bad directory must
+    # not blind the whole census.
+    assert report["archives"]["writefailRelayed"]["status"] == "ok"
+    assert report["archives"]["writefailRelayed"]["artifactCount"] == 0
+    assert report["total"]["status"] == "partial"
+    # No path, no errno text, no exception string.
+    assert str(root) not in stdout
+    assert "relayed" not in stderr
+    assert "Errno" not in stdout
+
+
+def test_census_total_stays_partial_and_counts_only_what_it_could_read(collector, tmp_path):
+    root = tmp_path / "bot-errors"
+    _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
+    # relayed/ is absent entirely.
+    report = _census(collector, root)
+
+    assert report["archives"]["relayed"]["status"] == "unavailable"
+    assert report["archives"]["writefailRelayed"]["status"] == "ok"
+    assert report["total"]["status"] == "partial"
+    # The total reports what was actually read, and its status says the
+    # number is incomplete rather than pretending the missing side was empty.
+    assert report["total"]["artifactCount"] == 1
+
+
+def test_census_refuses_a_symlinked_archive_directory(collector, tmp_path):
+    """S2: the archive directory ITSELF being a symlink walked the census out
+    of the root entirely. The reviewer probe counted five files living
+    outside the root this way. Refuse the directory and count nothing."""
+    root = tmp_path / "bot-errors"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    for index in range(5):
+        _write_artifact(outside, f"outside-{index}.json", _event(source="OUTSIDEKINDTOKEN"), age_seconds=_HOUR)
+    os.symlink(outside, root / "relayed")
+    (root / "writefail-relayed").mkdir()
+
+    returncode, stdout, stderr = _run_census(collector, root)
+    assert returncode == 0, stderr
+
+    report = json.loads(stdout)
+    block = report["archives"]["relayed"]
+    assert block["status"] == "refused_symlink"
+    assert block["artifactCount"] is None
+    assert report["total"]["status"] == "partial"
+    # The five files outside the root are counted nowhere.
     assert report["total"]["artifactCount"] == 0
+    assert "OUTSIDEKINDTOKEN" not in stdout
+    assert str(outside) not in stdout
+
+
+def test_census_still_refuses_a_symlinked_entry_inside_a_real_archive(collector, tmp_path):
+    """The directory-level refusal must not replace the entry-level defence:
+    a real archive directory holding a symlink to an outside file still must
+    not count that file."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "real.json.1.relayed", _event(), age_seconds=_HOUR)
+    outside_file = tmp_path / "outside.json"
+    outside_file.write_text(_event(source="OUTSIDEENTRYTOKEN"), encoding="utf-8")
+    os.symlink(outside_file, relayed / "link.json.2.relayed")
+
+    report = _census(collector, root)
+    block = report["archives"]["relayed"]
+    assert block["status"] == "ok"
+    assert block["artifactCount"] == 1
+    assert block["sourceKindCardinality"] == 1
+    assert "OUTSIDEENTRYTOKEN" not in json.dumps(report)
 
 
 def test_census_counts_a_malformed_artifact_as_present_and_unparseable(collector, tmp_path):
@@ -331,7 +442,14 @@ def test_census_emits_only_numeric_aggregates_and_fixed_labels(collector, popula
     test happened to seed that exact token."""
     report = _census(collector, populated_root)
 
-    allowed_string_fields = {"censusStatus"}
+    # Every string the census may emit comes from a closed vocabulary. This is
+    # stronger than allowing a field NAME to hold any string: a status field
+    # that started carrying an errno message would fail here.
+    allowed_string_fields = {"censusStatus", "status", "errnoClass"}
+    allowed_string_values = {
+        "ok", "failed", "partial", "unavailable", "refused_symlink",
+        "permission", "missing", "other",
+    }
 
     def walk(node, trail: str) -> None:
         if isinstance(node, dict):
@@ -340,12 +458,61 @@ def test_census_emits_only_numeric_aggregates_and_fixed_labels(collector, popula
             return
         if isinstance(node, str):
             assert trail.split(".")[-1] in allowed_string_fields, f"string leaf at {trail}: {node!r}"
+            assert node in allowed_string_values, f"unvetted string value at {trail}: {node!r}"
             return
         assert node is None or isinstance(node, (int, float)), f"unexpected leaf at {trail}: {node!r}"
 
     walk(report, "report")
     # Coverage assertion: the walk must actually have visited leaves.
     assert report["total"]["artifactCount"] == 5
+
+
+_FAILURE_ROOT_TOKEN = "FAILUREROOTTOKEN"
+_FAILURE_CLOCK_TOKEN = "FAILURECLOCKTOKEN"
+
+
+def _run_census_raw(collector, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-", *args],
+        input=collector.REMOTE_ARCHIVE_CENSUS_SCRIPT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_census_failure_payload_leaks_neither_the_root_nor_a_seeded_token(collector, tmp_path):
+    """S3: the fail-quiet promise was never asserted on the SCRIPT side.
+
+    An unhandled exception makes Python print a traceback naming the failing
+    line and the offending value -- and the offending value is argv, which
+    carries the remote root. The census must answer a forced failure with the
+    fixed failed payload and nothing else, on both streams.
+    """
+    root = tmp_path / _FAILURE_ROOT_TOKEN / "bot-errors"
+    root.mkdir(parents=True)
+
+    # A clock argument that cannot be parsed: the failure happens while
+    # reading argv, which is exactly where a traceback would echo it.
+    proc = _run_census_raw(collector, [str(root), f"NOT-A-NUMBER-{_FAILURE_CLOCK_TOKEN}"])
+
+    assert proc.returncode != 0, "a census that could not run must not exit 0"
+    for stream_name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        assert _FAILURE_ROOT_TOKEN not in stream, f"{stream_name} leaked the remote root"
+        assert _FAILURE_CLOCK_TOKEN not in stream, f"{stream_name} leaked the clock argument"
+        assert "Traceback" not in stream, f"{stream_name} carried a traceback"
+    assert json.loads(proc.stdout) == {"schemaVersion": 1, "censusStatus": "failed"}
+
+
+def test_census_failure_payload_is_quiet_when_argv_is_missing_entirely(collector):
+    """The same guarantee with no arguments at all -- an IndexError raised
+    while reading argv must not become a traceback either."""
+    proc = _run_census_raw(collector, [])
+    assert proc.returncode != 0
+    assert "Traceback" not in proc.stderr
+    assert json.loads(proc.stdout) == {"schemaVersion": 1, "censusStatus": "failed"}
 
 
 def test_census_privacy_walk_is_not_vacuous():
