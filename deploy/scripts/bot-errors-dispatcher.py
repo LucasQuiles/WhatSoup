@@ -425,6 +425,29 @@ CONVERSATION_SCOPE_MAX_PER_KEY = positive_env_int(
 # processing/ carrying one of these is a crash between the terminal state
 # commit and the archive rename, never work still to do.
 TERMINAL_DELIVERY_STATUSES = frozenset({"sent", "email_delivered"})
+# The status a record carries while an attempt is in progress. On its own it
+# says nothing about the remote: the same value is on disk whether the request
+# was issued or the process died before it ever left (#2424).
+IN_FLIGHT_DELIVERY_STATUS = "sending"
+# Delivery status for a send that may have been accepted and whose outcome
+# cannot be proven either way. Deliberately NOT a member of
+# TERMINAL_DELIVERY_STATUSES: that set means "an operator HAS been shown this
+# event" and drives the archive-to-sent/ repair, which an unconfirmed send has
+# not earned. A held record stays in processing/ until an operator releases it
+# or dead-letters it; it is never re-sent and never archived as delivered.
+AMBIGUOUS_DELIVERY_STATUS = "outcome_unknown"
+HELD_DELIVERY_STATUSES = frozenset({AMBIGUOUS_DELIVERY_STATUS})
+# Write-ahead marker, published durably immediately before the external send and
+# cleared by every mark_attempt so it describes THIS attempt only. It is the one
+# on-disk fact that separates "may have been accepted" from "never left".
+DELIVERY_SEND_ISSUED_FIELD = "sendIssuedAt"
+DELIVERY_HELD_AT_FIELD = "outcomeUnknownAt"
+DELIVERY_HELD_REASON_FIELD = "outcomeUnknownReason"
+# Idempotency stamp: committed in the same durable write as the held status, so
+# a restart cannot emit a second signal for one held item.
+DELIVERY_HELD_SIGNAL_FIELD = "outcomeUnknownSignalledAt"
+AMBIGUOUS_SEND_SIGNAL_KIND = "delivery_outcome_unknown_held"
+AMBIGUOUS_CRASH_REASON = "restart found an issued send with no recorded outcome"
 CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
 # Top-level counterpart of the per-key marker. Written into the incident state
 # root (NOT into conversationScopes, so it is never a scope key and never an
@@ -3509,6 +3532,44 @@ def redacted_state_text(value: Any, limit: int, *, tail: bool = False) -> str:
     return truncate(text, limit)
 
 
+class ProvenRemoteRejection(RuntimeError):
+    """A PARSED reply that named an error. The outcome is known: rejected.
+
+    Kept distinct so the phase-labelling handler below cannot swallow it. A
+    rejection is proven whichever phase produced it, and it must keep the
+    ordinary bounded-retry, email-fallback and dead-letter path (#2424).
+    """
+
+
+# Protocol-phase labels, written as a SUFFIX on every no-outcome failure.
+# The label, not the error class, decides whether an outcome is ambiguous
+# (#2424): the same timeout means "never left" during the handshake and "may
+# have been accepted" after the tool call was flushed.
+JSON_RPC_HANDSHAKE_PHASE = "phase=handshake"
+JSON_RPC_POST_REQUEST_PHASE = "phase=post_request"
+# Seam prefix that makes BOT_ERRORS_DRY_SEND_FAIL raise the typed outcome.
+DRY_SEND_AMBIGUOUS_PREFIX = "ambiguous:"
+
+
+class AmbiguousSendOutcome(RuntimeError):
+    """A send whose outcome could not be established, tagged with its phase.
+
+    The phase travels on the EXCEPTION, never in the message text. A parsed
+    rejection embeds the remote's own error field, so with a text classifier a
+    remote could end its error string with the phase literal and turn its own
+    proven rejection into a hold -- the alert would then wait for an operator
+    instead of taking retry, email fallback and dead-letter. Nothing the remote
+    controls can forge a type.
+
+    The message still carries a human-readable "(phase=...)" label, for logs and
+    for the operator, and nothing on the decision path reads it.
+    """
+
+    def __init__(self, message: str, *, phase: str):
+        super().__init__(f"{message} ({phase})")
+        self.phase = phase
+
+
 def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     if not socket_path:
         raise RuntimeError("socket path missing")
@@ -3534,7 +3595,9 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
             },
         }) + "\n")
         writer.flush()
-        wait_for_response(reader, init_id, timeout)
+        # #2424: everything up to and including this handshake wait happens
+        # before the tool call is written, so nothing can have been accepted.
+        wait_for_response(reader, init_id, timeout, phase=JSON_RPC_HANDSHAKE_PHASE)
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -3543,25 +3606,58 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
             "params": params,
         }) + "\n")
         writer.flush()
-        return wait_for_response(reader, call_id, timeout)
+        # #2424: past this flush the remote may already have acted on the
+        # request, so a missing reply is an ambiguous outcome, not a failure.
+        return wait_for_response(reader, call_id, timeout, phase=JSON_RPC_POST_REQUEST_PHASE)
 
 
-def wait_for_response(reader: Any, expected_id: int, timeout: float) -> dict[str, Any]:
+def wait_for_response(
+    reader: Any, expected_id: int, timeout: float, *, phase: str
+) -> dict[str, Any]:
+    """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
+
+    `phase` is what separates "the request never left" from "the request left
+    and the answer did not" (#2424). Reading, decoding and PARSING the reply all
+    happen after the request was flushed, so every failure among them is equally
+    uninformative about what the remote did: a truncated line, a non-JSON line,
+    a line that is not an object, and undecodable bytes are all replies the
+    remote produced only because it had the request. Labelling just the read
+    left the parse failures unlabelled, and the event was silently re-sent.
+
+    The ONLY outcome that is proven is a parsed reply for the expected id that
+    names an error, which is raised as ProvenRemoteRejection so this handler
+    cannot relabel it.
+
+    Framing note: replies are newline-framed, so a reply that never terminates
+    its line is indistinguishable from a slow one and surfaces as the timeout.
+    """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        line = reader.readline()
-        if not line:
-            raise RuntimeError("socket closed before response")
-        msg = json.loads(line)
-        if msg.get("id") != expected_id:
-            continue
-        if "error" in msg:
-            raise RuntimeError(f"rpc error: {msg['error']}")
-        result = msg.get("result", {})
-        if isinstance(result, dict) and result.get("isError") is True:
-            raise RuntimeError(f"tool error: {result}")
-        return result if isinstance(result, dict) else {"result": result}
-    raise RuntimeError("timeout waiting for JSON-RPC response")
+    try:
+        while time.monotonic() < deadline:
+            # The socket carries the same timeout as this deadline, so readline
+            # raises socket.timeout("timed out") first; that is the text an
+            # operator sees, not the deadline message below.
+            line = reader.readline()
+            if not line:
+                raise RuntimeError("socket closed before response")
+            msg = json.loads(line)
+            if not isinstance(msg, dict):
+                raise RuntimeError("reply was not a JSON-RPC object")
+            if msg.get("id") != expected_id:
+                continue
+            if "error" in msg:
+                raise ProvenRemoteRejection(f"rpc error: {msg['error']}")
+            result = msg.get("result", {})
+            if isinstance(result, dict) and result.get("isError") is True:
+                raise ProvenRemoteRejection(f"tool error: {result}")
+            return result if isinstance(result, dict) else {"result": result}
+        raise RuntimeError("timeout waiting for JSON-RPC response")
+    except ProvenRemoteRejection:
+        raise
+    except Exception as exc:
+        raise AmbiguousSendOutcome(
+            str(exc) or exc.__class__.__name__, phase=phase
+        ) from exc
 
 
 def validate_bot_errors_target() -> None:
@@ -3581,6 +3677,17 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
     # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
     dry_fail = os.environ.get("BOT_ERRORS_DRY_SEND_FAIL")
     if dry_fail:
+        # Seam contract. A value prefixed with DRY_SEND_AMBIGUOUS_PREFIX raises
+        # the TYPED post-request outcome, so a subprocess test can drive a hold
+        # deterministically now that the decision reads the type and not the
+        # text. Any other value raises a plain RuntimeError, which is a pre-send
+        # failure taking the retry path -- unchanged, so existing seam users
+        # keep the behaviour they were written against.
+        if dry_fail.startswith(DRY_SEND_AMBIGUOUS_PREFIX):
+            raise AmbiguousSendOutcome(
+                dry_fail[len(DRY_SEND_AMBIGUOUS_PREFIX):] or "injected ambiguous outcome",
+                phase=JSON_RPC_POST_REQUEST_PHASE,
+            )
         raise RuntimeError(dry_fail)
     dry_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE")
     if dry_capture:
@@ -3829,6 +3936,60 @@ def is_transient_transport_failure(error: str) -> bool:
     )
 
 
+# A transport failure carries NO proof of the outcome when the tools/call
+# request had already been flushed and no readable reply naming the outcome came
+# back -- including a reply that arrived but could not be read, decoded or
+# parsed. wait_for_response raises AmbiguousSendOutcome for exactly those, with
+# the phase on the exception, and process_one decides on the TYPE and the phase.
+# Nothing on the decision path reads message text, so a remote cannot influence
+# the classification with the contents of its own error field.
+#
+# Everything else keeps the ordinary bounded-retry, email-fallback and
+# dead-letter path:
+#   - connect errors and a missing socket raise before the protocol is entered,
+#     and every handshake-phase failure carries phase=handshake: nothing was
+#     asked of the remote. Holding these would turn a transient MCP outage into
+#     a queue of held alerts needing operator action.
+#   - a PARSED reply naming error / isError is a ProvenRemoteRejection, and
+#     "send_message returned error: ..." is built from a parsed result, so
+#     neither is ever ambiguous whichever phase produced it.
+#
+# LIMIT: a missing or unreadable reply after the flush is ambiguous by
+# construction. The protocol carries no delivery identity and no idempotency
+# key, so nothing distinguishes accepted-then-lost from never-processed, and the
+# fail-closed reading the issue requires is to hold. An error raised while
+# WRITING or flushing the request is treated as PRE-SEND: replies are
+# newline-framed, so a partially written request is not a parseable message and
+# the remote cannot have acted on it.
+
+
+def delivery_status_of(event: dict[str, Any]) -> str:
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict):
+        return ""
+    return str(delivery.get("status") or "")
+
+
+def is_held_delivery(event: dict[str, Any]) -> bool:
+    """A record parked on an ambiguous outcome: never sent, never archived."""
+    return delivery_status_of(event) in HELD_DELIVERY_STATUSES
+
+
+def is_ambiguous_in_flight(event: dict[str, Any]) -> bool:
+    """A durable record whose request was issued and whose outcome never landed.
+
+    Both halves are required. The status alone is the pre-issue crash, which
+    must still be delivered (holding it would trade a duplicate-alert bug for a
+    lost-alert bug); the marker alone would fire on a resolved record.
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict):
+        return False
+    return delivery_status_of(event) == IN_FLIGHT_DELIVERY_STATUS and bool(
+        delivery.get(DELIVERY_SEND_ISSUED_FIELD)
+    )
+
+
 def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
     delivery = event.setdefault("delivery", {})
     if not isinstance(delivery, dict):
@@ -3836,6 +3997,10 @@ def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
         event["delivery"] = delivery
     attempts = max(int(delivery.get("attempts") or 0), 1)
     delivery["status"] = "queued"
+    # #2424: this attempt is over, so its issued marker must not survive. A
+    # requeued record carrying it would read as in-flight to the next reclaim,
+    # which would hold an alert that was never sent.
+    delivery.pop(DELIVERY_SEND_ISSUED_FIELD, None)
     delivery["lastError"] = truncate(redact(error), 500)
     backoff = next_backoff(attempts)
     delivery["nextAttemptAtEpoch"] = int(time.time()) + backoff if backoff is not None else 0
@@ -3848,9 +4013,31 @@ def mark_attempt(event: dict[str, Any]) -> dict[str, Any]:
         delivery = {}
         event["delivery"] = delivery
     delivery["attempts"] = int(delivery.get("attempts") or 0) + 1
-    delivery["status"] = "sending"
+    delivery["status"] = IN_FLIGHT_DELIVERY_STATUS
     delivery["lastAttemptAt"] = now_iso()
     delivery["nextAttemptAtEpoch"] = 0
+    # #2424: the issued marker describes ONE attempt. A requeued event still
+    # carries the previous attempt's marker, and keeping it would make a crash
+    # before the next request left read as "may have been accepted" -- holding
+    # an alert that never reached the remote.
+    delivery.pop(DELIVERY_SEND_ISSUED_FIELD, None)
+    return event
+
+
+def mark_send_issued(event: dict[str, Any]) -> dict[str, Any]:
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery[DELIVERY_SEND_ISSUED_FIELD] = now_iso()
+    return event
+
+
+def mark_outcome_unknown(event: dict[str, Any], reason: str) -> dict[str, Any]:
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery["status"] = AMBIGUOUS_DELIVERY_STATUS
+        delivery[DELIVERY_HELD_AT_FIELD] = now_iso()
+        delivery[DELIVERY_HELD_REASON_FIELD] = truncate(redact(reason), 500)
+        delivery["nextAttemptAtEpoch"] = 0
     return event
 
 
@@ -6659,6 +6846,12 @@ def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle |
             event = safe_read_json(path)
         except Exception:
             continue
+        # #2424: a held record must never be consumed by a sweep. This one
+        # ARCHIVES what it collapses, so a held item reaching it is lost outright
+        # rather than merely requeued. reclaim_processing already keeps held
+        # records out of outbox/; this is the second line of defence.
+        if is_held_delivery(event):
+            continue
         if not is_storm_candidate(event):
             continue
         fingerprint = storm_fingerprint(event)
@@ -7797,11 +7990,120 @@ def original_name_from_processing(path: Path) -> str:
     return name
 
 
+def hold_ambiguous_send(
+    paths: dict[str, Path], claimed: Path, event: dict[str, Any], reason: str
+) -> str:
+    """Park an ambiguous post-send outcome and signal it exactly once (#2424).
+
+    The item stays where it is, in processing/. Every other home is wrong: the
+    outbox re-enters the send path this hold exists to close, and sent/ claims a
+    delivery that was never proven.
+
+    The held disposition and the signal stamp are committed in ONE durable
+    publication, so no crash can leave a record that signals a second time. The
+    durable record -- not the best-effort log -- is the authority on whether the
+    item was reported.
+
+    ORDER: the log line is appended BEFORE the publication. A publication can
+    reach disk and still be refused (durability unproven, e.g. a parent-sync
+    fault after the rename); the record then already reads held-and-signalled,
+    every later reclaim skips it, and a log line appended afterwards would never
+    be written at all. Logging first costs at most ONE DUPLICATE LOG LINE PER
+    RETRIED HOLD -- when the publication does not reach disk, the next pass
+    re-logs -- and never a duplicate send, because the send decision reads the
+    durable record and not the log.
+    """
+    event = mark_outcome_unknown(event, reason)
+    delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    first_signal = not delivery.get(DELIVERY_HELD_SIGNAL_FIELD)
+    if first_signal:
+        delivery[DELIVERY_HELD_SIGNAL_FIELD] = now_iso()
+        # Metadata only (A9): append_dispatch_log projects details to bounded
+        # counts, booleans and allow-listed enums, so no destination, message
+        # text, account, path or private topology can reach the log here. The
+        # signal is a durable-log record, never a new chat or email send -- a
+        # send from the hold path would re-enter the window being closed.
+        #
+        # The signal is per-item ANONYMOUS by design. An eventId passed here is
+        # projected away rather than written, so carrying one would only look
+        # like identification; the operator lists processing/ for the record
+        # itself, which is where the durable disposition lives.
+        append_dispatch_log(
+            paths,
+            {
+                "type": AMBIGUOUS_SEND_SIGNAL_KIND,
+                "attempts": delivery.get("attempts"),
+                "held": True,
+            },
+            level="warning",
+        )
+    target = _durable_target(claimed)
+    observation = observe_json(target)
+    publication = publish_state_json(
+        target,
+        event,
+        component="dispatcher.process_held_state",
+        operation_id=operation_id(
+            target,
+            event,
+            component="dispatcher.process_held_state",
+            predecessor=observation.version,
+        ),
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_all_advance([publication])
+    return f"held_outcome_unknown; deliveryStatus={AMBIGUOUS_DELIVERY_STATUS}"
+
+
 def reclaim_processing(paths: dict[str, Path]) -> int:
     reclaimed = 0
     for path in sorted(paths["processing"].glob("*")):
         if not safe_is_data_entry(path):
             continue
+        # #2424: two kinds of record must not be bounced back into the queue.
+        #   - a HELD record is already parked and already signalled; returning
+        #     it to the outbox re-enters the window the hold exists to close.
+        #   - a record whose request was ISSUED but never resolved IS that
+        #     window: the remote may have accepted it and nothing on disk says
+        #     so. Convert it here, at the restart boundary, which is the last
+        #     point before process_one would send it a second time.
+        # A record that cannot be read falls through to the historical
+        # unconditional bounce, which the poison and malformed-attempt paths
+        # depend on: a hold must never wedge the reclaim pass.
+        try:
+            claimed_event = safe_read_json(path)
+        except Exception:
+            claimed_event = None
+        if isinstance(claimed_event, dict):
+            if is_held_delivery(claimed_event):
+                continue
+            if is_ambiguous_in_flight(claimed_event):
+                # Contain the hold PER RECORD. run_once calls reclaim_processing
+                # bare, so a raise here aborts the whole cycle -- and every later
+                # cycle, because the record that raises is still there next time.
+                # One poisoned claim then strands every healthy stranded alert,
+                # which is a worse failure than the duplicate this branch exists
+                # to prevent. The record keeps "sending" + its marker, so the
+                # next reclaim retries the hold. Deliberately broad: any escape
+                # from this call wedges the dispatcher.
+                try:
+                    hold_ambiguous_send(paths, path, claimed_event, AMBIGUOUS_CRASH_REASON)
+                except Exception as exc:
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "delivery_hold_publication_failed",
+                            # Bounded enum: free strings are projected away by
+                            # metadata_only_controller_details, so name the class
+                            # with a value the log actually keeps.
+                            "reason": "os_error" if isinstance(exc, OSError) else "unexpected_error",
+                            "retryable": True,
+                        },
+                        level="error",
+                        outcome="failed",
+                    )
+                continue
         target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
         fsync_parent(target)
@@ -8025,6 +8327,15 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         })
         return True, f"terminal_replay_archived; deliveryStatus={terminal_status}"
 
+    # #2424: a HELD record reached the send path again -- an operator moved it
+    # back without releasing it, or a race requeued it. Leave the claim in
+    # processing/, where reclaim now leaves it too, and send nothing. Keyed on
+    # the durable status ALONE, so an operator who releases the item by setting
+    # delivery.status back to "queued" is not immediately re-held; the issued
+    # marker from the ambiguous attempt is cleared by mark_attempt below.
+    if is_held_delivery(event):
+        return False, f"held_outcome_unknown; deliveryStatus={delivery_status_of(event)}"
+
     event = mark_attempt(event)
     attempt_target = _durable_target(claimed)
     attempt_observation = observe_json(attempt_target)
@@ -8129,9 +8440,46 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     append_clear_context(event, incident_state)
     stamp_delivery_freshness(event, int(time.time()))
     text = format_event(event)
+    # #2424: publish the intent-to-issue durably BEFORE the external effect. The
+    # attempt publication above cannot serve as this marker: it lands long
+    # before this point, so a crash anywhere in between would be indistinguishable
+    # from a crash after the request left, and every such record would be held.
+    # This write is what lets reclaim tell the two apart.
+    event = mark_send_issued(event)
+    issued_target = _durable_target(claimed)
+    issued_observation = observe_json(issued_target)
+    issued_publication = publish_state_json(
+        issued_target,
+        event,
+        component="dispatcher.process_send_issued_state",
+        operation_id=operation_id(
+            issued_target,
+            event,
+            component="dispatcher.process_send_issued_state",
+            predecessor=issued_observation.version,
+        ),
+        expected=issued_observation.version,
+        generation=(issued_observation.version.generation or 0) + 1,
+    )
     try:
+        # #2424: inside the try. If the marker reached disk but the advance
+        # check refuses, the send is correctly skipped -- but the record now
+        # reads as in-flight, and the next reclaim would hold an alert that
+        # never left. Routing the refusal through mark_failure below requeues it
+        # with the marker cleared, so the next pass retries the send instead.
+        require_all_advance([issued_publication])
         send_whatsapp(text)
     except Exception as exc:
+        # #2424: an outcome with no proof must never be re-sent. This runs
+        # BEFORE mark_failure and before the transient carve-out below, which
+        # requeues and resends -- exactly the duplicate operator page this
+        # branch exists to prevent. A response that NAMED an error is not
+        # ambiguous and still takes the bounded-retry path.
+        if (
+            isinstance(exc, AmbiguousSendOutcome)
+            and exc.phase == JSON_RPC_POST_REQUEST_PHASE
+        ):
+            return False, hold_ambiguous_send(paths, claimed, event, str(exc))
         event = mark_failure(event, str(exc))
         attempts = int(event.get("delivery", {}).get("attempts") or 0)
         delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
