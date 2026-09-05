@@ -64,18 +64,30 @@ that was checked and the inode that is modified cannot differ.
 | Leaf is a regular file | `not_regular` |
 | Leaf is owned by the executing UID | `foreign_owner` |
 | Leaf has exactly one hard link | `multiple_links` |
-| No ancestor of the leaf is a symlink | `parent_symlink` |
+| Resolved parent path is still symlink-free when re-walked | `parent_symlink` |
 | Parent is not group- or world-writable | `parent_writable` |
 | Parent is openable as a directory | `parent_unreadable` |
 | `O_NOFOLLOW` is available on this platform | `unsupported_capability` |
 | Leaf could not be opened or chmod'ed | `unopenable` |
 
-The parent is proven by walking its components from the filesystem root under
-`O_NOFOLLOW`, not by statting the path. Statting follows symlinks, so a
-symlinked state directory pointed at a real private directory would let the
-repair modify the leaf behind the link. The leaf is then opened relative to the
-proven parent descriptor rather than by path, so the walk cannot be re-run
-against a component that changed underneath it.
+The parent is resolved the way the reader resolves its trusted root, then
+re-verified by walking the resolved path component by component under
+`O_NOFOLLOW`. The leaf is opened relative to that proven descriptor rather than
+by path, so the walk cannot be re-run against a component that changed
+underneath it.
+
+The resolution step is parity with the reader, and it is load-bearing.
+`_durable_target` resolves the receipt's parent, so a symlinked state root, or
+a symlinked ancestor such as a linked home directory, is transparent to the
+reader and it publishes through the link. If the repair refused there it would
+be permanently inert on exactly the hosts whose legacy receipt still needs
+repairing. So: a symlinked ancestor at or above the state root is transparent
+to both; a symlinked receipt file still refuses `symlink`.
+
+Because resolution has already removed every symlink, `parent_symlink` fires
+only if a component is replaced by a symlink between the resolution and the
+walk. Re-verifying under `O_NOFOLLOW` rather than trusting the resolved string
+is what makes that race visible.
 
 The repair runs *before* `ensure_private_dir()`, deliberately.
 `ensure_private_dir()` re-applies `0700` to the state root, so running it first
@@ -148,16 +160,12 @@ destroys the evidence of why it was refused.
    when this cycle looked. Investigate why; do not treat the next cycle's
    success as evidence the condition was benign, because the root is narrowed
    automatically in between.
-5. `parent_symlink` means an ancestor of the receipt is a symlink. Note the
-   divergence from the reader here. `_durable_target` resolves the state root
-   before building the target, so the reader follows a symlinked ancestor once
-   at resolve time and then walks the already-resolved real path under
-   `O_NOFOLLOW`. A symlinked ancestor is therefore transparent to the reader,
-   while the repair refuses to traverse one at all. On a host whose state root
-   is reached through a symlink the reader will publish and the repair will
-   never fire, so the legacy leaf stays unrepaired indefinitely. That is
-   fail-closed rather than self-healing, and it is the intended trade: the
-   repair is the side that mutates, so it is the stricter side.
+5. `parent_symlink` does not mean "the state root is reached through a
+   symlink". That case is transparent, to the repair exactly as to the reader.
+   It means a component of the already-resolved parent path was a symlink when
+   the walk re-checked it, which on a quiet host implies the path changed
+   underneath the running cycle. Treat it as a tampering signal, not a layout
+   quirk: capture the path and escalate rather than re-running the cycle.
 6. The receipt is a receipt, not a source of truth. Once the cause is
    understood, deleting the leaf is a valid recovery: the next cycle observes an
    absent predecessor and publishes a fresh receipt at generation 1.

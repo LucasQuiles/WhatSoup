@@ -313,14 +313,12 @@ def test_repair_refuses_a_group_or_world_writable_parent(tmp_path, parent_mode):
     assert _mode_of(receipt_path) == 0o644, "a leaf under a writable parent must be left unmodified"
 
 
-def test_repair_refuses_a_symlinked_parent_directory(tmp_path):
-    """The parent must be walked, not stat'ed by path.
+def test_repair_matches_the_reader_through_a_symlinked_state_root(tmp_path):
+    """Parity: a symlinked state root is transparent to the repair.
 
-    Statting the parent by path follows symlinks, so a symlinked state
-    directory pointed at a real 0700 directory let the repair chmod the leaf
-    behind the link. The strict reader walks its own ancestors under
-    O_NOFOLLOW; the repair is the side that mutates, so it must be at least as
-    strict.
+    _durable_target resolves the parent, so the reader publishes through a
+    symlinked state root. A repair that refused there would be permanently
+    inert on exactly the hosts whose legacy receipt still needs repairing.
     """
     real_root = tmp_path / "real-state"
     real_root.mkdir(mode=0o700)
@@ -332,28 +330,69 @@ def test_repair_refuses_a_symlinked_parent_directory(tmp_path):
         linked_root / "daily-health-receipt.json"
     )
 
-    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
-    assert outcome.previous_mode is None
+    assert outcome.refusal is None
+    assert outcome.previous_mode == 0o644
     assert receipt_path.read_bytes() == raw
-    assert _mode_of(receipt_path) == 0o644, "the leaf behind the link must be unmodified"
+    assert _mode_of(receipt_path) == 0o600
 
 
-def test_repair_refuses_a_symlinked_grandparent_directory(tmp_path):
-    """Any symlinked component, not only the immediate parent, refuses."""
-    real_parent = tmp_path / "real-parent"
-    real_root = real_parent / "state"
+def test_repair_matches_the_reader_through_a_symlinked_ancestor(tmp_path, monkeypatch):
+    """Parity control: a symlinked ancestor above the state root is transparent.
+
+    A linked home directory is the realistic shape. Going through
+    record_daily_health_receipt asserts the other half of parity too: the
+    reader observes and publishes on the same path the repair accepted.
+    """
+    real_home = tmp_path / "real-home"
+    real_root = real_home / "state"
     real_root.mkdir(mode=0o700, parents=True)
-    real_parent.chmod(0o700)
-    receipt_path, raw = _write_legacy_receipt(real_root)
-    linked_parent = tmp_path / "linked-parent"
-    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    real_home.chmod(0o700)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home, target_is_directory=True)
+    root_via_link = linked_home / "state"
+    _write_legacy_receipt(root_via_link)
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root_via_link))
+    event_path = _new_event(root_via_link)
 
-    outcome = _mod.repair_legacy_private_receipt_mode(
-        linked_parent / "state" / "daily-health-receipt.json"
-    )
+    result = _mod.record_daily_health_receipt(event_path, "info")
 
-    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
-    assert _mode_of(receipt_path) == 0o644
+    assert result.advance_allowed, "the reader must publish where the repair accepted"
+    real_receipt = real_root / "daily-health-receipt.json"
+    successor = json.loads(real_receipt.read_text(encoding="utf-8"))
+    assert successor["eventId"] == event_path.stem
+    assert successor[_mod.LEGACY_RECEIPT_MODE_EVIDENCE_FIELD] == "0644"
+    assert _mode_of(real_receipt) == _EXPECTED_SUCCESSOR_MODE
+
+
+def test_parent_walk_refuses_a_symlinked_component(tmp_path):
+    """The O_NOFOLLOW walk still refuses, exercised below the resolution step.
+
+    After resolution no component is a symlink, so this guard fires only when a
+    component is swapped for a symlink between the resolve and the walk. That
+    race has no deterministic end-to-end test, so the walk is driven directly
+    with an unresolved path to keep the guard falsifiable.
+    """
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    linked_root = tmp_path / "linked-state"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(_mod._ReceiptParentUnusable) as excinfo:
+        _mod._open_receipt_parent(linked_root)
+
+    assert excinfo.value.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+
+
+def test_parent_walk_accepts_a_real_directory_chain(tmp_path):
+    """Positive control for the walk itself."""
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+
+    descriptor = _mod._open_receipt_parent(real_root.resolve(strict=True))
+    try:
+        assert os.stat(descriptor).st_ino == real_root.stat().st_ino
+    finally:
+        os.close(descriptor)
 
 
 def test_repair_still_repairs_under_a_real_directory_parent(tmp_path):

@@ -1365,19 +1365,41 @@ def _classify_parent_component_failure(component: str, *, dir_fd: int) -> str:
     return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
 
 
-def _open_receipt_parent(path: Path) -> int:
-    """Open the receipt's parent directory without traversing any symlink.
+def _resolved_receipt_parent(path: Path) -> Path:
+    """Resolve the receipt's parent exactly as the reader resolves its root.
 
-    Walks the absolute parent path one component at a time from the filesystem
-    root under O_NOFOLLOW|O_DIRECTORY, so a symlinked ancestor cannot redirect
-    the walk to a directory the caller did not name. This mirrors the strict
-    reader's _open_target_parent (lib/durable_json.py), reimplemented here
-    rather than imported because that helper is private and durable_json.py is
-    out of scope for this change.
+    _durable_target() builds the reader's target with
+    ``path.parent.resolve(strict=True)``, so a symlinked state root, or a
+    symlinked ancestor such as a linked home directory, is transparent to the
+    reader: it publishes through the link. The repair must resolve identically
+    or it would refuse on hosts the reader is happy with, and the repair would
+    then be permanently inert exactly where a legacy receipt still needs it.
+
+    Keep this expression in lockstep with _durable_target above. It is written
+    out rather than reusing that function because _durable_target() also calls
+    ensure_private_dir(), which must not run before the repair has judged the
+    state root.
+    """
+    return path.parent.resolve(strict=True)
+
+
+def _open_receipt_parent(resolved_parent: Path) -> int:
+    """Open an already-resolved parent directory without traversing a symlink.
+
+    Walks the resolved absolute path one component at a time from the
+    filesystem root under O_NOFOLLOW|O_DIRECTORY, mirroring the strict reader's
+    _open_target_parent (lib/durable_json.py), which walks its own resolved
+    trusted_root the same way. Reimplemented here rather than imported because
+    that helper is private and durable_json.py is out of scope.
+
+    Resolution has already removed every symlink, so parent_symlink refuses
+    only when a component was replaced by a symlink between the resolution and
+    this walk. That race is the whole point of re-verifying under O_NOFOLLOW
+    instead of trusting the resolved string.
 
     The caller owns the returned descriptor and must close it.
     """
-    anchor = Path(os.path.abspath(path.parent))
+    anchor = resolved_parent
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for component in anchor.parts[1:]:
@@ -1418,9 +1440,10 @@ def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
     then chmod'ed, so the inode that was checked and the inode that is modified
     cannot differ.
 
-    The parent is proven by walking its components under O_NOFOLLOW rather than
-    by statting the path, which would follow a symlinked state directory, and
-    the leaf is then opened relative to that proven descriptor.
+    The parent is resolved exactly as the reader resolves its trusted root, so
+    a symlinked ancestor is transparent to both, and the resolved path is then
+    re-verified by walking its components under O_NOFOLLOW before the leaf is
+    opened relative to that proven descriptor.
 
     Refusal is silent about the mode: it never chmods, never raises, and leaves
     the leaf byte- and mode-identical, so the strict reader downstream remains
@@ -1435,7 +1458,17 @@ def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
     if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
         return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
     try:
-        parent_fd = _open_receipt_parent(path)
+        resolved_parent = _resolved_receipt_parent(path)
+    except FileNotFoundError:
+        # No state root yet, so no legacy leaf. Not a refusal: a fresh install
+        # must not log one every cycle.
+        return LegacyReceiptRepair(None, None)
+    except (OSError, RuntimeError):
+        # RuntimeError covers a symlink loop reported by resolve() rather than
+        # by errno.
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE)
+    try:
+        parent_fd = _open_receipt_parent(resolved_parent)
     except _ReceiptParentUnusable as exc:
         # refusal None means the parent is simply absent: no leaf, no repair,
         # and no log line on a fresh install.
