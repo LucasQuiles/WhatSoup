@@ -7,6 +7,7 @@ import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { confineAlertContent } from '../lib/alert-evidence.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
 import {
   clearRecoveryMarker,
@@ -210,13 +211,59 @@ const MARKER_ERROR_MAX_LENGTH = 200;
  * and leave its opening fragment behind unmatched.
  */
 function redactErrorForMarker(error: string): string {
-  const redacted = error
+  return error
     .replace(/"[\s\S]*"|"[\s\S]*$/, '"<redacted>"')
     .replace(/'[\s\S]*'|'[\s\S]*$/, "'<redacted>'");
-  return redacted.length <= MARKER_ERROR_MAX_LENGTH
-    ? redacted
-    : `${redacted.slice(0, MARKER_ERROR_MAX_LENGTH)}…`;
 }
+
+/**
+ * The full confinement applied to an error before it is written to a marker.
+ *
+ * Quoting alone was not enough. It covers the JSON.parse echo, which is where
+ * payload bytes appear, but `failure.error` is the message of ANY send-path
+ * throw: a provider that names the recipient in prose puts a destination into
+ * the record with no quote in sight. So the quoted-run redaction runs first,
+ * then identifier shapes go to placeholders, and only then is the result
+ * bounded — bounding earlier could sever a run or an address and leave half of
+ * it behind unmatched.
+ */
+function confineErrorForMarker(error: string): string {
+  let confined = redactErrorForMarker(error);
+  for (const [pattern, placeholder] of MARKER_IDENTIFIER_PATTERNS) {
+    confined = confined.replace(pattern, placeholder);
+  }
+  return confined.length <= MARKER_ERROR_MAX_LENGTH
+    ? confined
+    : `${confined.slice(0, MARKER_ERROR_MAX_LENGTH)}…`;
+}
+
+/**
+ * Identity of one marker's stored content (#2387).
+ *
+ * The serialized payload itself, not a hash: it is already bounded (the error
+ * field is length-capped) and equality on it needs no digest. Content rather
+ * than `setAt` alone, because two markers written inside the same millisecond
+ * share a timestamp but not a failure, and the whole point is to tell one
+ * obligation from the next at a key that names only a row.
+ */
+function markerIdentity(payload: Record<string, unknown>): string {
+  return JSON.stringify(payload);
+}
+
+/**
+ * Shapes that name a person or a destination and survive quote-stripping.
+ *
+ * `failure.error` is `errorMessage()` of ANY send-path throw, not only a
+ * JSON.parse message, so a transport error can carry a recipient in plain text
+ * with no quotes anywhere. Ordered most specific first: a chat address is
+ * recognised as such before the generic mail-shaped rule, and a bare digit run
+ * last so it cannot eat part of an address already replaced.
+ */
+const MARKER_IDENTIFIER_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/[\w.+-]+@[\w.-]*(?:s\.whatsapp\.net|lid|g\.us)\b/gi, '<chat>'],
+  [/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '<address>'],
+  [/\d{7,}/g, '<digits>'],
+];
 
 /**
  * Rebuild a terminal-failure record from a marker payload, or null.
@@ -280,8 +327,16 @@ export class MessageScheduler {
    * disk still holds that — only a record that this process already delivered
    * this one. A restart therefore re-emits once, which is the honest reading of
    * a marker that is still on disk saying the alert was never cleared.
+   *
+   * The value is the IDENTITY of the marker that was delivered, and suppression
+   * applies only while the marker on disk still matches it. The key names a ROW,
+   * not a delivery, so a fresh obligation can land at the same key — an operator
+   * re-queues the row and it fails terminally again, or the marker is recreated
+   * out of band. Keyed on the row alone, this set would skip that obligation
+   * unread and delete it once the clear succeeded: a silent loss of exactly the
+   * alert this leaf exists to retain.
    */
-  private readonly deliveredUnclearable = new Set<string>();
+  private readonly deliveredUnclearable = new Map<string, string>();
 
   constructor(
     db: Database,
@@ -760,8 +815,19 @@ export class MessageScheduler {
       // bytes into the JSON.parse message, and clause 5 forbids those in the
       // record. A retry therefore re-emits the redacted form — the operator sees
       // the same failure, minus a payload fragment.
-      setRecoveryMarker(key, { ...failure, error: redactErrorForMarker(failure.error) });
+      setRecoveryMarker(key, {
+        ...failure,
+        error: confineErrorForMarker(failure.error),
+        // Diagnostic only, never rendered into an alert: confinement can blank
+        // the part of the message that named the failure, and an operator
+        // reading the file still needs to know what kind of failure it was.
+        // Taken from the alert channel's own classifier so the two agree.
+        errorClass: confineAlertContent('evidence', failure.error).failureClass,
+      });
       this.pendingTerminalAlerts.add(key);
+      // A new obligation now exists at this key, so any suppression recorded
+      // for an earlier delivery no longer speaks for it.
+      this.deliveredUnclearable.delete(key);
       log.warn(
         { event: 'scheduler_terminal_alert_retained', id: failure.scheduledId },
         'scheduler: terminal send alert enqueue rejected; notification authority retained for a later tick',
@@ -793,20 +859,35 @@ export class MessageScheduler {
     if (!instance) return;
 
     for (const key of this.retainedTerminalAlertKeys()) {
-      if (this.deliveredUnclearable.has(key)) {
-        // Delivered already; only the clear is still owed. Retry it and say
-        // nothing further — the entry warned once when it was recorded.
-        if (this.discardTerminalAlertMarker(key)) {
-          this.deliveredUnclearable.delete(key);
+      // Read BEFORE consulting the suppression: the set records a delivery, and
+      // only the bytes on disk can say whether this is still that same one.
+      const stored = readRecoveryMarkerState(key);
+      const deliveredIdentity = this.deliveredUnclearable.get(key);
+
+      if (deliveredIdentity !== undefined) {
+        if (stored.state === 'ok' && markerIdentity(stored.payload) === deliveredIdentity) {
+          // The same marker this process already delivered. Only the clear is
+          // still owed; retry it and say nothing more — the entry warned once.
+          if (this.discardTerminalAlertMarker(key)) {
+            this.deliveredUnclearable.delete(key);
+            log.info(
+              { event: 'scheduler_terminal_alert_marker_cleared_late', key },
+              'scheduler: previously unclearable terminal send alert marker cleared',
+            );
+          }
+          continue;
+        }
+        // The marker is gone or is no longer the one that was delivered, so the
+        // suppression has nothing left to speak for. Retire it and treat what is
+        // on disk on its own terms.
+        this.deliveredUnclearable.delete(key);
+        if (stored.state === 'missing') {
           log.info(
             { event: 'scheduler_terminal_alert_marker_cleared_late', key },
-            'scheduler: previously unclearable terminal send alert marker cleared',
+            'scheduler: previously unclearable terminal send alert marker is gone',
           );
         }
-        continue;
       }
-
-      const stored = readRecoveryMarkerState(key);
 
       if (stored.state === 'missing') {
         // The end of a marker's normal life: the clear landed, or another
@@ -827,6 +908,9 @@ export class MessageScheduler {
         continue;
       }
 
+      // Identity is captured alongside the parse, while the payload is in hand:
+      // a suppression recorded below must name the exact bytes just delivered.
+      const identity = stored.state === 'ok' ? markerIdentity(stored.payload) : '';
       const failure = stored.state === 'ok' ? parseTerminalSendFailure(stored.payload) : null;
       if (failure === null) {
         // Bytes were read and can never render an alert. Discarding is safe here
@@ -845,7 +929,9 @@ export class MessageScheduler {
         continue; // still owed; the next tick retries
       }
       this.pendingTerminalAlerts.delete(key);
-      if (!this.discardTerminalAlertMarker(key)) this.noteUnclearable(key);
+      if (!this.discardTerminalAlertMarker(key)) {
+        this.noteUnclearable(key, identity);
+      }
       log.info(
         { event: 'scheduler_terminal_alert_drained', id: failure.scheduledId },
         'scheduler: retained terminal send alert delivered',
@@ -902,9 +988,9 @@ export class MessageScheduler {
    * "I already sent this", never "nothing is owed". Disk keeps the obligation,
    * so a restart re-emits once and a healed store clears on the next tick.
    */
-  private noteUnclearable(key: string): void {
+  private noteUnclearable(key: string, identity: string): void {
     if (this.deliveredUnclearable.has(key)) return;
-    this.deliveredUnclearable.add(key);
+    this.deliveredUnclearable.set(key, identity);
     log.warn(
       { event: 'scheduler_terminal_alert_marker_unclearable', key },
       'scheduler: terminal send alert delivered but its marker could not be cleared; '
