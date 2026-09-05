@@ -1,6 +1,6 @@
 """Absent vs unobservable in the active-service inventory (#2486).
 
-``active_whatsoup_service_names()`` returned a bare ``set[str]``, so a missing
+The inventory reader returned a bare ``set[str]``, so a missing
 service-manager binary, a timeout, a nonzero exit and a malformed read all
 produced the same empty set as a healthy host running zero WhatSoup services.
 Profile completeness then reported full coverage from an inventory that was
@@ -51,6 +51,11 @@ _SYSTEMCTL_ACTIVE = f"{_ROGUE_UNIT} loaded active running WhatSoup {_ROGUE}\n"
 # A line cut mid-record: too few fields for the backend's grammar.
 _LAUNCHCTL_TRUNCATED = "4242\n"
 _SYSTEMCTL_TRUNCATED = f"{_ROGUE_UNIT} loaded\n"
+# A record cut INSIDE the discriminating token. The field count is intact and
+# the token no longer matches, so a field-count check sees nothing and the row
+# is silently skipped; only a token-level check catches it.
+_LAUNCHCTL_TOKEN_CUT = "4242\t0\tcom.what\n"
+_SYSTEMCTL_TOKEN_CUT = f"whatsoup@{_ROGUE}.serv loaded active running WhatSoup\n"
 
 
 class _FakeProc:
@@ -82,6 +87,9 @@ def backend_env(request, monkeypatch):
         "active_line": _LAUNCHCTL_ACTIVE if platform == "darwin" else _SYSTEMCTL_ACTIVE,
         "truncated_line": (
             _LAUNCHCTL_TRUNCATED if platform == "darwin" else _SYSTEMCTL_TRUNCATED
+        ),
+        "token_cut_line": (
+            _LAUNCHCTL_TOKEN_CUT if platform == "darwin" else _SYSTEMCTL_TOKEN_CUT
         ),
     }
 
@@ -164,8 +172,57 @@ def test_nonzero_exit_never_parses_its_stdout(backend_env, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_truncated_record_makes_the_read_malformed(backend_env, tmp_path):
+def _rogue_coverage(lines: list[str]) -> list[str]:
+    return [
+        line for line in lines if line.startswith(f"FAIL profile_coverage_service {_ROGUE}:")
+    ]
+
+
+def test_unreadable_record_among_good_ones_is_partial(backend_env, tmp_path):
+    """A partly readable inventory must not hide the names it did read.
+
+    The gate stays non-green because coverage cannot be proven from an
+    incomplete read, but every positively observed name still reaches the
+    undeclared-instance comparison.
+    """
     stdout = backend_env["active_line"] + backend_env["truncated_line"]
+    lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
+    fails = _inventory_fails(lines)
+    assert len(fails) == 1, lines
+    assert "status=partial" in fails[0]
+    assert "unreadable_lines=1" in fails[0]
+    assert "count=1" in fails[0]
+    assert len(_rogue_coverage(lines)) == 1, lines
+
+
+def test_duplicate_record_among_good_ones_is_partial(backend_env, tmp_path):
+    stdout = backend_env["active_line"] * 2
+    lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
+    fails = _inventory_fails(lines)
+    assert len(fails) == 1, lines
+    assert "status=partial" in fails[0]
+    assert "duplicate_labels=1" in fails[0]
+    assert len(_rogue_coverage(lines)) == 1, lines
+
+
+def test_all_records_unusable_stays_malformed(backend_env, tmp_path):
+    """Nothing usable was read, so there is no name to carry."""
+    stdout = backend_env["truncated_line"] * 2
+    lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
+    fails = _inventory_fails(lines)
+    assert len(fails) == 1, lines
+    assert "status=malformed" in fails[0]
+    assert "count=0" in fails[0]
+    assert _rogue_coverage(lines) == [], lines
+
+
+# ---------------------------------------------------------------------------
+# Q -- a record cut inside the discriminating token is unusable, not observed
+# ---------------------------------------------------------------------------
+
+
+def test_token_truncation_alone_is_unusable(backend_env, tmp_path):
+    stdout = backend_env["token_cut_line"]
     lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
     fails = _inventory_fails(lines)
     assert len(fails) == 1, lines
@@ -173,13 +230,25 @@ def test_truncated_record_makes_the_read_malformed(backend_env, tmp_path):
     assert "unreadable_lines=1" in fails[0]
 
 
-def test_duplicate_records_make_the_read_malformed(backend_env, tmp_path):
-    stdout = backend_env["active_line"] * 2
+def test_token_truncation_among_good_records_is_partial(backend_env, tmp_path):
+    """The surviving record must not read as full coverage."""
+    stdout = backend_env["active_line"] + backend_env["token_cut_line"]
     lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
     fails = _inventory_fails(lines)
     assert len(fails) == 1, lines
-    assert "status=malformed" in fails[0]
-    assert "duplicate_labels=1" in fails[0]
+    assert "status=partial" in fails[0]
+    assert "unreadable_lines=1" in fails[0]
+    assert len(_rogue_coverage(lines)) == 1, lines
+
+
+def test_stream_cut_before_the_final_terminator_is_unusable(backend_env, tmp_path):
+    """A stream whose last record has no terminator was cut in transit."""
+    stdout = backend_env["active_line"].rstrip("\n")
+    lines = _drive(backend_env, tmp_path, lambda argv, **kw: _FakeProc(stdout, 0))
+    fails = _inventory_fails(lines)
+    assert len(fails) == 1, lines
+    assert "status=partial" in fails[0]
+    assert "unreadable_lines=1" in fails[0]
 
 
 # ---------------------------------------------------------------------------

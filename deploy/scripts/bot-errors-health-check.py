@@ -7136,6 +7136,7 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
 # because lib.controller_state is imported normally.
 ServiceInventoryStatus = Literal[
     "observed",
+    "partial",
     "unavailable_missing_binary",
     "unavailable_timeout",
     "unavailable_nonzero_exit",
@@ -7151,10 +7152,13 @@ SERVICE_INVENTORY_MAX_AGE_SECONDS = 300
 class ServiceInventoryObservation(NamedTuple):
     """One active-WhatSoup-service inventory read and how far it can be trusted.
 
-    `names` is populated ONLY for an observed read, so a caller that iterates
-    it can never act on an inventory that was not seen. The counts are carried
-    separately from the names because a collapsing set cannot report that a
-    record was unreadable or repeated.
+    `names` carries every positively observed service and is empty whenever
+    nothing usable was read, so a caller that iterates it can never act on an
+    inventory that was not seen. A `partial` read keeps its names: they were
+    observed, and hiding them would let one unreadable record conceal every
+    rogue service. It still cannot PROVE coverage, which is why the counts are
+    carried separately -- a collapsing set cannot report that a record was
+    unreadable or repeated.
     """
 
     status: ServiceInventoryStatus
@@ -7196,6 +7200,25 @@ class ServiceInventoryObservation(NamedTuple):
         )
 
 
+# The discriminating tokens each backend's records are recognised by. A record
+# cut inside one of these keeps its field count and stops matching, so only a
+# token-level comparison can tell truncation from a job that is not ours.
+_LAUNCHCTL_LABEL_PREFIX = "com.whatsoup."
+_SYSTEMCTL_UNIT_PREFIX = "whatsoup@"
+_SYSTEMCTL_UNIT_SUFFIX = ".service"
+
+
+def _unterminated_record_count(stdout: str) -> int:
+    """1 when the stream stopped before its last record was terminated.
+
+    Every record a service manager writes ends in a newline, so output that
+    does not is output that was cut in transit. This catches the truncation a
+    per-record check cannot see: a final record severed inside an instance
+    name still parses, and would otherwise report a shorter inventory.
+    """
+    return 1 if stdout and not stdout.endswith("\n") else 0
+
+
 def _service_inventory_unavailable(
     status: ServiceInventoryStatus, backend: str
 ) -> ServiceInventoryObservation:
@@ -7214,20 +7237,28 @@ def _service_inventory_observed(
 ) -> ServiceInventoryObservation:
     """Classify a completed rc=0 read.
 
-    Fail closed on an unreadable or repeated record: a duplicate label cannot
-    occur on a healthy service manager, and a record this parser could not read
-    means the answer was not fully understood. Either way the parsed names are
-    withheld rather than reported as a shorter inventory.
+    A duplicate label cannot occur on a healthy service manager, and a record
+    this parser could not read means the answer was not fully understood, so
+    either one costs the read its `observed` status. It does not cost the read
+    the names it did parse: `partial` reports an incomplete inventory that
+    still cannot prove coverage, and `malformed` is reserved for a read that
+    yielded nothing usable at all.
     """
-    unusable = unreadable_lines or duplicate_labels
+    unusable = unreadable_lines + duplicate_labels
+    if not unusable:
+        status: ServiceInventoryStatus = "observed"
+    elif names:
+        status = "partial"
+    else:
+        status = "malformed"
     return ServiceInventoryObservation(
-        status="malformed" if unusable else "observed",
+        status=status,
         backend=backend,
         count=len(names),
         unreadable_lines=unreadable_lines,
         duplicate_labels=duplicate_labels,
         observed_at_monotonic=time.monotonic(),
-        names=frozenset() if unusable else frozenset(names),
+        names=frozenset(names),
     )
 
 
@@ -7251,7 +7282,7 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
     if proc.returncode != 0:
         return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
     names: set[str] = set()
-    unreadable_lines = 0
+    unreadable_lines = _unterminated_record_count(proc.stdout)
     duplicate_labels = 0
     for line in proc.stdout.splitlines():
         # A blank line carries no record, so it is not evidence of truncation.
@@ -7264,9 +7295,15 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
             unreadable_lines += 1
             continue
         pid, label = parts[0], parts[-1]
-        if pid == "-" or not label.startswith("com.whatsoup."):
+        if _LAUNCHCTL_LABEL_PREFIX.startswith(label):
+            # The field count is intact but the label stops inside our own
+            # prefix, so this record was cut mid-token rather than belonging
+            # to another job. A skip here would read as a shorter inventory.
+            unreadable_lines += 1
             continue
-        name = label.removeprefix("com.whatsoup.")
+        if pid == "-" or not label.startswith(_LAUNCHCTL_LABEL_PREFIX):
+            continue
+        name = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
         if name in names:
             duplicate_labels += 1
             continue
@@ -7292,7 +7329,7 @@ def _systemctl_service_observation() -> ServiceInventoryObservation:
     if proc.returncode != 0:
         return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
     names: set[str] = set()
-    unreadable_lines = 0
+    unreadable_lines = _unterminated_record_count(proc.stdout)
     duplicate_labels = 0
     for line in proc.stdout.splitlines():
         if not line.strip():
@@ -7303,9 +7340,21 @@ def _systemctl_service_observation() -> ServiceInventoryObservation:
             unreadable_lines += 1
             continue
         unit = parts[0]
-        if not (unit.startswith("whatsoup@") and unit.endswith(".service")):
+        if unit.startswith(_SYSTEMCTL_UNIT_PREFIX) and not unit.endswith(
+            _SYSTEMCTL_UNIT_SUFFIX
+        ):
+            # The query filters --type=service, so one of our units that does
+            # not end in .service was cut inside its own token.
+            unreadable_lines += 1
             continue
-        name = unit.removeprefix("whatsoup@").removesuffix(".service")
+        if not (
+            unit.startswith(_SYSTEMCTL_UNIT_PREFIX)
+            and unit.endswith(_SYSTEMCTL_UNIT_SUFFIX)
+        ):
+            continue
+        name = unit.removeprefix(_SYSTEMCTL_UNIT_PREFIX).removesuffix(
+            _SYSTEMCTL_UNIT_SUFFIX
+        )
         if name in names:
             duplicate_labels += 1
             continue
@@ -7337,17 +7386,6 @@ def active_whatsoup_service_observation() -> ServiceInventoryObservation:
     return _systemctl_service_observation()
 
 
-def active_whatsoup_service_names() -> set[str]:
-    """Lossy name-only view of active_whatsoup_service_observation() (#2486).
-
-    Returns an EMPTY set for every unobservable inventory, which is precisely
-    the collapse this issue is about: it cannot tell an absent service from an
-    unreadable service manager. A caller that must fail closed reads the
-    observation instead.
-    """
-    return set(active_whatsoup_service_observation().names)
-
-
 def unprofiled_service_inventory(
     root: Path,
     expected_names: set[str],
@@ -7355,19 +7393,28 @@ def unprofiled_service_inventory(
 ) -> list[str]:
     """Report active WhatSoup services that no health profile declares.
 
-    An inventory that was not observed, or is no longer current, yields one
-    typed FAIL line and NO per-service comparison: profile completeness must
-    not read an unreadable inventory as full coverage (#2486). `observation`
-    lets a caller pass a reading it already holds; nothing is persisted.
+    A reading that cannot prove coverage emits one typed FAIL line, so profile
+    completeness never reads an unreadable inventory as full coverage (#2486).
+    A `partial` reading emits that line AND still compares the names it did
+    observe: an incomplete read must not become a hiding place for a rogue
+    service. A reading that is no longer current is refused outright, because
+    a stale name proves nothing about what is running now.
+
+    `observation` lets a caller pass a reading it already holds. No production
+    caller does, so the freshness gate is reachable in production only through
+    the reading this function takes itself, which is always current; the gate
+    is what a future cached reading would have to pass. Nothing is persisted.
     """
     reading = active_whatsoup_service_observation() if observation is None else observation
-    if not reading.can_report_coverage():
-        return [
-            "FAIL profile_coverage_service_inventory: "
-            "inventory not usable for profile coverage "
-            + reading.evidence_fields()
-        ]
+    unusable_line = (
+        "FAIL profile_coverage_service_inventory: "
+        "inventory not usable for profile coverage " + reading.evidence_fields()
+    )
+    if not reading.is_fresh():
+        return [unusable_line]
     lines: list[str] = []
+    if not reading.can_report_coverage():
+        lines.append(unusable_line)
     for name in sorted(reading.names):
         if name in expected_names:
             continue
