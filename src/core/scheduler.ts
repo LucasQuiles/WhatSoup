@@ -184,21 +184,35 @@ const MARKER_ERROR_MAX_LENGTH = 200;
  * violates that — V8 embeds a prefix of the input, rendering an undecodable
  * payload as `Unexpected token 'H', "Hi Rachel,"... is not valid JSON`.
  *
- * Every quoted run goes, not only the double-quoted snippet: the single-quoted
- * token in that same message is itself a payload byte, and the exact phrasing is
- * a V8 implementation detail that moves between Node versions. Redacting by
- * quoting rather than by message shape survives that drift, at the cost of also
- * blanking grammar tokens in positional messages (`Expected ',' or '}' …`) — the
- * skeleton and the position, which is what an operator acts on, remain.
+ * Everything from the first quote to the last goes, and both quote styles go:
+ * the single-quoted token in that same message is itself a payload byte, and the
+ * exact phrasing is a V8 implementation detail that moves between Node versions.
+ * Redacting by quoting rather than by message shape survives that drift, at the
+ * cost of also blanking grammar tokens in positional messages
+ * (`Expected ',' or '}' …`) — the skeleton and the position, which is what an
+ * operator acts on, remain.
+ *
+ * The span is GREEDY, not quote-pair matched. A payload that contains a double
+ * quote makes V8 echo it whole — `{"x":}` renders as `Unexpected token '}',
+ * "{"x":}" is not valid JSON` — and pair matching there aligns the quotes wrongly
+ * and leaves the payload between two redacted pairs. Since the echo is the only
+ * quoted region these messages carry, spanning it whole is both safe and simpler
+ * than tracking nesting.
  *
  * An unterminated run redacts to end of string, so a malformed message cannot
- * leak its tail. Redaction runs BEFORE the length bound: truncating first could
- * sever a run and leave its opening fragment behind unmatched.
+ * leak its tail — but the CLOSED form is tried first, so a message that does
+ * close its quotes keeps everything after them (the position an operator reads).
+ * A single pattern ending in `("|$)` would not: greedy matching reaches the end
+ * of the string, where `$` succeeds without ever backtracking to the real
+ * closing quote, and the tail is swallowed.
+ *
+ * Redaction runs BEFORE the length bound: truncating first could sever the span
+ * and leave its opening fragment behind unmatched.
  */
 function redactErrorForMarker(error: string): string {
   const redacted = error
-    .replace(/"[^"]*("|$)/g, '"<redacted>"')
-    .replace(/'[^']*('|$)/g, "'<redacted>'");
+    .replace(/"[\s\S]*"|"[\s\S]*$/, '"<redacted>"')
+    .replace(/'[\s\S]*'|'[\s\S]*$/, "'<redacted>'");
   return redacted.length <= MARKER_ERROR_MAX_LENGTH
     ? redacted
     : `${redacted.slice(0, MARKER_ERROR_MAX_LENGTH)}…`;

@@ -566,6 +566,20 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     expect(retainedKeys()).toEqual([]);
   });
 
+  it('B1b: a payload that itself contains a double quote still reaches no durable byte', async () => {
+    // V8 echoes such a payload WHOLE rather than as a ten-character prefix:
+    // `{"x":}` renders as `Unexpected token '}', "{"x":}" is not valid JSON`.
+    // Pair-matching the quotes there aligns them wrongly and leaves the payload
+    // sitting between two redacted pairs, so the span must be greedy.
+    const id = insertPending(db.raw, `{"${PAYLOAD_SENTINEL}":}`);
+    const { conn } = makeConn();
+    rejectEnqueue();
+    await new MessageScheduler(db, conn, SCHEDULER_CONFIG).tick();
+
+    expect(rowOf(db, id).error ?? '').toContain(PAYLOAD_SENTINEL);
+    expect(terminalMarkers()[0]!.raw).not.toContain(PAYLOAD_SENTINEL);
+  });
+
   it('B2b: redaction blanks quoted runs by shape, not by matching a V8 phrasing', async () => {
     // The positional message quotes grammar tokens rather than payload bytes.
     // Blanking those too is the price of not depending on V8 wording, which is
