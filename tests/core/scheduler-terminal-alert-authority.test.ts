@@ -30,16 +30,40 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+
+// Scheduler-scoped logger capture: the marker branches are distinguished by
+// whether they SAY anything, so "discarded loudly" and "dropped silently" need
+// the log, not just the file. Other components fall through to a discarding
+// mock (same shape as health-probe-storm.test.ts).
+const schedulerLog = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
+
+vi.mock('../../src/logger.ts', async () => {
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('scheduler', () => loggerMock().createChildLogger());
+  Object.assign(schedulerLog, log);
+  return { createChildLogger };
+});
+
 import { Database } from '../../src/core/database.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
 import { confineAlertContent } from '../../src/lib/alert-evidence.ts';
 import { resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
 import { loadRecoveryMarkers, setRecoveryMarker } from '../../src/lib/recovery-authority-store.ts';
 import type { RuntimeConnection } from '../../src/transport/runtime-connection.ts';
+import { resetLoggerMock } from '../helpers/logger-mock.ts';
 
 const INSTANCE = 'personal';
 const MARKER_PREFIX = `scheduler_send_failed:${INSTANCE}:`;
@@ -49,6 +73,15 @@ const SCHEDULER_CONFIG = { intervalMs: 60_000, maxRetries: 3, instance: INSTANCE
 /** A body distinctive enough that its presence in a durable record is provable. */
 const SECRET_BODY = 'sentinel-body-must-not-be-persisted';
 const SECRET_JID = '15550100777@s.whatsapp.net';
+
+/**
+ * Payload bytes that DO reach the JSON.parse message, and therefore the row's
+ * error column. V8 quotes only the first ten characters of an input that is not
+ * JSON-shaped at all ("Unexpected token 'R', \"RACHEL-PAY\"... is not valid
+ * JSON"), so a longer sentinel would be truncated away and the assertion that
+ * the marker excludes it would pass for the wrong reason.
+ */
+const PAYLOAD_SENTINEL = 'RACHEL-PAY';
 
 interface MockConn {
   conn: RuntimeConnection;
@@ -197,6 +230,7 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     process.env['WHATSOUP_ALERT_SINK'] = sink;
     process.env['EMIT_ALERT_THROTTLE_MS'] = '0';
     resetEmitAlertThrottle();
+    resetLoggerMock(schedulerLog);
   });
 
   afterEach(() => {
@@ -228,21 +262,67 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
       .filter((e) => e['source'] === source && e['eventType'] === eventType);
   }
 
-  /** The durable records themselves, read as files rather than via the producer. */
-  function markerFiles(): Array<{ key: string; body: Record<string, unknown> }> {
-    const dir = join(markerDir, MARKER_DIR_NAME);
+  function markerDirPath(): string {
+    return join(markerDir, MARKER_DIR_NAME);
+  }
+
+  /** Resolve one key to its file through the store's own encoder, never a copy of it. */
+  function markerPathOf(key: string): string {
+    setRecoveryMarker(key);
+    const name = readdirSync(markerDirPath()).find((f) => decodeURIComponent(f.slice(0, -'.json'.length)) === key);
+    if (name === undefined) throw new Error(`no marker file materialised for ${key}`);
+    return join(markerDirPath(), name);
+  }
+
+  /** Replace one marker's bytes with arbitrary content (corrupt-marker fixtures). */
+  function writeRawMarker(key: string, bytes: string): void {
+    writeFileSync(markerPathOf(key), bytes);
+  }
+
+  /** Remove one marker behind the scheduler's back, as another process would. */
+  function removeRawMarker(key: string): void {
+    unlinkSync(markerPathOf(key));
+  }
+
+  /** Scheduler warn-event names seen so far, for the loud-versus-silent branches. */
+  function warnEvents(): string[] {
+    return schedulerLog['warn']!.mock.calls.map((call) => {
+      const first = call[0] as Record<string, unknown> | undefined;
+      return typeof first?.['event'] === 'string' ? (first['event'] as string) : '';
+    });
+  }
+
+  /**
+   * The durable records themselves, read as files rather than via the producer.
+   *
+   * `body` is null for bytes that are not parseable JSON — a corrupt record is a
+   * fixture here, so the reader must survive it and let the assertion speak.
+   */
+  function markerFiles(): Array<{ key: string; body: Record<string, unknown> | null; raw: string }> {
+    const dir = markerDirPath();
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
       .filter((name) => name.endsWith('.json'))
-      .map((name) => ({
-        key: decodeURIComponent(name.slice(0, -'.json'.length)),
-        body: JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<string, unknown>,
-      }));
+      .map((name) => {
+        const raw = readFileSync(join(dir, name), 'utf8');
+        let body: Record<string, unknown> | null = null;
+        try {
+          body = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          body = null;
+        }
+        return { key: decodeURIComponent(name.slice(0, -'.json'.length)), raw, body };
+      });
   }
 
   /** Marker keys as the producer's own restart scan sees them. */
   function retainedKeys(): string[] {
     return [...loadRecoveryMarkers()].filter((key) => key.startsWith(MARKER_PREFIX)).sort();
+  }
+
+  /** Only this leaf's records, with their bytes. */
+  function terminalMarkers(): Array<{ key: string; body: Record<string, unknown> | null; raw: string }> {
+    return markerFiles().filter((m) => m.key.startsWith(MARKER_PREFIX));
   }
 
   /** Drive a decodable row to retry exhaustion (maxRetries = 3). */
@@ -304,13 +384,18 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     // The row is gone from the due set, so the drain cannot ride on the row loop.
     expect(dueRowCount(db)).toBe(0);
 
+    // Captured before the drain clears it: the record is what the retried alert
+    // must be built from, so the expectation comes from disk rather than from a
+    // second copy of the producer's logic. The error it holds is redacted (B1);
+    // everything else is the baseline text.
+    const storedError = String(terminalMarkers()[0]!.body?.['error']);
+
     acceptEnqueue();
     await scheduler.tick();
 
     const alerts = alertsOf('scheduler_send_failed');
     expect(alerts.length).toBe(1);
-    // The retained alert is the SAME alert, not a reconstruction that resembles it.
-    expectAlertText(alerts[0], baselineUndecodableAlert(id, rowOf(db, id).error ?? '', false));
+    expectAlertText(alerts[0], baselineUndecodableAlert(id, storedError, false));
     expect(retainedKeys()).toEqual([]);
 
     // Discharged, not merely delayed: further ticks add nothing.
@@ -421,11 +506,11 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     const retained = markerFiles().filter((m) => m.key.startsWith(MARKER_PREFIX));
     expect(retained.length).toBe(1);
     const record = retained[0]!;
-    expect(record.body['scheduledId']).toBe(id);
+    expect(record.body?.['scheduledId']).toBe(id);
 
     // `source` and `setAt` are the marker store's own envelope fields; the rest
     // is exactly what re-rendering the alert needs.
-    expect(Object.keys(record.body).sort()).toEqual(
+    expect(Object.keys(record.body ?? {}).sort()).toEqual(
       ['attempts', 'error', 'kind', 'scheduledId', 'setAt', 'source'].sort(),
     );
 
@@ -435,6 +520,166 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     const serialized = JSON.stringify(record.body);
     expect(serialized).not.toContain(SECRET_JID);
     expect(serialized).not.toContain(SECRET_BODY);
+  });
+
+  it('B1: an undecodable payload puts no payload bytes in the durable record or in the retried alert', async () => {
+    const id = insertPending(db.raw, `${PAYLOAD_SENTINEL} roll advance 4200 lands Friday`);
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await scheduler.tick();
+
+    // Positive control. Without it the two negative assertions below would pass
+    // on a fixture whose error simply never carried payload bytes — which is
+    // exactly how the first clause-5 control (A8) missed this path.
+    expect(rowOf(db, id).error ?? '').toContain(PAYLOAD_SENTINEL);
+
+    const retained = terminalMarkers();
+    expect(retained.length).toBe(1);
+    expect(retained[0]!.raw).not.toContain(PAYLOAD_SENTINEL);
+    const storedError = String(retained[0]!.body?.['error']);
+    expect(storedError).toContain('<redacted>');
+
+    // The retried alert is rendered from the record, so it inherits the
+    // redaction. Built from the bytes on disk, not from a copy of the redactor.
+    acceptEnqueue();
+    await scheduler.tick();
+    const alerts = alertsOf('scheduler_send_failed');
+    expect(alerts.length).toBe(1);
+    expectAlertText(alerts[0], baselineUndecodableAlert(id, storedError, false));
+  });
+
+  it('B2 (control): an accepted first-attempt alert still carries the raw error, unchanged from base', async () => {
+    const id = insertPending(db.raw, `${PAYLOAD_SENTINEL} roll advance 4200 lands Friday`);
+    const { conn } = makeConn();
+
+    // Sink healthy: no record is written, so nothing is redacted and the
+    // operator sees exactly what the baseline emitted.
+    await new MessageScheduler(db, conn, SCHEDULER_CONFIG).tick();
+
+    const alerts = alertsOf('scheduler_send_failed');
+    expect(alerts.length).toBe(1);
+    const rawError = rowOf(db, id).error ?? '';
+    expect(rawError).toContain(PAYLOAD_SENTINEL);
+    expectAlertText(alerts[0], baselineUndecodableAlert(id, rawError, false));
+    expect(retainedKeys()).toEqual([]);
+  });
+
+  it('B2b: redaction blanks quoted runs by shape, not by matching a V8 phrasing', async () => {
+    // The positional message quotes grammar tokens rather than payload bytes.
+    // Blanking those too is the price of not depending on V8 wording, which is
+    // not a stable contract across Node versions — so pin the price.
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    rejectEnqueue();
+    await new MessageScheduler(db, conn, SCHEDULER_CONFIG).tick();
+
+    const rawError = rowOf(db, id).error ?? '';
+    expect(rawError).toContain("'}'");
+    const storedError = String(terminalMarkers()[0]!.body?.['error']);
+    expect(storedError).not.toContain("'}'");
+    expect(storedError).toContain("'<redacted>'");
+    // The skeleton an operator acts on survives.
+    expect(storedError).toContain('in JSON at position 1');
+  });
+
+  it('B2c (control): an unquoted transport error is stored byte-identical, so its retried alert is unchanged', async () => {
+    const id = insertSendable(db.raw);
+    const { conn } = makeConn(async () => {
+      throw new Error('WhatsApp is not connected');
+    });
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await exhaustRetries(scheduler);
+
+    // Redaction is scoped to quoted content: the retry-exhaustion path carries no
+    // payload bytes and must not pay for the undecodable path's problem.
+    expect(String(terminalMarkers()[0]!.body?.['error'])).toBe('WhatsApp is not connected');
+
+    acceptEnqueue();
+    await scheduler.tick();
+    const alerts = alertsOf('scheduler_send_failed');
+    expect(alerts.length).toBe(1);
+    expectAlertText(alerts[0], baselineExhaustionAlert(id, 'WhatsApp is not connected', 3));
+  });
+
+  it('B2d: a pathological error is bounded before it reaches the record', async () => {
+    insertSendable(db.raw);
+    const { conn } = makeConn(async () => {
+      throw new Error(`overflow ${'X'.repeat(5000)}`);
+    });
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await exhaustRetries(scheduler);
+
+    const storedError = String(terminalMarkers()[0]!.body?.['error']);
+    // The row keeps the whole thing; the durable record is a bounded field, not a log.
+    expect((rowOf(db, 1).error ?? '').length).toBeGreaterThan(1000);
+    expect(storedError.length).toBeLessThanOrEqual(201);
+  });
+
+  it('B3: a record whose bytes are unparseable is logged and discarded, not dropped silently', async () => {
+    writeRawMarker(`${MARKER_PREFIX}77`, '{"kind":"retry_exhausted","scheduledId":77,');
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    await scheduler.tick();
+
+    expect(alertsOf('scheduler_send_failed').length).toBe(0);
+    expect(terminalMarkers()).toEqual([]);
+    expect(warnEvents()).toContain('scheduler_terminal_alert_marker_unusable');
+  });
+
+  it('B4 (control): a record another process already discharged is dropped without a word', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await scheduler.tick();
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+
+    removeRawMarker(`${MARKER_PREFIX}${id}`);
+    resetLoggerMock(schedulerLog);
+    acceptEnqueue();
+    await scheduler.tick();
+
+    // Nothing to re-emit and nothing wrong: a missing record is the normal
+    // shape of "someone else discharged it", not a fault to report.
+    expect(alertsOf('scheduler_send_failed').length).toBe(0);
+    expect(warnEvents()).not.toContain('scheduler_terminal_alert_marker_unusable');
+  });
+
+  it('B5: a retained record survives a failed startup scan and is emitted on a later tick exactly once', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+
+    rejectEnqueue();
+    await new MessageScheduler(db, conn, SCHEDULER_CONFIG).tick();
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+
+    // Restart while the marker directory is unreadable. readMarkerDirectory
+    // returns an EMPTY set rather than throwing on a readdir failure, so a
+    // constructor-only seed cannot tell this from "nothing is owed" — and the
+    // rows are terminal, so no later event could ever re-seed it.
+    chmodSync(markerDirPath(), 0o000);
+    let restarted: MessageScheduler;
+    try {
+      restarted = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+
+    acceptEnqueue();
+    await restarted.tick();
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+    expect(retainedKeys()).toEqual([]);
+
+    await restarted.tick();
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
   });
 
   it('A10 (control): a retained record that cannot be re-rendered is discarded once, not retried forever', async () => {
@@ -478,3 +723,4 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     expect(retainedKeys()).toEqual([]);
   });
 });
+

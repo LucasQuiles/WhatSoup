@@ -298,7 +298,21 @@ export function loadRecoveryMarkers(): Set<string> {
 }
 
 /**
- * Read the payload stored with one marker, or null.
+ * Outcome of reading one marker's stored payload.
+ *
+ * The three failures are kept apart because they call for opposite handling:
+ * `missing` is the normal end of a marker's life, `invalid` means bytes were
+ * read and can never be interpreted, and `unreadable` means nothing is known
+ * about the bytes at all — so they must not be deleted.
+ */
+export type RecoveryMarkerRead =
+  | { state: 'missing' }
+  | { state: 'unreadable' }
+  | { state: 'invalid' }
+  | { state: 'ok'; payload: Record<string, unknown> };
+
+/**
+ * Read the payload stored with one marker, discriminating why a read failed.
  *
  * `loadRecoveryMarkers` answers "did this source have an alert" from filenames
  * alone, which is all a producer needs when it can rebuild its own state. A
@@ -306,21 +320,34 @@ export function loadRecoveryMarkers(): Set<string> {
  * speaks for is terminal and gone from every query, so the fields it needs live
  * only here (#2387).
  *
- * Missing, unreadable and not-an-object all read as null — a caller re-emitting
- * from this must never mistake a corrupt marker for an empty one. The legacy
- * aggregate plane holds no per-key payload (its values are `true`), so a key
- * that survives only there also reads null.
+ * Collapsing the failures into one null value is what let a caller treat corrupt
+ * bytes as "already discharged" and drop the obligation silently. The legacy
+ * aggregate plane holds no per-key payload (its values are `true`), so a key that
+ * survives only there reads `missing`.
+ *
+ * Total: an over-long key, a permission error and a deleted directory all land on
+ * a state rather than a throw, so a caller iterating markers cannot be aborted by
+ * one bad entry.
  */
-export function readRecoveryMarker(source: string): Record<string, unknown> | null {
+export function readRecoveryMarkerState(source: string): RecoveryMarkerRead {
+  let raw: string;
   try {
-    const raw: unknown = JSON.parse(fs.readFileSync(markerFilePath(source), 'utf-8'));
-    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-      return raw as Record<string, unknown>;
-    }
-    return null;
-  } catch {
-    return null;
+    raw = fs.readFileSync(markerFilePath(source), 'utf-8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'missing' }
+      : { state: 'unreadable' };
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { state: 'invalid' };
+  }
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? { state: 'ok', payload: parsed as Record<string, unknown> }
+    : { state: 'invalid' };
 }
 
 function mutationErrorCode(error: unknown): string {

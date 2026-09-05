@@ -11,7 +11,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts'
 import {
   clearRecoveryMarker,
   loadRecoveryMarkers,
-  readRecoveryMarker,
+  readRecoveryMarkerState,
   setRecoveryMarker,
 } from '../lib/recovery-authority-store.ts';
 
@@ -170,6 +170,41 @@ function terminalSendAlertText(
 }
 
 /**
+ * Length bound for the error string stored in a terminal-failure marker. Long
+ * enough for the message skeleton and a position, short enough that a pathological
+ * error cannot turn a marker into a log.
+ */
+const MARKER_ERROR_MAX_LENGTH = 200;
+
+/**
+ * Strip quoted content from an error string before it is written to a marker.
+ *
+ * Contract clause 5 (#2387): the durable record may carry only what re-rendering
+ * the alert needs, never payload bytes. `errorMessage()` of a `JSON.parse` throw
+ * violates that — V8 embeds a prefix of the input, rendering an undecodable
+ * payload as `Unexpected token 'H', "Hi Rachel,"... is not valid JSON`.
+ *
+ * Every quoted run goes, not only the double-quoted snippet: the single-quoted
+ * token in that same message is itself a payload byte, and the exact phrasing is
+ * a V8 implementation detail that moves between Node versions. Redacting by
+ * quoting rather than by message shape survives that drift, at the cost of also
+ * blanking grammar tokens in positional messages (`Expected ',' or '}' …`) — the
+ * skeleton and the position, which is what an operator acts on, remain.
+ *
+ * An unterminated run redacts to end of string, so a malformed message cannot
+ * leak its tail. Redaction runs BEFORE the length bound: truncating first could
+ * sever a run and leave its opening fragment behind unmatched.
+ */
+function redactErrorForMarker(error: string): string {
+  const redacted = error
+    .replace(/"[^"]*("|$)/g, '"<redacted>"')
+    .replace(/'[^']*('|$)/g, "'<redacted>'");
+  return redacted.length <= MARKER_ERROR_MAX_LENGTH
+    ? redacted
+    : `${redacted.slice(0, MARKER_ERROR_MAX_LENGTH)}…`;
+}
+
+/**
  * Rebuild a terminal-failure record from a marker payload, or null.
  *
  * Validated rather than cast: the marker is durable state that can outlive the
@@ -211,10 +246,12 @@ export class MessageScheduler {
   private deLinkAlertEmitted = false;
 
   /**
-   * #2387: marker keys for terminal scheduled-send failures whose operator
-   * alert was REJECTED at enqueue and is therefore still owed. Seeded from the
-   * durable store at construction, so the obligation is inherited across a
-   * restart rather than dying with the process that incurred it.
+   * #2387: marker keys written by THIS process whose operator alert is still
+   * owed. A fast path and a fallback, never the source of truth — the drain
+   * re-derives the obligation from the marker directory on every tick, because
+   * a store read that fails once must not orphan an alert until the next
+   * restart. This set is what keeps a just-written marker discoverable while
+   * that directory read is failing.
    */
   private readonly pendingTerminalAlerts = new Set<string>();
 
@@ -237,15 +274,7 @@ export class MessageScheduler {
     // latch cannot (same restoration shape as ConnectionManager's markers).
     if (config.instance) {
       try {
-        const markers = loadRecoveryMarkers();
-        this.deLinkAlertEmitted = markers.has(this.deLinkMarkerKey());
-        // #2387: reclaim terminal alerts still owed. Their rows are already
-        // `failed` and can never be selected again, so nothing but this scan
-        // would ever discharge them after a restart.
-        const prefix = this.terminalAlertMarkerPrefix();
-        for (const key of markers) {
-          if (key.startsWith(prefix)) this.pendingTerminalAlerts.add(key);
-        }
+        this.deLinkAlertEmitted = loadRecoveryMarkers().has(this.deLinkMarkerKey());
       } catch {
         // intentional: marker store unreadable — treat as no prior incident.
       }
@@ -698,7 +727,12 @@ export class MessageScheduler {
 
     const key = this.terminalAlertMarkerKey(failure.scheduledId);
     try {
-      setRecoveryMarker(key, { ...failure });
+      // The alert just emitted carried the raw error, exactly as at baseline.
+      // What goes to DISK is redacted: an undecodable payload puts its own first
+      // bytes into the JSON.parse message, and clause 5 forbids those in the
+      // record. A retry therefore re-emits the redacted form — the operator sees
+      // the same failure, minus a payload fragment.
+      setRecoveryMarker(key, { ...failure, error: redactErrorForMarker(failure.error) });
       this.pendingTerminalAlerts.add(key);
       log.warn(
         { event: 'scheduler_terminal_alert_retained', id: failure.scheduledId },
@@ -728,23 +762,40 @@ export class MessageScheduler {
    */
   private drainTerminalAlertAuthority(): void {
     const instance = this.config.instance;
-    if (!instance || this.pendingTerminalAlerts.size === 0) return;
+    if (!instance) return;
 
-    for (const key of [...this.pendingTerminalAlerts]) {
-      const stored = readRecoveryMarker(key);
-      const failure = stored === null ? null : parseTerminalSendFailure(stored);
-      if (failure === null) {
-        // Either the marker is gone (another process discharged it) or it cannot
-        // be re-rendered. Retrying it every tick forever would be a no-op loop,
-        // so drop it — and say so when bytes were actually there to interpret.
+    for (const key of this.retainedTerminalAlertKeys()) {
+      const stored = readRecoveryMarkerState(key);
+
+      if (stored.state === 'missing') {
+        // The end of a marker's normal life: the clear landed, or another
+        // process discharged it. Nothing owed and nothing wrong.
         this.pendingTerminalAlerts.delete(key);
-        if (stored !== null) {
-          log.warn(
-            { event: 'scheduler_terminal_alert_marker_unusable', key },
-            'scheduler: retained terminal send alert is not re-emittable; discarding the marker',
-          );
-          this.discardTerminalAlertMarker(key);
-        }
+        continue;
+      }
+
+      if (stored.state === 'unreadable') {
+        // Bytes exist that this process could not read. Never unlink what could
+        // not be interpreted — the same rule readLegacyMarkersStrict follows in
+        // the store — so the obligation stays on disk for a luckier reader.
+        this.pendingTerminalAlerts.delete(key);
+        log.warn(
+          { event: 'scheduler_terminal_alert_marker_unusable', key, reason: 'unreadable' },
+          'scheduler: retained terminal send alert could not be read; leaving the marker in place',
+        );
+        continue;
+      }
+
+      const failure = stored.state === 'ok' ? parseTerminalSendFailure(stored.payload) : null;
+      if (failure === null) {
+        // Bytes were read and can never render an alert. Discarding is safe here
+        // precisely because they were seen.
+        this.pendingTerminalAlerts.delete(key);
+        log.warn(
+          { event: 'scheduler_terminal_alert_marker_unusable', key, reason: stored.state === 'ok' ? 'unparseable' : 'invalid' },
+          'scheduler: retained terminal send alert is not re-emittable; discarding the marker',
+        );
+        this.discardTerminalAlertMarker(key);
         continue;
       }
 
@@ -759,6 +810,31 @@ export class MessageScheduler {
         'scheduler: retained terminal send alert delivered',
       );
     }
+  }
+
+  /**
+   * Terminal-alert keys still owed, re-derived from the marker directory and
+   * unioned with what this process wrote.
+   *
+   * Disk is the source of truth on every tick, not just at construction. The
+   * directory scan returns an EMPTY set rather than throwing when it fails, so a
+   * seed taken once could not distinguish a failed read from "nothing owed" — and
+   * these rows are terminal, so no later event could ever re-seed it. Re-deriving
+   * costs one readdir of a directory holding one entry per active alert, and it
+   * makes the drain a function of durable state rather than of process history.
+   */
+  private retainedTerminalAlertKeys(): string[] {
+    const prefix = this.terminalAlertMarkerPrefix();
+    const keys = new Set(this.pendingTerminalAlerts);
+    try {
+      for (const key of loadRecoveryMarkers()) {
+        if (key.startsWith(prefix)) keys.add(key);
+      }
+    } catch {
+      // intentional: an unreadable store leaves this process's own writes as the
+      // only view; the next tick re-derives from disk again.
+    }
+    return [...keys];
   }
 
   private discardTerminalAlertMarker(key: string): void {
