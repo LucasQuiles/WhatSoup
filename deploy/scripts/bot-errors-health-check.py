@@ -1369,11 +1369,17 @@ def _resolved_receipt_parent(path: Path) -> Path:
     """Resolve the receipt's parent exactly as the reader resolves its root.
 
     _durable_target() builds the reader's target with
-    ``path.parent.resolve(strict=True)``, so a symlinked state root, or a
-    symlinked ancestor such as a linked home directory, is transparent to the
-    reader: it publishes through the link. The repair must resolve identically
-    or it would refuse on hosts the reader is happy with, and the repair would
-    then be permanently inert exactly where a legacy receipt still needs it.
+    ``path.parent.resolve(strict=True)``, so a symlinked ancestor above the
+    state root, such as a linked home directory, is transparent to the reader:
+    it publishes through the link. The repair must resolve identically or it
+    would refuse on hosts the reader is happy with, and the repair would then
+    be permanently inert exactly where a legacy receipt still needs it.
+
+    The state directory ITSELF being a symlink is a different case. This
+    resolution accepts it and the leaf is repaired, but publication does not
+    get that far: record_daily_health_receipt() calls ensure_private_dir(),
+    which refuses a symlinked private directory outright. Such a host is
+    repaired and still fails to publish.
 
     Keep this expression in lockstep with _durable_target above. It is written
     out rather than reusing that function because _durable_target() also calls
@@ -1400,7 +1406,13 @@ def _open_receipt_parent(resolved_parent: Path) -> int:
     The caller owns the returned descriptor and must close it.
     """
     anchor = resolved_parent
-    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        # Descriptor exhaustion (EMFILE/ENFILE) reaches even this open. The
+        # caller handles _ReceiptParentUnusable only, so an escaping OSError
+        # would abort the cycle instead of refusing the repair.
+        raise _ReceiptParentUnusable(LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE) from exc
     try:
         for component in anchor.parts[1:]:
             try:
@@ -8733,13 +8745,15 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationR
     repair = repair_legacy_private_receipt_mode(receipt_path)
     if repair.refusal is not None:
         # The writable-parent refusal is not durable and the log line must not
-        # imply that it is: ensure_private_dir() below narrows the root, so the
-        # next cycle sees 0700 and proceeds.
+        # imply that it is: ensure_private_dir() below ATTEMPTS to narrow the
+        # root. It suppresses its own chmod errors, so the narrowing is not
+        # guaranteed and the next cycle re-checks the mode either way.
         deferral = (
-            " (holds for this cycle only: ensure_private_dir narrows the state"
-            " root to 0700 after this refusal, so the next cycle repairs the"
-            " leaf if it passes the owner, regular-file, single-link and"
-            " non-symlinked-parent guards)"
+            " (holds for this cycle only: ensure_private_dir then attempts to"
+            " narrow the state root to 0700, suppressing any failure, so the"
+            " next cycle re-checks the root mode and repairs the leaf only if"
+            " the narrowing took effect and the leaf passes the owner,"
+            " regular-file, single-link and non-symlinked-parent guards)"
             if repair.refusal == LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE
             else ""
         )

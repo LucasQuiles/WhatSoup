@@ -13,6 +13,7 @@ test_bot_errors_health_check_deadman_levels.py.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -460,6 +461,60 @@ def test_repair_matches_the_reader_through_a_symlinked_ancestor(tmp_path, monkey
     assert successor["eventId"] == event_path.stem
     assert successor[_mod.LEGACY_RECEIPT_MODE_EVIDENCE_FIELD] == "0644"
     assert _mode_of(real_receipt) == _EXPECTED_SUCCESSOR_MODE
+
+
+def test_state_root_symlink_is_rejected_before_publication(tmp_path, monkeypatch):
+    """Documents the actual end-to-end behaviour of a symlinked state root.
+
+    The repair helper resolves the parent and so repairs the leaf behind the
+    link, but ensure_private_dir() then refuses the symlinked state directory
+    and the cycle raises before publishing. This pins that split rather than
+    changing it: repaired, not published.
+    """
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    linked_root = tmp_path / "linked-state"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(linked_root))
+    event_path = _new_event(linked_root)
+
+    with pytest.raises(RuntimeError, match="private directory through symlink"):
+        _mod.record_daily_health_receipt(event_path, "info")
+
+    assert _mode_of(receipt_path) == _EXPECTED_SUCCESSOR_MODE, "the leaf is repaired"
+    assert receipt_path.read_bytes() == raw, "but the legacy payload is still the predecessor"
+
+
+def test_root_open_failure_refuses_instead_of_raising(tmp_path, monkeypatch):
+    """Descriptor exhaustion on the "/" open must refuse, not abort the cycle.
+
+    The caller handles only _ReceiptParentUnusable, so an OSError escaping the
+    first open of the walk would propagate out of the repair and take the daily
+    cycle with it.
+    """
+    receipt_path, raw = _write_legacy_receipt(tmp_path)
+    real_open = os.open
+
+    def refuse_root_open(path, *args, **kwargs):
+        if path == "/":
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, *args, **kwargs)
+
+    # os.supports_dir_fd holds the ORIGINAL os.open, and the repair checks
+    # membership in it before walking. Patching the module attribute alone
+    # would fail that identity check and refuse with unsupported_capability,
+    # never reaching the open under test, so the set is patched to match.
+    monkeypatch.setattr(os, "open", refuse_root_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {refuse_root_open})
+
+    outcome = _mod.repair_legacy_private_receipt_mode(receipt_path)
+
+    monkeypatch.undo()
+    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+    assert outcome.previous_mode is None
+    assert receipt_path.read_bytes() == raw
+    assert _mode_of(receipt_path) == 0o644, "a refused repair must not chmod"
 
 
 def test_parent_walk_refuses_a_symlinked_component(tmp_path):

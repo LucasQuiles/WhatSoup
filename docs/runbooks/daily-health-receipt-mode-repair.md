@@ -66,7 +66,7 @@ that was checked and the inode that is modified cannot differ.
 | Leaf has exactly one hard link | `multiple_links` |
 | Resolved parent path is still symlink-free when re-walked | `parent_symlink` |
 | Parent is not group- or world-writable | `parent_writable` |
-| Parent is openable as a directory | `parent_unreadable` |
+| Parent is openable as a directory, and descriptors are available | `parent_unreadable` |
 | `O_NOFOLLOW` is available on this platform | `unsupported_capability` |
 | Leaf could not be opened or chmod'ed | `unopenable` |
 
@@ -77,12 +77,24 @@ by path, so the walk cannot be re-run against a component that changed
 underneath it.
 
 The resolution step is parity with the reader, and it is load-bearing.
-`_durable_target` resolves the receipt's parent, so a symlinked state root, or
-a symlinked ancestor such as a linked home directory, is transparent to the
+`_durable_target` resolves the receipt's parent, so a symlinked ancestor
+*above* the state root, such as a linked home directory, is transparent to the
 reader and it publishes through the link. If the repair refused there it would
 be permanently inert on exactly the hosts whose legacy receipt still needs
-repairing. So: a symlinked ancestor at or above the state root is transparent
-to both; a symlinked receipt file still refuses `symlink`.
+repairing.
+
+The state directory **itself** being a symlink is a different case, and the two
+should not be confused. The repair resolves the link and repairs the leaf, but
+the cycle then calls `ensure_private_dir()`, which refuses a symlinked private
+directory outright and raises. Such a host is repaired and still does not
+publish. Fixing that means replacing the symlinked state directory with a real
+one, not changing the repair.
+
+| Layout | Repair | Publication |
+| ------ | ------ | ----------- |
+| Symlinked ancestor above the state root | repairs | publishes |
+| State directory itself a symlink | repairs | refuses, raises |
+| Receipt file itself a symlink | refuses `symlink` | not reached |
 
 Because resolution has already removed every symlink, `parent_symlink` fires
 only if a component is replaced by a symlink between the resolution and the
@@ -96,10 +108,14 @@ sanitized value — erasing the very signal that the leaf may have been planted.
 
 ### The writable-parent refusal holds for one cycle, not permanently
 
-`ensure_private_dir()` narrows the state root immediately after the refusal, so
-the *next* cycle sees a `0700` root and repairs the leaf if it passes the owner,
-regular-file, single-link and non-symlinked-parent guards. The refusal buys one
-cycle and a log line; it is not a durable quarantine, and the log line says so.
+`ensure_private_dir()` *attempts* to narrow the state root immediately after the
+refusal. It suppresses its own `chmod` errors, so the narrowing is not
+guaranteed: on a root the process cannot chmod, the refusal simply repeats every
+cycle. Where the narrowing does take effect, the next cycle sees a `0700` root
+and repairs the leaf if it passes the owner, regular-file, single-link and
+non-symlinked-parent guards. Either way the next cycle re-checks the mode rather
+than assuming it changed. The refusal buys one cycle and a log line; it is not a
+durable quarantine, and the log line says so.
 
 This is deliberate. Making it durable would require persisting the refusal,
 which means another state file on the very path this repair exists to unblock.
