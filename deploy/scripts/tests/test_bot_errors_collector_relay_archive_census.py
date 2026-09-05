@@ -402,7 +402,8 @@ def test_census_counts_entries_it_could_not_stat_as_unusable_not_absent(collecto
     # incomplete, and says by how much.
     assert block["status"] == "partial"
     assert block["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
-    assert block["artifactCount"] == 0
+    # Nothing here was measured, so the block reports no count at all.
+    assert block["artifactCount"] is None
     # The gap has to survive aggregation too. A consumer that reads only
     # `total` would otherwise see a silently lower sum with no quantified
     # gap -- exactly what this test exists to remove.
@@ -446,8 +447,8 @@ def test_census_total_sums_a_partial_directory_beside_a_complete_one(collector, 
     blocked = report["archives"]["relayed"]
     assert blocked["status"] == "partial"
     assert blocked["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
-    assert blocked["artifactCount"] == 0
-    assert blocked["sourceKindCardinality"] == 0
+    assert blocked["artifactCount"] is None
+    assert blocked["sourceKindCardinality"] is None
 
     readable = report["archives"]["writefailRelayed"]
     assert readable["status"] == "ok"
@@ -468,18 +469,26 @@ def test_census_total_sums_a_partial_directory_beside_a_complete_one(collector, 
     assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
 
 
-def test_census_counts_an_unreadable_file_as_present_and_unparseable(collector, tmp_path):
-    """Positive control for the counter above: an entry the census can STAT
-    but cannot OPEN keeps the classification it has today.
+def test_census_never_measures_an_entry_it_could_not_open(collector, tmp_path):
+    """Size and age come off the descriptor that was read, or they do not
+    come at all.
 
-    Mode-000 FILE inside a normal directory: its bytes and its age ARE known,
-    only its content is not, so it stays a counted artifact plus a parse
-    failure and must NOT be reclassified as unusable. If this test moves when
-    the one above goes green, the new counter has swallowed a case it should
-    not own."""
+    An entry that stats but does not open (mode 000) used to be counted as an
+    artifact carrying the size and mtime of the PRE-OPEN stat -- a path-
+    resolved measurement, which is exactly what the descriptor pinning exists
+    to remove, and which the entry could have stopped matching between the
+    two calls. It is now reported as an entry the census could not look at,
+    contributing no size, no age and no artifact count. `parseFailureCount`
+    is not the bucket: that counts artifacts that were READ and did not
+    parse, and this one was never read.
+
+    Control in the same fixture: a normal entry beside it is still measured,
+    so the rule is "not opened, not measured" and not "nothing is measured".
+    """
     root = tmp_path / "bot-errors"
     relayed = root / "relayed"
-    path = _write_artifact(relayed, "unreadable.json.1.relayed", _event(), age_seconds=_HOUR)
+    path = _write_artifact(relayed, "unreadable.json.1.relayed", _event(), age_seconds=_DAY)
+    _write_artifact(relayed, "readable.json.2.relayed", _event(), age_seconds=_HOUR)
     (root / "writefail-relayed").mkdir(parents=True)
     os.chmod(path, 0o000)
     try:
@@ -488,10 +497,92 @@ def test_census_counts_an_unreadable_file_as_present_and_unparseable(collector, 
         os.chmod(path, 0o644)
 
     block = report["archives"]["relayed"]
-    assert block["status"] == "ok"
+    assert block["status"] == "partial"
+    assert block["unusableEntryCount"] == 1
+    assert block["parseFailureCount"] == 0
+    # Only the readable entry is measured: one artifact, and the 1-day age of
+    # the unopened one never reaches the payload.
     assert block["artifactCount"] == 1
-    assert block["parseFailureCount"] == 1
     assert block["oldestAgeSeconds"] == _HOUR
+    assert block["newestAgeSeconds"] == _HOUR
+    assert block["totalBytes"] == os.path.getsize(relayed / "readable.json.2.relayed")
+
+
+def test_census_reports_null_aggregates_when_no_entry_could_be_measured(collector, tmp_path):
+    """A directory can list and stat perfectly and still measure nothing.
+
+    Every entry failing at the open leaves `artifactCount` at zero beside a
+    non-zero unusable count -- a zero that means "I could not look", which is
+    the conflation this census refuses everywhere else. Such a directory
+    reports null aggregates and contributes none, so the total is null too
+    rather than a sum over two directories that measured nothing."""
+    root = tmp_path / "bot-errors"
+    paths = []
+    for directory, name in ((root / "relayed", "a.json.1.relayed"), (root / "writefail-relayed", "d.json.1.relayed")):
+        paths.append(_write_artifact(directory, name, _event(), age_seconds=_HOUR))
+    for path in paths:
+        os.chmod(path, 0o000)
+    try:
+        report = _census(collector, root)
+    finally:
+        for path in paths:
+            os.chmod(path, 0o644)
+
+    for label in ("relayed", "writefailRelayed"):
+        block = report["archives"][label]
+        assert block["status"] == "partial"
+        assert block["unusableEntryCount"] == 1
+        assert block["artifactCount"] is None
+        assert block["totalBytes"] is None
+        assert block["oldestAgeSeconds"] is None
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["unusableEntryCount"] == 2
+
+
+def test_census_classifies_a_vanished_entry_the_same_in_both_windows(
+    collector, tmp_path, monkeypatch
+):
+    """An entry can disappear before the stat or between the stat and the
+    open, and both are the same event: the archive moved on under a census
+    that is not holding a lock. Neither is a measurement the census failed to
+    take, so both are reported as vanished rather than as unusable, and a
+    consumer can tell a busy archive from a broken one."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.gone-before-stat.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, "b.gone-after-stat.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, "c.stays.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    real_lstat = os.lstat
+    windows: list[str] = []
+
+    def vanishing_lstat(path, *args, **kwargs):
+        if path == "a.gone-before-stat.relayed":
+            windows.append("before-stat")
+            raise OSError(errno.ENOENT, "vanished before the stat")
+        info = real_lstat(path, *args, **kwargs)
+        if path == "b.gone-after-stat.relayed":
+            windows.append("after-stat")
+            os.unlink(relayed / "b.gone-after-stat.relayed")
+        return info
+
+    monkeypatch.setattr(os, "lstat", vanishing_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert sorted(windows) == ["after-stat", "before-stat"], windows
+
+    block = report["archives"]["relayed"]
+    # One rule for both windows: neither counts as unusable.
+    assert block["vanishedEntryCount"] == 2
+    assert block["unusableEntryCount"] == 0
+    assert block["artifactCount"] == 1
+    assert report["total"]["vanishedEntryCount"] == 2
 
 
 def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector, tmp_path):

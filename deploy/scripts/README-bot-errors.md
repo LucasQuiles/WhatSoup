@@ -305,10 +305,11 @@ terminal relay archive a remote host is holding, without reading any of it
 aloud. It scans exactly the two archive directories the collector's own
 remote scripts write under the given root — `relayed/` and
 `writefail-relayed/` — and reports each of them, plus a combined total, as
-seven aggregates: artifact count, total bytes, oldest and newest artifact age
+eight aggregates: artifact count, total bytes, oldest and newest artifact age
 in seconds, the number of artifacts that no longer parse as a JSON event
-record, the number of listed entries the census could not stat, and the
-number of distinct producer source kinds (a cardinality, not the values).
+record, the number of listed entries the census could not look at, the number
+that were already gone, and the number of distinct producer source kinds (a
+cardinality, not the values).
 Nothing else under the root is scanned, so archive volume is
 never conflated with live `outbox/` backlog. No symlink is ever followed, at
 either level: an archive directory that is itself a symlink is refused with
@@ -320,17 +321,19 @@ directory are both skipped.
 the census could not list reports status `unavailable` with an errno class of
 `permission`, `missing` or `other`, and every one of its aggregates is null
 rather than zero — "nothing to retain" and "I cannot see what is there" drive
-opposite operator decisions. An entry the census could not stat, or that was
-swapped between the stat and the open, is reported in `unusableEntryCount`
-and makes its directory `partial` rather than `ok` with a lower count, and
-the archive directory is opened once with `O_DIRECTORY|O_NOFOLLOW` so every
-listing, stat and read is addressed to that descriptor rather than to a name
-that could be repointed between the check and the use. Whenever any
-directory is not `ok`, the combined total carries status `partial` and sums
-only the directories that produced numbers, so an incomplete answer cannot
-be mistaken for a complete one; when no directory reached an entry, the
-total's aggregates are null rather than zero, beside the count of what could
-not be looked at.
+opposite operator decisions. An entry the census could not look at is
+reported in `unusableEntryCount` and an entry that was already gone in
+`vanishedEntryCount`; neither contributes a count, a size or an age, because
+every aggregate comes from an entry that was opened and measured through the
+descriptor, so a directory that measured nothing reports null aggregates and
+`partial` rather than a zero. The archive directory is opened once with
+`O_DIRECTORY|O_NOFOLLOW` so every listing, stat and read is addressed to that
+descriptor rather than to a name that could be repointed between the check
+and the use. Whenever any directory is not `ok`, the combined total carries
+status `partial` and sums only the directories that measured at least one
+entry, so an incomplete answer cannot be mistaken for a complete one; when
+none did, the total's aggregates are null rather than zero, beside the counts
+of what could not be looked at and what was gone.
 The output carries no host, account, instance, user, message text, path,
 errno message or identifier, and the failure path is deliberately quiet for
 the same reason — a census whose traceback prints the remote root would

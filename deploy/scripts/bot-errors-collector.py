@@ -3021,13 +3021,12 @@ DIR_OPEN_FLAGS = os.O_RDONLY | O_DIRECTORY_FLAG | O_NOFOLLOW_FLAG | O_CLOEXEC_FL
 # planted in the archive from parking the census forever.
 ENTRY_OPEN_FLAGS = os.O_RDONLY | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG | O_NONBLOCK_FLAG
 READ_CHUNK_BYTES = 65536
-# An entry that was stat-ed and is then GONE at the open -- renamed away
-# (ENOENT) or now a symlink (ELOOP) -- was swapped mid-flight. The lstat
-# numbers describe an object that is no longer there, so it is reported as
-# something the census could not look at rather than counted from stale data.
-# Any other open failure (mode 000, say) leaves the same object in place with
-# only its content out of reach, which is a parse failure.
-SWAPPED_ENTRY_ERRNOS = (errno.ENOENT, errno.ELOOP)
+# An entry that is simply GONE -- before the stat or between the stat and the
+# open, the same ENOENT either way -- is not a measurement the census failed
+# to take. The archive moved on under a census that holds no lock, so it is
+# reported separately from the entries the census could not look at, and a
+# consumer can tell a busy archive from a broken one.
+VANISHED_ENTRY_ERRNOS = (errno.ENOENT,)
 
 
 def errno_class(exc):
@@ -3052,6 +3051,7 @@ def blank_report(status, errno_name=None):
         "newestAgeSeconds": None,
         "parseFailureCount": None,
         "unusableEntryCount": None,
+        "vanishedEntryCount": None,
         "sourceKindCardinality": None,
     }
 
@@ -3102,11 +3102,11 @@ def census(directory):
         # Without both flags the name can be neither pinned nor refused, and
         # a census that cannot keep that promise must not count through an
         # unpinned name as though it could.
-        return blank_report("unavailable", "other"), set(), 0
+        return blank_report("unavailable", "other"), set()
     try:
         fd = os.open(directory, DIR_OPEN_FLAGS)
     except OSError as exc:
-        return refusal_report(directory, exc), set(), 0
+        return refusal_report(directory, exc), set()
     try:
         return census_descriptor(fd)
     finally:
@@ -3114,30 +3114,32 @@ def census(directory):
 
 
 def census_descriptor(fd):
-    # Returns (report, source_kinds, reached) where `reached` counts the
-    # entries the census actually got a stat for. A directory that listed but
-    # reached nothing produced no number, only a refusal, and the total below
-    # has to know the difference.
+    # One rule for every entry: it is MEASURED only if it was opened and
+    # stat-ed through the descriptor. An entry that vanished is counted as
+    # vanished, an entry that could not be looked at is counted as unusable,
+    # and neither contributes a size, an age or an artifact count -- a number
+    # taken from a name the census did not go on to read is exactly the
+    # path-resolved measurement the descriptor pinning exists to remove.
     count = 0
     total_bytes = 0
     oldest = None
     newest = None
     parse_failures = 0
     unusable = 0
-    reached = 0
+    vanished = 0
     source_kinds = set()
     try:
         names = sorted(os.listdir(fd))
     except OSError as exc:
         # Unreadable is NOT empty.
-        return blank_report("unavailable", errno_class(exc)), set(), 0
+        return blank_report("unavailable", errno_class(exc)), set()
     for name in names:
         try:
             info = os.lstat(name, dir_fd=fd)
         except OSError as exc:
-            if getattr(exc, "errno", None) == errno.ENOENT:
-                # Vanished between listing and stat -- it is not in the
-                # archive now, so there is nothing the census failed to see.
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone before the stat.
+                vanished += 1
                 continue
             # Every OTHER entry-level failure is information the census did
             # not get: a directory that lists but does not permit stat (mode
@@ -3146,7 +3148,6 @@ def census_descriptor(fd):
             # block below say it is incomplete.
             unusable += 1
             continue
-        reached += 1
         # lstat + S_ISREG, so a symlink is never followed out of the archive
         # and a nested directory is never descended into.
         if not S_ISREG(info.st_mode):
@@ -3154,25 +3155,19 @@ def census_descriptor(fd):
         try:
             entry_fd = os.open(name, ENTRY_OPEN_FLAGS, dir_fd=fd)
         except OSError as exc:
-            if getattr(exc, "errno", None) in SWAPPED_ENTRY_ERRNOS:
-                # Swapped between the stat and the open: renamed away, or now
-                # a symlink that O_NOFOLLOW refuses to follow out of the
-                # archive. Reporting the stale lstat size and age would be a
-                # claim about an object that is gone, and dropping the entry
-                # silently would make a detected swap disappear from the
-                # report entirely.
-                unusable += 1
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone between the stat and the open. The SAME event as the
+                # branch above, so it gets the same answer: the window it
+                # fell through is an implementation detail, not something an
+                # operator should have to reason about.
+                vanished += 1
                 continue
-            # Stat-able but not openable (mode 000, say): its bytes and its
-            # age ARE known and only its content is not, so it stays a
-            # counted artifact plus a parse failure rather than becoming
-            # something the census could not see at all.
-            count += 1
-            total_bytes += info.st_size
-            age = int(round(now - info.st_mtime))
-            oldest = age if oldest is None else max(oldest, age)
-            newest = age if newest is None else min(newest, age)
-            parse_failures += 1
+            # Present but not openable -- mode 000, or now a symlink that
+            # O_NOFOLLOW refuses to follow out of the archive. It is NOT
+            # measured: the pre-open stat resolved a name the census never
+            # went on to read, and a size or an age taken from it is a claim
+            # about an object that may already have changed.
+            unusable += 1
             continue
         try:
             try:
@@ -3214,79 +3209,96 @@ def census_descriptor(fd):
         kind = record.get("source")
         if isinstance(kind, str) and kind:
             source_kinds.add(kind)
-    report = {
-        # A directory whose entries were not all readable is reported as
-        # partial, never as ok with a lower count.
-        "status": "partial" if unusable else "ok",
-        "errnoClass": None,
-        "artifactCount": count,
-        "totalBytes": total_bytes,
-        "oldestAgeSeconds": oldest,
-        "newestAgeSeconds": newest,
-        "parseFailureCount": parse_failures,
-        # How many entries were listed but could not be looked at. Zero here
-        # is a claim that the count above is complete.
-        "unusableEntryCount": unusable,
-        # Cardinality only -- how MANY distinct producers are represented,
-        # never which ones.
-        "sourceKindCardinality": len(source_kinds),
-    }
-    return report, source_kinds, reached
+    # A directory whose entries were not all readable is reported as partial,
+    # never as ok with a lower count.
+    status = "partial" if unusable else "ok"
+    if status == "partial" and not count:
+        # It listed, and possibly stat-ed, and measured NOTHING. A zero here
+        # would say "there is nothing there" about entries the census never
+        # managed to open, so the aggregates are null and the counts of what
+        # it could not look at carry the whole answer.
+        report = blank_report(status)
+    else:
+        report = {
+            "status": status,
+            "errnoClass": None,
+            "artifactCount": count,
+            "totalBytes": total_bytes,
+            "oldestAgeSeconds": oldest,
+            "newestAgeSeconds": newest,
+            "parseFailureCount": parse_failures,
+            # Cardinality only -- how MANY distinct producers are
+            # represented, never which ones.
+            "sourceKindCardinality": len(source_kinds),
+        }
+    # How many entries were listed but could not be looked at, and how many
+    # were gone. Zero in both is a claim that the aggregates are complete.
+    report["unusableEntryCount"] = unusable
+    report["vanishedEntryCount"] = vanished
+    if report["artifactCount"] is None:
+        # Nothing was measured, so no producer was seen either.
+        source_kinds = set()
+    return report, source_kinds
 
 
-def produced_numbers(report, reached):
-    # A directory contributes numbers when it completed (an empty `ok`
-    # directory really does hold nothing) or when it reached at least one
-    # entry. A directory that listed and then reached NOTHING -- mode 0444 --
-    # has a zero that means "I could not look", so it contributes no number
-    # even though its status is partial rather than unavailable.
-    return report["status"] == "ok" or reached > 0
+def produced_numbers(report):
+    # A directory contributes to the sums exactly when it produced a number
+    # of its own. Every block that measured nothing -- unavailable, refused,
+    # or listed-but-never-measured -- already reports a null count, so there
+    # is one test here and not a second vocabulary of statuses to keep in
+    # step with the first.
+    return report["artifactCount"] is not None
 
 
-def combine(reports, kind_sets, reached_counts):
+def gap_total(reports, field):
+    # Summed across EVERY directory that measured a gap, including one that
+    # contributed no other number. Dropping these with the sums would hide
+    # the size of what could not be looked at.
+    values = [r[field] for r in reports if r[field] is not None]
+    return sum(values) if values else None
+
+
+def combine(reports, kind_sets):
     # If any directory is not ok the total is "partial", so a caller can
     # never read an incomplete sum as a complete one.
-    numeric = [r for r, reached in zip(reports, reached_counts) if produced_numbers(r, reached)]
+    numeric = [r for r in reports if produced_numbers(r)]
     complete = [r for r in reports if r["status"] == "ok"]
     status = "ok" if len(complete) == len(reports) else "partial"
-    # The gap is reported from EVERY directory that measured one, including a
-    # directory that contributed no other number. Dropping it with the sums
-    # would hide the size of what could not be looked at.
-    unusable_values = [r["unusableEntryCount"] for r in reports if r["unusableEntryCount"] is not None]
-    unusable_total = sum(unusable_values) if unusable_values else None
+    gaps = {
+        "unusableEntryCount": gap_total(reports, "unusableEntryCount"),
+        "vanishedEntryCount": gap_total(reports, "vanishedEntryCount"),
+    }
     if not numeric:
-        # NOTHING was reached. A zero here would answer "I could not look"
+        # NOTHING was measured. A zero here would answer "I could not look"
         # with "there is nothing there" -- the conflation every directory
         # block already refuses, and the one a retention pass would act on.
-        return {
-            "status": status,
-            "artifactCount": None,
-            "totalBytes": None,
-            "oldestAgeSeconds": None,
-            "newestAgeSeconds": None,
-            "parseFailureCount": None,
-            "unusableEntryCount": unusable_total,
-            "sourceKindCardinality": None,
-        }
+        return dict(
+            status=status,
+            artifactCount=None,
+            totalBytes=None,
+            oldestAgeSeconds=None,
+            newestAgeSeconds=None,
+            parseFailureCount=None,
+            sourceKindCardinality=None,
+            **gaps,
+        )
     oldest_values = [r["oldestAgeSeconds"] for r in numeric if r["oldestAgeSeconds"] is not None]
     newest_values = [r["newestAgeSeconds"] for r in numeric if r["newestAgeSeconds"] is not None]
     union = set()
-    for report, kinds, reached in zip(reports, kind_sets, reached_counts):
-        if produced_numbers(report, reached):
+    for report, kinds in zip(reports, kind_sets):
+        if produced_numbers(report):
             union |= kinds
-    return {
-        "status": status,
-        "artifactCount": sum(r["artifactCount"] for r in numeric),
-        "totalBytes": sum(r["totalBytes"] for r in numeric),
-        "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
-        "newestAgeSeconds": min(newest_values) if newest_values else None,
-        "parseFailureCount": sum(r["parseFailureCount"] for r in numeric),
-        # Carried to the total as well: a consumer that reads only this block
-        # would otherwise see a lower sum with no quantified gap.
-        "unusableEntryCount": unusable_total,
+    return dict(
+        status=status,
+        artifactCount=sum(r["artifactCount"] for r in numeric),
+        totalBytes=sum(r["totalBytes"] for r in numeric),
+        oldestAgeSeconds=max(oldest_values) if oldest_values else None,
+        newestAgeSeconds=min(newest_values) if newest_values else None,
+        parseFailureCount=sum(r["parseFailureCount"] for r in numeric),
         # Union, not a sum: a producer present in both archives is one kind.
-        "sourceKindCardinality": len(union),
-    }
+        sourceKindCardinality=len(union),
+        **gaps,
+    )
 
 
 try:
@@ -3298,19 +3310,17 @@ try:
     archives = {}
     reports = []
     kind_sets = []
-    reached_counts = []
     for label, dirname in ARCHIVE_DIRS:
-        report, kinds, reached = census(os.path.join(root, dirname))
+        report, kinds = census(os.path.join(root, dirname))
         archives[label] = report
         reports.append(report)
         kind_sets.append(kinds)
-        reached_counts.append(reached)
     payload = {
         "schemaVersion": 1,
         "censusStatus": "ok",
         "generatedAtEpoch": int(now),
         "archives": archives,
-        "total": combine(reports, kind_sets, reached_counts),
+        "total": combine(reports, kind_sets),
     }
     print(json.dumps(payload, sort_keys=True))
 except Exception:
