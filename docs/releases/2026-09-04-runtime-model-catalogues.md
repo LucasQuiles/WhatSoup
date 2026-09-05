@@ -235,3 +235,27 @@ The 284-test restored run used pinned Node 24.15.0 and no name filter. It retain
 the existing transformer-precedence warning; passing assertions are not a
 clean-log claim. Full application release validation, current published-head
 CI, required review and post-deployment checks remain pending.
+
+### Archive census and provider-probe follow-up
+
+The `b0b93155` canonical integration passes all 71 archive-census and remote
+read-only-command tests. Additional local controls distinguish an unreadable
+entry from a healthy empty archive, but still reproduce root-symlink following
+and acceptance of a second directory open by the actual static checker. The
+modified script also runs successfully over a synthetic archive. These two
+failing contrasts are not complete future confinement acceptance tests: the
+root/ancestor trust contract still needs the existing #2459 owner's decision.
+The [native open contract](https://man7.org/linux/man-pages/man2/open.2.html)
+explains why a no-follow flag on the final component does not constrain earlier
+components. No new general-purpose guard is justified by this finding alone.
+
+The full BOT ERRORS run failed: 2,837 passed and one provider-probe positive
+control failed because its last-command spy observed a host diagnostic command.
+The original trigger remains unknown. A separate controlled replay passes with
+the real synthetic executable; injecting `TimeoutExpired` before command launch
+reproduces the assertion failure and requests seven host diagnostic commands,
+all intercepted before execution. This establishes a failure-path fixture gap,
+not proof of the original timeout or credential disclosure. The probe source and test were
+unchanged by this canonical delta. Source, complete receipts and the remaining
+repair decision are retained in the existing private lane ledger. Release
+validation is paused; targeted passes do not supersede the failed full run.
