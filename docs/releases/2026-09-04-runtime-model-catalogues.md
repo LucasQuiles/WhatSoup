@@ -35,3 +35,18 @@ across 30 affected/adjacent files on pinned Node 24.15.0, with three existing
 scheduled-isolation expected failures retained explicitly. Source/test type
 checking passed. These scoped results do not replace full release validation,
 updated-revision CI, required review, or evidence-backed Git-estate disposition.
+
+The next integration, `a2962ba6`, includes canonical `79536789` without conflicts.
+All 551 tests in the 16 changed test files passed on pinned Node 24.15.0;
+source and test type checking passed. This selected run did not include the
+three scheduled-isolation probes above. Two missing-keychain-item diagnostics
+were emitted: credential-store isolation of the selected run remains unproven,
+even though its test assertions passed. Existing randomized missing-service
+fixtures are a source-inspected candidate, not a proven attribution.
+
+The sentinel gap was also reproduced locally: 170 tests passed at 97.78%
+coverage with exit zero. Explicit precision made that same suite exit one;
+a valid 57-test pin suite still exited zero at 99.61%. A 2,001-case comparator
+sweep demonstrated that precision alone still accepts some unrounded totals
+below 98%. No coverage threshold, validation logic, or test exclusion was
+changed, and issue #3481 remains required before meaningful release green.
