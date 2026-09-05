@@ -44,6 +44,7 @@ The latest canonical integrations have separate, revision-scoped receipts:
 | `61b9fdb2` | `9500141a`, deferred-work retention hold | 40 tests in all four retention suites; source/test type checks passed |
 | `44e28489` | `bf4f4faa`, registered stop control and reap-outcome reporting | 222 passed and three existing expected failures in seven control/lifecycle suites; source/test type checks passed |
 | `ba8b6550` | `0c78c09b`, service-inventory observations, archive census, and legacy receipt-mode repair | Existing full BOT ERRORS runner: 2,776 passed; separate sentinel gate: 717 passed with the unchanged coverage floors |
+| `c0d35040` | `310b3892`, ambiguous send-outcome holds | Existing full BOT ERRORS runner: 2,815 passed; five complete messaging, send-pipeline and routing/catalogue files: 284 passed |
 
 The merges were conflict-free. Node checks used pinned Node 24.15.0; the latest
 Python checks used Python 3.12.13. The retention
@@ -200,3 +201,37 @@ The exploration also identified two unresolved selection gaps:
   lane; priority: catalogue usability. A bounded search or navigation design must
   preserve visible-row identity and sender isolation; changing the cap alone is
   not an adequate solution. No model leaf was selected during the live check.
+
+## Canonical recovery review
+
+The conflict-free `310b3892` integration preserves two reproduced gaps under
+existing [issue #2424](https://github.com/LucasQuiles/WhatSoup/issues/2424).
+They belong to that dispatcher/transport owner, not a parallel repair here:
+
+- A synthetic successful transport followed by a real SQLite audit-write
+  failure produced an error result through the native registry and send
+  pipeline. Feeding that exact result into the real dispatcher decoder and
+  queue cycle caused two submission attempts. This is a composed local
+  contract test, not live end-to-end delivery. An error result is not itself
+  proof of non-submission: the [MCP tool contract](https://modelcontextprotocol.io/specification/2024-11-05/server/tools)
+  includes errors originating during execution. Preserve external-effect
+  evidence across this boundary before deciding whether to retry.
+- Exactly one reclaim-read `OSError` let a record with both in-flight status
+  and an issued marker reach submission again. The no-fault marked record
+  remained held, and the ordinary queued control submitted once. Reuse the
+  existing uncertainty predicate before resetting attempt evidence; preserve
+  genuinely unissued attempts and authorized releases.
+
+The combined private diagnostics returned three failures and three passing
+controls. Their patches, synthetic producer response and full receipts are
+accounted for in the existing lane ledger; no failing test or temporary source
+change remains in this candidate. The 2,815-test repository suite passes without
+these additional diagnostics, so it does not establish those missing outcomes.
+Acceptance must reject duplicate eligibility without blocking proven pre-send
+failures. A blanket hold for every error or every in-flight status is too broad.
+
+The 284-test restored run used pinned Node 24.15.0 and no name filter. It retained
+115 in-memory SQLite journal warnings, three failed-elevation diagnostics and
+the existing transformer-precedence warning; passing assertions are not a
+clean-log claim. Full application release validation, current published-head
+CI, required review and post-deployment checks remain pending.
