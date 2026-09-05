@@ -64,6 +64,14 @@ HELD_SIGNAL_KIND = "delivery_outcome_unknown_held"
 # publication, and the sender would never be reached at all.
 SENT_PUBLICATION_COMPONENT = "dispatcher.process_sent_state"
 ATTEMPT_PUBLICATION_COMPONENT = "dispatcher.process_attempt_state"
+HELD_PUBLICATION_COMPONENT = "dispatcher.process_held_state"
+SEND_ISSUED_COMPONENT = "dispatcher.process_send_issued_state"
+
+# collapse_ready_storms clusters on DISTINCT HOSTS and fires at
+# storm_threshold(), which defaults to 3. The siblings must reach that count on
+# their own: if the held record were needed to make up the number, excluding it
+# would stop the sweep firing and the test would pass for the wrong reason.
+STORM_SIBLINGS = 3
 
 INJECTED_PUBLICATION_FAILURE = "injected sent-publication failure"
 
@@ -80,11 +88,21 @@ POST_REQUEST_PHASE = "phase=post_request"
 # Fake-peer behaviours, named so the parametrize lists carry no bare literals.
 CLOSE_IN_HANDSHAKE = "close_in_handshake"
 HANG_IN_HANDSHAKE = "hang_in_handshake"
+NOT_JSON_IN_HANDSHAKE = "not_json_in_handshake"
 CLOSE_AFTER_REQUEST = "close_after_request"
 HANG_AFTER_REQUEST = "hang_after_request"
 ERROR_AFTER_REQUEST = "error_after_request"
-HANDSHAKE_FAILURES = (HANG_IN_HANDSHAKE, CLOSE_IN_HANDSHAKE)
+REJECTION_NAMING_THE_PHASE = "rejection_naming_the_phase"
+# The remote had the request and answered with something unreadable. Reading,
+# decoding and parsing that answer are all post-flush, so all of them are
+# ambiguous -- the defect this iteration closes.
+PARTIAL_LINE = "partial_line_after_request"
+NOT_JSON = "not_json_after_request"
+NOT_OBJECT = "not_object_after_request"
+BAD_UTF8 = "bad_utf8_after_request"
+HANDSHAKE_FAILURES = (HANG_IN_HANDSHAKE, CLOSE_IN_HANDSHAKE, NOT_JSON_IN_HANDSHAKE)
 POST_REQUEST_FAILURES = (HANG_AFTER_REQUEST, CLOSE_AFTER_REQUEST)
+POST_REQUEST_PARSE_FAILURES = (PARTIAL_LINE, NOT_JSON, NOT_OBJECT, BAD_UTF8)
 
 # Connect-phase failures, which never reach the protocol at all.
 MISSING_SOCKET = "missing_socket"
@@ -192,20 +210,44 @@ def _cycle(mod, paths, raises: str | None = None) -> list:
     return calls
 
 
-class _FakePeer:
-    """A minimal AF_UNIX JSON-RPC peer that fails at a chosen protocol phase.
+def _malformed_reply(fail_at: str) -> bytes:
+    """The bytes a peer sends back after reading the tools/call request.
 
-    The point is to let the REAL json_rpc_call produce the error text. A test
-    that hard-codes the message it expects proves only that the constant matches
+    Every one of these is a reply the remote produced AFTER it had the request,
+    so the message may already have been delivered no matter how unreadable the
+    answer is.
+    """
+    if fail_at == PARTIAL_LINE:
+        # A reply cut off mid-write: valid framing, truncated JSON.
+        return b'{"jsonrpc":"2.0","id":\n'
+    if fail_at == NOT_JSON:
+        return b"this is not json\n"
+    if fail_at == NOT_OBJECT:
+        return b"[1, 2, 3]\n"
+    if fail_at == BAD_UTF8:
+        return b"\xff\xfe\n"
+    return b""
+
+
+class _FakePeer:
+    """A minimal AF_UNIX JSON-RPC peer that fails in a chosen way.
+
+    The point is to let the REAL json_rpc_call meet the failure. A test that
+    hard-codes the message it expects proves only that the constant matches
     itself, and would keep passing after the transport stopped raising it.
+
+    `requests` records every tools/call line the peer ACTUALLY received, which
+    is the only honest count of how many times the remote was asked to send.
+    The peer serves connections in a loop so one instance spans several cycles.
     """
 
     def __init__(self, path: str, fail_at: str):
         self.path = path
         self.fail_at = fail_at
+        self.requests: list[str] = []
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(path)
-        self._sock.listen(1)
+        self._sock.listen(8)
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     def __enter__(self):
@@ -220,43 +262,62 @@ class _FakePeer:
         return False
 
     def _serve(self) -> None:
-        try:
-            conn, _ = self._sock.accept()
-        except OSError:
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            try:
+                self._handle(conn)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    def _handle(self, conn) -> None:
+        reader = conn.makefile("rb")
+        handshake = reader.readline()
+        if not handshake:
             return
-        with conn:
-            reader = conn.makefile("r", encoding="utf-8", newline="\n")
-            writer = conn.makefile("w", encoding="utf-8", newline="\n")
-            handshake = reader.readline()
-            if self.fail_at == CLOSE_IN_HANDSHAKE:
-                return
-            if self.fail_at == HANG_IN_HANDSHAKE:
-                time.sleep(SERVER_HANG_SECONDS)
-                return
-            writer.write(
+        if self.fail_at == CLOSE_IN_HANDSHAKE:
+            return
+        if self.fail_at == HANG_IN_HANDSHAKE:
+            time.sleep(SERVER_HANG_SECONDS)
+            return
+        if self.fail_at == NOT_JSON_IN_HANDSHAKE:
+            conn.sendall(b"this is not json\n")
+            return
+        conn.sendall(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": json.loads(handshake)["id"], "result": {}}
+            ).encode("utf-8")
+            + b"\n"
+        )
+        request = reader.readline()
+        if not request:
+            return
+        self.requests.append(request.decode("utf-8", "replace"))
+        if self.fail_at == HANG_AFTER_REQUEST:
+            time.sleep(SERVER_HANG_SECONDS)
+            return
+        if self.fail_at in (ERROR_AFTER_REQUEST, REJECTION_NAMING_THE_PHASE):
+            message = "unknown chat"
+            if self.fail_at == REJECTION_NAMING_THE_PHASE:
+                # A hostile or unlucky remote payload that contains the literal
+                # phase label. A substring match would hold a proven rejection.
+                message = f"unknown chat ({POST_REQUEST_PHASE})"
+            conn.sendall(
                 json.dumps(
-                    {"jsonrpc": "2.0", "id": json.loads(handshake)["id"], "result": {}}
-                )
-                + "\n"
+                    {
+                        "jsonrpc": "2.0",
+                        "id": json.loads(request)["id"],
+                        "error": {"code": -32602, "message": message},
+                    }
+                ).encode("utf-8")
+                + b"\n"
             )
-            writer.flush()
-            request = reader.readline()
-            if self.fail_at == HANG_AFTER_REQUEST:
-                time.sleep(SERVER_HANG_SECONDS)
-                return
-            if self.fail_at == ERROR_AFTER_REQUEST:
-                writer.write(
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": json.loads(request)["id"],
-                            "error": {"code": -32602, "message": "unknown chat"},
-                        }
-                    )
-                    + "\n"
-                )
-                writer.flush()
             return
+        conn.sendall(_malformed_reply(self.fail_at))
 
 
 def _transport_error(mod, fail_at: str) -> str:
@@ -689,4 +750,291 @@ def test_an_incident_commit_failure_after_the_sent_publication_never_resends(tmp
     assert list(paths["sent"].glob("*.sent")), (
         "a durable sent record is resolved by the terminal-replay guard, "
         "which archives it to sent/"
+    )
+
+
+# --------------------------------------------------------------------------
+# F1: reading, decoding and parsing the reply are all post-flush.
+# --------------------------------------------------------------------------
+
+
+def _peer_backed_sender(mod, path: str, sent: list):
+    """A sender that drives the REAL transport against the fake peer."""
+
+    def _send(text, *_a, **_k):
+        sent.append(text)
+        mod.json_rpc_call(
+            path,
+            "tools/call",
+            {"name": "send_message", "arguments": {"text": text}},
+            timeout=TRANSPORT_TIMEOUT,
+        )
+
+    return _send
+
+
+def _cycles_against_peer(mod, paths, path: str, rounds: int) -> list:
+    """reclaim -> ready -> process_one, `rounds` times, real transport."""
+    sent: list = []
+    for _ in range(rounds):
+        mod.reclaim_processing(paths)
+        with patch.object(
+            mod, "send_whatsapp", side_effect=_peer_backed_sender(mod, path, sent)
+        ):
+            for queued in sorted(paths["outbox"].glob("*.json")):
+                if mod.ready(queued, paths["quarantine"]):
+                    mod.process_one(queued, paths)
+    return sent
+
+
+@pytest.mark.parametrize("fail_at", POST_REQUEST_PARSE_FAILURES)
+def test_an_unreadable_reply_after_the_request_is_held_not_resent(tmp_path, fail_at):
+    """F1: the remote had the request, so an unreadable answer proves nothing.
+
+    Only readline was inside the phase handler, so a truncated, non-JSON,
+    non-object or badly encoded reply raised unlabelled and the event was
+    re-sent. The peer counts what it actually received: it must be one.
+    """
+    mod = _load(tmp_path / f"unreadable-{fail_at}")
+    paths = mod.setup_dirs()
+    event = _event(f"evt-2424-{fail_at}", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    _seed_outbox(paths, event)
+
+    directory = tempfile.mkdtemp()
+    path = os.path.join(directory, "s")
+    try:
+        with _FakePeer(path, fail_at) as peer:
+            _cycles_against_peer(mod, paths, path, rounds=3)
+            received = len(peer.requests)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+    assert received == 1, (
+        "the remote was asked to send the same notification more than once "
+        f"after an unreadable reply: {received} tools/call request(s)"
+    )
+    held = _processing_records(paths)
+    assert len(held) == 1 and _delivery_status(held[0]) == HELD_STATUS, (
+        f"an unreadable reply must be held as {HELD_STATUS!r}: {held!r}"
+    )
+    assert not list(paths["outbox"].glob("*.json")), (
+        "an ambiguous outcome must not be requeued for a blind resend"
+    )
+    assert len(_held_signals(paths)) == 1, (
+        f"exactly one signal for the held item: {len(_held_signals(paths))}"
+    )
+
+
+def test_a_rejection_naming_the_phase_label_is_still_a_rejection(tmp_path):
+    """F1/N2: the label is a suffix the transport writes, not a magic substring.
+
+    A remote error payload that happens to contain the literal must not be able
+    to force a hold, so the match is anchored to the end of the message.
+    """
+    mod = _load(tmp_path / "rejection-naming-phase")
+    error = _transport_error(mod, REJECTION_NAMING_THE_PHASE)
+    assert POST_REQUEST_PHASE in error, (
+        f"this probe is only meaningful if the payload carries the literal: {error!r}"
+    )
+    assert not mod.is_ambiguous_send_outcome(error), (
+        f"a proven rejection carrying the literal was classified ambiguous: {error!r}"
+    )
+    paths = mod.setup_dirs()
+    event = _event("evt-2424-phase-payload", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    _seed_outbox(paths, event)
+
+    _assert_requeued_not_held(mod, paths, error, expect_sends=1)
+
+
+# --------------------------------------------------------------------------
+# F2/F3/F4: containment, the reclaim exemption, and a refused marker write.
+# --------------------------------------------------------------------------
+
+
+def test_a_failing_hold_publication_does_not_abort_the_reclaim_pass(tmp_path):
+    """F2: one poisoned record must not strand every other claimed file.
+
+    run_once calls reclaim_processing bare, so a raise here aborts the whole
+    cycle -- and the next one, and every one after, because the record that
+    raises is still there. A healthy stranded alert was never delivered.
+    """
+    mod = _load(tmp_path / "hold-publication-fails")
+    paths = mod.setup_dirs()
+    ambiguous = _event(
+        "evt-2424-poison", IN_FLIGHT_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT}
+    )
+    healthy = _event("evt-2424-healthy", QUEUED_STATUS)
+    _open_incident(mod, paths, healthy)
+    _seed_processing(paths, ambiguous)
+    _seed_processing(paths, healthy)
+
+    with _failing_publication(mod, HELD_PUBLICATION_COMPONENT):
+        reclaimed = mod.reclaim_processing(paths)
+    assert reclaimed >= 1, (
+        f"the healthy claim must still be reclaimed: {reclaimed}"
+    )
+
+    calls: list = []
+    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)):
+        for queued in sorted(paths["outbox"].glob("*.json")):
+            if mod.ready(queued, paths["quarantine"]):
+                mod.process_one(queued, paths)
+    assert len(calls) == 1, (
+        f"a healthy stranded alert was not delivered: {len(calls)} send(s)"
+    )
+
+    stranded = _processing_records(paths)
+    assert len(stranded) == 1 and _delivery_status(stranded[0]) == IN_FLIGHT_STATUS, (
+        f"the record whose hold failed must stay claimed for the next pass: {stranded!r}"
+    )
+
+    # Injection removed: the next pass completes the hold, still once.
+    mod.reclaim_processing(paths)
+    held = _processing_records(paths)
+    assert len(held) == 1 and _delivery_status(held[0]) == HELD_STATUS, (
+        f"the retried hold must succeed: {held!r}"
+    )
+    assert len(_held_signals(paths)) == 1, (
+        f"the retried hold must still signal exactly once: {len(_held_signals(paths))}"
+    )
+
+
+def test_reclaim_leaves_a_held_record_where_it_is(tmp_path):
+    """F3: the reclaim-level exemption, pinned on its own.
+
+    Deleting the exemption survived every other test because process_one's own
+    held branch caught the bounced record. It does not catch the pre-loop
+    sweeps, which run first and consult no delivery status.
+    """
+    mod = _load(tmp_path / "reclaim-exemption")
+    paths = mod.setup_dirs()
+    held = _event("evt-2424-parked", HELD_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT})
+    _seed_processing(paths, held)
+
+    reclaimed = mod.reclaim_processing(paths)
+
+    assert not list(paths["outbox"].glob("*")), (
+        "a held record was bounced into the outbox, where the pre-loop sweeps "
+        f"can consume it: {list(paths['outbox'].glob('*'))}"
+    )
+    assert reclaimed == 0, f"a held record must not be counted as reclaimed: {reclaimed}"
+    parked = _processing_records(paths)
+    assert len(parked) == 1 and _delivery_status(parked[0]) == HELD_STATUS, (
+        f"the held record must stay parked in processing/: {parked!r}"
+    )
+
+
+def test_the_storm_sweep_does_not_consume_a_held_record(tmp_path):
+    """F3: the sweep most likely to consume a held record, proved directly.
+
+    collapse_ready_storms is the one that ARCHIVES what it consumes (into
+    storm-collapsed/), so a held record reaching it is lost outright rather than
+    merely re-queued. The record is placed in outbox/ by force: reclaim will not
+    put it there, and this asserts the second line of defence.
+    """
+    mod = _load(tmp_path / "storm-sweep-held")
+    paths = mod.setup_dirs()
+    # The sweep clusters on DISTINCT HOSTS, not on event count, so each record
+    # needs its own machine or the sweep never fires and this test proves
+    # nothing. The sibling assertion below is the control that it did fire.
+    # The id must not be a PREFIX of the sibling ids: the archive check below
+    # matches on file name, and a prefix would match a sibling instead.
+    held = _event("evt-2424-parked-item", HELD_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT})
+    held["machine"] = "host-held"
+    _seed_outbox(paths, held)
+    siblings = []
+    for index in range(STORM_SIBLINGS):
+        sibling = _event(f"evt-2424-storm-sib{index}", QUEUED_STATUS)
+        sibling["machine"] = f"host-{index}"
+        siblings.append(sibling)
+        _seed_outbox(paths, sibling)
+
+    mod.collapse_ready_storms(paths)
+
+    collapsed = [p.name for p in paths["storm_collapsed"].glob("*")]
+    assert all(
+        any(sibling["id"] in name for name in collapsed) for sibling in siblings
+    ), (
+        "positive control: the sweep must actually have collapsed the ordinary "
+        f"siblings, or this test asserts nothing: {collapsed}"
+    )
+    assert not any(held["id"] in name for name in collapsed), (
+        "a held record was archived by the storm sweep, which loses it "
+        f"outright: {collapsed}"
+    )
+
+
+def test_a_refused_send_issued_publication_requeues_without_the_marker(tmp_path):
+    """F4: a refused advance means the send never happened.
+
+    The marker may already be on disk, so leaving it makes the next reclaim
+    hold an alert that was never sent. The record must go back to the queue in
+    a state that cannot be mistaken for in-flight.
+    """
+    mod = _load(tmp_path / "issued-refused")
+    paths = mod.setup_dirs()
+    event = _event("evt-2424-refused", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    queued = _seed_outbox(paths, event)
+
+    calls: list = []
+    original = mod.require_all_advance
+
+    def _require(results):
+        for result in results:
+            if getattr(result, "component", "") == SEND_ISSUED_COMPONENT:
+                raise RuntimeError("injected non-advancing issued publication")
+        return original(results)
+
+    with patch.object(mod, "require_all_advance", side_effect=_require):
+        with patch.object(
+            mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)
+        ):
+            mod.process_one(queued, paths)
+
+    assert calls == [], f"a refused marker write must not send: {len(calls)}"
+    assert _held_signals(paths) == [], "a send that never left must not be held"
+    assert not _processing_records(paths), (
+        f"the record must not stay claimed: {_processing_records(paths)!r}"
+    )
+    requeued = list(paths["outbox"].glob("*.json"))
+    assert len(requeued) == 1, f"the record must be requeued: {requeued!r}"
+    delivery = json.loads(requeued[0].read_text()).get("delivery") or {}
+    assert not delivery.get(SEND_ISSUED_FIELD), (
+        f"the issued marker must not survive a refused publication: {delivery!r}"
+    )
+    assert not mod.is_ambiguous_in_flight(json.loads(requeued[0].read_text())), (
+        f"the requeued record must not read as in-flight: {delivery!r}"
+    )
+
+
+def test_the_hold_signal_carries_no_event_identifier(tmp_path):
+    """The signal is per-item anonymous by design.
+
+    metadata_only_controller_details projects unlisted strings away, so an
+    eventId passed here never reaches the log. Rather than leave a field that
+    silently disappears, none is passed: the operator lists processing/ to see
+    which item is held. This pins that decision (A9 stays clean by construction).
+    """
+    mod = _load(tmp_path / "signal-anonymous")
+    paths = mod.setup_dirs()
+    event = _event(
+        "evt-2424-anon", IN_FLIGHT_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT}
+    )
+    _open_incident(mod, paths, event)
+    _seed_processing(paths, event)
+
+    _cycle(mod, paths)
+
+    signals = _held_signals(paths)
+    assert len(signals) == 1, f"exactly one signal: {len(signals)}"
+    rendered = json.dumps(signals[0])
+    assert event["id"] not in rendered, (
+        f"the signal must not carry an event identifier: {rendered}"
+    )
+    details = signals[0].get("details") or {}
+    assert details.get("held") is True and "attempts" in details, (
+        f"the signal must still carry its bounded metadata: {details!r}"
     )

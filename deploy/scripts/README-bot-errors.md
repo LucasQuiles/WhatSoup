@@ -496,9 +496,20 @@ second time for one incident.
 Such an event is **held** rather than resent: its durable `delivery.status`
 becomes `outcome_unknown`, it stays in `processing/`, and it is exempt from the
 reclaim pass that returns other claimed files to `outbox/`. A held event is
-never archived under `sent/` and is never dropped. Each hold emits exactly one
-metadata-only record in `logs/dispatch.jsonl` with record kind
-`delivery_outcome_unknown_held`; restarts do not repeat it.
+never archived under `sent/` and is never dropped.
+
+**How a held event surfaces.** Three signals fire, none of which names the
+event:
+
+- one record in `logs/dispatch.jsonl` with record kind
+  `delivery_outcome_unknown_held`, emitted once per held item and not repeated
+  across restarts. It is deliberately anonymous: the controller log projects
+  unlisted strings away, so it carries bounded metadata (`attempts`, `held`)
+  and no event id. Read `processing/` to find out which item is held;
+- the health check's `processing` queue line, which warns at 1 entry for 60 s
+  and goes critical at 10 entries for 300 s, and stays critical for as long as
+  the file is parked;
+- the heartbeat watchdog's `queue:processing` alert.
 
 **Inspect.** Held events are the files in `processing/` whose
 `delivery.status` reads `outcome_unknown`. Each also carries
@@ -513,17 +524,20 @@ grep -l '"status": "outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
 the alert never arrived. Set `delivery.status` back to `"queued"` and move the
 file into `outbox/` under its original name (the `.json.<pid>.processing`
 suffix drops back to `.json`). The next cycle treats it as an ordinary queued
-event; its attempt counter and backoff are preserved. Status is the only field
-to edit — the dispatcher clears its internal send marker on the next attempt.
+event. Its attempt counter is kept, but the backoff is **reset**: recording the
+hold clears `nextAttemptAtEpoch`, so a released item is retried on the next
+cycle rather than waiting out the delay its attempt count would otherwise
+impose. Status is the only field to edit — the dispatcher clears its internal
+send marker on the next attempt.
 
 **Dead-letter.** If the alert did arrive, or is no longer actionable, move the
 file into `dead-letter/` with the `.dead_letter.json` suffix the exhausted-retry
 path uses. It leaves `processing/` and is not delivered.
 
-A held event holds a `processing/` slot until an operator acts, so the
-`processing` count in the dispatcher state file rises and stays raised. That is
-the intended signal: an unresolved delivery is visible rather than silently
-duplicated or silently lost.
+A held event occupies a `processing/` slot until an operator acts, which is why
+the queue signals above stay raised. They report that the queue is not draining;
+they do not distinguish a held item from a backlog, so read `processing/` to
+tell which it is.
 
 ## Test suites + CI gates
 

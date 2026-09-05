@@ -3532,6 +3532,23 @@ def redacted_state_text(value: Any, limit: int, *, tail: bool = False) -> str:
     return truncate(text, limit)
 
 
+class ProvenRemoteRejection(RuntimeError):
+    """A PARSED reply that named an error. The outcome is known: rejected.
+
+    Kept distinct so the phase-labelling handler below cannot swallow it. A
+    rejection is proven whichever phase produced it, and it must keep the
+    ordinary bounded-retry, email-fallback and dead-letter path (#2424).
+    """
+
+
+# Protocol-phase labels, written as a SUFFIX on every no-outcome failure.
+# The label, not the error class, decides whether an outcome is ambiguous
+# (#2424): the same timeout means "never left" during the handshake and "may
+# have been accepted" after the tool call was flushed.
+JSON_RPC_HANDSHAKE_PHASE = "phase=handshake"
+JSON_RPC_POST_REQUEST_PHASE = "phase=post_request"
+
+
 def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     if not socket_path:
         raise RuntimeError("socket path missing")
@@ -3576,35 +3593,50 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
 def wait_for_response(
     reader: Any, expected_id: int, timeout: float, *, phase: str
 ) -> dict[str, Any]:
-    """Read one JSON-RPC reply, stamping the protocol phase on no-reply failures.
+    """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
 
     `phase` is what separates "the request never left" from "the request left
-    and the answer did not" (#2424). It is stamped ONLY on failures where no
-    reply was read; a reply that names an error proves the outcome whichever
-    phase produced it, so those messages stay unlabelled and keep the ordinary
-    bounded-retry path.
+    and the answer did not" (#2424). Reading, decoding and PARSING the reply all
+    happen after the request was flushed, so every failure among them is equally
+    uninformative about what the remote did: a truncated line, a non-JSON line,
+    a line that is not an object, and undecodable bytes are all replies the
+    remote produced only because it had the request. Labelling just the read
+    left the parse failures unlabelled, and the event was silently re-sent.
+
+    The ONLY outcome that is proven is a parsed reply for the expected id that
+    names an error, which is raised as ProvenRemoteRejection so this handler
+    cannot relabel it.
+
+    Framing note: replies are newline-framed, so a reply that never terminates
+    its line is indistinguishable from a slow one and surfaces as the timeout.
     """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
+    try:
+        while time.monotonic() < deadline:
+            # The socket carries the same timeout as this deadline, so readline
+            # raises socket.timeout("timed out") first; that is the text an
+            # operator sees, not the deadline message below.
             line = reader.readline()
-        except OSError as exc:
-            # The socket's own timeout fires here, before the loop deadline
-            # below, because both use the same value -- so this is the read
-            # error class an operator actually sees, not the deadline message.
-            raise RuntimeError(f"{str(exc) or 'socket read failed'} ({phase})") from exc
-        if not line:
-            raise RuntimeError(f"socket closed before response ({phase})")
-        msg = json.loads(line)
-        if msg.get("id") != expected_id:
-            continue
-        if "error" in msg:
-            raise RuntimeError(f"rpc error: {msg['error']}")
-        result = msg.get("result", {})
-        if isinstance(result, dict) and result.get("isError") is True:
-            raise RuntimeError(f"tool error: {result}")
-        return result if isinstance(result, dict) else {"result": result}
-    raise RuntimeError(f"timeout waiting for JSON-RPC response ({phase})")
+            if not line:
+                raise RuntimeError("socket closed before response")
+            msg = json.loads(line)
+            if not isinstance(msg, dict):
+                raise RuntimeError("reply was not a JSON-RPC object")
+            if msg.get("id") != expected_id:
+                continue
+            if "error" in msg:
+                raise ProvenRemoteRejection(f"rpc error: {msg['error']}")
+            result = msg.get("result", {})
+            if isinstance(result, dict) and result.get("isError") is True:
+                raise ProvenRemoteRejection(f"tool error: {result}")
+            return result if isinstance(result, dict) else {"result": result}
+        raise RuntimeError("timeout waiting for JSON-RPC response")
+    except ProvenRemoteRejection:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"{str(exc) or exc.__class__.__name__} ({phase})"
+        ) from exc
 
 
 def validate_bot_errors_target() -> None:
@@ -3872,35 +3904,34 @@ def is_transient_transport_failure(error: str) -> bool:
     )
 
 
-# Protocol-phase labels stamped by wait_for_response on no-reply failures.
-# The label, not the error class, is what decides whether an outcome is
-# ambiguous (#2424): the same timeout means "never left" during the handshake
-# and "may have been accepted" after the tool call was flushed.
-JSON_RPC_HANDSHAKE_PHASE = "phase=handshake"
-JSON_RPC_POST_REQUEST_PHASE = "phase=post_request"
-
-# A transport failure carries NO proof of the outcome only when the tools/call
-# request had already been flushed and no reply came back. Everything else keeps
-# the ordinary bounded-retry, email-fallback and dead-letter path:
+# A transport failure carries NO proof of the outcome when the tools/call
+# request had already been flushed and no readable reply naming the outcome came
+# back -- including a reply that arrived but could not be read, decoded or
+# parsed. Everything else keeps the ordinary bounded-retry, email-fallback and
+# dead-letter path:
 #   - connect errors, a missing socket, and any handshake-phase failure are
 #     PRE-SEND: nothing was asked of the remote. Holding these would turn a
 #     transient MCP outage into a queue of held alerts needing operator action.
-#   - "rpc error: ...", "tool error: ..." and "send_message returned error: ..."
-#     were BUILT FROM a reply, which proves the send was rejected, so they are
-#     never labelled whichever phase produced them.
+#   - a PARSED reply naming error / isError is a ProvenRemoteRejection, and
+#     "send_message returned error: ..." is built from a parsed result, so both
+#     stay unlabelled whichever phase produced them.
 #
-# LIMIT: a missing reply after the flush is ambiguous by construction. The
-# protocol carries no delivery identity and no idempotency key, so nothing
-# distinguishes accepted-then-lost from never-processed, and the fail-closed
-# reading the issue requires is to hold. An error raised while writing or
-# flushing the request itself is treated as PRE-SEND: a partially written line
-# is not a parseable JSON-RPC message.
-_AMBIGUOUS_SEND_SIGNATURES = (JSON_RPC_POST_REQUEST_PHASE,)
+# The label is a SUFFIX written by wait_for_response, and the match is anchored
+# to the end of the message: a remote error payload that happens to contain the
+# literal must not be able to force a hold.
+#
+# LIMIT: a missing or unreadable reply after the flush is ambiguous by
+# construction. The protocol carries no delivery identity and no idempotency
+# key, so nothing distinguishes accepted-then-lost from never-processed, and the
+# fail-closed reading the issue requires is to hold. An error raised while
+# WRITING or flushing the request is treated as PRE-SEND: replies are
+# newline-framed, so a partially written request is not a parseable message and
+# the remote cannot have acted on it.
+_AMBIGUOUS_SEND_SUFFIX = f"({JSON_RPC_POST_REQUEST_PHASE})"
 
 
 def is_ambiguous_send_outcome(error: str) -> bool:
-    lower = (error or "").lower()
-    return any(sig in lower for sig in _AMBIGUOUS_SEND_SIGNATURES)
+    return (error or "").rstrip().endswith(_AMBIGUOUS_SEND_SUFFIX)
 
 
 def delivery_status_of(event: dict[str, Any]) -> str:
@@ -3937,6 +3968,10 @@ def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
         event["delivery"] = delivery
     attempts = max(int(delivery.get("attempts") or 0), 1)
     delivery["status"] = "queued"
+    # #2424: this attempt is over, so its issued marker must not survive. A
+    # requeued record carrying it would read as in-flight to the next reclaim,
+    # which would hold an alert that was never sent.
+    delivery.pop(DELIVERY_SEND_ISSUED_FIELD, None)
     delivery["lastError"] = truncate(redact(error), 500)
     backoff = next_backoff(attempts)
     delivery["nextAttemptAtEpoch"] = int(time.time()) + backoff if backoff is not None else 0
@@ -6782,6 +6817,12 @@ def collapse_ready_storms(paths: dict[str, Path], incident: IncidentStateCycle |
             event = safe_read_json(path)
         except Exception:
             continue
+        # #2424: a held record must never be consumed by a sweep. This one
+        # ARCHIVES what it collapses, so a held item reaching it is lost outright
+        # rather than merely requeued. reclaim_processing already keeps held
+        # records out of outbox/; this is the second line of defence.
+        if is_held_delivery(event):
+            continue
         if not is_storm_candidate(event):
             continue
         fingerprint = storm_fingerprint(event)
@@ -7963,11 +8004,15 @@ def hold_ambiguous_send(
         # text, account, path or private topology can reach the log here. The
         # signal is a durable-log record, never a new chat or email send -- a
         # send from the hold path would re-enter the window being closed.
+        #
+        # The signal is per-item ANONYMOUS by design. An eventId passed here is
+        # projected away rather than written, so carrying one would only look
+        # like identification; the operator lists processing/ for the record
+        # itself, which is where the durable disposition lives.
         append_dispatch_log(
             paths,
             {
                 "type": AMBIGUOUS_SEND_SIGNAL_KIND,
-                "eventId": event.get("id"),
                 "attempts": delivery.get("attempts"),
                 "held": True,
             },
@@ -7999,7 +8044,30 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
             if is_held_delivery(claimed_event):
                 continue
             if is_ambiguous_in_flight(claimed_event):
-                hold_ambiguous_send(paths, path, claimed_event, AMBIGUOUS_CRASH_REASON)
+                # Contain the hold PER RECORD. run_once calls reclaim_processing
+                # bare, so a raise here aborts the whole cycle -- and every later
+                # cycle, because the record that raises is still there next time.
+                # One poisoned claim then strands every healthy stranded alert,
+                # which is a worse failure than the duplicate this branch exists
+                # to prevent. The record keeps "sending" + its marker, so the
+                # next reclaim retries the hold. Deliberately broad: any escape
+                # from this call wedges the dispatcher.
+                try:
+                    hold_ambiguous_send(paths, path, claimed_event, AMBIGUOUS_CRASH_REASON)
+                except Exception as exc:
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "delivery_hold_publication_failed",
+                            # Bounded enum: free strings are projected away by
+                            # metadata_only_controller_details, so name the class
+                            # with a value the log actually keeps.
+                            "reason": "os_error" if isinstance(exc, OSError) else "unexpected_error",
+                            "retryable": True,
+                        },
+                        level="error",
+                        outcome="failed",
+                    )
                 continue
         target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
@@ -8358,8 +8426,13 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         expected=issued_observation.version,
         generation=(issued_observation.version.generation or 0) + 1,
     )
-    require_all_advance([issued_publication])
     try:
+        # #2424: inside the try. If the marker reached disk but the advance
+        # check refuses, the send is correctly skipped -- but the record now
+        # reads as in-flight, and the next reclaim would hold an alert that
+        # never left. Routing the refusal through mark_failure below requeues it
+        # with the marker cleared, so the next pass retries the send instead.
+        require_all_advance([issued_publication])
         send_whatsapp(text)
     except Exception as exc:
         # #2424: an outcome with no proof must never be re-sent. This runs
