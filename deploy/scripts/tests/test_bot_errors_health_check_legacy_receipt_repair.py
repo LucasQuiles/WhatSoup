@@ -409,6 +409,53 @@ def test_repair_uses_the_held_descriptor_when_the_parent_is_swapped_after_the_wa
     assert _mode_of(decoy_path) == 0o644, "the swapped-in decoy must never be chmodded"
 
 
+def test_repair_refuses_an_intermediate_ancestor_swapped_after_resolution(
+    tmp_path, monkeypatch
+):
+    """The walk must check EVERY ancestor, not just the final parent.
+
+    The other symlink tests plant the link at the parent itself, which a single
+    O_NOFOLLOW open of the resolved parent path would also refuse, so none of
+    them can tell the per-component walk from that cheaper check. Here the swap
+    is two levels up: the parent's own final component stays a real directory,
+    reached through a symlinked grandparent. Only walking each component
+    catches it. Without the walk the repair follows the redirected path and
+    chmods the attacker's file instead of the real receipt.
+    """
+    anchor = tmp_path / "anchor"
+    real_root = anchor / "state-parent" / "state-root"
+    real_root.mkdir(mode=0o700, parents=True)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    # Same subpath under the attacker tree, so redirecting `anchor` alone lands
+    # the identical relative walk on the decoy.
+    decoy_path, decoy_raw = _plant_attacker_receipt(
+        tmp_path / "attacker" / "state-parent" / "state-root"
+    )
+    real_resolve = _mod._resolved_receipt_parent
+
+    def resolve_then_swap_the_grandparent(path: Path) -> Path:
+        resolved = real_resolve(path)
+        anchor.rename(tmp_path / "moved-aside")
+        anchor.symlink_to(tmp_path / "attacker", target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(_mod, "_resolved_receipt_parent", resolve_then_swap_the_grandparent)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(
+        real_root / "daily-health-receipt.json"
+    )
+
+    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    assert outcome.previous_mode is None
+    moved_receipt = (
+        tmp_path / "moved-aside" / "state-parent" / "state-root" / receipt_path.name
+    )
+    assert moved_receipt.read_bytes() == raw
+    assert _mode_of(moved_receipt) == 0o644, "the real receipt must be untouched"
+    assert decoy_path.read_bytes() == decoy_raw
+    assert _mode_of(decoy_path) == 0o644, "the decoy behind the swapped ancestor must never be chmodded"
+
+
 def test_repair_matches_the_reader_through_a_symlinked_state_root(tmp_path):
     """A symlinked state root is transparent to the REPAIR, not to publication.
 
