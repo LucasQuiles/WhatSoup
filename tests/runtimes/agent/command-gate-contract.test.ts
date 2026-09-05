@@ -462,6 +462,12 @@ describe('B22 group 1: authorization matrix', () => {
   //   /help     → gate 'none' probe (queue-routed render)
   //   /sessions → gate 'admin' probe (admin-bypass messenger path)
   //   /new      → gate 'admin-shared-scope' probe (queue-routed ack)
+  //
+  // #2949 N1 review of this matrix for the /stop append (group 2's tripwire
+  // requires it): the rows probe GATE CLASSES, one command per class, not one
+  // row per command. /stop declares gate 'admin-shared-scope' — the same class
+  // /new probes here — so it adds no new authorization semantics and needs no
+  // new row. A future entry declaring a NEW gate value does.
   type Row = {
     title: string;
     command: '/help' | '/sessions' | '/new';
@@ -571,7 +577,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     // this set, forcing its author into this file where groups 2 and 3 pick
     // the entry up automatically and the matrix in group 1 must be reviewed.
     expect([...COMMAND_REGISTRY].map((c) => c.name).sort()).toEqual(
-      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status'].sort(),
+      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status', 'stop'].sort(),
     );
   });
 
@@ -629,6 +635,58 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     },
   );
 
+  it('#2949 N1: a mid-turn /stop is never forwarded to the agent as text', async () => {
+    // The defect #2949 names: a control arriving during an active turn used to
+    // reach the provider as ordinary text and terminalize as an
+    // admission-rejected WORK turn. Registration makes it a local control, and
+    // runtime.ts returns before the enqueue block — so the provider must see
+    // exactly ONE turn (the long-running one) and never the control.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    // per_chat: the production scope for #2949 (the incident instance runs
+    // per_chat). There the provider turn runs on the per-chat TurnQueue, so the
+    // control's handler is reachable while it is in flight. In SINGLE/shared
+    // scope the turn runs inline inside _handleMessageInner, which
+    // handleMessage serializes on this.turnChain (runtime.ts:4460) — so no
+    // local command, /new included, executes mid-turn there today. That
+    // serialization is ingress ordering and belongs to leaf N2, not here.
+    const runtime = makeRuntime('per_chat', db, messenger);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    try {
+      // Hold the provider turn open so the /stop below genuinely arrives mid-turn.
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('long running work');
+
+      await runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop', content: '/stop', senderJid: ADMIN_WA,
+      }));
+      // The control's HANDLER ran while the turn was still in flight — the
+      // mid-turn admission this leaf exists to prove. Waiting on the ack
+      // instead would wait out the teardown's bounded wait, which is a
+      // different assertion (outcome taxonomy, runtime-stop-command.test.ts).
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+
+      // It never became a provider turn and never entered the outbound queue as
+      // text: exactly one turn reached the provider, and it is not the control.
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/stop');
+      expect(enqueuedTexts()).not.toContain('/stop');
+      expect(mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+        .some((w) => w.includes('no handler'))).toBe(false);
+    } finally {
+      releaseTurn();
+    }
+  });
+
   it('a FUTURE registry entry with no switch case warns and forwards to the agent (B21-A F4b)', async () => {
     // Simulated Phase-2 append (delegating override seams): classifier admits
     // '/stats', registry serves a spec, but the switch has no case — the
@@ -674,7 +732,7 @@ describe('B22 group 3: denied gated commands finalize terminally and reply once'
   const gatedSpecs = [...COMMAND_REGISTRY].filter((spec) => spec.gate !== 'none');
 
   it('derives at least one gated entry from the registry (derivation tripwire)', () => {
-    expect(gatedSpecs.map((s) => s.name).sort()).toEqual(['kill-session', 'new', 'sessions']);
+    expect(gatedSpecs.map((s) => s.name).sort()).toEqual(['kill-session', 'new', 'sessions', 'stop']);
     for (const spec of gatedSpecs) expect(spec.gate === 'admin' || spec.gate === 'admin-shared-scope').toBe(true);
   });
 
