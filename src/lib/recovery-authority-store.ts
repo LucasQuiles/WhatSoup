@@ -260,12 +260,16 @@ function migrateLegacyMarkers(): void {
   }
 }
 
-function markerPayload(source: string): Record<string, unknown> {
+function markerPayload(source: string, detail?: Record<string, unknown>): Record<string, unknown> {
   // Stamped through the Clock SSOT (#2200) rather than a direct `new Date()`: this
   // value is only ever read by an operator inspecting the file, but src/ has exactly
   // one sanctioned wall-clock reader, and going through it is what makes the stamp
   // drivable to a known instant in tests instead of untestable.
-  return { source, setAt: systemClock.nowIso() };
+  //
+  // `detail` is spread FIRST so the envelope fields always win: a caller cannot
+  // shadow `source` or `setAt` and make a marker describe a key it is not filed
+  // under.
+  return { ...detail, source, setAt: systemClock.nowIso() };
 }
 
 /**
@@ -293,6 +297,32 @@ export function loadRecoveryMarkers(): Set<string> {
   return markers;
 }
 
+/**
+ * Read the payload stored with one marker, or null.
+ *
+ * `loadRecoveryMarkers` answers "did this source have an alert" from filenames
+ * alone, which is all a producer needs when it can rebuild its own state. A
+ * producer re-emitting an alert whose enqueue was rejected cannot: the row it
+ * speaks for is terminal and gone from every query, so the fields it needs live
+ * only here (#2387).
+ *
+ * Missing, unreadable and not-an-object all read as null — a caller re-emitting
+ * from this must never mistake a corrupt marker for an empty one. The legacy
+ * aggregate plane holds no per-key payload (its values are `true`), so a key
+ * that survives only there also reads null.
+ */
+export function readRecoveryMarker(source: string): Record<string, unknown> | null {
+  try {
+    const raw: unknown = JSON.parse(fs.readFileSync(markerFilePath(source), 'utf-8'));
+    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+      return raw as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function mutationErrorCode(error: unknown): string {
   return typeof error === 'object' && error !== null && 'code' in error
     ? String((error as NodeJS.ErrnoException).code ?? 'unknown')
@@ -308,15 +338,24 @@ function logMutationFailure(operation: 'set' | 'clear', startedAtMs: number, err
   }, 'recovery authority mutation failed');
 }
 
-/** Write a marker indicating *source* has an active alert. */
-export function setRecoveryMarker(source: string): void {
+/**
+ * Write a marker indicating *source* has an active alert.
+ *
+ * *detail* is optional producer state stored alongside the marker and read back
+ * with `readRecoveryMarker`. Presence remains the truth for `loadRecoveryMarkers`,
+ * which never interprets values; detail exists for the producer that must
+ * RE-EMIT the alert it could not enqueue and therefore needs more than "an alert
+ * was owed" (#2387). Keep it small and free of message content — these files are
+ * durable state, not an event log.
+ */
+export function setRecoveryMarker(source: string, detail?: Record<string, unknown>): void {
   const startedAtMs = performance.now();
   try {
     forceEnsurePrivateDirectorySync(markerDirPath(), 'recovery authority state');
     // Atomic temp-file + rename on a path unique to this key. Two processes
     // setting the same key converge on "present", which is the intended meaning;
     // distinct keys never touch the same path, so no lock is required.
-    writePrivateJsonMarkerSync(markerFilePath(source), markerPayload(source), {
+    writePrivateJsonMarkerSync(markerFilePath(source), markerPayload(source, detail), {
       label: 'recovery authority marker',
     });
   } catch (error) {
