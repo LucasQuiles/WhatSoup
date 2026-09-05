@@ -28,6 +28,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import socket
+import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -61,14 +65,34 @@ HELD_SIGNAL_KIND = "delivery_outcome_unknown_held"
 SENT_PUBLICATION_COMPONENT = "dispatcher.process_sent_state"
 ATTEMPT_PUBLICATION_COMPONENT = "dispatcher.process_attempt_state"
 
-# Transport error classes. json_rpc_call raises RuntimeError for both, and the
-# caller sees only the message, so the message is the classifier's input.
-AMBIGUOUS_TRANSPORT_ERROR = "timeout waiting for JSON-RPC response"
-LOST_CONNECTION_ERROR = "socket closed before response"
-PROVEN_REJECTION_ERROR = "rpc error: {'code': -32602, 'message': 'unknown chat'}"
 INJECTED_PUBLICATION_FAILURE = "injected sent-publication failure"
 
-AMBIGUOUS_ERRORS = (AMBIGUOUS_TRANSPORT_ERROR, LOST_CONNECTION_ERROR)
+# json_rpc_call raises RuntimeError for every transport failure and the caller
+# sees only the message, so the message is the classifier's input. What makes a
+# failure ambiguous is WHEN it happened: only after the tools/call request was
+# flushed can the remote already have accepted the message. json_rpc_call stamps
+# the protocol phase into the text of the no-reply failures, and these tests
+# drive the real transport against a fake peer so the phase labels under test
+# are the ones the code actually raises.
+HANDSHAKE_PHASE = "phase=handshake"
+POST_REQUEST_PHASE = "phase=post_request"
+
+# Fake-peer behaviours, named so the parametrize lists carry no bare literals.
+CLOSE_IN_HANDSHAKE = "close_in_handshake"
+HANG_IN_HANDSHAKE = "hang_in_handshake"
+CLOSE_AFTER_REQUEST = "close_after_request"
+HANG_AFTER_REQUEST = "hang_after_request"
+ERROR_AFTER_REQUEST = "error_after_request"
+HANDSHAKE_FAILURES = (HANG_IN_HANDSHAKE, CLOSE_IN_HANDSHAKE)
+POST_REQUEST_FAILURES = (HANG_AFTER_REQUEST, CLOSE_AFTER_REQUEST)
+
+# Connect-phase failures, which never reach the protocol at all.
+MISSING_SOCKET = "missing_socket"
+STALE_SOCKET_FILE = "stale_socket_file"
+CONNECT_FAILURES = (MISSING_SOCKET, STALE_SOCKET_FILE)
+
+TRANSPORT_TIMEOUT = 0.2
+SERVER_HANG_SECONDS = 2.0
 
 _ENV_KEYS = ["BOT_ERRORS_STATE_DIR", "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES"]
 
@@ -166,6 +190,100 @@ def _cycle(mod, paths, raises: str | None = None) -> list:
             if mod.ready(queued, paths["quarantine"]):
                 mod.process_one(queued, paths)
     return calls
+
+
+class _FakePeer:
+    """A minimal AF_UNIX JSON-RPC peer that fails at a chosen protocol phase.
+
+    The point is to let the REAL json_rpc_call produce the error text. A test
+    that hard-codes the message it expects proves only that the constant matches
+    itself, and would keep passing after the transport stopped raising it.
+    """
+
+    def __init__(self, path: str, fail_at: str):
+        self.path = path
+        self.fail_at = fail_at
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(path)
+        self._sock.listen(1)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        return False
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._sock.accept()
+        except OSError:
+            return
+        with conn:
+            reader = conn.makefile("r", encoding="utf-8", newline="\n")
+            writer = conn.makefile("w", encoding="utf-8", newline="\n")
+            handshake = reader.readline()
+            if self.fail_at == CLOSE_IN_HANDSHAKE:
+                return
+            if self.fail_at == HANG_IN_HANDSHAKE:
+                time.sleep(SERVER_HANG_SECONDS)
+                return
+            writer.write(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": json.loads(handshake)["id"], "result": {}}
+                )
+                + "\n"
+            )
+            writer.flush()
+            request = reader.readline()
+            if self.fail_at == HANG_AFTER_REQUEST:
+                time.sleep(SERVER_HANG_SECONDS)
+                return
+            if self.fail_at == ERROR_AFTER_REQUEST:
+                writer.write(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": json.loads(request)["id"],
+                            "error": {"code": -32602, "message": "unknown chat"},
+                        }
+                    )
+                    + "\n"
+                )
+                writer.flush()
+            return
+
+
+def _transport_error(mod, fail_at: str) -> str:
+    """Return the message the REAL transport raises for one failure mode."""
+    directory = tempfile.mkdtemp()
+    path = os.path.join(directory, "s")
+    try:
+        if fail_at == MISSING_SOCKET:
+            with pytest.raises(Exception) as caught:
+                mod.json_rpc_call(path, "tools/call", {}, timeout=TRANSPORT_TIMEOUT)
+            return str(caught.value)
+        if fail_at == STALE_SOCKET_FILE:
+            Path(path).write_text("not a socket")
+            with pytest.raises(Exception) as caught:
+                mod.json_rpc_call(path, "tools/call", {}, timeout=TRANSPORT_TIMEOUT)
+            return str(caught.value)
+        with _FakePeer(path, fail_at):
+            with pytest.raises(Exception) as caught:
+                mod.json_rpc_call(
+                    path,
+                    "tools/call",
+                    {"name": "send_message", "arguments": {}},
+                    timeout=TRANSPORT_TIMEOUT,
+                )
+        return str(caught.value)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _failing_publication(mod, component: str):
@@ -304,15 +422,20 @@ def test_a_failed_sent_publication_holds_the_event_and_the_restart_does_not_rese
     )
 
 
-@pytest.mark.parametrize("error", AMBIGUOUS_ERRORS)
-def test_a_lost_response_is_held_rather_than_requeued(tmp_path, error):
-    """Acceptance 3: the request was issued and no outcome came back.
+@pytest.mark.parametrize("fail_at", POST_REQUEST_FAILURES)
+def test_a_lost_response_is_held_rather_than_requeued(tmp_path, fail_at):
+    """Acceptance 3: the request was flushed and no outcome came back.
 
-    Both messages are raised by wait_for_response after the tool call was
-    written to the socket, so the remote may already have accepted. Treating
-    them as failures requeues and re-sends.
+    The peer accepted the handshake, then died or went silent after reading the
+    tools/call request, so the remote may already have accepted the message.
+    Treating that as a failure requeues and re-sends.
     """
-    mod = _load(tmp_path / f"lost-response-{abs(hash(error)) % 1000}")
+    mod = _load(tmp_path / f"lost-response-{fail_at}")
+    error = _transport_error(mod, fail_at)
+    assert POST_REQUEST_PHASE in error, (
+        f"a failure after the request was flushed must be labelled "
+        f"{POST_REQUEST_PHASE!r}: {error!r}"
+    )
     paths = mod.setup_dirs()
     event = _event("evt-2424-lost", QUEUED_STATUS)
     _open_incident(mod, paths, event)
@@ -363,32 +486,94 @@ def test_a_second_reclaim_does_not_signal_the_held_item_again(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_a_proven_rejection_keeps_the_bounded_retry_path(tmp_path):
-    """Acceptance 3 control (A5): a response naming an error is not ambiguous.
+def _assert_requeued_not_held(mod, paths, error: str, expect_sends: int) -> None:
+    calls = _cycle(mod, paths, raises=error)
+    assert len(calls) == expect_sends, (
+        f"expected {expect_sends} transport attempt(s), got {len(calls)}: {error!r}"
+    )
+    requeued = list(paths["outbox"].glob("*.json"))
+    assert len(requeued) == 1, (
+        f"a pre-send or proven failure must stay on the bounded retry path, "
+        f"got outbox={requeued!r} processing={_processing_records(paths)!r} "
+        f"for {error!r}"
+    )
+    record = json.loads(requeued[0].read_text())
+    assert _delivery_status(record) == QUEUED_STATUS, (
+        f"must requeue, not hold: {record.get('delivery')!r} for {error!r}"
+    )
+    assert int((record.get("delivery") or {}).get("attempts") or 0) >= 1, (
+        f"the attempt must be counted against the retry budget: {record.get('delivery')!r}"
+    )
+    assert _held_signals(paths) == [], (
+        f"a non-ambiguous failure must not emit a hold signal: {error!r}"
+    )
 
-    wait_for_response raises this only after reading a reply that carries an
-    error, so the remote provably did not accept the message.
+
+def test_a_proven_rejection_keeps_the_bounded_retry_path(tmp_path):
+    """Acceptance 3 control (A5): a reply naming an error is not ambiguous.
+
+    The peer answered the tools/call with a JSON-RPC error, so the remote
+    provably did not accept the message -- even though the failure happened
+    after the request was flushed. The phase label must not be stamped on
+    reply-derived failures, or every rejection would be held.
     """
     mod = _load(tmp_path / "proven-rejection")
+    error = _transport_error(mod, ERROR_AFTER_REQUEST)
+    assert POST_REQUEST_PHASE not in error, (
+        f"a reply that names an error proves the outcome and must NOT carry the "
+        f"ambiguous phase label: {error!r}"
+    )
     paths = mod.setup_dirs()
     event = _event("evt-2424-rejected", QUEUED_STATUS)
     _open_incident(mod, paths, event)
     _seed_outbox(paths, event)
 
-    calls = _cycle(mod, paths, raises=PROVEN_REJECTION_ERROR)
+    _assert_requeued_not_held(mod, paths, error, expect_sends=1)
 
-    assert len(calls) == 1, f"the rejected send must still be attempted: {len(calls)}"
-    requeued = list(paths["outbox"].glob("*.json"))
-    assert len(requeued) == 1, (
-        f"a proven rejection must stay on the bounded retry path: {requeued!r}"
+
+@pytest.mark.parametrize("fail_at", HANDSHAKE_FAILURES)
+def test_a_handshake_failure_is_requeued_not_held(tmp_path, fail_at):
+    """H2: a failure before the tools/call request was flushed is PRE-SEND.
+
+    json_rpc_call runs the initialize handshake first. Nothing has been asked of
+    the remote yet, so nothing can have been accepted. Holding here would turn a
+    transient MCP outage into an operator queue of held alerts instead of the
+    bounded retry that has always applied.
+    """
+    mod = _load(tmp_path / f"handshake-{fail_at}")
+    error = _transport_error(mod, fail_at)
+    assert HANDSHAKE_PHASE in error, (
+        f"a handshake-phase failure must be labelled {HANDSHAKE_PHASE!r}: {error!r}"
     )
-    record = json.loads(requeued[0].read_text())
-    assert _delivery_status(record) == QUEUED_STATUS, (
-        f"a proven rejection must requeue, not hold: {record.get('delivery')!r}"
+    assert POST_REQUEST_PHASE not in error, (
+        f"a handshake-phase failure must not be labelled ambiguous: {error!r}"
     )
-    assert _held_signals(paths) == [], (
-        "a proven rejection must not emit an ambiguous-outcome signal"
+    paths = mod.setup_dirs()
+    event = _event(f"evt-2424-{fail_at}", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    _seed_outbox(paths, event)
+
+    _assert_requeued_not_held(mod, paths, error, expect_sends=1)
+
+
+@pytest.mark.parametrize("fail_at", CONNECT_FAILURES)
+def test_a_connect_failure_is_requeued_not_held(tmp_path, fail_at):
+    """H2 control: the protocol was never entered, so nothing is ambiguous.
+
+    Already true before the phase distinction existed; proved here so that a
+    later widening of the ambiguous class cannot silently swallow it.
+    """
+    mod = _load(tmp_path / f"connect-{fail_at}")
+    error = _transport_error(mod, fail_at)
+    assert POST_REQUEST_PHASE not in error, (
+        f"a connect failure must not be labelled ambiguous: {error!r}"
     )
+    paths = mod.setup_dirs()
+    event = _event(f"evt-2424-{fail_at}", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    _seed_outbox(paths, event)
+
+    _assert_requeued_not_held(mod, paths, error, expect_sends=1)
 
 
 def test_a_crash_before_the_send_is_issued_still_delivers_once(tmp_path):

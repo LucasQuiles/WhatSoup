@@ -3557,7 +3557,9 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
             },
         }) + "\n")
         writer.flush()
-        wait_for_response(reader, init_id, timeout)
+        # #2424: everything up to and including this handshake wait happens
+        # before the tool call is written, so nothing can have been accepted.
+        wait_for_response(reader, init_id, timeout, phase=JSON_RPC_HANDSHAKE_PHASE)
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -3566,15 +3568,33 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
             "params": params,
         }) + "\n")
         writer.flush()
-        return wait_for_response(reader, call_id, timeout)
+        # #2424: past this flush the remote may already have acted on the
+        # request, so a missing reply is an ambiguous outcome, not a failure.
+        return wait_for_response(reader, call_id, timeout, phase=JSON_RPC_POST_REQUEST_PHASE)
 
 
-def wait_for_response(reader: Any, expected_id: int, timeout: float) -> dict[str, Any]:
+def wait_for_response(
+    reader: Any, expected_id: int, timeout: float, *, phase: str
+) -> dict[str, Any]:
+    """Read one JSON-RPC reply, stamping the protocol phase on no-reply failures.
+
+    `phase` is what separates "the request never left" from "the request left
+    and the answer did not" (#2424). It is stamped ONLY on failures where no
+    reply was read; a reply that names an error proves the outcome whichever
+    phase produced it, so those messages stay unlabelled and keep the ordinary
+    bounded-retry path.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        line = reader.readline()
+        try:
+            line = reader.readline()
+        except OSError as exc:
+            # The socket's own timeout fires here, before the loop deadline
+            # below, because both use the same value -- so this is the read
+            # error class an operator actually sees, not the deadline message.
+            raise RuntimeError(f"{str(exc) or 'socket read failed'} ({phase})") from exc
         if not line:
-            raise RuntimeError("socket closed before response")
+            raise RuntimeError(f"socket closed before response ({phase})")
         msg = json.loads(line)
         if msg.get("id") != expected_id:
             continue
@@ -3584,7 +3604,7 @@ def wait_for_response(reader: Any, expected_id: int, timeout: float) -> dict[str
         if isinstance(result, dict) and result.get("isError") is True:
             raise RuntimeError(f"tool error: {result}")
         return result if isinstance(result, dict) else {"result": result}
-    raise RuntimeError("timeout waiting for JSON-RPC response")
+    raise RuntimeError(f"timeout waiting for JSON-RPC response ({phase})")
 
 
 def validate_bot_errors_target() -> None:
@@ -3852,24 +3872,30 @@ def is_transient_transport_failure(error: str) -> bool:
     )
 
 
-# Post-issue transport failures that carry NO proof of the outcome (#2424).
-# json_rpc_call writes the tool call to the socket and then waits;
-# wait_for_response raises exactly these two when no reply ever arrives, so the
-# remote may already have accepted the message. Every other RuntimeError it
-# raises ("rpc error: ...", "tool error: ...", "send_message returned error: ...")
-# was BUILT FROM a reply, which proves the send was rejected and keeps the
-# ordinary bounded-retry and dead-letter path.
+# Protocol-phase labels stamped by wait_for_response on no-reply failures.
+# The label, not the error class, is what decides whether an outcome is
+# ambiguous (#2424): the same timeout means "never left" during the handshake
+# and "may have been accepted" after the tool call was flushed.
+JSON_RPC_HANDSHAKE_PHASE = "phase=handshake"
+JSON_RPC_POST_REQUEST_PHASE = "phase=post_request"
+
+# A transport failure carries NO proof of the outcome only when the tools/call
+# request had already been flushed and no reply came back. Everything else keeps
+# the ordinary bounded-retry, email-fallback and dead-letter path:
+#   - connect errors, a missing socket, and any handshake-phase failure are
+#     PRE-SEND: nothing was asked of the remote. Holding these would turn a
+#     transient MCP outage into a queue of held alerts needing operator action.
+#   - "rpc error: ...", "tool error: ..." and "send_message returned error: ..."
+#     were BUILT FROM a reply, which proves the send was rejected, so they are
+#     never labelled whichever phase produced them.
 #
-# LIMIT, deliberately fail-closed: wait_for_response serves both the initialize
-# handshake and the tool call and raises identical text for both, so a handshake
-# timeout is classified ambiguous even though the request never left. That holds
-# an item that could have been delivered. The issue requires the fail-closed
-# direction, and a held item is visible to an operator while a duplicate page is
-# indistinguishable from a real second incident.
-_AMBIGUOUS_SEND_SIGNATURES = (
-    "timeout waiting for json-rpc response",
-    "socket closed before response",
-)
+# LIMIT: a missing reply after the flush is ambiguous by construction. The
+# protocol carries no delivery identity and no idempotency key, so nothing
+# distinguishes accepted-then-lost from never-processed, and the fail-closed
+# reading the issue requires is to hold. An error raised while writing or
+# flushing the request itself is treated as PRE-SEND: a partially written line
+# is not a parseable JSON-RPC message.
+_AMBIGUOUS_SEND_SIGNATURES = (JSON_RPC_POST_REQUEST_PHASE,)
 
 
 def is_ambiguous_send_outcome(error: str) -> bool:
