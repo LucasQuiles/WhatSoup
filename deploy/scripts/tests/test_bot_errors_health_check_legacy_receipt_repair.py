@@ -323,12 +323,100 @@ def test_repair_refuses_a_group_or_world_writable_parent(tmp_path, parent_mode):
     assert _mode_of(receipt_path) == 0o644, "a leaf under a writable parent must be left unmodified"
 
 
-def test_repair_matches_the_reader_through_a_symlinked_state_root(tmp_path):
-    """Parity: a symlinked state root is transparent to the repair.
+def _plant_attacker_receipt(directory: Path) -> tuple[Path, bytes]:
+    """A second 0644 receipt of the same name, outside the proven parent."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    decoy = directory / "daily-health-receipt.json"
+    raw = (json.dumps({"eventId": "attacker-planted"}, sort_keys=True) + "\n").encode("utf-8")
+    decoy.write_bytes(raw)
+    decoy.chmod(0o644)
+    return decoy, raw
 
-    _durable_target resolves the parent, so the reader publishes through a
-    symlinked state root. A repair that refused there would be permanently
-    inert on exactly the hosts whose legacy receipt still needs repairing.
+
+def test_repair_refuses_when_the_parent_is_swapped_after_resolution(tmp_path, monkeypatch):
+    """A component swapped between the resolve and the walk must refuse.
+
+    Resolution removes every symlink, so the O_NOFOLLOW walk earns its keep
+    only in this window. The swap is injected at _resolved_receipt_parent so
+    the public entry point sees exactly the race it defends against.
+    """
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    decoy_path, decoy_raw = _plant_attacker_receipt(tmp_path / "attacker")
+    real_resolve = _mod._resolved_receipt_parent
+
+    def resolve_then_swap(path: Path) -> Path:
+        resolved = real_resolve(path)
+        real_root.rename(tmp_path / "moved-aside")
+        real_root.symlink_to(tmp_path / "attacker", target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(_mod, "_resolved_receipt_parent", resolve_then_swap)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(
+        real_root / "daily-health-receipt.json"
+    )
+
+    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    assert outcome.previous_mode is None
+    moved_receipt = tmp_path / "moved-aside" / "daily-health-receipt.json"
+    assert moved_receipt.read_bytes() == raw
+    assert _mode_of(moved_receipt) == 0o644, "the real receipt must be untouched"
+    assert decoy_path.read_bytes() == decoy_raw
+    assert _mode_of(decoy_path) == 0o644, "the attacker receipt must never be chmodded"
+
+
+def test_repair_uses_the_held_descriptor_when_the_parent_is_swapped_after_the_walk(
+    tmp_path, monkeypatch
+):
+    """The leaf must be opened THROUGH the walked descriptor, not by path.
+
+    Once the walk has proven the parent, the descriptor pins that directory by
+    inode. Re-opening the leaf by absolute path instead would re-traverse the
+    path and land in whatever the attacker swapped in, which is exactly the
+    ancestor-redirection exposure this repair exists to remove. Swapping the
+    directory after the descriptor is held discriminates the two: with the
+    descriptor the original inode is repaired, by path the decoy would be.
+    """
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    original_inode = receipt_path.lstat().st_ino
+    decoy_path, decoy_raw = _plant_attacker_receipt(tmp_path / "attacker")
+    real_open = _mod._open_receipt_parent
+
+    def open_then_swap(resolved_parent: Path) -> int:
+        descriptor = real_open(resolved_parent)
+        real_root.rename(tmp_path / "moved-aside")
+        real_root.symlink_to(tmp_path / "attacker", target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(_mod, "_open_receipt_parent", open_then_swap)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(
+        real_root / "daily-health-receipt.json"
+    )
+
+    assert outcome.refusal is None
+    assert outcome.previous_mode == 0o644
+    moved_receipt = tmp_path / "moved-aside" / "daily-health-receipt.json"
+    assert moved_receipt.lstat().st_ino == original_inode
+    assert moved_receipt.read_bytes() == raw
+    assert _mode_of(moved_receipt) == _EXPECTED_SUCCESSOR_MODE
+    assert decoy_path.read_bytes() == decoy_raw
+    assert _mode_of(decoy_path) == 0o644, "the swapped-in decoy must never be chmodded"
+
+
+def test_repair_matches_the_reader_through_a_symlinked_state_root(tmp_path):
+    """A symlinked state root is transparent to the REPAIR, not to publication.
+
+    _resolved_receipt_parent resolves the parent, so this helper repairs the
+    leaf behind the link. Publication is a separate question: the recording
+    path calls ensure_private_dir(), which rejects a symlinked state directory
+    outright, so this layout repairs and then fails to publish. The case that
+    works end to end is a symlinked ANCESTOR above the state root, covered by
+    the next test. See test_state_root_symlink_is_rejected_before_publication.
     """
     real_root = tmp_path / "real-state"
     real_root.mkdir(mode=0o700)
