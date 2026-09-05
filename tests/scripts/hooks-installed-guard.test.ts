@@ -18,6 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,6 +28,8 @@ import {
   HOOK_ENTRYPOINTS,
   HOOK_HELPERS,
   MAX_HOOK_RECEIPT_BYTES,
+  type GitExecutableIdentityV1,
+  deriveHookLineageRefFormat,
   interpretSymbolicHeadAttempt,
   parseHookIdentityReceiptBytes,
   readBoundDirectoryNames,
@@ -39,8 +42,10 @@ import {
   serializeHookIdentityReceipt,
   validateHookIdentityReceipt,
   withStableHeadLineage,
+  withStableHeadLineageUsing,
 } from '../../scripts/hooks-installed-guard.ts';
 import { reasonDefinition } from '../../scripts/lib/ci-control/reasons.ts';
+import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
 import { loadControlManifest } from '../../scripts/lib/ci-control/manifest.ts';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
@@ -67,7 +72,12 @@ function git(cwd: string, args: string[]): string {
 }
 
 function writeExecutable(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  // Pin the parent directory mode: hosts with umask 002 (dev workstations)
+  // otherwise leak a group-writable 0775 hooks directory into the fixture,
+  // and the guard correctly fails closed on exactly that. CI's umask 022
+  // masked this seam. mkdir applies umask by clearing bits only, so an
+  // explicit 0o755 is deterministic under any umask.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
   writeFileSync(path, text);
   chmodSync(path, 0o755);
 }
@@ -87,9 +97,69 @@ function repoFixture(): string {
   return root;
 }
 
+/**
+ * A `git` that behaves like a pre-2.45 binary for the one flag this suite needs
+ * to reproduce: `rev-parse` did not know `--show-ref-format` before 2.45, so it
+ * treated the flag as a literal argument and echoed it back with exit 0
+ * (observed on 2.43.0). Every other invocation delegates to the real trusted
+ * git, so the lineage envelope still runs against a genuine repository.
+ */
+function writePre245RevParseShim(root: string): string {
+  const shim = resolve(root, 'git-pre-2.45-shim');
+  writeExecutable(shim, `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--show-ref-format" ]; then
+  printf '%s\\n' "--show-ref-format"
+  exit 0
+fi
+exec ${resolveTrustedGit()} "$@"
+`);
+  return shim;
+}
+
+/** The shim, described the way `trustedGitExecutable()` describes a real git. */
+function trustedShimExecutable(shim: string, version: string): {
+  path: string;
+  identity: GitExecutableIdentityV1;
+} {
+  const digest = `sha256:${createHash('sha256').update(readFileSync(shim)).digest('hex')}`;
+  return {
+    path: shim,
+    identity: { identity: 'system', version, launcherDigest: digest, implementationDigest: digest },
+  };
+}
+
 // spawnSync fixture repos, ACL ops, and the pinned-npm guard run can exceed
 // the 10s default (observed as pure timeouts with every assertion green);
 // 30s keeps the local workflow fast while accommodating the subprocess overhead.
+describe('ref-format evidence capability detection', () => {
+  it('passes through files and reftable evidence from a reftable-capable Git', () => {
+    expect(deriveHookLineageRefFormat('git version 2.45.0', 'files')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.49.1', 'reftable')).toBe('reftable');
+    expect(deriveHookLineageRefFormat('git version 2.45.0-rc0', 'reftable')).toBe('reftable');
+  });
+
+  it('derives files on pre-2.45 Git whose --show-ref-format echoes the unknown flag', () => {
+    // Observed 2.43.0 behavior: exit 0, stdout is the flag echoed back.
+    expect(deriveHookLineageRefFormat('git version 2.43.0', '--show-ref-format')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.44.5', '--show-ref-format')).toBe('files');
+    expect(deriveHookLineageRefFormat('git version 2.39.2 (Apple Git-143)', '')).toBe('files');
+  });
+
+  it('fails closed on ambiguous or contradictory evidence from a capable Git', () => {
+    expect(deriveHookLineageRefFormat('git version 2.45.0', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2.47.0', 'FILES')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2.45.0', '')).toBeNull();
+    // A pre-2.45 Git claiming reftable is lying — contradictory, fail closed.
+    expect(deriveHookLineageRefFormat('git version 2.43.0', 'reftable')).toBeNull();
+  });
+
+  it('never earns the fallback from an unparsable or out-of-scope version', () => {
+    expect(deriveHookLineageRefFormat('not a version', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 3.0.1', '--show-ref-format')).toBeNull();
+    expect(deriveHookLineageRefFormat('git version 2', '--show-ref-format')).toBeNull();
+  });
+});
+
 describe('repository hook installation identity', { timeout: 30_000 }, () => {
   it('passes only for canonical relative hooks whose complete closure matches HEAD', () => {
     const root = repoFixture();
@@ -437,6 +507,39 @@ describe('repository hook installation identity', { timeout: 30_000 }, () => {
     expect(evaluation.initialOid).toBe(a);
     expect(evaluation.finalOid).toBe(a);
     expect(evaluation.stable).toBe(false);
+  });
+
+  it('resolves ref-format evidence through the executing git at the capture site', () => {
+    const root = repoFixture();
+    const shim = writePre245RevParseShim(root);
+
+    // A pre-2.45 Git echoes the unknown flag back instead of naming a ref
+    // format. The capture site must resolve that against the executing git's
+    // version and derive 'files', not discard the lineage: without the
+    // capability-detection call every inspection degrades to
+    // evidence-unavailable, which is the whole-suite failure this guard's
+    // ref-format handling exists to prevent on pre-2.45 workstations.
+    const legacy = withStableHeadLineageUsing(
+      trustedShimExecutable(shim, 'git version 2.43.0'),
+      root,
+      () => 'evaluated',
+    );
+
+    expect(legacy.code).toBe('stable');
+    expect(legacy.stable).toBe(true);
+    expect(legacy.value).toBe('evaluated');
+
+    // The version the site resolves against is the executing git's own, not a
+    // constant: the identical echoed flag from a reftable-capable Git is
+    // ambiguous evidence and still fails closed.
+    const capable = withStableHeadLineageUsing(
+      trustedShimExecutable(shim, 'git version 2.45.0'),
+      root,
+      () => 'evaluated',
+    );
+
+    expect(capable.value).toBeNull();
+    expect(capable.code).toBe('ci.hooks.evidence-unavailable');
   });
 
   it('treats only the documented symbolic-ref status as detached lineage', () => {
