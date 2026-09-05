@@ -256,6 +256,28 @@ the real synthetic executable; injecting `TimeoutExpired` before command launch
 reproduces the assertion failure and requests seven host diagnostic commands,
 all intercepted before execution. This establishes a failure-path fixture gap,
 not proof of the original timeout or credential disclosure. The probe source and test were
-unchanged by this canonical delta. Source, complete receipts and the remaining
-repair decision are retained in the existing private lane ledger. Release
-validation is paused; targeted passes do not supersede the failed full run.
+unchanged by this canonical delta. Source and complete receipts are retained in
+the existing private lane ledger. Release validation paused at this failure;
+targeted passes alone did not supersede the failed full run.
+
+### Provider-path fixture repair
+
+The approved test-only repair isolates credential and live-session diagnostics
+in the existing governed-path fixture. Command resolution and the real marker
+executable remain active. The positive control records ordered commands and
+outcomes and rejects an unsuccessful primary command instead of losing its
+evidence to a later diagnostic. Production probe behavior is unchanged.
+
+Both new timeout and nonzero-exit controls failed before the repair, with three
+intercepted credential-command requests per case. Afterwards, all 201 tests in
+the provider-probe file passed. Six additional proof checks remove each
+isolation independently and inject primary failures into the positive control;
+the actual assertions reject each invalid case. These checks prove the scoped
+fixture boundary, not OS-enforced or process-tree isolation. The original
+full-run trigger remains unknown.
+
+The unchanged full BOT ERRORS command now passes all 2,840 tests. The existing
+curated exclusions remain owned by their separate coverage gate. Test Integrity
+reports no findings in the changed file or private proof. Full release checks,
+published-head CI and required review still determine integration readiness;
+this result alone does not authorize a push, merge or deployment.
