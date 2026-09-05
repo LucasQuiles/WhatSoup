@@ -3013,10 +3013,13 @@ DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # planted in the archive from parking the census forever.
 ENTRY_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 READ_CHUNK_BYTES = 65536
-# A block that read some of its entries and could not read others is neither
-# ok nor unavailable, so it contributes its numbers to the total while the
-# total's own status stays partial.
-CONTRIBUTING_STATUSES = ("ok", "partial")
+# An entry that was stat-ed and is then GONE at the open -- renamed away
+# (ENOENT) or now a symlink (ELOOP) -- was swapped mid-flight. The lstat
+# numbers describe an object that is no longer there, so it is reported as
+# something the census could not look at rather than counted from stale data.
+# Any other open failure (mode 000, say) leaves the same object in place with
+# only its content out of reach, which is a parse failure.
+SWAPPED_ENTRY_ERRNOS = (errno.ENOENT, errno.ELOOP)
 
 
 def errno_class(exc):
@@ -3090,7 +3093,7 @@ def census(directory):
     try:
         fd = os.open(directory, DIR_OPEN_FLAGS)
     except OSError as exc:
-        return refusal_report(directory, exc), set()
+        return refusal_report(directory, exc), set(), 0
     try:
         return census_descriptor(fd)
     finally:
@@ -3098,18 +3101,23 @@ def census(directory):
 
 
 def census_descriptor(fd):
+    # Returns (report, source_kinds, reached) where `reached` counts the
+    # entries the census actually got a stat for. A directory that listed but
+    # reached nothing produced no number, only a refusal, and the total below
+    # has to know the difference.
     count = 0
     total_bytes = 0
     oldest = None
     newest = None
     parse_failures = 0
     unusable = 0
+    reached = 0
     source_kinds = set()
     try:
         names = sorted(os.listdir(fd))
     except OSError as exc:
         # Unreadable is NOT empty.
-        return blank_report("unavailable", errno_class(exc)), set()
+        return blank_report("unavailable", errno_class(exc)), set(), 0
     for name in names:
         try:
             info = os.lstat(name, dir_fd=fd)
@@ -3125,6 +3133,7 @@ def census_descriptor(fd):
             # block below say it is incomplete.
             unusable += 1
             continue
+        reached += 1
         # lstat + S_ISREG, so a symlink is never followed out of the archive
         # and a nested directory is never descended into.
         if not S_ISREG(info.st_mode):
@@ -3132,7 +3141,14 @@ def census_descriptor(fd):
         try:
             entry_fd = os.open(name, ENTRY_OPEN_FLAGS, dir_fd=fd)
         except OSError as exc:
-            if getattr(exc, "errno", None) == errno.ENOENT:
+            if getattr(exc, "errno", None) in SWAPPED_ENTRY_ERRNOS:
+                # Swapped between the stat and the open: renamed away, or now
+                # a symlink that O_NOFOLLOW refuses to follow out of the
+                # archive. Reporting the stale lstat size and age would be a
+                # claim about an object that is gone, and dropping the entry
+                # silently would make a detected swap disappear from the
+                # report entirely.
+                unusable += 1
                 continue
             # Stat-able but not openable (mode 000, say): its bytes and its
             # age ARE known and only its content is not, so it stays a
@@ -3150,7 +3166,9 @@ def census_descriptor(fd):
             if not S_ISREG(entry_info.st_mode):
                 # Swapped for a non-file between the stat and the open. The
                 # descriptor, not the name, is what got counted -- so it is
-                # not counted.
+                # not counted as an artifact, and the swap the census DID
+                # detect is reported rather than dropped.
+                unusable += 1
                 continue
             # Size and age come off the DESCRIPTOR that was read, not off a
             # name that could have been repointed since.
@@ -3193,20 +3211,33 @@ def census_descriptor(fd):
         # never which ones.
         "sourceKindCardinality": len(source_kinds),
     }
-    return report, source_kinds
+    return report, source_kinds, reached
 
 
-def combine(reports, kind_sets):
-    # Only directories that produced numbers contribute them. If any
-    # directory is not ok the total is "partial", so a caller can never read
-    # an incomplete sum as a complete one.
-    contributing = [r for r in reports if r["status"] in CONTRIBUTING_STATUSES]
+def produced_numbers(report, reached):
+    # A directory contributes numbers when it completed (an empty `ok`
+    # directory really does hold nothing) or when it reached at least one
+    # entry. A directory that listed and then reached NOTHING -- mode 0444 --
+    # has a zero that means "I could not look", so it contributes no number
+    # even though its status is partial rather than unavailable.
+    return report["status"] == "ok" or reached > 0
+
+
+def combine(reports, kind_sets, reached_counts):
+    # If any directory is not ok the total is "partial", so a caller can
+    # never read an incomplete sum as a complete one.
+    numeric = [r for r, reached in zip(reports, reached_counts) if produced_numbers(r, reached)]
     complete = [r for r in reports if r["status"] == "ok"]
     status = "ok" if len(complete) == len(reports) else "partial"
-    if not contributing:
-        # NOTHING was read. A zero here would answer "I could not look" with
-        # "there is nothing there" -- the conflation every directory block
-        # already refuses, and the one a retention pass would act on.
+    # The gap is reported from EVERY directory that measured one, including a
+    # directory that contributed no other number. Dropping it with the sums
+    # would hide the size of what could not be looked at.
+    unusable_values = [r["unusableEntryCount"] for r in reports if r["unusableEntryCount"] is not None]
+    unusable_total = sum(unusable_values) if unusable_values else None
+    if not numeric:
+        # NOTHING was reached. A zero here would answer "I could not look"
+        # with "there is nothing there" -- the conflation every directory
+        # block already refuses, and the one a retention pass would act on.
         return {
             "status": status,
             "artifactCount": None,
@@ -3214,25 +3245,25 @@ def combine(reports, kind_sets):
             "oldestAgeSeconds": None,
             "newestAgeSeconds": None,
             "parseFailureCount": None,
-            "unusableEntryCount": None,
+            "unusableEntryCount": unusable_total,
             "sourceKindCardinality": None,
         }
-    oldest_values = [r["oldestAgeSeconds"] for r in contributing if r["oldestAgeSeconds"] is not None]
-    newest_values = [r["newestAgeSeconds"] for r in contributing if r["newestAgeSeconds"] is not None]
+    oldest_values = [r["oldestAgeSeconds"] for r in numeric if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in numeric if r["newestAgeSeconds"] is not None]
     union = set()
-    for report, kinds in zip(reports, kind_sets):
-        if report["status"] in CONTRIBUTING_STATUSES:
+    for report, kinds, reached in zip(reports, kind_sets, reached_counts):
+        if produced_numbers(report, reached):
             union |= kinds
     return {
         "status": status,
-        "artifactCount": sum(r["artifactCount"] for r in contributing),
-        "totalBytes": sum(r["totalBytes"] for r in contributing),
+        "artifactCount": sum(r["artifactCount"] for r in numeric),
+        "totalBytes": sum(r["totalBytes"] for r in numeric),
         "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
         "newestAgeSeconds": min(newest_values) if newest_values else None,
-        "parseFailureCount": sum(r["parseFailureCount"] for r in contributing),
+        "parseFailureCount": sum(r["parseFailureCount"] for r in numeric),
         # Carried to the total as well: a consumer that reads only this block
         # would otherwise see a lower sum with no quantified gap.
-        "unusableEntryCount": sum(r["unusableEntryCount"] for r in contributing),
+        "unusableEntryCount": unusable_total,
         # Union, not a sum: a producer present in both archives is one kind.
         "sourceKindCardinality": len(union),
     }
@@ -3247,17 +3278,19 @@ try:
     archives = {}
     reports = []
     kind_sets = []
+    reached_counts = []
     for label, dirname in ARCHIVE_DIRS:
-        report, kinds = census(os.path.join(root, dirname))
+        report, kinds, reached = census(os.path.join(root, dirname))
         archives[label] = report
         reports.append(report)
         kind_sets.append(kinds)
+        reached_counts.append(reached)
     payload = {
         "schemaVersion": 1,
         "censusStatus": "ok",
         "generatedAtEpoch": int(now),
         "archives": archives,
-        "total": combine(reports, kind_sets),
+        "total": combine(reports, kind_sets, reached_counts),
     }
     print(json.dumps(payload, sort_keys=True))
 except Exception:

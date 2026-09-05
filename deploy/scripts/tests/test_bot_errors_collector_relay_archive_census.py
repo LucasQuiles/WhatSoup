@@ -42,7 +42,9 @@ Deploy Python tests run in Linux CI; a local macOS run is an indicator only.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -518,6 +520,45 @@ def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector
     assert total["newestAgeSeconds"] is None
 
 
+def test_census_total_is_null_when_every_directory_listed_but_reached_nothing(collector, tmp_path):
+    """Listability is not the test; reaching an entry is.
+
+    Both archive directories at mode 0444 list fine, so both blocks are
+    `partial` rather than `unavailable` -- and a total that keyed on status
+    summed them to `artifactCount: 0` and `totalBytes: 0`. That is the same
+    "I could not look" reported as "there is nothing there" the per-directory
+    blocks refuse. The gap itself still has to reach the total as a count,
+    which is the one number here that is not null.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    writefail = root / "writefail-relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(writefail, "d.json.1.relayed", _event(), age_seconds=_DAY)
+    os.chmod(relayed, 0o444)
+    os.chmod(writefail, 0o444)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+        os.chmod(writefail, 0o755)
+
+    assert report["archives"]["relayed"]["status"] == "partial"
+    assert report["archives"]["writefailRelayed"]["status"] == "partial"
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["parseFailureCount"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["oldestAgeSeconds"] is None
+    assert total["newestAgeSeconds"] is None
+    # The size of what could not be looked at is the one thing that IS known.
+    assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS + 1
+
+
 # MED-1 is a race, and a race is not a deterministic pytest. What IS
 # deterministic is the property that removes it: after the archive directory
 # is opened, every listing, stat and read is addressed to that DESCRIPTOR, so
@@ -526,15 +567,44 @@ def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector
 # test_bot_errors_remote_command_readonly.py uses on these constants, with
 # negative controls underneath so it cannot pass by construction.
 #
-# Scope, stated so it is not read as more than it is: this proves no LISTING,
-# no aggregate STAT and no READ is addressed by path. It does not prove the
-# absence of every path resolution -- the refusal-label lstat is one, and is
-# budgeted below by name.
+# Scope, stated so it is not read as more than it is: this proves that no
+# filesystem call in the script resolves a path, with exactly two budgeted
+# exceptions named below -- the single directory open that PRODUCES the
+# descriptor, and the lstat that labels a refusal that has already happened.
+# The budget is over the whole population of path-resolving calls, not over
+# one spelling of it: an aggregate re-stat written as os.stat, a re-listing
+# written as os.scandir and a os.readlink are each as much a second
+# resolution as an lstat is, and each is flagged.
 _MAX_LABEL_ONLY_PATH_LSTAT_CALLS = 1
 _DIR_OPEN_FLAGS_NAME = "DIR_OPEN_FLAGS"
 _ENTRY_OPEN_FLAGS_NAME = "ENTRY_OPEN_FLAGS"
 _REQUIRED_DIR_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+# O_NOFOLLOW on the ENTRY open is what stops a name swapped for a symlink
+# between the entry stat and the entry open from being read out of the
+# archive. Dropping that one token is a live regression, so the walk checks
+# the flags actually USED at the entry open, not only that the constant
+# exists.
 _REQUIRED_ENTRY_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_NOFOLLOW")
+
+# os functions that resolve a path argument against the filesystem. Purely
+# descriptor-addressed calls (fstat, read, close) and pure string handling
+# (os.path.join, os.path.basename) are not here, because neither reaches the
+# filesystem through a name.
+_PATH_RESOLVING_OS_CALLS = frozenset(
+    {
+        "stat", "lstat", "listdir", "scandir", "readlink", "open", "walk",
+        "fwalk", "access", "statvfs", "truncate", "utime", "chmod", "chown",
+        "link", "symlink", "rename", "replace", "remove", "unlink", "rmdir",
+        "mkdir", "makedirs", "removedirs", "getxattr", "listxattr", "pathconf",
+    }
+)
+# os.path helpers that stat behind the scenes.
+_PATH_RESOLVING_OSPATH_CALLS = frozenset(
+    {
+        "exists", "lexists", "isdir", "isfile", "islink", "getsize",
+        "getmtime", "getctime", "getatime", "realpath", "samefile",
+    }
+)
 
 
 def _descriptor_names(tree: ast.AST) -> set[str]:
@@ -567,6 +637,26 @@ def _flag_expression_source(tree: ast.AST, source: str, name: str) -> str:
     return ""
 
 
+def _is_os_path_call(func: ast.Attribute) -> bool:
+    value = func.value
+    return (
+        isinstance(value, ast.Attribute)
+        and value.attr == "path"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "os"
+    )
+
+
+def _flags_are_acceptable(source: str, flags, constant_name: str, required: tuple) -> bool:
+    """The flags expression must be the named module-level constant, or spell
+    out every required token inline. Either way the token that matters cannot
+    be dropped without the walk seeing it."""
+    if isinstance(flags, ast.Name) and flags.id == constant_name:
+        return True
+    rendered = ast.get_source_segment(source, flags) if flags is not None else ""
+    return bool(rendered) and all(token in rendered for token in required)
+
+
 def _descriptor_pinning_violations(source: str) -> list[str]:
     """Return a list of violation descriptions; an empty list means pinned."""
     tree = ast.parse(source)
@@ -597,30 +687,63 @@ def _descriptor_pinning_violations(source: str) -> list[str]:
             continue
         if not isinstance(func, ast.Attribute):
             continue
+        rendered = ast.get_source_segment(source, node) or f"os.{func.attr}(...)"
         keywords = {keyword.arg: keyword.value for keyword in node.keywords}
         pinned_to = keywords.get("dir_fd")
         if pinned_to is not None and not (
             isinstance(pinned_to, ast.Name) and pinned_to.id in descriptors
         ):
-            rendered = ast.get_source_segment(source, node) or "os.*(dir_fd=...)"
             violations.append(f"dir_fd is not an os.open() descriptor: {rendered}")
-        if func.attr == "listdir":
-            argument = node.args[0] if node.args else None
-            if not (isinstance(argument, ast.Name) and argument.id in descriptors):
-                rendered = ast.get_source_segment(source, node) or "os.listdir(...)"
-                violations.append(f"listing is not addressed to an os.open() descriptor: {rendered}")
-        elif func.attr == "lstat":
-            if "dir_fd" in keywords:
-                pinned_lstat_calls += 1
-            else:
-                path_lstat_calls += 1
-        elif func.attr == "open" and "dir_fd" not in keywords:
+
+        name = func.attr
+        if _is_os_path_call(func):
+            if name in _PATH_RESOLVING_OSPATH_CALLS:
+                violations.append(f"os.path.{name}() resolves a path: {rendered}")
+            continue
+        if name not in _PATH_RESOLVING_OS_CALLS:
+            continue
+
+        # The entry open is descriptor-relative, and the flags it actually
+        # uses are what keeps a swapped-in symlink from being followed out of
+        # the archive -- so they are checked at the call site, not only where
+        # the constant is defined.
+        if name == "open" and "dir_fd" in keywords:
             flags = node.args[1] if len(node.args) > 1 else None
-            if not (isinstance(flags, ast.Name) and flags.id == _DIR_OPEN_FLAGS_NAME):
-                rendered = ast.get_source_segment(source, node) or "os.open(...)"
+            if not _flags_are_acceptable(
+                source, flags, _ENTRY_OPEN_FLAGS_NAME, _REQUIRED_ENTRY_OPEN_FLAG_TOKENS
+            ):
+                violations.append(
+                    f"entry os.open() does not carry {_ENTRY_OPEN_FLAGS_NAME}"
+                    f" or {list(_REQUIRED_ENTRY_OPEN_FLAG_TOKENS)}: {rendered}"
+                )
+            continue
+
+        first = node.args[0] if node.args else None
+        if "dir_fd" in keywords or (isinstance(first, ast.Name) and first.id in descriptors):
+            if name == "lstat":
+                pinned_lstat_calls += 1
+            continue
+
+        # Everything below resolves a path. Exactly two are budgeted.
+        if name == "open":
+            # Budgeted exception 1: the single open that PRODUCES the
+            # descriptor everything else is addressed to.
+            flags = node.args[1] if len(node.args) > 1 else None
+            if not _flags_are_acceptable(
+                source, flags, _DIR_OPEN_FLAGS_NAME, _REQUIRED_DIR_OPEN_FLAG_TOKENS
+            ):
                 violations.append(
                     f"os.open() without dir_fd does not use {_DIR_OPEN_FLAGS_NAME}: {rendered}"
                 )
+            continue
+        if name == "lstat":
+            # Budgeted exception 2: the refusal label, counted below.
+            path_lstat_calls += 1
+            continue
+        if name == "listdir":
+            violations.append(f"listing is not addressed to an os.open() descriptor: {rendered}")
+            continue
+        violations.append(f"os.{name}() resolves a path: {rendered}")
 
     if pinned_lstat_calls < 1:
         violations.append("no os.lstat(..., dir_fd=...): archive entries are stat-ed by path")
@@ -656,7 +779,151 @@ _PINNING_NEGATIVE_CONTROLS = (
         "import os\ninfo = os.lstat(name, dir_fd=some_other_value)\n",
         "dir_fd is not an os.open() descriptor",
     ),
+    (
+        "entry open keeps dir_fd but drops O_NOFOLLOW",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "entry_fd = os.open(name, os.O_RDONLY, dir_fd=fd)\n",
+        "entry os.open() does not carry",
+    ),
+    (
+        "aggregates re-stat by path with os.stat",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "again = os.stat(os.path.join(directory, name))\n",
+        "os.stat() resolves a path",
+    ),
+    (
+        "re-listing spelled os.scandir",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "for entry in os.scandir(directory):\n    pass\n",
+        "os.scandir() resolves a path",
+    ),
+    (
+        "symlink target read by path with os.readlink",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "target = os.readlink(os.path.join(directory, name))\n",
+        "os.readlink() resolves a path",
+    ),
+    (
+        "existence probed through os.path",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "present = os.path.isdir(directory)\n",
+        "os.path.isdir() resolves a path",
+    ),
 )
+
+
+_SWAP_TARGET_NAME = "b.swapme.relayed"
+_OUTSIDE_SOURCE_KIND = "OUTSIDEENTRYSWAPKIND"
+_OUTSIDE_AGE_SECONDS = 999_999
+
+
+def _run_census_in_process(collector, root: Path) -> dict:
+    """Execute the shipped script text in THIS process so a swap can be
+    driven from inside the syscall the script itself makes.
+
+    The subprocess helper above is the normal path and covers everything
+    else; a check-then-use window cannot be opened from outside the process
+    deterministically, and a sleep-and-hope race is not a test.
+    """
+    namespace: dict = {"__name__": "__main__"}
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            exec(compile(collector.REMOTE_ARCHIVE_CENSUS_SCRIPT, "<census>", "exec"), namespace)
+    except SystemExit as exit_exc:  # the script exits 3 on its quiet-failure path
+        raise AssertionError(f"census exited {exit_exc.code}; stdout={captured.getvalue()!r}")
+    return json.loads(captured.getvalue())
+
+
+def test_census_refuses_an_entry_swapped_for_a_symlink_after_it_was_stat_ed(
+    collector, tmp_path, monkeypatch
+):
+    """The entry-open flags are load-bearing, so an entry-level swap must be
+    exercised and not merely described.
+
+    `test_census_still_refuses_a_symlinked_entry_inside_a_real_archive` plants
+    its symlink BEFORE the run, so the entry stat rejects it and the open is
+    never reached -- which leaves the open's own O_NOFOLLOW untested. Here the
+    entry is a real file when it is stat-ed and a symlink to a file outside
+    the archive by the time it is opened. Without O_NOFOLLOW on that open the
+    census reads a file that is not in the archive and that file's mtime
+    reaches the payload as an age.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.keep.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    outside = tmp_path / "outside-of-the-archive.json"
+    outside.write_text(_event(source=_OUTSIDE_SOURCE_KIND), encoding="utf-8")
+    os.utime(outside, (_NOW - _OUTSIDE_AGE_SECONDS, _NOW - _OUTSIDE_AGE_SECONDS))
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            # The stat has already returned a regular file; the name now
+            # points outside the archive. This is the window.
+            fired.append(path)
+            os.unlink(relayed / _SWAP_TARGET_NAME)
+            os.symlink(outside, relayed / _SWAP_TARGET_NAME)
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    # The outside file is never opened, so its producer never appears ...
+    assert block["sourceKindCardinality"] == 1
+    assert _OUTSIDE_SOURCE_KIND not in json.dumps(report)
+    # ... and its mtime never becomes an age.
+    assert block["oldestAgeSeconds"] == _HOUR
+    assert block["newestAgeSeconds"] == _HOUR
+    # The swapped entry is reported as something the census could not look
+    # at, rather than counted from the stat it took before the swap.
+    assert block["artifactCount"] == 1
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
+    assert report["total"]["unusableEntryCount"] == 1
+
+
+def test_census_counts_an_entry_swapped_for_a_directory_as_unusable(
+    collector, tmp_path, monkeypatch
+):
+    """The other half of the same window: the name is a regular file at the
+    stat and a directory at the open, so `os.fstat` on the descriptor
+    disagrees with the stat. The entry is not an artifact and the swap the
+    census detected has to survive into the report."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.keep.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            fired.append(path)
+            os.unlink(relayed / _SWAP_TARGET_NAME)
+            (relayed / _SWAP_TARGET_NAME).mkdir()
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 1
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
 
 
 def test_census_addresses_every_read_to_a_pinned_directory_descriptor(collector):
