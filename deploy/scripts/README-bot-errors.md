@@ -298,6 +298,26 @@ quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
 
+### Relay archive census (read-only)
+
+`remote_archive_census()` in `bot-errors-collector.py` reports how much
+terminal relay archive a remote host is holding, without reading any of it
+aloud. It scans exactly the two archive directories the collector's own
+remote scripts write under the given root — `relayed/` and
+`writefail-relayed/` — and reports each of them, plus a combined total, as
+six aggregates: artifact count, total bytes, oldest and newest artifact age
+in seconds, the number of artifacts that no longer parse as a JSON event
+record, and the number of distinct producer source kinds (a cardinality, not
+the values). Nothing else under the root is scanned, so archive volume is
+never conflated with live `outbox/` backlog; nested directories and symlinks
+are not followed. The output carries no host, account, instance, user,
+message text, path or identifier, and the failure path is deliberately quiet
+for the same reason — a census whose traceback prints the remote root would
+defeat its own purpose. **The census deletes nothing.** It performs no
+retention, no compaction, no rewriting and no move; it only counts what is
+already there. Retention thresholds, terminal-status rewriting and any
+deletion path remain unimplemented and are gated separately (issue #2459).
+
 ### Controller diagnostic envelope
 
 The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new

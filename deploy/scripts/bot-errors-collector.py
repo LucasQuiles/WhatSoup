@@ -2946,6 +2946,180 @@ def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
     return proc.stdout.strip() == "present"
 
 
+REMOTE_ARCHIVE_CENSUS_SCRIPT = r"""
+import json, os, sys, time
+from stat import S_ISREG
+
+# #2459 C3: read-only census of the terminal relay archive.
+#
+# Reports how much archive exists, how old it is and how much of it no longer
+# parses -- as aggregates only. It never deletes, moves, renames or rewrites
+# anything, and it never echoes the root it was pointed at, an artifact name,
+# a source value or any payload field. The answer an operator gets is a
+# handful of numbers, which is the whole point: the alternative (listing the
+# directory by hand) puts host, account, instance, user and message text on
+# a terminal.
+#
+# Scope: exactly the two directories this collector's own remote scripts
+# write under the given root -- relayed/ (REMOTE_ACK_SCRIPT) and
+# writefail-relayed/ (REMOTE_WRITEFAIL_ACK_SCRIPT). Sibling directories
+# (outbox/, relay-processing/) hold live queue state, not archive, and
+# conflating the two is the confusion this census exists to remove. Nested
+# directories are not walked. The other writefail terminal locations the
+# writefail script falls back to (home, TMPDIR, /tmp) are deliberately NOT
+# scanned: they are outside the root the caller named.
+#
+# `now` (argv[2], optional) makes ages deterministic for a caller that needs
+# a fixed clock; empty or absent means "read the clock here".
+
+root = os.path.expanduser(sys.argv[1])
+now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
+
+ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"))
+
+
+def census(directory):
+    # Aggregate one archive directory. Returns (report, source_kinds).
+    count = 0
+    total_bytes = 0
+    oldest = None
+    newest = None
+    parse_failures = 0
+    source_kinds = set()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        # A host that has never relayed has no such directory. That is a zero
+        # census, not a fault.
+        names = []
+    for name in names:
+        entry = os.path.join(directory, name)
+        try:
+            info = os.lstat(entry)
+        except OSError:
+            # Vanished between listing and stat -- it is not in the archive now.
+            continue
+        # lstat + S_ISREG, so a symlink is never followed out of the archive
+        # and a nested directory is never descended into.
+        if not S_ISREG(info.st_mode):
+            continue
+        count += 1
+        total_bytes += info.st_size
+        age = int(round(now - info.st_mtime))
+        oldest = age if oldest is None else max(oldest, age)
+        newest = age if newest is None else min(newest, age)
+        try:
+            with open(entry, "rb") as handle:
+                record = json.loads(handle.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Unreadable or not JSON: still a present artifact occupying
+            # bytes and ageing, so it is counted AND flagged. Skipping it
+            # would under-report exactly the artifacts worth knowing about.
+            parse_failures += 1
+            continue
+        if not isinstance(record, dict):
+            # `[]` and `"text"` are valid JSON but not event records.
+            parse_failures += 1
+            continue
+        kind = record.get("source")
+        if isinstance(kind, str) and kind:
+            source_kinds.add(kind)
+    report = {
+        "artifactCount": count,
+        "totalBytes": total_bytes,
+        "oldestAgeSeconds": oldest,
+        "newestAgeSeconds": newest,
+        "parseFailureCount": parse_failures,
+        # Cardinality only -- how MANY distinct producers are represented,
+        # never which ones.
+        "sourceKindCardinality": len(source_kinds),
+    }
+    return report, source_kinds
+
+
+def combine(reports, kind_sets):
+    oldest_values = [r["oldestAgeSeconds"] for r in reports if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in reports if r["newestAgeSeconds"] is not None]
+    union = set()
+    for kinds in kind_sets:
+        union |= kinds
+    return {
+        "artifactCount": sum(r["artifactCount"] for r in reports),
+        "totalBytes": sum(r["totalBytes"] for r in reports),
+        "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
+        "newestAgeSeconds": min(newest_values) if newest_values else None,
+        "parseFailureCount": sum(r["parseFailureCount"] for r in reports),
+        # Union, not a sum: a producer present in both archives is one kind.
+        "sourceKindCardinality": len(union),
+    }
+
+
+try:
+    archives = {}
+    reports = []
+    kind_sets = []
+    for label, dirname in ARCHIVE_DIRS:
+        report, kinds = census(os.path.join(root, dirname))
+        archives[label] = report
+        reports.append(report)
+        kind_sets.append(kinds)
+    payload = {
+        "schemaVersion": 1,
+        "censusStatus": "ok",
+        "generatedAtEpoch": int(now),
+        "archives": archives,
+        "total": combine(reports, kind_sets),
+    }
+except Exception:
+    # Fail closed and fail QUIET: an escaping traceback would print argv,
+    # which carries the remote root. The caller sees a non-zero exit and an
+    # explicit failed status, never a path.
+    print(json.dumps({"schemaVersion": 1, "censusStatus": "failed"}, sort_keys=True))
+    sys.exit(3)
+
+print(json.dumps(payload, sort_keys=True))
+"""
+
+
+def remote_archive_census(host: str, remote_root: str, timeout: int, now: float | None = None) -> dict[str, Any]:
+    """#2459 C3: read-only, privacy-safe census of the remote relay archive.
+
+    The acknowledged-claim archive lives on the REMOTE host (REMOTE_ACK_SCRIPT
+    moves claims under the remote root), so no local scan can cover it -- see
+    the LOCAL_EVENT_LIFECYCLE_DIR_NAMES note below. This probe answers how
+    much of it there is, how old it is and how much of it no longer parses,
+    without moving or deleting anything and without surfacing a host,
+    account, instance, user, message, path or identifier.
+
+    Unlike the other remote helpers, the failure path deliberately does NOT
+    append `proc.stderr` to the raised error: the census's own stderr can name
+    the remote root, and a probe whose failure mode leaks the path defeats the
+    privacy property that is the reason it exists.
+
+    `now` pins the clock the ages are measured against; None reads the remote
+    clock. Returns the parsed aggregate report.
+    """
+    args = [remote_root, "" if now is None else str(int(now))]
+    proc = subprocess.run(
+        remote_python_command(host, args),
+        input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh archive-census {host} failed rc={proc.returncode}")
+    try:
+        report = json.loads(proc.stdout.strip() or "{}")
+    except ValueError:
+        raise RuntimeError(f"ssh archive-census {host} returned unparseable output") from None
+    if not isinstance(report, dict):
+        raise RuntimeError(f"ssh archive-census {host} returned a non-object report")
+    return report
+
+
 def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
     proc = subprocess.run(
         remote_python_command(host, [claim, remote_root, action]),
