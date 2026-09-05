@@ -523,7 +523,7 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     // `source` and `setAt` are the marker store's own envelope fields; the rest
     // is exactly what re-rendering the alert needs.
     expect(Object.keys(record.body ?? {}).sort()).toEqual(
-      ['attempts', 'error', 'kind', 'scheduledId', 'setAt', 'source'].sort(),
+      ['attempts', 'error', 'errorClass', 'kind', 'scheduledId', 'setAt', 'source'].sort(),
     );
 
     // The destination and the message body never reach durable storage. (The
@@ -694,6 +694,125 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     await scheduler.tick();
     expect(retainedKeys()).toEqual([]);
     expect(alertsOf('scheduler_send_failed').length).toBe(1);
+  });
+
+  it('E1: a NEW obligation at a suppressed key is emitted, not skipped unread and deleted', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await scheduler.tick();
+    const firstMarker = terminalMarkers()[0]!.raw;
+
+    // Deliver, fail the clear: the key is now suppressed against re-emission.
+    acceptEnqueue();
+    chmodSync(markerDirPath(), 0o500);
+    try {
+      await scheduler.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+
+    // A DIFFERENT obligation lands at the same key while the suppression stands
+    // — the operator-recreated marker of the design note. The key names a row,
+    // not a delivery, so nothing about the old delivery speaks for this one.
+    const path = markerPathOf(`${MARKER_PREFIX}${id}`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        kind: 'retry_exhausted',
+        scheduledId: id,
+        error: 'a second, different terminal failure',
+        attempts: 3,
+        source: `${MARKER_PREFIX}${id}`,
+        setAt: '2099-01-01T00:00:00.000Z',
+      }),
+    );
+    expect(readFileSync(path, 'utf8')).not.toBe(firstMarker);
+    chmodSync(markerDirPath(), 0o500);
+    try {
+      await scheduler.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+
+    // Emitted, and the record still on disk because the clear is still failing.
+    expect(alertsOf('scheduler_send_failed').length).toBe(2);
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+    // And it is the NEW obligation that was paged, not a repeat of the first:
+    // the confined summary is a digest of the text, so inequality here is
+    // inequality of the alert itself.
+    const paged = alertsOf('scheduler_send_failed');
+    expect(paged[1]?.['summary']).not.toEqual(paged[0]?.['summary']);
+    expect(paged[1]?.['summary']).toEqual(
+      confineAlertContent('summary', baselineExhaustionAlert(id, 'a second, different terminal failure', 3).summary),
+    );
+  });
+
+  it('E2 (control): once the clear lands, a later obligation at the same key emits normally', async () => {
+    const id = insertUndecodable(db.raw);
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await scheduler.tick();
+    acceptEnqueue();
+    chmodSync(markerDirPath(), 0o500);
+    try {
+      await scheduler.tick();
+    } finally {
+      chmodSync(markerDirPath(), 0o700);
+    }
+    expect(alertsOf('scheduler_send_failed').length).toBe(1);
+
+    // Healed store: the clear lands and the suppression retires with it.
+    await scheduler.tick();
+    expect(retainedKeys()).toEqual([]);
+
+    // The same row fails terminally again with the sink rejecting.
+    db.raw
+      .prepare("UPDATE scheduled_messages SET status = 'pending', retry_count = 0 WHERE id = ?")
+      .run(id);
+    rejectEnqueue();
+    await scheduler.tick();
+    expect(retainedKeys()).toEqual([`${MARKER_PREFIX}${id}`]);
+
+    acceptEnqueue();
+    await scheduler.tick();
+    expect(alertsOf('scheduler_send_failed').length).toBe(2);
+    expect(retainedKeys()).toEqual([]);
+  });
+
+  it('E3: an unquoted destination in a send error never reaches the durable record', async () => {
+    const destination = '15551234567@s.whatsapp.net';
+    insertSendable(db.raw);
+    const { conn } = makeConn(async () => {
+      throw new Error(`send to ${destination} rejected`);
+    });
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+
+    rejectEnqueue();
+    await exhaustRetries(scheduler);
+
+    // Positive control: quoting does not cover this shape, so the raw error
+    // really does carry the destination and the assertions below are not vacuous.
+    expect(rowOf(db, 1).error ?? '').toContain(destination);
+
+    const record = terminalMarkers()[0]!;
+    expect(record.raw).not.toContain(destination);
+    expect(record.raw).not.toContain('15551234567');
+    expect(record.raw).not.toContain('s.whatsapp.net');
+    const storedError = String(record.body?.['error']);
+    expect(storedError).toContain('rejected');
+
+    // The retry-path alert carries the placeholder form, not the destination.
+    acceptEnqueue();
+    await scheduler.tick();
+    const alerts = alertsOf('scheduler_send_failed');
+    expect(alerts.length).toBe(1);
+    expectAlertText(alerts[0], baselineExhaustionAlert(1, storedError, 3));
   });
 
   it('C2 (documented): a restart over a marker whose clear never landed re-emits exactly once', async () => {
