@@ -3201,7 +3201,15 @@ def census_descriptor(fd):
                 parse_failures += 1
                 continue
         finally:
-            os.close(entry_fd)
+            try:
+                os.close(entry_fd)
+            except OSError:
+                # The kernel releases the descriptor whether or not close
+                # reports an error, so there is nothing to record and nothing
+                # to reclassify -- the entry was measured before this point.
+                # Letting it escape would discard the accumulated report for
+                # BOTH archives, the way the entry stat once did.
+                pass
         if not isinstance(record, dict):
             # `[]` and `"text"` are valid JSON but not event records.
             parse_failures += 1
@@ -3211,7 +3219,7 @@ def census_descriptor(fd):
             source_kinds.add(kind)
     # A directory whose entries were not all readable is reported as partial,
     # never as ok with a lower count.
-    status = "partial" if unusable else "ok"
+    status = "partial" if (unusable or vanished) else "ok"
     if status == "partial" and not count:
         # It listed, and possibly stat-ed, and measured NOTHING. A zero here
         # would say "there is nothing there" about entries the census never
