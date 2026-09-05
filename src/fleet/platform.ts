@@ -254,9 +254,9 @@ export interface LaunchdReconcileOptions {
   renderOptions?: LaunchdPlistRenderOptions;
   /**
    * Acknowledge that applying may delete installed non-governed
-   * EnvironmentVariables keys (or an unparseable dict whose keys cannot be
-   * enumerated). Without it, an apply that would do so is refused before any
-   * mutation. Ignored on dry runs.
+   * EnvironmentVariables keys (or a dict whose keys cannot be enumerated —
+   * absent, declared more than once, or unparseable). Without it, an apply that
+   * would do so is refused before any mutation. Ignored on dry runs.
    */
   dropNonGovernedEnv?: boolean;
 }
@@ -425,13 +425,14 @@ function throwLaunchdFailure(original: unknown, rollbackFailures: readonly unkno
 /**
  * Applying regenerates the whole plist, so every installed key the render
  * does not own disappears from the job. Refuse — before any mutation — unless
- * the caller acknowledged the drop; an unparseable installed dict is refused
- * the same way because its keys cannot be enumerated.
+ * the caller acknowledged the drop; an installed dict the reader cannot
+ * enumerate is refused the same way, because a key it never saw is a key it
+ * cannot report as dropped.
  */
 function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
   if (!comparison.comparable) {
     throw new LaunchdReconcileRefusedError(
-      'installed plist has an unparseable EnvironmentVariables dict, so --apply cannot prove it drops no non-governed keys; pass --drop-non-governed-env to acknowledge',
+      'installed plist has no EnvironmentVariables dict this reader can enumerate (absent, declared more than once, or unparseable), so --apply cannot prove it drops no non-governed keys; pass --drop-non-governed-env to acknowledge',
     );
   }
   const dropped = comparison.droppedNonGovernedKeys;

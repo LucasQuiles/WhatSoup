@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -3594,3 +3595,412 @@ def test_a_leaked_probe_stub_variable_cannot_disable_the_plist_gate(
     assert not captured, "probe must not run a provider it cannot vouch for"
     assert "failure_class=provider_runtime_plist_unreadable" in lines[0], lines[0]
     _assert_fail_line_is_path_free(lines[0], tmp_path)
+
+
+# --- Every inert XML region, not only the comment (queue row 130) ---
+#
+# A comment, a CDATA section and a processing instruction are all inert text to
+# the system plist parser. Only the comment was masked here, so a decoy
+# ``<key>EnvironmentVariables</key><dict/>`` written inside either of the other
+# two won the marker search and the reader answered with an EMPTY map -- a map
+# it had no basis for. Both decoy shapes below lint clean and
+# ``plutil -extract EnvironmentVariables json`` returns the live environment for
+# each. The scenario is operator-caused, not attacker-caused: someone who can
+# write the LaunchAgent can write an honest dict, so the shape confers nothing
+# on an attacker. What it does is let a hand-edited or hand-migrated plist read
+# as an environment the service does not have.
+
+_LIVE_BODY_WITH_NON_GOVERNED_KEY = [
+    "    <key>PATH</key><string>/fixture/pin/bin:/usr/bin</string>",
+    "    <key>OPERATOR_SECRET</key><string>keep-me</string>",
+]
+_LIVE_ENVIRONMENT = {
+    "PATH": "/fixture/pin/bin:/usr/bin",
+    "OPERATOR_SECRET": "keep-me",
+}
+_INERT_DECOY = "  <key>EnvironmentVariables</key>\n  <dict/>"
+
+
+def _decoyed_plist(
+    target: Path, opener: str, closer: str, *, inside_string: bool = False
+) -> str:
+    """Return the same plist with an inert decoy dict ahead of the live one."""
+    honest = target.read_text()
+    assert honest.count("  <key>EnvironmentVariables</key>") == 1, "fixture shape changed"
+    region = f"  {opener}\n{_INERT_DECOY}\n  {closer}"
+    if inside_string:
+        region = f"  <key>Notes</key>\n  <string>{opener}\n{_INERT_DECOY}\n  {closer}</string>"
+    return honest.replace(
+        "  <key>EnvironmentVariables</key>",
+        f"{region}\n  <key>EnvironmentVariables</key>",
+        1,
+    )
+
+
+def test_a_cdata_decoy_dict_cannot_hide_the_live_environment(monkeypatch, tmp_path):
+    """Stated as a DIFFERENTIAL: the decoy must make no difference at all.
+
+    Asserting only the post-fix map would keep passing if the reader started
+    refusing BOTH shapes, which is different behaviour wearing the same green.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    decoyed = _decoyed_plist(target, "<![CDATA[", "]]>", inside_string=True)
+    assert "<![CDATA[" in decoyed, "fixture must actually carry the decoy"
+
+    target.write_text(decoyed)
+    from_decoyed = _mod.instance_plist_environment("agent-alpha")
+    target.write_text(honest)
+    from_honest = _mod.instance_plist_environment("agent-alpha")
+
+    assert from_decoyed == from_honest
+    # And the shared value is the LIVE dict's, so neither side is the decoy's.
+    assert from_decoyed == _LIVE_ENVIRONMENT
+
+
+def test_a_processing_instruction_decoy_dict_cannot_hide_the_live_environment(
+    monkeypatch, tmp_path
+):
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    decoyed = _decoyed_plist(target, "<?ide", "?>")
+    assert "<?ide" in decoyed, "fixture must actually carry the decoy"
+
+    target.write_text(decoyed)
+    from_decoyed = _mod.instance_plist_environment("agent-alpha")
+    target.write_text(honest)
+    from_honest = _mod.instance_plist_environment("agent-alpha")
+
+    assert from_decoyed == from_honest
+    assert from_decoyed == _LIVE_ENVIRONMENT
+
+
+def test_a_second_environment_variables_declaration_is_refused(monkeypatch, tmp_path):
+    """Exactly one top-level EnvironmentVariables dictionary.
+
+    This reader took the FIRST declaration, so a decoy dict written above the
+    live one was returned as the service's environment. The system parser has
+    its own precedence for a repeated key and this reader must not invent a
+    different one; refusing is the answer both readers now give.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    # Positive control: one declaration of the same body still parses, so the
+    # refusal below is attributable to the second declaration.
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <key>EnvironmentVariables</key>\n"
+            "  <dict><key>PATH</key><string>/fixture/decoy/bin</string></dict>\n"
+            "  <key>EnvironmentVariables</key>",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_canonical_then_xml_whitespace_padded_declarations_are_refused(
+    monkeypatch, tmp_path
+):
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    mixed = honest.replace(
+        "</dict>\n</plist>",
+        "  <key >EnvironmentVariables</key >\n"
+        "  <dict><key>PATH</key><string>/fixture/decoy/bin</string></dict>\n"
+        "</dict>\n</plist>",
+        1,
+    )
+    assert "<key>EnvironmentVariables</key>" in mixed
+    assert "<key >EnvironmentVariables</key >" in mixed
+    assert "/fixture/decoy/bin" in mixed
+    target.write_text(mixed)
+
+    assert _mod.instance_plist_environment("agent-alpha") is None
+    assert _mod.instance_plist_governed_environment("agent-alpha") == (
+        _mod.GOVERNED_PLIST_UNREADABLE,
+        None,
+    )
+
+
+def test_a_marker_spelled_with_tag_whitespace_is_refused_not_read_as_empty(
+    monkeypatch, tmp_path
+):
+    """This reader already refused; the TypeScript comparator answered "empty".
+
+    Pinned here so the two readers cannot drift apart again on this cell. The
+    marker is held as ONE literal spelling on both sides on purpose: parsing
+    ``<key >EnvironmentVariables</key >`` would make both readers newly ACCEPT a
+    file they used to refuse, which is a contract widening, and a refusal is the
+    fail-closed answer to "I could not find the element you are about to
+    overwrite".
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <key >EnvironmentVariables</key >",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment("agent-alpha") is None
+
+
+def test_the_earliest_inert_opener_wins_so_one_region_stays_one_region(
+    monkeypatch, tmp_path
+):
+    """A processing instruction may carry ``<!--`` as literal text.
+
+    Searching one region kind before the others rather than taking the EARLIEST
+    opener splits one region into a mismatched pair: the ``<!--`` below has no
+    ``-->``, so a comment-first scan calls the file unterminated and refuses a
+    plist the system parser loads.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    target = _write_plist_with_raw_entries(
+        tmp_path, "agent-alpha", _LIVE_BODY_WITH_NON_GOVERNED_KEY
+    )
+    honest = target.read_text()
+    target.write_text(
+        honest.replace(
+            "  <key>EnvironmentVariables</key>",
+            "  <?ide fold <!-- not a comment ?>\n  <key>EnvironmentVariables</key>",
+            1,
+        )
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") == _LIVE_ENVIRONMENT
+
+
+def test_a_masked_cdata_value_inside_the_block_still_fails_closed(monkeypatch, tmp_path):
+    """THE CELL THE MASK ALONE WOULD HAVE OPENED, measured rather than reasoned.
+
+    The mask blanks an inert region to '-', and '-' is legal CHARACTER DATA:
+    ``<string><![CDATA[/opt/bin]]></string>`` masks to ``<string>`` plus twenty
+    dashes plus ``</string>``, which the pair pattern's ``[^<]*`` value group
+    matches. The block would then count as fully consumed and parse to a
+    dash-valued key -- a cell that fails closed today turned fail-open by its
+    own fix. The whitespace rules cannot catch it, because the region is not in
+    a whitespace-only gap; the reader refuses on a masked span INTERSECTING the
+    block instead.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            "    <key>PATH</key><string>/fixture/pin/bin</string>",
+            "    <key>WHATSOUP_PATH_PREPEND</key>"
+            "<string><![CDATA[/fixture/pin/bin]]></string>",
+        ],
+    )
+
+    assert _mod.instance_plist_environment("agent-alpha") is None
+
+
+def test_a_plist_value_keeps_the_whitespace_it_was_written_with(monkeypatch, tmp_path):
+    """Divergence 3 (queue row 129). plist(5) <string> content is significant.
+
+    This reader stripped the parsed value while the TypeScript comparator kept
+    it as written, so the two disagreed about one file. The "empty or
+    whitespace-only reads as absent" policy belongs at environment_value(),
+    which is where every consumer of this map reaches its values, and the
+    assertion below pins that the accessor still applies it.
+    """
+    _arm_darwin_host(monkeypatch, tmp_path)
+    _write_plist_with_raw_entries(
+        tmp_path,
+        "agent-alpha",
+        [
+            "    <key>PATH</key><string>/fixture/pin/bin</string>",
+            "    <key>CLAUDE_CONFIG_DIR</key><string> /fixture/roots/agent </string>",
+        ],
+    )
+
+    parsed = _mod.instance_plist_environment("agent-alpha")
+    assert parsed == {
+        "PATH": "/fixture/pin/bin",
+        "CLAUDE_CONFIG_DIR": " /fixture/roots/agent ",
+    }
+    # The accessor still normalises, so no consumer sees the padding.
+    assert _mod.environment_value(parsed, "CLAUDE_CONFIG_DIR") == "/fixture/roots/agent"
+    # And a whitespace-only value still reads as absent there.
+    assert _mod.environment_value({"CLAUDE_CONFIG_DIR": "   "}, "CLAUDE_CONFIG_DIR") is None
+
+
+# --- ONE reader contract, proved against ONE corpus (queue row 129) ---
+#
+# ``src/fleet/launchd-env-drift.ts`` and this script are two independently
+# written parsers for the same security-sensitive file. They drifted apart one
+# hand-mirrored fix at a time -- duplicate-key refusal reached both sides months
+# apart, and a missing marker meant "empty" on one side and "unreadable" on the
+# other. The corpus below is plain .plist files in one directory with a manifest
+# naming the required answer, driven by BOTH suites: this one through
+# ``instance_plist_environment`` (so the Label and size gates run for real), and
+# ``tests/fleet/launchd-env-drift.test.ts`` through ``compareGovernedLaunchdEnv``.
+# A divergence is then a test failure rather than a discovery. The answers come
+# from docs/runbooks/launchd-governed-env-reader-contract.md.
+
+_CONTRACT_CORPUS_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "tests"
+    / "fixtures"
+    / "launchd-env-plist-contract"
+)
+# The three-valued answer vocabulary, OWNED BY THIS TEST as a literal. The
+# manifest's own list is asserted against it rather than trusted, so a fourth
+# answer cannot arrive in the corpus without a decision here.
+_CONTRACT_ANSWERS = ("refuse", "empty", "map")
+
+
+def _read_contract_manifest() -> dict:
+    return json.loads((_CONTRACT_CORPUS_DIR / "manifest.json").read_text())
+
+
+def _run_contract_corpus(monkeypatch, tmp_path) -> list[dict]:
+    """Arrange, act, and RETURN the observations.
+
+    Every assertion lives in a named test below rather than inside this loop, so
+    a case that stops running shows up as a coverage failure instead of
+    vanishing quietly.
+    """
+    manifest = _read_contract_manifest()
+    instance = manifest["instance"]
+    _arm_darwin_host(monkeypatch, tmp_path)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / f"com.whatsoup.{instance}.plist"
+
+    observations: list[dict] = []
+    for case in manifest["cases"]:
+        target.write_text((_CONTRACT_CORPUS_DIR / case["fixture"]).read_text())
+        parsed = _mod.instance_plist_environment(instance)
+        # A cell may be deliberately left divergent; the manifest then carries
+        # this reader's answer explicitly rather than the corpus pretending the
+        # two readers agree.
+        expected_environment = case.get("environment")
+        divergence = case.get("openDivergence")
+        if divergence is not None:
+            expected_environment = divergence["python"]
+
+        if parsed is None:
+            observed = "refuse"
+        elif parsed == {}:
+            observed = "empty"
+        elif parsed == expected_environment:
+            observed = "map"
+        else:
+            observed = f"disagrees({sorted(parsed)})"
+        observations.append(
+            {
+                "name": case["name"],
+                "declared": case["answer"],
+                "observed": observed,
+                "parsed": parsed,
+            }
+        )
+    return observations
+
+
+def test_contract_corpus_answers_every_fixture_as_the_manifest_declares(
+    monkeypatch, tmp_path
+):
+    observations = _run_contract_corpus(monkeypatch, tmp_path)
+    assert [f"{o['name']}={o['observed']}" for o in observations] == [
+        f"{o['name']}={o['declared']}" for o in observations
+    ]
+
+
+def test_contract_corpus_runs_one_case_for_every_manifest_entry(monkeypatch, tmp_path):
+    """COVERAGE ASSERTION, not a positive control.
+
+    A positive control catches a corpus that fails to parse; only a count
+    catches a case that silently stopped running, which is how a table-driven
+    corpus decays into theatre.
+    """
+    manifest = _read_contract_manifest()
+    assert len(manifest["cases"]) > 0
+    assert len(_run_contract_corpus(monkeypatch, tmp_path)) == len(manifest["cases"])
+
+
+def test_contract_corpus_names_exactly_the_fixtures_on_disk():
+    """The other half of coverage.
+
+    A manifest entry count alone stays green when a fixture file is deleted
+    along with its row, and misses a fixture that is never listed. Reading the
+    DIRECTORY makes an orphaned or an unlisted fixture a failure.
+    """
+    manifest = _read_contract_manifest()
+    on_disk = sorted(p.name for p in _CONTRACT_CORPUS_DIR.glob("*.plist"))
+    assert on_disk == sorted(case["fixture"] for case in manifest["cases"])
+
+
+def test_contract_corpus_states_an_answer_from_the_vocabulary_for_every_case():
+    """"Unspecified" is not a cell.
+
+    A fixture added without deciding its answer fails here rather than being
+    carried as an untested file.
+    """
+    manifest = _read_contract_manifest()
+    assert tuple(manifest["answers"]) == _CONTRACT_ANSWERS
+    for case in manifest["cases"]:
+        assert case["answer"] in _CONTRACT_ANSWERS, case["name"]
+        assert case["why"], case["name"]
+
+
+def test_contract_corpus_reaches_this_reader_through_its_own_guards(
+    monkeypatch, tmp_path
+):
+    """Vacuity guard for the corpus run above.
+
+    Every fixture is written to the real LaunchAgent pathname and read back
+    through instance_plist_environment, so the Label match and the size cap run.
+    A fixture whose Label named a different instance would refuse for a reason
+    that has nothing to do with its shape, and every row would pass for free.
+    """
+    manifest = _read_contract_manifest()
+    instance = manifest["instance"]
+    _arm_darwin_host(monkeypatch, tmp_path)
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    target = agents / f"com.whatsoup.{instance}.plist"
+    honest = (_CONTRACT_CORPUS_DIR / "honest-live-dict.plist").read_text()
+
+    target.write_text(honest)
+    assert _mod.instance_plist_environment(instance) is not None
+
+    # Relabelled: the same bytes must now refuse, which proves the guard ran.
+    target.write_text(
+        honest.replace(
+            f"<string>com.whatsoup.{instance}</string>",
+            "<string>com.whatsoup.some-other-instance</string>",
+            1,
+        )
+    )
+    assert _mod.instance_plist_environment(instance) is None

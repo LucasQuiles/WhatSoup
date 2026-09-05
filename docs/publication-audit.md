@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 401
+**Total classification rows:** 402
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 203 |
+| PRIVATE-ARCHIVE | 204 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 401 |
+| Total | 402 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -41,6 +41,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/runbooks/fleet-bot-hardening-standard.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/host-maintenance.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/imessage-transport.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/launchd-governed-env-reader-contract.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/knowledge-profiles.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/loop-lag-forensic-collector.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/macos-host-setup.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
