@@ -148,11 +148,16 @@ destroys the evidence of why it was refused.
    when this cycle looked. Investigate why; do not treat the next cycle's
    success as evidence the condition was benign, because the root is narrowed
    automatically in between.
-5. `parent_symlink` means an ancestor of the receipt is a symlink. The strict
-   reader resolves the state root before it walks, so the reader may still
-   accept a path the repair refuses. On such a host the cycle stays red and the
-   receipt is never repaired. That is fail-closed rather than self-healing, and
-   it is the intended trade: the repair mutates, so it is the stricter side.
+5. `parent_symlink` means an ancestor of the receipt is a symlink. Note the
+   divergence from the reader here. `_durable_target` resolves the state root
+   before building the target, so the reader follows a symlinked ancestor once
+   at resolve time and then walks the already-resolved real path under
+   `O_NOFOLLOW`. A symlinked ancestor is therefore transparent to the reader,
+   while the repair refuses to traverse one at all. On a host whose state root
+   is reached through a symlink the reader will publish and the repair will
+   never fire, so the legacy leaf stays unrepaired indefinitely. That is
+   fail-closed rather than self-healing, and it is the intended trade: the
+   repair is the side that mutates, so it is the stricter side.
 6. The receipt is a receipt, not a source of truth. Once the cause is
    understood, deleting the leaf is a valid recovery: the next cycle observes an
    absent predecessor and publishes a fresh receipt at generation 1.
