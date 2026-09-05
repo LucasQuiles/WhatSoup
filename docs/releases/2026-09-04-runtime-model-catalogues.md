@@ -48,9 +48,22 @@ checks the newly integrated retention change, not a repeat of the earlier
 catalogue selection. Neither run includes the three scheduled-isolation
 probes above. The 551-test run emitted two missing-keychain-item diagnostics:
 credential-store isolation remains unproven despite passing assertions.
-Existing randomized missing-service fixtures are a source-inspected candidate,
-not a proven attribution; those host-dependent paths were not rerun merely to
-reproduce their stderr.
+
+A controlled follow-up at `65caad9d` confirmed one fixture dependency without
+accessing the host keychain. The existing non-routable model-pin test passed
+with one platform-keyring command intercepted by the existing child-process
+mock; a valid-primary control passed with zero process calls. Each run selected
+one test and excluded 105, retaining both repository setup files. The fixture's
+random nonexistent service prevents neither lookup nor host dependence.
+This does not uniquely attribute both earlier diagnostics or prove whole-suite
+isolation. The initial diagnostic failed during setup with zero tests collected;
+only the corrected, nonzero runs support the finding.
+
+Owner: this lane. Required follow-up: reuse the existing child-process fixture
+at the unintended boundary, then validate the whole affected suite and retain
+independent credential-resolution tests. A global hook or new guard framework
+is not justified. The repair is pending design approval; neither production nor
+test source changed during the diagnostic.
 
 The sentinel gap was also reproduced locally: 170 tests passed at 97.78%
 coverage with exit zero. Explicit precision made that same suite exit one;
