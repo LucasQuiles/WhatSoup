@@ -43,8 +43,10 @@ The latest canonical integrations have separate, revision-scoped receipts:
 | `a2962ba6` | `79536789` | 551 tests in the 16 changed files; source/test type checks passed |
 | `61b9fdb2` | `9500141a`, deferred-work retention hold | 40 tests in all four retention suites; source/test type checks passed |
 | `44e28489` | `bf4f4faa`, registered stop control and reap-outcome reporting | 222 passed and three existing expected failures in seven control/lifecycle suites; source/test type checks passed |
+| `ba8b6550` | `0c78c09b`, service-inventory observations, archive census, and legacy receipt-mode repair | Existing full BOT ERRORS runner: 2,776 passed; separate sentinel gate: 717 passed with the unchanged coverage floors |
 
-The merges were conflict-free; the checks used pinned Node 24.15.0. The retention
+The merges were conflict-free. Node checks used pinned Node 24.15.0; the latest
+Python checks used Python 3.12.13. The retention
 run checks its canonical delta, not the earlier catalogue selection. The latest
 control/lifecycle run includes the three scheduled-isolation probes, which remain
 expected failures rather than protected outcomes. The 551-test run emitted two missing-keychain-item diagnostics:
@@ -102,6 +104,25 @@ pytest-cov 7.1.0 on macOS. The native terminal verdict compares the unrounded
 total; unknown future output formats will fail closed. This is not a claim of
 arbitrary version compatibility, Linux CI completion, or a gate around direct
 ad-hoc pytest commands. Updated-revision CI and required review remain pending.
+
+The coverage gate was rerun after canonical integration at `ba8b6550`; all
+four native floor verdicts and the final success marker were present, with
+exit zero. The separate full BOT ERRORS runner used its existing shared
+curated-file exclusion list; no test selection or threshold was changed.
+These results cover the integrated Python changes, not a full application
+release. Canonical follow-ups under #2459 and #3501 remain open.
+
+The standalone runtime-manifest check passed at 49 entries. The separately
+requested manifest/integrity sequence was refused single-slot admission after
+120 seconds and ran neither command; current-revision Test Integrity remains
+pending. Documentation and source-runtime trust checks passed.
+
+The resumed Git-estate gate returned zero against its current baseline, with
+count-growth warnings: 31 branches, 31 worktrees and zero stashes. Foreign
+detached, locked and dirty work remains. The baseline was not changed by this
+lane; its acceptance does not establish repository convergence or authorize
+deletion. The published head is still `d3764288`, so neither the integrated
+source nor the repaired coverage gate has current published-revision CI.
 
 ## Catalogue context audit
 
