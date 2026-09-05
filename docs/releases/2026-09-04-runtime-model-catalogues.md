@@ -26,9 +26,9 @@ The published candidate `d3764288` has a successful hosted job status, but its
 sentinel coverage step printed 97.78% against a 98% requirement and continued
 to a success marker. The exact Node 24 job log confirms the discrepancy tracked
 in [issue #3481](https://github.com/LucasQuiles/WhatSoup/issues/3481).
-Hosted green therefore does not prove that coverage requirement. The gate
-semantics and missing coverage must be resolved without lowering the threshold
-merely to permit landing; this candidate is not merge-ready.
+Hosted green therefore does not prove that coverage requirement. The local
+repair below addresses the gate and missing coverage without lowering the
+threshold; the published candidate remains unchanged and is not merge-ready.
 
 Local integration `c1be835a` includes canonical `3fc43aed` and passed 838 tests
 across 30 affected/adjacent files on pinned Node 24.15.0, with three existing
@@ -42,11 +42,12 @@ The latest canonical integrations have separate, revision-scoped receipts:
 |---|---|---|
 | `a2962ba6` | `79536789` | 551 tests in the 16 changed files; source/test type checks passed |
 | `61b9fdb2` | `9500141a`, deferred-work retention hold | 40 tests in all four retention suites; source/test type checks passed |
+| `44e28489` | `bf4f4faa`, registered stop control and reap-outcome reporting | 222 passed and three existing expected failures in seven control/lifecycle suites; source/test type checks passed |
 
-Both merges were conflict-free; the checks used pinned Node 24.15.0. The latter run
-checks the newly integrated retention change, not a repeat of the earlier
-catalogue selection. Neither run includes the three scheduled-isolation
-probes above. The 551-test run emitted two missing-keychain-item diagnostics:
+The merges were conflict-free; the checks used pinned Node 24.15.0. The retention
+run checks its canonical delta, not the earlier catalogue selection. The latest
+control/lifecycle run includes the three scheduled-isolation probes, which remain
+expected failures rather than protected outcomes. The 551-test run emitted two missing-keychain-item diagnostics:
 credential-store isolation remains unproven despite passing assertions.
 
 A controlled follow-up at `65caad9d` confirmed one fixture dependency without
@@ -69,8 +70,38 @@ The sentinel gap was also reproduced locally: 170 tests passed at 97.78%
 coverage with exit zero. Explicit precision made that same suite exit one;
 a valid 57-test pin suite still exited zero at 99.61%. A 2,001-case comparator
 sweep demonstrated that precision alone still accepts some unrounded totals
-below 98%. No coverage threshold, validation logic, or test exclusion was
-changed, and issue #3481 remains required before meaningful release green.
+below 98%. That investigation changed neither thresholds nor test exclusions.
+
+### Local coverage-gate repair
+
+The existing `pytest-runner.sh` now owns one `run_pytest_coverage` helper used
+by all four coverage calls in `run-sentinel-tests.sh`. It preserves the original
+pytest status, captures and replays output, and requires exactly one native
+98%-floor success verdict. Missing, malformed, duplicate or contradictory
+verdicts fail closed. Output-readback failure also blocks success without
+replacing an original pytest failure. Explicit precision and uncoloured terminal
+reporting stabilize the format; precision is not the enforcement by itself.
+
+The causal tests execute the real enclosing gate with only its external test
+commands replaced. All 64 negative cases stop at the intended coverage step
+without the final success marker; both valid controls reach all seven Python
+suites and that marker. Independent review found and verified repairs for
+mixed-verdict acceptance and exit-status loss during failed output readback.
+
+Six added fleet tests cover missing/unreadable probe metadata, absent probe
+configuration, outbox scan errors that retain pending work, and malformed
+retirement entries that preserve valid pins and stored bytes. The full real
+sentinel gate passes 717 Python tests, including 176 fleet tests at 98.48%
+combined statement/branch coverage. The other three measured totals are 99.61%,
+98.23% and 99.56%; the 98% requirement is unchanged. No production sentinel
+behavior, dependency, exclusion or test-integrity baseline changed.
+
+Run `bash deploy/scripts/run-sentinel-tests.sh` locally; the existing Quality
+workflow invokes the same entry point. These results used Python 3.12.13 and
+pytest-cov 7.1.0 on macOS. The native terminal verdict compares the unrounded
+total; unknown future output formats will fail closed. This is not a claim of
+arbitrary version compatibility, Linux CI completion, or a gate around direct
+ad-hoc pytest commands. Updated-revision CI and required review remain pending.
 
 ## Catalogue context audit
 
