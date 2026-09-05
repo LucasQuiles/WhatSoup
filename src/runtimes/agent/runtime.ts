@@ -655,6 +655,13 @@ import {
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 import { runNewCommand } from './runtime-new-command.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+  NEW_ACK_REFUSED_STOP_IN_PROGRESS,
+  STOP_ACK_COMPOUND_BODY_REFUSED,
+  NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED,
+} from './runtime-stop-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -4661,6 +4668,10 @@ export class AgentRuntime implements Runtime {
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
     let forwardAfterLocalCommand: string | null = null;
+    // #2949 N1: set by the /new fence below so the compound site refuses the
+    // body too. A flag, not a second guard read: the teardown can settle
+    // between the two sites, and the body must follow the command's fate.
+    let newRefusedForStopTeardown = false;
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
@@ -4727,6 +4738,14 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
+            // #2949 N1: /new re-runs this seam and then RESETS. Against a scope
+            // whose /stop teardown has not settled that spawns a replacement
+            // for an unproven cancellation, so refuse until the guard clears.
+            if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
+              newRefusedForStopTeardown = true;
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              break;
+            }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
             await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
@@ -4783,6 +4802,54 @@ export class AgentRuntime implements Runtime {
                 const resetKey = toConversationKey(chatJid);
                 clearStandbyNotice(this.db, resetKey);
                 deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
+            break;
+
+          case 'stop':
+            // #2949 N1. Extracted leaf collaborator: runtime-stop-command.ts owns
+            // the control flow. Deliberately the SAME teardown closures /new's
+            // interrupt branch binds (one teardown seam, never a second) minus
+            // the reset epilogue — /stop stops, it does not start a new session.
+            await runStopCommand<SessionManager, RuntimeTurnQueueTeardown>({
+              chatJid,
+              sessionScope: this.sessionScope,
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              // The runtime's OWN termination proof — the same predicate the
+              // respawn and turn-recovery abort paths require. /stop's
+              // 'stopped' is not authorized without it.
+              isSessionProvablyTerminated: (session) => this.isSessionProvablyTerminated(session),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
+                ?.abortTurn({ preserveEvidence: true }),
+              disposePerChatSession: async (session, teardown) => {
+                await session.shutdown(false);
+                await this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+              },
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getGlobalInterruptQueue()
+                ?.abortTurn({ preserveEvidence: true }),
+              terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+              retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
+                : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
               sendDirect: (text) => this.sendDirect(chatJid, text),
@@ -4965,7 +5032,31 @@ export class AgentRuntime implements Runtime {
         // via the turn's durable terminal — NOT local_command_handled. The body is
         // a NEW first-turn admission (not #2334 active-turn steering).
         if (classified.type === 'local' && classified.compoundBody !== undefined) {
-          forwardAfterLocalCommand = classified.compoundBody;
+          if (classified.command === 'stop' || newRefusedForStopTeardown) {
+            // #2949 N1: /stop is the one registered command whose handler tears
+            // the lane down, so the compound path would dispatch the body as a
+            // NEW turn onto state the teardown just cleared — in single/shared
+            // straight onto `this.session!` (runtime.ts:5162 and :5173 at
+            // 6ae583e1, non-null asserted after clearSingleScopeRefs nulled it),
+            // in per_chat as a fresh turn from the same inbound moments after
+            // the kill. Refuse the body instead of forwarding it; leaving
+            // forwardAfterLocalCommand null completes the inbound as
+            // 'local_command_handled', exactly as a plain /stop does. The body
+            // is NOT dispatched, so the acknowledgement says so rather than
+            // implying it was queued.
+            // A refused /new reaches here too: the fence broke out of the
+            // switch, so without this its body would still be forwarded into
+            // the scope whose teardown is unproven.
+            log.warn(
+              { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
+              'compound body refused — not dispatched',
+            );
+            this.sendDirect(chatJid, newRefusedForStopTeardown
+              ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
+              : STOP_ACK_COMPOUND_BODY_REFUSED);
+          } else {
+            forwardAfterLocalCommand = classified.compoundBody;
+          }
         }
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
@@ -8168,6 +8259,11 @@ export class AgentRuntime implements Runtime {
    * the latch away and lets a replacement spawn as if the write had settled,
    * so treat it as work that may still be outstanding rather than as a
    * terminated generation.
+   *
+   * The guarantee is bounded by what the status reports: a kill-tree census
+   * that left descendant PIDs unsignalled still returns normally and clears the
+   * handle, and this predicate cannot see that, so it proves the manager's own
+   * generation is finished rather than that no provider descendant survives.
    */
   private isSessionProvablyTerminated(session: SessionManager): boolean {
     const status = session.getStatus();
