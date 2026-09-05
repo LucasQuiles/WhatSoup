@@ -159,6 +159,70 @@ def test_runner_envelope_names_the_target_when_releases_diverge(tmp_path, monkey
     assert divergence["divergentParty"] == "target"
 
 
+def test_health_outbox_event_names_the_target_when_releases_diverge(tmp_path, monkeypatch):
+    """The health check attaches the verdict through redact_json_value, which
+    the runner path does not. Redaction must not disturb the classification."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_divergence", _HEALTH)
+    tp = sys.modules["lib.target_provenance"]
+
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    monkeypatch.setattr(
+        tp, "default_probes",
+        lambda platform: tp.TargetProbes(
+            platform=platform,
+            service_state=lambda unit: "active",
+            service_pids=lambda unit: [4242],
+            process_started_epoch=lambda pid: 1_750_000_000,
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {
+                "manifestDigest": _TARGET_MANIFEST_DIGEST,
+                "sourceCommit": commit_for(cwd),
+            },
+            git_head=commit_for,
+            now_iso=lambda: "2026-08-26T00:00:00Z",
+        ),
+    )
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "probe-line"
+    # Precondition: the two releases really differ once redaction has run.
+    assert event["observerProvenance"]["release"]["sourceCommit"] == _OBSERVER_RELEASE_SHA
+    assert event["targetProvenance"]["release"]["sourceCommit"] == _TARGET_RELEASE_SHA
+
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "diverged"
+    assert divergence["divergentParty"] == "target"
+
+
+def test_health_self_event_has_no_divergence_verdict(tmp_path, monkeypatch):
+    """A producer-self event carries no target block, so there is nothing to
+    diverge from and no verdict to attach -- rather than a vacuous one."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_self_divergence", _HEALTH)
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL outbox: queue write latency",
+        severity="warning",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "bot-errors-health"
+    assert "targetProvenance" not in event
+    assert "releaseDivergence" not in event
+
+
 def test_new_blocks_are_content_free(tmp_path, monkeypatch):
     """No PID, cwd, argv, or path may appear in the new blocks (issue #2358:
     exact process identifiers stay in the legacy private ``process`` block)."""
