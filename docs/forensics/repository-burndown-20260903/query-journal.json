@@ -1,0 +1,841 @@
+{
+  "schema_version": "forensic.query-journal.v1",
+  "families": [
+    {
+      "family": "claude",
+      "passes": [
+        {
+          "pass": 1,
+          "corpus": [
+            "claude-session-01",
+            "claude-session-02"
+          ],
+          "queries": [
+            {
+              "id": "G01",
+              "technique": "substring",
+              "retained_hits": 8,
+              "useful_evidence_ids": [
+                "evidence-7d8c2618994fadf80131329d3413c25e8d7e7d9209e2c3d6de81eb0e1ea64330"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 7,
+              "pivot_query_ids": [
+                "P01",
+                "P02",
+                "P03"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 8 candidates; 1 source-adjudicated useful, 0 false positive, and 7 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G02",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [
+                "P02"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G03",
+              "technique": "substring",
+              "retained_hits": 893,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 893,
+              "pivot_query_ids": [
+                "P04"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 893 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G04",
+              "technique": "all_tokens",
+              "retained_hits": 556,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 556,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 556 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G05",
+              "technique": "all_tokens",
+              "retained_hits": 136,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 136,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 136 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G06",
+              "technique": "all_tokens",
+              "retained_hits": 454,
+              "useful_evidence_ids": [
+                "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b"
+              ],
+              "false_positive_evidence_ids": [
+                "evidence-305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624"
+              ],
+              "unreviewed_hits": 452,
+              "pivot_query_ids": [
+                "P04",
+                "P05"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 454 candidates; 1 source-adjudicated useful, 1 false positive, and 452 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G07",
+              "technique": "substring",
+              "retained_hits": 1,
+              "useful_evidence_ids": [
+                "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [
+                "P03"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 1 candidates; 1 source-adjudicated useful, 0 false positive, and 0 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G08",
+              "technique": "all_tokens",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 2,
+            "failed_sources": 0,
+            "candidates": 1858,
+            "new_evidence": 1858
+          }
+        },
+        {
+          "pass": 2,
+          "corpus": [
+            "claude-session-01",
+            "claude-session-02"
+          ],
+          "queries": [
+            {
+              "id": "P01",
+              "technique": "substring",
+              "retained_hits": 1,
+              "useful_evidence_ids": [
+                "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 1 candidates; 1 source-adjudicated useful, 0 false positive, and 0 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P02",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P03",
+              "technique": "substring",
+              "retained_hits": 5,
+              "useful_evidence_ids": [
+                "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 4,
+              "pivot_query_ids": [],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 5 candidates; 1 source-adjudicated useful, 0 false positive, and 4 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P04",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P05",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P06",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P07",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 2,
+            "failed_sources": 0,
+            "candidates": 5,
+            "new_evidence": 3
+          }
+        }
+      ],
+      "saturation": {
+        "saturated": false,
+        "reason": "insufficient-passes",
+        "marginalYield": [
+          1,
+          0.6
+        ]
+      }
+    },
+    {
+      "family": "codex",
+      "passes": [
+        {
+          "pass": 1,
+          "corpus": [
+            "codex-session-01",
+            "codex-session-02",
+            "codex-session-03",
+            "codex-session-04",
+            "codex-session-05",
+            "codex-session-06",
+            "codex-session-07",
+            "codex-session-08"
+          ],
+          "queries": [
+            {
+              "id": "G01",
+              "technique": "substring",
+              "retained_hits": 225,
+              "useful_evidence_ids": [
+                "evidence-bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 224,
+              "pivot_query_ids": [
+                "P01",
+                "P02",
+                "P03"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 225 candidates; 1 source-adjudicated useful, 0 false positive, and 224 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G02",
+              "technique": "substring",
+              "retained_hits": 20,
+              "useful_evidence_ids": [
+                "evidence-bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 19,
+              "pivot_query_ids": [
+                "P02"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 20 candidates; 1 source-adjudicated useful, 0 false positive, and 19 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G03",
+              "technique": "substring",
+              "retained_hits": 638,
+              "useful_evidence_ids": [
+                "evidence-5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 637,
+              "pivot_query_ids": [
+                "P04"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 638 candidates; 1 source-adjudicated useful, 0 false positive, and 637 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G04",
+              "technique": "all_tokens",
+              "retained_hits": 381,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 381,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 381 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G05",
+              "technique": "all_tokens",
+              "retained_hits": 187,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 187,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 187 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G06",
+              "technique": "all_tokens",
+              "retained_hits": 952,
+              "useful_evidence_ids": [
+                "evidence-bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a",
+                "evidence-6c5c60f3bd432eae97d7c2d656fc6ecfaa2c315befd72fb856b0fb3e2957cb14",
+                "evidence-5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 949,
+              "pivot_query_ids": [
+                "P04",
+                "P05"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 952 candidates; 3 source-adjudicated useful, 0 false positive, and 949 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G07",
+              "technique": "substring",
+              "retained_hits": 116,
+              "useful_evidence_ids": [
+                "evidence-5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 115,
+              "pivot_query_ids": [
+                "P03"
+              ],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 116 candidates; 1 source-adjudicated useful, 0 false positive, and 115 unreviewed.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G08",
+              "technique": "all_tokens",
+              "retained_hits": 67,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [
+                "evidence-3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125"
+              ],
+              "unreviewed_hits": 66,
+              "pivot_query_ids": [],
+              "confidence_change": "decrease",
+              "note": {
+                "text": "Retained 67 candidates; 0 source-adjudicated useful, 1 false positive, and 66 unreviewed.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 8,
+            "failed_sources": 0,
+            "candidates": 1876,
+            "new_evidence": 1876
+          }
+        },
+        {
+          "pass": 2,
+          "corpus": [
+            "codex-session-01",
+            "codex-session-02",
+            "codex-session-03",
+            "codex-session-04",
+            "codex-session-05",
+            "codex-session-06",
+            "codex-session-07",
+            "codex-session-08"
+          ],
+          "queries": [
+            {
+              "id": "P01",
+              "technique": "substring",
+              "retained_hits": 212,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 212,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 212 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P02",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P03",
+              "technique": "substring",
+              "retained_hits": 130,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 130,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 130 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P04",
+              "technique": "substring",
+              "retained_hits": 1,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 1,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 1 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P05",
+              "technique": "substring",
+              "retained_hits": 9,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 9,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 9 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P06",
+              "technique": "substring",
+              "retained_hits": 47,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 47,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 47 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P07",
+              "technique": "substring",
+              "retained_hits": 120,
+              "useful_evidence_ids": [
+                "evidence-8f55fc7d4f490993c35a71bfce82d8451d37425374a6c74b43a5724c9c713cc6"
+              ],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 119,
+              "pivot_query_ids": [],
+              "confidence_change": "increase",
+              "note": {
+                "text": "Retained 120 candidates; 1 source-adjudicated useful, 0 false positive, and 119 unreviewed.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 8,
+            "failed_sources": 0,
+            "candidates": 475,
+            "new_evidence": 229
+          }
+        }
+      ],
+      "saturation": {
+        "saturated": false,
+        "reason": "insufficient-passes",
+        "marginalYield": [
+          1,
+          0.482105
+        ]
+      }
+    },
+    {
+      "family": "opencode",
+      "passes": [
+        {
+          "pass": 1,
+          "corpus": [
+            "opencode-snapshot-01"
+          ],
+          "queries": [
+            {
+              "id": "G01",
+              "technique": "substring",
+              "retained_hits": 53,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 53,
+              "pivot_query_ids": [
+                "P01",
+                "P02",
+                "P03"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 53 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G02",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [
+                "P02"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G03",
+              "technique": "substring",
+              "retained_hits": 814,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 814,
+              "pivot_query_ids": [
+                "P04"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 814 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G04",
+              "technique": "all_tokens",
+              "retained_hits": 2083,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 2083,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 2083 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G05",
+              "technique": "all_tokens",
+              "retained_hits": 218,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 218,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 218 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G06",
+              "technique": "all_tokens",
+              "retained_hits": 9230,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 9230,
+              "pivot_query_ids": [
+                "P04",
+                "P05"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 9230 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G07",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [
+                "P03"
+              ],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "G08",
+              "technique": "all_tokens",
+              "retained_hits": 57,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 57,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 57 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 1,
+            "failed_sources": 0,
+            "candidates": 11352,
+            "new_evidence": 11310
+          }
+        },
+        {
+          "pass": 2,
+          "corpus": [
+            "opencode-snapshot-01"
+          ],
+          "queries": [
+            {
+              "id": "P01",
+              "technique": "substring",
+              "retained_hits": 2,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 2,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 2 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P02",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P03",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P04",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P05",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P06",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            },
+            {
+              "id": "P07",
+              "technique": "substring",
+              "retained_hits": 0,
+              "useful_evidence_ids": [],
+              "false_positive_evidence_ids": [],
+              "unreviewed_hits": 0,
+              "pivot_query_ids": [],
+              "confidence_change": "unchanged",
+              "note": {
+                "text": "Retained 0 candidates; none were source-adjudicated for this query, so they do not support a conclusion.",
+                "redactions": []
+              }
+            }
+          ],
+          "metrics": {
+            "sources_examined": 1,
+            "failed_sources": 0,
+            "candidates": 2,
+            "new_evidence": 1
+          }
+        }
+      ],
+      "saturation": {
+        "saturated": false,
+        "reason": "insufficient-passes",
+        "marginalYield": [
+          0.9963,
+          0.5
+        ]
+      }
+    }
+  ]
+}

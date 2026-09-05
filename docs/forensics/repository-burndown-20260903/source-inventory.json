@@ -1,0 +1,386 @@
+{
+  "schema_version": "forensic.source-inventory.v1",
+  "integer_encoding": "number-or-underscore-grouped-decimal-string",
+  "sources": [
+    {
+      "alias": "claude-session-01",
+      "family": "claude",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "claude-jsonl",
+      "identity": {
+        "bytes": 49747613,
+        "sha256": "04d651fe58ae0d169c361541370e4a733f7445fc1ee7350bdbb4f8b4a4a28ba1"
+      },
+      "observations": [
+        {
+          "family": "claude",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 33816,
+          "matches_observed": 1203,
+          "findings": []
+        },
+        {
+          "family": "claude",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 33816,
+          "matches_observed": 0,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "claude-session-02",
+      "family": "claude",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "claude-jsonl",
+      "identity": {
+        "bytes": 73800478,
+        "sha256": "a8a1445026a49081a5f87f6bb1c572d96de6f0e11c81599ef72e3c613ced797d"
+      },
+      "observations": [
+        {
+          "family": "claude",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 49455,
+          "matches_observed": 655,
+          "findings": []
+        },
+        {
+          "family": "claude",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 49455,
+          "matches_observed": 5,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-01",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 47160265,
+        "sha256": "7de5d4099970537102c4b50740936394542ca2b9cfd441125ad17908d03b9f74"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 15927,
+          "matches_observed": 518,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 15927,
+          "matches_observed": 112,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-02",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 66405135,
+        "sha256": "3f3d01a86c9db5ff2961152703116d7c9870c654b21f9b6d647937397262dea7"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 6921,
+          "matches_observed": 506,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 6921,
+          "matches_observed": 339,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-03",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 60487056,
+        "sha256": "f3a0cf97d937d3bb9426a144d64a29f851e519d3cf3625149c07377b24df646c"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 6217,
+          "matches_observed": 711,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 6217,
+          "matches_observed": 4,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-04",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 1087699,
+        "sha256": "1f63793d252bbd3e5d2d9d10ed4311e1e2b88e1b9929b386a602371eb33d97e5"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 196,
+          "matches_observed": 22,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 196,
+          "matches_observed": 2,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-05",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 3958394,
+        "sha256": "e4d3c26337a8fa0f7720336c6a0f75725f200a919d15868b2fe0c012096d129b"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 629,
+          "matches_observed": 30,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 629,
+          "matches_observed": 8,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-06",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 1022114,
+        "sha256": "45145ab312cca025ff22ece52dbb7cdfcd6c9c84b39396af3e2b8e43b08d1152"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 182,
+          "matches_observed": 21,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 182,
+          "matches_observed": 2,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-07",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 3250757,
+        "sha256": "5933126764fea2dd6dc82753b804b5804039eded2bfa0d26e64756949bce9d01"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 622,
+          "matches_observed": 23,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 622,
+          "matches_observed": 4,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "codex-session-08",
+      "family": "codex",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "raw",
+      "access": "read",
+      "adapter": "codex-jsonl",
+      "identity": {
+        "bytes": 2370319,
+        "sha256": "bf27d8f00a22b4b7b1acb441acd6d32d086dd1f901b459be2e67faffd8b48649"
+      },
+      "observations": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 257,
+          "matches_observed": 45,
+          "findings": []
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 257,
+          "matches_observed": 4,
+          "findings": []
+        }
+      ]
+    },
+    {
+      "alias": "opencode-snapshot-01",
+      "family": "opencode",
+      "authority": "primary-record",
+      "freshness": "frozen-at-observation",
+      "completeness": "complete",
+      "mutability": "hash-bound",
+      "provenance": "snapshot",
+      "access": "read",
+      "adapter": "opencode-sqlite",
+      "identity": {
+        "bytes": "10_813_071_360",
+        "sha256": "3d7df533bf2bba87a4d6b1c52a5648c231d3d2562e10d01f1761b759afce0fef",
+        "members": [
+          {
+            "name": "database",
+            "bytes": "10_813_071_360",
+            "sha256": "3d7df533bf2bba87a4d6b1c52a5648c231d3d2562e10d01f1761b759afce0fef"
+          },
+          {
+            "name": "wal",
+            "bytes": 32768,
+            "sha256": "0ee1797207e4d272eabc80a982439dc302d41ef54021ab1758395cabcde42333"
+          },
+          {
+            "name": "shm",
+            "bytes": 32768,
+            "sha256": "45a1635ed37c306c6b41a566289bf539a1efa11e51925862e97f690bea652458"
+          }
+        ]
+      },
+      "observations": [
+        {
+          "family": "opencode",
+          "pass": 1,
+          "complete": true,
+          "records_examined": 739180,
+          "matches_observed": 11352,
+          "findings": []
+        },
+        {
+          "family": "opencode",
+          "pass": 2,
+          "complete": true,
+          "records_examined": 739180,
+          "matches_observed": 2,
+          "findings": []
+        }
+      ]
+    }
+  ]
+}

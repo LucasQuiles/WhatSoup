@@ -1,0 +1,61 @@
+{
+  "schema_version": "forensic.narrative.v1",
+  "events": [
+    {
+      "id": "N01",
+      "at": "2026-09-03T21:19:31Z",
+      "summary": {
+        "text": "The process-ownership revision was recorded with a focused green result and a missing terminal full-release result.",
+        "redactions": []
+      },
+      "evidence_ids": [
+        "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+        "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b"
+      ]
+    },
+    {
+      "id": "N02",
+      "at": "2026-09-04T02:23:58Z",
+      "summary": {
+        "text": "The phase inventory recorded separate process-diagnostics, source-inventory, and repository-state workstreams rather than treating them as one implementation.",
+        "redactions": []
+      },
+      "evidence_ids": [
+        "evidence-5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0",
+        "evidence-8f55fc7d4f490993c35a71bfce82d8451d37425374a6c74b43a5724c9c713cc6"
+      ]
+    },
+    {
+      "id": "N03",
+      "at": "2026-09-04T09:30:39Z",
+      "summary": {
+        "text": "The first complete deterministic retrieval pass began over frozen session sources.",
+        "redactions": []
+      },
+      "evidence_ids": []
+    },
+    {
+      "id": "N04",
+      "at": "2026-09-04T09:44:16Z",
+      "summary": {
+        "text": "The second pass over the third harness snapshot completed with one distinct new evidence record and no source failure.",
+        "redactions": []
+      },
+      "evidence_ids": []
+    },
+    {
+      "id": "N05",
+      "at": "2026-09-04T09:53:00Z",
+      "summary": {
+        "text": "Selected original records were reopened by hash-bound byte range; useful and false-positive candidates were separated before publication.",
+        "redactions": []
+      },
+      "evidence_ids": [
+        "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+        "evidence-6c5c60f3bd432eae97d7c2d656fc6ecfaa2c315befd72fb856b0fb3e2957cb14",
+        "evidence-305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624",
+        "evidence-3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125"
+      ]
+    }
+  ]
+}

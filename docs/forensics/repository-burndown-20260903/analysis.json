@@ -1,0 +1,281 @@
+{
+  "schema_version": "forensic.analysis.v1",
+  "method_configuration": {
+    "applied_search_modes": [
+      "all_tokens",
+      "substring"
+    ],
+    "query_text_published": false,
+    "normalization": {
+      "applied_to_modes": [
+        "all_tokens"
+      ],
+      "unicode": "NFKC",
+      "locale": "en-US",
+      "pathSeparators": "posix",
+      "identifierSplitting": true,
+      "punctuationCollapsed": true
+    },
+    "synonyms": {
+      "applied_to_search": false,
+      "groups": [
+        {
+          "canonical": "process-ownership",
+          "aliases": [
+            {
+              "text": "sibling reap",
+              "redactions": []
+            },
+            {
+              "text": "process ownership",
+              "redactions": []
+            }
+          ]
+        },
+        {
+          "canonical": "process-diagnostics",
+          "aliases": [
+            {
+              "text": "typed termination outcomes",
+              "redactions": []
+            },
+            {
+              "text": "caller adoption",
+              "redactions": []
+            }
+          ]
+        },
+        {
+          "canonical": "source-inventory",
+          "aliases": [
+            {
+              "text": "fail-closed traversal",
+              "redactions": []
+            },
+            {
+              "text": "shared source inventory",
+              "redactions": []
+            }
+          ]
+        },
+        {
+          "canonical": "phase-control",
+          "aliases": [
+            {
+              "text": "repository burndown",
+              "redactions": []
+            },
+            {
+              "text": "phase state",
+              "redactions": []
+            }
+          ]
+        }
+      ]
+    },
+    "regex": {
+      "applied_to_search": false,
+      "patterns": []
+    },
+    "ngram": {
+      "applied_to_search": false,
+      "tokenOrders": [
+        1,
+        2,
+        3
+      ],
+      "characterOrders": [
+        3,
+        4,
+        5
+      ],
+      "weights": {
+        "unigram": 0.15,
+        "bigram": 0.25,
+        "trigram": 0.3,
+        "character": 0.3
+      }
+    },
+    "fuzzy": {
+      "applied_to_search": false,
+      "metrics": [
+        "damerau-levenshtein",
+        "jaro-winkler",
+        "token-sort",
+        "token-set"
+      ],
+      "combination": "equal-mean",
+      "proof": false
+    },
+    "ranking": {
+      "applied_to_search": false,
+      "bm25": 0.4,
+      "tfidf": 0.2,
+      "lexical": 0.15,
+      "fuzzy": 0.05,
+      "exactEntity": 0.15,
+      "temporal": 0.05,
+      "titleBoost": 0.05,
+      "exactFieldBoosts": {
+        "path": 5,
+        "commit": 5,
+        "symbol": 4,
+        "error": 4
+      }
+    },
+    "candidate_ranking_applied": false
+  },
+  "entity_graph": {
+    "nodes": [
+      {
+        "id": "document:conclusion-C01",
+        "kind": "document"
+      },
+      {
+        "id": "document:conclusion-C02",
+        "kind": "document"
+      },
+      {
+        "id": "document:conclusion-C03",
+        "kind": "document"
+      },
+      {
+        "id": "document:conclusion-C04",
+        "kind": "document"
+      },
+      {
+        "id": "document:conclusion-C05",
+        "kind": "document"
+      },
+      {
+        "id": "document:narrative-N01",
+        "kind": "document"
+      },
+      {
+        "id": "document:narrative-N02",
+        "kind": "document"
+      },
+      {
+        "id": "document:narrative-N03",
+        "kind": "document"
+      },
+      {
+        "id": "document:narrative-N04",
+        "kind": "document"
+      },
+      {
+        "id": "document:narrative-N05",
+        "kind": "document"
+      },
+      {
+        "id": "entity:process-diagnostics",
+        "kind": "entity"
+      }
+    ],
+    "edges": [
+      {
+        "source": "document:conclusion-C02",
+        "target": "entity:process-diagnostics",
+        "relation": "references"
+      }
+    ]
+  },
+  "findings": {
+    "lifecycle_anomalies": [
+      {
+        "id": "A01",
+        "statement": {
+          "text": "A focused green result and hosted checks existed before a terminal local release result, so merge readiness remained incomplete at the source observation.",
+          "redactions": []
+        },
+        "evidence_ids": [
+          "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7"
+        ]
+      }
+    ],
+    "contradictions": [
+      {
+        "id": "X01",
+        "statement": {
+          "text": "Two candidates matched the query vocabulary but source context belonged to unrelated guidance or another project; both were rejected.",
+          "redactions": []
+        },
+        "evidence_ids": [
+          "evidence-305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624",
+          "evidence-3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125"
+        ]
+      }
+    ],
+    "negative_space": [
+      {
+        "id": "Z01",
+        "statement": {
+          "text": "No terminal release result was present in the inspected branch summary; this is a bounded retrieval result, not proof that no later run exists.",
+          "redactions": []
+        },
+        "evidence_ids": [
+          "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7"
+        ]
+      }
+    ],
+    "copied_forward_claims": [
+      {
+        "id": "D01",
+        "statement": {
+          "text": "Repeated verification prose was treated as one narrative lineage until an independent Git object or test receipt corroborated it.",
+          "redactions": []
+        },
+        "evidence_ids": [
+          "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+          "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b"
+        ]
+      }
+    ]
+  },
+  "next_searches": [
+    {
+      "id": "S01",
+      "statement": {
+        "text": "Inspect the two retained second-pass third-harness candidates at their immutable row hashes before promoting their content.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "S02",
+      "statement": {
+        "text": "Run a third bounded pass over the second harness because its second-pass marginal yield remains material.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "S03",
+      "statement": {
+        "text": "Attach the terminal local release receipt to the process-ownership conclusion when that run completes.",
+        "redactions": []
+      }
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "R01",
+      "statement": {
+        "text": "Keep deterministic source adapters, package projection, and privacy enforcement in one shared implementation with a thin command interface.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "R02",
+      "statement": {
+        "text": "Treat retrieved records as candidates until source context and an independent enforcing source support the claim.",
+        "redactions": []
+      }
+    },
+    {
+      "id": "R03",
+      "statement": {
+        "text": "Publish only referenced metadata and aggregate counts; keep raw conversation records in the private hash-bound run.",
+        "redactions": []
+      }
+    }
+  ]
+}
