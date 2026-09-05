@@ -485,6 +485,46 @@ The registry is both deployer-managed and SHA-pinned in
 `deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
 shipping the matching registry fails the local manifest and deployer guards.
 
+## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
+
+The dispatcher sends to the chat transport before it can record that the send
+succeeded. If the process dies in that window, or the response is lost, nothing
+on disk proves whether the operator was paged. The transport supplies no
+idempotency key, so a resend cannot be deduplicated remotely and would page a
+second time for one incident.
+
+Such an event is **held** rather than resent: its durable `delivery.status`
+becomes `outcome_unknown`, it stays in `processing/`, and it is exempt from the
+reclaim pass that returns other claimed files to `outbox/`. A held event is
+never archived under `sent/` and is never dropped. Each hold emits exactly one
+metadata-only record in `logs/dispatch.jsonl` with record kind
+`delivery_outcome_unknown_held`; restarts do not repeat it.
+
+**Inspect.** Held events are the files in `processing/` whose
+`delivery.status` reads `outcome_unknown`. Each also carries
+`delivery.outcomeUnknownAt` and a redacted, truncated
+`delivery.outcomeUnknownReason`.
+
+```bash
+grep -l '"status": "outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
+```
+
+**Release for a re-send.** Only after confirming from the BOT ERRORS chat that
+the alert never arrived. Set `delivery.status` back to `"queued"` and move the
+file into `outbox/` under its original name (the `.json.<pid>.processing`
+suffix drops back to `.json`). The next cycle treats it as an ordinary queued
+event; its attempt counter and backoff are preserved. Status is the only field
+to edit — the dispatcher clears its internal send marker on the next attempt.
+
+**Dead-letter.** If the alert did arrive, or is no longer actionable, move the
+file into `dead-letter/` with the `.dead_letter.json` suffix the exhausted-retry
+path uses. It leaves `processing/` and is not delivered.
+
+A held event holds a `processing/` slot until an operator acts, so the
+`processing` count in the dispatcher state file rises and stays raised. That is
+the intended signal: an unresolved delivery is visible rather than silently
+duplicated or silently lost.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
