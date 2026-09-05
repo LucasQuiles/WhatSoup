@@ -3147,24 +3147,36 @@ def remote_archive_census(host: str, remote_root: str, timeout: int, now: float 
     without moving or deleting anything and without surfacing a host,
     account, instance, user, message, path or identifier.
 
-    Unlike the other remote helpers, the failure path deliberately does NOT
-    append `proc.stderr` to the raised error: the census's own stderr can name
-    the remote root, and a probe whose failure mode leaks the path defeats the
-    privacy property that is the reason it exists.
+    EVERY route out of this function names the host and nothing else. Unlike
+    the other remote helpers the failure paths deliberately do NOT append
+    `proc.stderr`: the census's own stderr can name the remote root, and a
+    probe whose failure mode leaks the path defeats the privacy property that
+    is the reason it exists. `subprocess.TimeoutExpired` needs the same care
+    for a different reason -- it carries the assembled argv, whose last
+    argument IS the remote root -- so it is caught and re-raised host-only,
+    `from None` so the original is not chained back onto the traceback.
+
+    A census that did not complete is an error, never an empty report: an
+    empty stdout parses to `{}`, and returning that would answer "I could not
+    look" with "there is nothing there" -- the same conflation the script side
+    refuses per-directory.
 
     `now` pins the clock the ages are measured against; None reads the remote
     clock. Returns the parsed aggregate report.
     """
     args = [remote_root, "" if now is None else str(int(now))]
-    proc = subprocess.run(
-        remote_python_command(host, args),
-        input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            remote_python_command(host, args),
+            input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh archive-census {host} timed out") from None
     if proc.returncode != 0:
         raise RuntimeError(f"ssh archive-census {host} failed rc={proc.returncode}")
     try:
@@ -3173,6 +3185,8 @@ def remote_archive_census(host: str, remote_root: str, timeout: int, now: float 
         raise RuntimeError(f"ssh archive-census {host} returned unparseable output") from None
     if not isinstance(report, dict):
         raise RuntimeError(f"ssh archive-census {host} returned a non-object report")
+    if report.get("censusStatus") != "ok":
+        raise RuntimeError(f"ssh archive-census {host} did not complete")
     return report
 
 

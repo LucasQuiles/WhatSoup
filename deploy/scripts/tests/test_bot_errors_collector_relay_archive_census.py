@@ -609,3 +609,100 @@ def test_remote_archive_census_failure_message_carries_no_remote_detail(collecto
 
 def _dir_bytes(directory: Path) -> int:
     return sum(path.stat().st_size for path in directory.iterdir() if path.is_file())
+
+
+# ---------------------------------------------------------------------------
+# 6. Wrapper failure routes. Every route out of remote_archive_census() must
+#    name the host and nothing else; the rc-nonzero and unparseable routes
+#    already did, the timeout route did not.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_ROOT_TOKEN = "WRAPPERROOTTOKEN"
+
+
+def test_remote_archive_census_timeout_leaks_neither_argv_nor_the_remote_root(collector, monkeypatch):
+    """Item T: `subprocess.run(..., timeout=...)` raises TimeoutExpired, and
+    that exception carries the FULL argv in its message -- argv that ends with
+    the remote root. With no handler it propagated to the caller verbatim, so
+    the one unhardened route out of this function was also the one that
+    printed a path.
+    """
+
+    def fake_run(cmd, **kwargs):
+        # The real TimeoutExpired is built by subprocess with exactly this
+        # cmd, so the fixture reproduces the real leak rather than a stand-in.
+        raise subprocess.TimeoutExpired(cmd=list(cmd), timeout=kwargs.get("timeout", 5))
+
+    monkeypatch.setattr(collector.subprocess, "run", fake_run)
+    remote_root = f"/srv/{_WRAPPER_ROOT_TOKEN}/bot-errors"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        collector.remote_archive_census("host-a", remote_root, 5)
+
+    message = str(excinfo.value)
+    assert "host-a" in message, "the failure must still say which host"
+    assert _WRAPPER_ROOT_TOKEN not in message, "the remote root reached the error message"
+    assert "python3" not in message, "the assembled argv reached the error message"
+    # `from None`: without it the TimeoutExpired stays chained as __context__
+    # and its argv is printed under "During handling of the above exception".
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+
+
+def test_remote_archive_census_timeout_is_not_swallowed(collector, monkeypatch):
+    """Symmetry: hardening the timeout route must not turn a timeout into a
+    successful empty census."""
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=list(cmd), timeout=5)
+
+    monkeypatch.setattr(collector.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError):
+        collector.remote_archive_census("host-a", "/remote/root", 5)
+
+
+def _stub_run(monkeypatch, collector, stdout: str, returncode: int = 0):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(collector.subprocess, "run", fake_run)
+
+
+def test_remote_archive_census_rejects_empty_stdout_rather_than_reporting_an_empty_census(
+    collector, monkeypatch
+):
+    """Item U: the wrapper never checked censusStatus. Empty stdout with a
+    zero exit parsed to `{}` and came back as a report -- an answer that reads
+    as a completed census of nothing. Same class of defect as the script side:
+    the absence of an answer must not be served as an answer."""
+    _stub_run(monkeypatch, collector, stdout="")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        collector.remote_archive_census("host-a", f"/srv/{_WRAPPER_ROOT_TOKEN}", 5)
+    assert "host-a" in str(excinfo.value)
+    assert _WRAPPER_ROOT_TOKEN not in str(excinfo.value)
+
+
+def test_remote_archive_census_rejects_a_failed_census_payload(collector, monkeypatch):
+    """The script answers a forced failure with censusStatus "failed" and a
+    non-zero exit. A caller that only checked the exit code would still be
+    relying on the exit code alone; check the payload it actually returned."""
+    _stub_run(monkeypatch, collector, stdout=json.dumps({"schemaVersion": 1, "censusStatus": "failed"}))
+
+    with pytest.raises(RuntimeError):
+        collector.remote_archive_census("host-a", "/remote/root", 5)
+
+
+def test_remote_archive_census_accepts_a_complete_report(collector, monkeypatch):
+    """Falsifier symmetry: the censusStatus check must not reject a real
+    report, or every one of the rejections above would be vacuous."""
+    good = {
+        "schemaVersion": 1,
+        "censusStatus": "ok",
+        "generatedAtEpoch": _NOW,
+        "archives": {},
+        "total": {"status": "ok", "artifactCount": 0},
+    }
+    _stub_run(monkeypatch, collector, stdout=json.dumps(good))
+
+    assert collector.remote_archive_census("host-a", "/remote/root", 5) == good
