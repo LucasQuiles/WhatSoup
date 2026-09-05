@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { isNonEmptyString } from '../src/lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
 import {
   createReleaseSnapshotDriftReport,
   type ReleaseSnapshotDriftIssue,
@@ -265,6 +265,81 @@ function alertEvidence(assessment: DriftAssessment): string {
   }, null, 2);
 }
 
+const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
+/** Explicit sentinel for an identity that cannot be attested, never an empty string. */
+const UNKNOWN_RELEASE_IDENTITY = 'unknown';
+
+/**
+ * Path-free release identity (#2385 C1): a digest over the manifest's
+ * identity-bearing fields ONLY — schema version, source ref and commit, the
+ * sorted repo-relative file list with hashes and sizes, and the required
+ * outputs. `release.path`, `release.createdAt` and `rollback.path` are excluded
+ * on purpose: the release directory name is an accident of a rollout, so two
+ * assets deployed from the same bytes under different directory names are the
+ * same release and must correlate.
+ *
+ * This is deliberately NOT `desiredReleaseDigest`, which hashes the manifest
+ * FILE. That digest answers a different question (did this invocation see the
+ * same manifest bytes?) and moves with the directory name, so it can never
+ * correlate two differently-named assets.
+ */
+function releaseIdentityFromManifest(manifestPath: string): string {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (!isRecord(parsed)) return UNKNOWN_RELEASE_IDENTITY;
+    const source = isRecord(parsed.source) ? parsed.source : {};
+    const files = Array.isArray(parsed.files) ? parsed.files : [];
+    const canonical = JSON.stringify({
+      schemaVersion: parsed.schemaVersion,
+      sourceRef: source.ref,
+      sourceCommit: source.commit,
+      files: files
+        .map((file) => (isRecord(file) ? `${String(file.path)}:${String(file.sha256)}:${String(file.sizeBytes)}` : ''))
+        .sort(),
+      requiredOutputs: Array.isArray(parsed.requiredOutputs)
+        ? parsed.requiredOutputs.map((value) => String(value)).sort()
+        : [],
+    });
+    return domainDigest(RELEASE_IDENTITY_DOMAIN, canonical);
+  } catch {
+    return UNKNOWN_RELEASE_IDENTITY;
+  }
+}
+
+/**
+ * The bounded drift kind for the event: the sorted set of issue kinds present,
+ * or `none` when the release verifies. Every member is a
+ * `ReleaseSnapshotDriftKind` or `LaunchdSelectorIssue['kind']`, so the value is
+ * a closed-enum join and carries no content. Deliberately the same set
+ * `conditionFingerprint` is built from, rather than a new precedence ordering
+ * no test pins.
+ */
+function driftKind(assessment: DriftAssessment): string {
+  const kinds = Object.keys(countIssueKinds(assessment.issues)).sort();
+  return kinds.length === 0 ? 'none' : kinds.join(',');
+}
+
+/**
+ * Typed drift facts as structured event data (#2385 L1a). They ride the emit
+ * helper's existing repeatable `--diagnostic key=value` channel, which lands
+ * them verbatim in the event's `diagnostics` object. The human-readable summary
+ * is untouched: `storm_fingerprint` keys on source, severity and the normalized
+ * summary only, so adding diagnostics cannot re-key an in-flight incident.
+ */
+function typedDriftDiagnostics(assessment: DriftAssessment): string[] {
+  const desired = releaseIdentityFromManifest(assessment.report.manifestPath);
+  // The observed tree identity is only attestable when verification passed —
+  // the same rule the structured log record already applies. Reconstructing a
+  // drifted tree's real identity needs a re-walk this leaf does not do, so it
+  // stays the explicit sentinel rather than a guess.
+  const observed = assessment.ok && desired !== UNKNOWN_RELEASE_IDENTITY ? desired : UNKNOWN_RELEASE_IDENTITY;
+  return [
+    `drift_kind=${driftKind(assessment)}`,
+    `desired_release_identity=${desired}`,
+    `observed_release_identity=${observed}`,
+  ];
+}
+
 function runEmit(
   options: LiveReleaseDriftAlertOptions,
   assessment: DriftAssessment,
@@ -273,7 +348,11 @@ function runEmit(
   return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
     summary: alertSummary(assessment),
     evidence: alertEvidence(assessment),
-    diagnostics: [`release=${assessment.report.releasePath}`, `manifest=${assessment.report.manifestPath}`],
+    diagnostics: [
+      `release=${assessment.report.releasePath}`,
+      `manifest=${assessment.report.manifestPath}`,
+      ...typedDriftDiagnostics(assessment),
+    ],
     severity: 'critical',
   }, eventType);
 }

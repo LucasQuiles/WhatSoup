@@ -664,3 +664,177 @@ describe('live release drift alert #2458: per-invocation structured log record',
     expect(result.record.observedAt).toBe('2026-08-21T12:34:56.000Z');
   });
 });
+
+/**
+ * #2385 L1a. The release directory basename is an accident of a rollout, not an
+ * identity: two hosts running the same bytes under different directory names are
+ * the same release. These tests pin the typed, path-free identity the event now
+ * carries, and pin that the human-readable summary did NOT move — the summary is
+ * `storm_fingerprint` input, so changing it would re-key in-flight incidents.
+ */
+const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
+const FIXTURE_RELEASE_NAME_A = 'WhatSoup-release-alpha';
+const FIXTURE_RELEASE_NAME_B = 'WhatSoup-release-bravo';
+const FIXTURE_SOURCE_COMMIT = 'abc123def4567890';
+const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
+
+/**
+ * Summaries b0b93155 emits for these fixtures, recorded as constants. The format
+ * is `alertSummary` at b0b93155; the accompanying receipt runs that exact
+ * revision of the script against the same fixtures and reproduces both strings.
+ */
+const BASELINE_RECOVERED_SUMMARY_A = `release drift recovered: ${FIXTURE_RELEASE_NAME_A}`;
+const BASELINE_DETECTED_SUMMARY_B = `release drift detected: ${FIXTURE_RELEASE_NAME_B} (1 issue)`;
+
+/**
+ * Independent oracle for the typed identity: recomputed here from the manifest
+ * the fixture wrote, deliberately NOT imported from the script under test, so a
+ * canonicalisation change on either side fails this test instead of hiding.
+ */
+function expectedReleaseIdentity(manifestPath: string): string {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    schemaVersion: number;
+    source: { ref: string; commit: string };
+    files: Array<{ path: string; sha256: string; sizeBytes: number }>;
+    requiredOutputs: string[];
+  };
+  const canonical = JSON.stringify({
+    schemaVersion: manifest.schemaVersion,
+    sourceRef: manifest.source.ref,
+    sourceCommit: manifest.source.commit,
+    files: manifest.files.map((file) => `${file.path}:${file.sha256}:${file.sizeBytes}`).sort(),
+    requiredOutputs: [...manifest.requiredOutputs].sort(),
+  });
+  return createHash('sha256').update(`${RELEASE_IDENTITY_DOMAIN}|${canonical}`).digest('hex');
+}
+
+function eventDiagnostics(event: Record<string, unknown>): Record<string, string> {
+  return event.diagnostics as Record<string, string>;
+}
+
+/**
+ * Two releases built from one source tree at one commit, differing ONLY in
+ * release directory basename. `releaseName` is passed explicitly because the
+ * default derives the name from the source commit, which would make both
+ * fixtures share a basename and let the identity assertion pass by coincidence.
+ */
+function writeTwinReleases(options: { drift?: boolean } = {}): { a: string; b: string } {
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+  const sourceRoot = path.join(tmpRoot, 'source');
+  mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
+  writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"fixture"}\n', 'utf8');
+  writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const value = true;\n', 'utf8');
+
+  const build = (releaseName: string): string => {
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'HEAD',
+      sourceCommit: FIXTURE_SOURCE_COMMIT,
+      releaseRoot: path.join(tmpRoot, 'releases'),
+      releaseName,
+      buildTime: FIXTURE_BUILD_TIME,
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(
+      path.join(releasePath, 'src/main.ts'),
+      options.drift ? 'export const value = false;\n' : readFileSync(path.join(sourceRoot, 'src/main.ts')),
+      'utf8',
+    );
+    writeFileSync(
+      path.join(releasePath, '.whatsoup-release-manifest.json'),
+      `${JSON.stringify(plan.manifest, null, 2)}\n`,
+      'utf8',
+    );
+    return releasePath;
+  };
+
+  return { a: build(FIXTURE_RELEASE_NAME_A), b: build(FIXTURE_RELEASE_NAME_B) };
+}
+
+describe('live release drift alert #2385: typed drift identity on the emitted event', () => {
+  it('carries an equal typed identity for two releases that differ only in directory basename', () => {
+    const { a, b } = writeTwinReleases();
+    // Coverage assertion: without this the identity equality could hold because
+    // both fixtures are the same directory, which would prove nothing.
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(0);
+    expect(procB.status, procB.stderr).toBe(0);
+
+    const [eventA] = outboxEvents(stateDirA);
+    const [eventB] = outboxEvents(stateDirB);
+    const diagA = eventDiagnostics(eventA);
+    const diagB = eventDiagnostics(eventB);
+
+    // Positive control: a real digest, not the `unknown` sentinel, and equal to
+    // an independently recomputed expectation.
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(expectedIdentity).toMatch(/^[0-9a-f]{64}$/);
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagA.observed_release_identity).toBe(expectedIdentity);
+
+    // The property #2385 C2 needs: different basenames, one identity.
+    expect(diagB.desired_release_identity).toBe(diagA.desired_release_identity);
+    expect(diagB.observed_release_identity).toBe(diagA.observed_release_identity);
+    expect(diagA.drift_kind).toBe('none');
+    expect(diagB.drift_kind).toBe('none');
+
+    // Content-free: the typed fields name no path and no release directory.
+    const identities = [
+      diagA.desired_release_identity,
+      diagA.observed_release_identity,
+      diagB.desired_release_identity,
+      diagB.observed_release_identity,
+    ];
+    for (const value of identities) {
+      expect(value).not.toContain(path.sep);
+      expect(value).not.toContain(FIXTURE_RELEASE_NAME_A);
+      expect(value).not.toContain(FIXTURE_RELEASE_NAME_B);
+      expect(value).not.toContain(tmpRoot);
+    }
+  });
+
+  it('carries a bounded drift kind and a real desired identity on a drift alert', () => {
+    const { a, b } = writeTwinReleases({ drift: true });
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(1);
+    expect(procB.status, procB.stderr).toBe(1);
+
+    const diagA = eventDiagnostics(outboxEvents(stateDirA)[0]);
+    const diagB = eventDiagnostics(outboxEvents(stateDirB)[0]);
+
+    expect(diagA.drift_kind).toBe('file-sha256-drift');
+    expect(diagB.drift_kind).toBe('file-sha256-drift');
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagB.desired_release_identity).toBe(expectedIdentity);
+    // A drifted tree's real identity would need a re-walk this leaf does not do,
+    // so observed stays the explicit `unknown` sentinel rather than a guess.
+    expect(diagA.observed_release_identity).toBe('unknown');
+    expect(diagB.observed_release_identity).toBe('unknown');
+  });
+
+  it('leaves the summary text byte-identical to what b0b93155 emitted', () => {
+    const clean = writeTwinReleases();
+    const cleanStateDir = path.join(tmpRoot, 'state-clean');
+    expect(runCli(['--release', clean.a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: cleanStateDir }).status).toBe(0);
+    expect(outboxEvents(cleanStateDir)[0].summary).toBe(BASELINE_RECOVERED_SUMMARY_A);
+
+    const drifted = writeTwinReleases({ drift: true });
+    const driftStateDir = path.join(tmpRoot, 'state-drift');
+    expect(runCli(['--release', drifted.b], { BOT_ERRORS_STATE_DIR: driftStateDir }).status).toBe(1);
+    expect(outboxEvents(driftStateDir)[0].summary).toBe(BASELINE_DETECTED_SUMMARY_B);
+  });
+});
