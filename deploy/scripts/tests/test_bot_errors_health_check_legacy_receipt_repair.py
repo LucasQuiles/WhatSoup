@@ -313,6 +313,63 @@ def test_repair_refuses_a_group_or_world_writable_parent(tmp_path, parent_mode):
     assert _mode_of(receipt_path) == 0o644, "a leaf under a writable parent must be left unmodified"
 
 
+def test_repair_refuses_a_symlinked_parent_directory(tmp_path):
+    """The parent must be walked, not stat'ed by path.
+
+    Statting the parent by path follows symlinks, so a symlinked state
+    directory pointed at a real 0700 directory let the repair chmod the leaf
+    behind the link. The strict reader walks its own ancestors under
+    O_NOFOLLOW; the repair is the side that mutates, so it must be at least as
+    strict.
+    """
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    linked_root = tmp_path / "linked-state"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(
+        linked_root / "daily-health-receipt.json"
+    )
+
+    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    assert outcome.previous_mode is None
+    assert receipt_path.read_bytes() == raw
+    assert _mode_of(receipt_path) == 0o644, "the leaf behind the link must be unmodified"
+
+
+def test_repair_refuses_a_symlinked_grandparent_directory(tmp_path):
+    """Any symlinked component, not only the immediate parent, refuses."""
+    real_parent = tmp_path / "real-parent"
+    real_root = real_parent / "state"
+    real_root.mkdir(mode=0o700, parents=True)
+    real_parent.chmod(0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(
+        linked_parent / "state" / "daily-health-receipt.json"
+    )
+
+    assert outcome.refusal == _mod.LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    assert _mode_of(receipt_path) == 0o644
+
+
+def test_repair_still_repairs_under_a_real_directory_parent(tmp_path):
+    """Positive control for the walk: a real parent chain still repairs."""
+    real_root = tmp_path / "real-state"
+    real_root.mkdir(mode=0o700)
+    receipt_path, raw = _write_legacy_receipt(real_root)
+
+    outcome = _mod.repair_legacy_private_receipt_mode(receipt_path)
+
+    assert outcome.refusal is None
+    assert outcome.previous_mode == 0o644
+    assert _mode_of(receipt_path) == 0o600
+    assert receipt_path.read_bytes() == raw
+
+
 def test_repair_refuses_a_non_regular_leaf(tmp_path):
     tmp_path.chmod(0o700)
     fifo_path = tmp_path / "daily-health-receipt.json"

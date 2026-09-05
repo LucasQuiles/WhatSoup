@@ -64,15 +64,40 @@ that was checked and the inode that is modified cannot differ.
 | Leaf is a regular file | `not_regular` |
 | Leaf is owned by the executing UID | `foreign_owner` |
 | Leaf has exactly one hard link | `multiple_links` |
+| No ancestor of the leaf is a symlink | `parent_symlink` |
 | Parent is not group- or world-writable | `parent_writable` |
-| Parent is stat-able | `parent_unreadable` |
+| Parent is openable as a directory | `parent_unreadable` |
 | `O_NOFOLLOW` is available on this platform | `unsupported_capability` |
 | Leaf could not be opened or chmod'ed | `unopenable` |
+
+The parent is proven by walking its components from the filesystem root under
+`O_NOFOLLOW`, not by statting the path. Statting follows symlinks, so a
+symlinked state directory pointed at a real private directory would let the
+repair modify the leaf behind the link. The leaf is then opened relative to the
+proven parent descriptor rather than by path, so the walk cannot be re-run
+against a component that changed underneath it.
 
 The repair runs *before* `ensure_private_dir()`, deliberately.
 `ensure_private_dir()` re-applies `0700` to the state root, so running it first
 would narrow a group- or world-writable root and hand the parent guard a
 sanitized value — erasing the very signal that the leaf may have been planted.
+
+### The writable-parent refusal holds for one cycle, not permanently
+
+`ensure_private_dir()` narrows the state root immediately after the refusal, so
+the *next* cycle sees a `0700` root and repairs the leaf if it passes the owner,
+regular-file, single-link and non-symlinked-parent guards. The refusal buys one
+cycle and a log line; it is not a durable quarantine, and the log line says so.
+
+This is deliberate. Making it durable would require persisting the refusal,
+which means another state file on the very path this repair exists to unblock.
+The owner guard is what actually protects against a foreign plant: a file placed
+by another UID is refused on every cycle, permanently. A file planted by the
+executing UID itself is outside this threat model, since that UID already owns
+the receipt and can write it directly.
+
+Operationally: if you see `parent_writable`, the important artifact is the log
+line, not the file state on the next run. Capture it before the next cycle.
 
 A refusal never chmods, never raises, and leaves the leaf byte- and
 mode-identical. The strict reader downstream stays the sole authority on whether
@@ -119,9 +144,16 @@ destroys the evidence of why it was refused.
 3. `foreign_owner`, `multiple_links` and `symlink` on a host that should have
    neither are a possible tampering signal, not a permissions nuisance.
    Preserve the file and escalate before repairing.
-4. `parent_writable` means the state root itself is group- or world-writable.
-   Fix the directory first; the leaf repair will then run on the next cycle.
-5. The receipt is a receipt, not a source of truth. Once the cause is
+4. `parent_writable` means the state root itself was group- or world-writable
+   when this cycle looked. Investigate why; do not treat the next cycle's
+   success as evidence the condition was benign, because the root is narrowed
+   automatically in between.
+5. `parent_symlink` means an ancestor of the receipt is a symlink. The strict
+   reader resolves the state root before it walks, so the reader may still
+   accept a path the repair refuses. On such a host the cycle stays red and the
+   receipt is never repaired. That is fail-closed rather than self-healing, and
+   it is the intended trade: the repair mutates, so it is the stricter side.
+6. The receipt is a receipt, not a source of truth. Once the cause is
    understood, deleting the leaf is a valid recovery: the next cycle observes an
    absent predecessor and publishes a fresh receipt at generation 1.
 

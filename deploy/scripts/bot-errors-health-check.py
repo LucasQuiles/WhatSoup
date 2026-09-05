@@ -1317,6 +1317,7 @@ LEGACY_RECEIPT_REFUSAL_NOT_REGULAR = "not_regular"
 LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER = "foreign_owner"
 LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS = "multiple_links"
 LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE = "parent_writable"
+LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK = "parent_symlink"
 LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE = "parent_unreadable"
 LEGACY_RECEIPT_REFUSAL_UNOPENABLE = "unopenable"
 LEGACY_RECEIPT_REFUSAL_UNSUPPORTED = "unsupported_capability"
@@ -1333,6 +1334,71 @@ class LegacyReceiptRepair(NamedTuple):
 
     previous_mode: int | None
     refusal: str | None
+
+
+class _ReceiptParentUnusable(Exception):
+    """Internal: the receipt's parent cannot be opened without following a link.
+
+    ``refusal`` is a LEGACY_RECEIPT_REFUSAL_* code, or None when the parent is
+    merely absent, which is a silent no-op rather than a refusal.
+    """
+
+    def __init__(self, refusal: str | None) -> None:
+        super().__init__(refusal or "absent")
+        self.refusal = refusal
+
+
+def _classify_parent_component_failure(component: str, *, dir_fd: int) -> str:
+    """Name the reason a parent component could not be opened as a directory.
+
+    O_NOFOLLOW|O_DIRECTORY reports ENOTDIR for a symlink on darwin and ELOOP on
+    linux, and ENOTDIR also covers a plain file, so the errno alone cannot say
+    which it was. The open is still the security boundary; this lstat only
+    labels the refusal, so a race here downgrades the message, never the guard.
+    """
+    try:
+        component_stat = os.stat(component, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+    if stat.S_ISLNK(component_stat.st_mode):
+        return LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+
+
+def _open_receipt_parent(path: Path) -> int:
+    """Open the receipt's parent directory without traversing any symlink.
+
+    Walks the absolute parent path one component at a time from the filesystem
+    root under O_NOFOLLOW|O_DIRECTORY, so a symlinked ancestor cannot redirect
+    the walk to a directory the caller did not name. This mirrors the strict
+    reader's _open_target_parent (lib/durable_json.py), reimplemented here
+    rather than imported because that helper is private and durable_json.py is
+    out of scope for this change.
+
+    The caller owns the returned descriptor and must close it.
+    """
+    anchor = Path(os.path.abspath(path.parent))
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in anchor.parts[1:]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                raise _ReceiptParentUnusable(None) from exc
+            except OSError as exc:
+                raise _ReceiptParentUnusable(
+                    _classify_parent_component_failure(component, dir_fd=descriptor)
+                ) from exc
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
@@ -1352,54 +1418,69 @@ def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
     then chmod'ed, so the inode that was checked and the inode that is modified
     cannot differ.
 
+    The parent is proven by walking its components under O_NOFOLLOW rather than
+    by statting the path, which would follow a symlinked state directory, and
+    the leaf is then opened relative to that proven descriptor.
+
     Refusal is silent about the mode: it never chmods, never raises, and leaves
     the leaf byte- and mode-identical, so the strict reader downstream remains
     the sole authority on whether the leaf may be used.
+
+    The parent_writable refusal holds for one cycle only. ensure_private_dir()
+    narrows the state root immediately after this returns, so the next cycle
+    sees a 0700 root and repairs the leaf if it passes the remaining guards.
+    The owner guard is what protects against a foreign plant; a plant by the
+    executing uid itself is outside this threat model.
     """
-    if not getattr(os, "O_NOFOLLOW", 0):
+    if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
         return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
     try:
-        parent_stat = os.stat(path.parent)
-    except FileNotFoundError:
-        # No state root yet, so no legacy leaf to repair. Not a refusal: a fresh
-        # install must not log one every cycle.
-        return LegacyReceiptRepair(None, None)
-    except OSError:
-        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE)
-    if stat.S_IMODE(parent_stat.st_mode) & LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS:
-        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE)
+        parent_fd = _open_receipt_parent(path)
+    except _ReceiptParentUnusable as exc:
+        # refusal None means the parent is simply absent: no leaf, no repair,
+        # and no log line on a fresh install.
+        return LegacyReceiptRepair(None, exc.refusal)
     try:
-        # O_NONBLOCK so a FIFO planted at the receipt path fails the regular-file
-        # guard instead of blocking the daily cycle forever on open(); it is
-        # ignored for the regular file this is expected to find.
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
-        )
-    except FileNotFoundError:
-        return LegacyReceiptRepair(None, None)
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.EMLINK}:
-            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_SYMLINK)
-        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
-    try:
-        leaf_stat = os.stat(descriptor)
-        if not stat.S_ISREG(leaf_stat.st_mode):
-            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_NOT_REGULAR)
-        if leaf_stat.st_uid != os.getuid():
-            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER)
-        if leaf_stat.st_nlink != 1:
-            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS)
-        previous_mode = stat.S_IMODE(leaf_stat.st_mode)
-        if not previous_mode & LEGACY_RECEIPT_FORBIDDEN_MODE_BITS:
-            return LegacyReceiptRepair(None, None)
+        parent_stat = os.stat(parent_fd)
+        if stat.S_IMODE(parent_stat.st_mode) & LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE)
         try:
-            os.chmod(descriptor, previous_mode & ~LEGACY_RECEIPT_FORBIDDEN_MODE_BITS)
-        except OSError:
+            # Opened relative to the walked parent descriptor, so the leaf is
+            # resolved in the directory this function proved, not by re-walking
+            # the path. O_NONBLOCK so a FIFO planted at the receipt path fails
+            # the regular-file guard instead of blocking the daily cycle forever
+            # on open(); it is ignored for the regular file expected here.
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return LegacyReceiptRepair(None, None)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_SYMLINK)
             return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
-        return LegacyReceiptRepair(previous_mode, None)
+        try:
+            leaf_stat = os.stat(descriptor)
+            if not stat.S_ISREG(leaf_stat.st_mode):
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_NOT_REGULAR)
+            if leaf_stat.st_uid != os.getuid():
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER)
+            if leaf_stat.st_nlink != 1:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS)
+            previous_mode = stat.S_IMODE(leaf_stat.st_mode)
+            if not previous_mode & LEGACY_RECEIPT_FORBIDDEN_MODE_BITS:
+                return LegacyReceiptRepair(None, None)
+            try:
+                os.chmod(descriptor, previous_mode & ~LEGACY_RECEIPT_FORBIDDEN_MODE_BITS)
+            except OSError:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+            return LegacyReceiptRepair(previous_mode, None)
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        os.close(parent_fd)
 
 
 def safe_segment(value: str) -> str:
@@ -8618,9 +8699,20 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationR
     # parent guard could read it (#3501).
     repair = repair_legacy_private_receipt_mode(receipt_path)
     if repair.refusal is not None:
+        # The writable-parent refusal is not durable and the log line must not
+        # imply that it is: ensure_private_dir() below narrows the root, so the
+        # next cycle sees 0700 and proceeds.
+        deferral = (
+            " (holds for this cycle only: ensure_private_dir narrows the state"
+            " root to 0700 after this refusal, so the next cycle repairs the"
+            " leaf if it passes the owner, regular-file, single-link and"
+            " non-symlinked-parent guards)"
+            if repair.refusal == LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE
+            else ""
+        )
         sys.stderr.write(
             "[bot-errors-health] daily-health receipt mode repair refused: "
-            f"{repair.refusal}\n"
+            f"{repair.refusal}{deferral}\n"
         )
     elif repair.previous_mode is not None:
         sys.stderr.write(
