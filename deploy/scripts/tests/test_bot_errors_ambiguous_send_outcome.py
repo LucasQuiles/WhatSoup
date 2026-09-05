@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -72,6 +73,14 @@ SEND_ISSUED_COMPONENT = "dispatcher.process_send_issued_state"
 # their own: if the held record were needed to make up the number, excluding it
 # would stop the sweep firing and the test would pass for the wrong reason.
 STORM_SIBLINGS = 3
+
+# Every seeded event starts with one prior attempt, so an assertion about the
+# retry budget has to name the increment rather than a floor the seed satisfies.
+SEEDED_ATTEMPTS = 1
+PARENT_SYNC_STAGE = "parent_sync"
+# One line per hold ATTEMPT: the first attempt whose publication never landed,
+# plus the retry that succeeded. See hold_ambiguous_send for the ORDER note.
+RETRIED_HOLD_SIGNALS = 2
 
 INJECTED_PUBLICATION_FAILURE = "injected sent-publication failure"
 
@@ -141,7 +150,7 @@ def _load(state_dir: Path):
 
 def _event(event_id: str, status: str, **delivery: object) -> dict:
     record = {
-        "attempts": 1,
+        "attempts": SEEDED_ATTEMPTS,
         "status": status,
         "nextAttemptAtEpoch": 0,
         "lastError": None,
@@ -562,8 +571,12 @@ def _assert_requeued_not_held(mod, paths, error: str, expect_sends: int) -> None
     assert _delivery_status(record) == QUEUED_STATUS, (
         f"must requeue, not hold: {record.get('delivery')!r} for {error!r}"
     )
-    assert int((record.get("delivery") or {}).get("attempts") or 0) >= 1, (
-        f"the attempt must be counted against the retry budget: {record.get('delivery')!r}"
+    # The seed already carries attempts=1, so ">= 1" would hold even if the
+    # attempt were never counted. mark_attempt increments before the send, so
+    # the requeued record must read exactly one MORE than the seed.
+    assert int((record.get("delivery") or {}).get("attempts") or 0) == SEEDED_ATTEMPTS + 1, (
+        f"the attempt must be counted against the retry budget, expected "
+        f"{SEEDED_ATTEMPTS + 1}: {record.get('delivery')!r}"
     )
     assert _held_signals(paths) == [], (
         f"a non-ambiguous failure must not emit a hold signal: {error!r}"
@@ -896,9 +909,16 @@ def test_a_failing_hold_publication_does_not_abort_the_reclaim_pass(tmp_path):
     assert len(held) == 1 and _delivery_status(held[0]) == HELD_STATUS, (
         f"the retried hold must succeed: {held!r}"
     )
-    assert len(_held_signals(paths)) == 1, (
-        f"the retried hold must still signal exactly once: {len(_held_signals(paths))}"
+    # The disclosed cost of appending the log line BEFORE the publication: a
+    # publication that never reached disk is retried, and the line is written
+    # again. One duplicate LOG LINE per retried hold, never a duplicate send --
+    # the send decision reads the durable record, which is stamped once.
+    assert len(_held_signals(paths)) == RETRIED_HOLD_SIGNALS, (
+        f"one duplicate line per retried hold was expected, got "
+        f"{len(_held_signals(paths))}"
     )
+    stamped = (held[0].get("delivery") or {}).get("outcomeUnknownSignalledAt")
+    assert stamped, f"the durable record must carry one signal stamp: {held[0]!r}"
 
 
 def test_reclaim_leaves_a_held_record_where_it_is(tmp_path):
@@ -1037,4 +1057,149 @@ def test_the_hold_signal_carries_no_event_identifier(tmp_path):
     details = signals[0].get("details") or {}
     assert details.get("held") is True and "attempts" in details, (
         f"the signal must still carry its bounded metadata: {details!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Publications that REACH DISK and are still refused, and the runbook command.
+# --------------------------------------------------------------------------
+
+
+def _non_advancing_publication(mod, component: str):
+    """A publication that lands on disk but cannot prove durability.
+
+    The fault fires at PARENT_SYNC, after the rename, so the bytes ARE visible
+    and only the advance check refuses. Raising at require_all_advance instead
+    would leave nothing on disk and would not exercise this state at all.
+    """
+    original = mod.publish_state_json
+
+    def _publish(*args, **kwargs):
+        if kwargs.get("component") == component:
+            def _fault(stage):
+                if getattr(stage, "value", "") == PARENT_SYNC_STAGE:
+                    raise OSError("injected parent-sync fault")
+
+            kwargs["_fault_hook"] = _fault
+        return original(*args, **kwargs)
+
+    return patch.object(mod, "publish_state_json", side_effect=_publish)
+
+
+def test_a_refused_hold_publication_still_signals_exactly_once(tmp_path):
+    """The record is the authority, and the log line must not be lost with it.
+
+    A hold publication can reach disk and still be refused. The record then
+    already reads held-and-signalled, so every later reclaim skips it -- and a
+    log line appended after the publication would never be written at all. The
+    line is therefore appended first.
+    """
+    mod = _load(tmp_path / "hold-refused")
+    paths = mod.setup_dirs()
+    event = _event(
+        "evt-2424-refused-hold", IN_FLIGHT_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT}
+    )
+    _seed_processing(paths, event)
+
+    with _non_advancing_publication(mod, HELD_PUBLICATION_COMPONENT):
+        try:
+            mod.reclaim_processing(paths)
+        except Exception as exc:  # contained per record, but never wedge the test
+            pytest.fail(f"reclaim must contain a refused hold: {exc!r}")
+
+    parked = _processing_records(paths)
+    assert len(parked) == 1 and _delivery_status(parked[0]) == HELD_STATUS, (
+        f"the refused publication still reached disk, so the record reads held: {parked!r}"
+    )
+    assert len(_held_signals(paths)) == 1, (
+        "a hold whose publication was refused lost its signal: "
+        f"{len(_held_signals(paths))}"
+    )
+
+    mod.reclaim_processing(paths)
+    mod.reclaim_processing(paths)
+    assert len(_held_signals(paths)) == 1, (
+        f"two further passes must not signal again: {len(_held_signals(paths))}"
+    )
+
+
+def test_a_refused_send_issued_publication_that_reached_disk_requeues(tmp_path):
+    """The issued marker landed, but the advance was refused: no send, no hold.
+
+    The record on disk carries the marker, so without the requeue path the next
+    reclaim would hold an alert that never left the process.
+    """
+    mod = _load(tmp_path / "issued-refused-ondisk")
+    paths = mod.setup_dirs()
+    event = _event("evt-2424-issued-refused", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    queued = _seed_outbox(paths, event)
+
+    calls: list = []
+    with _non_advancing_publication(mod, SEND_ISSUED_COMPONENT):
+        with patch.object(
+            mod, "send_whatsapp", side_effect=lambda *a, **k: calls.append(a)
+        ):
+            mod.process_one(queued, paths)
+
+    assert calls == [], f"a refused marker write must not send: {len(calls)}"
+    assert _held_signals(paths) == [], "a send that never left must not be held"
+    requeued = list(paths["outbox"].glob("*.json"))
+    assert len(requeued) == 1, f"the record must be requeued: {requeued!r}"
+    record = json.loads(requeued[0].read_text())
+    assert not (record.get("delivery") or {}).get(SEND_ISSUED_FIELD), (
+        f"the issued marker must not survive: {record.get('delivery')!r}"
+    )
+    assert not mod.is_ambiguous_in_flight(record), (
+        f"the requeued record must not read as in-flight: {record.get('delivery')!r}"
+    )
+
+
+def _documented_inspect_command() -> str:
+    """The command the README tells an operator to run, read from the README.
+
+    Read rather than copied: a command duplicated into the test can drift from
+    the runbook, and the runbook is what an operator actually types.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README-bot-errors.md").read_text()
+    marker = "**Inspect.**"
+    assert marker in readme, "the README must document how to inspect a held item"
+    fence = readme.index("```bash", readme.index(marker))
+    start = readme.index("\n", fence) + 1
+    return readme[start : readme.index("```", start)].strip()
+
+
+def test_the_documented_inspection_command_lists_a_real_held_record(tmp_path):
+    """Contract clause 4: the runbook command must match what is written.
+
+    publish_state_json renders compact JSON, so a pattern assuming a space after
+    the colon matches nothing. The record here is written through the real
+    publication path, and the command is run verbatim.
+    """
+    mod = _load(tmp_path / "runbook-grep")
+    paths = mod.setup_dirs()
+    event = _event(
+        "evt-2424-runbook", IN_FLIGHT_STATUS, **{SEND_ISSUED_FIELD: STALE_ISSUED_AT}
+    )
+    _seed_processing(paths, event)
+    mod.reclaim_processing(paths)
+
+    held = _processing_records(paths)
+    assert len(held) == 1 and _delivery_status(held[0]) == HELD_STATUS, (
+        f"the record must be held through the real publication path: {held!r}"
+    )
+
+    command = _documented_inspect_command()
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "BOT_ERRORS_STATE_DIR": str(paths["root"])},
+    )
+    assert result.returncode == 0 and result.stdout.strip(), (
+        f"the documented command matched no held record. command={command!r} "
+        f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert event["id"] in result.stdout, (
+        f"the documented command must list the held file: {result.stdout!r}"
     )

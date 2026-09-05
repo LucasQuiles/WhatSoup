@@ -502,10 +502,13 @@ never archived under `sent/` and is never dropped.
 event:
 
 - one record in `logs/dispatch.jsonl` with record kind
-  `delivery_outcome_unknown_held`, emitted once per held item and not repeated
-  across restarts. It is deliberately anonymous: the controller log projects
-  unlisted strings away, so it carries bounded metadata (`attempts`, `held`)
-  and no event id. Read `processing/` to find out which item is held;
+  `delivery_outcome_unknown_held`. It is written before the durable record is
+  published, so a hold whose publication does not reach disk is retried and
+  logs the line again: expect at most one duplicate line per retried hold, and
+  never a duplicate send. Once the record is on disk the line is not repeated,
+  including across restarts. It is deliberately anonymous: the controller log
+  projects unlisted strings away, so it carries bounded metadata (`attempts`,
+  `held`) and no event id. Read `processing/` to find out which item is held;
 - the health check's `processing` queue line, which warns at 1 entry for 60 s
   and goes critical at 10 entries for 300 s, and stays critical for as long as
   the file is parked;
@@ -516,8 +519,11 @@ event:
 `delivery.outcomeUnknownAt` and a redacted, truncated
 `delivery.outcomeUnknownReason`.
 
+The dispatcher writes these records as compact JSON, so the pattern must not
+assume a space after the colon:
+
 ```bash
-grep -l '"status": "outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
+grep -lE '"status": ?"outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
 ```
 
 **Release for a re-send.** Only after confirming from the BOT ERRORS chat that

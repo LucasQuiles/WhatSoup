@@ -7972,33 +7972,23 @@ def hold_ambiguous_send(
 
     The held disposition and the signal stamp are committed in ONE durable
     publication, so no crash can leave a record that signals a second time. The
-    dispatch-log line is best-effort by construction, which is why the durable
-    record -- not the log -- is the authority on whether the item was reported.
-    A crash between the publication and the log therefore loses one log line and
-    still never re-sends and never re-signals.
+    durable record -- not the best-effort log -- is the authority on whether the
+    item was reported.
+
+    ORDER: the log line is appended BEFORE the publication. A publication can
+    reach disk and still be refused (durability unproven, e.g. a parent-sync
+    fault after the rename); the record then already reads held-and-signalled,
+    every later reclaim skips it, and a log line appended afterwards would never
+    be written at all. Logging first costs at most ONE DUPLICATE LOG LINE PER
+    RETRIED HOLD -- when the publication does not reach disk, the next pass
+    re-logs -- and never a duplicate send, because the send decision reads the
+    durable record and not the log.
     """
     event = mark_outcome_unknown(event, reason)
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     first_signal = not delivery.get(DELIVERY_HELD_SIGNAL_FIELD)
     if first_signal:
         delivery[DELIVERY_HELD_SIGNAL_FIELD] = now_iso()
-    target = _durable_target(claimed)
-    observation = observe_json(target)
-    publication = publish_state_json(
-        target,
-        event,
-        component="dispatcher.process_held_state",
-        operation_id=operation_id(
-            target,
-            event,
-            component="dispatcher.process_held_state",
-            predecessor=observation.version,
-        ),
-        expected=observation.version,
-        generation=(observation.version.generation or 0) + 1,
-    )
-    require_all_advance([publication])
-    if first_signal:
         # Metadata only (A9): append_dispatch_log projects details to bounded
         # counts, booleans and allow-listed enums, so no destination, message
         # text, account, path or private topology can reach the log here. The
@@ -8018,6 +8008,22 @@ def hold_ambiguous_send(
             },
             level="warning",
         )
+    target = _durable_target(claimed)
+    observation = observe_json(target)
+    publication = publish_state_json(
+        target,
+        event,
+        component="dispatcher.process_held_state",
+        operation_id=operation_id(
+            target,
+            event,
+            component="dispatcher.process_held_state",
+            predecessor=observation.version,
+        ),
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_all_advance([publication])
     return f"held_outcome_unknown; deliveryStatus={AMBIGUOUS_DELIVERY_STATUS}"
 
 
