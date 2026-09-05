@@ -3003,15 +3003,23 @@ ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"
 PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
 MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
 
+# Looked up with getattr, the way the rest of this file guards optional open
+# flags: a bare attribute here would raise at import, outside the fail-quiet
+# guard below, on a platform that lacks one. Absence is handled where the
+# census can still emit a payload -- see the refusal in census().
+O_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
+O_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
 # The archive directory is opened ONCE and every later listing, stat and read
 # is addressed to the descriptor that comes back. O_NOFOLLOW refuses a
 # symlinked archive directory inside the syscall, so the refusal and the
 # listing cannot disagree about which inode they mean.
-DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+DIR_OPEN_FLAGS = os.O_RDONLY | O_DIRECTORY_FLAG | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG
 # Entries are opened relative to that descriptor. O_NOFOLLOW keeps a symlinked
 # entry from being read out of the archive, and O_NONBLOCK keeps a fifo
 # planted in the archive from parking the census forever.
-ENTRY_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+ENTRY_OPEN_FLAGS = os.O_RDONLY | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG | O_NONBLOCK_FLAG
 READ_CHUNK_BYTES = 65536
 # An entry that was stat-ed and is then GONE at the open -- renamed away
 # (ENOENT) or now a symlink (ELOOP) -- was swapped mid-flight. The lstat
@@ -3090,6 +3098,11 @@ def census(directory):
     # directory on the host. Everything after this point is addressed to the
     # descriptor, so there is no second resolution of the name for a swap
     # between the check and the use to land in.
+    if not (O_DIRECTORY_FLAG and O_NOFOLLOW_FLAG):
+        # Without both flags the name can be neither pinned nor refused, and
+        # a census that cannot keep that promise must not count through an
+        # unpinned name as though it could.
+        return blank_report("unavailable", "other"), set(), 0
     try:
         fd = os.open(directory, DIR_OPEN_FLAGS)
     except OSError as exc:
@@ -3162,7 +3175,14 @@ def census_descriptor(fd):
             parse_failures += 1
             continue
         try:
-            entry_info = os.fstat(entry_fd)
+            try:
+                entry_info = os.fstat(entry_fd)
+            except OSError:
+                # Contained per entry, like every other entry-level failure.
+                # Letting this escape would discard the accumulated report for
+                # BOTH archives over one stale handle or one I/O error.
+                unusable += 1
+                continue
             if not S_ISREG(entry_info.st_mode):
                 # Swapped for a non-file between the stat and the open. The
                 # descriptor, not the name, is what got counted -- so it is

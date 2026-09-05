@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -267,7 +268,9 @@ def test_census_reports_an_unreadable_archive_directory_as_unavailable_permissio
     assert "Errno" not in stdout
 
 
-def test_census_total_stays_partial_and_counts_only_what_it_could_read(collector, tmp_path):
+def test_census_total_stays_partial_and_sums_the_directory_that_produced_numbers(
+    collector, tmp_path
+):
     root = tmp_path / "bot-errors"
     _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
     # relayed/ is absent entirely.
@@ -356,20 +359,17 @@ def test_census_counts_a_json_non_object_as_a_parse_failure(collector, tmp_path)
 # ---------------------------------------------------------------------------
 # 1b. Entry-level failures are counted, not swallowed, and the archive
 #     directory is pinned by descriptor so the check and the use address the
-#     same inode. Both defects were adjudicated on the L2459-A head 0a0c0697
-#     (adv-med-adjudication: MED-1 lstat/listdir TOCTOU, MED-2 entry-level
-#     fail-open) and neither is reachable from production yet -- the census
-#     has no caller outside tests, which is why they land as their own leaf.
+#     same inode.
 # ---------------------------------------------------------------------------
 
-# The adjudication fixture: a directory that can be LISTED but whose entries
-# cannot be STAT-ed (mode 0444 -- read, no execute/search). Before this
-# change the census reported all seven of these as a healthy zero.
+# A directory that can be LISTED but whose entries cannot be STAT-ed (mode
+# 0444 -- read, no execute/search). Before this change the census reported
+# all seven of these as a healthy zero.
 _UNUSABLE_FIXTURE_ARTIFACTS = 7
 
 
 def test_census_counts_entries_it_could_not_stat_as_unusable_not_absent(collector, tmp_path):
-    """MED-2: an entry-level failure is missing information, not absence.
+    """An entry-level failure is missing information, not absence.
 
     `except OSError: continue` swallowed every entry-level error, not just
     the ENOENT its comment described. A mode-0444 archive directory holding
@@ -495,7 +495,7 @@ def test_census_counts_an_unreadable_file_as_present_and_unparseable(collector, 
 
 
 def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector, tmp_path):
-    """Review MED #2: the null-not-zero promise stopped at the directory level.
+    """The null-not-zero promise stopped at the directory level.
 
     With both directories unavailable the combined block summed an empty list
     and reported `artifactCount: 0` beside `status: partial`. A retention pass
@@ -559,8 +559,8 @@ def test_census_total_is_null_when_every_directory_listed_but_reached_nothing(co
     assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS + 1
 
 
-# MED-1 is a race, and a race is not a deterministic pytest. What IS
-# deterministic is the property that removes it: after the archive directory
+# A race is not a deterministic pytest. What IS deterministic is the property
+# that removes the race: after the archive directory
 # is opened, every listing, stat and read is addressed to that DESCRIPTOR, so
 # there is no second resolution of the name for a swap to land in. The check
 # below is a static walk of the shipped script text in the same shape
@@ -926,8 +926,77 @@ def test_census_counts_an_entry_swapped_for_a_directory_as_unusable(
     assert block["status"] == "partial"
 
 
+def test_census_contains_a_failing_entry_stat_and_still_reports_every_other_entry(
+    collector, tmp_path, monkeypatch
+):
+    """One bad entry must cost one entry, not the whole census.
+
+    The stat on the freshly opened entry sat in a try/finally with no OSError
+    handler while every neighbouring entry-level failure was contained, so a
+    single I/O error or stale handle discarded the accumulated report for
+    BOTH archive directories and returned the quiet failure payload. It fails
+    closed, but an operator loses an answer that was almost entirely
+    collected."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(3):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
+
+    real_fstat = os.fstat
+    calls: list[int] = []
+
+    def failing_fstat(descriptor, *args, **kwargs):
+        calls.append(descriptor)
+        if len(calls) == 1:
+            raise OSError(errno.EIO, "injected entry stat failure")
+        return real_fstat(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fstat", failing_fstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert calls, "the injected stat failure never fired"
+
+    assert report["censusStatus"] == "ok"
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 2
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
+    # The neighbouring archive is untouched -- the failure cost one entry.
+    assert report["archives"]["writefailRelayed"]["status"] == "ok"
+    assert report["archives"]["writefailRelayed"]["artifactCount"] == 1
+    assert report["total"]["artifactCount"] == 3
+    assert report["total"]["unusableEntryCount"] == 1
+
+
+def test_census_refuses_a_directory_it_cannot_pin_when_an_open_flag_is_absent(
+    collector, tmp_path, monkeypatch
+):
+    """The flags are looked up with getattr so an unsupported platform does
+    not raise before the fail-quiet guard is even installed. Degrading
+    silently instead would be worse than raising: the census would keep
+    counting through a name it can neither pin nor refuse. It reports the
+    directory unavailable and still emits a well-formed payload."""
+    root = tmp_path / "bot-errors"
+    _write_artifact(root / "relayed", "a.json.1.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+
+    assert report["censusStatus"] == "ok"
+    for label in ("relayed", "writefailRelayed"):
+        block = report["archives"][label]
+        assert block["status"] == "unavailable"
+        assert block["errnoClass"] == "other"
+        assert block["artifactCount"] is None
+    assert report["total"]["status"] == "partial"
+    assert report["total"]["artifactCount"] is None
+
+
 def test_census_addresses_every_read_to_a_pinned_directory_descriptor(collector):
-    """MED-1: `os.lstat(directory)` then `os.listdir(directory)` were two
+    """`os.lstat(directory)` then `os.listdir(directory)` were two
     independent resolutions of the same name with nothing pinning the inode,
     so whoever can write the archive parent could swap the directory for a
     symlink in the window and redirect every aggregate. Opening the directory
