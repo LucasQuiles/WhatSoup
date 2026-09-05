@@ -1284,6 +1284,7 @@ describe('TurnRecoverySupervisor — successful scan watermark', () => {
         orphanTransfers: 0,
         echoConflicts: 0,
         openRecoveries: 0,
+        blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
       }),
       recoverStaleTurnRecoveryJobs: () => ({ requeued: 0, exhausted: 0 }),
       getTurnRecoveryOriginalDeliveryStatus: vi.fn(),
