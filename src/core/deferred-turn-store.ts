@@ -31,6 +31,29 @@ import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 
 export const DEFERRED_TURN_MAX_ATTEMPTS = 5;
 
+/**
+ * The absorbing states of the lifecycle above — the CHECK-backed statuses after
+ * which no further transition is possible and nothing is owed.
+ */
+export const DEFERRED_TURN_TERMINAL_STATUSES = [
+  'terminal_completed',
+  'terminal_quarantined',
+  'terminal_operator',
+] as const;
+
+/**
+ * SQL predicate that is TRUE while an obligation row is non-terminal, rendered
+ * once from the list above.
+ *
+ * Exported because the retention sweep must hold the source inbound and its
+ * replay envelope while ANY obligation for that inbound is still non-terminal
+ * (#3295 required behaviour 8). A second copy of the status list over there
+ * would silently resume deleting held evidence the day a terminal state is
+ * added here, so both sites read the same definition.
+ */
+export const DEFERRED_TURN_NON_TERMINAL_STATUS_SQL =
+  `status NOT IN (${DEFERRED_TURN_TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ')})`;
+
 const ERROR_CLASS_RE = /^[a-z0-9_.:-]{1,64}$/;
 const CLAIM_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -196,7 +219,7 @@ export class DeferredTurnStore {
         WHERE id = (
           SELECT id FROM deferred_turn_obligations
           WHERE scope = ?
-            AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+            AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
           ORDER BY inbound_seq ASC
           LIMIT 1
         )
@@ -224,7 +247,7 @@ export class DeferredTurnStore {
             terminal_reason = ?,
             updated_at = datetime('now')
         WHERE id = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
         RETURNING id
       `),
       expireStale: prepare(`
@@ -242,7 +265,7 @@ export class DeferredTurnStore {
         SELECT id, inbound_seq, status, attempt_count
         FROM deferred_turn_obligations
         WHERE scope = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
         ORDER BY inbound_seq ASC
       `),
       countByStatus: prepare(`
@@ -254,7 +277,7 @@ export class DeferredTurnStore {
       hasNonTerminal: prepare(`
         SELECT 1 AS present FROM deferred_turn_obligations
         WHERE scope = ? AND inbound_seq = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
       `),
       getStatus: prepare(`
         SELECT status FROM deferred_turn_obligations WHERE id = ?
