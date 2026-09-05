@@ -2946,6 +2946,250 @@ def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
     return proc.stdout.strip() == "present"
 
 
+REMOTE_ARCHIVE_CENSUS_SCRIPT = r"""
+import json, os, sys, time
+import errno
+from stat import S_ISDIR, S_ISLNK, S_ISREG
+
+# #2459 C3: read-only census of the terminal relay archive.
+#
+# Reports how much archive exists, how old it is and how much of it no longer
+# parses -- as aggregates only. It never deletes, moves, renames or rewrites
+# anything, and it never echoes the root it was pointed at, an artifact name,
+# a source value or any payload field. The answer an operator gets is a
+# handful of numbers, which is the whole point: the alternative (listing the
+# directory by hand) puts host, account, instance, user and message text on
+# a terminal.
+#
+# Scope: exactly the two directories this collector's own remote scripts
+# write under the given root -- relayed/ (REMOTE_ACK_SCRIPT) and
+# writefail-relayed/ (REMOTE_WRITEFAIL_ACK_SCRIPT). Sibling directories
+# (outbox/, relay-processing/) hold live queue state, not archive, and
+# conflating the two is the confusion this census exists to remove. Nested
+# directories are not walked. The other writefail terminal locations the
+# writefail script falls back to (home, TMPDIR, /tmp) are deliberately NOT
+# scanned: they are outside the root the caller named.
+#
+# UNAVAILABLE IS NOT EMPTY. A directory the census could not list reports
+# status "unavailable" with an errno CLASS, never a count of zero: "nothing
+# to retain" and "I cannot see what is there" drive opposite decisions, and a
+# later retention pass leans on this instrument. A directory that is itself a
+# symlink is refused outright ("refused_symlink") rather than followed, which
+# would walk the census out of the root entirely. Any directory that is not
+# ok makes the combined total "partial", so an incomplete answer can never be
+# mistaken for a complete one.
+#
+# `now` (argv[2], optional) makes ages deterministic for a caller that needs
+# a fixed clock; empty or absent means "read the clock here".
+
+ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"))
+
+PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
+MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
+
+
+def errno_class(exc):
+    # An errno CLASS, never the errno message: strerror can embed the path.
+    code = getattr(exc, "errno", None)
+    if code in PERMISSION_ERRNOS:
+        return "permission"
+    if code in MISSING_ERRNOS:
+        return "missing"
+    return "other"
+
+
+def blank_report(status, errno_name=None):
+    # Every aggregate is null, not zero. A zero here would be a claim about
+    # content the census never managed to look at.
+    return {
+        "status": status,
+        "errnoClass": errno_name,
+        "artifactCount": None,
+        "totalBytes": None,
+        "oldestAgeSeconds": None,
+        "newestAgeSeconds": None,
+        "parseFailureCount": None,
+        "sourceKindCardinality": None,
+    }
+
+
+def census(directory):
+    # Aggregate one archive directory. Returns (report, source_kinds).
+    # The directory ITSELF is lstat-ed first: if it is a symlink, following it
+    # would let whoever controls the remote root redirect the census at any
+    # directory on the host.
+    try:
+        dir_info = os.lstat(directory)
+    except OSError as exc:
+        return blank_report("unavailable", errno_class(exc)), set()
+    if S_ISLNK(dir_info.st_mode):
+        return blank_report("refused_symlink"), set()
+    if not S_ISDIR(dir_info.st_mode):
+        return blank_report("unavailable", "other"), set()
+    count = 0
+    total_bytes = 0
+    oldest = None
+    newest = None
+    parse_failures = 0
+    source_kinds = set()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        # Unreadable is NOT empty.
+        return blank_report("unavailable", errno_class(exc)), set()
+    for name in names:
+        entry = os.path.join(directory, name)
+        try:
+            info = os.lstat(entry)
+        except OSError:
+            # Vanished between listing and stat -- it is not in the archive now.
+            continue
+        # lstat + S_ISREG, so a symlink is never followed out of the archive
+        # and a nested directory is never descended into.
+        if not S_ISREG(info.st_mode):
+            continue
+        count += 1
+        total_bytes += info.st_size
+        age = int(round(now - info.st_mtime))
+        oldest = age if oldest is None else max(oldest, age)
+        newest = age if newest is None else min(newest, age)
+        try:
+            with open(entry, "rb") as handle:
+                record = json.loads(handle.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Unreadable or not JSON: still a present artifact occupying
+            # bytes and ageing, so it is counted AND flagged. Skipping it
+            # would under-report exactly the artifacts worth knowing about.
+            parse_failures += 1
+            continue
+        if not isinstance(record, dict):
+            # `[]` and `"text"` are valid JSON but not event records.
+            parse_failures += 1
+            continue
+        kind = record.get("source")
+        if isinstance(kind, str) and kind:
+            source_kinds.add(kind)
+    report = {
+        "status": "ok",
+        "errnoClass": None,
+        "artifactCount": count,
+        "totalBytes": total_bytes,
+        "oldestAgeSeconds": oldest,
+        "newestAgeSeconds": newest,
+        "parseFailureCount": parse_failures,
+        # Cardinality only -- how MANY distinct producers are represented,
+        # never which ones.
+        "sourceKindCardinality": len(source_kinds),
+    }
+    return report, source_kinds
+
+
+def combine(reports, kind_sets):
+    # Only directories that were actually read contribute numbers. If any
+    # directory is not ok the total is "partial", so a caller can never read
+    # an incomplete sum as a complete one.
+    readable = [r for r in reports if r["status"] == "ok"]
+    oldest_values = [r["oldestAgeSeconds"] for r in readable if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in readable if r["newestAgeSeconds"] is not None]
+    union = set()
+    for report, kinds in zip(reports, kind_sets):
+        if report["status"] == "ok":
+            union |= kinds
+    return {
+        "status": "ok" if len(readable) == len(reports) else "partial",
+        "artifactCount": sum(r["artifactCount"] for r in readable),
+        "totalBytes": sum(r["totalBytes"] for r in readable),
+        "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
+        "newestAgeSeconds": min(newest_values) if newest_values else None,
+        "parseFailureCount": sum(r["parseFailureCount"] for r in readable),
+        # Union, not a sum: a producer present in both archives is one kind.
+        "sourceKindCardinality": len(union),
+    }
+
+
+try:
+    # argv is read INSIDE the guard. A bad clock argument or a missing root
+    # raises here, and an escaping traceback would echo argv -- which carries
+    # the remote root -- onto stderr.
+    root = os.path.expanduser(sys.argv[1])
+    now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
+    archives = {}
+    reports = []
+    kind_sets = []
+    for label, dirname in ARCHIVE_DIRS:
+        report, kinds = census(os.path.join(root, dirname))
+        archives[label] = report
+        reports.append(report)
+        kind_sets.append(kinds)
+    payload = {
+        "schemaVersion": 1,
+        "censusStatus": "ok",
+        "generatedAtEpoch": int(now),
+        "archives": archives,
+        "total": combine(reports, kind_sets),
+    }
+    print(json.dumps(payload, sort_keys=True))
+except Exception:
+    # Fail closed and fail QUIET: the caller sees a non-zero exit and an
+    # explicit failed status, never a path, an argument or an exception string.
+    print(json.dumps({"schemaVersion": 1, "censusStatus": "failed"}, sort_keys=True))
+    sys.exit(3)
+"""
+
+
+def remote_archive_census(host: str, remote_root: str, timeout: int, now: float | None = None) -> dict[str, Any]:
+    """#2459 C3: read-only, privacy-safe census of the remote relay archive.
+
+    The acknowledged-claim archive lives on the REMOTE host (REMOTE_ACK_SCRIPT
+    moves claims under the remote root), so no local scan can cover it -- see
+    the LOCAL_EVENT_LIFECYCLE_DIR_NAMES note below. This probe answers how
+    much of it there is, how old it is and how much of it no longer parses,
+    without moving or deleting anything and without surfacing a host,
+    account, instance, user, message, path or identifier.
+
+    EVERY route out of this function names the host and nothing else. Unlike
+    the other remote helpers the failure paths deliberately do NOT append
+    `proc.stderr`: the census's own stderr can name the remote root, and a
+    probe whose failure mode leaks the path defeats the privacy property that
+    is the reason it exists. `subprocess.TimeoutExpired` needs the same care
+    for a different reason -- it carries the assembled argv, whose last
+    argument IS the remote root -- so it is caught and re-raised host-only,
+    `from None` so the original is not chained back onto the traceback.
+
+    A census that did not complete is an error, never an empty report: an
+    empty stdout parses to `{}`, and returning that would answer "I could not
+    look" with "there is nothing there" -- the same conflation the script side
+    refuses per-directory.
+
+    `now` pins the clock the ages are measured against; None reads the remote
+    clock. Returns the parsed aggregate report.
+    """
+    args = [remote_root, "" if now is None else str(int(now))]
+    try:
+        proc = subprocess.run(
+            remote_python_command(host, args),
+            input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh archive-census {host} timed out") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh archive-census {host} failed rc={proc.returncode}")
+    try:
+        report = json.loads(proc.stdout.strip() or "{}")
+    except ValueError:
+        raise RuntimeError(f"ssh archive-census {host} returned unparseable output") from None
+    if not isinstance(report, dict):
+        raise RuntimeError(f"ssh archive-census {host} returned a non-object report")
+    if report.get("censusStatus") != "ok":
+        raise RuntimeError(f"ssh archive-census {host} did not complete")
+    return report
+
+
 def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
     proc = subprocess.run(
         remote_python_command(host, [claim, remote_root, action]),
