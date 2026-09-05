@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -42,6 +42,7 @@ from lib.controller_log import (
 )
 from lib.durable_json import (
     JsonVersion,
+    PublicationResult,
     durable_json_target,
     observe_json,
     operation_id,
@@ -1301,6 +1302,104 @@ def _durable_target(path: Path):
         trusted_root=path.parent.resolve(strict=True),
         relative_path=path.name,
     )
+
+
+# The strict durable reader (lib/durable_json.observe_json) forbids any bit in
+# 0o077 on a private leaf. Kept as a named constant so a repair and its tests
+# cannot drift onto the writer's 0o600 by accident: they are different values
+# answering different questions.
+LEGACY_RECEIPT_FORBIDDEN_MODE_BITS = 0o077
+LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS = 0o022
+LEGACY_RECEIPT_MODE_EVIDENCE_FIELD = "legacyReceiptModeRepairedFrom"
+
+LEGACY_RECEIPT_REFUSAL_SYMLINK = "symlink"
+LEGACY_RECEIPT_REFUSAL_NOT_REGULAR = "not_regular"
+LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER = "foreign_owner"
+LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS = "multiple_links"
+LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE = "parent_writable"
+LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE = "parent_unreadable"
+LEGACY_RECEIPT_REFUSAL_UNOPENABLE = "unopenable"
+LEGACY_RECEIPT_REFUSAL_UNSUPPORTED = "unsupported_capability"
+
+
+class LegacyReceiptRepair(NamedTuple):
+    """Outcome of one legacy durable-receipt mode repair attempt.
+
+    ``previous_mode`` is set only when a repair actually happened, so it doubles
+    as the evidence of the pre-repair state. ``refusal`` is one of the
+    LEGACY_RECEIPT_REFUSAL_* codes; both fields are None when there was nothing
+    to repair.
+    """
+
+    previous_mode: int | None
+    refusal: str | None
+
+
+def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
+    """Clear group and other permission bits from a pre-adoption durable leaf.
+
+    ensure_private_dir() re-applies 0700 to the state directory on every cycle,
+    but nothing repaired the leaf. A receipt written before the strict durable
+    reader was adopted therefore keeps its permissive mode forever and
+    observe_json() rejects it on every subsequent cycle, so the daily cycle
+    never publishes (#3501).
+
+    This is deliberately narrower than the best-effort
+    ``try: path.chmod(0o600) except OSError: pass`` idiom used elsewhere in this
+    script. A permissive mode on a state file is exactly the condition an
+    attacker would have exploited, so ownership is proven before the mode is
+    narrowed, and every guard is evaluated against the same descriptor that is
+    then chmod'ed, so the inode that was checked and the inode that is modified
+    cannot differ.
+
+    Refusal is silent about the mode: it never chmods, never raises, and leaves
+    the leaf byte- and mode-identical, so the strict reader downstream remains
+    the sole authority on whether the leaf may be used.
+    """
+    if not getattr(os, "O_NOFOLLOW", 0):
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
+    try:
+        parent_stat = os.stat(path.parent)
+    except FileNotFoundError:
+        # No state root yet, so no legacy leaf to repair. Not a refusal: a fresh
+        # install must not log one every cycle.
+        return LegacyReceiptRepair(None, None)
+    except OSError:
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE)
+    if stat.S_IMODE(parent_stat.st_mode) & LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS:
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE)
+    try:
+        # O_NONBLOCK so a FIFO planted at the receipt path fails the regular-file
+        # guard instead of blocking the daily cycle forever on open(); it is
+        # ignored for the regular file this is expected to find.
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+    except FileNotFoundError:
+        return LegacyReceiptRepair(None, None)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_SYMLINK)
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+    try:
+        leaf_stat = os.stat(descriptor)
+        if not stat.S_ISREG(leaf_stat.st_mode):
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_NOT_REGULAR)
+        if leaf_stat.st_uid != os.getuid():
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER)
+        if leaf_stat.st_nlink != 1:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS)
+        previous_mode = stat.S_IMODE(leaf_stat.st_mode)
+        if not previous_mode & LEGACY_RECEIPT_FORBIDDEN_MODE_BITS:
+            return LegacyReceiptRepair(None, None)
+        try:
+            os.chmod(descriptor, previous_mode & ~LEGACY_RECEIPT_FORBIDDEN_MODE_BITS)
+        except OSError:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+        return LegacyReceiptRepair(previous_mode, None)
+    finally:
+        os.close(descriptor)
 
 
 def safe_segment(value: str) -> str:
@@ -8498,8 +8597,13 @@ def tree_provenance_inventory(profile: dict[str, Any]) -> list[str]:
         return [f"WARN tree_provenance: inventory_error {str(exc)[:160]}"]
 
 
-def record_daily_health_receipt(event_path: Path, severity: str) -> None:
-    """Write a durable receipt after queuing a daily-health event."""
+def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationResult:
+    """Write a durable receipt after queuing a daily-health event.
+
+    Returns the publication result so a caller can inspect the advanced
+    generation, which is carried in the result rather than in the receipt
+    payload. The daily() call site ignores it.
+    """
     root = state_root()
     receipt_path = root / "daily-health-receipt.json"
     receipt = {
@@ -8508,6 +8612,22 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         "emittedAt": now_iso(),
         "eventPath": str(event_path),
     }
+    # Before ensure_private_dir(), which re-applies 0700 to the state root: a
+    # root that is group- or world-writable is the reason the leaf may have been
+    # planted, and narrowing it first would erase that signal before the repair's
+    # parent guard could read it (#3501).
+    repair = repair_legacy_private_receipt_mode(receipt_path)
+    if repair.refusal is not None:
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repair refused: "
+            f"{repair.refusal}\n"
+        )
+    elif repair.previous_mode is not None:
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repaired from "
+            f"{repair.previous_mode:04o}\n"
+        )
+        receipt[LEGACY_RECEIPT_MODE_EVIDENCE_FIELD] = f"{repair.previous_mode:04o}"
     ensure_private_dir(root)
     target = _durable_target(receipt_path)
     observation = observe_json(target)
@@ -8526,6 +8646,7 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         generation=(observation.version.generation or 0) + 1,
     )
     require_advance(publication)
+    return publication
 
 
 def daily() -> int:
