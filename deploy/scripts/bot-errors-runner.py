@@ -26,8 +26,8 @@ if str(SCRIPT_DIR) not in sys.path:
 from lib.bot_errors_envelope import new_event_fields
 from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
 from lib.target_provenance import (
-    classify_release_divergence,
     safe_observer_provenance,
+    safe_release_divergence,
     safe_target_provenance,
 )
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
@@ -434,7 +434,7 @@ def build_failure_event(
     # running other code than the producer. Read back off the envelope so the
     # verdict describes the very blocks it ships with, and attached after
     # construction so no probe is called earlier than it already was.
-    event["releaseDivergence"] = classify_release_divergence(
+    event["releaseDivergence"] = safe_release_divergence(
         event["observerProvenance"], event["targetProvenance"]
     )
     return event

@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "38d5e6d68da39daefa7346ea98ab0dfe4f1e674bacae4d2aaf737ccb3f2f3dce",
+      "sha256": "c76c718ed01900922aac5c1a27b49c2d65f2cf436e2646fec239099afbaf9960",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -291,7 +291,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "7f32fdaa99492d63935eff2e9ece5ced845416c6107bb06f0d66063ce479ca05",
+      "sha256": "223e1964611637e5da6c481f10eeb74f184c6bd94cef05251d95d995d71c1f9e",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -610,13 +610,14 @@
     },
     {
       "path": "deploy/scripts/lib/target_provenance.py",
-      "sha256": "b9ad9db5ab63f7ecae9da15db79e129ab1bdbe9e4221df0b308af302ae637408",
+      "sha256": "3cbb529eaf77c0d7d9c90a03ec909b7921e144b1c1914535abe409f76af167cf",
       "mustContain": [
         "TARGET_PROVENANCE_SCHEMA_VERSION",
         "class TargetProbes:",
         "def resolve_target_provenance(",
         "def observer_provenance_block(",
         "def classify_release_divergence(",
+        "def safe_release_divergence(",
         "def safe_target_provenance(",
         "def safe_observer_provenance(",
         "def unit_for_instance(",

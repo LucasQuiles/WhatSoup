@@ -33,8 +33,8 @@ if str(SCRIPT_DIR) not in sys.path:
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
 from lib.target_provenance import (
-    classify_release_divergence,
     safe_observer_provenance,
+    safe_release_divergence,
     safe_target_provenance,
 )
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
@@ -2557,7 +2557,7 @@ def outbox_event(
         # compare against. A producer-self event has no target block, so there
         # is nothing to diverge from and no verdict to attach.
         event["releaseDivergence"] = redact_json_value(
-            classify_release_divergence(event["observerProvenance"], event["targetProvenance"])
+            safe_release_divergence(event["observerProvenance"], event["targetProvenance"])
         )
     if force_notify:
         event["diagnostics"]["forceNotify"] = True

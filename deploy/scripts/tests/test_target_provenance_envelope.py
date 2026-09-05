@@ -48,9 +48,9 @@ def _runner_args(instance: str) -> argparse.Namespace:
 
 # #2358 C9/C10 fixture: the observer and the target resolve to different
 # release commits while each side stays internally consistent.
-_OBSERVER_RELEASE_SHA = "a" * 40
-_TARGET_RELEASE_SHA = "b" * 40
-_TARGET_MANIFEST_DIGEST = "c" * 64
+_OBSERVER_RELEASE_SHA = "1450192837" * 4
+_TARGET_RELEASE_SHA = "8675309124" * 4
+_TARGET_MANIFEST_DIGEST = "9078451236" * 6 + "abcd"
 _TARGET_CWD = "/srv/release"
 
 
@@ -221,6 +221,65 @@ def test_health_self_event_has_no_divergence_verdict(tmp_path, monkeypatch):
     assert event["instance"] == "bot-errors-health"
     assert "targetProvenance" not in event
     assert "releaseDivergence" not in event
+
+
+def _raise_classifier_defect(observer, target):
+    raise RuntimeError("classifier defect")
+
+
+def _break_the_classifier(monkeypatch, producer_module):
+    """Break every binding a producer could reach the classifier through.
+
+    The producer imports its wrapper by name, and the wrapper resolves the
+    classifier through module globals, so patching the library binding is what
+    exercises the wrapper. The producer-local binding is patched too, with
+    raising=False, so this test cannot pass merely because a producer stopped
+    calling the classifier under that name.
+    """
+    tp = sys.modules["lib.target_provenance"]
+    monkeypatch.setattr(tp, "classify_release_divergence", _raise_classifier_defect)
+    monkeypatch.setattr(
+        producer_module, "classify_release_divergence", _raise_classifier_defect, raising=False
+    )
+
+
+def test_runner_event_survives_a_classifier_defect(tmp_path, monkeypatch):
+    """build_failure_event is called outside the alert-preserving try, so a
+    raise in the classifier would lose the alert entirely rather than degrade
+    it. The verdict must fail closed instead."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_runner_2358_defect", _RUNNER)
+    _break_the_classifier(monkeypatch, mod)
+
+    event = mod.build_failure_event(_runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit")
+    written = mod.write_event(event)
+
+    assert Path(written).is_file()
+    assert event["targetProvenance"]["role"] == "target"
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "not_comparable"
+    assert divergence["notes"] == ["classifier_error"]
+
+
+def test_health_outbox_event_survives_a_classifier_defect(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_defect", _HEALTH)
+    _break_the_classifier(monkeypatch, mod)
+
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "probe-line"
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "not_comparable"
+    assert divergence["notes"] == ["classifier_error"]
 
 
 def test_new_blocks_are_content_free(tmp_path, monkeypatch):

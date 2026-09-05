@@ -56,6 +56,21 @@ RELEASE_DIVERGENCE_ALIGNED = "aligned"
 RELEASE_DIVERGENCE_DIVERGED = "diverged"
 RELEASE_DIVERGENCE_NOT_COMPARABLE = "not_comparable"
 
+# Versioned apart from the provenance blocks: the verdict is a different shape
+# and the two can evolve independently.
+RELEASE_DIVERGENCE_SCHEMA_VERSION = 1
+
+# Every note the verdict can carry. Named so a consumer matches a symbol
+# rather than a spelling, and so the closed set is readable in one place.
+NOTE_OBSERVER_BLOCK_ABSENT = "observer_block_absent"
+NOTE_OBSERVER_SOURCE_COMMIT_ABSENT = "observer_source_commit_absent"
+NOTE_OBSERVER_RELEASE_SELF_MISMATCH = "observer_release_self_mismatch"
+NOTE_TARGET_BLOCK_ABSENT = "target_block_absent"
+NOTE_TARGET_UNRESOLVED = "target_unresolved"
+NOTE_TARGET_SOURCE_COMMIT_ABSENT = "target_source_commit_absent"
+NOTE_TARGET_RELEASE_SELF_MISMATCH = "target_release_self_mismatch"
+NOTE_CLASSIFIER_ERROR = "classifier_error"
+
 
 def _is_hex_digest(value: Any) -> bool:
     return isinstance(value, str) and len(value) in (40, 64) and all(c in _HEX for c in value)
@@ -254,6 +269,16 @@ def _release_source_commit(block: Mapping[str, Any] | None) -> str | None:
     return commit if _is_hex_digest(commit) else None
 
 
+def _release_self_mismatch(block: Mapping[str, Any] | None) -> bool:
+    """True when one side contradicts itself: its manifest receipt and its own
+    git head disagree. A within-block fact, independent of the cross-block
+    axis, and never a reason to move the verdict."""
+    if not isinstance(block, Mapping):
+        return False
+    release = block.get("release")
+    return isinstance(release, Mapping) and release.get("agreement") == "mismatch"
+
+
 def classify_release_divergence(
     observer: Mapping[str, Any] | None,
     target: Mapping[str, Any] | None,
@@ -261,7 +286,16 @@ def classify_release_divergence(
     """Classify the OBSERVER's release against the TARGET's release.
 
     Pure: reads two already-built blocks and returns a new dict. It writes
-    nothing and probes nothing, so it cannot fail an envelope that resolved.
+    nothing and probes nothing. Total over its annotated input type and over
+    anything else an envelope read back as JSON can present: a block that is
+    absent, or is not a mapping at all, classifies not_comparable rather than
+    raising.
+
+    A side whose own manifest receipt and git head disagree adds a note naming
+    that side. The verdict itself does not move, because the two axes are
+    different questions and merging them is the conflation this module exists
+    to prevent -- but a bare verdict over self-contradictory evidence would
+    read as more certain than it is.
 
     The two sides are judged by deliberately different predicates, because the
     blocks are not symmetric. ``resolve_target_provenance`` carries an explicit
@@ -284,20 +318,24 @@ def classify_release_divergence(
     notes: list[str] = []
 
     observer_commit = _release_source_commit(observer)
-    if observer is None:
-        notes.append("observer_block_absent")
+    if not isinstance(observer, Mapping):
+        notes.append(NOTE_OBSERVER_BLOCK_ABSENT)
     elif observer_commit is None:
-        notes.append("observer_source_commit_absent")
+        notes.append(NOTE_OBSERVER_SOURCE_COMMIT_ABSENT)
+    if _release_self_mismatch(observer):
+        notes.append(NOTE_OBSERVER_RELEASE_SELF_MISMATCH)
 
     target_commit: str | None = None
-    if target is None:
-        notes.append("target_block_absent")
+    if not isinstance(target, Mapping):
+        notes.append(NOTE_TARGET_BLOCK_ABSENT)
     elif target.get("resolution") != "resolved":
-        notes.append("target_unresolved")
+        notes.append(NOTE_TARGET_UNRESOLVED)
     else:
         target_commit = _release_source_commit(target)
         if target_commit is None:
-            notes.append("target_source_commit_absent")
+            notes.append(NOTE_TARGET_SOURCE_COMMIT_ABSENT)
+    if _release_self_mismatch(target):
+        notes.append(NOTE_TARGET_RELEASE_SELF_MISMATCH)
 
     if observer_commit is None or target_commit is None:
         classification = RELEASE_DIVERGENCE_NOT_COMPARABLE
@@ -310,7 +348,7 @@ def classify_release_divergence(
         divergent_party = "target"
 
     return {
-        "schemaVersion": TARGET_PROVENANCE_SCHEMA_VERSION,
+        "schemaVersion": RELEASE_DIVERGENCE_SCHEMA_VERSION,
         "classification": classification,
         "divergentParty": divergent_party,
         "notes": notes,
@@ -474,6 +512,27 @@ def safe_target_provenance(instance: str, platform: str) -> dict[str, Any]:
             "release": {"manifestDigest": None, "sourceCommit": None, "gitHead": None, "agreement": "unknown"},
             "resolution": "unknown",
             "notes": ["resolver_error"],
+        }
+
+
+def safe_release_divergence(
+    observer: Mapping[str, Any] | None,
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Same never-break contract for the cross-block verdict.
+
+    The runner builds its failure event OUTSIDE the try that preserves the
+    alert, so a raise here would lose the alert entirely rather than degrade
+    it. Fails closed to not_comparable, and performs no I/O.
+    """
+    try:
+        return classify_release_divergence(observer, target)
+    except Exception:  # noqa: BLE001 - alert emission must survive classifier defects.
+        return {
+            "schemaVersion": RELEASE_DIVERGENCE_SCHEMA_VERSION,
+            "classification": RELEASE_DIVERGENCE_NOT_COMPARABLE,
+            "divergentParty": None,
+            "notes": [NOTE_CLASSIFIER_ERROR],
         }
 
 

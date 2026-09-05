@@ -17,6 +17,7 @@ from lib.target_provenance import (  # noqa: E402
     classify_release_divergence,
     observer_provenance_block,
     resolve_target_provenance,
+    safe_release_divergence,
     safe_target_provenance,
     unit_for_instance,
 )
@@ -27,6 +28,9 @@ _DIGEST = "c" * 64
 # The probe cwd that stands for the TARGET checkout; anything else a probe is
 # asked about is the OBSERVER's own checkout.
 _TARGET_CWD = "/srv/release"
+# Shapes a corrupted or hand-edited envelope can present where a provenance
+# block belongs. Named so the probe below is not a bare literal sweep.
+_NON_MAPPING_BLOCKS = ([], "not-a-block", 7)
 
 
 def probes(**overrides) -> TargetProbes:
@@ -191,14 +195,14 @@ class TestReleaseDivergence:
     axis can move the verdict.
     """
 
-    def _blocks(self, target_commit: str, **overrides):
+    def _blocks(self, target_commit: str, head_for=None, **overrides):
         def commit_for(cwd):
             return target_commit if cwd == _TARGET_CWD else _SHA_A
 
         side_probes = probes(
             process_cwd=lambda pid: _TARGET_CWD,
             release_receipt=lambda cwd: {"manifestDigest": _DIGEST, "sourceCommit": commit_for(cwd)},
-            git_head=commit_for,
+            git_head=head_for or commit_for,
             **overrides,
         )
         repo_root = Path(__file__).resolve().parents[3]
@@ -259,6 +263,66 @@ class TestReleaseDivergence:
         verdict = classify_release_divergence(observer, target)
         assert verdict["classification"] == "not_comparable"
         assert "observer_source_commit_absent" in verdict["notes"]
+
+    def test_observer_self_mismatch_is_noted_without_moving_the_verdict(self):
+        # The manifest receipt on the observer side and the git head on that
+        # same side disagree, so its evidence is internally contradictory. The
+        # cross-block verdict stays correct, because sourceCommit is
+        # unambiguously the manifest receipt, but a bare verdict would hide
+        # that one side is ambiguous about the code it carries.
+        # Both sides report the same git head; only the observer manifest
+        # receipt disagrees with it, so the target stays internally consistent.
+        observer, target = self._blocks(_SHA_B, head_for=lambda cwd: _SHA_B)
+        assert observer["release"]["agreement"] == "mismatch"
+        assert target["release"]["agreement"] == "agree"
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "diverged"
+        assert verdict["divergentParty"] == "target"
+        assert "observer_release_self_mismatch" in verdict["notes"]
+
+    def test_target_self_mismatch_is_noted_without_moving_the_verdict(self):
+        # The serving target is ambiguous about the code it runs, yet its
+        # manifest receipt matches the observer, so the cross-block axis reads
+        # aligned. The note is the only thing that keeps that visible.
+        observer, target = self._blocks(
+            _SHA_A, head_for=lambda cwd: _SHA_B if cwd == _TARGET_CWD else _SHA_A
+        )
+        assert observer["release"]["agreement"] == "agree"
+        assert target["release"]["agreement"] == "mismatch"
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "aligned"
+        assert verdict["divergentParty"] is None
+        assert "target_release_self_mismatch" in verdict["notes"]
+
+    def test_non_mapping_target_is_not_comparable_not_a_crash(self):
+        # Reachable once a consumer reads envelopes back as JSON: the block can
+        # be any JSON type after corruption or hand-editing.
+        observer, _ = self._blocks(_SHA_A)
+        for shape in _NON_MAPPING_BLOCKS:
+            verdict = classify_release_divergence(observer, shape)
+            assert verdict["classification"] == "not_comparable", repr(shape)
+            assert "target_block_absent" in verdict["notes"], repr(shape)
+
+    def test_non_mapping_observer_is_not_comparable_not_a_crash(self):
+        _, target = self._blocks(_SHA_A)
+        for shape in _NON_MAPPING_BLOCKS:
+            verdict = classify_release_divergence(shape, target)
+            assert verdict["classification"] == "not_comparable", repr(shape)
+            assert "observer_block_absent" in verdict["notes"], repr(shape)
+
+    def test_classifier_defect_degrades_to_not_comparable(self, monkeypatch):
+        import lib.target_provenance as tp
+
+        def boom(observer, target):
+            raise RuntimeError("classifier defect")
+
+        monkeypatch.setattr(tp, "classify_release_divergence", boom)
+        verdict = safe_release_divergence({}, {})
+        assert verdict["classification"] == "not_comparable"
+        assert verdict["divergentParty"] is None
+        assert verdict["notes"] == ["classifier_error"]
 
 
 class TestSafeWrappers:
