@@ -4,11 +4,13 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { isNonEmptyString, isRecord } from '../src/lib/type-guards.ts';
+import { isNonEmptyString } from '../src/lib/type-guards.ts';
 import {
   createReleaseSnapshotDriftReport,
+  parseReleaseSnapshotManifest,
   type ReleaseSnapshotDriftIssue,
   type ReleaseSnapshotDriftReport,
+  type ReleaseSnapshotManifest,
 } from './release-snapshot-plan.ts';
 import { emitReleaseAlert, type ReleaseAlertEmitResult } from './lib/live-release-alert.ts';
 import {
@@ -266,57 +268,116 @@ function alertEvidence(assessment: DriftAssessment): string {
 }
 
 const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
+/** Unchanged #2458 domain: the digest over the manifest FILE bytes. */
+const MANIFEST_DIGEST_DOMAIN = 'whatsoup-release-drift-manifest-v1';
 /** Explicit sentinel for an identity that cannot be attested, never an empty string. */
 const UNKNOWN_RELEASE_IDENTITY = 'unknown';
 
+/** One member of the closed drift-kind union carried on the event. */
+export type DriftKindMember = LiveReleaseDriftIssue['kind'];
+
 /**
- * Path-free release identity (#2385 C1): a digest over the manifest's
- * identity-bearing fields ONLY — schema version, source ref and commit, the
- * sorted repo-relative file list with hashes and sizes, and the required
+ * The `drift_kind` field: `none`, one kind, or a comma-joined ascending join of
+ * kinds. Typed as a join of the closed union so a newly added issue kind cannot
+ * flow through as a bare `string`.
+ */
+export type DriftKindField = 'none' | DriftKindMember | `${DriftKindMember},${string}`;
+
+/**
+ * The two manifest-derived facts this invocation needs, read ONCE. Splitting
+ * them across two reads would let the manifest change between them and let the
+ * log record and the event disagree about the same release.
+ */
+interface ReleaseManifestFacts {
+  /** sha256 over the manifest FILE bytes — the pre-existing #2458 semantics. */
+  desiredDigest: string;
+  /** Path-free identity over the PARSED manifest, or the unknown sentinel. */
+  identity: string;
+}
+
+/**
+ * Path-free release identity (#2385 C1): a digest over the identity-bearing
+ * fields of the VALIDATED manifest — schema version, source ref and commit, the
+ * ascending repo-relative file list with hashes and sizes, and the required
  * outputs. `release.path`, `release.createdAt` and `rollback.path` are excluded
  * on purpose: the release directory name is an accident of a rollout, so two
  * assets deployed from the same bytes under different directory names are the
  * same release and must correlate.
+ *
+ * The input is the manifest the schema parser returns, not raw JSON, so the
+ * parser's normalisations (repo-relative paths, lowercased hashes) are part of
+ * the identity and a manifest that fails validation yields the sentinel rather
+ * than a digest over whatever fields happened to be present.
  *
  * This is deliberately NOT `desiredReleaseDigest`, which hashes the manifest
  * FILE. That digest answers a different question (did this invocation see the
  * same manifest bytes?) and moves with the directory name, so it can never
  * correlate two differently-named assets.
  */
-function releaseIdentityFromManifest(manifestPath: string): string {
+export function releaseIdentityFromManifestText(manifestText: string): string {
+  let payload: unknown;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    if (!isRecord(parsed)) return UNKNOWN_RELEASE_IDENTITY;
-    const source = isRecord(parsed.source) ? parsed.source : {};
-    const files = Array.isArray(parsed.files) ? parsed.files : [];
-    const canonical = JSON.stringify({
-      schemaVersion: parsed.schemaVersion,
-      sourceRef: source.ref,
-      sourceCommit: source.commit,
-      files: files
-        .map((file) => (isRecord(file) ? `${String(file.path)}:${String(file.sha256)}:${String(file.sizeBytes)}` : ''))
-        .sort(),
-      requiredOutputs: Array.isArray(parsed.requiredOutputs)
-        ? parsed.requiredOutputs.map((value) => String(value)).sort()
-        : [],
-    });
-    return domainDigest(RELEASE_IDENTITY_DOMAIN, canonical);
-  } catch {
+    payload = JSON.parse(manifestText);
+  } catch (error) {
+    if (error instanceof SyntaxError) return UNKNOWN_RELEASE_IDENTITY;
+    throw error;
+  }
+  let manifest: ReleaseSnapshotManifest;
+  try {
+    manifest = parseReleaseSnapshotManifest(payload);
+  } catch (error) {
+    // The parser rejects every schema violation with a plain Error. A TypeError
+    // or RangeError from here is a defect in this script, not a bad manifest,
+    // and must surface instead of being laundered into the sentinel.
+    if (error instanceof TypeError || error instanceof RangeError) throw error;
     return UNKNOWN_RELEASE_IDENTITY;
   }
+  // Encoded as an array of objects rather than a delimiter join: a joined
+  // string admits crafted path/hash/size combinations that collide with a
+  // different release, and JSON keeps every field boundary explicit.
+  const canonical = JSON.stringify({
+    schemaVersion: manifest.schemaVersion,
+    sourceRef: manifest.source.ref,
+    sourceCommit: manifest.source.commit,
+    files: [...manifest.files]
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+      .map((file) => ({ path: file.path, sha256: file.sha256, sizeBytes: file.sizeBytes })),
+    requiredOutputs: [...manifest.requiredOutputs].sort(),
+  });
+  return domainDigest(RELEASE_IDENTITY_DOMAIN, canonical);
 }
 
 /**
- * The bounded drift kind for the event: the sorted set of issue kinds present,
- * or `none` when the release verifies. Every member is a
- * `ReleaseSnapshotDriftKind` or `LaunchdSelectorIssue['kind']`, so the value is
- * a closed-enum join and carries no content. Deliberately the same set
- * `conditionFingerprint` is built from, rather than a new precedence ordering
- * no test pins.
+ * Read the manifest once and derive both facts from the same bytes. An
+ * unreadable manifest is not an error here: the drift report has already
+ * classified that as `manifest-missing`, and both facts fail closed to the
+ * sentinel.
  */
-function driftKind(assessment: DriftAssessment): string {
-  const kinds = Object.keys(countIssueKinds(assessment.issues)).sort();
-  return kinds.length === 0 ? 'none' : kinds.join(',');
+function readManifestFacts(manifestPath: string): ReleaseManifestFacts {
+  let manifestText: string;
+  try {
+    manifestText = readFileSync(manifestPath, 'utf8');
+  } catch {
+    return { desiredDigest: UNKNOWN_RELEASE_IDENTITY, identity: UNKNOWN_RELEASE_IDENTITY };
+  }
+  return {
+    desiredDigest: domainDigest(MANIFEST_DIGEST_DOMAIN, manifestText),
+    identity: releaseIdentityFromManifestText(manifestText),
+  };
+}
+
+/**
+ * The bounded drift kind for the event: the ascending set of issue kinds
+ * present, or `none` when the release verifies. Every member comes from the
+ * closed `LiveReleaseDriftIssue` union, so the result is a closed-enum join and
+ * carries no content. Deliberately the same set `conditionFingerprint` is built
+ * from, rather than a new precedence ordering no test pins.
+ */
+function driftKind(issues: readonly LiveReleaseDriftIssue[]): DriftKindField {
+  const kinds: DriftKindMember[] = [...new Set(issues.map((issue) => issue.kind))].sort();
+  const [first, ...rest] = kinds;
+  if (first === undefined) return 'none';
+  return rest.length === 0 ? first : `${first},${rest.join(',')}`;
 }
 
 /**
@@ -326,16 +387,17 @@ function driftKind(assessment: DriftAssessment): string {
  * is untouched: `storm_fingerprint` keys on source, severity and the normalized
  * summary only, so adding diagnostics cannot re-key an in-flight incident.
  */
-function typedDriftDiagnostics(assessment: DriftAssessment): string[] {
-  const desired = releaseIdentityFromManifest(assessment.report.manifestPath);
+function typedDriftDiagnostics(assessment: DriftAssessment, facts: ReleaseManifestFacts): string[] {
   // The observed tree identity is only attestable when verification passed —
   // the same rule the structured log record already applies. Reconstructing a
   // drifted tree's real identity needs a re-walk this leaf does not do, so it
   // stays the explicit sentinel rather than a guess.
-  const observed = assessment.ok && desired !== UNKNOWN_RELEASE_IDENTITY ? desired : UNKNOWN_RELEASE_IDENTITY;
+  const observed = assessment.ok && facts.identity !== UNKNOWN_RELEASE_IDENTITY
+    ? facts.identity
+    : UNKNOWN_RELEASE_IDENTITY;
   return [
-    `drift_kind=${driftKind(assessment)}`,
-    `desired_release_identity=${desired}`,
+    `drift_kind=${driftKind(assessment.issues)}`,
+    `desired_release_identity=${facts.identity}`,
     `observed_release_identity=${observed}`,
   ];
 }
@@ -344,6 +406,7 @@ function runEmit(
   options: LiveReleaseDriftAlertOptions,
   assessment: DriftAssessment,
   eventType: 'alert' | 'clear',
+  facts: ReleaseManifestFacts,
 ): ReleaseAlertEmitResult {
   return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
     summary: alertSummary(assessment),
@@ -351,7 +414,7 @@ function runEmit(
     diagnostics: [
       `release=${assessment.report.releasePath}`,
       `manifest=${assessment.report.manifestPath}`,
-      ...typedDriftDiagnostics(assessment),
+      ...typedDriftDiagnostics(assessment, facts),
     ],
     severity: 'critical',
   }, eventType);
@@ -364,15 +427,7 @@ function domainDigest(domain: string, value: string): string {
   return createHash('sha256').update(`${domain}|${value}`).digest('hex');
 }
 
-function desiredReleaseDigest(manifestPath: string): string {
-  try {
-    return domainDigest('whatsoup-release-drift-manifest-v1', readFileSync(manifestPath, 'utf8'));
-  } catch {
-    return 'unknown';
-  }
-}
-
-function countIssueKinds(issues: readonly { kind: string }[]): Record<string, number> {
+function countIssueKinds(issues: readonly LiveReleaseDriftIssue[]): Record<string, number> {
   const issueKinds: Record<string, number> = {};
   for (const issue of issues) issueKinds[issue.kind] = (issueKinds[issue.kind] ?? 0) + 1;
   return issueKinds;
@@ -383,10 +438,11 @@ function buildLogRecord(input: {
   alertKind: 'alert' | 'clear' | null;
   emitResult: ReleaseAlertEmitResult | null;
   emitFailedOutcome: boolean;
+  manifestFacts: ReleaseManifestFacts;
   now: () => Date;
 }): LiveReleaseDriftLogRecord {
   const issueKinds = countIssueKinds(input.assessment.issues);
-  const desired = desiredReleaseDigest(input.assessment.report.manifestPath);
+  const desired = input.manifestFacts.desiredDigest;
   // The observed tree identity is only attestable when verification passed.
   const observed = input.assessment.ok && desired !== 'unknown' ? desired : 'unknown';
   const kindSet = Object.keys(issueKinds).sort().join(',');
@@ -423,13 +479,16 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
   // the false pass this check exists to catch; treating it as ok would emit a
   // clear event under --clear-on-ok, which is worse than staying silent.
   const assessment = assess(report, options.launchdSelection);
+  // Read the manifest once, before emitting, so the event and the log record
+  // describe the same bytes even if the release changes underneath us.
+  const manifestFacts = readManifestFacts(assessment.report.manifestPath);
   const alertKind: 'alert' | 'clear' | null = assessment.ok ? (options.clearOnOk ? 'clear' : null) : 'alert';
   let emitResult: ReleaseAlertEmitResult | null = null;
   if (alertKind && options.emit) {
-    emitResult = runEmit(options, assessment, alertKind);
+    emitResult = runEmit(options, assessment, alertKind, manifestFacts);
   }
   const emitFailedOutcome = Boolean(emitResult && emitResult.status !== 0);
-  const record = buildLogRecord({ assessment, alertKind, emitResult, emitFailedOutcome, now: options.now ?? (() => new Date()) });
+  const record = buildLogRecord({ assessment, alertKind, emitResult, emitFailedOutcome, manifestFacts, now: options.now ?? (() => new Date()) });
   const selection = options.launchdSelection;
   return {
     check: 'live-release-drift-alert',
