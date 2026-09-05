@@ -174,7 +174,7 @@ function validSpec(): unknown {
 }
 
 describe('forensic evidence failure boundaries', () => {
-  it.each(['plain', 'unicode', 'private-path', 'private-term', 'object-key', 'key-context', 'duplicate-key'] as const)('rejects unsafe decoded content in re-manifested public metadata: %s', (encoding) => {
+  it.each(['plain', 'unicode', 'private-path', 'private-term', 'object-key', 'key-context', 'duplicate-key', 'basic', 'escaped-basic', 'embedded-basic', 'embedded-unicode-basic', 'embedded-whitespace-basic', 'decode-budget'] as const)('rejects unsafe decoded content in re-manifested public metadata: %s', (encoding) => {
     const output = path.join(tmp.make('envelope-reverification'), 'package');
     writeForensicPackage(validSpec(), output);
     const member = path.join(output, 'evidence.json');
@@ -192,9 +192,26 @@ describe('forensic evidence failure boundaries', () => {
       envelope.token = 'fixturevalueabcdefghijklmnop';
     }
     if (encoding === 'duplicate-key') envelope.type = 'message';
+    if (encoding === 'basic' || encoding === 'escaped-basic') {
+      envelope.type = 'message';
+      envelope.authorization = 'Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64');
+    }
+    if (encoding === 'embedded-basic') {
+      envelope.type = JSON.stringify({ authorization: 'Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64') });
+    }
+    if (encoding === 'embedded-unicode-basic') {
+      envelope.type = JSON.stringify({ authorization: 'Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64') })
+        .replace('"authorization":', '"\\u0061uthorization":');
+    }
+    if (encoding === 'embedded-whitespace-basic') {
+      envelope.type = ('{"authorization":\n"Basic ' + Buffer.from('fixture-user:fixture-password').toString('base64') + '"}')
+        .replaceAll('"', '\\"').replaceAll('\n', '\\n');
+    }
+    if (encoding === 'decode-budget') envelope.type = '\\' + 'u005c'.repeat(16) + 'u0078';
     const serialized = JSON.stringify(evidence);
     const encoded = encoding === 'private-path' ? serialized.replaceAll('/', '\\/')
-      : encoding === 'private-term' ? serialized.replace('fixture-private-scope', '\\u0066ixture-private-scope')
+      : encoding === 'escaped-basic' ? serialized.replace('"authorization":', '"\\u0061uthorization":')
+        : encoding === 'private-term' ? serialized.replace('fixture-private-scope', '\\u0066ixture-private-scope')
         : encoding === 'key-context' ? serialized.replace('"token":', '"\\u0074oken":')
           : encoding === 'duplicate-key' ? serialized.replace('"type":"message"', '"type":"\\u0067hp_' + 'A'.repeat(24) + '","type":"message"')
             : encoding === 'plain' ? serialized : serialized.replace('ghp_', '\\u0067hp_');
@@ -211,6 +228,60 @@ describe('forensic evidence failure boundaries', () => {
     expect(verifyForensicPackage(output, manifestSha256(output), { forbiddenTerms: ['fixture-private-scope'] })).toEqual({
       valid: false, findings: ['redaction-violation:evidence.json'],
     });
+  });
+
+  it('preserves a benign Basic label without authorization context', () => {
+    const spec = validSpec() as MutableSearchSpec;
+    spec.searches[0]!.sources[0]!.hits[0]!.envelope.type = 'Basic layout';
+    const output = path.join(tmp.make('benign-basic-label'), 'package');
+    writeForensicPackage(spec, output);
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
+  });
+
+  it('redacts quoted Basic authorization embedded in narrative text', () => {
+    const spec = validSpec() as { narrative: Array<{ summary: string }> };
+    const credential = Buffer.from('fixture-user:fixture-password').toString('base64');
+    spec.narrative[0]!.summary = JSON.stringify({ authorization: 'Basic ' + credential });
+    expect(spec.narrative[0]!.summary).toContain(credential);
+    const output = path.join(tmp.make('basic-narrative'), 'package');
+    writeForensicPackage(spec, output);
+    const narrative = readFileSync(path.join(output, 'narrative.json'), 'utf8');
+    expect(narrative).not.toContain(credential);
+    expect(narrative).toContain('Basic [REDACTED]');
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
+  });
+
+  it.each(['unicode-key', 'escaped-whitespace'] as const)('refuses unredacted encoded authorization before publication: %s', (format) => {
+    const spec = validSpec() as { narrative: Array<{ summary: string }> };
+    const credential = Buffer.from('fixture-user:fixture-password').toString('base64');
+    spec.narrative[0]!.summary = format === 'unicode-key'
+      ? JSON.stringify({ authorization: 'Basic ' + credential }).replace('"authorization":', '"\\u0061uthorization":')
+      : ('{"authorization":\n"Basic ' + credential + '"}').replaceAll('"', '\\"').replaceAll('\n', '\\n');
+    expect(spec.narrative[0]!.summary).toContain(credential);
+    const output = path.join(tmp.make('encoded-narrative'), 'package');
+    expect(() => writeForensicPackage(spec, output)).toThrow(/redaction_violation/);
+    expect(existsSync(output)).toBe(false);
+  });
+
+  it('preserves harmless nested JSON escapes within the decoding budget', () => {
+    const spec = validSpec() as { narrative: Array<{ summary: string }> };
+    spec.narrative[0]!.summary = '\\' + 'u005c'.repeat(3) + 'u0078';
+    const output = path.join(tmp.make('benign-encoded-narrative'), 'package');
+    writeForensicPackage(spec, output);
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
+  });
+
+  it.each([{ escapes: 6, accepted: true }, { escapes: 7, accepted: false }])('enforces the eight-pass publication boundary: $escapes escape links', ({ escapes, accepted }) => {
+    const spec = validSpec() as { narrative: Array<{ summary: string }> };
+    spec.narrative[0]!.summary = '\\' + 'u005c'.repeat(escapes) + 'u0078';
+    const output = path.join(tmp.make('escape-budget-boundary'), 'package');
+    if (accepted) {
+      writeForensicPackage(spec, output);
+      expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
+    } else {
+      expect(() => writeForensicPackage(spec, output)).toThrow(/redaction_violation: narrative\.json exceeds the public escape-decoding budget/);
+      expect(existsSync(output)).toBe(false);
+    }
   });
 
   it.each(['unicode', 'crlf', 'negative-zero'] as const)('accepts benign decoded content in re-manifested public metadata: %s', (format) => {
@@ -307,6 +378,25 @@ describe('forensic evidence failure boundaries', () => {
     source.matches_observed = 2;
     receipt.metrics.candidates = 2;
     expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/locator.*unique/);
+  });
+
+  it.each([
+    ['claude', 'duplicate'], ['codex', 'duplicate'],
+    ['claude', 'reversed'], ['codex', 'reversed'],
+  ] as const)('rejects contradictory %s line labels across distinct ranges: %s', (family, contradiction) => {
+    const receipt = searchResult(family, 1, 'line-labels') as Mutable<ForensicHarnessSearchResult>;
+    const source = receipt.sources[0]!;
+    source.identity.bytes = 30;
+    source.records_examined = 3;
+    source.matches_observed = 2;
+    const second = structuredClone(source.hits[0]!);
+    second.locator = { kind: 'jsonl', line: 3, byte_start: 20, byte_end: 30 };
+    source.hits.unshift(second);
+    receipt.metrics.candidates = 2;
+    expect(parseForensicHarnessSearchResult(receipt).sources[0]!.hits).toHaveLength(2);
+    second.locator.line = contradiction === 'duplicate' ? 1 : 2;
+    if (contradiction === 'reversed') source.hits[1]!.locator = { kind: 'jsonl', line: 3, byte_start: 0, byte_end: 10 };
+    expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/locator.*line.*increas/);
   });
 
   it.each(['claude', 'codex'] as const)('rejects overlapping physical ranges within a %s source', (family) => {

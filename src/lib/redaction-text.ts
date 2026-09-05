@@ -5,7 +5,7 @@ import { jidPattern } from './redaction-patterns.ts';
 // inputs that previously caused quadratic backtracking.
 const SECRETISH_ASSIGNMENT =
   /(^|[^A-Za-z0-9_]|\\n)(["']?(?:[A-Za-z0-9]+_)*(?:(?:[A-Za-z0-9_.-]{0,20}api[_-]?key[A-Za-z0-9_.-]{0,20})|client[_-]?secret|secret[_-]?access[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie|credential|password|passphrase|secret|session|token|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)|pat)["']?\s*[:=]\s*["']?)((?:(?:Bearer|Basic)\s+)?[^\s\\,"';}]+)(["']?)/gi;
-const AUTHORIZATION_BEARER = /\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\"',;}]+/gi;
+const AUTHORIZATION_BEARER = /\b(authorization(?:\\*["'])?\s*[:=]\s*(?:\\*["'])?(?:Bearer|Basic)\s+)[^\s\\"',;}]+/gi;
 const AUTHORIZATION_KEYED =
   /(^|[^A-Za-z0-9_]|\\n)(["']?authorization["']?\s*[:=]\s*["']?)(?!(?:Bearer|Basic)\s)([^\s\\,"';}]+)(["']?)/gi;
 const BEARER_VALUE = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi;

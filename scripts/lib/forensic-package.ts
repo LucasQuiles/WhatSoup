@@ -20,7 +20,6 @@ import {
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import ts from 'typescript';
 
 import { assertNoSecretLike } from '../artifact-redaction.ts';
 import { redactText } from '../../src/lib/redaction-text.ts';
@@ -212,6 +211,7 @@ const PACKAGE_DATA_FILES = [
 ] as const;
 const PACKAGE_FILES = [...PACKAGE_DATA_FILES, 'manifest.json'].sort();
 const MAX_PACKAGE_MANIFEST_BYTES = 64 * 1024;
+const MAX_PUBLIC_ESCAPE_PASSES = 8;
 const SQLITE_TABLES = ['session', 'message', 'part', 'session_message'] as const;
 type SqliteTable = typeof SQLITE_TABLES[number];
 
@@ -1014,6 +1014,9 @@ export function parseForensicHarnessSearchResult(
       if (ranges[index]!.byte_start < ranges[index - 1]!.byte_end) {
         throw new TypeError(`${sourceLabel} physical locators must not overlap`);
       }
+      if (ranges[index]!.line <= ranges[index - 1]!.line) {
+        throw new TypeError(`${sourceLabel} physical locators line labels must increase with byte position`);
+      }
     }
     for (const [hitIndex, hit] of hits.entries()) {
       if (hit.evidence_id !== `evidence-${hit.record_sha256}`) {
@@ -1472,22 +1475,19 @@ function assertPublicContent(
     }
   };
   checkText(content);
-  if (name.endsWith('.json')) {
-    JSON.parse(content);
-    // Scan the validated text so duplicate keys cannot hide earlier values from a reviver.
-    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, content);
-    let decodedText = '';
-    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-      if (token === ts.SyntaxKind.StringLiteral) {
-        const value = scanner.getTokenValue();
-        checkText(value);
-        decodedText += JSON.stringify(value);
-      } else {
-        decodedText += scanner.getTokenText();
-      }
-    }
-    // Assignment rules need decoded keys and values together, not only isolated strings.
+  if (name.endsWith('.json')) JSON.parse(content);
+  // Inspect every textual occurrence, including duplicate keys and JSON embedded in strings.
+  // Only the inspection view is decoded; published bytes are never rewritten here.
+  let decodedText = content;
+  for (let pass = 0; pass <= MAX_PUBLIC_ESCAPE_PASSES; pass += 1) {
     checkText(decodedText);
+    const next = decodedText.replace(/\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])/g,
+      (escape) => JSON.parse(`"${escape}"`) as string);
+    if (next === decodedText) return;
+    if (pass === MAX_PUBLIC_ESCAPE_PASSES) {
+      throw new Error(`redaction_violation: ${name} exceeds the public escape-decoding budget`);
+    }
+    decodedText = next;
   }
 }
 
