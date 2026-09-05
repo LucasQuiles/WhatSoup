@@ -1461,11 +1461,14 @@ def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
     the leaf byte- and mode-identical, so the strict reader downstream remains
     the sole authority on whether the leaf may be used.
 
-    The parent_writable refusal holds for one cycle only. ensure_private_dir()
-    narrows the state root immediately after this returns, so the next cycle
-    sees a 0700 root and repairs the leaf if it passes the remaining guards.
-    The owner guard is what protects against a foreign plant; a plant by the
-    executing uid itself is outside this threat model.
+    The parent_writable refusal holds for one cycle only, and not because the
+    root is guaranteed to change. ensure_private_dir() ATTEMPTS to narrow the
+    state root after this returns and suppresses its own chmod errors, so on a
+    root this process cannot chmod the refusal simply repeats. The next cycle
+    re-checks the root mode either way, and repairs the leaf only if the
+    narrowing took effect and the leaf passes the remaining guards. The owner
+    guard is what protects against a foreign plant; a plant by the executing
+    uid itself is outside this threat model.
     """
     if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
         return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
