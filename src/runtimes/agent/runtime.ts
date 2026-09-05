@@ -655,6 +655,13 @@ import {
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 import { runNewCommand } from './runtime-new-command.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+  NEW_ACK_REFUSED_STOP_IN_PROGRESS,
+  STOP_ACK_COMPOUND_BODY_REFUSED,
+  NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED,
+} from './runtime-stop-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -3140,6 +3147,13 @@ export class AgentRuntime implements Runtime {
    */
   private releaseWedgedReclaimedLanes(rows: readonly StaleReclaimedInbound[]): void {
     if (rows.length === 0) return;
+    // shared and single own no per-chat lanes: a wedged turn there pins the ONE
+    // global lane instead, whose executing turn is published on
+    // currentRuntimeTurnContext rather than on a per-chat TurnQueue.
+    if (this.sessionScope !== 'per_chat') {
+      this.releaseWedgedReclaimedGlobalLane(rows);
+      return;
+    }
     const byMessageId = new Map(rows.map((row) => [row.sourceMessageId, row]));
     for (const [mapKey, turnQueue] of this.perChatTurnQueues) {
       const active = turnQueue.activeTurn;
@@ -3192,17 +3206,7 @@ export class AgentRuntime implements Runtime {
         );
         continue;
       }
-      log.warn(
-        { inboundSeq: row.seq, queuedBehind: turnQueue.pending, scope: this.sessionScope },
-        'durably reclaimed turn still pins a live lane — releasing via crash finalization',
-      );
-      emitAlertChecked(
-        this.instanceName,
-        'agent_wedged_turn_released',
-        'Wedged agent turn released after durable reclamation',
-        `inbound_seq=${row.seq} queued_behind=${turnQueue.pending} scope=${this.sessionScope}`,
-        'warning',
-      );
+      this.announceWedgedLaneRelease(row.seq, turnQueue.pending);
       // A live provider child (real-process wedge) is killed intentionally so
       // its exit routes through the session's own crash machinery; session
       // doubles and managed-provider sessions have no child to kill.
@@ -3230,6 +3234,109 @@ export class AgentRuntime implements Runtime {
       );
       session.completeProviderTurn();
     }
+  }
+
+  /** Operator-facing announcement shared by every wedged-lane release. */
+  private announceWedgedLaneRelease(inboundSeq: number, queuedBehind: number): void {
+    log.warn(
+      { inboundSeq, queuedBehind, scope: this.sessionScope },
+      'durably reclaimed turn still pins a live lane — releasing via crash finalization',
+    );
+    emitAlertChecked(
+      this.instanceName,
+      'agent_wedged_turn_released',
+      'Wedged agent turn released after durable reclamation',
+      `inbound_seq=${inboundSeq} queued_behind=${queuedBehind} scope=${this.sessionScope}`,
+      'warning',
+    );
+  }
+
+  /**
+   * #3374 ask 2 — the shared/single half of the wedged-lane release.
+   *
+   * shared serializes every chat on one global TurnQueue and single has no
+   * queue at all (turns chain on `turnChain`), so neither lane appears in
+   * `perChatTurnQueues` and the per-chat release above can never reach them.
+   * What both DO publish is the executing turn's immutable runtime context on
+   * `currentRuntimeTurnContext`, awaiting that turn's completion promise
+   * (processTurn for shared, sendTurnNonShared for single). That context is the
+   * global lane's observable, and it carries `identity.inboundSeq` — the exact
+   * durable key the sweep reclaimed, a stronger match than the per-chat path's
+   * source message id.
+   */
+  private releaseWedgedReclaimedGlobalLane(rows: readonly StaleReclaimedInbound[]): void {
+    const context = this.currentRuntimeTurnContext;
+    if (!context) return;
+    const inboundSeq = context.identity.inboundSeq;
+    // A legacy unjournaled turn has no durable identity to match a reclaimed
+    // row against, so it can never be proven to be the row's turn.
+    if (inboundSeq === null) return;
+    const row = rows.find((candidate) => candidate.seq === inboundSeq);
+    if (row === undefined) return;
+    // Identity must agree on both axes, exactly as the per-chat path requires.
+    if (row.conversationKey !== context.identity.conversationKey) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: reclaimed row conversation does not match the global lane — skipping',
+      );
+      return;
+    }
+    const session = this.session;
+    if (!session || session === this.controlSession) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: reclaimed turn pins the global lane with no owned session — skipping',
+      );
+      return;
+    }
+    if (this.sessionManagerIds.get(session) !== context.identity.managerId) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: global session ownership is not current — skipping',
+      );
+      return;
+    }
+    // A session whose provider turn is NOT in flight is not wedged: its
+    // terminal arrived and ordinary finalization is racing the sweep — killing
+    // it would shoot a healthy child. Doubles without the field report
+    // undefined and proceed (same comparison as the per-chat path).
+    if (session.getStatus().turnInFlight === false) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: provider turn already terminalized — leaving finalization to its owner',
+      );
+      return;
+    }
+    // shared queues followers behind the wedge; single chains them on turnChain
+    // with nothing to count.
+    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0);
+    if (typeof session.reapWedgedProviderChild === 'function') {
+      session.reapWedgedProviderChild();
+    }
+    // The reject is the live-turn interlock, not just a signal: it refuses
+    // unless the published completion IS this context's logical turn
+    // (rejectRuntimeTurnCompletionValue). Only then is the provider-turn
+    // promise force-settled — so a lane holding some other turn keeps its
+    // provider boundary untouched. The global lane holds at most one context by
+    // construction, which is why this replaces the per-chat path's
+    // "exactly one published context" check.
+    const rejected = this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+      new WedgedTurnReclaimedError(),
+      undefined,
+      context,
+    );
+    if (!rejected) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: no published completion for the reclaimed turn — leaving the provider turn alone',
+      );
+      return;
+    }
+    // shared settles through the queue's ordinary processor-error path;
+    // single settles through handleMessage's turn-chain catch. Both recognize
+    // the sweep-owned durable terminal (reclaimed_by_sweep) rather than writing
+    // a second one.
+    session.completeProviderTurn();
   }
 
   /**
@@ -4459,21 +4566,40 @@ export class AgentRuntime implements Runtime {
     const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
-        log.error(
-          { err, messageId: msg.messageId, chatJid: msg.chatJid },
-          'unhandled error in message processing',
-        );
+        // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
+        // settlement of a turn the W2 sweep already terminalized, not a
+        // processing failure. It reaches this catch because single mode has no
+        // TurnQueue to absorb it. The canonical finalization below still runs —
+        // the coordinator owns the runtime state — but the fault log, the
+        // legacy durable fallback (the sweep is the durable owner; a second
+        // write would collide with the terminal it already holds) and the user
+        // notice would all misreport it. For a scheduled job that notice lands
+        // in the report chat a day or more after the fact.
+        const wedgedReclaim = err instanceof WedgedTurnReclaimedError;
+        if (wedgedReclaim) {
+          log.warn(
+            { messageId: msg.messageId, chatJid: msg.chatJid, inboundSeq: msg.inboundSeq },
+            'turn released by durable stale reclamation — settling the turn chain',
+          );
+        } else {
+          log.error(
+            { err, messageId: msg.messageId, chatJid: msg.chatJid },
+            'unhandled error in message processing',
+          );
+        }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
           // Coordinator owns terminal persistence and reply-guarantee disarm.
-        } else if (this.durability && msg.inboundSeq !== undefined) {
+        } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Notify user of failure
-        this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+        if (!wedgedReclaim) {
+          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+        }
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
@@ -4542,6 +4668,10 @@ export class AgentRuntime implements Runtime {
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
     let forwardAfterLocalCommand: string | null = null;
+    // #2949 N1: set by the /new fence below so the compound site refuses the
+    // body too. A flag, not a second guard read: the teardown can settle
+    // between the two sites, and the body must follow the command's fate.
+    let newRefusedForStopTeardown = false;
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
@@ -4608,6 +4738,14 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
+            // #2949 N1: /new re-runs this seam and then RESETS. Against a scope
+            // whose /stop teardown has not settled that spawns a replacement
+            // for an unproven cancellation, so refuse until the guard clears.
+            if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
+              newRefusedForStopTeardown = true;
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              break;
+            }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
             await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
@@ -4664,6 +4802,54 @@ export class AgentRuntime implements Runtime {
                 const resetKey = toConversationKey(chatJid);
                 clearStandbyNotice(this.db, resetKey);
                 deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
+            break;
+
+          case 'stop':
+            // #2949 N1. Extracted leaf collaborator: runtime-stop-command.ts owns
+            // the control flow. Deliberately the SAME teardown closures /new's
+            // interrupt branch binds (one teardown seam, never a second) minus
+            // the reset epilogue — /stop stops, it does not start a new session.
+            await runStopCommand<SessionManager, RuntimeTurnQueueTeardown>({
+              chatJid,
+              sessionScope: this.sessionScope,
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              // The runtime's OWN termination proof — the same predicate the
+              // respawn and turn-recovery abort paths require. /stop's
+              // 'stopped' is not authorized without it.
+              isSessionProvablyTerminated: (session) => this.isSessionProvablyTerminated(session),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
+                ?.abortTurn({ preserveEvidence: true }),
+              disposePerChatSession: async (session, teardown) => {
+                await session.shutdown(false);
+                await this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+              },
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getGlobalInterruptQueue()
+                ?.abortTurn({ preserveEvidence: true }),
+              terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+              retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
+                : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
               sendDirect: (text) => this.sendDirect(chatJid, text),
@@ -4846,7 +5032,31 @@ export class AgentRuntime implements Runtime {
         // via the turn's durable terminal — NOT local_command_handled. The body is
         // a NEW first-turn admission (not #2334 active-turn steering).
         if (classified.type === 'local' && classified.compoundBody !== undefined) {
-          forwardAfterLocalCommand = classified.compoundBody;
+          if (classified.command === 'stop' || newRefusedForStopTeardown) {
+            // #2949 N1: /stop is the one registered command whose handler tears
+            // the lane down, so the compound path would dispatch the body as a
+            // NEW turn onto state the teardown just cleared — in single/shared
+            // straight onto `this.session!` (runtime.ts:5162 and :5173 at
+            // 6ae583e1, non-null asserted after clearSingleScopeRefs nulled it),
+            // in per_chat as a fresh turn from the same inbound moments after
+            // the kill. Refuse the body instead of forwarding it; leaving
+            // forwardAfterLocalCommand null completes the inbound as
+            // 'local_command_handled', exactly as a plain /stop does. The body
+            // is NOT dispatched, so the acknowledgement says so rather than
+            // implying it was queued.
+            // A refused /new reaches here too: the fence broke out of the
+            // switch, so without this its body would still be forwarded into
+            // the scope whose teardown is unproven.
+            log.warn(
+              { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
+              'compound body refused — not dispatched',
+            );
+            this.sendDirect(chatJid, newRefusedForStopTeardown
+              ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
+              : STOP_ACK_COMPOUND_BODY_REFUSED);
+          } else {
+            forwardAfterLocalCommand = classified.compoundBody;
+          }
         }
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
@@ -8049,6 +8259,11 @@ export class AgentRuntime implements Runtime {
    * the latch away and lets a replacement spawn as if the write had settled,
    * so treat it as work that may still be outstanding rather than as a
    * terminated generation.
+   *
+   * The guarantee is bounded by what the status reports: a kill-tree census
+   * that left descendant PIDs unsignalled still returns normally and clears the
+   * handle, and this predicate cannot see that, so it proves the manager's own
+   * generation is finished rather than that no provider descendant survives.
    */
   private isSessionProvablyTerminated(session: SessionManager): boolean {
     const status = session.getStatus();
