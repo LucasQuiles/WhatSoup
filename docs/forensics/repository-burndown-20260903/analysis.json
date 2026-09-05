@@ -185,7 +185,7 @@
       {
         "id": "A01",
         "statement": {
-          "text": "A focused green result and hosted checks existed before a terminal local release result, so merge readiness remained incomplete at the source observation.",
+          "text": "Historical summaries report focused and hosted checks; their timing, terminal local release status, and merge readiness remain unverified against original validation receipts.",
           "redactions": []
         },
         "evidence_ids": [
@@ -197,7 +197,7 @@
       {
         "id": "X01",
         "statement": {
-          "text": "Two candidates matched the query vocabulary but source context belonged to unrelated guidance or another project; both were rejected.",
+          "text": "Two candidates matched the query vocabulary; the recorded assessment classified their source context as unrelated guidance or another project and rejected both. Their underlying relevance was not independently re-adjudicated.",
           "redactions": []
         },
         "evidence_ids": [
@@ -210,7 +210,7 @@
       {
         "id": "Z01",
         "statement": {
-          "text": "No terminal release result was present in the inspected branch summary; this is a bounded retrieval result, not proof that no later run exists.",
+          "text": "The retained branch narrative reports no terminal release result, but the cited evidence does not establish whether a result existed at that observation or in a later run.",
           "redactions": []
         },
         "evidence_ids": [
@@ -222,7 +222,7 @@
       {
         "id": "D01",
         "statement": {
-          "text": "Repeated verification prose was treated as one narrative lineage until an independent Git object or test receipt corroborated it.",
+          "text": "The repeated verification prose is retained as one narrative lineage. The cited Git object supports the code change; it does not independently establish publication or validation chronology.",
           "redactions": []
         },
         "evidence_ids": [
@@ -243,14 +243,14 @@
     {
       "id": "S02",
       "statement": {
-        "text": "Run a third bounded pass over the second harness because its second-pass marginal yield remains material.",
+        "text": "Run a third bounded pass over the second harness because its second pass added 229 distinct records; whether that yield is material independent evidence is unverified.",
         "redactions": []
       }
     },
     {
       "id": "S03",
       "statement": {
-        "text": "Attach the terminal local release receipt to the process-ownership conclusion when that run completes.",
+        "text": "Locate the original publication and terminal local release receipts for the process-ownership revision, bind their timestamps and revision identifiers, and resolve the corresponding unknowns before promoting those claims.",
         "redactions": []
       }
     }

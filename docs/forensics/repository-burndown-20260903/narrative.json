@@ -5,7 +5,7 @@
       "id": "N01",
       "at": "2026-09-03T21:19:31Z",
       "summary": {
-        "text": "The process-ownership revision was recorded with a focused green result and a missing terminal full-release result.",
+        "text": "The process-ownership revision kept service-cgroup membership observational and added a confirmed-ownership check for process-group signaling.",
         "redactions": []
       },
       "evidence_ids": [
@@ -29,7 +29,7 @@
       "id": "N03",
       "at": "2026-09-04T09:30:39Z",
       "summary": {
-        "text": "The first complete deterministic retrieval pass began over frozen session sources.",
+        "text": "The first deterministic retrieval pass began over frozen session sources.",
         "redactions": []
       },
       "evidence_ids": []
@@ -38,7 +38,7 @@
       "id": "N04",
       "at": "2026-09-04T09:44:16Z",
       "summary": {
-        "text": "The second pass over the third harness snapshot completed with one distinct new evidence record and no source failure.",
+        "text": "The second pass over the third harness snapshot ran to completion, declaring one distinct new record and no source failure; completeness of that snapshot is unverified.",
         "redactions": []
       },
       "evidence_ids": []
@@ -47,7 +47,7 @@
       "id": "N05",
       "at": "2026-09-04T09:53:00Z",
       "summary": {
-        "text": "Selected original records were reopened by hash-bound byte range; useful and false-positive candidates were separated before publication.",
+        "text": "The retained query assessments record that selected original records were reopened by hash-bound byte range and that useful and false-positive candidates were separated before publication; that context inspection was not independently re-adjudicated.",
         "redactions": []
       },
       "evidence_ids": [

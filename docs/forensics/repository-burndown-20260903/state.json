@@ -6,7 +6,7 @@
       "id": "C01",
       "confidence": "high",
       "statement": {
-        "text": "The process-ownership branch was recorded at the exact published revision while its terminal local release proof was still unresolved.",
+        "text": "The process-ownership commit kept service-cgroup membership observational and required every current process-group member to match a confirmed provider-session identity before group signaling.",
         "redactions": []
       },
       "harness_evidence_ids": [
@@ -25,7 +25,7 @@
       "id": "C02",
       "confidence": "high",
       "statement": {
-        "text": "The process-lifecycle diagnostics work introduced typed termination outcomes and a dedicated caller-adoption guard.",
+        "text": "The process-lifecycle diagnostics commit added typed termination error codes, retry classes, canonical diagnostic sources, and a dedicated guard for caller adoption.",
         "redactions": []
       },
       "harness_evidence_ids": [
@@ -61,7 +61,7 @@
       "id": "C04",
       "confidence": "medium",
       "statement": {
-        "text": "All three harness adapters completed two hash-bound passes without source failures; marginal new evidence was three, two hundred twenty-nine, and one respectively.",
+        "text": "The six retained search receipts declare two hash-bound passes per harness that ran to completion and zero source failures. Their retained record hashes reproduce second-pass new-record counts of 3, 229 and 1. Source completeness, independent evidential value of those records, and saturation remain unverified.",
         "redactions": []
       },
       "harness_evidence_ids": [],
@@ -71,7 +71,7 @@
       "id": "C05",
       "confidence": "medium",
       "statement": {
-        "text": "Source inspection rejected at least two lexical candidates as unrelated, demonstrating that candidate retrieval alone is not evidence promotion.",
+        "text": "The retained query assessments classify two distinct retrieved records as false positives, demonstrating that recorded candidate retrieval and recorded promotion decisions are separate. Their underlying relevance was not independently re-adjudicated in this review.",
         "redactions": []
       },
       "harness_evidence_ids": [
@@ -99,7 +99,7 @@
     {
       "id": "K03",
       "statement": {
-        "text": "Private identifier terms are supplied at build time and are not embedded in the package or its errors.",
+        "text": "Private identifier terms are supplied at build time and are not embedded in the package. A build or verify refusal caused by a matched term names the affected file and not the term. Other CLI errors can include caller-supplied paths; this package-content privacy guarantee does not cover every error message.",
         "redactions": []
       }
     }
@@ -108,7 +108,7 @@
     {
       "id": "U01",
       "statement": {
-        "text": "The second harness has not reached diminishing returns because its second pass found two hundred twenty-nine distinct records.",
+        "text": "Diminishing returns for the second harness are not established: its second pass found 229 distinct records, and their independent evidential value is unadjudicated.",
         "redactions": []
       }
     },
@@ -122,7 +122,7 @@
     {
       "id": "U03",
       "statement": {
-        "text": "The terminal local release outcome was outside the frozen source window.",
+        "text": "Publication timing and terminal local release status for the process-ownership revision remain unknown without original remote and validation receipts tied to that revision.",
         "redactions": []
       }
     }
@@ -131,14 +131,14 @@
     {
       "id": "F01",
       "statement": {
-        "text": "The third harness was not unavailable: a read-only, hash-bound snapshot supported two complete passes.",
+        "text": "The third harness was not permanently unavailable: a later hash-bound snapshot supported two passes that ran to completion. The earlier live-database observer effect remains recorded; the snapshot acquisition's non-mutation is not independently verified here, and source completeness and search saturation for that harness remain unverified.",
         "redactions": []
       }
     },
     {
       "id": "F02",
       "statement": {
-        "text": "A lexical match was not sufficient for promotion: source inspection rejected unrelated candidates.",
+        "text": "A lexical match was not sufficient for promotion: the recorded source inspection rejected two candidates as unrelated. That inspection was not independently re-adjudicated.",
         "redactions": []
       }
     }
