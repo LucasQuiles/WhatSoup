@@ -687,6 +687,114 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     }
   });
 
+  it('#2949 N1: a mid-turn compound /stop refuses the body instead of dispatching it', async () => {
+    // Registration gave /stop a compound-body path it never had as forwarded
+    // text: `/stop\n<body>` classifies local with a compoundBody, and the
+    // #2357 B1 fall-through would dispatch that body as a NEW turn under the
+    // same inbound, moments after this command tore the session down.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = makeRuntime('per_chat', db, messenger);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    // A per_chat teardown deletes this chat's outbound queue, so sendDirect
+    // falls back to the messenger for anything sent after it. Read both sinks.
+    const directTexts = (): string[] => [...enqueuedTexts(), ...sentMessages.map((m) => m.text)];
+    try {
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+      // Not awaited yet: the compound path runs only AFTER the stop handler
+      // returns, and that handler is waiting on the teardown of the turn this
+      // test is holding open. Awaiting here would deadlock against the release
+      // below, so drive the release first and then await the whole command.
+      const compoundStop = runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop-compound',
+        content: '/stop\nrun this other thing instead',
+        senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+      releaseTurn();
+      await compoundStop;
+
+      // The body never became a turn: still exactly the one long-running turn.
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
+      expect(directTexts()).not.toContain('run this other thing instead');
+      // handleMessage returns once the per-chat turn is queued, so the
+      // acknowledgements land after it resolves; wait for the refusal itself.
+      await vi.waitFor(
+        () => expect(directTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(true),
+        { timeout: 4_000 },
+      );
+    } finally {
+      releaseTurn();
+    }
+  });
+
+  it('#2949 N1: a compound /stop still completes its inbound as local_command_handled', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.sendTurn.mockClear();
+
+    try {
+      const seq = durability.journalInbound('m-stop-compound', 'k-stop-compound', DM_CHAT, 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'm-stop-compound',
+        content: '/stop\ndo this instead',
+        senderJid: ADMIN_WA,
+        inboundSeq: seq,
+      }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      // The body-retained reason belongs to a FAILED handler; this one succeeded
+      // and simply refused the body, so the plain /stop terminal must stand.
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(true);
+      expect(enqueuedTexts()).not.toContain('do this instead');
+    } finally {
+      duraDb.close();
+    }
+  });
+
+  it('#2949 N1 positive control: a compound body on another command still dispatches', async () => {
+    // Falsifies "the refusal disabled compound bodies": /status keeps the
+    // #2357 B1 behaviour, so only /stop is narrowed.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'm-status-compound',
+      content: '/status\ndo this instead',
+      senderJid: ADMIN_WA,
+    }));
+
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(false);
+  });
+
   it('a FUTURE registry entry with no switch case warns and forwards to the agent (B21-A F4b)', async () => {
     // Simulated Phase-2 append (delegating override seams): classifier admits
     // '/stats', registry serves a spec, but the switch has no case — the

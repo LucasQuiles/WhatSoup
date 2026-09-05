@@ -72,6 +72,26 @@
 // `retireTurnQueueAfterInterrupt` closures (runtime.ts:4637-4642 and
 // :4700-4705). Left as-is deliberately.
 //
+// ACKNOWLEDGEMENT DELIVERY, RECORDED LIMIT: every acknowledgement here goes
+// through `runtime.sendDirect`, which passes `bypassEchoGuard = false` and
+// discards the promise (runtime.ts:8579-8580). `sendDirectWithReceipt` returns
+// `{ accepted: false }` without sending when the chat's outbound queue is
+// poisoned (chat-transport.ts:211-217), so STOP_ACK_UNCERTAIN_DELIVERY is
+// dropped in exactly the case it describes. The bypass path exists but no
+// production call site uses it, so introducing one here would be a new
+// precedent rather than a fix; it is filed as a follow-up on #2949 instead.
+//
+// COMMAND TEXT AFTER /stop: single-line trailing text ("/stop now") is parsed
+// into `args` by classifyInput (commands.ts:145-151) and deliberately ignored
+// — /stop takes no arguments. A multi-line body ("/stop\n<body>") is different:
+// classifyInput returns it as `compoundBody` (commands.ts:87-93, :150), and the
+// #2357 B1 fall-through would dispatch it as a NEW turn under the same inbound,
+// onto state this command just tore down. The runtime therefore refuses a
+// compound body for /stop and acknowledges the refusal
+// (STOP_ACK_COMPOUND_BODY_REFUSED, runtime.ts's compound-forwarding site); the
+// inbound still completes as 'local_command_handled'. Every other command keeps
+// the #2357 B1 behaviour.
+//
 // WHY NOT `teardown.disposition`: the coordinator assigns it unconditionally
 // from WHICH method ran — 'interruption' in terminalizeGlobalTurnForReset,
 // 'kill' in terminalizePerChatTurnQueueForKill. It is a function of session
@@ -107,6 +127,9 @@ export const STOP_ACK_UNCERTAIN_NOT_PROVEN =
   '*Stop requested — the task process could not be proven terminated, outcome uncertain; operator reconciliation required*';
 export const STOP_ACK_ALREADY_STOPPING =
   '*Stop already in progress — waiting for the current teardown to settle*';
+/** Compound `/stop\n<body>` refusal. See the COMPOUND BODY note in the header. */
+export const STOP_ACK_COMPOUND_BODY_REFUSED =
+  '*/stop does not take a follow-up message; send it on its own after the stop acknowledgement*';
 
 /** The durable outcomes. Never a false success. */
 export type StopOutcome = 'stopped' | 'nothing-to-stop' | 'uncertain' | 'already-stopping';
