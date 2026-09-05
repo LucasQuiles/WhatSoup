@@ -38,7 +38,7 @@ import { Database } from '../../src/core/database.ts';
 import { MessageScheduler } from '../../src/core/scheduler.ts';
 import { confineAlertContent } from '../../src/lib/alert-evidence.ts';
 import { resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
-import { loadRecoveryMarkers } from '../../src/lib/recovery-authority-store.ts';
+import { loadRecoveryMarkers, setRecoveryMarker } from '../../src/lib/recovery-authority-store.ts';
 import type { RuntimeConnection } from '../../src/transport/runtime-connection.ts';
 
 const INSTANCE = 'personal';
@@ -435,6 +435,23 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     const serialized = JSON.stringify(record.body);
     expect(serialized).not.toContain(SECRET_JID);
     expect(serialized).not.toContain(SECRET_BODY);
+  });
+
+  it('A10 (control): a retained record that cannot be re-rendered is discarded once, not retried forever', async () => {
+    // A marker written by a future or older shape. The drain must neither page
+    // with a half-built alert nor loop on it every tick for the life of the
+    // process. Written through the store so the real key encoding is exercised.
+    const poisonKey = `${MARKER_PREFIX}99`;
+    setRecoveryMarker(poisonKey, { kind: 'bogus-shape-from-another-version' });
+    expect(retainedKeys()).toEqual([poisonKey]);
+
+    const { conn } = makeConn();
+    const scheduler = new MessageScheduler(db, conn, SCHEDULER_CONFIG);
+    await scheduler.tick();
+    await scheduler.tick();
+
+    expect(alertsOf('scheduler_send_failed').length).toBe(0);
+    expect(retainedKeys()).toEqual([]);
   });
 
   it('A9 (control): a de-linked instance still holds its rows and alerts on its own source, untouched by this path', async () => {
