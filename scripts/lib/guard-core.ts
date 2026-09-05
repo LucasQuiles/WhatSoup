@@ -591,8 +591,16 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
         }
         continue;
       }
-      if (!stat.isFile() || !options.includeFile(relativeEntry)) continue;
+      if (!options.includeFile(relativeEntry)) continue;
       candidatesFound += 1;
+      if (!stat.isFile()) {
+        recordIssue({
+          code: 'guard.scan.entry-unreadable',
+          operation: 'lstat',
+          path: relativeEntry,
+        });
+        continue;
+      }
       try {
         const content = fileSystem.readFileSync(absoluteEntry, stat, entry);
         if (typeof content !== 'string') {
@@ -757,10 +765,11 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
       }
     }
 
+    let repositoryNavigationValid = true;
     rootLoop: for (const root of repositoryStat === null ? [] : roots) {
+      if (!repositoryNavigationValid) break;
       const absoluteRoot = path.join(repoRoot, root);
       const rootFileCheckpoint = files.length;
-      let repositoryNavigationValid = true;
       try {
         let enteredStat: SourceInventoryStat | null = null;
         let traversedRoot = '';
@@ -878,7 +887,6 @@ export function inventorySourceFiles(options: SourceInventoryOptions): SourceInv
           repositoryNavigationValid = false;
         }
       }
-      if (!repositoryNavigationValid) break;
     }
   } finally {
     const currentCwdStat = lstatSync('.');
