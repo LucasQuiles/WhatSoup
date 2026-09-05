@@ -46,8 +46,16 @@ def _runner_args(instance: str) -> argparse.Namespace:
     )
 
 
+# #2358 C9/C10 fixture: the observer and the target resolve to different
+# release commits while each side stays internally consistent.
+_OBSERVER_RELEASE_SHA = "a" * 40
+_TARGET_RELEASE_SHA = "b" * 40
+_TARGET_MANIFEST_DIGEST = "c" * 64
+_TARGET_CWD = "/srv/release"
+
+
 def _new_block_keys() -> set[str]:
-    return {"observerProvenance", "targetProvenance"}
+    return {"observerProvenance", "targetProvenance", "releaseDivergence"}
 
 
 def test_runner_failure_event_carries_separated_provenance_blocks(tmp_path, monkeypatch):
@@ -104,6 +112,51 @@ def test_health_self_event_has_observer_but_no_target_block(tmp_path, monkeypatc
     assert "observerProvenance" in event
     # A producer-self event has no distinct serving target to attribute.
     assert "targetProvenance" not in event
+
+
+def test_runner_envelope_names_the_target_when_releases_diverge(tmp_path, monkeypatch):
+    """#2358 C10: the originating defect. The producer ran from a different
+    checkout than the service it inspected, and the envelope has to say so --
+    naming the TARGET as the differing party, never the observer."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    mod = _load("bot_errors_runner_2358_divergence", _RUNNER)
+    tp = sys.modules["lib.target_provenance"]
+
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    monkeypatch.setattr(
+        tp, "default_probes",
+        lambda platform: tp.TargetProbes(
+            platform=platform,
+            service_state=lambda unit: "active",
+            service_pids=lambda unit: [4242],
+            process_started_epoch=lambda pid: 1_750_000_000,
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {
+                "manifestDigest": _TARGET_MANIFEST_DIGEST,
+                "sourceCommit": commit_for(cwd),
+            },
+            git_head=commit_for,
+            now_iso=lambda: "2026-08-26T00:00:00Z",
+        ),
+    )
+    event = mod.build_failure_event(_runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit")
+
+    observer = event["observerProvenance"]
+    target = event["targetProvenance"]
+    # Precondition, so this cannot pass vacuously if both sides ever resolve
+    # to the same commit: the two releases really do differ, and each block
+    # agrees with itself, so only the cross-block axis is under test.
+    assert observer["release"]["sourceCommit"] == _OBSERVER_RELEASE_SHA
+    assert target["release"]["sourceCommit"] == _TARGET_RELEASE_SHA
+    assert observer["release"]["sourceCommit"] != target["release"]["sourceCommit"]
+    assert observer["release"]["agreement"] == "agree"
+    assert target["release"]["agreement"] == "agree"
+
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "diverged"
+    assert divergence["divergentParty"] == "target"
 
 
 def test_new_blocks_are_content_free(tmp_path, monkeypatch):

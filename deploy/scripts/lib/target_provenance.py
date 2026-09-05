@@ -46,6 +46,16 @@ _NOT_RUNNING_RAW = {"inactive", "failed", "not-loaded", "deactivating", "dead"}
 
 _HEX = set("0123456789abcdef")
 
+# Cross-block release verdicts (issue #2358 C9/C10). Deliberately distinct from
+# the within-block ``release.agreement`` vocabulary: ``agree``/``mismatch``
+# compare ONE side's manifest receipt against that same side's git head, while
+# these compare the observer's release against the target's. Sharing words
+# across the two axes is what let a within-target mismatch read as coverage of
+# the observer-versus-target defect this issue was filed for.
+RELEASE_DIVERGENCE_ALIGNED = "aligned"
+RELEASE_DIVERGENCE_DIVERGED = "diverged"
+RELEASE_DIVERGENCE_NOT_COMPARABLE = "not_comparable"
+
 
 def _is_hex_digest(value: Any) -> bool:
     return isinstance(value, str) and len(value) in (40, 64) and all(c in _HEX for c in value)
@@ -229,6 +239,80 @@ def observer_provenance_block(
         "receiptAt": probes.now_iso(),
         "producer": producer,
         "release": _release_block(root, probes, notes),
+        "notes": notes,
+    }
+
+
+def _release_source_commit(block: Mapping[str, Any] | None) -> str | None:
+    """The release commit a provenance block actually proved, or None."""
+    if not isinstance(block, Mapping):
+        return None
+    release = block.get("release")
+    if not isinstance(release, Mapping):
+        return None
+    commit = release.get("sourceCommit")
+    return commit if _is_hex_digest(commit) else None
+
+
+def classify_release_divergence(
+    observer: Mapping[str, Any] | None,
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify the OBSERVER's release against the TARGET's release.
+
+    Pure: reads two already-built blocks and returns a new dict. It writes
+    nothing and probes nothing, so it cannot fail an envelope that resolved.
+
+    The two sides are judged by deliberately different predicates, because the
+    blocks are not symmetric. ``resolve_target_provenance`` carries an explicit
+    ``resolution``, and an unresolved target can still surface a release commit
+    -- a failed service-state probe leaves ``resolution`` unknown while the
+    manifest receipt survives. Comparing digests alone would call that
+    agreement, so a target is comparable only when it resolved AND proved a
+    commit. ``observer_provenance_block`` has no ``resolution`` field at all;
+    its failure to resolve shows up as an absent release commit, which is
+    therefore the whole observer-side predicate.
+
+    Fail closed (#2358 C7): anything short of two proven commits is
+    ``not_comparable`` with a note naming the missing side. It is never
+    ``aligned``, because absence of evidence is not evidence of agreement.
+    When the commits differ the verdict names the TARGET as the divergent
+    party (#2358 C10): the observer reported faithfully about a service that
+    was running other code, and attributing the difference to the observer is
+    the misattribution this issue was filed for.
+    """
+    notes: list[str] = []
+
+    observer_commit = _release_source_commit(observer)
+    if observer is None:
+        notes.append("observer_block_absent")
+    elif observer_commit is None:
+        notes.append("observer_source_commit_absent")
+
+    target_commit: str | None = None
+    if target is None:
+        notes.append("target_block_absent")
+    elif target.get("resolution") != "resolved":
+        notes.append("target_unresolved")
+    else:
+        target_commit = _release_source_commit(target)
+        if target_commit is None:
+            notes.append("target_source_commit_absent")
+
+    if observer_commit is None or target_commit is None:
+        classification = RELEASE_DIVERGENCE_NOT_COMPARABLE
+        divergent_party = None
+    elif observer_commit == target_commit:
+        classification = RELEASE_DIVERGENCE_ALIGNED
+        divergent_party = None
+    else:
+        classification = RELEASE_DIVERGENCE_DIVERGED
+        divergent_party = "target"
+
+    return {
+        "schemaVersion": TARGET_PROVENANCE_SCHEMA_VERSION,
+        "classification": classification,
+        "divergentParty": divergent_party,
         "notes": notes,
     }
 

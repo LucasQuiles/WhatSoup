@@ -14,6 +14,7 @@ if str(_SCRIPT_ROOT) not in sys.path:
 
 from lib.target_provenance import (  # noqa: E402
     TargetProbes,
+    classify_release_divergence,
     observer_provenance_block,
     resolve_target_provenance,
     safe_target_provenance,
@@ -23,6 +24,9 @@ from lib.target_provenance import (  # noqa: E402
 _SHA_A = "a" * 40
 _SHA_B = "b" * 40
 _DIGEST = "c" * 64
+# The probe cwd that stands for the TARGET checkout; anything else a probe is
+# asked about is the OBSERVER's own checkout.
+_TARGET_CWD = "/srv/release"
 
 
 def probes(**overrides) -> TargetProbes:
@@ -176,6 +180,85 @@ class TestObserverBlock:
         block = observer_provenance_block("probe-producer", tmp_path / "orphan.py", probes())
         assert "observer_root_unresolved" in block["notes"]
         assert block["release"]["agreement"] == "unknown"
+
+
+class TestReleaseDivergence:
+    """#2358 C9/C10: the OBSERVER's release versus the TARGET's release.
+
+    This is a different axis from ``release.agreement``, which compares a
+    single side's manifest receipt against that same side's git head. Every
+    case below keeps both blocks internally agreeing, so only the cross-block
+    axis can move the verdict.
+    """
+
+    def _blocks(self, target_commit: str, **overrides):
+        def commit_for(cwd):
+            return target_commit if cwd == _TARGET_CWD else _SHA_A
+
+        side_probes = probes(
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {"manifestDigest": _DIGEST, "sourceCommit": commit_for(cwd)},
+            git_head=commit_for,
+            **overrides,
+        )
+        repo_root = Path(__file__).resolve().parents[3]
+        observer = observer_provenance_block(
+            "probe-producer", repo_root / "deploy" / "scripts" / "bot-errors-runner.py", side_probes
+        )
+        target = resolve_target_provenance("probe", side_probes)
+        return observer, target
+
+    def test_differing_release_commits_name_the_target_as_divergent(self):
+        observer, target = self._blocks(_SHA_B)
+        # Precondition: the divergence is strictly between the two blocks.
+        assert observer["release"]["sourceCommit"] == _SHA_A
+        assert target["release"]["sourceCommit"] == _SHA_B
+        assert observer["release"]["agreement"] == "agree"
+        assert target["release"]["agreement"] == "agree"
+        assert target["resolution"] == "resolved"
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "diverged"
+        assert verdict["divergentParty"] == "target"
+
+    def test_same_release_commit_is_aligned(self):
+        observer, target = self._blocks(_SHA_A)
+        assert observer["release"]["sourceCommit"] == target["release"]["sourceCommit"]
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "aligned"
+        assert verdict["divergentParty"] is None
+
+    def test_unresolved_target_is_not_comparable_even_when_commits_match(self):
+        # The service-state probe failed, so the target block is unresolved --
+        # yet its release evidence survives and happens to equal the observer's.
+        # Comparing digests alone would call that agreement; it is not.
+        observer, target = self._blocks(_SHA_A, service_state=lambda unit: None)
+        assert target["resolution"] == "unknown"
+        assert target["release"]["sourceCommit"] == observer["release"]["sourceCommit"]
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "not_comparable"
+        assert verdict["divergentParty"] is None
+        assert "target_unresolved" in verdict["notes"]
+
+    def test_unresolved_observer_is_not_comparable(self, tmp_path):
+        def commit_for(cwd):
+            return _SHA_A
+
+        side_probes = probes(
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {"manifestDigest": _DIGEST, "sourceCommit": commit_for(cwd)},
+            git_head=commit_for,
+        )
+        observer = observer_provenance_block("probe-producer", tmp_path / "orphan.py", side_probes)
+        target = resolve_target_provenance("probe", side_probes)
+        assert observer["release"]["sourceCommit"] is None
+        assert target["release"]["sourceCommit"] == _SHA_A
+
+        verdict = classify_release_divergence(observer, target)
+        assert verdict["classification"] == "not_comparable"
+        assert "observer_source_commit_absent" in verdict["notes"]
 
 
 class TestSafeWrappers:
