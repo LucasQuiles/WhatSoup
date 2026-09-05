@@ -76,7 +76,39 @@ function launchdAbsentError(message = 'no service'): Error & { code: number } {
   return Object.assign(new Error(message), { code: 3 });
 }
 
-function generatedPlistIdentity(name = 'agent'): string {
+/**
+ * A plist carrying the generated identity — and, by default, an
+ * EnvironmentVariables dict, because every repo-generated plist has one:
+ * buildPlist emits the key, its dict and PATH as UNCONDITIONAL array literals.
+ * A fixture without one is not a shape this repo produces.
+ *
+ * That matters here because the governed-env reader refuses an installed plist
+ * whose EnvironmentVariables element it cannot find: an env-less fixture would
+ * make every apply-path test below refuse for a reason none of them is about.
+ * `environment: null` builds that shape deliberately, for the one test that
+ * needs a plist the reader cannot enumerate.
+ *
+ * The block goes AFTER </array>: the identity predicate requires Label to be
+ * followed directly by ProgramArguments.
+ */
+function generatedPlistIdentity(
+  name = 'agent',
+  options: { environment?: Record<string, string> | null } = {},
+): string {
+  const environment = options.environment === undefined
+    ? { PATH: '/usr/bin' }
+    : options.environment;
+  const envBlock = environment === null
+    ? []
+    : [
+        '<key>EnvironmentVariables</key>',
+        '<dict>',
+        ...Object.entries(environment).flatMap(([key, value]) => [
+          `<key>${key}</key>`,
+          `<string>${value}</string>`,
+        ]),
+        '</dict>',
+      ];
   return [
     '<plist>',
     '<key>Label</key>',
@@ -86,6 +118,7 @@ function generatedPlistIdentity(name = 'agent'): string {
     '<string>/tmp/whatsoup-home/.local/bin/whatsoup</string>',
     `<string>${name}</string>`,
     '</array>',
+    ...envBlock,
     '</plist>',
   ].join('\n');
 }
@@ -743,6 +776,52 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });
 
+  it('refuses mixed canonical and XML-whitespace-padded declarations before any apply mutation', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const observed = rendered.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict>',
+        '    <key>PATH</key>',
+        '    <string>/opt/decoy-bin</string>',
+        '  </dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+    expect(observed).not.toBe(rendered);
+    expect(observed).toContain('<key>EnvironmentVariables</key>');
+    expect(observed).toContain('<key >EnvironmentVariables</key >');
+    expect(observed).toContain('/opt/decoy-bin');
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const launchctlCalls = childProcessMocks.execFile.mock.calls
+      .filter(([command]) => command === 'launchctl').length;
+    expect({
+      refused: thrown instanceof LaunchdReconcileRefusedError,
+      writeCalls: fsMocks.writeFileSync.mock.calls.length,
+      renameCalls: fsMocks.renameSync.mock.calls.length,
+      unlinkCalls: fsMocks.unlinkSync.mock.calls.length,
+      launchctlCalls,
+    }).toEqual({
+      refused: true,
+      writeCalls: 0,
+      renameCalls: 0,
+      unlinkCalls: 0,
+      launchctlCalls: 0,
+    });
+  });
+
   it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
@@ -854,7 +933,11 @@ describe('platform service managers', () => {
   it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
     setPlatform('darwin');
     const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();
-    const observed = `${generatedPlistIdentity()}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
+    // `environment: null` so this fixture carries exactly ONE marker: with the
+    // helper's default dict it would carry two, and the refusal would come from
+    // the duplicate-declaration rule rather than from the unterminated dict this
+    // test names. Same green, different behaviour.
+    const observed = `${generatedPlistIdentity('agent', { environment: null })}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     await expect(reconcileLaunchdPlist('agent', { dryRun: false })).rejects.toThrow(LaunchdReconcileRefusedError);

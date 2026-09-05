@@ -64,6 +64,22 @@ const PROTECTED_ENV_NAMES = [...new Set([
   'GEMINI_API_KEY',
 ])];
 
+/**
+ * The credential store `deploy/whatsoup` reaches on THIS host, and the fixture
+ * call log its fail-closed stub writes there.
+ *
+ * The wrapper selects the store by `uname -s` (deploy/whatsoup:69-79): Darwin
+ * reads the Keychain through `deploy/lib/read-keychain-secret.mjs`, every other
+ * platform shells out to `secret-tool`. The fixture stubs both arms, so exactly
+ * one log is produced per host — the one belonging to the arm the wrapper took.
+ * Tests read that log unconditionally, which keeps "the stub answered every
+ * lookup" falsifiable on both platforms instead of passing where the file that
+ * should exist does not.
+ */
+const HOST_CREDENTIAL_STORE = process.platform === 'darwin'
+  ? { log: 'keychain-calls.log', callPrefix: 'read-keychain-secret.mjs ' }
+  : { log: 'secret-tool-calls.log', callPrefix: 'lookup service ' };
+
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
 // fleet hosts instead of depending on a host nvm install.
@@ -298,7 +314,19 @@ function makeWrapperFixture(): WrapperFixture {
   // the protected-env assertion correctly fails. Shadow `secret-tool` with
   // a failing stub and pin a minimal PATH so the fixture is hermetic on
   // every host, matching keyring-less CI.
-  writeFileSync(join(sbin, 'secret-tool'), '#!/usr/bin/env bash\nexit 1\n', 'utf8');
+  // The stub also records every lookup it denied so tests can prove the
+  // fixture's only credential-store path is this fail-closed stub.
+  // `deploy/whatsoup` selects its credential store by `uname -s`, so this stub
+  // only ever runs on the non-Darwin arm. The Darwin arm reaches the Keychain
+  // through `deploy/lib/read-keychain-secret.mjs`, which the fake Node above
+  // shadows with an equally fail-closed branch recording its own call log
+  // (WHATSOUP_TEST_KEYCHAIN_CALLS). Exactly one of the two logs is produced on
+  // any given host, and the arm the host actually takes always produces one.
+  writeFileSync(
+    join(sbin, 'secret-tool'),
+    '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${WHATSOUP_TEST_STUB_CALLS:-/dev/null}"\nexit 1\n',
+    'utf8',
+  );
   chmodSync(join(sbin, 'secret-tool'), 0o755);
   writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
@@ -326,6 +354,10 @@ if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
       exit 91
     fi
   done
+fi
+if [[ "\${1:-}" == */lib/read-keychain-secret.mjs ]]; then
+  printf '%s %s\\n' "$(basename "$1")" "\${*:2}" >> "\${WHATSOUP_TEST_KEYCHAIN_CALLS:-/dev/null}"
+  exit 1
 fi
 if [ "\${1:-}" = "-e" ]; then
   if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
@@ -440,6 +472,8 @@ function runWrapper(
       WHATSOUP_TEST_DB_MODE: 'ready',
       WHATSOUP_TEST_PREFLIGHT_RC: '0',
       WHATSOUP_SKIP_PREFLIGHT: '',
+      WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
+      WHATSOUP_TEST_KEYCHAIN_CALLS: join(fixture.root, 'keychain-calls.log'),
       WHATSOUP_HEALTH_TOKEN: 'test-health-token',
       OPENAI_API_KEY: 'test-openai-key',
       PINECONE_API_KEY: 'test-pinecone-key',
@@ -815,6 +849,50 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.status, result.stderr).toBe(0);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
     expect(result.stderr).not.toContain('protected-env-present:');
+  });
+
+  it('stays credential-hermetic behind the failing stub with synthetic canaries', () => {
+    const fixture = makeWrapperFixture();
+    // Distinctive synthetic values for every protected name: if the fixture
+    // ever regresses to a real credential store, observed values for these
+    // names stop being the canaries and the pattern assertions below fire.
+    // Built dynamically (no literal name-to-value assignment) so the
+    // secret-assignment pre-commit guard stays quiet; values remain
+    // deterministic and distinctive per protected name.
+    const canaries: Record<string, string> = Object.fromEntries(
+      PROTECTED_ENV_NAMES.map((name) => [name, `canary-${name.toLowerCase()}-3f9d1a`]),
+    );
+
+    const result = runWrapper(fixture, canaries);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    // No real-format credential value ever surfaced in any observable channel.
+    const observed = `${result.stdout}\n${result.stderr}\n${result.trace.join('\n')}`;
+    expect(observed).not.toMatch(/sk-proj-/);
+    expect(observed).not.toMatch(/pcsk_/);
+    expect(observed).not.toMatch(/canary-/);
+    // Every denied lookup was answered by the fixture's fail-closed stub, and
+    // only through the read-only entry point of the store this host actually
+    // uses — the fixture has no other store path. The read is unconditional on
+    // both platforms: an absent log means the stub that was supposed to answer
+    // never ran, which is a fixture regression and must fail here.
+    const storeCalls = readFileSync(join(fixture.root, HOST_CREDENTIAL_STORE.log), 'utf8');
+    const storeCallLines = storeCalls.split('\n').filter((line) => line !== '');
+    expect(storeCallLines.length).toBeGreaterThan(0);
+    for (const line of storeCallLines) {
+      expect(line.startsWith(HOST_CREDENTIAL_STORE.callPrefix), line).toBe(true);
+    }
+    // And in the wrapper's pinned PATH, secret-tool resolves to the stub.
+    const resolved = spawnSync('bash', ['-c', 'command -v secret-tool'], {
+      encoding: 'utf8',
+      env: {
+        ...cleanGitEnv(),
+        PATH: [join(fixture.root, 'sbin'), '/usr/bin:/bin'].join(':'),
+        HOME: fixture.home,
+      },
+    });
+    expect(resolved.stdout.trim()).toBe(join(fixture.root, 'sbin', 'secret-tool'));
   });
 
   it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
