@@ -758,6 +758,16 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
+/**
+ * What a wedged-lane release did to the provider (#3374 C7). `reaped_child` is
+ * the real-process wedge, where an intentional SIGKILL routes the exit through
+ * the session's own crash machinery. `reap_skipped_no_child` is the
+ * managed-provider wedge: the session holds no child, so nothing is killed and
+ * the remote request is left outstanding — the release still frees the lane,
+ * but it must not be recorded as a reap that happened.
+ * `reap_unavailable` is a session surface that does not implement the reap.
+ */
+type WedgedLaneReapOutcome = 'reaped_child' | 'reap_skipped_no_child' | 'reap_unavailable';
 
 export class AgentRuntime implements Runtime {
 
@@ -3206,13 +3216,12 @@ export class AgentRuntime implements Runtime {
         );
         continue;
       }
-      this.announceWedgedLaneRelease(row.seq, turnQueue.pending);
-      // A live provider child (real-process wedge) is killed intentionally so
-      // its exit routes through the session's own crash machinery; session
-      // doubles and managed-provider sessions have no child to kill.
-      if (typeof session.reapWedgedProviderChild === 'function') {
-        session.reapWedgedProviderChild();
-      }
+      // Reap BEFORE announcing so the operator record carries what the reap
+      // actually did rather than what the release intended (#3374 C7). Both
+      // statements are synchronous and adjacent, so no lane state can change
+      // between them.
+      const reapOutcome = this.reapWedgedLaneProvider(session);
+      this.announceWedgedLaneRelease(row.seq, turnQueue.pending, reapOutcome);
       // Reject the held turn's runtime completion (the turn-recovery
       // replay-abort pattern), then settle the session's provider-turn
       // promise: the pinned processor is parked inside `sendTurn`, which by
@@ -3236,17 +3245,40 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** Operator-facing announcement shared by every wedged-lane release. */
-  private announceWedgedLaneRelease(inboundSeq: number, queuedBehind: number): void {
+  /**
+   * Kill the wedged lane's provider child, if it has one, and report what
+   * happened. `reapWedgedProviderChild` returns false when the session holds no
+   * child — every managed-loop provider — so a bare call cannot distinguish a
+   * reap from a no-op (#3374 C7). The absent-method case is a session surface
+   * older than the reap and is named separately: it is not evidence that the
+   * session had no child.
+   */
+  private reapWedgedLaneProvider(session: SessionManager): WedgedLaneReapOutcome {
+    if (typeof session.reapWedgedProviderChild !== 'function') return 'reap_unavailable';
+    return session.reapWedgedProviderChild() ? 'reaped_child' : 'reap_skipped_no_child';
+  }
+
+  /**
+   * Operator-facing announcement shared by every wedged-lane release. The reap
+   * outcome is required, not defaulted: the compiler is what proves both
+   * release call sites report one.
+   */
+  private announceWedgedLaneRelease(
+    inboundSeq: number,
+    queuedBehind: number,
+    reapOutcome: WedgedLaneReapOutcome,
+  ): void {
     log.warn(
-      { inboundSeq, queuedBehind, scope: this.sessionScope },
-      'durably reclaimed turn still pins a live lane — releasing via crash finalization',
+      { inboundSeq, queuedBehind, scope: this.sessionScope, reapOutcome },
+      reapOutcome === 'reaped_child'
+        ? 'durably reclaimed turn still pins a live lane — releasing via crash finalization'
+        : 'durably reclaimed turn still pins a live lane — releasing with no provider child reaped',
     );
     emitAlertChecked(
       this.instanceName,
       'agent_wedged_turn_released',
       'Wedged agent turn released after durable reclamation',
-      `inbound_seq=${inboundSeq} queued_behind=${queuedBehind} scope=${this.sessionScope}`,
+      `inbound_seq=${inboundSeq} queued_behind=${queuedBehind} scope=${this.sessionScope} reap=${reapOutcome}`,
       'warning',
     );
   }
@@ -3309,10 +3341,10 @@ export class AgentRuntime implements Runtime {
     }
     // shared queues followers behind the wedge; single chains them on turnChain
     // with nothing to count.
-    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0);
-    if (typeof session.reapWedgedProviderChild === 'function') {
-      session.reapWedgedProviderChild();
-    }
+    // Same ordering as the per-chat path: the reap's answer is what the
+    // announcement reports (#3374 C7).
+    const reapOutcome = this.reapWedgedLaneProvider(session);
+    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
     // The reject is the live-turn interlock, not just a signal: it refuses
     // unless the published completion IS this context's logical turn
     // (rejectRuntimeTurnCompletionValue). Only then is the provider-turn
