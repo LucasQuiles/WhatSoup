@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "8f2f0999c9c17deb7a8fafcbbcbcc4ce0bd4f7c9c2dfba40fc3dcdd9e6d26045",
+      "sha256": "24a0d7d3b0e81119cec835accfef2f12626dde99b0563e3c00d0677c02cdff1b",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -227,6 +227,8 @@
         "deadman_observation_gap_line",
         "deadman_observation_gap_inventory",
         "instance_plist_environment",
+        "mask_inert_xml_regions",
+        "PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE",
         "instance_plist_governed_environment",
         "GOVERNED_PLIST_UNREADABLE",
         "GOVERNED_PLIST_NOT_APPLICABLE",

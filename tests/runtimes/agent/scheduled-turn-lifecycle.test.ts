@@ -102,6 +102,10 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
       shutdown: vi.fn(async () => {
         active = false;
       }),
+      // Present so the wedged-lane release's intentional-kill step is
+      // OBSERVABLE (the real SessionManager reaps a live provider child here).
+      // A no-op: these doubles own no child process.
+      reapWedgedProviderChild: vi.fn(),
       clearTurnWatchdog: vi.fn(),
       tickWatchdog: vi.fn(),
       trackToolStart: vi.fn(),
@@ -336,6 +340,7 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '../../../src/core/observability/lifecycle-emission.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
+import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 // ─── Shared fixtures ────────────────────────────────────────────────────────
@@ -348,6 +353,9 @@ const SCHEDULED_PROMPT_MARK = '[isolated scheduled background turn]';
 // long enough for the runtime to settle if the property held, short enough to
 // keep the suite well under the 10s per-test budget.
 const GAP_PROBE_BOUND_MS = 1_500;
+// The user-facing notice handleMessage's turn-chain catch sends on a genuine
+// processing failure (runtime.ts). A wedged-lane release is not one.
+const PROCESSING_FAILURE_NOTICE = 'Something went wrong processing that message. Try again?';
 
 function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
   const sentMessages: Array<{ jid: string; text: string }> = [];
@@ -407,10 +415,58 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   let runtime: AgentRuntime;
   let messenger: Messenger;
 
+  /**
+   * Text the runtime pushed through sendDirect. chat-transport.ts routes a
+   * direct send to the chat's outbound queue (enqueueText) whenever one exists,
+   * which it always does here, so the queue doubles — not the messenger — are
+   * where a direct send is observable.
+   */
+  function directSendTexts(): string[] {
+    return queueDoubles.flatMap((q) => q.enqueueText.mock.calls.map((call) => call[0] as string));
+  }
+
   function status(seq: number): string {
     return (db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as {
       processing_status: string;
     }).processing_status;
+  }
+
+  /**
+   * Model the race guard 7 exists for: the provider terminal HAS arrived (the
+   * real SessionManager clears providerTurnInFlight at terminalization) while
+   * the runtime lane has not been released yet, so ordinary finalization is
+   * still racing the sweep. The double conflates those two states, so the
+   * status is overridden for this one session only.
+   */
+  function reportProviderTurnTerminalized(session: SessionDouble): void {
+    const terminalized = { ...session.getStatus(), turnInFlight: false };
+    session.getStatus.mockReturnValue(terminalized as ReturnType<typeof session.getStatus>);
+  }
+
+  /** emitAlertChecked calls carrying the wedged-lane release key. */
+  function wedgeReleaseAlerts(): unknown[] {
+    return vi.mocked(emitAlertChecked).mock.calls.filter(
+      (call) => call[1] === 'agent_wedged_turn_released',
+    );
+  }
+
+  /**
+   * Spy on the coordinator call the release makes. Its argument is a freshly
+   * constructed WedgedTurnReclaimedError, so "never called" is direct evidence
+   * that no such error was constructed — arguments evaluate at call time.
+   */
+  function spyOnTurnCompletionRejection() {
+    const coordinator = (runtime as unknown as {
+      runtimeTurnCoordinator: { rejectRuntimeTurnCompletion: (...args: never[]) => boolean };
+    }).runtimeTurnCoordinator;
+    return vi.spyOn(coordinator, 'rejectRuntimeTurnCompletion');
+  }
+
+  /** Who owns the durable terminal: the sweep writes 'stale_reclaim'. */
+  function failureClass(seq: number): string | null {
+    return (db.raw.prepare('SELECT failure_class FROM inbound_events WHERE seq = ?').get(seq) as {
+      failure_class: string | null;
+    }).failure_class;
   }
 
   function backdate(seq: number, interval: string): void {
@@ -712,12 +768,17 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
 
-    // OPEN GAP (#3374 ask 2): the stale-reclaim release iterates only
-    // perChatTurnQueues — shared mode's single global TurnQueue is never
-    // matched, so durable reclamation still leaves the runtime lane wedged.
-    // This probe asserts the DESIRED coupling; it.fails keeps it green only
-    // while the gap exists.
-    it.fails('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the
+    // stale-reclaim release no longer iterates only perChatTurnQueues. shared
+    // mode's wedged turn pins the ONE global TurnQueue, and the release now
+    // reaches it through the lane's own observable — the published
+    // currentRuntimeTurnContext, matched to the reclaimed row by inboundSeq —
+    // rejecting that turn's runtime completion and settling the session's
+    // provider-turn promise. The queue's ordinary processor-error finalization
+    // then recognizes the sweep-owned durable terminal (reclaimed_by_sweep)
+    // and advances, so the wedge ends without a restart and afterEach's normal
+    // shutdown still succeeds.
+    it('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
@@ -727,6 +788,91 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(globalQueue().activeTurn ?? null).toBeNull();
       }, { timeout: GAP_PROBE_BOUND_MS });
+    });
+
+    // NEGATIVE CONTROL for the release above. The 24h grace is NOT the
+    // discriminator — a grace-bounded test passes even against a release that
+    // fires on any non-empty reclaim batch. So the sweep genuinely reclaims a
+    // row (failedStale: 1, the listener runs with a non-empty set) while the
+    // wedged scheduled turn stays INSIDE its grace: only the identity match
+    // (reclaimed seq === the lane context's inboundSeq) can keep the live turn
+    // pinned here.
+    it('cell 7 reclamation NEGATIVE: a reclaimed row for a DIFFERENT turn leaves the live shared lane pinned', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      // An unrelated stale open inbound in another conversation — never
+      // dispatched, so it pins no lane.
+      const strangerSeq = engine.journalInbound(
+        'msg-unrelated-stale', toConversationKey(otherChatJid), otherChatJid, 'agent',
+      );
+      backdate(strangerSeq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+      expect(status(strangerSeq)).toBe('failed');
+
+      // The live turn is untouched: still pinned, still open, provider promise
+      // never force-settled.
+      expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      expect(session.turnInFlight).toBe(true);
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(status(seq)).toBe('processing');
+    });
+
+    // NEGATIVE CONTROL for the healthy-child interlock. Identity matches on
+    // BOTH axes here — the reclaimed row IS this lane's turn — so the seq and
+    // conversation-key guards let it through. What must stop the release is the
+    // provider-turn-in-flight check: a session whose terminal already arrived
+    // has a finalization owner, and releasing would reap a healthy child and
+    // reject a turn somebody else is settling.
+    it('cell 7 reclamation NEGATIVE: a MATCHING reclaimed row is not released once the provider turn has terminalized', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      reportProviderTurnTerminalized(session);
+      const rejectSpy = spyOnTurnCompletionRejection();
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      // Nothing the release does happened: no announcement, no child reap, no
+      // completion rejection (hence no WedgedTurnReclaimedError constructed),
+      // no forced provider-turn settle — and the lane is untouched.
+      expect(wedgeReleaseAlerts()).toHaveLength(0);
+      expect(session.reapWedgedProviderChild).not.toHaveBeenCalled();
+      expect(rejectSpy).not.toHaveBeenCalled();
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      expect(session.turnInFlight).toBe(true);
+    });
+
+    // NEGATIVE CONTROL for the session-ownership guard: the reclaimed row and
+    // the lane agree on identity, but the live session is no longer the one the
+    // turn context was minted against (a recycled session). Releasing would
+    // reject a context a dead generation owns.
+    it('cell 7 reclamation NEGATIVE: a MATCHING reclaimed row is not released when session ownership is stale', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      (runtime as unknown as { sessionManagerIds: WeakMap<object, string> })
+        .sessionManagerIds.set(session as unknown as object, 'superseded-manager-id');
+      const rejectSpy = spyOnTurnCompletionRejection();
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(wedgeReleaseAlerts()).toHaveLength(0);
+      expect(rejectSpy).not.toHaveBeenCalled();
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
     });
   });
 
@@ -792,20 +938,26 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     });
 
     // OPEN GAP (#3374): single mode has NO scheduled/interactive isolation on
-    // main (same shape as shared mode — proven above). This probe asserts the
-    // DESIRED isolation; it.fails keeps it green only while the gap exists.
+    // main — the #3341 port routes scheduled jobs to an isolated session/queue
+    // only in non-sandbox per_chat mode, the same shape as shared mode (proven
+    // above). This probe asserts the DESIRED isolation; it.fails keeps it green
+    // only while the gap exists.
     it.fails('cell 7 isolation gap probe: interactive turn completes while a scheduled terminal is withheld (no single-mode isolation on main)', async () => {
       dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
       await driveInteractiveToComplete({}, GAP_PROBE_BOUND_MS);
     });
 
-    // OPEN GAP (#3374 ask 2): single mode has no TurnQueue — the wedged turn
-    // pins this.turnChain, and the stale-reclaim release has no lane to
-    // match. This probe asserts the DESIRED coupling (the chain settles once
-    // the durable row is reclaimed); it.fails keeps it green only while the
-    // gap exists.
-    it.fails('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
+    // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: single
+    // mode still has no TurnQueue, so the release reaches the lane through the
+    // published currentRuntimeTurnContext instead, matched to the reclaimed row
+    // by inboundSeq. Rejecting that turn's runtime completion unpins
+    // sendTurnNonShared, and handleMessage's turn-chain catch settles the
+    // chain. That catch recognizes the release as a DESIGNED settlement: the
+    // sweep keeps durable ownership (failure_class stays 'stale_reclaim', so no
+    // second terminal was written) and no user-facing failure notice is sent —
+    // for a scheduled job that notice would land in the report chat a day late.
+    it('cell 7 reclamation gap probe: durable reclamation also settles the wedged turn chain (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
       await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
 
@@ -813,6 +965,50 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
       expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('settled');
+      expect(failureClass(seq)).toBe('stale_reclaim');
+      expect(directSendTexts()).not.toContain(PROCESSING_FAILURE_NOTICE);
+    });
+
+    // NEGATIVE CONTROL for the release above — same shape as shared's: the
+    // sweep genuinely reclaims a row (so the release listener runs with a
+    // non-empty set) while the wedged turn stays inside its grace. Only the
+    // identity match keeps the live turn pinned.
+    it('cell 7 reclamation NEGATIVE: a reclaimed row for a DIFFERENT turn leaves the live turn chain pinned', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      const strangerSeq = engine.journalInbound(
+        'msg-unrelated-stale-single', toConversationKey(otherChatJid), otherChatJid, 'agent',
+      );
+      backdate(strangerSeq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+      expect(status(strangerSeq)).toBe('failed');
+
+      expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('pending');
+      expect(session.turnInFlight).toBe(true);
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(status(seq)).toBe('processing');
+    });
+
+    // NEGATIVE CONTROL for the healthy-child interlock, single-scope twin of
+    // the shared case: identity matches on both axes, so only the
+    // provider-turn-in-flight check can stop the release.
+    it('cell 7 reclamation NEGATIVE: a MATCHING reclaimed row is not released once the provider turn has terminalized', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      reportProviderTurnTerminalized(session);
+      const rejectSpy = spyOnTurnCompletionRejection();
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(wedgeReleaseAlerts()).toHaveLength(0);
+      expect(session.reapWedgedProviderChild).not.toHaveBeenCalled();
+      expect(rejectSpy).not.toHaveBeenCalled();
+      expect(session.completeProviderTurn).not.toHaveBeenCalled();
+      expect(await turnChainState(GAP_PROBE_BOUND_MS)).toBe('pending');
+      expect(session.turnInFlight).toBe(true);
     });
   });
 
