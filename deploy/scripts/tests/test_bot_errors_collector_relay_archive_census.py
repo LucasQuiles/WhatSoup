@@ -982,6 +982,76 @@ def test_census_refuses_an_entry_swapped_for_a_symlink_after_it_was_stat_ed(
     assert report["total"]["unusableEntryCount"] == 1
 
 
+# The replacement is a regular file, so O_NOFOLLOW lets the open through and
+# the swap reaches the measurement itself. It is deliberately older and much
+# larger than the entry that was stat-ed, so a payload built from either one
+# is unmistakable.
+_SWAP_ORIGINAL_AGE_SECONDS = _HOUR
+_SWAP_REPLACEMENT_AGE_SECONDS = 5 * _DAY
+_SWAP_REPLACEMENT_PADDING = "x" * 4096
+
+
+def test_census_measures_the_file_it_opened_not_the_one_it_stat_ed(
+    collector, tmp_path, monkeypatch
+):
+    """Size and age come off the descriptor that was read.
+
+    The other swap fixtures put a SYMLINK in the window, which O_NOFOLLOW
+    refuses at the open, so none of them reaches the measurement. Here the
+    entry is renamed over by a different REGULAR file between the entry stat
+    and the entry open: the open succeeds, and the only thing separating the
+    two possible answers is which stat result the aggregates are built from.
+    Measuring from the pre-open stat would report the size and age of a file
+    the census never read.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    original = _write_artifact(
+        relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_SWAP_ORIGINAL_AGE_SECONDS
+    )
+    (root / "writefail-relayed").mkdir(parents=True)
+    original_size = os.path.getsize(original)
+
+    replacement = tmp_path / "replacement-artifact.json"
+    replacement.write_text(_event(summary=_SWAP_REPLACEMENT_PADDING), encoding="utf-8")
+    replacement_mtime = _NOW - _SWAP_REPLACEMENT_AGE_SECONDS
+    os.utime(replacement, (replacement_mtime, replacement_mtime))
+    replacement_size = os.path.getsize(replacement)
+    # Coverage assertion: unless the two files differ in BOTH size and age,
+    # the assertions below cannot tell which one was measured.
+    assert replacement_size != original_size
+    assert _SWAP_REPLACEMENT_AGE_SECONDS != _SWAP_ORIGINAL_AGE_SECONDS
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            # The stat has returned the original; the name now resolves to a
+            # different regular file. This is the window.
+            fired.append(path)
+            os.rename(replacement, relayed / _SWAP_TARGET_NAME)
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 1
+    # The file that was OPENED is the one measured ...
+    assert block["totalBytes"] == replacement_size
+    assert block["oldestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+    assert block["newestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+    # ... and the pre-open stat contributes nothing.
+    assert block["totalBytes"] != original_size
+    assert block["oldestAgeSeconds"] != _SWAP_ORIGINAL_AGE_SECONDS
+    assert report["total"]["totalBytes"] == replacement_size
+    assert report["total"]["oldestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+
+
 def test_census_counts_an_entry_swapped_for_a_directory_as_unusable(
     collector, tmp_path, monkeypatch
 ):
