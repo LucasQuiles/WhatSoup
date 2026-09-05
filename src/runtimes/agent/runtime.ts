@@ -660,6 +660,7 @@ import {
   isStopTeardownInFlight,
   NEW_ACK_REFUSED_STOP_IN_PROGRESS,
   STOP_ACK_COMPOUND_BODY_REFUSED,
+  NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED,
 } from './runtime-stop-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
@@ -4548,6 +4549,10 @@ export class AgentRuntime implements Runtime {
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
     let forwardAfterLocalCommand: string | null = null;
+    // #2949 N1: set by the /new fence below so the compound site refuses the
+    // body too. A flag, not a second guard read: the teardown can settle
+    // between the two sites, and the body must follow the command's fate.
+    let newRefusedForStopTeardown = false;
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
@@ -4618,6 +4623,7 @@ export class AgentRuntime implements Runtime {
             // whose /stop teardown has not settled that spawns a replacement
             // for an unproven cancellation, so refuse until the guard clears.
             if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
+              newRefusedForStopTeardown = true;
               this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
               break;
             }
@@ -4907,7 +4913,7 @@ export class AgentRuntime implements Runtime {
         // via the turn's durable terminal — NOT local_command_handled. The body is
         // a NEW first-turn admission (not #2334 active-turn steering).
         if (classified.type === 'local' && classified.compoundBody !== undefined) {
-          if (classified.command === 'stop') {
+          if (classified.command === 'stop' || newRefusedForStopTeardown) {
             // #2949 N1: /stop is the one registered command whose handler tears
             // the lane down, so the compound path would dispatch the body as a
             // NEW turn onto state the teardown just cleared — in single/shared
@@ -4919,11 +4925,16 @@ export class AgentRuntime implements Runtime {
             // 'local_command_handled', exactly as a plain /stop does. The body
             // is NOT dispatched, so the acknowledgement says so rather than
             // implying it was queued.
+            // A refused /new reaches here too: the fence broke out of the
+            // switch, so without this its body would still be forwarded into
+            // the scope whose teardown is unproven.
             log.warn(
               { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
-              'compound body refused for /stop — not dispatched',
+              'compound body refused — not dispatched',
             );
-            this.sendDirect(chatJid, STOP_ACK_COMPOUND_BODY_REFUSED);
+            this.sendDirect(chatJid, newRefusedForStopTeardown
+              ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
+              : STOP_ACK_COMPOUND_BODY_REFUSED);
           } else {
             forwardAfterLocalCommand = classified.compoundBody;
           }

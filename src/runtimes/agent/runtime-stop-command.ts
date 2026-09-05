@@ -64,7 +64,7 @@
 //     termination. Pinned by the RESIDUAL tests in runtime-stop-command.test.ts
 //     so a later change to it is deliberate.
 // (2) Ambiguous kill census. `SessionManager.shutdown` nulls `child` after
-//     `killSessionTree` returns normally even when PIDs stayed ambiguous and
+//     `killChildTree` returns normally even when PIDs stayed ambiguous and
 //     were never signalled (session.ts:4165-4188 and process-tree.ts:428-442 at
 //     b65984f0; the outcome sink at session.ts:1134-1138 only logs). The status
 //     this command reads then reports `providerTerminated` true, so 'stopped'
@@ -119,7 +119,18 @@
 // `isStopTeardownInFlight(scopeKey)` holds. This state exists only because THIS
 // leaf introduced a bounded wait: before it, /new awaited the teardown
 // unboundedly and no teardown ever outlived its command, so the guard changes
-// no pre-existing behaviour.
+// no pre-existing behaviour. A compound `/new\n<body>` is refused whole: the
+// body is not dispatched either, and NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED says
+// so, because forwarding it would put a new turn in the very scope the fence is
+// protecting.
+//
+// TWO RECORDED LIMITS ON THE FENCE, both follow-ups on #2949, neither closed
+// here. It is keyed by the scopeKey captured when /stop began, so a per-chat
+// alias migration moves the owned session and queue to a new key without moving
+// the guard (runtime.ts:3334 at b524de44) and a /new under the new key is not
+// fenced. And its refusal rides the same receipt-discarding sendDirect as every
+// other acknowledgement in this module, so a poisoned outbound queue drops it
+// (chat-transport.ts:215-216) and the user sees no answer at all.
 //
 // WHY NOT `teardown.disposition`: the coordinator assigns it unconditionally
 // from WHICH method ran — 'interruption' in terminalizeGlobalTurnForReset,
@@ -139,7 +150,7 @@ export const DEFAULT_STOP_TEARDOWN_TIMEOUT_MS = 30_000;
 export const STOP_ACK_STOPPED = '*Stopped the running task* ✓';
 export const STOP_ACK_NOTHING_TO_STOP = '*Nothing to stop — no task is running*';
 /** SINGLE scope only. Only single runs the provider turn inline inside
- *  _handleMessageInner (runtime.ts:5063 onward at b65984f0), so there a /stop
+ *  _handleMessageInner (runtime.ts:5064 onward at b65984f0), so there a /stop
  *  sent DURING a task is handled only once that task finishes — at which point
  *  the scope reads idle and the plain wording above would tell the user nothing
  *  was running. Shared does NOT belong here: it enqueues the provider turn
@@ -165,6 +176,11 @@ export const STOP_ACK_ALREADY_STOPPING =
  *  the /new note in the header. */
 export const NEW_ACK_REFUSED_STOP_IN_PROGRESS =
   '*A stop for this task is still in progress and its outcome is not yet proven; /new is refused until it settles. If it never settles, operator reconciliation is required.*';
+/** The body carried by a compound `/new\n<body>` that the fence above refused.
+ *  The command and its body are answered separately: refusing the command says
+ *  nothing about the text riding the same inbound. */
+export const NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED =
+  '*Your follow-up message was not sent: a stop for this task is still in progress. Send it again once the stop settles.*';
 /** Compound `/stop\n<body>` refusal. See the COMPOUND BODY note in the header. */
 export const STOP_ACK_COMPOUND_BODY_REFUSED =
   '*/stop does not take a follow-up message; send it on its own after the stop acknowledgement*';
@@ -284,11 +300,13 @@ async function tearDownActiveTurn<TSession, TTeardown>(
  * Teardowns in flight, keyed by scopeKey (item C). Module state because the
  * runtime builds a fresh host per /stop, so the guard cannot live on the host.
  *
- * HELD UNTIL THE TEARDOWN PROMISE SETTLES, not merely until the bounded wait
- * elapses. On timeout the teardown is detached and still owns the coordinator
- * state for that scope, and a second teardown running concurrently against it
- * is exactly the un-contained duplicate this command's outcome contract
- * forbids. The user is never left silent: a /stop that hits the guard still
+ * LIFETIME: the entry exists from the moment the teardown starts, and every
+ * non-timeout outcome releases it eagerly before the command returns, so it
+ * outlives the invocation ONLY on timeout. There the teardown is detached and
+ * still owns the coordinator state for that scope, and a second teardown
+ * running concurrently against it is exactly the un-contained duplicate this
+ * command's outcome contract forbids, so the entry stays until the detached
+ * promise settles. The user is never left silent: a /stop that hits the guard still
  * gets STOP_ACK_ALREADY_STOPPING. The cost is that a teardown which never
  * settles holds its scope's guard for the life of the process — deliberate, and
  * consistent with the poisoned-lane rule above.

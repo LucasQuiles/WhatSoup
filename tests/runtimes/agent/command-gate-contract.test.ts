@@ -700,6 +700,14 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     const db = makeDb();
     const { messenger, sentMessages } = makeMessenger();
     const runtime = makeRuntime('per_chat', db, messenger);
+    // Durable observable: a forwarded body after the per-chat teardown throws
+    // the missing-session error before it can reach the provider mock, and the
+    // outer handler swallows that into the generic message. Only the inbound
+    // row separates "refused" from "forwarded and died on the way".
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
     await runtime.start();
     mockQueue.enqueueText.mockClear();
     let releaseTurn: () => void = () => {};
@@ -717,10 +725,14 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       // returns, and that handler is waiting on the teardown of the turn this
       // test is holding open. Awaiting here would deadlock against the release
       // below, so drive the release first and then await the whole command.
+      const compoundSeq = durability.journalInbound(
+        'msg-stop-compound', 'k-stop-compound', DM_CHAT, 'agent',
+      );
       const compoundStop = runtime.handleMessage(makeMsg({
         messageId: 'msg-stop-compound',
         content: '/stop\nrun this other thing instead',
         senderJid: ADMIN_WA,
+        inboundSeq: compoundSeq,
       }));
       await vi.waitFor(() => expect(
         mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
@@ -751,8 +763,20 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
       expect(directTexts()).not.toContain('run this other thing instead');
+
+      // The refusal path completes the inbound as a locally-handled command. A
+      // forwarded body would take the turn path instead and, with the session
+      // gone, strand or fail the row — this is the assertion that separates
+      // them.
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(compoundSeq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(directTexts().some((text) => text.includes('Something went wrong processing that message'))).toBe(false);
     } finally {
       releaseTurn();
+      duraDb.close();
     }
   });
 
@@ -909,6 +933,82 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     } finally {
       release();
       await vi.waitFor(() => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false));
+    }
+  });
+
+  it('#2949 N1: a compound /new refused during a teardown does not dispatch its body', async () => {
+    // The fence refuses the command, but the body rides the same inbound. Left
+    // to the #2357 B1 fall-through it becomes a NEW turn in exactly the scope
+    // whose teardown is unproven — the replacement the fence exists to stop.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    mockSession.sendTurn.mockClear();
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stopOutcome = await runStopCommand({
+      chatJid: DM_CHAT,
+      sessionScope: 'single',
+      scopeKey: GLOBAL_CONVERSATION_KEY,
+      perChatMapKey: null,
+      teardownTimeoutMs: 5,
+      isTurnInFlight: () => true,
+      isOutboundQueuePoisoned: () => false,
+      isSessionProvablyTerminated: () => true,
+      getPerChatSession: () => undefined,
+      abortPerChatQueue: () => {},
+      disposePerChatSession: async () => {},
+      getSingleSession: () => null,
+      abortActiveQueue: () => {},
+      terminalizeTurnForInterrupt: async () => { await gate; return {}; },
+      retireTurnQueueAfterInterrupt: async () => {},
+      shutdownOperationTracker: () => {},
+      cleanupGlobalAutoCompactState: () => {},
+      shutdownSingleSession: async () => {},
+      clearSingleScopeRefs: () => {},
+      clearTurnHadVisibleOutput: () => {},
+      sendDirect: () => {},
+    });
+
+    try {
+      expect(stopOutcome).toBe('uncertain');
+      expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(true);
+
+      const seq = durability.journalInbound('m-new-compound', 'k-new-compound', DM_CHAT, 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'm-new-compound',
+        content: '/new\nrun this instead',
+        senderJid: ADMIN_WA,
+        inboundSeq: seq,
+      }));
+
+      // Both halves are answered: the command and the body it carried.
+      expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(true);
+      expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(true);
+      // And the body went nowhere.
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this instead');
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(directTexts().some((text) => text.includes('Something went wrong processing that message'))).toBe(false);
+    } finally {
+      release();
+      await vi.waitFor(() => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false));
+      duraDb.close();
     }
   });
 
