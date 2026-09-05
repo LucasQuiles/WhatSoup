@@ -102,6 +102,15 @@ CLOSE_AFTER_REQUEST = "close_after_request"
 HANG_AFTER_REQUEST = "hang_after_request"
 ERROR_AFTER_REQUEST = "error_after_request"
 REJECTION_NAMING_THE_PHASE = "rejection_naming_the_phase"
+# The remote controls the text of a STRING-valued error field, so it controls
+# the tail of the message a text classifier reads. These two modes put the phase
+# literal at the very end of a PROVEN rejection.
+STRING_ERROR_NAMING_THE_PHASE = "string_error_naming_the_phase"
+TOOL_ERROR_NAMING_THE_PHASE = "tool_error_naming_the_phase"
+REMOTE_CONTROLLED_REJECTIONS = (
+    STRING_ERROR_NAMING_THE_PHASE,
+    TOOL_ERROR_NAMING_THE_PHASE,
+)
 # The remote had the request and answered with something unreadable. Reading,
 # decoding and parsing that answer are all post-flush, so all of them are
 # ambiguous -- the defect this iteration closes.
@@ -202,13 +211,18 @@ def _seed_outbox(paths, event: dict) -> Path:
     return queued
 
 
-def _cycle(mod, paths, raises: str | None = None) -> list:
+def _cycle(mod, paths, raises=None) -> list:
     """reclaim -> ready -> process_one, exactly as run_once sequences it."""
     mod.reclaim_processing(paths)
     calls: list = []
 
     def _spy(*args, **kwargs):
         calls.append(args)
+        if isinstance(raises, BaseException):
+            # Classification is by TYPE, so a test that re-raised the
+            # transport message as a plain RuntimeError would prove nothing
+            # about the path production takes.
+            raise raises
         if raises is not None:
             raise RuntimeError(raises)
 
@@ -308,6 +322,34 @@ class _FakePeer:
         self.requests.append(request.decode("utf-8", "replace"))
         if self.fail_at == HANG_AFTER_REQUEST:
             time.sleep(SERVER_HANG_SECONDS)
+            return
+        if self.fail_at == STRING_ERROR_NAMING_THE_PHASE:
+            # error is a STRING, not an object: the remote owns the whole tail.
+            conn.sendall(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": json.loads(request)["id"],
+                        "error": f"remote refused the message ({POST_REQUEST_PHASE})",
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+            return
+        if self.fail_at == TOOL_ERROR_NAMING_THE_PHASE:
+            conn.sendall(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": json.loads(request)["id"],
+                        "result": {
+                            "isError": True,
+                            "content": f"tool refused ({POST_REQUEST_PHASE})",
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
             return
         if self.fail_at in (ERROR_AFTER_REQUEST, REJECTION_NAMING_THE_PHASE):
             message = "unknown chat"
@@ -501,10 +543,12 @@ def test_a_lost_response_is_held_rather_than_requeued(tmp_path, fail_at):
     Treating that as a failure requeues and re-sends.
     """
     mod = _load(tmp_path / f"lost-response-{fail_at}")
-    error = _transport_error(mod, fail_at)
-    assert POST_REQUEST_PHASE in error, (
-        f"a failure after the request was flushed must be labelled "
-        f"{POST_REQUEST_PHASE!r}: {error!r}"
+    error = _transport_exception(mod, fail_at)
+    assert isinstance(error, mod.AmbiguousSendOutcome), (
+        f"a failure after the request was flushed must be typed: {error!r}"
+    )
+    assert error.phase == POST_REQUEST_PHASE, (
+        f"and must carry the post-request phase: {error.phase!r}"
     )
     paths = mod.setup_dirs()
     event = _event("evt-2424-lost", QUEUED_STATUS)
@@ -556,7 +600,7 @@ def test_a_second_reclaim_does_not_signal_the_held_item_again(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _assert_requeued_not_held(mod, paths, error: str, expect_sends: int) -> None:
+def _assert_requeued_not_held(mod, paths, error, expect_sends: int) -> None:
     calls = _cycle(mod, paths, raises=error)
     assert len(calls) == expect_sends, (
         f"expected {expect_sends} transport attempt(s), got {len(calls)}: {error!r}"
@@ -592,8 +636,8 @@ def test_a_proven_rejection_keeps_the_bounded_retry_path(tmp_path):
     reply-derived failures, or every rejection would be held.
     """
     mod = _load(tmp_path / "proven-rejection")
-    error = _transport_error(mod, ERROR_AFTER_REQUEST)
-    assert POST_REQUEST_PHASE not in error, (
+    error = _transport_exception(mod, ERROR_AFTER_REQUEST)
+    assert POST_REQUEST_PHASE not in str(error), (
         f"a reply that names an error proves the outcome and must NOT carry the "
         f"ambiguous phase label: {error!r}"
     )
@@ -615,11 +659,11 @@ def test_a_handshake_failure_is_requeued_not_held(tmp_path, fail_at):
     bounded retry that has always applied.
     """
     mod = _load(tmp_path / f"handshake-{fail_at}")
-    error = _transport_error(mod, fail_at)
-    assert HANDSHAKE_PHASE in error, (
+    error = _transport_exception(mod, fail_at)
+    assert HANDSHAKE_PHASE in str(error), (
         f"a handshake-phase failure must be labelled {HANDSHAKE_PHASE!r}: {error!r}"
     )
-    assert POST_REQUEST_PHASE not in error, (
+    assert POST_REQUEST_PHASE not in str(error), (
         f"a handshake-phase failure must not be labelled ambiguous: {error!r}"
     )
     paths = mod.setup_dirs()
@@ -638,8 +682,8 @@ def test_a_connect_failure_is_requeued_not_held(tmp_path, fail_at):
     later widening of the ambiguous class cannot silently swallow it.
     """
     mod = _load(tmp_path / f"connect-{fail_at}")
-    error = _transport_error(mod, fail_at)
-    assert POST_REQUEST_PHASE not in error, (
+    error = _transport_exception(mod, fail_at)
+    assert POST_REQUEST_PHASE not in str(error), (
         f"a connect failure must not be labelled ambiguous: {error!r}"
     )
     paths = mod.setup_dirs()
@@ -847,10 +891,10 @@ def test_a_rejection_naming_the_phase_label_is_still_a_rejection(tmp_path):
     """
     mod = _load(tmp_path / "rejection-naming-phase")
     error = _transport_error(mod, REJECTION_NAMING_THE_PHASE)
-    assert POST_REQUEST_PHASE in error, (
+    assert POST_REQUEST_PHASE in str(error), (
         f"this probe is only meaningful if the payload carries the literal: {error!r}"
     )
-    assert not mod.is_ambiguous_send_outcome(error), (
+    assert not isinstance(_transport_exception(mod, REJECTION_NAMING_THE_PHASE), mod.AmbiguousSendOutcome), (
         f"a proven rejection carrying the literal was classified ambiguous: {error!r}"
     )
     paths = mod.setup_dirs()
@@ -1203,3 +1247,120 @@ def test_the_documented_inspection_command_lists_a_real_held_record(tmp_path):
     assert event["id"] in result.stdout, (
         f"the documented command must list the held file: {result.stdout!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# The remote must not be able to steer the classification (typed, not textual).
+# --------------------------------------------------------------------------
+
+
+def _transport_exception(mod, fail_at: str) -> BaseException:
+    """Return the exception object the REAL transport raises, not its text."""
+    directory = tempfile.mkdtemp()
+    path = os.path.join(directory, "s")
+    try:
+        # The connect-phase modes must NOT stand up a peer, or the call reaches
+        # the protocol and produces a post-request failure instead -- which is
+        # the opposite of what those tests exist to prove.
+        if fail_at in CONNECT_FAILURES:
+            if fail_at == STALE_SOCKET_FILE:
+                Path(path).write_text("not a socket")
+            with pytest.raises(Exception) as caught:
+                mod.json_rpc_call(path, "tools/call", {}, timeout=TRANSPORT_TIMEOUT)
+            return caught.value
+        with _FakePeer(path, fail_at):
+            with pytest.raises(Exception) as caught:
+                mod.json_rpc_call(
+                    path,
+                    "tools/call",
+                    {"name": "send_message", "arguments": {}},
+                    timeout=TRANSPORT_TIMEOUT,
+                )
+        return caught.value
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.mark.parametrize("fail_at", REMOTE_CONTROLLED_REJECTIONS)
+def test_a_remote_error_text_cannot_turn_a_rejection_into_a_hold(tmp_path, fail_at):
+    """The remote owns the message tail, so it must not own the decision.
+
+    A STRING-valued JSON-RPC error field is interpolated straight into the
+    message, so a reply whose text ends with the phase literal made a text
+    classifier read a PROVEN rejection as ambiguous and hold it. The alert then
+    waited for an operator instead of taking retry, email fallback and
+    dead-letter. Classification is by exception TYPE, which the remote cannot
+    influence.
+    """
+    mod = _load(tmp_path / f"remote-steer-{fail_at}")
+    exc = _transport_exception(mod, fail_at)
+    paths = mod.setup_dirs()
+    event = _event(f"evt-2424-{fail_at}", QUEUED_STATUS)
+    _open_incident(mod, paths, event)
+    _seed_outbox(paths, event)
+
+    # Behaviour first: this is the defect, and it is visible without the type.
+    _assert_requeued_not_held(mod, paths, exc, expect_sends=1)
+    assert not isinstance(exc, mod.AmbiguousSendOutcome), (
+        f"a parsed reply naming an error is a proven rejection, not an "
+        f"ambiguous outcome: {type(exc).__name__}: {exc}"
+    )
+
+
+@pytest.mark.parametrize("fail_at", POST_REQUEST_FAILURES + POST_REQUEST_PARSE_FAILURES)
+def test_every_no_outcome_failure_carries_the_post_request_phase_on_its_type(
+    tmp_path, fail_at
+):
+    """E3: the hold half of the table, re-verified through the typed path."""
+    mod = _load(tmp_path / f"typed-post-{fail_at}")
+    exc = _transport_exception(mod, fail_at)
+    assert isinstance(exc, mod.AmbiguousSendOutcome), (
+        f"a post-flush failure with no readable outcome must be typed: "
+        f"{type(exc).__name__}: {exc}"
+    )
+    assert exc.phase == POST_REQUEST_PHASE, (
+        f"the phase must be carried on the exception: {exc.phase!r}"
+    )
+
+
+@pytest.mark.parametrize("fail_at", HANDSHAKE_FAILURES)
+def test_a_handshake_failure_carries_the_handshake_phase_on_its_type(tmp_path, fail_at):
+    """E3: the pre-send half of the table, re-verified through the typed path."""
+    mod = _load(tmp_path / f"typed-handshake-{fail_at}")
+    exc = _transport_exception(mod, fail_at)
+    assert isinstance(exc, mod.AmbiguousSendOutcome), (
+        f"a handshake failure is typed too, and its phase is what excludes it: "
+        f"{type(exc).__name__}: {exc}"
+    )
+    assert exc.phase == HANDSHAKE_PHASE, (
+        f"a handshake failure must not carry the post-request phase: {exc.phase!r}"
+    )
+
+
+def test_the_dry_send_seam_can_raise_the_typed_ambiguous_outcome(tmp_path):
+    """The seam must still be able to drive a hold deterministically.
+
+    Subprocess tests cannot reach the fake peer, so the seam needs an explicit
+    typed form. A bare value stays a plain RuntimeError, which is a pre-send
+    failure, so every existing seam user keeps its behaviour.
+    """
+    mod = _load(tmp_path / "dry-seam-typed")
+    saved = os.environ.get("BOT_ERRORS_DRY_SEND_FAIL")
+    try:
+        os.environ["BOT_ERRORS_DRY_SEND_FAIL"] = mod.DRY_SEND_AMBIGUOUS_PREFIX + "lost"
+        with pytest.raises(mod.AmbiguousSendOutcome) as typed:
+            mod.send_whatsapp("text")
+        assert typed.value.phase == POST_REQUEST_PHASE, (
+            f"the seam must raise a post-request outcome: {typed.value.phase!r}"
+        )
+        os.environ["BOT_ERRORS_DRY_SEND_FAIL"] = "plain transport failure"
+        with pytest.raises(RuntimeError) as plain:
+            mod.send_whatsapp("text")
+        assert not isinstance(plain.value, mod.AmbiguousSendOutcome), (
+            f"a bare seam value must stay a pre-send failure: {plain.value!r}"
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("BOT_ERRORS_DRY_SEND_FAIL", None)
+        else:
+            os.environ["BOT_ERRORS_DRY_SEND_FAIL"] = saved
