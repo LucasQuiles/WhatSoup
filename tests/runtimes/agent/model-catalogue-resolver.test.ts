@@ -16,6 +16,36 @@ beforeEach(() => {
 
 const T0 = 1_000_000; // arbitrary fixed clock base
 
+it.each([
+  { provider: 'opencode-cli', binary: 'opencode', dependency: 'listFn', sourceLabel: 'opencode CLI' },
+  { provider: 'codex-cli', binary: 'codex', dependency: 'codexFn', sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)' },
+] as const)('$provider replaces a stale capture on recovery and ages the replacement from its own capture time', async ({ provider, binary, dependency, sourceLabel }) => {
+  const probe = vi.fn()
+    .mockResolvedValueOnce({ status: 'ok', ids: ['vendor/model-a'] })
+    .mockResolvedValueOnce({ status: 'unavailable', reason: 'timeout' })
+    .mockResolvedValueOnce({ status: 'ok', ids: ['vendor/model-b'] })
+    .mockResolvedValueOnce({ status: 'unavailable', reason: 'timeout' });
+  const resolveAt = (elapsedMs: number) => resolveModelCatalogue(provider, binary, {
+    nowMs: T0 + elapsedMs,
+    [dependency]: probe,
+  });
+
+  expect(await resolveAt(0)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenNthCalledWith(1, binary);
+  expect(await resolveAt(59_999)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(1);
+
+  expect(await resolveAt(60_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: '1m ago' });
+  expect(probe).toHaveBeenCalledTimes(2);
+  expect(await resolveAt(61_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(3);
+
+  expect(await resolveAt(120_999)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(3);
+  expect(await resolveAt(121_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: '1m ago' });
+  expect(probe).toHaveBeenCalledTimes(4);
+});
+
 describe('formatCaptureAsOf', () => {
   it('renders "just now" under a minute, "Nm ago" under an hour, "Nh ago (stale)" beyond', () => {
     expect(formatCaptureAsOf(T0, T0 + 30_000)).toBe('just now');

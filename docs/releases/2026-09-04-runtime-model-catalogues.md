@@ -162,3 +162,41 @@ configuration are different evidence. Effective default/plugin-free catalogue
 parity remains unverified. No context guard, configuration rewrite, or plugin
 change is justified by this audit alone. Source/capture labels must not be
 presented as proof of upstream refresh or of the model that executed a turn.
+
+## Adjacent recovery and usability checks
+
+Two new CLI-adapter cases exercise the shared resolver through initial capture,
+cache reuse, outage, recovery with different IDs, another cache hit and a second
+outage. They assert exact IDs, source, age and probe counts at both 60-second
+boundaries. All 35 resolver tests pass. Deliberately retaining the old IDs or
+old capture timestamp makes both new cases fail; the original source bytes were
+restored before the passing full-file rerun. Independent review found no blocker.
+This proves sensitivity to those two regressions, not a general mutation score
+or upstream freshness. No production cache policy changed.
+
+The final three-file routing/catalogue run passes all 148 tests. Source/test
+types and required Test Integrity also pass; the same 81 baseline findings and
+three location drifts remain. These results are not full-release validation.
+
+The exploration also identified two unresolved selection gaps:
+
+- Deferred-pin retry: after an initial catalogue outage, repeating the same
+  numbered selection returns "Already set" without another catalogue lookup.
+  Two local diagnostic cases reproduced this with both recovery and continued
+  outage: the row remained unverified. The repeat-confirm path returns before
+  verification; history confirms this predates the recent helper extraction.
+  Owner: this lane; priority: required for truthful selection continuity.
+  Repair design remains pending. Acceptance must include recovered verification,
+  honest continued deferral and unchanged behavior for already-verified pins,
+  sticky preferences and competing senders. The diagnostic patch and failure
+  receipts are retained in the existing private lane ledger; no failing test
+  or temporary production mutation remains in this candidate.
+- Discovery access: a served menu check on September 5 returned four configured
+  choices through `/model list`, while the provider drill discovered 76 models
+  and displayed its first 12. Source inspection confirms that the drill slices
+  its snapshot to the displayed rows and the existing text filter searches only
+  configured models. The bounded menu is intentional, but discovery alone does
+  not make the undisplayed models accessible through that picker. Owner: this
+  lane; priority: catalogue usability. A bounded search or navigation design must
+  preserve visible-row identity and sender isolation; changing the cap alone is
+  not an adequate solution. No model leaf was selected during the live check.
