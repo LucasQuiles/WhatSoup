@@ -174,13 +174,32 @@ function validSpec(): unknown {
 }
 
 describe('forensic evidence failure boundaries', () => {
-  it('rejects a shared credential shape in re-manifested public metadata', () => {
+  it.each(['plain', 'unicode', 'private-path', 'private-term', 'object-key', 'key-context', 'duplicate-key'] as const)('rejects unsafe decoded content in re-manifested public metadata: %s', (encoding) => {
     const output = path.join(tmp.make('envelope-reverification'), 'package');
     writeForensicPackage(validSpec(), output);
     const member = path.join(output, 'evidence.json');
     const evidence = JSON.parse(readFileSync(member, 'utf8'));
-    evidence.evidence[0].occurrences[0].envelope.type = 'ghp_' + 'A'.repeat(24);
-    const bytes = Buffer.from(JSON.stringify(evidence));
+    const syntheticToken = 'ghp_' + 'A'.repeat(24);
+    const envelope = evidence.evidence[0].occurrences[0].envelope;
+    envelope.type = encoding === 'private-path' ? '/home/testuser/private'
+      : encoding === 'private-term' ? 'fixture-private-scope' : syntheticToken;
+    if (encoding === 'object-key') {
+      envelope.type = 'message';
+      envelope[syntheticToken] = 'ordinary';
+    }
+    if (encoding === 'key-context') {
+      envelope.type = 'message';
+      envelope.token = 'fixturevalueabcdefghijklmnop';
+    }
+    if (encoding === 'duplicate-key') envelope.type = 'message';
+    const serialized = JSON.stringify(evidence);
+    const encoded = encoding === 'private-path' ? serialized.replaceAll('/', '\\/')
+      : encoding === 'private-term' ? serialized.replace('fixture-private-scope', '\\u0066ixture-private-scope')
+        : encoding === 'key-context' ? serialized.replace('"token":', '"\\u0074oken":')
+          : encoding === 'duplicate-key' ? serialized.replace('"type":"message"', '"type":"\\u0067hp_' + 'A'.repeat(24) + '","type":"message"')
+            : encoding === 'plain' ? serialized : serialized.replace('ghp_', '\\u0067hp_');
+    expect(JSON.parse(encoded)).toEqual(evidence);
+    const bytes = Buffer.from(encoded);
     writeFileSync(member, bytes);
     const manifestPath = path.join(output, 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<{ path: string; bytes: number; sha256: string }> };
@@ -189,9 +208,30 @@ describe('forensic evidence failure boundaries', () => {
     row!.bytes = bytes.length;
     row!.sha256 = sha256(bytes);
     writeFileSync(manifestPath, JSON.stringify(manifest));
-    expect(verifyForensicPackage(output, manifestSha256(output), { forbiddenTerms: ['unrelated-fixture-term'] })).toEqual({
+    expect(verifyForensicPackage(output, manifestSha256(output), { forbiddenTerms: ['fixture-private-scope'] })).toEqual({
       valid: false, findings: ['redaction-violation:evidence.json'],
     });
+  });
+
+  it.each(['unicode', 'crlf', 'negative-zero'] as const)('accepts benign decoded content in re-manifested public metadata: %s', (format) => {
+    const output = path.join(tmp.make('benign-escape'), 'package');
+    writeForensicPackage(validSpec(), output);
+    const member = path.join(output, 'evidence.json');
+    const original = readFileSync(member, 'utf8');
+    const encoded = format === 'unicode' ? original.replace('message', '\\u006dessage')
+      : format === 'crlf' ? original.replaceAll('\n', '\r\n')
+        : original.replace('"byte_start": 0', '"byte_start": -0');
+    expect(encoded).not.toBe(original);
+    expect(JSON.stringify(JSON.parse(encoded))).toBe(JSON.stringify(JSON.parse(original)));
+    writeFileSync(member, encoded);
+    const manifestPath = path.join(output, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<{ path: string; bytes: number; sha256: string }> };
+    const row = manifest.files.find((file) => file.path === 'evidence.json');
+    expect(row).toBeDefined();
+    row!.bytes = Buffer.byteLength(encoded);
+    row!.sha256 = sha256(encoded);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    expect(verifyForensicPackage(output, manifestSha256(output))).toEqual({ valid: true, findings: [] });
   });
 
   it.each(['type', 'role'] as const)('redacts synthetic credentials in public envelope %s', (field) => {
@@ -234,6 +274,54 @@ describe('forensic evidence failure boundaries', () => {
     receipt.sources[0]!.findings = [{ code: 'FORENSIC_HIT_LIMIT' }];
     receipt.metrics.failed_sources = 1;
     expect(parseForensicHarnessSearchResult(receipt).sources[0]!.complete).toBe(false);
+  });
+
+  it.each(['claude', 'codex', 'opencode'] as const)('rejects duplicate physical locators within a %s source', (family) => {
+    const spec = validSpec() as MutableSearchSpec;
+    const search = spec.searches.find((entry) => entry.family === family && entry.pass === 1)!;
+    const source = search.sources[0]!;
+    source.identity.bytes = 20;
+    source.records_examined = 2;
+    source.matches_observed = 2;
+    const second = structuredClone(source.hits[0]!);
+    second.locator = family === 'opencode'
+      ? { kind: 'sqlite-row', table: 'message', row_hash: sha256('row-2') }
+      : { kind: 'jsonl', line: 2, byte_start: 10, byte_end: 20 };
+    source.hits.push(second);
+    search.metrics.candidates = 2;
+    expect(parseForensicHarnessSearchResult(search).sources[0]!.hits).toHaveLength(2);
+    expect(() => parseForensicPackageSpec(spec)).not.toThrow();
+    source.hits[1] = structuredClone(source.hits[0]!);
+    expect(() => parseForensicHarnessSearchResult(search)).toThrow(/locator.*unique/);
+    expect(() => parseForensicPackageSpec(spec)).toThrow(/locator.*unique/);
+  });
+
+  it.each(['claude', 'codex'] as const)('rejects a changed line label over the same %s physical record', (family) => {
+    const receipt = searchResult(family, 1, 'duplicate-offset') as Mutable<ForensicHarnessSearchResult>;
+    const source = receipt.sources[0]!;
+    const second = structuredClone(source.hits[0]!);
+    expect(second.locator.kind).toBe('jsonl');
+    second.locator = { kind: 'jsonl', line: 2, byte_start: 0, byte_end: 10 };
+    source.hits.push(second);
+    source.records_examined = 2;
+    source.matches_observed = 2;
+    receipt.metrics.candidates = 2;
+    expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/locator.*unique/);
+  });
+
+  it.each(['claude', 'codex'] as const)('rejects overlapping physical ranges within a %s source', (family) => {
+    const receipt = searchResult(family, 1, 'overlap') as Mutable<ForensicHarnessSearchResult>;
+    const source = receipt.sources[0]!;
+    source.identity.bytes = 20;
+    const second = structuredClone(source.hits[0]!);
+    second.locator = { kind: 'jsonl', line: 2, byte_start: 10, byte_end: 20 };
+    source.hits.unshift(second);
+    source.records_examined = 2;
+    source.matches_observed = 2;
+    receipt.metrics.candidates = 2;
+    expect(parseForensicHarnessSearchResult(receipt).sources[0]!.hits).toHaveLength(2);
+    second.locator = { kind: 'jsonl', line: 2, byte_start: 1, byte_end: 10 };
+    expect(() => parseForensicHarnessSearchResult(receipt)).toThrow(/locator.*overlap/);
   });
 
   it.each([false, true])('accounts for SQLite content when BLOB=%s', (blob) => {

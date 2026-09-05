@@ -20,6 +20,7 @@ import {
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import ts from 'typescript';
 
 import { assertNoSecretLike } from '../artifact-redaction.ts';
 import { redactText } from '../../src/lib/redaction-text.ts';
@@ -1004,6 +1005,16 @@ export function parseForensicHarnessSearchResult(
     if (complete && hits.length !== matchesObserved) {
       throw new TypeError(`${sourceLabel} complete source must retain all observed matches`);
     }
+    requireUnique(hits.map((hit) => hit.locator.kind === 'jsonl'
+      ? `jsonl:${hit.locator.byte_start}`
+      : `sqlite:${hit.locator.table}:${hit.locator.row_hash}`), `${sourceLabel} physical locators`);
+    const ranges = hits.flatMap((hit) => hit.locator.kind === 'jsonl' ? [hit.locator] : [])
+      .sort((left, right) => left.byte_start - right.byte_start);
+    for (let index = 1; index < ranges.length; index += 1) {
+      if (ranges[index]!.byte_start < ranges[index - 1]!.byte_end) {
+        throw new TypeError(`${sourceLabel} physical locators must not overlap`);
+      }
+    }
     for (const [hitIndex, hit] of hits.entries()) {
       if (hit.evidence_id !== `evidence-${hit.record_sha256}`) {
         throw new TypeError(`${sourceLabel}.hits[${hitIndex}].evidence_id does not match record_sha256`);
@@ -1447,16 +1458,36 @@ function assertPublicContent(
   name: string,
   forbiddenTerms: readonly string[],
 ): void {
-  assertNoSecretLike(content, name);
-  if (redactText(content) !== content) {
-    throw new Error(`redaction_violation: ${name} contains a credential or private value recognized by the shared redactor`);
-  }
-  if (/\/(?:Users|home)\//u.test(content)) {
-    throw new Error(`redaction_violation: ${name} contains a private home path`);
-  }
-  const folded = content.toLocaleLowerCase('en-US');
-  if (forbiddenTerms.some((term) => folded.includes(term))) {
-    throw new Error(`redaction_violation: ${name} contains a configured forbidden term`);
+  const checkText = (text: string): void => {
+    assertNoSecretLike(text, name);
+    if (redactText(text) !== text) {
+      throw new Error(`redaction_violation: ${name} contains a credential or private value recognized by the shared redactor`);
+    }
+    if (/\/(?:Users|home)\//u.test(text)) {
+      throw new Error(`redaction_violation: ${name} contains a private home path`);
+    }
+    const folded = text.toLocaleLowerCase('en-US');
+    if (forbiddenTerms.some((term) => folded.includes(term))) {
+      throw new Error(`redaction_violation: ${name} contains a configured forbidden term`);
+    }
+  };
+  checkText(content);
+  if (name.endsWith('.json')) {
+    JSON.parse(content);
+    // Scan the validated text so duplicate keys cannot hide earlier values from a reviver.
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, content);
+    let decodedText = '';
+    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+      if (token === ts.SyntaxKind.StringLiteral) {
+        const value = scanner.getTokenValue();
+        checkText(value);
+        decodedText += JSON.stringify(value);
+      } else {
+        decodedText += scanner.getTokenText();
+      }
+    }
+    // Assignment rules need decoded keys and values together, not only isolated strings.
+    checkText(decodedText);
   }
 }
 
