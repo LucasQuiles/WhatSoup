@@ -125,4 +125,49 @@ describe('provider process-tree reaping', () => {
       rmSync(pidFile, { force: true });
     }
   }, 20_000);
+
+  it('reaps one provider root without killing a cgroup-only sibling', async () => {
+    const runId = `l7-cgroup-sibling-${process.pid}-${Date.now()}`;
+    const spawnProvider = (tag: string) => spawn(
+      process.execPath,
+      [FAKE_PROVIDER, JSON.stringify({
+        runId: `${runId}-${tag}`,
+        sessionId: `${runId}-${tag}`,
+        graceMs: 100,
+      })],
+      { detached: true, stdio: 'ignore' },
+    );
+    const target = spawnProvider('target');
+    const sibling = spawnProvider('sibling');
+    let observedOffTreeCount: number | null = null;
+
+    try {
+      expect(target.pid).toBeTypeOf('number');
+      expect(sibling.pid).toBeTypeOf('number');
+      expect(await waitUntil(
+        () => isAlive(target.pid) && isAlive(sibling.pid),
+        4_000,
+      )).toBe(true);
+
+      await killSessionTree(target.pid as number, 'SIGKILL', {
+        generationMarker: `cgroup-sibling-test:${runId}`,
+        killGraceMs: 1_000,
+        onCgroupDivergence: (info) => {
+          observedOffTreeCount = info.offTreeCount;
+        },
+        readCgroupMemberPids: () => [
+          process.pid,
+          target.pid as number,
+          sibling.pid as number,
+        ],
+      });
+
+      expect(isAlive(target.pid)).toBe(false);
+      expect(isAlive(sibling.pid)).toBe(true);
+      expect(observedOffTreeCount).toBe(2);
+    } finally {
+      killPid(target.pid);
+      killPid(sibling.pid);
+    }
+  }, 20_000);
 });
