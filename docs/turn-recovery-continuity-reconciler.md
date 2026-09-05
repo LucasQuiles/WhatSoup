@@ -90,11 +90,38 @@ The safety claim above is exercised, not just asserted
 for genuinely unexpected failures (not proof-shape rejections) so the caller can
 alert on it rather than treat it as benign.
 
+## PR2 — supervisor wiring (deploy-gated)
+
+`runScan()` now invokes the reconciler once per cycle, immediately after
+`recoverStaleTurnRecoveryJobs` (so freshly-reclaimed rows are visible) and
+before job enumeration (so the cycle's totals include its outcome):
+
+- **Gate:** a new optional supervisor dep, `catchupReconcile: { groupLimit? }`.
+  Absent/null — the default everywhere today, including
+  `createTurnRecoverySupervisorForRuntime` — keeps exactly the pre-PR2
+  behavior. Enabling it is a separately-gated cutover decision, forwarded
+  verbatim through `turn-recovery-dispatch.ts`.
+- **Surface:** `DurabilityEngine.reconcileOperatorCatchupRecoveries(params?)`
+  delegates to the core selector on the engine's own raw handle; the
+  supervisor's narrow `TurnRecoverySupervisorDurability` interface carries it
+  as an optional method, so fakes/legacy surfaces simply never reconcile.
+- **Observability:** three new scan-result counters
+  (`catchupReconcileAttempted / Closed / Skipped`); a whole-call failure
+  (storage/schema drift) records `catchup_reconcile_failed` as the scan
+  failure reason and logs a warning **without aborting the rest of the scan**
+  (same contract as the stale-claim sweep). Unexpected-error skips inside a
+  successful report are logged at error level for alert wiring.
+- **Tests:** `tests/runtimes/agent/turn-recovery-catchup-reconcile-wiring.test.ts`
+  drives a REAL `Database` + `DurabilityEngine` + `TurnRecoverySupervisor`
+  end-to-end (only the socket is absent): gate-on closes a caught-up group
+  with `auto_reconciler` actors and is idempotent; gate-off (default) leaves
+  everything pending; `groupLimit` bounds a cycle and the next cycle drains
+  the remainder; a throwing reconciler resolves the scan, keeps everything
+  pending, and lands `catchup_reconcile_failed` in health.
+
 ## Follow-ups (separate PRs)
 
-- **PR2 — wiring:** invoke `reconcileOperatorCatchupRecoveries` from the
-  supervisor `runScan()` loop (bounded per cycle, right after
-  `recoverStaleTurnRecoveryJobs`). Behavior change → deploy-gated.
+- ~~**PR2 — wiring**~~: shipped — see "PR2 — supervisor wiring" above.
 - **② synthetic exclusion + actionable gauge:** stop enrolling
   `create_agent_job` self-turns (`source_message_id LIKE 'agentjob-%'`) in
   user-facing recovery, and split the health gauge into
