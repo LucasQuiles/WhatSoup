@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import { git as runGit, gitList as runGitList, readText } from './lib/guard-core.ts';
-import { asRecord } from '../src/lib/type-guards.ts';
+import { asRecord, isNonEmptyString } from '../src/lib/type-guards.ts';
 import { BRANCH_STEPS, NEUTRALIZED_SKIP_VARS, RELEASE_STEPS } from './push-gate.ts';
 import type { GateStep } from './push-gate.ts';
 
@@ -487,6 +487,16 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'Restore the 60-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
   },
   {
+    id: 'tag-release-process-tree-adoption',
+    category: 'guard-chain',
+    file: '.github/workflows/tag-release-gate.yml',
+    anchors: [],
+    requiredUnconditionalRuns: ['run: npm run guard:process-tree-diagnostics'],
+    requiredWorkflowJob: 'release-gate',
+    validate: tagReleaseTriggerFailures,
+    remediation: 'Restore version-tag activation and the unconditional process-tree adoption guard in the tag release job.',
+  },
+  {
     id: 'tag-release-console-design-chain',
     category: 'guard-chain',
     file: '.github/workflows/tag-release-gate.yml',
@@ -852,6 +862,19 @@ function parseWorkflow(text: string, label: string): { root: Record<string, unkn
       failures: [`${label} YAML conversion failed: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
+}
+
+function tagReleaseTriggerFailures(text: string): string[] {
+  const { root, failures } = parseWorkflow(text, 'tag release workflow');
+  if (!root) return failures;
+  const push = asRecord(asRecord(root.on)?.push);
+  const tags = push?.tags;
+  if (!push || !Array.isArray(tags) || !tags.includes('v*')
+    || tags.some((tag) => !isNonEmptyString(tag) || tag.startsWith('!'))
+    || hasOwn(push, 'tags-ignore')) {
+    return ['tag release workflow must include on.push.tags v* with only positive tag patterns and no tags-ignore'];
+  }
+  return [];
 }
 
 function qualityCiSemanticShadowFailures(text: string): string[] {

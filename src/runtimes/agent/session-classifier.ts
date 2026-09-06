@@ -6,7 +6,8 @@
  *
  * Safety rules (from investigation 2026-04-01):
  * - Never kill based on agent_sessions.status alone
- * - Only reap PIDs that belong to this service process (verified via PPID)
+ * - Classify live stale children only with parent/provider evidence or exact registered spawn authority
+ * - Classification never grants signal authority; cleanup validates the retained capability again
  * - Only reap PIDs for the same conversation that do NOT match the current checkpoint
  * - If checkpoint is missing or ambiguous, do not auto-kill — log and escalate
  * - If checkpoint status is not 'active', do not label its match as authoritative_live
@@ -26,12 +27,13 @@ import {
   isProviderId,
 } from './providers/index.ts';
 import { getProviderBinary } from './providers/provider-binary.ts';
+import { getRegisteredProcessTreeTerminationLease } from './process-tree.ts';
 
 const log = createChildLogger('session-classifier');
 
 export type SessionClassification =
   | 'authoritative_live'  // matches current checkpoint AND checkpoint is active — the real session
-  | 'stale_live'          // PID looks like an owned stale child; signaling still requires spawn capability
+  | 'stale_live'          // Owned stale child or retained row-bound handle; signaling still requires spawn capability
   | 'stale_dead'          // PID dead, DB row still 'active' — should be marked orphaned
   | 'ambiguous';          // no checkpoint, ownership unverified, or multiple conflicts — do not touch
 
@@ -230,13 +232,7 @@ export function classifyActiveSessions(
       }
     }
 
-    if (duplicatePids.has(session.claude_pid)) {
-      results.push({
-        ...sessionFields(session, convKey),
-        classification: 'ambiguous',
-        reason: `duplicate live PID ${session.claude_pid} appears in multiple active rows`,
-      });
-    } else if (convKey) {
+    if (convKey) {
       const existing = byConversation.get(convKey) ?? [];
       existing.push(session);
       byConversation.set(convKey, existing);
@@ -286,6 +282,17 @@ export function classifyActiveSessions(
 
     for (const session of sessions) {
       const pidCheck = pidChecker(session.claude_pid, session.provider);
+
+      // Duplicate rows cannot establish ownership of a live process, but must
+      // not prevent checkpoint-backed recovery once that process is gone.
+      if (duplicatePids.has(session.claude_pid) && pidCheck.alive) {
+        results.push({
+          ...sessionFields(session, convKey),
+          classification: 'ambiguous',
+          reason: `duplicate live PID ${session.claude_pid} appears in multiple active rows`,
+        });
+        continue;
+      }
 
       if (session === matchingSession) {
         const mode = executionMode(session.provider);
@@ -371,7 +378,8 @@ function executionMode(provider: string | null) {
 
 /**
  * Classify a session that is NOT the authoritative match.
- * Uses PID ownership to distinguish stale_live (safe to kill) from ambiguous (unsafe).
+ * Uses PID ownership or retained spawn authority to identify stale-live candidates.
+ * Classification alone never grants signal authority.
  */
 function classifyNonAuthoritative(
   results: ClassifiedSession[],
@@ -391,12 +399,14 @@ function classifyNonAuthoritative(
       classification: 'stale_dead',
       reason: `${base}PID ${session.claude_pid} dead, checkpoint points to PID ${checkpoint.claudePid}`,
     });
-  } else if (pidCheck.owned) {
-    // PID is alive AND verified as our child for the durable provider → safe to kill
+  } else if (
+    pidCheck.owned
+    || getRegisteredProcessTreeTerminationLease(session.id, session.claude_pid, session.provider) !== null
+  ) {
     results.push({
       ...sessionFields(session, convKey),
       classification: 'stale_live',
-      reason: `${base}PID ${session.claude_pid} alive+owned, checkpoint points to PID ${checkpoint.claudePid}`,
+      reason: `${base}PID ${session.claude_pid} alive with verified ownership or retained spawn authority, checkpoint points to PID ${checkpoint.claudePid}`,
     });
   } else {
     // PID is alive but ownership unverified (parent/provider mismatch or probe unavailable)

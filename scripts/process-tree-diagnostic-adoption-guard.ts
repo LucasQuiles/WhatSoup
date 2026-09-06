@@ -1732,6 +1732,17 @@ export function scanProcessTreeDiagnosticAdoptionRepo(
     }
   }
 
+  if (!sources.has(CANONICAL_PROCESS_TREE_FILE)) {
+    findings.push(finding(
+      'PROCESS_TREE_SOURCE_READ_FAILED',
+      CANONICAL_PROCESS_TREE_FILE,
+      { line: 1, column: 1 },
+      'Canonical process-tree source is absent from the readable source inventory.',
+      'Restore the canonical source module and rerun the adoption guard.',
+      true,
+    ));
+  }
+
   const syntax = parsedSources(sources);
   const exportsByFile = canonicalExportsByFile(sources, syntax);
   for (const [file, text] of sources) {

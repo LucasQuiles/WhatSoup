@@ -1,9 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
+import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
+import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
+import {
+  bindProcessTreeRootAuthority,
+  captureProcessTreeRootAuthority,
+  resetProcessTreeTerminationLeasesForTesting,
+} from '../../../src/runtimes/agent/process-tree.ts';
 
 const mocks = vi.hoisted(() => ({
   readFileSync: vi.fn(),
   execFileSync: vi.fn(),
-  birthToken: vi.fn((pid: number) => `birth:${pid}`),
+  birthToken: vi.fn((pid: number): string | null => `birth:${pid}`),
 }));
 
 vi.mock('../../../src/lib/process-identity.ts', () => ({
@@ -26,10 +34,10 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-const { defaultPidOwnershipChecker } = await import('../../../src/runtimes/agent/session-classifier.ts');
+const { classifyActiveSessions, defaultPidOwnershipChecker } = await import('../../../src/runtimes/agent/session-classifier.ts');
 
 describe('defaultPidOwnershipChecker', () => {
-  let killSpy: ReturnType<typeof vi.spyOn>;
+  let killSpy: MockInstance<typeof process.kill>;
 
   beforeEach(() => {
     mocks.readFileSync.mockReset();
@@ -224,6 +232,93 @@ describe('defaultPidOwnershipChecker', () => {
       .mockReturnValueOnce('birth:after');
 
     expect(defaultPidOwnershipChecker(7900)).toEqual({ alive: true, owned: false });
+  });
+
+  describe('registered spawn authority for resolved executables', () => {
+    let db: Database;
+    let durability: DurabilityEngine;
+    let rowId: number;
+    let target: { pid: number; exitCode: null; signalCode: null; kill: Mock<(signal: NodeJS.Signals) => boolean> };
+
+    beforeEach(() => {
+      db = new Database(':memory:');
+      db.open();
+      ensureAgentSchema(db);
+      durability = new DurabilityEngine(db);
+      rowId = Number(db.raw.prepare(`
+        INSERT INTO agent_sessions (session_id, claude_pid, started_in_directory, chat_jid, status, provider, started_at)
+        VALUES ('old', 4242, '/tmp', '12345@s.whatsapp.net', 'active', 'claude-cli', '2026-01-01T00:00:00Z')
+      `).run().lastInsertRowid);
+      durability.upsertSessionCheckpoint('12345', {
+        claudePid: 9001, sessionId: 'current', sessionStatus: 'active',
+      });
+      target = { pid: 4242, exitCode: null, signalCode: null, kill: vi.fn(() => true) };
+      mocks.readFileSync.mockImplementation(() => { throw new Error('no procfs'); });
+      mocks.execFileSync.mockReturnValue(`${process.pid} /opt/claude/versions/2.1.0 --print\n`);
+    });
+
+    afterEach(() => {
+      resetProcessTreeTerminationLeasesForTesting();
+      db.close();
+    });
+
+    it.each([
+      ['procfs', '/opt/claude/versions/2.1.0\0--print'],
+      ['procfs', 'node\0/opt/claude/cli.js\0--print'],
+      ['ps', '/opt/claude/versions/2.1.0 --print'],
+      ['ps', 'node /opt/claude/cli.js --print'],
+    ])('keeps exact row-bound stale cleanup reachable for %s resolved argv %s', (transport, command) => {
+      const authority = captureProcessTreeRootAuthority(target)!;
+      expect(bindProcessTreeRootAuthority(authority, rowId, 'claude-cli')).toBe(true);
+      if (transport === 'procfs') {
+        mocks.readFileSync.mockImplementation((file: string) => {
+          if (file.endsWith('/status')) return `PPid:\t${process.pid}\n`;
+          if (file.endsWith('/cmdline')) return command;
+          throw new Error('unexpected fixture read');
+        });
+      } else {
+        mocks.execFileSync.mockReturnValue(`${process.pid} ${command}\n`);
+      }
+      expect(defaultPidOwnershipChecker(4242, 'claude-cli')).toEqual({ alive: true, owned: false });
+
+      const result = classifyActiveSessions(db, durability);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].classification).toBe('stale_live');
+      expect(target.kill).not.toHaveBeenCalled();
+      expect(killSpy).toHaveBeenCalledWith(4242, 0);
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    });
+
+    it.each(['absent', 'wrong row', 'wrong provider', 'changed birth', 'missing birth', 'duplicate live row'])('keeps resolved executable recovery fenced with %s authority evidence', (failure) => {
+      const authority = captureProcessTreeRootAuthority(target)!;
+      if (failure !== 'absent') {
+        expect(bindProcessTreeRootAuthority(
+          authority, failure === 'wrong row' ? rowId + 1 : rowId,
+          failure === 'wrong provider' ? 'codex-cli' : 'claude-cli',
+        )).toBe(true);
+      }
+      if (failure === 'changed birth') mocks.birthToken.mockReturnValue('birth:changed');
+      if (failure === 'missing birth') mocks.birthToken.mockReturnValue(null);
+      if (failure === 'duplicate live row') {
+        db.raw.prepare(`
+          INSERT INTO agent_sessions (session_id, claude_pid, started_in_directory, chat_jid, status, provider, started_at)
+          VALUES ('other', 4242, '/tmp', '54321@s.whatsapp.net', 'active', 'claude-cli', '2026-01-01T00:00:00Z')
+        `).run();
+        durability.upsertSessionCheckpoint('54321', {
+          claudePid: 4242, sessionId: 'other', sessionStatus: 'active',
+        });
+      }
+
+      const result = classifyActiveSessions(db, durability);
+
+      expect(result.map((row) => row.classification)).toEqual(
+        failure === 'duplicate live row' ? ['ambiguous', 'ambiguous'] : ['ambiguous'],
+      );
+      expect(target.kill).not.toHaveBeenCalled();
+      expect(killSpy).toHaveBeenCalledWith(4242, 0);
+      expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    });
   });
 
   // Production 2026-07-17: a cleared/invalid claude_pid reached the ps fallback

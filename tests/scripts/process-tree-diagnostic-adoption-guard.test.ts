@@ -537,6 +537,39 @@ describe('process-tree diagnostic adoption source scan', () => {
 });
 
 describe('process-tree diagnostic adoption live-tree ratchet', () => {
+  it.each([
+    { canonicalPresent: false, exitCode: 2, status: 'inconclusive' },
+    { canonicalPresent: true, exitCode: 0, status: 'pass' },
+  ])('requires readable canonical process-tree source despite a complete caller inventory (present=$canonicalPresent)', ({ canonicalPresent, exitCode, status }) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'process-tree-adoption-canonical-'));
+    temporaryRoots.push(root);
+    const agent = path.join(root, 'src', 'runtimes', 'agent');
+    mkdirSync(agent, { recursive: true });
+    if (canonicalPresent) {
+      writeFileSync(path.join(agent, 'process-tree.ts'), 'export function killSessionTree() {}\n');
+    }
+    for (const [file, sources] of [
+      ['session.ts', ['session_shutdown']],
+      ['runtime.ts', ['stale_session_sweep', 'ownership_loss_cleanup']],
+    ] as const) {
+      writeFileSync(path.join(agent, file), [
+        "import { killSessionTree } from './process-tree.ts';",
+        ...sources.map((source) => `void killSessionTree(42, 'SIGTERM', { rootAuthority, diagnosticSource: '${source}', onOutcome: () => {}, onCgroupDivergence: () => {} });`),
+      ].join('\n'));
+    }
+
+    const result = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning', '--experimental-strip-types',
+      GUARD, '--format', 'json', '--root', root,
+    ], { cwd: root, encoding: 'utf8' });
+
+    expect(result.status).toBe(exitCode);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status,
+      calls_examined: 3,
+    });
+  });
+
   it('keeps the guard on Node, TypeScript, and script-layer dependencies only', () => {
     const guardText = readFileSync(GUARD, 'utf8');
     const imports = [...guardText.matchAll(/from\s+['"]([^'"]+)['"]/g)]
@@ -881,6 +914,11 @@ describe('process-tree diagnostic adoption live-tree ratchet', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'process-tree-adoption-'));
     temporaryRoots.push(root);
     mkdirSync(path.join(root, 'src'), { recursive: true });
+    mkdirSync(path.join(root, 'src', 'runtimes', 'agent'), { recursive: true });
+    writeFileSync(
+      path.join(root, 'src', 'runtimes', 'agent', 'process-tree.ts'),
+      'export function killSessionTree() {}\n',
+    );
     writeFileSync(
       path.join(root, 'src', 'caller.ts'),
       [

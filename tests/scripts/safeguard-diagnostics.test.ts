@@ -330,6 +330,8 @@ const requiredTagReleaseWorkflow = [
   '    runs-on: ubuntu-latest',
   '    timeout-minutes: 60',
   '    steps:',
+  '      - name: Process-tree diagnostic adoption',
+  '        run: npm run guard:process-tree-diagnostics',
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Console build',
@@ -1660,6 +1662,83 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene -- --changed-since']) });
+  });
+
+  it('passes the required process-tree tag-release step', () => {
+    const result = checkSafeguards(makeRepo());
+
+    expect(result.ok).toBe(true);
+    expect(result.checks.find((check) => check.id === 'tag-release-process-tree-adoption'))
+      .toMatchObject({ status: 'pass' });
+  });
+
+  it.each([
+    ['version tags', "on:\n  push:\n    tags: ['v*']", true],
+    ['additional trigger', "on:\n  push:\n    tags: ['v*']\n  workflow_dispatch:", true],
+    ['additional positive tag', "on:\n  push:\n    tags: ['v*', 'release-*']", true],
+    ['manual only', 'on:\n  workflow_dispatch:', false],
+    ['branch only', 'on:\n  push:\n    branches: [main]', false],
+    ['wrong tags', "on:\n  push:\n    tags: ['release-*']", false],
+    ['negative tag filter', "on:\n  push:\n    tags: ['v*', '!v2*']", false],
+    ['ignored version tags', "on:\n  push:\n    tags-ignore: ['v*']", false],
+    ['conflicting tag filters', "on:\n  push:\n    tags: ['v*']\n    tags-ignore: ['other*']", false],
+    ['invalid tag pattern', "on:\n  push:\n    tags: ['v*', 42]", false],
+  ] as const)('checks process-tree tag-release activation: %s', (_label, trigger, valid) => {
+    const workflow = requiredTagReleaseWorkflow;
+    const mutated = workflow.replace("on:\n  push:\n    tags:\n      - 'v*'", trigger);
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({
+      files: { '.github/workflows/tag-release-gate.yml': mutated },
+    }));
+    const check = result.checks.find((entry) => entry.id === 'tag-release-process-tree-adoption');
+
+    expect(result.ok).toBe(valid);
+    expect(check).toMatchObject({ status: valid ? 'pass' : 'fail' });
+    if (!valid) {
+      expect(check?.evidence).toContain(
+        'tag release workflow must include on.push.tags v* with only positive tag patterns and no tags-ignore',
+      );
+    }
+  });
+
+  it.each([
+    ['missing', ''],
+    ['conditional', '      - if: false\n        run: npm run guard:process-tree-diagnostics'],
+    ['advisory', '      - continue-on-error: true\n        run: npm run guard:process-tree-diagnostics'],
+    ['masked', '      - run: npm run guard:process-tree-diagnostics || true'],
+    ['nonexecuting shell', '      - shell: bash -n {0}\n        run: npm run guard:process-tree-diagnostics'],
+  ])('fails a %s process-tree tag-release step', (_label, replacement) => {
+    const workflow = requiredTagReleaseWorkflow;
+    const mutated = workflow.replace(
+      '      - name: Process-tree diagnostic adoption\n        run: npm run guard:process-tree-diagnostics',
+      replacement,
+    );
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({
+      files: { '.github/workflows/tag-release-gate.yml': mutated },
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-process-tree-adoption'))
+      .toMatchObject({ status: 'fail' });
+  });
+
+  it('fails a process-tree tag-release step moved outside the release job', () => {
+    const workflow = requiredTagReleaseWorkflow;
+    const step = '      - name: Process-tree diagnostic adoption\n        run: npm run guard:process-tree-diagnostics';
+    const removed = workflow.replace(step, '');
+    expect(removed).not.toBe(workflow);
+    const mutated = removed.replace('jobs:\n  release-gate:', [
+      'jobs:', '  unrelated:', '    runs-on: ubuntu-latest', '    steps:', step, '  release-gate:',
+    ].join('\n'));
+    expect(mutated).not.toBe(removed);
+    const result = checkSafeguards(makeRepo({
+      files: { '.github/workflows/tag-release-gate.yml': mutated },
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-process-tree-adoption'))
+      .toMatchObject({ status: 'fail' });
   });
 
   it('fails when tag release CI omits the shared console design verification chain', () => {

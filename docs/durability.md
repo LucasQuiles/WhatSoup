@@ -1284,6 +1284,23 @@ birth observation, so one unrelated unreadable identity cannot retain already-pr
 Census loss, duplicate rows, a missing required birth observation, or any survivor keeps only the
 affected lease fenced; active attempts are never capacity-reclaimed.
 
+Stale-row classification keeps duplicate live PIDs ambiguous, but confirmed-dead PIDs
+do not prevent checkpointed stale rows from being retired without signaling. A live
+non-authoritative row can use its exact registered spawn capability even when a resolved
+executable path no longer has the provider's canonical basename. That lookup requires the
+same durable row, provider, PID, retained live handle, and current birth token; it neither
+broadens command-name matching nor replaces cleanup's independent authority validation.
+
+Adoption checks protect three distinct boundaries. `guard:process-tree-diagnostics`
+inventories canonical calls and required option shapes, including complete readable source
+inventory; it does not prove capability provenance or correct consumption of typed results.
+The runtime rejects fabricated, copied, or serialized authority before signaling. Behavioral
+tests separately require ambiguous cleanup to preserve the active row and block resume.
+The adoption command runs in local branch/release gates, hosted quality, and the hosted tag
+release job. The existing safeguard diagnostics validator requires explicit `v*` push-tag
+activation without negative tag filters; additional positive tags and other event triggers
+are allowed. It rejects missing, conditional, advisory, or shell-masked tag-job invocations.
+
 At runtime shutdown, every session is attempted even if an earlier one fails. Successfully
 closed managers release their ownership; a failed singleton or per-chat manager remains attached
 to its session/owner so a later shutdown call can retry it. Queue and auxiliary cleanup still
