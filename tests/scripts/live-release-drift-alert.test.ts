@@ -694,11 +694,16 @@ describe('live release drift alert #2458: per-invocation structured log record',
 });
 
 /**
- * #2385 L1a. The release directory basename is an accident of a rollout, not an
- * identity: two hosts running the same bytes under different directory names are
- * the same release. These tests pin the typed, path-free identity the event now
- * carries, and pin that the human-readable summary did NOT move — the summary is
- * `storm_fingerprint` input, so changing it would re-key in-flight incidents.
+ * #2385 L1a and L1b. The release directory basename is an accident of a rollout,
+ * not an identity: two hosts running the same bytes under different directory
+ * names are the same release. L1a put the typed, path-free identity on the event.
+ * L1b took the basename out of the human-readable summary, which is
+ * `storm_fingerprint` input, so those two hosts now normalise to one fingerprint
+ * and land in one incident group instead of two.
+ *
+ * Re-keying was the accepted cost, not an oversight: alerts carrying the old text
+ * and alerts carrying the new one fingerprint differently, so the owner ruling
+ * accepted one 120-second storm window split across both texts at cutover.
  */
 const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
 const FIXTURE_RELEASE_NAME_A = 'WhatSoup-release-alpha';
@@ -707,15 +712,18 @@ const FIXTURE_SOURCE_COMMIT = 'abc123def4567890';
 const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
 
 /**
- * Summaries b0b93155 emits for these fixtures, recorded as constants in the
- * format `alertSummary` used at b0b93155. They were confirmed against that
- * revision by the order of work, not by a replay harness: this test was written
- * and run BEFORE the typed fields existed, and it passed against the unmodified
- * script (iteration-1 RED receipt 09-red-vitest, where the other two new tests
- * failed and this one did not).
+ * The summary text `alertSummary` emits after L1b, pinned byte-for-byte and
+ * deliberately not derived from either fixture name: a constant built from
+ * `FIXTURE_RELEASE_NAME_*` would still pass if the basename came back, because
+ * both sides of the comparison would move together.
+ *
+ * The issue count stays in the text. It is a property of the drift, not of the
+ * release directory, so two hosts that drifted the same way still normalise to
+ * one fingerprint; and the recovered form carries no count because a recovered
+ * release has no issues to count.
  */
-const BASELINE_RECOVERED_SUMMARY_A = `release drift recovered: ${FIXTURE_RELEASE_NAME_A}`;
-const BASELINE_DETECTED_SUMMARY_B = `release drift detected: ${FIXTURE_RELEASE_NAME_B} (1 issue)`;
+const PATH_FREE_RECOVERED_SUMMARY = 'release drift recovered';
+const PATH_FREE_DETECTED_SUMMARY_ONE_ISSUE = 'release drift detected (1 issue)';
 
 /**
  * Independent oracle for the typed identity: recomputed here from the manifest
@@ -865,11 +873,11 @@ describe('live release drift alert #2385: typed drift identity on the emitted ev
     expect(diagB.observed_release_identity).toBe('unknown');
   });
 
-  it('leaves the summary text byte-identical to what b0b93155 emitted', () => {
+  it('emits the path-free summary byte-exactly on both the clear and the alert', () => {
     const clean = writeTwinReleases();
     const cleanStateDir = path.join(tmpRoot, 'state-clean');
     expect(runCli(['--release', clean.a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: cleanStateDir }).status).toBe(0);
-    expect(outboxEvents(cleanStateDir)[0].summary).toBe(BASELINE_RECOVERED_SUMMARY_A);
+    expect(outboxEvents(cleanStateDir)[0].summary).toBe(PATH_FREE_RECOVERED_SUMMARY);
 
     // afterEach only removes the LAST tmpRoot, so the first tree is removed here
     // rather than left behind for the run.
@@ -877,7 +885,65 @@ describe('live release drift alert #2385: typed drift identity on the emitted ev
     const drifted = writeTwinReleases({ drift: true });
     const driftStateDir = path.join(tmpRoot, 'state-drift');
     expect(runCli(['--release', drifted.b], { BOT_ERRORS_STATE_DIR: driftStateDir }).status).toBe(1);
-    expect(outboxEvents(driftStateDir)[0].summary).toBe(BASELINE_DETECTED_SUMMARY_B);
+    expect(outboxEvents(driftStateDir)[0].summary).toBe(PATH_FREE_DETECTED_SUMMARY_ONE_ISSUE);
+  });
+
+  /**
+   * #2385 L1b, the grouping property itself. The byte-exact test above pins one
+   * host's text; this one pins that the text does not vary with the release
+   * directory, which is what lets the dispatcher collapse two hosts into one
+   * incident.
+   */
+  it('emits one path-free summary for two hosts whose release directories differ', () => {
+    const { a, b } = writeTwinReleases({ drift: true });
+    // Coverage assertion: equal summaries would prove nothing about the basename
+    // if the two fixtures shared a directory name.
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(1);
+    expect(procB.status, procB.stderr).toBe(1);
+
+    const [eventA] = outboxEvents(stateDirA);
+    const [eventB] = outboxEvents(stateDirB);
+    const summaryA = String(eventA.summary);
+    const summaryB = String(eventB.summary);
+
+    // Coverage assertion, and it must come first: every `not.toContain` below
+    // passes on an empty string or on the literal `undefined`, so the text is
+    // pinned to a real value before anything is asserted absent from it.
+    expect(summaryA).toBe(PATH_FREE_DETECTED_SUMMARY_ONE_ISSUE);
+    // The property the dispatcher groups on: same release, two directory names,
+    // one text.
+    expect(summaryB).toBe(summaryA);
+
+    for (const summary of [summaryA, summaryB]) {
+      expect(summary).not.toContain(FIXTURE_RELEASE_NAME_A);
+      expect(summary).not.toContain(FIXTURE_RELEASE_NAME_B);
+      // No filesystem path segment of any kind, not merely these two fixtures.
+      expect(summary).not.toContain(path.sep);
+      expect(summary).not.toContain(tmpRoot);
+    }
+
+    // Negative control: taking the name out of the text left the typed fields
+    // untouched. They are the only identity channel on the event, so a summary
+    // that went path-free by dropping identity information altogether would
+    // fail here.
+    const diagA = eventDiagnostics(eventA);
+    const diagB = eventDiagnostics(eventB);
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(expectedIdentity).toMatch(/^[0-9a-f]{64}$/);
+    expect(diagA.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagB.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagB.desired_release_identity).toBe(expectedIdentity);
+    // A drifted tree's real identity would need a re-walk this leaf does not do,
+    // so observed stays the explicit sentinel, unchanged from L1a.
+    expect(diagA.observed_release_identity).toBe('unknown');
+    expect(diagB.observed_release_identity).toBe('unknown');
   });
 });
 

@@ -248,11 +248,29 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
   return { report, issues, ok: report.ok && issues.length === 0 };
 }
 
+/**
+ * The alert text, carrying no release directory name (#2385 L1b).
+ *
+ * The summary is the only free-text input to the dispatcher's
+ * `storm_fingerprint` (source, severity, normalised summary). While it named the
+ * release directory, two hosts running the SAME bytes under different directory
+ * names produced two fingerprints and two incidents, which is exactly the
+ * correlation the path-free identity above exists to establish. The name is an
+ * accident of a rollout, so it is gone from the text and the identity travels in
+ * the typed diagnostics instead, where it correlates without keying the storm.
+ *
+ * The issue count stays. It is a property of the drift rather than of the
+ * directory, so it does not vary between hosts running the same drifted release
+ * and cannot re-split the group.
+ *
+ * Cost, accepted by the owner ruling rather than overlooked: alerts emitted
+ * before this change and alerts emitted after fingerprint differently, so one
+ * 120-second storm window at cutover groups the two texts separately.
+ */
 function alertSummary(assessment: DriftAssessment): string {
-  const name = path.basename(assessment.report.releasePath);
-  if (assessment.ok) return `release drift recovered: ${name}`;
+  if (assessment.ok) return 'release drift recovered';
   const count = assessment.issues.length;
-  return `release drift detected: ${name} (${count} issue${count === 1 ? '' : 's'})`;
+  return `release drift detected (${count} issue${count === 1 ? '' : 's'})`;
 }
 
 function alertEvidence(assessment: DriftAssessment): string {
