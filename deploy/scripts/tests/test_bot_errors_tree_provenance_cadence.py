@@ -97,6 +97,7 @@ def test_completed_cycle_stamps_both_clocks(state_dir, monkeypatch, capsys):
     assert receipt["lastSuccessfulObservationAt"]
     assert receipt["outcome"] == "success"
     assert receipt["mode"] == "emit"
+    assert receipt["durableWrite"] == "written"
     assert emitted, "the fixture cycle must reach its durable domain write"
 
 
@@ -111,6 +112,9 @@ def test_inspection_error_advances_only_the_attempt_clock(state_dir, monkeypatch
     assert receipt["lastSuccessfulObservationAt"] is None
     assert receipt["outcome"] == "probe_error"
     assert receipt["stage"] == "observation"
+    # The cycle died before it owed anything durable, which is a different
+    # state from owing a write and failing it.
+    assert receipt["durableWrite"] == "not_reached"
 
 
 def test_inspection_error_after_a_success_preserves_the_success_clock(
@@ -149,6 +153,7 @@ def test_event_write_failure_does_not_advance_the_success_clock(
     assert receipt["lastSuccessfulObservationAt"] is None
     assert receipt["outcome"] == "emit_failure"
     assert receipt["stage"] == "durable_write"
+    assert receipt["durableWrite"] == "failed"
 
 
 def test_observe_mode_is_recorded_as_observe(state_dir, monkeypatch, capsys):
@@ -160,6 +165,27 @@ def test_observe_mode_is_recorded_as_observe(state_dir, monkeypatch, capsys):
     receipt = _receipt()
     assert receipt["mode"] == "observe"
     assert receipt["lastSuccessfulObservationAt"]
+
+
+def test_observe_mode_success_records_that_nothing_durable_was_owed(
+    state_dir, monkeypatch, capsys
+):
+    # This producer skips its only durable write in observe mode, so an
+    # observe-mode success clock records "the inspection completed", not "an
+    # observation was durably written". The receipt has to say which, because
+    # the installer admits only observe mode and the evaluator would otherwise
+    # weight a soak cycle as full emit-mode proof.
+    _stub_clean_snapshot(monkeypatch)
+    emitted: list[object] = []
+    monkeypatch.setattr(_mod, "emit_outbox_event", lambda event: emitted.append(event))
+
+    assert _mod.run_once(do_fetch=False, dry=True, reporter=True) == 0
+    capsys.readouterr()
+
+    assert emitted == [], "observe mode must not reach the durable domain write"
+    receipt = _receipt()
+    assert receipt["outcome"] == "success"
+    assert receipt["durableWrite"] == "not_owed"
 
 
 def test_offline_cycle_records_fetch_not_attempted(state_dir, monkeypatch, capsys):

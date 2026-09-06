@@ -27,10 +27,21 @@ Durability
 ----------
 Publication reuses the health-check daily receipt sequence
 (``observe_json`` -> ``operation_id`` -> ``publish_state_json`` ->
-``require_advance``) rather than introducing a second writer. Each call
-observes afresh: two publications in one cycle (attempt, then outcome) need two
-observations, because the second publication's ``expected`` version is the one
-the first publication produced.
+``require_advance``) rather than reimplementing atomic publication. It is
+nonetheless a new durable publisher under the repository's own vocabulary, and
+it is registered as one in ``deploy/bot-errors-durable-writer-inventory.json``.
+Each call observes afresh: two publications in one cycle (attempt, then
+outcome) need two observations, because the second publication's ``expected``
+version is the one the first publication produced.
+
+Was this cycle real evidence?
+-----------------------------
+Three fields qualify a clock rather than restating it. ``mode`` says which of
+the two shipped producer modes ran. ``durableWrite`` says whether anything
+reached disk, which ``mode`` alone cannot: the two producers behave differently
+in observe mode. ``invocationContext`` says whether the scheduler ran the cycle
+or a person did, so a hand-run detector cannot refresh the clocks that stand
+for a live timer.
 
 Redaction
 ---------
@@ -49,6 +60,7 @@ them to that module.
 from __future__ import annotations
 
 from enum import Enum
+import os
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping
@@ -145,15 +157,93 @@ class FetchStatus(str, Enum):
     offline from one that asked for a refresh and did not get it, because only
     the second means the comparison it reported was against an unproven ref.
 
-    ``REQUESTED``     refresh asked for and obtained.
-    ``REFUSED``       refresh asked for and not obtained.
-    ``NOT_ATTEMPTED`` no refresh asked for -- the scheduled path, and every
-                      cycle of a producer that has no fetch step at all.
+    ``REQUESTED``      refresh asked for and obtained.
+    ``REFUSED``        refresh asked for and not obtained.
+    ``NOT_ATTEMPTED``  the producer has a fetch step and did not use it this
+                       cycle -- the scheduled path, which is offline by
+                       contract.
+    ``NOT_APPLICABLE`` the producer has no fetch step at all. Separate from
+                       NOT_ATTEMPTED because a permanent structural fact and a
+                       per-cycle choice are different evidence: collapsing them
+                       lets an evaluator read a missing capability as a
+                       decision the cycle made.
     """
 
     REQUESTED = "requested"
     REFUSED = "refused"
     NOT_ATTEMPTED = "not_attempted"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class DurableWrite(str, Enum):
+    """What became of the durable write this cycle's success clock rests on.
+
+    ``outcome`` says whether the cycle succeeded; this says whether the
+    success rests on anything reaching disk. The two producers differ here and
+    an evaluator must not flatten them: in observe mode the tree producer
+    skips its only durable write entirely, while the runtime-staleness
+    producer still writes its per-instance high-water mark unless every
+    discovered instance is stopped.
+
+    ``WRITTEN``     the qualifying durable write landed.
+    ``NOT_OWED``    the cycle owed no qualifying write -- an observe-mode cycle
+                    with nothing to persist.
+    ``FAILED``      the write was owed, attempted and did not land.
+    ``NOT_REACHED`` the cycle ended before that write was due, or had not
+                    reached it yet when this receipt was stamped.
+
+    Scoped to the qualifying write on purpose: a cycle that fails may still
+    have persisted an unrelated obligation on its way out, and reporting that
+    as a durable write would let an evaluator read a failed cycle as one that
+    produced something.
+    """
+
+    WRITTEN = "written"
+    NOT_OWED = "not_owed"
+    FAILED = "failed"
+    NOT_REACHED = "not_reached"
+
+
+class InvocationContext(str, Enum):
+    """Whether the scheduler ran this cycle or a person did.
+
+    The receipt is keyed on the unit name, so without this an operator running
+    a detector by hand during an incident refreshes the very clocks the later
+    evaluator reads as proof the timer is alive -- masking a stopped timer for
+    a full dwell.
+
+    ``SCHEDULED`` the service manager supplied an invocation identifier.
+    ``MANUAL``    it did not, so nothing vouches for this cycle but the caller.
+    ``UNKNOWN``   the variable was present but carried no identifier, which is
+                  proof of neither.
+    """
+
+    SCHEDULED = "scheduled"
+    MANUAL = "manual"
+    UNKNOWN = "unknown"
+
+
+# The service manager exports this for every unit invocation. Only its
+# PRESENCE is published: the identifier itself is a machine-correlatable value
+# and this receipt admits no such thing (#2341 C21).
+INVOCATION_ID_ENV = "INVOCATION_ID"
+
+
+def invocation_context() -> InvocationContext:
+    """Classify this process's invocation from the scheduler's marker.
+
+    This component family already treats the same variable as the systemd
+    discriminator, but it treats a blank value as absent. A blank value is
+    reported here as UNKNOWN rather than MANUAL: for liveness evidence,
+    "something set the variable without an identifier" is a third state, and
+    reporting it as a hand run would be a claim this process cannot support.
+    """
+    raw = os.environ.get(INVOCATION_ID_ENV)
+    if raw is None:
+        return InvocationContext.MANUAL
+    if not raw.strip():
+        return InvocationContext.UNKNOWN
+    return InvocationContext.SCHEDULED
 
 
 WRAPPER_TOKENS: Mapping[ProducerIdentity, str] = {
@@ -176,6 +266,8 @@ OUTCOME_FIELD = "outcome"
 STAGE_FIELD = "stage"
 MODE_FIELD = "mode"
 FETCH_STATUS_FIELD = "fetchStatus"
+DURABLE_WRITE_FIELD = "durableWrite"
+INVOCATION_CONTEXT_FIELD = "invocationContext"
 
 
 def now_iso() -> str:
@@ -201,10 +293,10 @@ def receipt_path(producer: ProducerIdentity) -> Path:
 def _ensure_private_dir(path: Path) -> None:
     """Create or narrow the receipt directory to 0700, refusing a symlink.
 
-    Mirrors the producers' own private-directory guard: the durable reader
-    rejects any group- or world-accessible bit on the parent, so a leaked mode
-    would turn every later cycle into a publication refusal rather than a
-    silent widening.
+    Mirrors the tree-provenance producer's own private-directory guard, which
+    is the only one of the two that has one: the durable reader rejects any
+    group- or world-accessible bit on the parent, so a leaked mode would turn
+    every later cycle into a publication refusal rather than a silent widening.
     """
     try:
         path.lstat()
@@ -243,6 +335,7 @@ def record_cadence_receipt(
     outcome: CadenceOutcome,
     stage: CadenceStage,
     mode: CadenceMode,
+    durable_write: DurableWrite,
     fetch_status: FetchStatus = FetchStatus.NOT_ATTEMPTED,
     advance_attempt: bool = False,
     advance_success: bool = False,
@@ -295,6 +388,8 @@ def record_cadence_receipt(
         STAGE_FIELD: stage.value,
         MODE_FIELD: mode.value,
         FETCH_STATUS_FIELD: fetch_status.value,
+        DURABLE_WRITE_FIELD: durable_write.value,
+        INVOCATION_CONTEXT_FIELD: invocation_context().value,
     }
     publication_operation = operation_id(
         target,
@@ -331,6 +426,9 @@ def record_cycle_attempt(
         outcome=CadenceOutcome.IN_PROGRESS,
         stage=CadenceStage.CYCLE_START,
         mode=mode,
+        # The cycle has only just started, so whatever it owes is still ahead
+        # of it.
+        durable_write=DurableWrite.NOT_REACHED,
         fetch_status=fetch_status,
         advance_attempt=True,
     )
@@ -340,6 +438,7 @@ def record_cycle_success(
     producer: ProducerIdentity,
     *,
     mode: CadenceMode,
+    durable_write: DurableWrite,
     fetch_status: FetchStatus = FetchStatus.NOT_ATTEMPTED,
 ) -> PublicationResult:
     """Advance ``lastSuccessfulObservationAt`` after the durable domain write.
@@ -350,12 +449,17 @@ def record_cycle_success(
     A success never moves an attempt clock that is already set; it only fills
     one that is missing, so the receipt never claims an observation with no
     attempt behind it.
+
+    ``durable_write`` has no default: the caller has to say whether anything
+    reached disk, because a success that owed nothing and a success that wrote
+    are different evidence and only the caller knows which this was.
     """
     return record_cadence_receipt(
         producer,
         outcome=CadenceOutcome.SUCCESS,
         stage=CadenceStage.COMPLETE,
         mode=mode,
+        durable_write=durable_write,
         fetch_status=fetch_status,
         advance_success=True,
         require_attempt=True,
@@ -368,6 +472,7 @@ def record_cycle_failure(
     outcome: CadenceOutcome,
     stage: CadenceStage,
     mode: CadenceMode,
+    durable_write: DurableWrite,
     fetch_status: FetchStatus = FetchStatus.NOT_ATTEMPTED,
 ) -> PublicationResult:
     """Record a cycle that started and did not produce a qualifying observation.
@@ -380,6 +485,7 @@ def record_cycle_failure(
         outcome=outcome,
         stage=stage,
         mode=mode,
+        durable_write=durable_write,
         fetch_status=fetch_status,
     )
 
@@ -401,5 +507,7 @@ def record_lock_skip(
         outcome=CadenceOutcome.LOCK_SKIP,
         stage=CadenceStage.PRE_EXEC,
         mode=mode,
+        # The owned cycle never started, so it never owed a durable write.
+        durable_write=DurableWrite.NOT_REACHED,
         fetch_status=FetchStatus.NOT_ATTEMPTED,
     )

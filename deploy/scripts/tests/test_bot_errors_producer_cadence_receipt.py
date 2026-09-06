@@ -122,11 +122,63 @@ def test_stage_vocabulary_is_bounded():
 
 
 def test_fetch_status_vocabulary_is_bounded():
+    # not_applicable is the producer that has no fetch step at all;
+    # not_attempted is a producer that has one and did not use it. An
+    # evaluator that cannot tell those apart reads a permanent structural
+    # state as a per-cycle choice.
     assert {member.value for member in pcr.FetchStatus} == {
         "requested",
         "refused",
         "not_attempted",
+        "not_applicable",
     }
+
+
+def test_durable_write_vocabulary_is_bounded():
+    assert {member.value for member in pcr.DurableWrite} == {
+        "written",
+        "not_owed",
+        "failed",
+        "not_reached",
+    }
+
+
+def test_invocation_context_vocabulary_is_bounded():
+    assert {member.value for member in pcr.InvocationContext} == {
+        "scheduled",
+        "manual",
+        "unknown",
+    }
+
+
+def test_a_scheduler_invocation_identifier_marks_the_cycle_scheduled(monkeypatch):
+    monkeypatch.setenv(pcr.INVOCATION_ID_ENV, "b8f0c9d2e1a4")
+    assert pcr.invocation_context() is pcr.InvocationContext.SCHEDULED
+
+
+def test_no_scheduler_invocation_identifier_marks_the_cycle_manual(monkeypatch):
+    # The case this field exists for: an operator running the detector by hand
+    # during an incident must not refresh the clocks an evaluator reads as
+    # proof that the timer is alive.
+    monkeypatch.delenv(pcr.INVOCATION_ID_ENV, raising=False)
+    assert pcr.invocation_context() is pcr.InvocationContext.MANUAL
+
+
+def test_a_blank_scheduler_invocation_identifier_is_unknown(monkeypatch):
+    # Set but carrying no identifier is neither proof of a scheduled cycle nor
+    # proof of a hand run, so it must not be reported as either.
+    monkeypatch.setenv(pcr.INVOCATION_ID_ENV, "   ")
+    assert pcr.invocation_context() is pcr.InvocationContext.UNKNOWN
+
+
+def test_the_receipt_records_the_context_token_not_the_identifier(state_dir, monkeypatch):
+    secret_identifier = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setenv(pcr.INVOCATION_ID_ENV, secret_identifier)
+
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    receipt = _payload(TREE)
+    assert receipt["invocationContext"] == "scheduled"
+    assert secret_identifier not in json.dumps(receipt)
 
 
 def test_clock_field_names_are_the_two_the_evaluator_will_read():
@@ -158,7 +210,9 @@ def test_success_does_not_move_the_attempt_clock(state_dir, clock, producer):
     success_stamp = clock.advance()
     assert success_stamp != attempt_stamp
 
-    pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        producer, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     receipt = _payload(producer)
     assert receipt["lastAttemptAt"] == attempt_stamp
     assert receipt["lastSuccessfulObservationAt"] == success_stamp
@@ -169,7 +223,9 @@ def test_success_does_not_move_the_attempt_clock(state_dir, clock, producer):
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
 def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir, clock, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
-    pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        producer, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     success_stamp = _payload(producer)["lastSuccessfulObservationAt"]
 
     # The later cycle runs at a different instant, so a success clock that
@@ -183,6 +239,7 @@ def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir
         outcome=pcr.CadenceOutcome.PROBE_ERROR,
         stage=pcr.CadenceStage.OBSERVATION,
         mode=pcr.CadenceMode.EMIT,
+        durable_write=pcr.DurableWrite.NOT_REACHED,
     )
     receipt = _payload(producer)
     assert receipt["lastSuccessfulObservationAt"] == success_stamp
@@ -194,7 +251,9 @@ def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
 def test_lock_skip_moves_neither_clock(state_dir, clock, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
-    pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        producer, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     before = _payload(producer)
 
     # The refused cycle happens later than the cycle that set both clocks, so
@@ -225,7 +284,9 @@ def test_success_without_a_recorded_attempt_backfills_the_attempt_clock(state_di
     # pair as malformed. An attempt always precedes a success within the same
     # cycle, so the success stamp backfills it.
     success_stamp = clock.advance()
-    pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        producer, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     receipt = _payload(producer)
     assert receipt["lastAttemptAt"] == success_stamp
     assert receipt["lastSuccessfulObservationAt"] == success_stamp
@@ -233,7 +294,9 @@ def test_success_without_a_recorded_attempt_backfills_the_attempt_clock(state_di
 
 def test_a_clock_written_under_a_different_schema_version_is_not_carried_forward(state_dir):
     pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
-    pcr.record_cycle_success(TREE, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        TREE, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     assert _payload(TREE)["lastSuccessfulObservationAt"]
 
     stale = _payload(TREE)
@@ -265,7 +328,9 @@ def test_a_clock_written_under_a_declared_compatible_version_is_carried_forward(
     )
 
     pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
-    pcr.record_cycle_success(TREE, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        TREE, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
     success_stamp = _payload(TREE)["lastSuccessfulObservationAt"]
 
     prior = _payload(TREE)
@@ -287,6 +352,7 @@ def test_receipt_carries_no_path_hostname_or_command_evidence(state_dir, produce
         producer,
         mode=pcr.CadenceMode.OBSERVE,
         fetch_status=pcr.FetchStatus.NOT_ATTEMPTED,
+        durable_write=pcr.DurableWrite.NOT_OWED,
     )
     receipt = _payload(producer)
     assert set(receipt) == {
@@ -300,6 +366,8 @@ def test_receipt_carries_no_path_hostname_or_command_evidence(state_dir, produce
         "stage",
         "mode",
         "fetchStatus",
+        "invocationContext",
+        "durableWrite",
     }
     rendered = json.dumps(receipt)
     assert str(state_dir) not in rendered

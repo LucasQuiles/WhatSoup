@@ -30,6 +30,7 @@ RUNTIME_STALENESS = pcr.ProducerIdentity.RUNTIME_STALENESS
 FIXTURE_INSTANCE = "fixture"
 FRESH_OBSERVATION = {"running": True, "stale": False, "critical": False, "lag_seconds": 0}
 STALE_OBSERVATION = {"running": True, "stale": True, "critical": False, "lag_seconds": 90}
+STOPPED_OBSERVATION = {"running": False, "stale": False, "critical": False, "lag_seconds": None}
 
 EMIT_ACCEPTED = 0
 EMIT_REJECTED = 1
@@ -82,6 +83,7 @@ def test_completed_cycle_stamps_both_clocks(state_dir, monkeypatch, capsys):
     assert receipt["outcome"] == "success"
     assert receipt["stage"] == "complete"
     assert receipt["mode"] == "emit"
+    assert receipt["durableWrite"] == "written"
 
 
 def test_probe_error_advances_only_the_attempt_clock(state_dir, monkeypatch, capsys):
@@ -95,6 +97,7 @@ def test_probe_error_advances_only_the_attempt_clock(state_dir, monkeypatch, cap
     assert receipt["lastSuccessfulObservationAt"] is None
     assert receipt["outcome"] == "probe_error"
     assert receipt["stage"] == "observation"
+    assert receipt["durableWrite"] == "not_reached"
 
 
 def test_probe_error_after_a_success_preserves_the_success_clock(
@@ -125,6 +128,7 @@ def test_emit_failure_does_not_advance_the_success_clock(state_dir, monkeypatch,
     assert receipt["lastSuccessfulObservationAt"] is None
     assert receipt["outcome"] == "emit_failure"
     assert receipt["stage"] == "durable_write"
+    assert receipt["durableWrite"] == "failed"
 
 
 def test_discovery_failure_advances_only_the_attempt_clock(state_dir, monkeypatch, capsys):
@@ -169,9 +173,51 @@ def test_observe_mode_is_recorded_as_observe(state_dir, monkeypatch, capsys):
 
 
 def test_receipt_records_no_fetch_step_for_this_producer(state_dir, monkeypatch, capsys):
+    # This producer has no fetch step at all, which is a permanent structural
+    # fact. not_attempted would say "had one and did not use it this cycle",
+    # so an evaluator could read a missing capability as a per-cycle choice.
     _stub_cycle(monkeypatch, observation=FRESH_OBSERVATION)
 
     assert _mod.run_once(instances=[FIXTURE_INSTANCE], dry_run=False) == 0
     capsys.readouterr()
 
-    assert _receipt()["fetchStatus"] == "not_attempted"
+    assert _receipt()["fetchStatus"] == "not_applicable"
+
+
+def test_observe_mode_success_over_a_running_instance_still_writes_durably(
+    state_dir, monkeypatch, capsys
+):
+    # The asymmetry the evaluator must not flatten: unlike tree-provenance,
+    # this producer's per-instance high-water mark is written in observe mode
+    # too, so an observe-mode success here is stronger evidence.
+    #
+    # Method limit: probe_instance is stubbed, so this asserts the
+    # classification the producer derives from the observation's own running
+    # flag -- the same flag production derives it from -- not that a byte
+    # reached disk.
+    _stub_cycle(monkeypatch, observation=FRESH_OBSERVATION)
+
+    assert _mod.run_once(instances=[FIXTURE_INSTANCE], dry_run=True) == 0
+    capsys.readouterr()
+
+    receipt = _receipt()
+    assert receipt["mode"] == "observe"
+    assert receipt["outcome"] == "success"
+    assert receipt["durableWrite"] == "written"
+
+
+def test_observe_mode_success_over_a_stopped_fleet_owes_no_durable_write(
+    state_dir, monkeypatch, capsys
+):
+    # Every discovered instance stopped: no emit, no pending-clear save, and
+    # no high-water mark, yet the cycle succeeds. That is the one shape in
+    # which this producer's observe-mode success is as weak as the tree
+    # producer's, and an all-stopped fleet is an ordinary incident state.
+    _stub_cycle(monkeypatch, observation=STOPPED_OBSERVATION)
+
+    assert _mod.run_once(instances=[FIXTURE_INSTANCE], dry_run=True) == 0
+    capsys.readouterr()
+
+    receipt = _receipt()
+    assert receipt["outcome"] == "success"
+    assert receipt["durableWrite"] == "not_owed"

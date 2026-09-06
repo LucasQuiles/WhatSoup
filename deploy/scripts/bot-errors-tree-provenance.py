@@ -94,6 +94,7 @@ from lib.producer_cadence_receipt import (
     CadenceMode,
     CadenceOutcome,
     CadenceStage,
+    DurableWrite,
     FetchStatus,
     ProducerIdentity,
     record_cycle_attempt,
@@ -707,9 +708,20 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     Every exit path also stamps a cadence receipt (#2341, schema pinned by
     CADENCE_RECEIPT_SCHEMA_VERSION): ``lastAttemptAt`` at entry, and
     ``lastSuccessfulObservationAt`` only once the inspection completed and the
-    durable write (or, in observe mode, the report) landed. Receipt failures are
-    swallowed -- a dark liveness receipt must never break the domain guard it
-    observes.
+    durable write landed.
+
+    In observe mode nothing durable lands at all: emitting the outbox event is
+    this producer's only durable write and ``dry`` skips it, so an
+    observe-mode success clock means "the inspection completed" and the
+    receipt records ``durableWrite: not_owed`` to say so. The sibling
+    runtime-staleness producer is NOT symmetric here -- it still writes its
+    per-instance high-water mark in observe mode -- so an evaluator must read
+    ``durableWrite`` rather than weighting ``mode`` alike across the two.
+
+    Receipt failures are swallowed: the cycle prints a bounded
+    ``tree_provenance cadence_receipt_error <ExceptionClassName>`` line on
+    stderr and continues, because a dark liveness receipt must never break the
+    domain guard it observes.
     """
     mode = CadenceMode.OBSERVE if dry else CadenceMode.EMIT
     _record_cadence(record_cycle_attempt, mode=mode)
@@ -721,6 +733,7 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
             mode=mode,
             outcome=CadenceOutcome.PROBE_ERROR,
             stage=CadenceStage.OBSERVATION,
+            durable_write=DurableWrite.NOT_REACHED,
         )
         evidence = f"tree_provenance inspection_error {str(exc)[:200]}"
         if reporter:
@@ -768,12 +781,21 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
                 snapshot=snap,
                 outcome=CadenceOutcome.EMIT_FAILURE,
                 stage=CadenceStage.DURABLE_WRITE,
+                durable_write=DurableWrite.FAILED,
             )
             print(f"tree_provenance event_write_error {str(exc)[:200]}", file=sys.stderr)
             return 1
-    # The durable write has landed (or, in observe mode, was never owed), so
-    # this cycle produced a qualifying observation.
-    _record_cadence(record_cycle_success, mode=mode, snapshot=snap)
+    # The durable write has landed, or in observe mode was never owed: the
+    # `if not dry` gate above is this producer's ONLY durable write, so an
+    # observe-mode cycle persists nothing at all. The receipt records which of
+    # the two this was, because the success clock cannot distinguish them and
+    # the installer admits only observe mode.
+    _record_cadence(
+        record_cycle_success,
+        mode=mode,
+        snapshot=snap,
+        durable_write=DurableWrite.NOT_OWED if dry else DurableWrite.WRITTEN,
+    )
     print(summary)
     print(evidence)
     if reporter:
