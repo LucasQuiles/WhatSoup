@@ -272,9 +272,10 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
  * grouping key, not a constraint this change breaks.
  *
  * Eight is accepted anyway, for reasons specific to what this token identifies.
- * It identifies a RELEASE, and only a handful are distinct at any one time, so a
- * 32-bit prefix collision between two concurrently alerting releases is
- * negligible rather than merely improbable per pair. The full 64-hex identity
+ * It identifies a RELEASE, and the fleet is expected to run only a handful
+ * of distinct releases at once, so a 32-bit prefix collision between two
+ * concurrently alerting releases is negligible under that expectation
+ * rather than merely improbable per pair. The full 64-hex identity
  * still rides the event's typed diagnostics (`desired_release_identity`, built
  * in `typedDriftDiagnostics` below), so the truncation is not the only copy.
  * The residual cost is disclosed rather than hidden: two distinct releases
