@@ -7,8 +7,14 @@ import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { confineAlertContent } from '../lib/alert-evidence.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
-import { clearRecoveryMarker, loadRecoveryMarkers, setRecoveryMarker } from '../lib/recovery-authority-store.ts';
+import {
+  clearRecoveryMarker,
+  loadRecoveryMarkers,
+  readRecoveryMarkerState,
+  setRecoveryMarker,
+} from '../lib/recovery-authority-store.ts';
 
 const log = createChildLogger('scheduler');
 
@@ -112,6 +118,177 @@ export class ScheduledPayloadError extends Error {
   }
 }
 
+/**
+ * A scheduled send that has reached a TERMINAL disposition (#2387).
+ *
+ * The row is written `failed` and leaves the due query forever, so the operator
+ * alert is the only remaining trace of the dropped message. These fields are
+ * exactly what re-rendering that alert needs and nothing else — no chat jid, no
+ * payload, no message body — because the record is written to DURABLE storage
+ * whenever the alert enqueue is rejected.
+ */
+type TerminalSendFailure =
+  | { kind: 'payload_undecodable'; scheduledId: number; error: string; recurring: boolean }
+  | { kind: 'retry_exhausted'; scheduledId: number; error: string; attempts: number };
+
+/**
+ * Render the `scheduler_send_failed` alert for a terminal disposition.
+ *
+ * ONE builder for the first attempt and for any later re-emission from a
+ * retained record (#2387), so a retried alert is identical to the rejected one
+ * by construction rather than by two call sites happening to agree. The text is
+ * unchanged from the two inline emissions this replaced; #2386 owns the
+ * evidence-redaction boundary, deliberately not this seam.
+ */
+function terminalSendAlertText(
+  instance: string,
+  failure: TerminalSendFailure,
+): { summary: string; evidence: string } {
+  if (failure.kind === 'payload_undecodable') {
+    return {
+      summary:
+        `whatsoup@${instance} dead-lettered scheduled send (id ${failure.scheduledId}) — `
+        + `stored payload is undecodable, message DROPPED: ${failure.error}`,
+      evidence: [
+        `scheduledId=${failure.scheduledId}`,
+        `recurring=${failure.recurring}`,
+        `error=${failure.error}`,
+        'ref: #2359 — an undecodable payload is permanent, so it is dead-lettered on the first occurrence rather than consuming the retry budget. Inspect the scheduled_messages row; the payload column is not valid JSON.',
+      ].join('\n'),
+    };
+  }
+  return {
+    summary:
+      `whatsoup@${instance} permanently failed a scheduled send (id ${failure.scheduledId}) `
+      + `after ${failure.attempts} attempts — message DROPPED: ${failure.error}`,
+    evidence: [
+      `scheduledId=${failure.scheduledId}`,
+      `attempts=${failure.attempts}`,
+      `error=${failure.error}`,
+      'ref: #1779 remediation #3 — a permanent scheduled-send drop is now surfaced as an alert. If the transport is de-linked, re-pair the WhatsApp link; otherwise inspect the send error.',
+    ].join('\n'),
+  };
+}
+
+/**
+ * Length bound for the error string stored in a terminal-failure marker. Long
+ * enough for the message skeleton and a position, short enough that a pathological
+ * error cannot turn a marker into a log.
+ */
+const MARKER_ERROR_MAX_LENGTH = 200;
+
+/**
+ * Strip quoted content from an error string before it is written to a marker.
+ *
+ * Contract clause 5 (#2387): the durable record may carry only what re-rendering
+ * the alert needs, never payload bytes. `errorMessage()` of a `JSON.parse` throw
+ * violates that — V8 embeds a prefix of the input, rendering an undecodable
+ * payload as `Unexpected token 'H', "Hi Rachel,"... is not valid JSON`.
+ *
+ * Everything from the first quote to the last goes, and both quote styles go:
+ * the single-quoted token in that same message is itself a payload byte, and the
+ * exact phrasing is a V8 implementation detail that moves between Node versions.
+ * Redacting by quoting rather than by message shape survives that drift, at the
+ * cost of also blanking grammar tokens in positional messages
+ * (`Expected ',' or '}' …`) — the skeleton and the position, which is what an
+ * operator acts on, remain.
+ *
+ * The span is GREEDY, not quote-pair matched. A payload that contains a double
+ * quote makes V8 echo it whole — `{"x":}` renders as `Unexpected token '}',
+ * "{"x":}" is not valid JSON` — and pair matching there aligns the quotes wrongly
+ * and leaves the payload between two redacted pairs. Since the echo is the only
+ * quoted region these messages carry, spanning it whole is both safe and simpler
+ * than tracking nesting.
+ *
+ * An unterminated run redacts to end of string, so a malformed message cannot
+ * leak its tail — but the CLOSED form is tried first, so a message that does
+ * close its quotes keeps everything after them (the position an operator reads).
+ * A single pattern ending in `("|$)` would not: greedy matching reaches the end
+ * of the string, where `$` succeeds without ever backtracking to the real
+ * closing quote, and the tail is swallowed.
+ *
+ * Redaction runs BEFORE the length bound: truncating first could sever the span
+ * and leave its opening fragment behind unmatched.
+ */
+function redactErrorForMarker(error: string): string {
+  return error
+    .replace(/"[\s\S]*"|"[\s\S]*$/, '"<redacted>"')
+    .replace(/'[\s\S]*'|'[\s\S]*$/, "'<redacted>'");
+}
+
+/**
+ * The full confinement applied to an error before it is written to a marker.
+ *
+ * Quoting alone was not enough. It covers the JSON.parse echo, which is where
+ * payload bytes appear, but `failure.error` is the message of ANY send-path
+ * throw: a provider that names the recipient in prose puts a destination into
+ * the record with no quote in sight. So the quoted-run redaction runs first,
+ * then identifier shapes go to placeholders, and only then is the result
+ * bounded — bounding earlier could sever a run or an address and leave half of
+ * it behind unmatched.
+ */
+function confineErrorForMarker(error: string): string {
+  let confined = redactErrorForMarker(error);
+  for (const [pattern, placeholder] of MARKER_IDENTIFIER_PATTERNS) {
+    confined = confined.replace(pattern, placeholder);
+  }
+  return confined.length <= MARKER_ERROR_MAX_LENGTH
+    ? confined
+    : `${confined.slice(0, MARKER_ERROR_MAX_LENGTH)}…`;
+}
+
+/**
+ * Identity of one marker's stored content (#2387).
+ *
+ * The serialized payload itself, not a hash: it is already bounded (the error
+ * field is length-capped) and equality on it needs no digest. Content rather
+ * than `setAt` alone, because two markers written inside the same millisecond
+ * share a timestamp but not a failure, and the whole point is to tell one
+ * obligation from the next at a key that names only a row.
+ */
+function markerIdentity(payload: Record<string, unknown>): string {
+  return JSON.stringify(payload);
+}
+
+/**
+ * Shapes that name a person or a destination and survive quote-stripping.
+ *
+ * `failure.error` is `errorMessage()` of ANY send-path throw, not only a
+ * JSON.parse message, so a transport error can carry a recipient in plain text
+ * with no quotes anywhere. Ordered most specific first: a chat address is
+ * recognised as such before the generic mail-shaped rule, and a bare digit run
+ * last so it cannot eat part of an address already replaced.
+ */
+const MARKER_IDENTIFIER_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/[\w.+-]+@[\w.-]*(?:s\.whatsapp\.net|lid|g\.us)\b/gi, '<chat>'],
+  [/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '<address>'],
+  [/\d{7,}/g, '<digits>'],
+];
+
+/**
+ * Rebuild a terminal-failure record from a marker payload, or null.
+ *
+ * Validated rather than cast: the marker is durable state that can outlive the
+ * code that wrote it, and a half-typed record would re-emit an alert reading
+ * `id undefined` — worse than the missing alert this whole path exists to
+ * prevent.
+ */
+function parseTerminalSendFailure(raw: Record<string, unknown>): TerminalSendFailure | null {
+  const scheduledId = raw['scheduledId'];
+  const error = raw['error'];
+  if (typeof scheduledId !== 'number' || typeof error !== 'string') return null;
+
+  const recurring = raw['recurring'];
+  if (raw['kind'] === 'payload_undecodable' && typeof recurring === 'boolean') {
+    return { kind: 'payload_undecodable', scheduledId, error, recurring };
+  }
+  const attempts = raw['attempts'];
+  if (raw['kind'] === 'retry_exhausted' && typeof attempts === 'number') {
+    return { kind: 'retry_exhausted', scheduledId, error, attempts };
+  }
+  return null;
+}
+
 export class MessageScheduler {
   private timer: NodeJS.Timeout | null = null;
   private db: Database;
@@ -128,6 +305,38 @@ export class MessageScheduler {
    * unconditionally on the 'open' event).
    */
   private deLinkAlertEmitted = false;
+
+  /**
+   * #2387: marker keys written by THIS process whose operator alert is still
+   * owed. A fast path and a fallback, never the source of truth — the drain
+   * re-derives the obligation from the marker directory on every tick, because
+   * a store read that fails once must not orphan an alert until the next
+   * restart. This set is what keeps a just-written marker discoverable while
+   * that directory read is failing.
+   */
+  private readonly pendingTerminalAlerts = new Set<string>();
+
+  /**
+   * #2387: keys whose alert this process DELIVERED but whose marker it could
+   * not clear. The marker is still on disk and the per-tick re-derivation keeps
+   * handing the key back, so without this the operator is paged once a tick
+   * until the store heals.
+   *
+   * Membership suppresses only the RE-EMISSION; the clear is retried on every
+   * tick and the key leaves on success. It is not a claim about what is owed —
+   * disk still holds that — only a record that this process already delivered
+   * this one. A restart therefore re-emits once, which is the honest reading of
+   * a marker that is still on disk saying the alert was never cleared.
+   *
+   * The value is the IDENTITY of the marker that was delivered, and suppression
+   * applies only while the marker on disk still matches it. The key names a ROW,
+   * not a delivery, so a fresh obligation can land at the same key — an operator
+   * re-queues the row and it fails terminally again, or the marker is recreated
+   * out of band. Keyed on the row alone, this set would skip that obligation
+   * unread and delete it once the clear succeeded: a silent loss of exactly the
+   * alert this leaf exists to retain.
+   */
+  private readonly deliveredUnclearable = new Map<string, string>();
 
   constructor(
     db: Database,
@@ -157,6 +366,20 @@ export class MessageScheduler {
 
   private deLinkMarkerKey(): string {
     return `scheduler_delinked_send_held:${this.config.instance}`;
+  }
+
+  /**
+   * Namespace for per-row terminal-alert markers (#2387). One key per scheduled
+   * id, so two dropped rows are two independent obligations that cannot collapse
+   * into one another — the trailing separator is what keeps the restart scan
+   * from matching a different source that merely starts the same way.
+   */
+  private terminalAlertMarkerPrefix(): string {
+    return `scheduler_send_failed:${this.config.instance}:`;
+  }
+
+  private terminalAlertMarkerKey(scheduledId: number): string {
+    return `${this.terminalAlertMarkerPrefix()}${scheduledId}`;
   }
 
   start(): void {
@@ -266,6 +489,13 @@ export class MessageScheduler {
     // later de-link episode would hold sends without alerting.
     const linkState = this.assessLinkState();
     if (linkState === 'linked') this.clearDeLinkLatch();
+
+    // #2387 — discharge any terminal send alert whose enqueue was rejected.
+    // Placed with the latch clear for the same reason: it must run ABOVE both
+    // early returns below, because the row it speaks for is already `failed`
+    // and can never appear in the candidate query again. Not gated on link
+    // state — an alert travels to the bot-errors outbox, not over WhatsApp.
+    this.drainTerminalAlertAuthority();
 
     // Fetch pending rows whose scheduled_at (one-shot) or next_run_at (recurring)
     // has passed, then claim each by id. Fetching ids first and updating by id
@@ -557,6 +787,217 @@ export class MessageScheduler {
     log.info({ event: 'scheduler_relinked' }, 'scheduler: instance re-linked; resuming scheduled sends');
   }
 
+  /**
+   * Emit the terminal `scheduler_send_failed` alert, RETAINING durable
+   * notification authority if the checked enqueue is rejected (#2387).
+   *
+   * By the time this runs the row is `failed` and has left the due query, so a
+   * discarded rejection has no retry owner at all: the operator alert for a
+   * permanently dropped scheduled message would be lost for good, and silently.
+   * A rejected enqueue therefore writes a marker that `drainTerminalAlertAuthority`
+   * retries on a later tick.
+   *
+   * This is the de-link seam above (#2415) inverted. There an ACCEPTED emission
+   * writes the marker, and the marker means "an alert is active"; here a
+   * REJECTED emission writes it, and it means "an alert is still owed".
+   */
+  private emitTerminalSendAlert(failure: TerminalSendFailure): void {
+    const instance = this.config.instance;
+    if (!instance) return;
+
+    const { summary, evidence } = terminalSendAlertText(instance, failure);
+    if (emitAlertChecked(instance, 'scheduler_send_failed', summary, evidence, 'warning')) return;
+
+    const key = this.terminalAlertMarkerKey(failure.scheduledId);
+    try {
+      // The alert just emitted carried the raw error, exactly as at baseline.
+      // What goes to DISK is redacted: an undecodable payload puts its own first
+      // bytes into the JSON.parse message, and clause 5 forbids those in the
+      // record. A retry therefore re-emits the redacted form — the operator sees
+      // the same failure, minus a payload fragment.
+      setRecoveryMarker(key, {
+        ...failure,
+        error: confineErrorForMarker(failure.error),
+        // Diagnostic only, never rendered into an alert: confinement can blank
+        // the part of the message that named the failure, and an operator
+        // reading the file still needs to know what kind of failure it was.
+        // Taken from the alert channel's own classifier so the two agree.
+        errorClass: confineAlertContent('evidence', failure.error).failureClass,
+      });
+      this.pendingTerminalAlerts.add(key);
+      // A new obligation now exists at this key, so any suppression recorded
+      // for an earlier delivery no longer speaks for it.
+      this.deliveredUnclearable.delete(key);
+      log.warn(
+        { event: 'scheduler_terminal_alert_retained', id: failure.scheduledId },
+        'scheduler: terminal send alert enqueue rejected; notification authority retained for a later tick',
+      );
+    } catch (err) {
+      // Loud, and error-level: the marker store is the ONLY owner left for this
+      // notification, so a failed write is the moment the alert is actually lost.
+      log.error(
+        { err, event: 'scheduler_terminal_alert_authority_lost', id: failure.scheduledId },
+        'scheduler: could not retain terminal send alert authority; the operator alert for a dropped message is lost',
+      );
+    }
+  }
+
+  /**
+   * Re-emit terminal send alerts whose enqueue was previously rejected (#2387).
+   *
+   * Runs above BOTH of tick()'s early returns — the empty-candidates return and
+   * the de-linked return — for the same reason clearDeLinkLatch() does: the rows
+   * these alerts speak for are terminal, so anywhere below either gate the
+   * obligation would only be discharged when unrelated work happened to be due.
+   *
+   * Re-emits the ALERT alone. Nothing here reads or writes scheduled_messages,
+   * which is what makes "do not replay the scheduled send merely to recreate an
+   * alert" structural rather than a promise.
+   */
+  private drainTerminalAlertAuthority(): void {
+    const instance = this.config.instance;
+    if (!instance) return;
+
+    for (const key of this.retainedTerminalAlertKeys()) {
+      // Read BEFORE consulting the suppression: the set records a delivery, and
+      // only the bytes on disk can say whether this is still that same one.
+      const stored = readRecoveryMarkerState(key);
+      const deliveredIdentity = this.deliveredUnclearable.get(key);
+
+      if (deliveredIdentity !== undefined) {
+        if (stored.state === 'ok' && markerIdentity(stored.payload) === deliveredIdentity) {
+          // The same marker this process already delivered. Only the clear is
+          // still owed; retry it and say nothing more — the entry warned once.
+          if (this.discardTerminalAlertMarker(key)) {
+            this.deliveredUnclearable.delete(key);
+            log.info(
+              { event: 'scheduler_terminal_alert_marker_cleared_late', key },
+              'scheduler: previously unclearable terminal send alert marker cleared',
+            );
+          }
+          continue;
+        }
+        // The marker is gone or is no longer the one that was delivered, so the
+        // suppression has nothing left to speak for. Retire it and treat what is
+        // on disk on its own terms.
+        this.deliveredUnclearable.delete(key);
+        if (stored.state === 'missing') {
+          log.info(
+            { event: 'scheduler_terminal_alert_marker_cleared_late', key },
+            'scheduler: previously unclearable terminal send alert marker is gone',
+          );
+        }
+      }
+
+      if (stored.state === 'missing') {
+        // The end of a marker's normal life: the clear landed, or another
+        // process discharged it. Nothing owed and nothing wrong.
+        this.pendingTerminalAlerts.delete(key);
+        continue;
+      }
+
+      if (stored.state === 'unreadable') {
+        // Bytes exist that this process could not read. Never unlink what could
+        // not be interpreted — the same rule readLegacyMarkersStrict follows in
+        // the store — so the obligation stays on disk for a luckier reader.
+        this.pendingTerminalAlerts.delete(key);
+        log.warn(
+          { event: 'scheduler_terminal_alert_marker_unusable', key, reason: 'unreadable' },
+          'scheduler: retained terminal send alert could not be read; leaving the marker in place',
+        );
+        continue;
+      }
+
+      // Identity is captured alongside the parse, while the payload is in hand:
+      // a suppression recorded below must name the exact bytes just delivered.
+      const identity = stored.state === 'ok' ? markerIdentity(stored.payload) : '';
+      const failure = stored.state === 'ok' ? parseTerminalSendFailure(stored.payload) : null;
+      if (failure === null) {
+        // Bytes were read and can never render an alert. Discarding is safe here
+        // precisely because they were seen.
+        this.pendingTerminalAlerts.delete(key);
+        log.warn(
+          { event: 'scheduler_terminal_alert_marker_unusable', key, reason: stored.state === 'ok' ? 'unparseable' : 'invalid' },
+          'scheduler: retained terminal send alert is not re-emittable; discarding the marker',
+        );
+        this.discardTerminalAlertMarker(key);
+        continue;
+      }
+
+      const { summary, evidence } = terminalSendAlertText(instance, failure);
+      if (!emitAlertChecked(instance, 'scheduler_send_failed', summary, evidence, 'warning')) {
+        continue; // still owed; the next tick retries
+      }
+      this.pendingTerminalAlerts.delete(key);
+      if (!this.discardTerminalAlertMarker(key)) {
+        this.noteUnclearable(key, identity);
+      }
+      log.info(
+        { event: 'scheduler_terminal_alert_drained', id: failure.scheduledId },
+        'scheduler: retained terminal send alert delivered',
+      );
+    }
+  }
+
+  /**
+   * Terminal-alert keys still owed, re-derived from the marker directory and
+   * unioned with what this process wrote.
+   *
+   * Disk is the source of truth on every tick, not just at construction. The
+   * directory scan returns an EMPTY set rather than throwing when it fails, so a
+   * seed taken once could not distinguish a failed read from "nothing owed" — and
+   * these rows are terminal, so no later event could ever re-seed it. Re-deriving
+   * costs one readdir of a directory holding one entry per active alert, and it
+   * makes the drain a function of durable state rather than of process history.
+   */
+  private retainedTerminalAlertKeys(): string[] {
+    const prefix = this.terminalAlertMarkerPrefix();
+    const keys = new Set(this.pendingTerminalAlerts);
+    try {
+      for (const key of loadRecoveryMarkers()) {
+        if (key.startsWith(prefix)) keys.add(key);
+      }
+    } catch {
+      // intentional: an unreadable store leaves this process's own writes as the
+      // only view; the next tick re-derives from disk again.
+    }
+    return [...keys];
+  }
+
+  /** Clear one marker. False means the bytes are still on disk. */
+  private discardTerminalAlertMarker(key: string): boolean {
+    try {
+      clearRecoveryMarker(key);
+      return true;
+    } catch (err) {
+      // Quiet here on purpose: this runs on every tick while the store is
+      // faulted, and the loud line belongs at the moment the condition STARTS
+      // (noteUnclearable), not once per retry.
+      log.debug({ err, key }, 'scheduler: terminal send alert marker clear failed');
+      return false;
+    }
+  }
+
+  /**
+   * Record that a delivered alert's marker could not be cleared, once (#2387).
+   *
+   * Before this, a failed clear left the marker on disk and the per-tick
+   * re-derivation re-emitted the alert every tick for as long as the store
+   * stayed faulted — over-notification with no restart involved. Suppressing the
+   * re-emission is process-local, which is the correct scope: it says only
+   * "I already sent this", never "nothing is owed". Disk keeps the obligation,
+   * so a restart re-emits once and a healed store clears on the next tick.
+   */
+  private noteUnclearable(key: string, identity: string): void {
+    if (this.deliveredUnclearable.has(key)) return;
+    this.deliveredUnclearable.set(key, identity);
+    log.warn(
+      { event: 'scheduler_terminal_alert_marker_unclearable', key },
+      'scheduler: terminal send alert delivered but its marker could not be cleared; '
+      + 'suppressing re-emission in this process and retrying the clear each tick',
+    );
+  }
+
   private handleSendFailure(row: ScheduledRow, err: unknown): void {
     const newRetryCount = row.retry_count + 1;
     const errorMsg = errorMessage(err);
@@ -582,20 +1023,12 @@ export class MessageScheduler {
         { event: 'scheduler_payload_undecodable', id: row.id, recurring: row.recurrence !== null, err },
         'scheduler: scheduled payload is undecodable; dead-lettered without retry',
       );
-      if (this.config.instance) {
-        emitAlertChecked(
-          this.config.instance,
-          'scheduler_send_failed',
-          `whatsoup@${this.config.instance} dead-lettered scheduled send (id ${row.id}) — stored payload is undecodable, message DROPPED: ${errorMsg}`,
-          [
-            `scheduledId=${row.id}`,
-            `recurring=${row.recurrence !== null}`,
-            `error=${errorMsg}`,
-            'ref: #2359 — an undecodable payload is permanent, so it is dead-lettered on the first occurrence rather than consuming the retry budget. Inspect the scheduled_messages row; the payload column is not valid JSON.',
-          ].join('\n'),
-          'warning',
-        );
-      }
+      this.emitTerminalSendAlert({
+        kind: 'payload_undecodable',
+        scheduledId: row.id,
+        error: errorMsg,
+        recurring: row.recurrence !== null,
+      });
       return;
     }
 
@@ -668,20 +1101,12 @@ export class MessageScheduler {
         // for a de-link the fire-time gate could not classify (e.g. an SMS
         // transport with no link-state snapshot, or creds rejected with no
         // logout event this lifetime).
-        if (this.config.instance) {
-          emitAlertChecked(
-            this.config.instance,
-            'scheduler_send_failed',
-            `whatsoup@${this.config.instance} permanently failed a scheduled send (id ${row.id}) after ${newRetryCount} attempts — message DROPPED: ${errorMsg}`,
-            [
-              `scheduledId=${row.id}`,
-              `attempts=${newRetryCount}`,
-              `error=${errorMsg}`,
-              'ref: #1779 remediation #3 — a permanent scheduled-send drop is now surfaced as an alert. If the transport is de-linked, re-pair the WhatsApp link; otherwise inspect the send error.',
-            ].join('\n'),
-            'warning',
-          );
-        }
+        this.emitTerminalSendAlert({
+          kind: 'retry_exhausted',
+          scheduledId: row.id,
+          error: errorMsg,
+          attempts: newRetryCount,
+        });
       }
     } else {
       this.db.raw
