@@ -350,9 +350,12 @@ deletion path remain unimplemented and are gated separately (issue #2459).
 
 **Storm-collapse digest receipts (#2387).** Each collapsed window writes one
 receipt under `storm-receipts/` immediately before every digest it publishes --
-the first one and every superseding revision -- and the receipt is marked
+the first one, every superseding revision, and every in-flight refresh that
+absorbs late arrivals into a queued digest -- and the receipt is marked
 published only once that publication is proven, so a process that dies in
-between leaves a durable record of the page it owed. The receipt names the
+between leaves a durable record of the page it owed. A refresh rewrites the
+receipt with the counts it is about to publish, so the settled record describes
+the page an operator was actually shown. The receipt names the
 revision it is owed for, so evidence that the first page went out cannot settle
 a superseding page that never did. A receipt carries bounded counts, the
 severity bucket, the window identity and the opaque fingerprint; it carries no
@@ -370,13 +373,41 @@ window shows its digest was published, the receipt is settled without paging. If
 the window is still open, it is left to the re-collapse and counted once per
 process. If the window has closed with no such evidence, one content-free orphan
 alert is published for it -- the same bounded fields the receipt carries, no
-path and no host names -- and the receipt is settled behind that page. Nothing
-is dropped in silence and nothing is re-adopted forever.
+path and no host names -- and the receipt is settled behind that page.
+
+**"Published" here means the digest reached the dispatcher's own record of
+digest events, quarantine included -- not that an operator was shown it.** The
+receipt guards the publication, which is the irreversible move; delivery is a
+separate concern with its own record.
+
+That orphan page goes out **at most once per window and revision**. The intent
+to page is written to the receipt before the page exists, and the page carries an
+id derived from the window, so the next cycle can find it in the dispatcher's own
+record and settle from it rather than paging again. A settlement write that fails
+after the page went out is stated in the dispatch log and does not produce a
+second page. A page whose intent could not be written is not sent at all, and
+that refusal is stated too: an unrecorded page is one nothing can account for
+afterwards, which is the failure this record exists to prevent. So nothing is
+dropped in silence, nothing is re-adopted forever, and no fault path turns one
+owed page into a page every cycle.
+
+Unlike the unrenderable meta-alert it otherwise mirrors, the orphan alert's
+incident identity is qualified by its window. That pattern makes one claim per
+source and lets the renotify throttle absorb repeats; this one makes a **durable
+per-window claim**, so a second orphaned window absorbed into the first one's
+incident would leave a receipt recording a page that never reached an operator.
+Each orphaned window therefore opens its own incident and pages once, and the
+throttle applies within a window rather than across windows.
 
 The dispatcher owns retention: `BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS`
-(default 128) bounds the store, and the census is every file in it, so a
+(default 128) bounds the store, and the census is every data entry in it, so a
 damaged or wrong-shape file counts toward the bound and is evicted rather than
-persisting uncollectable. Unreadable entries are evicted first, oldest by
+persisting uncollectable. **The store is single-purpose.** Anything placed under
+`storm-receipts/` that is not a receipt becomes an eviction candidate once the
+bound is reached, where before it would have been ignored indefinitely; the only
+boundary is the durable writer's own internals (the parent lock and the
+temporary files), which the census excludes and never unlinks. Unreadable
+entries are evicted first, oldest by
 modification time; valid receipts follow, oldest window first. The receipt being
 written is never an eviction candidate and its slot is reserved before it
 exists, so the bound cannot destroy the record for the page that is publishing
