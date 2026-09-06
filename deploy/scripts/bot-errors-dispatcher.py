@@ -3931,7 +3931,11 @@ def format_event(event: dict[str, Any]) -> str:
             else None,
             1800,
         ),
-        event_line("storm_manifest", storm.get("manifest"), 900),
+        # #2387: no storm_manifest line. A digest this build produces no longer
+        # carries the field, but one queued by a pre-upgrade dispatcher still
+        # does, and rendering it would put the manifest path on the operator page
+        # for the whole in-flight tail. The absorb path strips the field; this
+        # makes the renderer refuse it whether or not an absorb ever runs.
     ]
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
@@ -6104,6 +6108,26 @@ def storm_fingerprint_hash(fingerprint: str) -> str:
 STORM_RECEIPT_MAX_RECORDS = positive_env_int("BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS", 128)
 STORM_RECEIPT_SCHEMA_VERSION = 1
 STORM_RECEIPT_KIND = "bot_errors_storm_digest_receipt"
+# The source of the content-free page a closed window gets when its digest
+# cannot be accounted for. Deliberately NOT a member of
+# INTERNAL_FORCE_NOTIFY_SOURCES: like the unrenderable meta-alert this mirrors,
+# it rides the ordinary notification gate rather than forcing past it.
+STORM_RECEIPT_ORPHAN_ALERT_SOURCE = "meta_alert_storm_receipt_orphan"
+# How a receipt stopped being owed. Adoption must terminate, so every path that
+# marks a receipt published names which of the three endings it took.
+STORM_RECEIPT_SETTLED_PUBLICATION_PROVEN = "publication-proven"
+STORM_RECEIPT_SETTLED_PUBLISHED_EVIDENCE = "published-evidence"
+STORM_RECEIPT_SETTLED_ORPHAN_PAGED = "orphan-paged"
+STORM_RECEIPT_SETTLED_REASONS = frozenset({
+    STORM_RECEIPT_SETTLED_PUBLICATION_PROVEN,
+    STORM_RECEIPT_SETTLED_PUBLISHED_EVIDENCE,
+    STORM_RECEIPT_SETTLED_ORPHAN_PAGED,
+})
+# The directories that together are the dispatcher's own ledger of digest
+# events. The collapse path already consults exactly this tuple to decide
+# whether a window has a digest; reconciliation reuses it so "the dispatcher's
+# record of this window shows its page was published" has one definition.
+STORM_DIGEST_LEDGER_DIRS = ("outbox", "processing", "sent", "suppressed", "quarantine")
 # Receipt ids this process has written and not yet proved published.
 # reconcile_storm_digest_receipts() skips them, so a receipt written earlier in
 # this same cycle is not adopted as if a previous process had owed it. An
@@ -6126,6 +6150,8 @@ _STORM_RECEIPT_KEYS = frozenset({
     "publishedAtEpoch",
     "lastAdoptedAtEpoch",
     "adoptions",
+    "revision",
+    "settledReason",
 })
 _STORM_RECEIPT_ID_RE = re.compile(r"^storm-[0-9a-f]{16}-\d{1,19}$")
 _STORM_RECEIPT_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -6158,6 +6184,7 @@ def storm_digest_receipt_record(
     severity: str,
     collapsed_events: int,
     affected_hosts: int,
+    revision: int = 1,
 ) -> dict[str, Any]:
     """The durable, content-free record of one collapsed window (#2387).
 
@@ -6165,6 +6192,11 @@ def storm_digest_receipt_record(
     fingerprint only. No manifest path, no fingerprint basis, no host names and
     no summary text, so the artifact that outlives the incident record is not
     itself a content channel.
+
+    ``revision`` names which digest of the window the record is owed for: 1 is
+    the window's first digest, n >= 2 a superseding revision. Without it the
+    record cannot say which page it owes, and a superseding page that never
+    published would be settled by evidence of the first one.
     """
     return {
         "schemaVersion": STORM_RECEIPT_SCHEMA_VERSION,
@@ -6180,7 +6212,38 @@ def storm_digest_receipt_record(
         "publishedAtEpoch": None,
         "lastAdoptedAtEpoch": None,
         "adoptions": 0,
+        "revision": revision,
+        "settledReason": None,
     }
+
+
+def storm_fingerprint_prefix(fingerprint_hash: str) -> int:
+    """The opaque fingerprint as a bounded integer, for the controller log.
+
+    The log's projection admits counts, booleans and enumerated strings only, so
+    a 16-hex fingerprint reaches it as nothing at all. Its first eight hex
+    characters are 32 bits, well inside the projection's integer range, and
+    carry strictly less than the fingerprint the receipt itself already stores.
+    Without it two drops from one window are indistinguishable.
+    """
+    try:
+        return int(str(fingerprint_hash)[:8], 16)
+    except ValueError:
+        return 0
+
+
+def storm_receipt_digest_id(record: dict[str, Any]) -> str:
+    """The id of the digest event the receipt is owed for.
+
+    Revision 1 is the window token itself; a superseding revision appends its
+    number, exactly as the superseding branch of ``collapse_storm_group``
+    builds it.
+    """
+    revision = int(record.get("revision") or 1)
+    receipt_id = str(record["receiptId"])
+    if revision <= 1:
+        return receipt_id
+    return f"{receipt_id}-v{revision}"
 
 
 def adoptable_storm_receipt(record: Any) -> dict[str, Any] | None:
@@ -6210,10 +6273,16 @@ def adoptable_storm_receipt(record: Any) -> dict[str, Any] | None:
         value = record[field]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return None
+    revision = record["revision"]
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        return None
     for field in ("publishedAtEpoch", "lastAdoptedAtEpoch"):
         value = record[field]
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
             return None
+    settled = record["settledReason"]
+    if settled is not None and settled not in STORM_RECEIPT_SETTLED_REASONS:
+        return None
     if record["receiptId"] != storm_window_token(record["fingerprint"], record["windowStartEpoch"]):
         return None
     return dict(record)
@@ -6261,119 +6330,368 @@ def write_storm_digest_receipt(paths: dict[str, Path], receipt: dict[str, Any]) 
     path = storm_receipt_path(paths, receipt_id)
     existing = read_storm_receipt(path)
     if existing is not None:
-        # A retry after a death before publication: the same window, so keep the
-        # first observation and the adoption history instead of restarting them.
+        # The same window, so its first observation and its adoption history are
+        # carried instead of restarted. The settlement is NOT: this call always
+        # precedes a publication, so a page is owed again whether this is a retry
+        # after a death before publication or a superseding revision.
         receipt = {
             **receipt,
             "recordedAtEpoch": existing["recordedAtEpoch"],
-            "publishedAtEpoch": existing["publishedAtEpoch"],
             "lastAdoptedAtEpoch": existing["lastAdoptedAtEpoch"],
             "adoptions": existing["adoptions"],
+            "publishedAtEpoch": None,
+            "settledReason": None,
         }
+    # BEFORE the insert, and never evicting the id being written: enforcing
+    # afterwards let the cap destroy the receipt for the page about to publish
+    # whenever the collapsed window was older than the retained set, which
+    # reopens the loss this receipt exists to close.
+    enforce_storm_receipt_cap(paths, reserve_id=receipt_id)
     require_all_advance([publish_storm_receipt(path, receipt)])
     _storm_receipts_written.add(receipt_id)
-    enforce_storm_receipt_cap(paths)
+    if read_storm_receipt(path) is None:
+        # Fail closed rather than page without a receipt: the caller publishes
+        # the digest next, and the whole point of this write is that it happened
+        # first.
+        raise RuntimeError(
+            "storm digest receipt did not survive its own write; refusing to publish the digest"
+        )
     return path
 
 
-def acknowledge_storm_digest_receipt(paths: dict[str, Path], receipt_id: str) -> bool:
+def acknowledge_storm_digest_receipt(
+    paths: dict[str, Path],
+    receipt_id: str,
+    reason: str = STORM_RECEIPT_SETTLED_PUBLICATION_PROVEN,
+) -> bool:
     """Mark the window's receipt published, AFTER the publication is proven.
 
     Ack-after-publish: a death before the publication leaves the receipt
     unpublished and the members still in the outbox, so the next cycle
     re-collapses the window; a death after it leaves an unpublished receipt that
-    the next cycle's absorb path acknowledges without issuing a second page.
+    ``reconcile_storm_digest_receipts`` settles, because for a window that has
+    already closed no later event can reach a collapse path at all.
     Unlike the write, this fails OPEN -- the page has already gone out, so an
     unwritable ack must not abort the cycle that still has terminal moves to do.
+
+    The in-process ledger id is discarded FIRST, so every return path drops it.
+    Leaving it behind on the early returns grew the set once per window whose
+    receipt was already settled, in a daemon that polls every 30 seconds.
     """
+    _storm_receipts_written.discard(receipt_id)
     path = storm_receipt_path(paths, receipt_id)
     record = read_storm_receipt(path)
     if record is None or record["publishedAtEpoch"] is not None:
         return False
     record["publishedAtEpoch"] = int(time.time())
+    record["settledReason"] = reason
     try:
         require_all_advance([publish_storm_receipt(path, record)])
     except Exception:  # noqa: BLE001 -- see the docstring; never abort the cycle
         return False
-    _storm_receipts_written.discard(receipt_id)
     return True
 
 
-def reconcile_storm_digest_receipts(paths: dict[str, Path]) -> int:
-    """Adopt receipts a previous process wrote but never proved published.
+def storm_receipt_publication_evidence(
+    paths: dict[str, Path], incident_state: dict[str, Any], record: dict[str, Any]
+) -> bool:
+    """Does the dispatcher's own record of this window show its page published?
 
-    A receipt still unpublished at the start of a cycle names a window whose
-    page was owed and not proven. Adoption records that durably and countably.
-    It does NOT re-issue the page: the members are still in the outbox, because
-    the terminal moves happen after the publication, so the re-collapse is what
-    republishes. Runs at the same point in the cycle as the unrenderable
-    reconcile, before the passes that can write a receipt of their own.
+    ``publishedAtEpoch`` means the publication is proven, not that an operator
+    read the page: the fresh path acknowledges immediately after
+    ``require_all_advance`` on the digest publication. So the digest event
+    existing anywhere in the dispatcher's own ledger of digest events is
+    evidence that the publication this receipt guards did happen.
+
+    The two incident-record forms are checked only for revision 1. A superseding
+    digest reuses the base window token as its force-notify level and keys to the
+    same incident, so neither form can tell revision 1's page from revision n's,
+    and treating them as evidence would settle a superseding page that never
+    published.
+    """
+    if find_event_path_by_id(
+        storm_receipt_digest_id(record), paths, STORM_DIGEST_LEDGER_DIRS
+    ) is not None:
+        return True
+    if int(record.get("revision") or 1) > 1:
+        return False
+    token = str(record["receiptId"])
+    open_incidents = incident_state.get("openIncidents")
+    if not isinstance(open_incidents, dict):
+        return False
+    for key, entry in open_incidents.items():
+        if str(key).endswith(f".{token}"):
+            return True
+        levels = entry.get("forceNotifyLevels") if isinstance(entry, dict) else None
+        if isinstance(levels, dict) and token in levels:
+            return True
+    return False
+
+
+def storm_receipt_orphan_event(record: dict[str, Any]) -> dict[str, Any]:
+    """A content-free page for a closed window whose digest cannot be found.
+
+    Same field rules as the receipt itself: bounded counts, the severity bucket,
+    the window identity and the opaque fingerprint. No manifest path, no
+    fingerprint basis, no host names, no summary text. Mirrors
+    ``unrenderable_meta_event``, which is the landed pattern for telling an
+    operator that something was owed and cannot be produced.
+    """
+    now = int(time.time())
+    severity = str(record["severity"])
+    return {
+        **new_event_fields("alert", severity),
+        # The process id carries a "p" for the reason unrenderable_meta_event
+        # states: an epoch joined to a bare number by a hyphen is a 10-15 digit
+        # run with separator syntax, which the phone-like redactor rewrites. The
+        # letter ends the digit run.
+        "id": f"dispatcher-storm-receipt-orphan-{now}-p{os.getpid()}-{str(record['fingerprint'])[:8]}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": STORM_RECEIPT_ORPHAN_ALERT_SOURCE,
+        "summary": "BOT ERRORS owed a storm collapse page it can no longer account for",
+        # NOTE: as in unrenderable_meta_event, no absolute state path goes in
+        # evidence -- matched_test_leak_pattern() walks every string field and a
+        # sandbox path would make this meta-alert drop itself.
+        "evidence": "\n".join([
+            f"fingerprint:{record['fingerprint']}",
+            f"window_start_epoch:{record['windowStartEpoch']}",
+            f"window_end_epoch:{record['windowEndEpoch']}",
+            f"severity:{severity}",
+            f"collapsed_events:{record['collapsedEvents']}",
+            f"affected_hosts:{record['affectedHosts']}",
+            f"digest_revision:{record['revision']}",
+            f"receipt_adoptions:{record['adoptions']}",
+            "disposition: the window closed with no publication evidence for its digest",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def publish_storm_receipt_orphan_alert(paths: dict[str, Path], record: dict[str, Any]) -> str:
+    """Page once for a window whose owed digest cannot be accounted for.
+
+    Raises if the publication does not advance, so the caller leaves the receipt
+    unsettled and retries on the next cycle rather than settling a page that
+    never went out.
+    """
+    event = storm_receipt_orphan_event(record)
+    path = outbox_path_for_event(event, paths)
+    target = _durable_target(path)
+    absent = JsonVersion(False, None, None, None)
+    event_publication = publish_event_json(
+        target,
+        event,
+        component="dispatcher.storm_receipt_orphan_alert",
+        operation_id=operation_id(
+            target,
+            event,
+            component="dispatcher.storm_receipt_orphan_alert",
+            predecessor=absent,
+        ),
+    )
+    require_advance(event_publication)
+    append_dispatch_log(paths, {
+        "type": "storm_receipt_orphan_paged",
+        "windowStartEpoch": record["windowStartEpoch"],
+        "windowEndEpoch": record["windowEndEpoch"],
+        "fingerprintPrefix": storm_fingerprint_prefix(record["fingerprint"]),
+        "revision": record["revision"],
+        "adoptions": record["adoptions"],
+    })
+    return str(event["id"])
+
+
+def reconcile_storm_digest_receipts(paths: dict[str, Path]) -> int:
+    """Adopt receipts a previous process wrote but never proved published, and
+    settle them.
+
+    A receipt still unpublished at the start of a cycle names a window whose page
+    was owed and not proven. Adoption records that durably and countably, and
+    then it TERMINATES, in one of three ways:
+
+    * the dispatcher's own record of the window shows the page was published, so
+      the receipt is settled without paging;
+    * the window is still open, so the members are still in the outbox and the
+      re-collapse republishes -- left alone, counted and logged once per process;
+    * the window has closed with no publication evidence, so one content-free
+      orphan page goes out and the receipt is settled behind it.
+
+    Without the third ending a receipt in a closed window could never settle:
+    both collapse-path acknowledgements need a live window, and
+    ``existing_storm_window`` matches only while the window is open. Adoption
+    would then repeat every cycle, republishing durably and appending to a
+    bounded dispatch log that evicts unrelated diagnostics to make room.
+
+    Runs at the same point in the cycle as the unrenderable reconcile, before
+    the passes that can write a receipt of their own.
     """
     directory = paths.get("storm_receipts")
     if directory is None or not directory.is_dir():
         return 0
+    incident_state: dict[str, Any] | None = None
+    now = int(time.time())
     adopted = 0
     for path in sorted(directory.glob("*.json")):
         record = read_storm_receipt(path)
         if record is None or record["publishedAtEpoch"] is not None:
             continue
-        if record["receiptId"] in _storm_receipts_written:
-            continue
+        if incident_state is None:
+            incident_state = load_incident_state(paths)
+        receipt_id = str(record["receiptId"])
+        if storm_receipt_publication_evidence(paths, incident_state, record):
+            settled_reason: str | None = STORM_RECEIPT_SETTLED_PUBLISHED_EVIDENCE
+        elif now < int(record["windowEndEpoch"]):
+            # The window is still open, so a re-collapse can still reach this
+            # receipt. Ledger membership gates ONLY this ending: were it to gate
+            # the whole loop, a receipt adopted here and then left by a closing
+            # window would be skipped forever and silently lost.
+            if receipt_id in _storm_receipts_written:
+                continue
+            settled_reason = None
+        else:
+            try:
+                publish_storm_receipt_orphan_alert(paths, record)
+            except Exception:  # noqa: BLE001 -- an orphan that cannot page retries next cycle
+                continue
+            settled_reason = STORM_RECEIPT_SETTLED_ORPHAN_PAGED
         record["adoptions"] = record["adoptions"] + 1
-        record["lastAdoptedAtEpoch"] = int(time.time())
+        record["lastAdoptedAtEpoch"] = now
+        if settled_reason is not None:
+            record["publishedAtEpoch"] = now
+            record["settledReason"] = settled_reason
         try:
             require_all_advance([publish_storm_receipt(path, record)])
         except Exception:  # noqa: BLE001 -- a stuck receipt must not wedge the cycle
             continue
+        if settled_reason is None:
+            _storm_receipts_written.add(receipt_id)
+        else:
+            _storm_receipts_written.discard(receipt_id)
         adopted += 1
-        # The receipt id is an opaque string, and the controller log projects
-        # details to counts, booleans and enumerated values, so the window start
-        # and the adoption count carry the disposition instead of the id.
+        # The receipt id is an opaque string and the controller log projects
+        # details to counts, booleans and enumerated values, so the window start,
+        # the revision and the adoption count carry the disposition instead. The
+        # ending is a record KIND rather than a field, because a record kind is
+        # the enumeration the projection admits; the receipt file itself keeps
+        # the settlement reason in full.
         append_dispatch_log(paths, {
-            "type": "storm_receipt_adopted",
+            "type": (
+                "storm_receipt_adopted" if settled_reason is None
+                else "storm_receipt_settled"
+            ),
             "windowStartEpoch": record["windowStartEpoch"],
+            "fingerprintPrefix": storm_fingerprint_prefix(record["fingerprint"]),
+            "revision": record["revision"],
             "adoptions": record["adoptions"],
+            "orphanPaged": settled_reason == STORM_RECEIPT_SETTLED_ORPHAN_PAGED,
         })
     enforce_storm_receipt_cap(paths)
     return adopted
 
 
-def enforce_storm_receipt_cap(paths: dict[str, Path]) -> list[str]:
-    """Bound the retained receipt set, oldest window first, every drop recorded.
+def enforce_storm_receipt_cap(
+    paths: dict[str, Path], reserve_id: str | None = None
+) -> list[str]:
+    """Bound the retained receipt store, every drop recorded.
 
-    The overflow disposition is stated rather than silent: each eviction writes
-    a dispatch-log record naming the receipt, its window and whether its page
-    had been proven published, so a bound reached under load is visible instead
-    of appearing as an absence. Nothing outside this set is ever removed.
+    The census is every data entry in the directory, not every parseable
+    receipt: a file that fails validation still occupies the store, and counting
+    only well-formed records left the bound unenforced for exactly the files no
+    later read can ever drain. Durable-writer internals (the parent lock and the
+    temporary files) are excluded by ``safe_is_data_entry`` and are never
+    unlinked here.
+
+    Unreadable entries go first, oldest by modification time, because they carry
+    no obligation; valid receipts follow, oldest window first. ``reserve_id``
+    names the receipt about to be written: it is never an eviction candidate and
+    its slot is counted before it exists, so the bound cannot destroy the record
+    for the page that is publishing next.
+
+    The overflow disposition is stated rather than silent: each eviction writes a
+    dispatch-log record with its reason, and an eviction that could not unlink
+    writes one too, so a store that has stopped accepting deletions is visible as
+    a stated bound violation instead of as an absence.
     """
     directory = paths.get("storm_receipts")
     if directory is None or not directory.is_dir():
         return []
-    records: list[tuple[int, str, Path, dict[str, Any]]] = []
-    for path in sorted(directory.glob("*.json")):
+    valid: list[tuple[int, str, Path, dict[str, Any]]] = []
+    unreadable: list[tuple[float, str, Path]] = []
+    for path in sorted(directory.iterdir()):
+        if not safe_is_data_entry(path):
+            continue
         record = read_storm_receipt(path)
         if record is None:
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0.0
+            unreadable.append((modified, path.name, path))
             continue
-        records.append((record["windowStartEpoch"], record["receiptId"], path, record))
-    overflow = len(records) - STORM_RECEIPT_MAX_RECORDS
+        if reserve_id is not None and record["receiptId"] == reserve_id:
+            continue
+        valid.append((record["windowStartEpoch"], record["receiptId"], path, record))
+    # The reserved slot is counted exactly once whether the receipt already
+    # exists (it was skipped above) or is about to be created, so the census is
+    # the store as it will stand after the write either way.
+    retained = len(valid) + len(unreadable) + (1 if reserve_id is not None else 0)
+    overflow = retained - STORM_RECEIPT_MAX_RECORDS
     if overflow <= 0:
         return []
+    unreadable.sort(key=lambda item: (item[0], item[1]))
+    valid.sort(key=lambda item: (item[0], item[1]))
+    candidates: list[tuple[Path, str, dict[str, Any] | None]] = [
+        (path, name, None) for _modified, name, path in unreadable
+    ]
+    candidates.extend(
+        (path, receipt_id, record) for _window_start, receipt_id, path, record in valid
+    )
     dropped: list[str] = []
-    records.sort(key=lambda item: (item[0], item[1]))
-    for _window_start, receipt_id, path, record in records[:overflow]:
+    for path, receipt_id, record in candidates[:overflow]:
         try:
             path.unlink()
         except OSError:
+            # The bound is exceeded and this process cannot correct it. Say so,
+            # and stop claiming the id: nothing here can prove the receipt is
+            # still owed by this process.
+            _storm_receipts_written.discard(receipt_id)
+            append_dispatch_log(paths, {
+                "type": "storm_receipt_evict_failed",
+                "retained": retained,
+                "cap": STORM_RECEIPT_MAX_RECORDS,
+                "unreadable": record is None,
+            })
             continue
         _storm_receipts_written.discard(receipt_id)
         dropped.append(receipt_id)
-        # Same projection limit as the adoption record above: the window and the
-        # publication state say which occurrence was dropped and whether its page
-        # had been proven, which is the disposition the bound owes an operator.
+        if record is None:
+            # A distinct record kind rather than a reason field: the controller
+            # log admits enumerated strings only, and a record kind IS the
+            # enumeration it admits. An unreadable file has no window to report.
+            append_dispatch_log(paths, {
+                "type": "storm_receipt_unreadable_evicted",
+                "retained": retained,
+                "cap": STORM_RECEIPT_MAX_RECORDS,
+            })
+            continue
+        # Same projection limit as the adoption record above: the window, the
+        # fingerprint prefix and the publication state say which occurrence was
+        # dropped and whether its page had been proven, which is the disposition
+        # the bound owes an operator. Two fingerprints can share a window, so
+        # without the prefix two drops are indistinguishable. The prefix is an
+        # integer because the projection admits no free-form string; it is
+        # strictly less than the opaque fingerprint the receipt already carries.
         append_dispatch_log(paths, {
             "type": "storm_receipt_evicted",
             "windowStartEpoch": record["windowStartEpoch"],
             "windowEndEpoch": record["windowEndEpoch"],
+            "fingerprintPrefix": storm_fingerprint_prefix(record["fingerprint"]),
+            "revision": record["revision"],
             "published": record["publishedAtEpoch"] is not None,
             "cap": STORM_RECEIPT_MAX_RECORDS,
         })
@@ -6620,7 +6938,7 @@ def collapse_storm_group(
     else:
         bucket_start = requested_start
         bucket_end = bucket_start + window
-        manifest_path = paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.json"
+        manifest_path = storm_manifest_path(paths, fingerprint_hash, bucket_start)
     digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
     events = [event for _, event in records]
     additions = [manifest_entry(path, event) for path, event in records]
@@ -6855,8 +7173,8 @@ def collapse_storm_group(
         # superseding revision with its own manifest and digest; the original
         # manifest and digest stay byte-stable.
         superseding_digest_id = f"storm-{fingerprint_hash}-{bucket_start}-v{next_version}"
-        superseding_manifest_path = (
-            paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.v{next_version}.json"
+        superseding_manifest_path = storm_manifest_path(
+            paths, fingerprint_hash, bucket_start, next_version
         )
         revision_hosts = sorted(set(sorted_unique_hosts(events)), key=lambda value: value.lower())
         publications = []
@@ -6900,6 +7218,21 @@ def collapse_storm_group(
         superseding_digest_path = storm_digest_outbox_path(
             paths, superseding_digest_id, str(superseding_digest.get("source")), bucket_start
         )
+        # #2387: BEFORE this publication too. A superseding revision is another
+        # page for the window, so the window's receipt is rewritten carrying this
+        # revision's number and counts, and its settlement is reset until this
+        # publication is proven.
+        superseding_receipt = storm_digest_receipt_record(
+            storm_window_token(fingerprint_hash, bucket_start),
+            fingerprint_hash,
+            bucket_start,
+            bucket_end,
+            str(superseding_digest.get("severity") or "critical"),
+            len(events),
+            len(revision_hosts),
+            revision=next_version,
+        )
+        write_storm_digest_receipt(paths, superseding_receipt)
         superseding_digest_target = _durable_target(superseding_digest_path)
         superseding_absent = JsonVersion(False, None, None, None)
         superseding_digest_operation = operation_id(
@@ -6914,6 +7247,7 @@ def collapse_storm_group(
         )
         require_all_advance([superseding_digest_publication])
         publications.append(superseding_digest_publication)
+        acknowledge_storm_digest_receipt(paths, str(superseding_receipt["receiptId"]))
         append_dispatch_log(paths, {
             "type": "storm_digest_superseded",
             "supersedingDigestId": superseding_digest_id,
