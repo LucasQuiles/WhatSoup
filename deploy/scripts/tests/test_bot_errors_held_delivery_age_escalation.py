@@ -100,6 +100,10 @@ NO_ESCALATIONS = 0
 NO_SENDS = 0
 
 ONE_SEND = 1
+# The containment case counts FILES reclaimed to outbox/, not sends. Same
+# number, different quantity: an assertion named for sends would read as a
+# delivery claim in a test that makes none.
+ONE_RECLAIMED_RECORD = 1
 
 # The status the documented release procedure restores before moving the file
 # back to outbox/. The runbook says status is the only field to edit, so every
@@ -769,7 +773,7 @@ def test_a_failing_escalation_publication_is_contained_and_retried(tmp_path):
         "the pass must not stop at the record whose escalation failed"
     )
     reclaimed = sorted(p.name for p in paths["outbox"].glob("*.json"))
-    assert len(reclaimed) == ONE_SEND, (
+    assert len(reclaimed) == ONE_RECLAIMED_RECORD, (
         f"the record behind it must still be reclaimed to outbox/: {reclaimed!r}"
     )
 
