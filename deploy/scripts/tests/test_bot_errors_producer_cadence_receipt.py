@@ -216,6 +216,21 @@ def test_lock_skip_moves_neither_clock(state_dir, clock, producer):
     assert after["lastInvocationAt"] > before["lastInvocationAt"]
 
 
+@pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
+def test_success_without_a_recorded_attempt_backfills_the_attempt_clock(state_dir, clock, producer):
+    # The attempt receipt is publishable and therefore losable: both producers
+    # swallow a receipt failure, so a cycle can reach its success stamp with no
+    # attempt stamp on disk. A success beside a null attempt clock reads as an
+    # observation nobody tried for, and the later evaluator has to treat that
+    # pair as malformed. An attempt always precedes a success within the same
+    # cycle, so the success stamp backfills it.
+    success_stamp = clock.advance()
+    pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
+    receipt = _payload(producer)
+    assert receipt["lastAttemptAt"] == success_stamp
+    assert receipt["lastSuccessfulObservationAt"] == success_stamp
+
+
 def test_a_clock_written_under_a_different_schema_version_is_not_carried_forward(state_dir):
     pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
     pcr.record_cycle_success(TREE, mode=pcr.CadenceMode.EMIT)
@@ -231,6 +246,38 @@ def test_a_clock_written_under_a_different_schema_version_is_not_carried_forward
 
     pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
     assert _payload(TREE)["lastSuccessfulObservationAt"] is None
+
+
+def test_a_clock_written_under_a_declared_compatible_version_is_carried_forward(
+    state_dir, monkeypatch
+):
+    # The negative case above is the safe default; this is the escape hatch a
+    # migration needs. Only one version exists today, so the compatible set is
+    # injected rather than exercised through a real second version: what is
+    # under test is that the writer consults the set at all, so a future bump
+    # that declares compatibility does not publish a null success clock and
+    # page the operator through a migration.
+    other_version = pcr.CADENCE_RECEIPT_SCHEMA_VERSION + 1
+    monkeypatch.setattr(
+        pcr,
+        "CLOCK_COMPATIBLE_SCHEMA_VERSIONS",
+        frozenset({pcr.CADENCE_RECEIPT_SCHEMA_VERSION, other_version}),
+    )
+
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(TREE, mode=pcr.CadenceMode.EMIT)
+    success_stamp = _payload(TREE)["lastSuccessfulObservationAt"]
+
+    prior = _payload(TREE)
+    prior["schemaVersion"] = other_version
+    receipt_file = pcr.receipt_path(TREE)
+    receipt_file.write_text(json.dumps(prior), encoding="utf-8")
+    receipt_file.chmod(0o600)
+
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    carried = _payload(TREE)
+    assert carried["lastSuccessfulObservationAt"] == success_stamp
+    assert carried["schemaVersion"] == pcr.CADENCE_RECEIPT_SCHEMA_VERSION
 
 
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)

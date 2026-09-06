@@ -64,8 +64,26 @@ from lib.durable_json import (
 from lib.state_root import state_root
 
 # Bumped only when a field is removed or its meaning changes; a reader that
-# sees an unknown version must refuse rather than guess (#2341 C1).
+# sees an unknown version must refuse rather than guess (#2341 C1). Adding a
+# field does not bump it: a reader of an earlier version simply does not see
+# the new key, and a bump costs a full dwell of blindness on both clocks
+# unless the new version is also listed below.
 CADENCE_RECEIPT_SCHEMA_VERSION = 1
+
+# Prior schema versions whose clock VALUES still mean what this version's
+# clocks mean. A receipt written under any listed version carries its clocks
+# forward; anything else drops them, because inheriting a clock across a
+# meaning change is how a stale clock becomes a false green.
+#
+# Today this holds the current version only, so behaviour is unchanged. It
+# exists so a future bump has one place to declare clock compatibility:
+# dropping both clocks on every bump publishes a null
+# lastSuccessfulObservationAt on the first cycle after a migration, which the
+# later evaluator reads as "never succeeded" and pages on. A migration must
+# not manufacture an alert.
+CLOCK_COMPATIBLE_SCHEMA_VERSIONS: frozenset[int] = frozenset(
+    {CADENCE_RECEIPT_SCHEMA_VERSION}
+)
 
 # The durable-publication component label. One label for both producers: the
 # producer is carried in the payload, not in the component name, so the
@@ -206,14 +224,14 @@ def _ensure_private_dir(path: Path) -> None:
 def _carried_clock(prior: Mapping[str, Any] | None, field: str) -> str | None:
     """Carry a clock forward from the prior receipt, or drop it.
 
-    A prior receipt written under a different schema version is not carried:
-    the clock's meaning is exactly what its version says it is, and silently
-    inheriting a value across a meaning change is how a stale clock becomes a
-    false green.
+    A prior receipt written under a schema version this one does not declare
+    clock-compatible is not carried: the clock's meaning is exactly what its
+    version says it is, and silently inheriting a value across a meaning
+    change is how a stale clock becomes a false green.
     """
     if not isinstance(prior, Mapping):
         return None
-    if prior.get(SCHEMA_VERSION_FIELD) != CADENCE_RECEIPT_SCHEMA_VERSION:
+    if prior.get(SCHEMA_VERSION_FIELD) not in CLOCK_COMPATIBLE_SCHEMA_VERSIONS:
         return None
     value = prior.get(field)
     return value if isinstance(value, str) and value else None
@@ -228,6 +246,7 @@ def record_cadence_receipt(
     fetch_status: FetchStatus = FetchStatus.NOT_ATTEMPTED,
     advance_attempt: bool = False,
     advance_success: bool = False,
+    require_attempt: bool = False,
 ) -> PublicationResult:
     """Publish one cadence receipt, carrying unadvanced clocks forward.
 
@@ -235,6 +254,10 @@ def record_cadence_receipt(
     rather than derived from ``outcome``: a caller has to say which clock this
     cycle earned, so a new outcome value cannot silently start advancing a
     clock it did not prove.
+
+    ``require_attempt`` backfills a missing attempt clock with this stamp
+    instead of publishing a success beside a null attempt. It never moves an
+    attempt clock that is already there.
     """
     root = state_root()
     _ensure_private_dir(root)
@@ -246,15 +269,24 @@ def record_cadence_receipt(
     observation = observe_json(target)
     prior = observation.payload
     stamp = receipt_clock()
+    attempt_at = (
+        stamp if advance_attempt
+        else _carried_clock(prior, LAST_ATTEMPT_AT_FIELD)
+    )
+    if require_attempt and attempt_at is None:
+        # An attempt always precedes a success within one cycle. The attempt
+        # receipt is itself publishable and therefore losable -- both producers
+        # swallow a receipt failure -- so a success can arrive with no attempt
+        # clock on disk. Publishing that pair would claim an observation nobody
+        # tried for; this stamp is coarse but true, because the attempt did
+        # happen, at or before this instant.
+        attempt_at = stamp
     receipt: dict[str, Any] = {
         SCHEMA_VERSION_FIELD: CADENCE_RECEIPT_SCHEMA_VERSION,
         PRODUCER_FIELD: producer.value,
         PRODUCER_TOKEN_FIELD: WRAPPER_TOKENS[producer],
         LAST_INVOCATION_AT_FIELD: stamp,
-        LAST_ATTEMPT_AT_FIELD: (
-            stamp if advance_attempt
-            else _carried_clock(prior, LAST_ATTEMPT_AT_FIELD)
-        ),
+        LAST_ATTEMPT_AT_FIELD: attempt_at,
         LAST_SUCCESSFUL_OBSERVATION_AT_FIELD: (
             stamp if advance_success
             else _carried_clock(prior, LAST_SUCCESSFUL_OBSERVATION_AT_FIELD)
@@ -314,6 +346,10 @@ def record_cycle_success(
 
     Call this only once the producer's own artefact or state write has landed.
     Calling it on exit zero alone would restore the defect this module cures.
+
+    A success never moves an attempt clock that is already set; it only fills
+    one that is missing, so the receipt never claims an observation with no
+    attempt behind it.
     """
     return record_cadence_receipt(
         producer,
@@ -322,6 +358,7 @@ def record_cycle_success(
         mode=mode,
         fetch_status=fetch_status,
         advance_success=True,
+        require_attempt=True,
     )
 
 
