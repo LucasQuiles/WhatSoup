@@ -865,3 +865,42 @@ exclusive with `--wrapper` and may not be repeated; combining the two, or
 repeating either flag, exits `2` before any check runs. Use it only for a
 host/context where the pilot units run without the wrapper layer, so there
 is nothing for the script to verify.
+
+### Producer cadence receipt (dark, no reader yet)
+
+Each release-proof producer writes one versioned receipt per cycle under the
+state root the units already grant write access to, through
+`deploy/scripts/lib/producer_cadence_receipt.py`. One file per producer:
+`release-proof-cadence-tree-provenance.json` and
+`release-proof-cadence-runtime-staleness.json`. Two files keep the clocks
+independent, so a partial write of one producer cannot corrupt the other.
+
+Fields, all bounded tokens, ISO-8601 UTC stamps or integers -- no path,
+hostname, process identifier or command output ever enters a receipt:
+
+| Field | Meaning |
+| ----- | ------- |
+| `schemaVersion` | receipt schema generation; a reader that does not know the version must refuse rather than guess |
+| `producer` | systemd unit name, from a closed two-value vocabulary |
+| `producerToken` | the wrapper's `tree` / `runtime-staleness` token for the same producer |
+| `lastInvocationAt` | every call stamps this, including a skipped cycle |
+| `lastAttemptAt` | advances when the producer's owned cycle actually starts |
+| `lastSuccessfulObservationAt` | advances only after a complete observation is durably written |
+| `outcome` | `in_progress`, `success`, `probe_error`, `emit_failure`, `lock_skip` |
+| `stage` | earliest stage reached: `pre_exec`, `cycle_start`, `observation`, `durable_write`, `complete` |
+| `mode` | `emit` or `observe`, so observe-mode evidence is never read as emit-mode proof |
+| `fetchStatus` | `requested` (refresh landed), `refused` (refresh asked for and not obtained), `not_attempted` |
+
+The two clocks are separate on purpose. A producer that starts every cycle and
+fails every observation looks alive under a single clock; separating them makes
+that state readable. A cycle the shared lock refused advances neither clock and
+records `lock_skip`, so permanent lock contention shows as a stalled attempt
+clock rather than as success. No producer code path reaches `lock_skip` yet:
+the wrapper that detects lock contention is a separate change, so today that
+outcome exists in the writer and its tests only.
+
+Nothing reads these receipts yet. There is no watchdog check, no dwell and no
+alert -- those arrive with the evaluator, which also has to decide what a
+receipt that never appears means on a host where the units are not installed.
+Receipt failures are swallowed by both producers: a dark liveness receipt must
+never break the domain guard it observes.

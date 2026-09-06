@@ -68,6 +68,15 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.state_files import RUNTIME_STALENESS_STATE  # noqa: E402
+from lib.producer_cadence_receipt import (  # noqa: E402
+    CadenceMode,
+    CadenceOutcome,
+    CadenceStage,
+    ProducerIdentity,
+    record_cycle_attempt,
+    record_cycle_failure,
+    record_cycle_success,
+)
 
 # Emit-script path. Overridable via env so tests can point at a stub and never
 # touch the real outbox, and so a deploy can relocate the emitter if needed.
@@ -535,15 +544,53 @@ def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
         return 1
 
 
+def _record_cadence(recorder, *, mode, **fields) -> None:
+    """Stamp one cadence receipt, absorbing any failure.
+
+    The receipt is dark liveness evidence for a later evaluator; the monitor's
+    own verdict is what operators depend on today. A receipt that cannot be
+    written must degrade to a stderr line and let the cycle finish.
+    """
+    try:
+        recorder(ProducerIdentity.RUNTIME_STALENESS, mode=mode, **fields)
+    except Exception as exc:  # defensive: never fail the monitor for its receipt
+        print(
+            f"runtime-staleness cadence_receipt_error {type(exc).__name__}",
+            file=sys.stderr,
+        )
+
+
 def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
-    """Run one monitor cycle; return 0 (success), 1 (emit failure), 2 (probe error)."""
+    """Run one monitor cycle; return 0 (success), 1 (emit failure), 2 (probe error).
+
+    Also stamps a cadence receipt (#2341, schema pinned by
+    CADENCE_RECEIPT_SCHEMA_VERSION): ``lastAttemptAt`` at entry, and
+    ``lastSuccessfulObservationAt`` only after the cycle's own durable state
+    write has landed and no probe or emit failure occurred. An unknown
+    observation must never move the success clock, for the same reason it must
+    never become a clear.
+    """
+    mode = CadenceMode.OBSERVE if dry_run else CadenceMode.EMIT
+    _record_cadence(record_cycle_attempt, mode=mode)
     if instances is None:
         try:
             instances = discover_instances()
         except ProbeError as exc:
+            _record_cadence(
+                record_cycle_failure,
+                mode=mode,
+                outcome=CadenceOutcome.PROBE_ERROR,
+                stage=CadenceStage.OBSERVATION,
+            )
             print(f"probe error: {exc}", file=sys.stderr)
             return 2
         if not instances:
+            _record_cadence(
+                record_cycle_failure,
+                mode=mode,
+                outcome=CadenceOutcome.PROBE_ERROR,
+                stage=CadenceStage.OBSERVATION,
+            )
             print(
                 "probe error: no whatsoup@ instances discovered; "
                 "refusing to report an empty fleet as healthy",
@@ -621,9 +668,25 @@ def run_once(*, instances: list[str] | None, dry_run: bool) -> int:
         save_pending_clears(pending_clears)
 
     if probe_error:
+        _record_cadence(
+            record_cycle_failure,
+            mode=mode,
+            outcome=CadenceOutcome.PROBE_ERROR,
+            stage=CadenceStage.OBSERVATION,
+        )
         return 2
     if emit_failed:
+        _record_cadence(
+            record_cycle_failure,
+            mode=mode,
+            outcome=CadenceOutcome.EMIT_FAILURE,
+            stage=CadenceStage.DURABLE_WRITE,
+        )
         return 1
+    # Every instance was observed and every handoff was accepted, and the
+    # pending-clear obligations are persisted, so this cycle earned its success
+    # clock.
+    _record_cadence(record_cycle_success, mode=mode)
     return 0
 
 

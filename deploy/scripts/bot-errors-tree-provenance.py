@@ -90,6 +90,16 @@ from lib.durable_json import (
     publish_event_json,
     require_advance,
 )
+from lib.producer_cadence_receipt import (
+    CadenceMode,
+    CadenceOutcome,
+    CadenceStage,
+    FetchStatus,
+    ProducerIdentity,
+    record_cycle_attempt,
+    record_cycle_failure,
+    record_cycle_success,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +660,41 @@ def emit_outbox_event(event: dict[str, Any]) -> Path:
     return path
 
 
+def _cadence_fetch_status(snapshot: dict[str, Any] | None) -> FetchStatus:
+    """Map this cycle's refresh outcome onto the receipt's bounded vocabulary.
+
+    Derived from the snapshot rather than from the ``--fetch`` flag so a
+    refresh that was asked for and did not land is recorded as such: the
+    scheduled path is offline by contract, and a cycle whose comparison rested
+    on an unproven ref must not read as full proof.
+    """
+    if not snapshot or not snapshot.get("fetch_attempted"):
+        return FetchStatus.NOT_ATTEMPTED
+    return FetchStatus.REFUSED if snapshot.get("fetch_error") else FetchStatus.REQUESTED
+
+
+def _record_cadence(recorder, *, mode, snapshot: dict[str, Any] | None = None, **fields) -> None:
+    """Stamp one cadence receipt, absorbing any failure.
+
+    The receipt is dark liveness evidence for a later evaluator; the guard's own
+    verdict is the thing operators depend on today. A receipt that cannot be
+    written must therefore degrade to a stderr line and let the cycle finish,
+    never abort it.
+    """
+    try:
+        recorder(
+            ProducerIdentity.TREE_PROVENANCE,
+            mode=mode,
+            fetch_status=_cadence_fetch_status(snapshot),
+            **fields,
+        )
+    except Exception as exc:  # defensive: never fail the guard for its receipt
+        print(
+            f"tree_provenance cadence_receipt_error {type(exc).__name__}",
+            file=sys.stderr,
+        )
+
+
 def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     """Inspect the tree and (unless dry) emit one outbox event summarising
     provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical.
@@ -658,10 +703,25 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     observed state (clean/warning/critical), 2 for an inspection failure, 1
     for an event-write failure. The default exit contract above is unchanged
     when ``reporter`` is False.
+
+    Every exit path also stamps a cadence receipt (#2341, schema pinned by
+    CADENCE_RECEIPT_SCHEMA_VERSION): ``lastAttemptAt`` at entry, and
+    ``lastSuccessfulObservationAt`` only once the inspection completed and the
+    durable write (or, in observe mode, the report) landed. Receipt failures are
+    swallowed -- a dark liveness receipt must never break the domain guard it
+    observes.
     """
+    mode = CadenceMode.OBSERVE if dry else CadenceMode.EMIT
+    _record_cadence(record_cycle_attempt, mode=mode)
     try:
         snap = gather_tree_provenance(REPO_ROOT, do_fetch=do_fetch)
     except GitError as exc:
+        _record_cadence(
+            record_cycle_failure,
+            mode=mode,
+            outcome=CadenceOutcome.PROBE_ERROR,
+            stage=CadenceStage.OBSERVATION,
+        )
         evidence = f"tree_provenance inspection_error {str(exc)[:200]}"
         if reporter:
             print(evidence, file=sys.stderr)
@@ -702,8 +762,18 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
                 event_type=event_type, alert_source=alert_source, snapshot=snap,
             ))
         except OSError as exc:
+            _record_cadence(
+                record_cycle_failure,
+                mode=mode,
+                snapshot=snap,
+                outcome=CadenceOutcome.EMIT_FAILURE,
+                stage=CadenceStage.DURABLE_WRITE,
+            )
             print(f"tree_provenance event_write_error {str(exc)[:200]}", file=sys.stderr)
             return 1
+    # The durable write has landed (or, in observe mode, was never owed), so
+    # this cycle produced a qualifying observation.
+    _record_cadence(record_cycle_success, mode=mode, snapshot=snap)
     print(summary)
     print(evidence)
     if reporter:

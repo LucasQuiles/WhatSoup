@@ -300,10 +300,16 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "13253e5d6ecdf220f99ad043f03120dc809c4afa0cbb7c6b9ec70c4838c41c22",
+      "sha256": "e71605b1a4215a5575564ca50cee86d905b0b6fd708eec87e0cbca2a72545ab3",
       "mustContain": [
         "Runtime code-staleness monitor",
-        "runtime_stale"
+        "runtime_stale",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -333,11 +339,18 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "fb19de0a00dc98673c9b4230f005004906eb23b6206eb8167f9e1a574c647ee7",
+      "sha256": "f1eb6db26ecfc84252341bdaa03038a80d1b773de802fc6547475bd828e629f0",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
-        "def redact_path_segment"
+        "def redact_path_segment",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "_cadence_fetch_status",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -565,6 +578,17 @@
         "build_contract",
         "project_outcome",
         "ObservationContractError"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/producer_cadence_receipt.py",
+      "sha256": "a1b28edc719da71bcd6224ef8c0345d0124385de1f11f3c965dd6b96bac053fe",
+      "mustContain": [
+        "CADENCE_RECEIPT_SCHEMA_VERSION",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "lock_skip",
+        "ProducerIdentity"
       ]
     },
     {
