@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
 import { assertCanonicalSchema43 } from './database-migration-43.ts';
 import { withTransaction } from './db-tx.ts';
+import { allFromStatement } from '../lib/db-query.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
   planId: string;
@@ -123,7 +124,7 @@ export function inspectOperatorCatchupRecovery(
   `).get(planId);
   if (!plan) throw new Error('Recovery plan does not exist');
 
-  const pending = raw.prepare(`
+  const pending = allFromStatement<DispositionRow>(raw.prepare(`
     SELECT links.inbound_seq, links.superseded_by_seq, links.actor, links.evidence_ref
     FROM inbound_disposition_links links
     JOIN inbound_events source ON source.seq = links.inbound_seq
@@ -131,7 +132,7 @@ export function inspectOperatorCatchupRecovery(
       AND links.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
     ORDER BY links.inbound_seq
-  `).all(planId, conversationKey) as unknown as DispositionRow[];
+  `), planId, conversationKey);
   const pendingSeqs = pending.map((row) => row.inbound_seq);
   if (!sameNumbers(pendingSeqs, expectedSourceSeqs)) {
     throw new Error('Expected source sequences must exactly match the pending recovery set');
@@ -140,7 +141,7 @@ export function inspectOperatorCatchupRecovery(
     throw new Error('Catch-up sequence must be later than every source sequence');
   }
 
-  const closed = raw.prepare(`
+  const closed = allFromStatement<DispositionRow>(raw.prepare(`
     SELECT links.inbound_seq, links.superseded_by_seq, links.actor, links.evidence_ref
     FROM inbound_disposition_links links
     JOIN inbound_events source ON source.seq = links.inbound_seq
@@ -148,7 +149,7 @@ export function inspectOperatorCatchupRecovery(
       AND links.disposition = 'superseded_by_operator_catchup'
       AND source.conversation_key = ?
     ORDER BY links.inbound_seq
-  `).all(planId, conversationKey) as unknown as DispositionRow[];
+  `), planId, conversationKey);
   if (closed.length > 0) {
     const closedSeqs = closed.map((row) => row.inbound_seq);
     const exactReplay = closed.every((row) => (
@@ -355,4 +356,197 @@ export function closeOperatorCatchupRecovery(
   params: CloseOperatorCatchupRecoveryParams,
 ): CloseOperatorCatchupRecoveryReceipt {
   return withTransaction(db, () => closeInspectedOperatorCatchupRecovery(db.raw, params));
+}
+
+// ---------------------------------------------------------------------------
+// Automatic catch-up reconciler (see docs/turn-recovery-continuity-reconciler.md)
+//
+// A pure selector on top of the closure primitive above: it invents no new
+// proof or closure semantics. For each open pending (plan, conversation) group
+// it picks the earliest later inbound that carries a unique delivery proof and
+// calls closeOperatorCatchupRecoveryRaw verbatim. Every closure is still
+// re-proven by inspectOperatorCatchupRecovery AND independently by the DB
+// trigger inbound_disposition_closure_validate_insert, so a wrong selection
+// fails closed and cannot corrupt state. The reconciler is therefore
+// best-effort: unprovable groups stay correctly pending.
+// ---------------------------------------------------------------------------
+
+export const RECONCILE_DEFAULT_GROUP_LIMIT = 50;
+export const RECONCILE_DEFAULT_ACTOR = 'auto_reconciler';
+
+export interface ReconcileOperatorCatchupParams {
+  /** Ledger actor recorded on auto-closed links. Defaults to 'auto_reconciler'. */
+  actor?: string;
+  /** Max distinct (plan, conversation) groups processed per invocation. */
+  groupLimit?: number;
+}
+
+export type ReconcileSkipReason =
+  | 'no_catchup_candidate'
+  | 'closure_rejected'
+  | 'busy'
+  | 'error';
+
+export interface ReconcileSkip {
+  planId: string;
+  conversationKey: string;
+  nSourceSeqs: number;
+  reason: ReconcileSkipReason;
+}
+
+export interface ReconcileOperatorCatchupReport {
+  /** Groups with a candidate catch-up that a closure was attempted for. */
+  attempted: number;
+  /** Groups whose open set was fully superseded. */
+  closed: number;
+  /** Total disposition links moved to superseded_by_operator_catchup. */
+  linksClosed: number;
+  /** Groups left pending this pass (no candidate, or a fail-closed rejection). */
+  skipped: number;
+  skips: ReconcileSkip[];
+}
+
+interface PendingGroupRow {
+  plan_id: string;
+  conversation_key: string;
+  inbound_seq: number;
+}
+
+// Known, benign fail-closed rejections from the closure primitive and the DB
+// trigger. Anything NOT in this set (e.g. a schema-drift assertion or an
+// unexpected bug) is reported as 'error' so the caller can alert rather than
+// silently treat it as a normal not-yet-superseded group.
+const BENIGN_CLOSURE_REJECTIONS: ReadonlySet<string> = new Set([
+  'Recovery plan does not exist',
+  'Expected source sequences must exactly match the pending recovery set',
+  'Catch-up sequence must be later than every source sequence',
+  'Catch-up inbound does not exist in the recovery conversation',
+  'Catch-up inbound must be complete',
+  'Catch-up reply must have echoed delivery proof',
+  'Catch-up closure did not resolve the exact recovery set',
+  'Catch-up closure did not persist its exact proof witness',
+  'Recovery was already closed against a different catch-up or evidence',
+  'Closed recovery lacks its exact durable proof witness',
+  'invalid operator catch-up closure',
+]);
+
+function classifyReconcileSkip(error: unknown): ReconcileSkipReason {
+  const sqliteError = error as { code?: unknown; errcode?: unknown };
+  if (
+    sqliteError?.code === 'ERR_SQLITE_ERROR'
+    && typeof sqliteError.errcode === 'number'
+    && (sqliteError.errcode === 5 || sqliteError.errcode === 6)
+  ) {
+    return 'busy';
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/database is locked|database table is locked/i.test(message)) return 'busy';
+  if (BENIGN_CLOSURE_REJECTIONS.has(message)) return 'closure_rejected';
+  return 'error';
+}
+
+/**
+ * Automatically close every open catch-up recovery whose conversation has
+ * demonstrably caught up (a later completed inbound with a unique, echoed
+ * delivery proof). Uses a raw, already-open SQLite handle with foreign-key
+ * enforcement; each group's closure runs in its own single-writer transaction
+ * inside closeOperatorCatchupRecoveryRaw. Never throws for a per-group closure
+ * rejection — those are recorded as bounded skips — so one unprovable group
+ * cannot stall the rest of the sweep.
+ */
+export function reconcileOperatorCatchupRecoveries(
+  raw: DatabaseSync,
+  params: ReconcileOperatorCatchupParams = {},
+): ReconcileOperatorCatchupReport {
+  const actor = requiredText(params.actor ?? RECONCILE_DEFAULT_ACTOR, 'Reconciler actor');
+  const groupLimit = params.groupLimit ?? RECONCILE_DEFAULT_GROUP_LIMIT;
+  if (!Number.isSafeInteger(groupLimit) || groupLimit <= 0) {
+    throw new Error('Reconciler group limit must be a positive safe integer');
+  }
+
+  // Plain autocommit read; the per-group closure below opens its own
+  // BEGIN IMMEDIATE single-writer reservation.
+  const rows = allFromStatement<PendingGroupRow>(raw.prepare(`
+    SELECT links.recovery_plan_id AS plan_id,
+           source.conversation_key AS conversation_key,
+           links.inbound_seq AS inbound_seq
+    FROM inbound_disposition_links links
+    JOIN inbound_events source ON source.seq = links.inbound_seq
+    WHERE links.disposition = 'recovery_pending_operator_catchup'
+      AND links.superseded_by_seq IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM inbound_disposition_links closed
+        WHERE closed.inbound_seq = links.inbound_seq
+          AND closed.recovery_plan_id = links.recovery_plan_id
+          AND closed.disposition = 'superseded_by_operator_catchup'
+      )
+    ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
+  `));
+
+  const groups = new Map<string, { planId: string; conversationKey: string; seqs: number[] }>();
+  for (const row of rows) {
+    const key = `${row.plan_id} ${row.conversation_key}`;
+    let bucket = groups.get(key);
+    if (!bucket) {
+      bucket = { planId: row.plan_id, conversationKey: row.conversation_key, seqs: [] };
+      groups.set(key, bucket);
+    }
+    bucket.seqs.push(row.inbound_seq);
+  }
+
+  // Earliest unambiguous delivery proof strictly later than every source seq.
+  const candidate = raw.prepare(`
+    SELECT MIN(target_seq) AS catchup_seq
+    FROM operator_catchup_delivery_proofs
+    WHERE conversation_key = ? AND target_seq > ?
+  `);
+
+  const report: ReconcileOperatorCatchupReport = {
+    attempted: 0, closed: 0, linksClosed: 0, skipped: 0, skips: [],
+  };
+
+  let processed = 0;
+  for (const bucket of groups.values()) {
+    if (processed >= groupLimit) break;
+    processed += 1;
+    // seqs are ORDER BY inbound_seq ASC, so the last is the max.
+    const maxSourceSeq = bucket.seqs[bucket.seqs.length - 1];
+    const candidateRow = candidate.get(bucket.conversationKey, maxSourceSeq) as
+      | { catchup_seq: number | null }
+      | undefined;
+    const catchupSeq = candidateRow?.catchup_seq ?? null;
+    if (catchupSeq === null) {
+      report.skipped += 1;
+      report.skips.push({
+        planId: bucket.planId,
+        conversationKey: bucket.conversationKey,
+        nSourceSeqs: bucket.seqs.length,
+        reason: 'no_catchup_candidate',
+      });
+      continue;
+    }
+    report.attempted += 1;
+    try {
+      const receipt = closeOperatorCatchupRecoveryRaw(raw, {
+        planId: bucket.planId,
+        conversationKey: bucket.conversationKey,
+        expectedSourceSeqs: bucket.seqs,
+        catchupSeq,
+        actor,
+        evidenceRef: `auto://catchup-delivery-proof:seq=${catchupSeq}`,
+      });
+      report.closed += 1;
+      report.linksClosed += receipt.inserted;
+    } catch (error) {
+      report.skipped += 1;
+      report.skips.push({
+        planId: bucket.planId,
+        conversationKey: bucket.conversationKey,
+        nSourceSeqs: bucket.seqs.length,
+        reason: classifyReconcileSkip(error),
+      });
+    }
+  }
+  return report;
 }
