@@ -446,7 +446,18 @@ DELIVERY_HELD_REASON_FIELD = "outcomeUnknownReason"
 # Idempotency stamp: committed in the same durable write as the held status, so
 # a restart cannot emit a second signal for one held item.
 DELIVERY_HELD_SIGNAL_FIELD = "outcomeUnknownSignalledAt"
+# Second idempotency stamp, written once when the hold outlives the bound. It
+# is separate from DELIVERY_HELD_SIGNAL_FIELD because that one records the
+# FIRST signal only; one field cannot make two signals each once-only.
+DELIVERY_HELD_ESCALATED_FIELD = "outcomeUnknownEscalatedAt"
 AMBIGUOUS_SEND_SIGNAL_KIND = "delivery_outcome_unknown_held"
+AMBIGUOUS_SEND_ESCALATION_KIND = "delivery_outcome_unknown_escalated"
+# How long a hold may stay quiet before it is reported again, louder. This is
+# INCIDENT_STALE_SECONDS (:153) under a name that says what it bounds here --
+# the SAME value and the SAME env override, not a second knob. A held record is
+# a stale condition of the dispatcher's own making, so it ages out on the clock
+# the dispatcher already uses for every other stale condition it reports.
+HELD_DELIVERY_ESCALATE_SECONDS = INCIDENT_STALE_SECONDS
 AMBIGUOUS_CRASH_REASON = "restart found an issued send with no recorded outcome"
 CONVERSATION_SCOPE_OVERFLOW_KEY = "__overflow__"
 # Top-level counterpart of the per-key marker. Written into the incident state
@@ -3973,6 +3984,51 @@ def delivery_status_of(event: dict[str, Any]) -> str:
 def is_held_delivery(event: dict[str, Any]) -> bool:
     """A record parked on an ambiguous outcome: never sent, never archived."""
     return delivery_status_of(event) in HELD_DELIVERY_STATUSES
+
+
+def delivery_held_epoch(event: dict[str, Any]) -> int | None:
+    """When the hold was taken, as a UTC epoch, or None if it cannot be read.
+
+    The hold instant is the only honest age basis: it is written once, in the
+    same durable publication as the held status, and is never rewritten. File
+    mtime is not a substitute -- any later publication of the same record would
+    reset it and the bound would never expire.
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict):
+        return None
+    held_at = delivery.get(DELIVERY_HELD_AT_FIELD)
+    if not isinstance(held_at, str) or not held_at.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(held_at.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # A naive stamp would be read against host-local time and shift the bound by
+    # the UTC offset, so the escalation would fire early or late by hours on any
+    # host that is not on UTC. Reject it, as event_created_order does for the
+    # same reason: only an unambiguous full timestamp is an age basis.
+    if parsed.tzinfo is None:
+        return None
+    return int(parsed.timestamp())
+
+
+def held_delivery_escalation_due(event: dict[str, Any], current: int) -> bool:
+    """Has this hold outlived the bound without having been escalated yet?
+
+    Fail-closed toward SILENCE on anything unreadable. An unbounded quiet hold
+    is the defect this bound closes, but a false escalation pages an operator
+    about a record whose age nobody can state, which is worse than late.
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict):
+        return False
+    if delivery.get(DELIVERY_HELD_ESCALATED_FIELD):
+        return False
+    held_epoch = delivery_held_epoch(event)
+    if held_epoch is None:
+        return False
+    return current - held_epoch >= HELD_DELIVERY_ESCALATE_SECONDS
 
 
 def is_ambiguous_in_flight(event: dict[str, Any]) -> bool:
@@ -7991,18 +8047,30 @@ def original_name_from_processing(path: Path) -> str:
 
 
 def hold_ambiguous_send(
-    paths: dict[str, Path], claimed: Path, event: dict[str, Any], reason: str
+    paths: dict[str, Path],
+    claimed: Path,
+    event: dict[str, Any],
+    reason: str,
+    *,
+    current: int | None = None,
 ) -> str:
-    """Park an ambiguous post-send outcome and signal it exactly once (#2424).
+    """Park an ambiguous post-send outcome and signal it (#2424).
 
     The item stays where it is, in processing/. Every other home is wrong: the
     outbox re-enters the send path this hold exists to close, and sent/ claims a
-    delivery that was never proven.
+    delivery that was never proven. That is true at the first signal and it is
+    still true at expiry: nothing on this path re-sends, dead-letters or
+    auto-disposes, at any age and at any severity.
 
-    The held disposition and the signal stamp are committed in ONE durable
-    publication, so no crash can leave a record that signals a second time. The
-    durable record -- not the best-effort log -- is the authority on whether the
-    item was reported.
+    This is the ONE durable publication site for a held record's state, so it
+    owns every signal that record will ever emit: the first one when the hold is
+    taken, and one louder one if the hold outlives HELD_DELIVERY_ESCALATE_SECONDS.
+    `reason` describes the FIRST hold only and is ignored for a record that is
+    already held. Each signal is committed with its own once-only stamp in the
+    same publication that carries it, so no crash can emit either one twice.
+    When nothing changed -- a hold still inside the bound, or one already
+    escalated -- the function returns without publishing, so a parked record
+    cannot burn a durable generation on every cycle for the rest of its life.
 
     ORDER: the log line is appended BEFORE the publication. A publication can
     reach disk and still be refused (durability unproven, e.g. a parent-sync
@@ -8013,11 +8081,36 @@ def hold_ambiguous_send(
     re-logs -- and never a duplicate send, because the send decision reads the
     durable record and not the log.
     """
-    event = mark_outcome_unknown(event, reason)
+    # A record already parked keeps its original hold instant. Re-deriving it
+    # here would reset the age basis on every pass and the bound below could
+    # never expire.
+    already_held = is_held_delivery(event)
+    if not already_held:
+        event = mark_outcome_unknown(event, reason)
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    changed = not already_held
     first_signal = not delivery.get(DELIVERY_HELD_SIGNAL_FIELD)
+    escalating = not first_signal and held_delivery_escalation_due(
+        event, int(time.time()) if current is None else current
+    )
+    if escalating:
+        delivery[DELIVERY_HELD_ESCALATED_FIELD] = now_iso()
+        changed = True
+        # Same bounded, anonymous shape as the first signal, one level louder.
+        # `held` is the load-bearing field: it says the item is STILL held,
+        # which is what separates an escalation from a disposal.
+        append_dispatch_log(
+            paths,
+            {
+                "type": AMBIGUOUS_SEND_ESCALATION_KIND,
+                "attempts": delivery.get("attempts"),
+                "held": True,
+            },
+            level="error",
+        )
     if first_signal:
         delivery[DELIVERY_HELD_SIGNAL_FIELD] = now_iso()
+        changed = True
         # Metadata only (A9): append_dispatch_log projects details to bounded
         # counts, booleans and allow-listed enums, so no destination, message
         # text, account, path or private topology can reach the log here. The
@@ -8037,6 +8130,8 @@ def hold_ambiguous_send(
             },
             level="warning",
         )
+    if not changed:
+        return f"held_outcome_unknown; deliveryStatus={AMBIGUOUS_DELIVERY_STATUS}"
     target = _durable_target(claimed)
     observation = observe_json(target)
     publication = publish_state_json(
@@ -8056,8 +8151,36 @@ def hold_ambiguous_send(
     return f"held_outcome_unknown; deliveryStatus={AMBIGUOUS_DELIVERY_STATUS}"
 
 
+def escalate_held_delivery(
+    paths: dict[str, Path], claimed: Path, event: dict[str, Any], current: int
+) -> bool:
+    """Report a hold that has outlived the bound, LOUDER, exactly once (#2424).
+
+    The disposition does not change and must not: the record stays held, in
+    processing/, at the same status, never re-sent, never dead-lettered, never
+    auto-disposed. Releasing it would reintroduce the duplicate the hold exists
+    to prevent, and dead-lettering it would decide -- without evidence -- that
+    an alert nobody can prove was delivered never needs to be. The only thing
+    that changes at expiry is how loudly the dispatcher says so.
+
+    The escalation is stamped on the record rather than counted in memory, so
+    one held item cannot re-signal every cycle and a restart cannot signal a
+    second time. The stamping, the signal and the publication all live in
+    hold_ambiguous_send, which is the single durable publication site for a
+    held record's state; this is the named entry point for the reclaim pass and
+    the guard that keeps an unexpired hold out of that function entirely.
+
+    Returns True when this call emitted the escalation.
+    """
+    if not held_delivery_escalation_due(event, current):
+        return False
+    hold_ambiguous_send(paths, claimed, event, AMBIGUOUS_CRASH_REASON, current=current)
+    return True
+
+
 def reclaim_processing(paths: dict[str, Path]) -> int:
     reclaimed = 0
+    current = int(time.time())
     for path in sorted(paths["processing"].glob("*")):
         if not safe_is_data_entry(path):
             continue
@@ -8077,6 +8200,28 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
             claimed_event = None
         if isinstance(claimed_event, dict):
             if is_held_delivery(claimed_event):
+                # The hold is unbounded in TIME, not in disposition: the record
+                # stays here either way. Past the bound it is reported again,
+                # louder, once. Contained per record for the reason the hold
+                # branch below documents -- a raise here would abort the whole
+                # cycle and strand every healthy stranded alert behind it, and
+                # the record would raise again on every later cycle.
+                try:
+                    escalate_held_delivery(paths, path, claimed_event, current)
+                except Exception as exc:
+                    append_dispatch_log(
+                        paths,
+                        {
+                            "type": "delivery_escalation_publication_failed",
+                            # Bounded enum: free strings are projected away by
+                            # metadata_only_controller_details, so name the
+                            # class with a value the log actually keeps.
+                            "reason": "os_error" if isinstance(exc, OSError) else "unexpected_error",
+                            "retryable": True,
+                        },
+                        level="error",
+                        outcome="failed",
+                    )
                 continue
             if is_ambiguous_in_flight(claimed_event):
                 # Contain the hold PER RECORD. run_once calls reclaim_processing

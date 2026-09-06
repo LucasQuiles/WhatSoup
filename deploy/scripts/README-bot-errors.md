@@ -595,6 +595,24 @@ the queue signals above stay raised. They report that the queue is not draining;
 they do not distinguish a held item from a backlog, so read `processing/` to
 tell which it is.
 
+**Aged-out holds.** A hold is unbounded in disposition but not in silence. Once
+a held record has sat for `BOT_ERRORS_INCIDENT_STALE_SECONDS` (the dispatcher's
+existing stale-incident clock, default 24 h, reused here rather than given a
+second knob), the next reclaim pass logs one `delivery_outcome_unknown_escalated`
+line at `error` level, above the `warning` of the first signal. Age is measured
+from `delivery.outcomeUnknownAt`, never from file mtime. Like the first signal it
+is anonymous and bounded (`attempts`, `held`), and it is once-only: the record
+carries `delivery.outcomeUnknownEscalatedAt`, committed in the same durable
+publication as the line it announces, so no restart re-emits it. The escalation
+changes nothing else. The record stays in `processing/` at
+`delivery.status = outcome_unknown`, and is still never re-sent, dead-lettered
+or auto-disposed. Only an operator disposes of a held item, by the two
+procedures above. A record whose `outcomeUnknownAt` cannot be read as an
+unambiguous UTC instant is never escalated: unparseable and zone-less stamps
+both yield no age basis, and the dispatcher stays silent rather than page on a
+guess or on a host-local reading. If you hand-edit a held record, keep the
+trailing `Z`.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
