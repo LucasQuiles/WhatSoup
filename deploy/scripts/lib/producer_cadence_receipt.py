@@ -51,7 +51,7 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from lib.durable_json import (
     PublicationResult,
@@ -165,6 +165,16 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# Every publication reads its stamp through this module attribute rather than
+# calling now_iso() directly, so a test can move the clock between two
+# publications. Stamps are second-resolution and a test body runs in
+# microseconds, so two publications otherwise carry the same stamp -- and an
+# assertion that a clock did NOT move then compares two equal values and holds
+# whether or not the clock rule does. Injecting the clock is what gives those
+# assertions a way to be wrong.
+receipt_clock: Callable[[], str] = now_iso
+
+
 def receipt_path(producer: ProducerIdentity) -> Path:
     """Absolute receipt path under the state root the producer units may write."""
     return state_root() / RECEIPT_FILENAMES[producer]
@@ -235,7 +245,7 @@ def record_cadence_receipt(
     )
     observation = observe_json(target)
     prior = observation.payload
-    stamp = now_iso()
+    stamp = receipt_clock()
     receipt: dict[str, Any] = {
         SCHEMA_VERSION_FIELD: CADENCE_RECEIPT_SCHEMA_VERSION,
         PRODUCER_FIELD: producer.value,

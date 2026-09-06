@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,40 @@ def state_dir(tmp_path, monkeypatch):
     root.mkdir(mode=0o700)
     monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
     return root
+
+
+# A fixed instant, so a stamp is reproducible and two stamps differ only when
+# the test moved the clock between them.
+_BASE_EPOCH = 1_700_000_000
+
+
+class _SteppedClock:
+    """Second-resolution receipt clock the test moves by hand.
+
+    The writer stamps at second resolution and a test body runs in
+    microseconds, so two real publications inside one test carry equal stamps.
+    An assertion that a clock was PRESERVED across those two publications then
+    compares two equal values and passes whether or not the writer preserved
+    anything. Advancing this clock between the calls makes the preserved value
+    and the newly stamped value distinct, so such an assertion can fail.
+    """
+
+    def __init__(self) -> None:
+        self._epoch = _BASE_EPOCH
+
+    def __call__(self) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._epoch))
+
+    def advance(self, seconds: int = 60) -> str:
+        self._epoch += seconds
+        return self()
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    stepped = _SteppedClock()
+    monkeypatch.setattr(pcr, "receipt_clock", stepped)
+    return stepped
 
 
 def _payload(producer):
@@ -114,22 +149,33 @@ def test_attempt_stamps_the_attempt_clock_and_leaves_success_absent(state_dir, p
 
 
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
-def test_success_advances_the_success_clock_and_keeps_the_attempt_clock(state_dir, producer):
+def test_success_does_not_move_the_attempt_clock(state_dir, clock, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
     attempt_stamp = _payload(producer)["lastAttemptAt"]
+
+    # Move the clock so the attempt stamp the success must preserve and the
+    # stamp the success writes are different values.
+    success_stamp = clock.advance()
+    assert success_stamp != attempt_stamp
+
     pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
     receipt = _payload(producer)
     assert receipt["lastAttemptAt"] == attempt_stamp
-    assert receipt["lastSuccessfulObservationAt"]
+    assert receipt["lastSuccessfulObservationAt"] == success_stamp
     assert receipt["outcome"] == "success"
     assert receipt["stage"] == "complete"
 
 
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
-def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir, producer):
+def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir, clock, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
     pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
     success_stamp = _payload(producer)["lastSuccessfulObservationAt"]
+
+    # The later cycle runs at a different instant, so a success clock that
+    # wrongly advanced would carry the new value rather than this one.
+    later_stamp = clock.advance()
+    assert later_stamp != success_stamp
 
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
     pcr.record_cycle_failure(
@@ -140,15 +186,23 @@ def test_failure_after_a_success_leaves_the_success_clock_where_it_was(state_dir
     )
     receipt = _payload(producer)
     assert receipt["lastSuccessfulObservationAt"] == success_stamp
+    assert receipt["lastAttemptAt"] == later_stamp
     assert receipt["outcome"] == "probe_error"
     assert receipt["stage"] == "observation"
 
 
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
-def test_lock_skip_moves_neither_clock(state_dir, producer):
+def test_lock_skip_moves_neither_clock(state_dir, clock, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.EMIT)
     pcr.record_cycle_success(producer, mode=pcr.CadenceMode.EMIT)
     before = _payload(producer)
+
+    # The refused cycle happens later than the cycle that set both clocks, so
+    # a clock that wrongly advanced would hold this stamp instead of the old
+    # one, and the invocation clock has somewhere to move to.
+    skip_stamp = clock.advance()
+    assert skip_stamp != before["lastAttemptAt"]
+    assert skip_stamp != before["lastSuccessfulObservationAt"]
 
     pcr.record_lock_skip(producer, mode=pcr.CadenceMode.EMIT)
     after = _payload(producer)
@@ -158,7 +212,8 @@ def test_lock_skip_moves_neither_clock(state_dir, producer):
     assert after["stage"] == "pre_exec"
     # The invocation clock is what separates a contended lock from a stopped
     # timer, so it must move even though neither cadence clock does.
-    assert after["lastInvocationAt"] >= before["lastInvocationAt"]
+    assert after["lastInvocationAt"] == skip_stamp
+    assert after["lastInvocationAt"] > before["lastInvocationAt"]
 
 
 def test_a_clock_written_under_a_different_schema_version_is_not_carried_forward(state_dir):
