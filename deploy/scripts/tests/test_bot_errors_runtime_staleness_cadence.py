@@ -257,6 +257,27 @@ def test_observe_mode_success_over_a_stopped_fleet_owes_no_durable_write(
     assert receipt["durableWrite"] == "not_owed"
 
 
+def test_emit_mode_success_over_a_stopped_fleet_still_writes_durably(
+    state_dir, monkeypatch, capsys
+):
+    # The other half of the same expression. In emit mode the pending-clear
+    # set is persisted after the loop whatever the loop found, so an emit
+    # cycle always lands a durable write even when every discovered instance
+    # was stopped and no high-water mark was written. The later evaluator is
+    # told to branch on this field rather than on mode, so the emit half needs
+    # a case that can fail: without one, deleting the mode term from the
+    # expression leaves every test in the tree passing.
+    _stub_cycle(monkeypatch, observation=STOPPED_OBSERVATION)
+
+    assert _mod.run_once(instances=[FIXTURE_INSTANCE], dry_run=False) == 0
+    capsys.readouterr()
+
+    receipt = _receipt()
+    assert receipt["mode"] == "emit"
+    assert receipt["outcome"] == "success"
+    assert receipt["durableWrite"] == "written"
+
+
 def test_the_wrapper_records_a_lock_skip_with_the_keyword_set_it_always_sends(
     state_dir, monkeypatch, capsys
 ):
