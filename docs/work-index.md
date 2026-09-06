@@ -238,7 +238,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-22 |  |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
 | `docs/superpowers/plans/2026-08-27-p8b-admission-invariant.md` | plan | completed | body-marker | p8b-admission-invariant | 2026-08-27 |  |
-| `docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md` | plan | active | body-marker | daily-health-alert-evidence | 2026-09-06 |  |
+| `docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md` | plan | active | body-marker | daily-health-alert-evidence | 2026-09-05 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -319,4 +319,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-09-06T01:11:43Z from commit `a8dbcc2dde286584943102ab192d96b6383d9977`
+- Generated at 2026-09-06T02:19:38Z from commit `9cb87031a93cdb2dea86cb48122c2eb40be5efd7`

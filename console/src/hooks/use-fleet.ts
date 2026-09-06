@@ -230,14 +230,21 @@ export async function fetchProviders(
 export function useProviders() {
   const query = useQuery({
     queryKey: ['providers'],
-    queryFn: () => fetchProviders(),
+    queryFn: async () => {
+      const receipt = await fetchProviders();
+      if (receipt.status === 'request-failed') {
+        throw new Error('Provider catalogue request failed');
+      }
+      return receipt;
+    },
+    retry: false,
     staleTime: MS_PER_MINUTE,
   });
   const receipt = query.data;
   return {
     ...query,
     data: receipt?.status === 'ok' ? receipt.providers : undefined,
-    catalogueStatus: receipt?.status,
+    catalogueStatus: query.isError ? 'request-failed' : receipt?.status,
   };
 }
 

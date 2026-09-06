@@ -4,7 +4,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 const getProviders = vi.fn()
@@ -20,7 +20,7 @@ function renderSelect(
   props: Partial<React.ComponentProps<typeof ProviderSelect>> = {},
 ) {
   const onChange = vi.fn()
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
   const view = render(
     <QueryClientProvider client={client}>
       <label htmlFor="provider-id">Provider</label>
@@ -32,13 +32,61 @@ function renderSelect(
       />
     </QueryClientProvider>,
   )
-  return { ...view, onChange }
+  return { ...view, onChange, client }
 }
 
-beforeEach(() => getProviders.mockReset())
+beforeEach(() => { getProviders.mockReset() })
 afterEach(cleanup)
 
 describe('ProviderSelect', () => {
+  it('retains last successful metadata on failure, then accepts authoritative empty data and recovery', async () => {
+    const reported = [
+      { id: 'runtime-default', displayName: 'Runtime Default', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+      { id: 'new-adapter', displayName: 'New Adapter', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+    ]
+    getProviders.mockResolvedValue(reported)
+    const { client } = renderSelect()
+    const select = screen.getByLabelText('Provider') as HTMLSelectElement
+    await waitFor(() => expect(select.options.length).toBe(2))
+    const before = client.getQueryState(['providers'])!
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      getProviders.mockRejectedValueOnce(new Error('private transport details'))
+      await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+      await waitFor(() => expect(screen.getByTestId('provider-catalogue-status').textContent).toContain('request failed'))
+
+      expect(Array.from(select.options).map((option) => option.value)).toEqual(['runtime-default', 'new-adapter'])
+      expect(client.getQueryState(['providers'])).toMatchObject({ status: 'error', data: before.data, dataUpdatedAt: before.dataUpdatedAt })
+      expect(getProviders).toHaveBeenCalledTimes(attempt + 2)
+      expect(screen.queryByText('private transport details')).toBeNull()
+    }
+
+    getProviders.mockResolvedValueOnce([])
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(screen.getByTestId('provider-catalogue-status').textContent).toContain('0 execution providers'))
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['runtime-default'])
+    expect(select.options[0]?.textContent).toContain('configured; not reported')
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(select.options.length).toBe(2))
+    expect(screen.getByTestId('provider-catalogue-status').textContent).toContain('2 execution providers')
+    expect(client.getQueryState(['providers'])?.status).toBe('success')
+  })
+
+  it('exposes an initial request failure without inventing provider metadata or retrying', async () => {
+    getProviders.mockRejectedValue(new Error('private transport details'))
+    const { client } = renderSelect()
+
+    await waitFor(() => expect(screen.getByTestId('provider-catalogue-status').textContent).toContain('request failed'))
+
+    const select = screen.getByLabelText('Provider') as HTMLSelectElement
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['runtime-default'])
+    expect(select.options[0]?.textContent).toContain('configured; not reported')
+    expect(client.getQueryState(['providers'])).toMatchObject({ status: 'error', data: undefined, dataUpdatedAt: 0 })
+    expect(getProviders).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('private transport details')).toBeNull()
+  })
+
   it('renders exactly the execution providers reported by the live server catalogue', async () => {
     getProviders.mockResolvedValue([
       { id: 'runtime-default', displayName: 'Runtime Default', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },

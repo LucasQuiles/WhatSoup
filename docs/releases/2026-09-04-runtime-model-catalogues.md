@@ -15,7 +15,11 @@
   replaced with a compiled fallback list.
 - Console execution-provider selectors now render the fleet server's registry.
   A configured value that is not reported is preserved and identified instead
-  of being silently replaced.
+  of being silently replaced. Failed requests retain the last successful
+  metadata with an explicit failure status; a successful empty response still
+  replaces it. New-line creation refuses an entered key with no reported
+  credential route before creating the line. The retained key stays editable
+  for explicit clearing; keyless creation remains available.
 - Managed API and CLI-session catalogue requests preserve their distinct
   credential identities so one account's visible models are not presented as
   another account's catalogue.
@@ -376,3 +380,41 @@ establish deployment.
 The [implementation plan](../superpowers/plans/2026-09-06-daily-health-alert-evidence.md)
 records the remaining integration gates. Authored-chat output fidelity remains a
 separate contract and is not subjected to this backend evidence policy.
+
+## Current integration and credential-intent check
+
+The backend repair is committed at `2a67a386`. The full release attempt completed
+40 of 44 steps before its outer 30-minute timeout interrupted coverage step 41;
+the final three steps did not run. The result is inconclusive, not green. The
+outer process-group cleanup reported a permission error; the verified owned
+remaining test group was stopped separately. This does not establish reliable
+process-tree cleanup. The next attempt uses the existing Quality workflow's
+60-minute full-job allowance while retaining the inner 30-minute test battery,
+all required steps and all thresholds.
+
+Canonical `15c05825` was integrated without conflicts at `9cb87031`. A subsequent
+review found an onboarding credential-loss path: a failed provider refetch
+replaced cached metadata with a successful error-shaped receipt, allowing
+creation to omit an entered key. Three behavioral regressions reproduced this
+and the authoritative-empty variant alongside 19 passing controls.
+
+The repair uses the existing query library's error transition and a narrow
+pre-creation check, without a parallel cache or static provider table. The ten
+affected/adjacent files now pass 222 tests on pinned Node 24.15.0, including the
+canonical release-drift delta, initial and repeated request failures, successful
+empty data, removed providers/routes, recovery, normal credential writes and
+keyless creation. Review caught a recovery trap when a retained key's input was
+hidden after route removal or a deliberate keyless-provider selection. Both
+negative cases reproduced the trap; the field now remains editable for explicit
+clearing. Restored-route submission retains the key and stores it exactly once.
+The persistent-failure test also exposed an initializer that
+returned a callable mock as an unintended cleanup callback; the initializer now
+returns nothing. These checks retain the real query client and mock the API
+boundary. Full release, current-revision CI, required review and deployment
+remain pending; the published branch has not changed.
+
+This follows the native [query error contract](https://tanstack.com/query/latest/docs/framework/react/guides/query-functions#handling-and-throwing-errors):
+transport failure must reject, not resolve error-shaped data. The
+[test-hook cleanup contract](https://vitest.dev/api/hooks#beforeeach) explains
+the unintended mock invocation. Installed source and behavioral tests were
+checked as well; neither finding required a new cache, global hook or lint rule.

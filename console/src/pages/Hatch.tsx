@@ -88,6 +88,10 @@ export default function Hatch() {
       setStep(4)
       return
     }
+    if (apiKey.trim() && !credentialService) {
+      toast.error('The entered key has no reported credential route. Refresh the provider catalogue or clear the key to continue without it.')
+      return
+    }
     const slug = slugifyName(name)
     if (!slug) {
       toast.error('Name must contain at least one letter')
@@ -274,10 +278,10 @@ export default function Hatch() {
                 onChange={setModel}
               />
             </div>
-            {credentialService ? (
+            {credentialService || apiKey ? (
               <div className="journey-field">
                 <label className="journey-label" htmlFor="hatch-key">
-                  {credentialService} API key
+                  {credentialService ? `${credentialService} API key` : 'Entered API key (no credential route)'}
                 </label>
                 <TextInput
                   id="hatch-key"

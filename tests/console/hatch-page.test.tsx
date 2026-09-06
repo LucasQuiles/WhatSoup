@@ -9,9 +9,10 @@
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
+import type { ProviderCatalogEntry } from '../../console/src/types'
 
 const toastMock = { toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), dismiss: vi.fn(), clear: vi.fn() }
 vi.mock('../../console/src/hooks/toast-context', () => ({
@@ -63,9 +64,10 @@ import { api } from '../../console/src/lib/api'
 const createLineMock = api.createLine as unknown as ReturnType<typeof vi.fn>
 const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
 const getProviderModelsMock = api.getProviderModels as unknown as ReturnType<typeof vi.fn>
+const getProvidersMock = api.getProviders as unknown as ReturnType<typeof vi.fn>
+const setCredentialMock = api.setCredential as unknown as ReturnType<typeof vi.fn>
 
-function renderHatch() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderHatch(qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -81,11 +83,139 @@ beforeEach(() => {
   createLineMock.mockClear().mockResolvedValue({ name: 'quinn', healthPort: 9096 })
   sendMessageMock.mockClear().mockResolvedValue({ sent: true })
   getProviderModelsMock.mockClear()
+  getProvidersMock.mockClear()
+  setCredentialMock.mockClear()
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+async function enterKeyedDraft() {
+  vi.stubGlobal('EventSource', class {
+    addEventListener() {}
+    close() {}
+  })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+  const view = renderHatch(client)
+  const { container } = view
+  await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+  fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue'))!)
+  await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+  fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue with WhatsApp'))!)
+  await waitFor(() => expect(container.querySelector('#hatch-provider option[value="anthropic-api"]')).not.toBeNull())
+  fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'anthropic-api' } })
+  fireEvent.change(container.querySelector('#hatch-key')!, { target: { value: 'fixture-input-value' } })
+  fireEvent.change(container.querySelector('#hatch-admin')!, { target: { value: '+1 555 0100' } })
+  const submit = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue to link'))!
+  return { ...view, client, submit }
+}
 
 describe('hatch flow — step discipline (14-onboarding §1, wave-4 law)', () => {
+  it('stores an entered key once for the server-advertised credential service', async () => {
+    const { submit } = await enterKeyedDraft()
+
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
+  it('does not lose an entered key when a provider refetch fails before creation', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    getProvidersMock.mockRejectedValueOnce(new Error('catalogue offline'))
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('Provider catalogue request failed'))
+    expect(getProvidersMock).toHaveBeenCalledTimes(2)
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
+  it.each(['empty catalogue', 'provider removed', 'credential route removed'] as const)(
+    'refuses creation when an entered key no longer has a reported credential route: %s', async (change) => {
+      const { container, client, submit } = await enterKeyedDraft()
+      const reported = client.getQueryData<{ providers: ProviderCatalogEntry[] }>(['providers'])!.providers
+      const next = change === 'empty catalogue'
+        ? []
+        : change === 'provider removed'
+          ? reported.filter((provider) => provider.id !== 'anthropic-api')
+          : reported.map((provider) => ({ ...provider, credentialService: null }))
+      getProvidersMock.mockResolvedValueOnce(next)
+
+      await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+      await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+      fireEvent.click(submit)
+
+      expect(createLineMock).not.toHaveBeenCalled()
+      expect(setCredentialMock).not.toHaveBeenCalled()
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('credential route'))
+    },
+  )
+
+  it('retains keyless creation when the configured provider is no longer reported', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    fireEvent.change(container.querySelector('#hatch-key')!, { target: { value: '' } })
+    getProvidersMock.mockResolvedValueOnce([])
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('0 execution providers'))
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['catalogue removal', 'keyless selection'] as const)(
+    'allows explicit key clearing after an unrouted-key refusal: %s', async (change) => {
+      const { container, client, submit } = await enterKeyedDraft()
+      if (change === 'catalogue removal') {
+        getProvidersMock.mockResolvedValueOnce([])
+        await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+      } else {
+        fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'claude-cli' } })
+      }
+      await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+      fireEvent.click(submit)
+      expect(createLineMock).not.toHaveBeenCalled()
+      expect(setCredentialMock).not.toHaveBeenCalled()
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('credential route'))
+
+      const key = container.querySelector<HTMLInputElement>('#hatch-key')
+      expect(key).not.toBeNull()
+      expect(key!.value).toBe('fixture-input-value')
+      fireEvent.change(key!, { target: { value: '' } })
+      fireEvent.click(submit)
+
+      await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+      expect(setCredentialMock).not.toHaveBeenCalled()
+    },
+  )
+
+  it('stores the retained key once after its reported credential route returns', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    getProvidersMock.mockResolvedValueOnce([])
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+    fireEvent.click(submit)
+    expect(createLineMock).not.toHaveBeenCalled()
+    expect(setCredentialMock).not.toHaveBeenCalled()
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('anthropic API key'))
+    expect(container.querySelector<HTMLInputElement>('#hatch-key')!.value).toBe('fixture-input-value')
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
   it('uses live provider-native model suggestions while preserving manual entry', async () => {
     const { container } = renderHatch()
     await waitFor(() => expect(container.textContent).toContain('Pick a kind'))

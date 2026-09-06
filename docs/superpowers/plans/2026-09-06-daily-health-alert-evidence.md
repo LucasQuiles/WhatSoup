@@ -58,9 +58,9 @@ def test_routine_prefix_cannot_hide_complete_failure(dispatcher):
 
 - [x] Run `bash tests/drills/bot-errors-failure-drills.sh` through capture and strict load admission. Keep D22c assertions unchanged. The new pytest file absorbs the existing observer's 0644/0666/0600 cases and retains producer/dispatcher stdout, stderr, queued events and delivered records; this replaces reliance on a private observer for acceptance.
 - [x] Run `bash deploy/scripts/run-bot-errors-full-suite.sh`; verify actual discovered/passed counts and retained failures.
-- [ ] Run `bash scripts/run-with-pinned-npm.sh run verify:release` under the existing bounded release runner. Keep its 1,800,000 ms battery limit and all 44 steps. A timeout, skipped required suite or masked failure is not a pass.
+- [ ] Run `bash scripts/run-with-pinned-npm.sh run verify:release` under the existing bounded release runner. Use the full-job 60-minute outer allowance already established in the Quality workflow; retain the inner 1,800,000 ms battery limit and all 44 steps. The first outer 30-minute attempt was inconclusive: 40 steps completed, coverage step 41 unfinished, and steps 42–44 unrun. A timeout, skipped required suite or masked failure is not a pass.
 - [x] Obtain independent production and final test reviews; update the release note with verified results and remaining limitations.
-- [ ] Commit only reviewed scoped files after verification.
+- [x] Commit only reviewed scoped backend files after verification (`2a67a386`).
 - [ ] Re-read remote canonical and PR state, integrate changed canonical if needed and revalidate. Push only the intended branch when pre-push gates pass; satisfy review/protection requirements before merge.
 - [ ] Perform a staged live canary only after deployment readiness and rollback checks. Record requested versus observed revision and delivered behavior; then reconcile the owned branches and the existing estate ledger.
 
