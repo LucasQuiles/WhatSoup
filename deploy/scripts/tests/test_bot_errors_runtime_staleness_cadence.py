@@ -184,6 +184,40 @@ def test_receipt_records_no_fetch_step_for_this_producer(state_dir, monkeypatch,
     assert _receipt()["fetchStatus"] == "not_applicable"
 
 
+def test_a_failing_receipt_write_leaves_the_cycle_and_its_emit_intact(
+    state_dir, monkeypatch, capsys
+):
+    # The swallow is what makes a dark receipt safe to ship: the monitor's own
+    # verdict is what operators depend on today, so a receipt that cannot be
+    # written must degrade to a stderr line rather than abort the cycle.
+    emits: list[object] = []
+
+    def _probe(_instance):
+        return dict(STALE_OBSERVATION)
+
+    def _emit(argv, *, dry_run):
+        emits.append(argv)
+        return EMIT_ACCEPTED
+
+    monkeypatch.setattr(_mod, "probe_instance", _probe)
+    monkeypatch.setattr(_mod, "emit_event", _emit)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("fixture receipt failure")
+
+    # Exactly one recorder raises, so "one token" is unambiguous.
+    monkeypatch.setattr(_mod, "record_cycle_success", _raise)
+
+    assert _mod.run_once(instances=[FIXTURE_INSTANCE], dry_run=False) == 0
+    captured = capsys.readouterr()
+
+    assert emits, "the domain handoff must still run when the receipt fails"
+    token_lines = [
+        line for line in captured.err.splitlines() if "cadence_receipt_error" in line
+    ]
+    assert token_lines == ["runtime-staleness cadence_receipt_error RuntimeError"]
+
+
 def test_observe_mode_success_over_a_running_instance_still_writes_durably(
     state_dir, monkeypatch, capsys
 ):

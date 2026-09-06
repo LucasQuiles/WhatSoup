@@ -930,4 +930,18 @@ Nothing reads these receipts yet. There is no watchdog check, no dwell and no
 alert -- those arrive with the evaluator, which also has to decide what a
 receipt that never appears means on a host where the units are not installed.
 Receipt failures are swallowed by both producers: a dark liveness receipt must
-never break the domain guard it observes.
+never break the domain guard it observes. A swallowed failure prints one
+bounded line per failed publication on stderr, so it is greppable rather than
+silent:
+
+```
+tree_provenance cadence_receipt_error <ExceptionClassName>
+runtime-staleness cadence_receipt_error <ExceptionClassName>
+```
+
+A producer whose receipts stop advancing while these lines appear in the
+journal has a writable-state problem, not a dead timer. A receipt that has
+stopped advancing with no such line, and refuses every later cycle, may instead
+be mode-locked: the durable reader rejects any group- or world-accessible bit
+on the receipt file, which a restore from backup or a manual copy can
+introduce.

@@ -212,6 +212,34 @@ def test_successful_refresh_is_recorded_as_requested(state_dir, monkeypatch, cap
     assert _receipt()["fetchStatus"] == "requested"
 
 
+def test_a_failing_receipt_write_leaves_the_cycle_and_its_domain_write_intact(
+    state_dir, monkeypatch, capsys
+):
+    # The swallow is what makes a dark receipt safe to ship: the guard's own
+    # verdict is what operators depend on today, so a receipt that cannot be
+    # written must degrade to a stderr line rather than abort the cycle.
+    # Without a test, a later refactor could turn the swallow into a crash, or
+    # drop the token, with every gate still green.
+    _stub_clean_snapshot(monkeypatch)
+    emitted: list[object] = []
+    monkeypatch.setattr(_mod, "emit_outbox_event", lambda event: emitted.append(event))
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("fixture receipt failure")
+
+    # Exactly one recorder raises, so "one token" is unambiguous.
+    monkeypatch.setattr(_mod, "record_cycle_success", _raise)
+
+    assert _mod.run_once(do_fetch=False, dry=False, reporter=True) == 0
+    captured = capsys.readouterr()
+
+    assert emitted, "the domain write must still land when the receipt fails"
+    token_lines = [
+        line for line in captured.err.splitlines() if "cadence_receipt_error" in line
+    ]
+    assert token_lines == ["tree_provenance cadence_receipt_error RuntimeError"]
+
+
 def test_failed_refresh_is_recorded_as_refused(state_dir, monkeypatch, capsys):
     # The case the issue thread names: the cycle completed, but its upstream
     # comparison was against a ref it could not prove current. A success clock
