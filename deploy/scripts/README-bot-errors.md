@@ -380,16 +380,28 @@ digest events, quarantine included -- not that an operator was shown it.** The
 receipt guards the publication, which is the irreversible move; delivery is a
 separate concern with its own record.
 
-That orphan page goes out **at most once per window and revision**. The intent
+That orphan page goes out **at most once per window and revision, for as long as
+that page remains in the dispatcher's own record**. The intent
 to page is written to the receipt before the page exists, and the page carries an
 id derived from the window, so the next cycle can find it in the dispatcher's own
-record and settle from it rather than paging again. A settlement write that fails
-after the page went out is stated in the dispatch log and does not produce a
+record and settle from it rather than paging again. If the page is pruned from
+every one of those directories while its receipt is still owed, the window can
+page a second time; that needs two independent faults, a settlement write that
+kept failing and a retention pass that removed the page. A settlement write that
+fails after the page went out is stated in the dispatch log and does not produce a
 second page. A page whose intent could not be written is not sent at all, and
 that refusal is stated too: an unrecorded page is one nothing can account for
-afterwards, which is the failure this record exists to prevent. So nothing is
-dropped in silence, nothing is re-adopted forever, and no fault path turns one
-owed page into a page every cycle.
+afterwards, which is the failure this record exists to prevent. So no fault path
+turns one owed page into **a page** every cycle.
+
+Two faults are known residuals rather than closed here, and the sentence above is
+scoped to the page for that reason. While a settlement write keeps failing, the
+receipt is never settled, so the dispatch log gains two records every cycle for
+that receipt even though the page itself does not repeat; on a bounded log that
+slowly evicts unrelated diagnostics. And when the orphan alert's own publication
+fails, nothing is written anywhere: no page, no dispatch record, and the adoption
+count on disk stops advancing, so that window is dropped in silence and re-adopted
+on every following cycle.
 
 Unlike the unrenderable meta-alert it otherwise mirrors, the orphan alert's
 incident identity is qualified by its window. That pattern makes one claim per
@@ -397,7 +409,10 @@ source and lets the renotify throttle absorb repeats; this one makes a **durable
 per-window claim**, so a second orphaned window absorbed into the first one's
 incident would leave a receipt recording a page that never reached an operator.
 Each orphaned window therefore opens its own incident and pages once, and the
-throttle applies within a window rather than across windows.
+throttle applies within a window rather than across windows. That identity opens a
+second key family in the open-incident store, one entry per orphaned window,
+alongside the per-window digest keys and under the same deferred bound described
+below.
 
 The dispatcher owns retention: `BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS`
 (default 128) bounds the store, and the census is every data entry in it, so a

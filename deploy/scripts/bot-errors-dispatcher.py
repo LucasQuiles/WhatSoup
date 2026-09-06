@@ -9620,13 +9620,13 @@ def run_once(max_events: int) -> dict[str, Any]:
             # #2387: same point in the cycle, same reason -- a receipt a previous
             # process wrote but never proved published names an owed page.
             #
-            # THIS POSITION IS LOAD-BEARING. reconcile_storm_digest_receipts
-            # takes no IncidentStateCycle: it reads incident state from the file
-            # through load_incident_state, so it must run BEFORE any pass that
-            # mutates the in-memory payload above, or it reads a pre-mutation
-            # snapshot, misses an openIncidents record carrying the window token,
-            # and orphan-pages a window whose digest did publish. Every pass that
-            # receives incident=_incident_cycle is below this line.
+            # The position mirrors the reconcile_unrenderable_signals call above.
+            # reconcile_storm_digest_receipts takes no IncidentStateCycle: it
+            # reads incident state from the file through load_incident_state, so
+            # it sees only what previous cycles committed, and nothing later in
+            # this cycle depends on what it returns. The position is deliberately
+            # not pinned by a test: moving the call changes no observable
+            # behaviour, so there is no difference for a test to hold.
             reconcile_storm_digest_receipts(paths)
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
