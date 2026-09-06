@@ -300,7 +300,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "e71605b1a4215a5575564ca50cee86d905b0b6fd708eec87e0cbca2a72545ab3",
+      "sha256": "8a56429036464893d4993040c9ddd445dd8c219f9e2879262064837a3f98111f",
       "mustContain": [
         "Runtime code-staleness monitor",
         "runtime_stale",
@@ -339,7 +339,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "f1eb6db26ecfc84252341bdaa03038a80d1b773de802fc6547475bd828e629f0",
+      "sha256": "778ec173f93e8530baf019bd2784d8809301280d66b50c7c39170866298be02a",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -582,13 +582,15 @@
     },
     {
       "path": "deploy/scripts/lib/producer_cadence_receipt.py",
-      "sha256": "a1b28edc719da71bcd6224ef8c0345d0124385de1f11f3c965dd6b96bac053fe",
+      "sha256": "68871da16c820f965d41c9498c35b1c8c7b82660841ac795dbc4bd53eff96919",
       "mustContain": [
         "CADENCE_RECEIPT_SCHEMA_VERSION",
         "lastAttemptAt",
         "lastSuccessfulObservationAt",
         "lock_skip",
-        "ProducerIdentity"
+        "ProducerIdentity",
+        "invocationContext",
+        "not_applicable"
       ]
     },
     {
