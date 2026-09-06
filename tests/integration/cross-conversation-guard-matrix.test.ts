@@ -19,6 +19,15 @@
  *     x alias target `to` (present / absent)
  *     x session conversationKey mirror (present / absent).
  *
+ * NOT an axis: the resolved / unresolved turn shape. Every cell here imports
+ * ToolRegistry from tests/helpers/resolved-tool-registry.ts, which forces
+ * `resolved: true`, so all thirteen cells run resolution-normal. No cell
+ * outcome depends on it — `executingResolution` has one reader in src/,
+ * scheduledAgentJobMaySee (src/mcp/registry.ts:104), reachable only for the
+ * tools in SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS (src/mcp/registry.ts:75-82),
+ * and neither `send_message` nor the M10 fixture tool is in that set. The
+ * unresolved axis belongs to sibling issue 3435.
+ *
  * Every cell asserts THREE things, because any one of them alone is weak:
  *   1. the caller-visible outcome (denied or admitted, and by which shape —
  *      the registry denies in PLAIN TEXT, the messaging guard denies inside a
@@ -500,6 +509,85 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
     expect(sent[0].jid).toBe(ALICE_JID);
 
     expect(lastToolCall(db, GLOBAL_CONVERSATION_KEY)).toEqual({
+      tool_name: 'send_message',
+      status: 'complete',
+      failure_code: null,
+      failure_stage: null,
+    });
+  });
+
+  // =========================================================================
+  // M9d — conversation-bound, top-level conversationKey mirror PRESENT,
+  //       NO caller target.
+  //       The only cell in which the MESSAGING guard adjudicates a target the
+  //       registry itself injected from the binding (registry.ts:704). The
+  //       registry guard is unreachable here (the bound arm at registry.ts:691
+  //       is taken), but messaging.ts:275 does NOT early-return, because a
+  //       conversation-bound session carries tier 'global' and the mirror is
+  //       truthy. Both sub-cases live in this one cell: the mirror AGREES with
+  //       the binding, and the mirror has DIVERGED from it.
+  // =========================================================================
+  it('M9d conversation-bound session with the conversationKey mirror present and no caller target: an agreeing mirror is admitted and a diverged mirror is denied by the messaging guard as returned_error/handler', async () => {
+    // Sub-case 1 — mirror AGREES with the binding.
+    const boundAgreeingMirror: SessionContext = {
+      tier: 'global',
+      conversationKey: ALICE_KEY,
+      binding: makeConversationBinding(ALICE_KEY, ALICE_JID),
+    };
+
+    const admitted = await registry.call(
+      'send_message',
+      { text: 'matrix cell M9d, agreeing mirror' },
+      boundAgreeingMirror,
+    );
+
+    expect(admitted.isError).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].jid).toBe(ALICE_JID);
+    expect(lastToolCall(db, ALICE_KEY)).toEqual({
+      tool_name: 'send_message',
+      status: 'complete',
+      failure_code: null,
+      failure_stage: null,
+    });
+
+    // Sub-case 2 — mirror has DIVERGED from the binding.
+    const boundDivergedMirror: SessionContext = {
+      tier: 'global',
+      conversationKey: BOB_KEY,
+      binding: makeConversationBinding(ALICE_KEY, ALICE_JID),
+    };
+
+    const diverged = await registry.call(
+      'send_message',
+      { text: 'matrix cell M9d, diverged mirror' },
+      boundDivergedMirror,
+    );
+
+    // The MESSAGING guard denies. The JSON envelope shape is what separates it
+    // from the registry guard, which denies in PLAIN TEXT (see M1 and M10).
+    expect(diverged.isError).toBe(true);
+    const envelope = errorEnvelope(diverged);
+    expect(envelope.error).toContain('does not match session conversation');
+    // The denied target is the one the registry ITSELF injected from the
+    // binding at registry.ts:704, and the key it is compared against is the
+    // diverged mirror. So this is a false deny of the session's OWN bound
+    // conversation, not a cross-conversation escape.
+    expect(envelope.error).toContain(ALICE_JID);
+    expect(envelope.error).toContain(BOB_KEY);
+    // No second dispatch: sub-case 1 sent one message, this sub-case sent none.
+    expect(sent).toHaveLength(1);
+
+    // The evidence row is filed under the DIVERGED MIRROR key.
+    expect(lastToolCall(db, BOB_KEY)).toEqual({
+      tool_name: 'send_message',
+      status: 'error',
+      failure_code: 'returned_error',
+      failure_stage: 'handler',
+    });
+    // and NOT under the binding key: the newest row there is still sub-case 1,
+    // unchanged by this denial.
+    expect(lastToolCall(db, ALICE_KEY)).toEqual({
       tool_name: 'send_message',
       status: 'complete',
       failure_code: null,

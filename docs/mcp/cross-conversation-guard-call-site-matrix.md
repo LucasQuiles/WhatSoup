@@ -46,6 +46,13 @@ so neither divergence admits a send.
 Axes: session tier, alias target `to` present or absent, session
 `conversationKey` mirror present or absent.
 
+`SessionTier` admits only `global` and `chat-scoped` (`src/mcp/types.ts:14`,
+Correction 1 below), so a conversation-bound session is NOT a third tier value.
+It appears in the Tier column as `global + binding`, which is what the tests
+construct and what makes the messaging guard live on the bound rows: the guard's
+predicate (`messaging.ts:275`) early-returns on `tier !== 'global'`, and a bound
+session does not satisfy that.
+
 | Cell | Tier | `to` | `conversationKey` | Trigger | Resolver | Outcome | Failure channel |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | M1 | global, unbound | absent | present | registry guard `registry.ts:741` fires | armed fold on the raw caller `chatJid` | denied, plain text, no dispatch | `authorization_denied` / `authorization` |
@@ -56,10 +63,24 @@ Axes: session tier, alias target `to` present or absent, session
 | M6 | chat-scoped | absent | present | neither guard runs; chat-scoped arm `:705` injects | none | admitted, target replaced by `deliveryJid` | none |
 | M7 | chat-scoped | present | present | neither guard runs; `to` stripped at `:716` | none | admitted, target is `deliveryJid`, alias never resolves | none |
 | M8 | global, unbound | present **and** `chatJid` present | present | registry guard suppressed by the caller-supplied `to`; never adjudicates | none reached | denied as a target-exclusivity fault, not a conversation fault | `returned_error` / `handler` |
-| M9a | conversation-bound | either, supplied | present | bound arm `:691` rejects any caller target before the guard arm | none | denied, plain text | `validation_rejected` / `validation` |
-| M9b | conversation-bound | either, supplied | absent | same bound arm; confinement is the binding, not the mirror | none | denied, plain text | `validation_rejected` / `validation`, filed under `__global__` |
-| M9c | conversation-bound | absent, no caller target | absent | bound arm fills the target from the binding `:704` | none | admitted, dispatched to the binding | none, filed under `__global__` |
+| M9a | global + binding | absent, `chatJid` supplied | present | bound arm `:691` rejects any caller target before the guard arm | none | denied, plain text | `validation_rejected` / `validation` |
+| M9b | global + binding | absent, `chatJid` supplied | absent | same bound arm; confinement is the binding, not the mirror | none | denied, plain text | `validation_rejected` / `validation`, filed under `__global__` |
+| M9c | global + binding | absent, no caller target | absent | bound arm fills the target from the binding `:704`; messaging guard `:275` early-returns on the absent mirror | none | admitted, dispatched to the binding | none, filed under `__global__` |
+| M9d | global + binding | absent, no caller target | present | bound arm fills the target from the binding `:704`; messaging guard `:275` does NOT early-return and adjudicates that injected target | database fold on `prepared.chatJid` | mirror agrees with the binding: admitted, dispatched to the binding. mirror diverged: denied, JSON envelope, no dispatch | agreeing: none. diverged: `returned_error` / `handler`, filed under the diverged MIRROR key |
 | M10 | global, unbound, no fold armed | absent | present, addressed by its own mapped `@lid` | registry guard fires on the bare fallback fold `:746` | `toConversationKey` yields the raw LID digits | denied, plain text, the session's OWN conversation | `authorization_denied` / `authorization` |
+
+Two things the rows above do not carry in a column:
+
+- M9a and M9b supply `chatJid`, not `to`. The bound arm at `registry.ts:696`
+  reads both keys and rejects either, so a `to` target would be rejected by the
+  same line; that variant is pinned by no test here.
+- M10 and its control run against `probe_injected_send`, a fixture
+  injected-target tool declared in the test file
+  (`tests/integration/cross-conversation-guard-matrix.test.ts:143-155`), not
+  against `send_message`. `registerMessagingTools` is the sole production arming
+  site for the canonical fold (`src/mcp/tools/messaging.ts:221`), so a registry
+  holding a real `send_message` always has the fold armed and the un-armed cell
+  is unreachable with a production tool.
 
 ### Cell index to tests
 
@@ -76,10 +97,11 @@ Axes: session tier, alias target `to` present or absent, session
 | M9a | `M9a conversation-bound session with the conversationKey mirror present: a caller-supplied target is rejected as validation_rejected/validation` |
 | M9b | `M9b conversation-bound session with no conversationKey mirror: a caller-supplied target is rejected as validation_rejected/validation` |
 | M9c | `M9c conversation-bound session with no conversationKey mirror and no caller target: the binding supplies the target` |
+| M9d | `M9d conversation-bound session with the conversationKey mirror present and no caller target: an agreeing mirror is admitted and a diverged mirror is denied by the messaging guard as returned_error/handler` |
 | M10 | `M10 registry guard with no fold armed: a pinned session addressing its OWN conversation by a mapped @lid is denied as authorization_denied/authorization` |
 | M10 control | `M10 control: the SAME call is admitted once the canonical fold is armed` |
 
-### How the twelve cells map to the intake enumeration
+### How the thirteen cells map to the intake enumeration
 
 The intake for issue 3457 counts nine cells, six pinned at base and three
 unpinned. That count folds two variants that this document keeps separate, so
@@ -94,7 +116,7 @@ the mapping is stated rather than assumed.
 | chat-scoped, `chatJid` and alias | pinned | M6 and M7 |
 | conversation-bound, any caller target | pinned | M9a |
 | (a) both `chatJid` and `to` on a pinned session | not pinned | M8 |
-| (b) bound session, mirror absent or diverged | not pinned | M9b and M9c |
+| (b) bound session, mirror absent or diverged | not pinned | M9b and M9c cover the absent half; M9d covers the mirror-present half, both the agreeing and the diverged sub-case |
 | (c) registry guard with an un-armed fold | not pinned | M10, with its armed control |
 
 ## Corrections to the issue table
@@ -117,8 +139,11 @@ injected-target branch. Reaching it requires all three of:
   `registry.ts:705`.
 
 `SessionTier` admits exactly two values (`src/mcp/types.ts:14`), so the
-surviving arm at `registry.ts:718` is global-and-unbound. Cells M6, M7, M9a and
-M9b pin the three arms that the guard never sees.
+surviving arm at `registry.ts:718` is global-and-unbound. Two arms are therefore
+closed to the guard, and the cells pin both: M6 and M7 pin the chat-scoped arm,
+M9a, M9b, M9c and M9d pin the bound arm. The third reaching condition,
+`tool.targetMode === 'injected'` (`registry.ts:688`), is pinned by no cell here
+and appears only as out-of-scope context below.
 
 **Correction 2. The installed-resolver anchor points at an unrelated resolver.**
 
@@ -147,11 +172,30 @@ None of the following is pinned by this matrix.
   guard is gated on `tool.targetMode === 'injected'` (`registry.ts:688`), so it
   never runs for a caller-supplied tool such as `forward_message`
   (`src/mcp/tools/chat-management.ts:470`).
-- **The mirror-versus-binding split is a latent divergence.**
+- **The mirror-versus-binding split is a latent divergence, and on a bound
+  session it produces a false DENY rather than an escape.**
   `assertConversationAccess` enforces from the binding; both guards here read
-  only the mirror. For a bound session the registry forces the target from the
-  binding before either guard runs, so no send escapes today. M9b and M9c pin
-  that, and do not change it.
+  only the mirror. The REGISTRY guard never adjudicates a bound session: the
+  bound arm at `registry.ts:691` returns at `:697` or fills the target from the
+  binding at `:704`, so the guard arm at `:718` is unreachable. The MESSAGING
+  guard does run. It lives inside the handler
+  (`src/mcp/tools/messaging.ts:275`, reached after `registry.ts:843` invokes the
+  handler), tests only `session.tier !== 'global'` and
+  `!session.conversationKey`, never consults the binding, and a
+  conversation-bound session carries `tier: 'global'`. So for a bound session
+  whose mirror has DIVERGED from the binding, supplying no caller target, the
+  messaging guard denies the target the registry itself injected from the
+  binding: a false deny of the session's OWN bound conversation, on the
+  `returned_error` / `handler` channel, with the evidence row filed under the
+  diverged mirror key rather than the binding key. That is a
+  confinement-availability property, the opposite failure direction from the
+  escape this bullet otherwise concerns, and a consolidation would move it
+  silently. Cell M9d pins it, together with the agreeing-mirror sub-case that
+  shows the same call admitted. M9b and M9c do NOT pin it: both have the mirror
+  absent, so `messaging.ts:275` early-returns and the messaging guard is not
+  exercised on a bound session there at all. No cross-conversation send escapes
+  on the bound path, but the reason is the registry's bound arm confining the
+  target, not either guard.
 - **An outbound suppression can mask a cross-conversation violation.** On the
   live send path `transformPrepared` (`src/mcp/tools/messaging.ts:361-373`) runs
   before `beforeAudit` (`src/core/send-pipeline.ts:100-103`), so a
@@ -159,6 +203,15 @@ None of the following is pinned by this matrix.
   a suppression and records no cross-conversation evidence. This is an ordering
   property of the send pipeline, not of either guard, and it is deliberately not
   a cell here.
+- **Every cell runs on a resolution-forced registry.** The tests import
+  `ToolRegistry` from `tests/helpers/resolved-tool-registry.ts`, which passes
+  `resolved: true` unconditionally (line 27 of that file), so the unresolved /
+  empty-context turn shape is deliberately NOT an axis of this matrix. No cell
+  outcome depends on it: `executingResolution` has one reader in `src/`,
+  `scheduledAgentJobMaySee` (`registry.ts:104`), reachable only for the tools in
+  `SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS` (`registry.ts:75-82`), and neither
+  `send_message` nor `probe_injected_send` is in that set. That axis belongs to
+  sibling issue 3435.
 - **One line in the chat-scoped arm is behaviourally dead.**
   `delete effectiveParams['chatJid']` (`registry.ts:715`) is immediately
   followed by an unconditional assignment at `registry.ts:717`, so removing the
