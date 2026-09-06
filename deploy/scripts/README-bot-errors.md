@@ -349,16 +349,56 @@ already there. Retention thresholds, terminal-status rewriting and any
 deletion path remain unimplemented and are gated separately (issue #2459).
 
 **Storm-collapse digest receipts (#2387).** Each collapsed window writes one
-receipt under `storm-receipts/` immediately before its digest is published, and
-the receipt is marked published only once that publication is proven, so a
-process that dies in between leaves a durable record of the page it owed. A
-receipt carries bounded counts, the severity bucket, the window identity and the
-opaque fingerprint; it carries no manifest path, no fingerprint basis, no host
-names and no summary text. The dispatcher owns their retention:
-`BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS` (default 128) bounds the retained set, the
-oldest window is evicted first, and every drop is recorded in the dispatch log
-with its window and whether its page had been proven published. Nothing outside
-that set is removed, and no incident, clear or sweep path rewrites a receipt.
+receipt under `storm-receipts/` immediately before every digest it publishes --
+the first one and every superseding revision -- and the receipt is marked
+published only once that publication is proven, so a process that dies in
+between leaves a durable record of the page it owed. The receipt names the
+revision it is owed for, so evidence that the first page went out cannot settle
+a superseding page that never did. A receipt carries bounded counts, the
+severity bucket, the window identity and the opaque fingerprint; it carries no
+manifest path, no fingerprint basis, no host names and no summary text.
+
+**The receipt write fails closed: a receipt store that cannot be written blocks
+storm digests entirely.** That is deliberate -- the whole value of the record is
+that it exists before the page does -- but it means an unwritable
+`storm-receipts/` stops storm collapse from paging at all. The acknowledgement
+and the adoption both fail open, so neither can wedge a cycle.
+
+A receipt an earlier process left unpublished is adopted at the start of a
+cycle, and the adoption always terminates. If the dispatcher's own record of the
+window shows its digest was published, the receipt is settled without paging. If
+the window is still open, it is left to the re-collapse and counted once per
+process. If the window has closed with no such evidence, one content-free orphan
+alert is published for it -- the same bounded fields the receipt carries, no
+path and no host names -- and the receipt is settled behind that page. Nothing
+is dropped in silence and nothing is re-adopted forever.
+
+The dispatcher owns retention: `BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS`
+(default 128) bounds the store, and the census is every file in it, so a
+damaged or wrong-shape file counts toward the bound and is evicted rather than
+persisting uncollectable. Unreadable entries are evicted first, oldest by
+modification time; valid receipts follow, oldest window first. The receipt being
+written is never an eviction candidate and its slot is reserved before it
+exists, so the bound cannot destroy the record for the page that is publishing
+next. **A drop can still remove another window's receipt whose page has not been
+published yet**; that is the price of a hard bound, and every drop is recorded
+in the dispatch log with its window, its fingerprint prefix and whether its page
+had been proven published. An eviction that cannot unlink is recorded too, so a
+store that has stopped accepting deletions shows up as a stated bound violation
+rather than as an absence. Nothing outside the store is removed, and no
+incident, clear or sweep path rewrites a receipt.
+
+On the first cycle after this change lands, the one surviving open-incident
+record under the unqualified `fleet|storm-collapse|storm-collapse` key is folded
+into whichever window key is processed first, carrying that record's opened
+time, its renotify and suppressed counters and its force-notify history. A
+brand-new window's record can therefore be dated well before the window it
+labels. This happens once; the alternative is an orphaned record only the stale
+sweep could close. Separately, a deployment that has extended the inhibition map
+by environment to name `storm-collapse` as a symptom of some root source will
+find that entry no longer matches a digest, because the digest's incident source
+is now window-qualified. The shipped map names no storm source, so this affects
+overrides only.
 
 The stale sweep and its auto-close language still apply to storm-collapse
 incident keys. Keying a digest by its window multiplies the open-incident store
