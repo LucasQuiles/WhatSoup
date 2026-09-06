@@ -335,7 +335,16 @@ def _carried_clock(prior: Mapping[str, Any] | None, field: str) -> str | None:
     """
     if not isinstance(prior, Mapping):
         return None
-    if prior.get(SCHEMA_VERSION_FIELD) not in CLOCK_COMPATIBLE_SCHEMA_VERSIONS:
+    version = prior.get(SCHEMA_VERSION_FIELD)
+    # Membership alone is not enough. JSON ``true`` and ``1.0`` both compare
+    # equal to the integer 1 in Python, so a receipt whose version field was
+    # corrupted into either would be read as the declared version and have its
+    # clocks carried across a meaning nothing declared compatible. The version
+    # is the whole warrant for reusing a clock, so it has to be the integer
+    # type the declaration is written in.
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if version not in CLOCK_COMPATIBLE_SCHEMA_VERSIONS:
         return None
     value = prior.get(field)
     return value if isinstance(value, str) and value else None

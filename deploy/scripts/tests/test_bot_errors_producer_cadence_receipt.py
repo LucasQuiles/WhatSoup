@@ -345,6 +345,45 @@ def test_a_clock_written_under_a_declared_compatible_version_is_carried_forward(
     assert carried["schemaVersion"] == pcr.CADENCE_RECEIPT_SCHEMA_VERSION
 
 
+# Two values a corrupted or hand-edited receipt can carry that Python's
+# equality reads as the declared version 1. Named rather than inlined so a
+# reader sees which coercion each case is about.
+BOOLEAN_TRUE_VERSION = True
+FLOAT_ONE_VERSION = 1.0
+VERSIONS_THAT_MERELY_COMPARE_EQUAL = (BOOLEAN_TRUE_VERSION, FLOAT_ONE_VERSION)
+
+
+@pytest.mark.parametrize(
+    "version",
+    VERSIONS_THAT_MERELY_COMPARE_EQUAL,
+    ids=("boolean_true", "float_one"),
+)
+def test_a_clock_written_under_a_non_integer_version_is_not_carried_forward(
+    state_dir, version
+):
+    # ``True in frozenset({1})`` and ``1.0 in frozenset({1})`` both evaluate
+    # true, so a membership test alone accepts a version field that was never
+    # declared clock-compatible and carries a clock across an undeclared
+    # meaning. The version a receipt claims is the whole warrant for reusing
+    # its clocks, so the check has to be strict on type as well as on value.
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    pcr.record_cycle_success(
+        TREE, mode=pcr.CadenceMode.EMIT, durable_write=pcr.DurableWrite.WRITTEN
+    )
+    assert _payload(TREE)["lastSuccessfulObservationAt"]
+
+    corrupted = _payload(TREE)
+    corrupted["schemaVersion"] = version
+    receipt_file = pcr.receipt_path(TREE)
+    receipt_file.write_text(json.dumps(corrupted), encoding="utf-8")
+    # The durable reader refuses any group- or world-accessible bit on a
+    # private leaf, so restore the writer's own mode after the raw overwrite.
+    receipt_file.chmod(0o600)
+
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    assert _payload(TREE)["lastSuccessfulObservationAt"] is None
+
+
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
 def test_receipt_carries_no_path_hostname_or_command_evidence(state_dir, producer):
     pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.OBSERVE)
