@@ -1164,6 +1164,7 @@ def state_paths() -> dict[str, Path]:
         "sent": root / "sent",
         "storm_collapsed": root / "storm-collapsed",
         "storm_manifests": root / "storm-manifests",
+        "storm_receipts": root / "storm-receipts",
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
         "unrenderable_signals": root / "unrenderable-signals",
@@ -1215,6 +1216,7 @@ def setup_dirs() -> dict[str, Path]:
         "sent",
         "storm_collapsed",
         "storm_manifests",
+        "storm_receipts",
         "suppressed",
         "quarantine",
         "testleak",
@@ -2306,11 +2308,56 @@ def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[st
     return host
 
 
+def storm_window_token(fingerprint_hash: str, window_start: int) -> str:
+    """The identity of one collapsed storm window: fingerprint plus window start.
+
+    Severity is a component of the fingerprint, so a critical aggregate and a
+    warning aggregate covering the same window are different tokens.
+    """
+    return f"storm-{fingerprint_hash}-{window_start}"
+
+
+def storm_window_identity(event: dict[str, Any]) -> str | None:
+    """The window token of a storm-collapse digest, or None for anything else.
+
+    #2387: the digest already computes this pair as its own id, and then the
+    incident identity discarded it -- every digest ever produced keyed to one
+    record, so a second terminal aggregate in the same window overwrote the
+    first one's summary and evidence. Both guards below (the source equality
+    and the digest-only storm block) must hold, so no other source's identity
+    moves and a collapsed MEMBER, which carries its digest reference under
+    diagnostics rather than a storm block, is not mistaken for a digest.
+    """
+    if str(event.get("source") or "") != "storm-collapse":
+        return None
+    storm = event.get("storm")
+    if not isinstance(storm, dict):
+        return None
+    fingerprint = str(storm.get("fingerprint") or "").strip()
+    window_start = storm.get("windowStartEpoch")
+    if not fingerprint or not isinstance(window_start, int) or isinstance(window_start, bool):
+        return None
+    token = storm_window_token(fingerprint, window_start)
+    # Never widen the key with a value safe_segment would rewrite: a lossy token
+    # would collapse distinct windows back together, which is the defect.
+    if _safe_segment_is_lossy(token):
+        return None
+    return token
+
+
 def incident_source(event: dict[str, Any]) -> str:
     source = str(event.get("source") or "unknown")
     alert_source = str(event.get("alertSource") or "").strip()
     if source in {"heartbeat-watchdog", "daily-health", "daily-health-fail"} and alert_source:
         return f"{source}:{alert_source}"
+    # #2387: qualify the storm digest by its own window rather than moving the
+    # "instance" field. incident_scope() is machine|instance, so qualifying the
+    # source keeps a maintenance window declared for fleet|storm-collapse
+    # covering storm digests, and force_notify_level() keeps reading the raw
+    # event["source"], which must stay the literal in INTERNAL_FORCE_NOTIFY_SOURCES.
+    storm_window = storm_window_identity(event)
+    if storm_window is not None:
+        return f"{source}.{storm_window}"
     diagnostics = event.get("diagnostics")
     remote = diagnostics.get("remote") if isinstance(diagnostics, dict) else None
     if str(event.get("instance") or "") == "bot-errors-collector" and isinstance(remote, str) and remote.strip():
@@ -2380,7 +2427,10 @@ def legacy_record_matches_alert_source(event: dict[str, Any], record: dict[str, 
 
 
 def migrate_legacy_unqualified_incident(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
-    if str(event.get("source") or "") not in {"daily-health", "heartbeat-watchdog"}:
+    # "storm-collapse" joins the set with #2387: qualifying the digest's source
+    # by its window leaves the one record written under the unqualified key
+    # orphaned, and this fold moves it into the first qualified key.
+    if str(event.get("source") or "") not in {"daily-health", "heartbeat-watchdog", "storm-collapse"}:
         return
     legacy_key = legacy_unqualified_incident_key(event)
     key = incident_key(event)
@@ -6044,6 +6094,288 @@ def storm_fingerprint_hash(fingerprint: str) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
 
 
+# Outer bound on how many per-window storm receipts are retained at once.
+# Modelled on CONVERSATION_SCOPE_MAX_KEYS rather than on UNRENDERABLE_SIGNAL_CAP:
+# that one bounds a PENDING set drained on acknowledgement, this one bounds a
+# RETAINED set whose records outlive the incident, so sharing the constant would
+# couple two unrelated lifetimes. It is a bound on a set, not a notification
+# threshold; #2387 supplies no count, age or severity threshold and none is
+# invented here.
+STORM_RECEIPT_MAX_RECORDS = positive_env_int("BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS", 128)
+STORM_RECEIPT_SCHEMA_VERSION = 1
+STORM_RECEIPT_KIND = "bot_errors_storm_digest_receipt"
+# Receipt ids this process has written. reconcile_storm_digest_receipts() skips
+# them so a receipt written earlier in this same cycle is not adopted as if a
+# previous process had owed it.
+_storm_receipts_written: set[str] = set()
+
+_STORM_RECEIPT_KEYS = frozenset({
+    "schemaVersion",
+    "kind",
+    "receiptId",
+    "fingerprint",
+    "windowStartEpoch",
+    "windowEndEpoch",
+    "severity",
+    "collapsedEvents",
+    "affectedHosts",
+    "recordedAtEpoch",
+    "publishedAtEpoch",
+    "lastAdoptedAtEpoch",
+    "adoptions",
+})
+_STORM_RECEIPT_ID_RE = re.compile(r"^storm-[0-9a-f]{16}-\d{1,19}$")
+_STORM_RECEIPT_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
+_STORM_RECEIPT_SEVERITY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+
+def storm_manifest_path(
+    paths: dict[str, Path], fingerprint_hash: str, window_start: int, version: int = 1
+) -> Path:
+    """The manifest bound to one digest revision of a window.
+
+    Revision 1 is the window's base manifest; every superseding revision writes
+    its own. Derived here rather than read back from the digest event, because
+    #2387 removes the manifest path from the digest's operator-facing payload.
+    """
+    if version <= 1:
+        return paths["storm_manifests"] / f"{window_start}.{fingerprint_hash}.json"
+    return paths["storm_manifests"] / f"{window_start}.{fingerprint_hash}.v{version}.json"
+
+
+def storm_receipt_path(paths: dict[str, Path], receipt_id: str) -> Path:
+    return paths["storm_receipts"] / f"{safe_segment(receipt_id)}.json"
+
+
+def storm_digest_receipt_record(
+    receipt_id: str,
+    fingerprint_hash: str,
+    window_start: int,
+    window_end: int,
+    severity: str,
+    collapsed_events: int,
+    affected_hosts: int,
+) -> dict[str, Any]:
+    """The durable, content-free record of one collapsed window (#2387).
+
+    Bounded counts, the severity bucket, the window identity and the opaque
+    fingerprint only. No manifest path, no fingerprint basis, no host names and
+    no summary text, so the artifact that outlives the incident record is not
+    itself a content channel.
+    """
+    return {
+        "schemaVersion": STORM_RECEIPT_SCHEMA_VERSION,
+        "kind": STORM_RECEIPT_KIND,
+        "receiptId": receipt_id,
+        "fingerprint": fingerprint_hash,
+        "windowStartEpoch": window_start,
+        "windowEndEpoch": window_end,
+        "severity": severity,
+        "collapsedEvents": collapsed_events,
+        "affectedHosts": affected_hosts,
+        "recordedAtEpoch": int(time.time()),
+        "publishedAtEpoch": None,
+        "lastAdoptedAtEpoch": None,
+        "adoptions": 0,
+    }
+
+
+def adoptable_storm_receipt(record: Any) -> dict[str, Any] | None:
+    """A receipt this process did not write, validated, or None.
+
+    A receipt is a file under the state root and its fields reach the dispatch
+    log, so an adopted record is held to the same closed vocabulary
+    storm_digest_receipt_record() builds from: exact keys, the fixed kind and
+    schema version, a digest-shaped window identity, bounded non-negative
+    counts and a single-token severity. Anything else is a damaged receipt and
+    is skipped, never rendered and never counted.
+    """
+    if not isinstance(record, dict) or set(record) != _STORM_RECEIPT_KEYS:
+        return None
+    if record["schemaVersion"] != STORM_RECEIPT_SCHEMA_VERSION or record["kind"] != STORM_RECEIPT_KIND:
+        return None
+    for field in ("receiptId", "fingerprint", "severity"):
+        if not isinstance(record[field], str):
+            return None
+    if not _STORM_RECEIPT_ID_RE.match(record["receiptId"]):
+        return None
+    if not _STORM_RECEIPT_FINGERPRINT_RE.match(record["fingerprint"]):
+        return None
+    if not _STORM_RECEIPT_SEVERITY_RE.match(record["severity"]):
+        return None
+    for field in ("windowStartEpoch", "windowEndEpoch", "collapsedEvents", "affectedHosts", "adoptions"):
+        value = record[field]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+    for field in ("publishedAtEpoch", "lastAdoptedAtEpoch"):
+        value = record[field]
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            return None
+    if record["receiptId"] != storm_window_token(record["fingerprint"], record["windowStartEpoch"]):
+        return None
+    return dict(record)
+
+
+def read_storm_receipt(path: Path) -> dict[str, Any] | None:
+    """One validated receipt from disk, or None for absent or damaged."""
+    try:
+        return adoptable_storm_receipt(read_json(path))
+    except Exception:  # noqa: BLE001 -- a damaged receipt must not wedge the cycle
+        return None
+
+
+def publish_storm_receipt(path: Path, receipt: dict[str, Any]) -> PublicationResult:
+    """The single durable publication site for a storm receipt."""
+    target = _durable_target(path)
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    return publish_state_json(
+        target,
+        receipt,
+        component="dispatcher.storm_receipt",
+        operation_id=operation_id(
+            target,
+            receipt,
+            component="dispatcher.storm_receipt",
+            predecessor=observation.version,
+        ),
+        expected=observation.version,
+        generation=generation,
+    )
+
+
+def write_storm_digest_receipt(paths: dict[str, Path], receipt: dict[str, Any]) -> Path:
+    """Persist the window's receipt BEFORE the digest publication (#2387).
+
+    The publication is the irreversible move: after it the page exists and the
+    occurrence is real, but nothing durable said so, and the standing incident
+    record cannot say so either because a later aggregate in the same window
+    overwrites it. This mirrors the write-before-move the unrenderable-alert
+    breadcrumb performs. It fails CLOSED, like every other publication in this
+    function: an unwritten receipt must not let the digest out.
+    """
+    receipt_id = str(receipt["receiptId"])
+    path = storm_receipt_path(paths, receipt_id)
+    existing = read_storm_receipt(path)
+    if existing is not None:
+        # A retry after a death before publication: the same window, so keep the
+        # first observation and the adoption history instead of restarting them.
+        receipt = {
+            **receipt,
+            "recordedAtEpoch": existing["recordedAtEpoch"],
+            "publishedAtEpoch": existing["publishedAtEpoch"],
+            "lastAdoptedAtEpoch": existing["lastAdoptedAtEpoch"],
+            "adoptions": existing["adoptions"],
+        }
+    require_all_advance([publish_storm_receipt(path, receipt)])
+    _storm_receipts_written.add(receipt_id)
+    enforce_storm_receipt_cap(paths)
+    return path
+
+
+def acknowledge_storm_digest_receipt(paths: dict[str, Path], receipt_id: str) -> bool:
+    """Mark the window's receipt published, AFTER the publication is proven.
+
+    Ack-after-publish: a death before the publication leaves the receipt
+    unpublished and the members still in the outbox, so the next cycle
+    re-collapses the window; a death after it leaves an unpublished receipt that
+    the next cycle's absorb path acknowledges without issuing a second page.
+    Unlike the write, this fails OPEN -- the page has already gone out, so an
+    unwritable ack must not abort the cycle that still has terminal moves to do.
+    """
+    path = storm_receipt_path(paths, receipt_id)
+    record = read_storm_receipt(path)
+    if record is None or record["publishedAtEpoch"] is not None:
+        return False
+    record["publishedAtEpoch"] = int(time.time())
+    try:
+        require_all_advance([publish_storm_receipt(path, record)])
+    except Exception:  # noqa: BLE001 -- see the docstring; never abort the cycle
+        return False
+    return True
+
+
+def reconcile_storm_digest_receipts(paths: dict[str, Path]) -> int:
+    """Adopt receipts a previous process wrote but never proved published.
+
+    A receipt still unpublished at the start of a cycle names a window whose
+    page was owed and not proven. Adoption records that durably and countably.
+    It does NOT re-issue the page: the members are still in the outbox, because
+    the terminal moves happen after the publication, so the re-collapse is what
+    republishes. Runs at the same point in the cycle as the unrenderable
+    reconcile, before the passes that can write a receipt of their own.
+    """
+    directory = paths.get("storm_receipts")
+    if directory is None or not directory.is_dir():
+        return 0
+    adopted = 0
+    for path in sorted(directory.glob("*.json")):
+        record = read_storm_receipt(path)
+        if record is None or record["publishedAtEpoch"] is not None:
+            continue
+        if record["receiptId"] in _storm_receipts_written:
+            continue
+        record["adoptions"] = record["adoptions"] + 1
+        record["lastAdoptedAtEpoch"] = int(time.time())
+        try:
+            require_all_advance([publish_storm_receipt(path, record)])
+        except Exception:  # noqa: BLE001 -- a stuck receipt must not wedge the cycle
+            continue
+        adopted += 1
+        # The receipt id is an opaque string, and the controller log projects
+        # details to counts, booleans and enumerated values, so the window start
+        # and the adoption count carry the disposition instead of the id.
+        append_dispatch_log(paths, {
+            "type": "storm_receipt_adopted",
+            "windowStartEpoch": record["windowStartEpoch"],
+            "adoptions": record["adoptions"],
+        })
+    enforce_storm_receipt_cap(paths)
+    return adopted
+
+
+def enforce_storm_receipt_cap(paths: dict[str, Path]) -> list[str]:
+    """Bound the retained receipt set, oldest window first, every drop recorded.
+
+    The overflow disposition is stated rather than silent: each eviction writes
+    a dispatch-log record naming the receipt, its window and whether its page
+    had been proven published, so a bound reached under load is visible instead
+    of appearing as an absence. Nothing outside this set is ever removed.
+    """
+    directory = paths.get("storm_receipts")
+    if directory is None or not directory.is_dir():
+        return []
+    records: list[tuple[int, str, Path, dict[str, Any]]] = []
+    for path in sorted(directory.glob("*.json")):
+        record = read_storm_receipt(path)
+        if record is None:
+            continue
+        records.append((record["windowStartEpoch"], record["receiptId"], path, record))
+    overflow = len(records) - STORM_RECEIPT_MAX_RECORDS
+    if overflow <= 0:
+        return []
+    dropped: list[str] = []
+    records.sort(key=lambda item: (item[0], item[1]))
+    for _window_start, receipt_id, path, record in records[:overflow]:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        _storm_receipts_written.discard(receipt_id)
+        dropped.append(receipt_id)
+        # Same projection limit as the adoption record above: the window and the
+        # publication state say which occurrence was dropped and whether its page
+        # had been proven, which is the disposition the bound owes an operator.
+        append_dispatch_log(paths, {
+            "type": "storm_receipt_evicted",
+            "windowStartEpoch": record["windowStartEpoch"],
+            "windowEndEpoch": record["windowEndEpoch"],
+            "published": record["publishedAtEpoch"] is not None,
+            "cap": STORM_RECEIPT_MAX_RECORDS,
+        })
+    return dropped
+
+
 def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str, ...]) -> Path | None:
     if not event_id:
         return None
@@ -6157,19 +6489,21 @@ def mark_collapsed(event: dict[str, Any], digest_id: str, manifest_path: Path) -
 
 def storm_digest_event(
     paths: dict[str, Path],
-    fingerprint: str,
     fingerprint_hash: str,
     bucket_start: int,
     bucket_end: int,
     events: list[dict[str, Any]],
-    manifest_path: Path,
 ) -> dict[str, Any]:
     first = events[0]
     hosts = sorted_unique_hosts(events)
     severity = str(first.get("severity") or "critical").lower()
     source = str(first.get("source") or "unknown")
     summary = normalized_summary(first) or "same fingerprint alert storm"
-    digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
+    digest_id = storm_window_token(fingerprint_hash, bucket_start)
+    # #2387 evidence boundary: bounded counts, severity bucket, window identity
+    # and the opaque fingerprint only. The manifest path and the fingerprint
+    # basis are gone -- the basis embeds the normalized producer summary and the
+    # path is private topology, and neither is read programmatically.
     evidence_lines = [
         f"affected_hosts:{len(hosts)}",
         f"hosts:{', '.join(hosts)}",
@@ -6179,8 +6513,6 @@ def storm_digest_event(
         f"window_start_epoch:{bucket_start}",
         f"window_end_epoch:{bucket_end}",
         f"collapsed_events:{len(events)}",
-        f"manifest:{manifest_path}",
-        f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
     ]
     return {
         **new_event_fields("alert", severity),
@@ -6193,10 +6525,9 @@ def storm_digest_event(
         "summary": f"BOT ERRORS storm collapse: {len(hosts)} hosts - {summary}",
         "evidence": "\n".join(evidence_lines),
         "diagnostics": {
-            "logHints": [str(manifest_path)],
             "queue": str(paths["outbox"]),
             "forceNotify": True,
-            "forceNotifyLevel": f"storm-{fingerprint_hash}-{bucket_start}",
+            "forceNotifyLevel": storm_window_token(fingerprint_hash, bucket_start),
         },
         "storm": {
             "fingerprint": fingerprint_hash,
@@ -6205,7 +6536,6 @@ def storm_digest_event(
             "hosts": hosts,
             "windowStartEpoch": bucket_start,
             "windowEndEpoch": bucket_end,
-            "manifest": str(manifest_path),
             "collapsedEvents": len(events),
         },
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
@@ -6324,7 +6654,18 @@ def collapse_storm_group(
             # manifest and regenerate the digest's membership-derived payload.
             digest_event = read_json(latest_digest_path)
             storm_block = digest_event.get("storm") if isinstance(digest_event.get("storm"), dict) else {}
-            bound_manifest_path = Path(str(storm_block.get("manifest") or "") or str(manifest_path))
+            # #2387: the digest no longer carries its manifest path, so the bound
+            # manifest is derived from the revision the loop above located.
+            # next_version is one past the newest existing digest, and the
+            # superseding branch writes revision n's manifest and digest from the
+            # same n, so revision next_version-1 names this digest's manifest.
+            # Revision 1 uses the located path itself, which is what the removed
+            # field resolved to.
+            bound_manifest_path = (
+                manifest_path
+                if next_version <= 2
+                else storm_manifest_path(paths, fingerprint_hash, bucket_start, next_version - 1)
+            )
             try:
                 bound = read_json(bound_manifest_path)
             except Exception:
@@ -6380,6 +6721,10 @@ def collapse_storm_group(
                 else (normalized_summary(events[0]) or "same fingerprint alert storm")
             )
             digest_event["summary"] = f"BOT ERRORS storm collapse: {len(merged_hosts)} hosts - {summary_tail}"
+            # #2387: the refreshed payload is held to the same evidence
+            # boundary as the fresh one, and a digest written before this change
+            # has its manifest key dropped rather than carried forward by the
+            # spread below.
             digest_event["evidence"] = "\n".join([
                 f"affected_hosts:{len(merged_hosts)}",
                 f"hosts:{', '.join(merged_hosts)}",
@@ -6389,16 +6734,16 @@ def collapse_storm_group(
                 f"window_start_epoch:{bucket_start}",
                 f"window_end_epoch:{bucket_end}",
                 f"collapsed_events:{len(merged_entries)}",
-                f"manifest:{bound_manifest_path}",
-                f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
             ])
             digest_event["storm"] = {
-                **storm_block,
+                **{key: value for key, value in storm_block.items() if key != "manifest"},
                 "hosts": merged_hosts,
                 "affectedHosts": len(merged_hosts),
                 "collapsedEvents": len(merged_entries),
-                "manifest": str(bound_manifest_path),
             }
+            digest_diagnostics = digest_event.get("diagnostics")
+            if isinstance(digest_diagnostics, dict):
+                digest_diagnostics.pop("logHints", None)
             digest_target = _durable_target(latest_digest_path)
             digest_observation = observe_json(digest_target)
             digest_generation = (digest_observation.version.generation or 0) + 1
@@ -6416,6 +6761,12 @@ def collapse_storm_group(
             )
             require_all_advance([digest_refresh_publication])
             publications.append(digest_refresh_publication)
+            # The window's page is proven published again, so a receipt this
+            # window owed from a process that died between publication and
+            # acknowledgement is settled here rather than staying owed forever.
+            acknowledge_storm_digest_receipt(
+                paths, storm_window_token(fingerprint_hash, bucket_start)
+            )
             collapsed = 0
             collapsed_entries: list[dict[str, Any]] = []
             prepared: list[tuple[Path, Path, dict[str, Any]]] = []
@@ -6537,7 +6888,7 @@ def collapse_storm_group(
         require_all_advance([superseding_manifest_publication])
         publications.append(superseding_manifest_publication)
         superseding_digest = storm_digest_event(
-            paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, superseding_manifest_path
+            paths, fingerprint_hash, bucket_start, bucket_end, events
         )
         superseding_digest["id"] = superseding_digest_id
         superseding_digest["supersedesId"] = latest_digest_id
@@ -6702,9 +7053,22 @@ def collapse_storm_group(
     publications.append(initial_manifest_publication)
 
     digest = storm_digest_event(
-        paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, manifest_path
+        paths, fingerprint_hash, bucket_start, bucket_end, events
     )
     digest_path = storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
+    # #2387: BEFORE the publication below. The publication is irreversible and
+    # the standing incident record cannot stand in for it -- a later aggregate
+    # in the same window overwrites that record's summary and evidence.
+    storm_receipt = storm_digest_receipt_record(
+        storm_window_token(fingerprint_hash, bucket_start),
+        fingerprint_hash,
+        bucket_start,
+        bucket_end,
+        str(digest.get("severity") or "critical"),
+        len(events),
+        len(sorted_unique_hosts(events)),
+    )
+    write_storm_digest_receipt(paths, storm_receipt)
     digest_target = _durable_target(digest_path)
     absent = JsonVersion(False, None, None, None)
     digest_operation = operation_id(
@@ -6721,6 +7085,7 @@ def collapse_storm_group(
     )
     require_all_advance([digest_publication])
     publications.append(digest_publication)
+    acknowledge_storm_digest_receipt(paths, str(storm_receipt["receiptId"]))
     append_dispatch_log(paths, {
         "type": "storm_digest_queued",
         "digestId": digest.get("id"),
@@ -8763,6 +9128,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             # publishing. Runs before the passes that can quarantine, so a crumb
             # this cycle writes is not adopted twice.
             reconcile_unrenderable_signals(paths)
+            # #2387: same point in the cycle, same reason -- a receipt a previous
+            # process wrote but never proved published names an owed page.
+            reconcile_storm_digest_receipts(paths)
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
