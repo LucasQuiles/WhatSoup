@@ -249,28 +249,69 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
 }
 
 /**
- * The alert text, carrying no release directory name (#2385 L1b).
+ * The identity token carried in the alert text: the leading hex of the ratified
+ * release identity, or the sentinel unchanged.
+ *
+ * Truncated rather than whole because the summary is human-facing incident text
+ * and 64 hex characters would dominate it. Eight is chosen against the
+ * dispatcher's redaction rules rather than by taste: `PHONE_LIKE_RE`
+ * (`deploy/scripts/lib/bot_errors_redaction.py`) matches a run of ten or more
+ * characters drawn from digits and separators, so an all-digit slice of ten
+ * would be rewritten in transit and the token would stop identifying anything.
+ * Eight cannot reach that floor. No other redaction pattern applies: every
+ * digest-shaped rule there is anchored to a prefix (`AKIA`, `gh?_`, `eyJ`) that
+ * a bare hex slice does not have.
+ *
+ * The sentinel is passed through as the literal word, never digested. Hashing it
+ * would produce a token indistinguishable in shape from a real identity, so an
+ * operator reading the incident could not tell an attested release from one that
+ * had no readable manifest.
+ */
+function releaseIdentityToken(identity: string): string {
+  if (identity === UNKNOWN_RELEASE_IDENTITY) return UNKNOWN_RELEASE_IDENTITY;
+  return identity.slice(0, 8);
+}
+
+/**
+ * The alert text, carrying the release identity but no release directory name
+ * (#2385 L1b).
  *
  * The summary is the only free-text input to the dispatcher's
  * `storm_fingerprint` (source, severity, normalised summary). While it named the
  * release directory, two hosts running the SAME bytes under different directory
  * names produced two fingerprints and two incidents, which is exactly the
  * correlation the path-free identity above exists to establish. The name is an
- * accident of a rollout, so it is gone from the text and the identity travels in
- * the typed diagnostics instead, where it correlates without keying the storm.
+ * accident of a rollout, so it is gone from the text.
  *
- * The issue count stays. It is a property of the drift rather than of the
- * directory, so it does not vary between hosts running the same drifted release
- * and cannot re-split the group.
+ * What replaces it is the identity token, and it deliberately DOES key the
+ * storm. Dropping the basename without it left the text varying only by issue
+ * count, so two unrelated releases drifting by the same amount would have
+ * grouped into one incident. The token restores that discrimination on the
+ * property that actually identifies a release. It is appended after a space, not
+ * a comma: the dispatcher's `normalize_token_lists` sorts comma-joined runs, so
+ * a comma would let the token reorder against its neighbours and make the
+ * emitted text differ from the grouped text for no gain.
+ *
+ * Coverage limit, stated rather than implied: for `manifest-missing` and
+ * `release-missing` there is no readable manifest, the identity is the sentinel,
+ * and the token is therefore the same constant on every host. Discrimination is
+ * restored for every drift kind except those two.
+ *
+ * The issue count stays, and it is a property of the drift rather than of the
+ * release. Two hosts running the same release that drift to different extents
+ * report different counts, and those alerts do land in different groups: what
+ * groups is hosts that drifted the same way on the same release, not every host
+ * running it.
  *
  * Cost, accepted by the owner ruling rather than overlooked: alerts emitted
  * before this change and alerts emitted after fingerprint differently, so one
  * 120-second storm window at cutover groups the two texts separately.
  */
-function alertSummary(assessment: DriftAssessment): string {
-  if (assessment.ok) return 'release drift recovered';
+function alertSummary(assessment: DriftAssessment, facts: ReleaseManifestFacts): string {
+  const token = releaseIdentityToken(facts.identity);
+  if (assessment.ok) return `release drift recovered release ${token}`;
   const count = assessment.issues.length;
-  return `release drift detected (${count} issue${count === 1 ? '' : 's'})`;
+  return `release drift detected (${count} issue${count === 1 ? '' : 's'}) release ${token}`;
 }
 
 function alertEvidence(assessment: DriftAssessment): string {
@@ -472,7 +513,7 @@ function runEmit(
   facts: ReleaseManifestFacts,
 ): ReleaseAlertEmitResult {
   return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
-    summary: alertSummary(assessment),
+    summary: alertSummary(assessment, facts),
     evidence: alertEvidence(assessment),
     diagnostics: [
       `release=${assessment.report.releasePath}`,
