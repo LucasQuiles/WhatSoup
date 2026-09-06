@@ -31,7 +31,26 @@ async function assertWritableAuthJsonTarget(path: string): Promise<void> {
   }
 }
 
-export async function writeAtomicBaileysJson(path: string, data: unknown): Promise<void> {
+/**
+ * Called the instant the rename makes new bytes visible, before the fallible
+ * chmod that follows it. Anything deriving state from this file must be
+ * invalidated here rather than after the returned promise settles: the rename
+ * is the commit point, and a chmod failure after it would otherwise leave a
+ * committed write that no observer was told about.
+ *
+ * Declared `void`, and the caller does not await it: the commit point must not
+ * wait on an observer. TypeScript admits an async function in a void slot, so
+ * the call site attaches a rejection handler to anything thenable rather than
+ * letting it become an unhandled rejection — which main.ts turns into an
+ * instance shutdown.
+ */
+export type AuthJsonCommitHook = () => void;
+
+export async function writeAtomicBaileysJson(
+  path: string,
+  data: unknown,
+  onCommitted?: AuthJsonCommitHook,
+): Promise<void> {
   const dir = dirname(path);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await assertPrivateDirectory(dir);
@@ -54,6 +73,20 @@ export async function writeAtomicBaileysJson(path: string, data: unknown): Promi
     file = null;
     await assertWritableAuthJsonTarget(path);
     await rename(tmp, path);
+    // The commit point. Fire before chmod, and never let a hook failure undo a
+    // write that already succeeded.
+    if (onCommitted) {
+      try {
+        const settled = onCommitted() as unknown;
+        // An async hook's rejection cannot reach the synchronous catch above.
+        if (settled && typeof (settled as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(settled).catch(() => { /* observers must not break the save */ });
+        }
+      } catch {
+        // Intentional: the rename already committed, so observer failure cannot
+        // be allowed to turn a durable credential save into an apparent failure.
+      }
+    }
     await chmod(path, 0o600);
 
     try {
@@ -83,12 +116,16 @@ export async function writeAtomicBaileysJson(path: string, data: unknown): Promi
   }
 }
 
-export function createAtomicCredsSaver(authDir: string, getCreds: () => unknown): () => Promise<void> {
+export function createAtomicCredsSaver(
+  authDir: string,
+  getCreds: () => unknown,
+  onCommitted?: AuthJsonCommitHook,
+): () => Promise<void> {
   let tail: Promise<void> = Promise.resolve();
   const credsPath = join(authDir, 'creds.json');
 
   return () => {
-    const next = tail.then(() => writeAtomicBaileysJson(credsPath, getCreds()));
+    const next = tail.then(() => writeAtomicBaileysJson(credsPath, getCreds(), onCommitted));
     tail = next.then(() => undefined, () => undefined);
     return next;
   };

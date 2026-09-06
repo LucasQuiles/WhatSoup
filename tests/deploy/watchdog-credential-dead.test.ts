@@ -271,6 +271,60 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(4);
     expect(r.stderr).toContain('terminal auth_failure_class');
   });
+
+  /**
+   * A review finding on the persistent-read escalation: a credential nobody
+   * could READ was being reported as `local_corruption_unrestorable`, which is
+   * in TERMINAL_AUTH_FAILURES — so the watchdog declined to restart and asked
+   * for a human relink, suppressing the one recovery that might clear a read
+   * fault. The class is now `auth_bond_read_persistent`, and this pins that it
+   * is NOT terminal here.
+   */
+  it('does not treat a persistent unreadable credential as terminal — it reaches the restart policy', () => {
+    // The payload is byte-for-byte the terminal case above apart from the
+    // class, so the two tests differ in exactly the thing under test.
+    const payload = {
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'auth_bond_read_persistent',
+        },
+      },
+    };
+
+    const r = runDecision(healthyPayload(payload));
+
+    // Not exit 4, and specifically not the terminal branch's exit 4: the
+    // stderr line is what separates "fell through to restart" from "declined
+    // to restart", since both quiescent and unknown outcomes also use 4.
+    expect(r.stderr).not.toContain('terminal auth_failure_class');
+    expect(r.status).not.toBe(4);
+    // Disconnected with a stale socket is restart-worthy, so the ordinary
+    // policy takes it — the same exit the identical payload reaches with
+    // auth_failure_class 'none'.
+    expect(r.status).toBe(1);
+
+    // Coverage assertion: the identical payload carrying a class that IS in
+    // TERMINAL_AUTH_FAILURES does reach the terminal branch. Without it, the
+    // assertions above could hold because the decision block stopped reading
+    // auth_failure_class at all.
+    const terminal = runDecision(healthyPayload({
+      ...payload,
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'local_corruption_unrestorable',
+        },
+      },
+    }));
+    expect(terminal.status).toBe(4);
+    expect(terminal.stderr).toContain('terminal auth_failure_class');
+  });
 });
 
 describe('watchdog decision block — recovery requires fresh, coherent evidence', () => {
