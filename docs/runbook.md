@@ -54,6 +54,14 @@ tests the package engine range but does not make a host ready. `path_hidden`
 means a tool was found in the canonical service roots but not the invoking
 shell's `PATH`; fix the caller environment rather than installing a duplicate.
 
+Version and architecture output is evidence only after its originating probe
+exits successfully. Failed probes, failed output formatting, and empty version
+output produce `inconclusive` rather than `available`; doctor exits 2. Platform
+discovery must also succeed before doctor evaluates capabilities or the installer
+selects packages. The installer rejects a failed Python probe before creating its
+managed environment and requires the post-install doctor to pass. These checks
+do not prove a service is running or that a particular agent runtime can use it.
+
 Quality and release setup create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
 and install `pytest`, `pytest-cov`, Hypothesis, and pinned Ruff there. WhatSoup's
