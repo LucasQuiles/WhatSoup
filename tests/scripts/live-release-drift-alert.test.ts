@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -729,14 +729,20 @@ const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
  * varies with the release, which is the whole point of carrying it. The literal
  * text around it stays hand-written for the same reason the fixture names are
  * not interpolated: only the token may move between an expectation and the
- * emitted string. Callers pass `expectedReleaseIdentity(...).slice(0, 8)`, an
+ * emitted string. Callers pass `expectedIdentityToken(...)`, which truncates an
  * oracle recomputed from the manifest on disk rather than imported from the
  * script under test, so a canonicalisation change on either side fails here.
+ * The width is named there rather than spelled again here, so this block cannot
+ * go stale against a deliberate widening.
  */
 // Deliberately a second, independent copy of the width rather than an import of
 // the literal in `releaseIdentityToken`: an oracle that took the width from the
 // code under test would move with it and could not fail on a width change. The
-// cost is that an intentional widening has to be made in both places.
+// cost is that an intentional widening is a THREE-site change, not a two-site
+// one: the slice in `releaseIdentityToken`, this constant, and the hardcoded
+// width in the anchored token-shape regex further down this file. That regex is
+// a second deliberate oracle and does not read this constant, so a coordinated
+// widening of the first two sites still fails there.
 const RELEASE_IDENTITY_TOKEN_LENGTH = 8;
 const UNKNOWN_IDENTITY_TOKEN = 'unknown';
 
@@ -1107,6 +1113,7 @@ const DRIFT_KIND_FIELD_REJECTS_FREE_TEXT: DriftKindField = 'not-a-drift-kind';
 const DRIFT_KIND_SINGLE: DriftKindField = 'file-sha256-drift';
 const DRIFT_KIND_JOINED: DriftKindField = 'extra-file,file-sha256-drift';
 const DRIFT_KIND_MANIFEST_MISSING: DriftKindField = 'manifest-missing';
+const DRIFT_KIND_RELEASE_MISSING: DriftKindField = 'release-missing';
 const DRIFT_KIND_NONE: DriftKindField = 'none';
 
 describe('live release drift alert #2385: drift_kind set and order', () => {
@@ -1264,6 +1271,47 @@ describe('live release drift alert #2385: fail-open branches stay pinned', () =>
     expect(summary).not.toContain(releaseName);
     expect(summary).not.toContain(path.sep);
     expect(summary).not.toContain(tmpRoot);
+  });
+
+  /**
+   * The other half of the documented coverage limit, and the half that is easy
+   * to get wrong from the kind name alone. `release-missing` reads a manifest:
+   * the issue is pushed inside `collectReleaseSnapshotDrift`, which runs only
+   * after the report has read and parsed the manifest, so the identity is a real
+   * 64-hex digest and the token discriminates between releases exactly as it
+   * does for a content drift. Without this test the comment's claim that the
+   * sentinel covers one kind rather than two rests on reading alone.
+   *
+   * The kind is only reachable through the documented `--manifest` override.
+   * With the default path the manifest lives inside the release directory, so a
+   * missing release directory makes the manifest missing too and the report
+   * returns `manifest-missing` before this branch is ever considered.
+   *
+   * The manifest is moved out of the release before the release is moved aside,
+   * so `manifest.release.path` still names the now-absent directory. An override
+   * naming a manifest built for some other path would add a
+   * `manifest-release-path-mismatch` issue and change the count the summary
+   * carries, which is why the record's issue-kind map is pinned exactly rather
+   * than the count being assumed from the fixture.
+   */
+  it('carries a real per-release token for release-missing rather than the sentinel', () => {
+    const { a } = writeTwinReleases();
+    const archivedManifest = path.join(tmpRoot, 'archived-manifest.json');
+    renameSync(path.join(a, '.whatsoup-release-manifest.json'), archivedManifest);
+    renameSync(a, path.join(tmpRoot, 'release-moved-aside'));
+
+    const stateDir = path.join(tmpRoot, 'state-release-missing');
+    const proc = runCli(['--release', a, '--manifest', archivedManifest], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+    expect(parseRecordLine(proc.stdout).issueKinds).toEqual({ 'release-missing': 1 });
+
+    const [event] = outboxEvents(stateDir);
+    // The oracle asserts the full 64-hex shape before truncating, so a sentinel
+    // identity cannot make the summary expectation below pass vacuously.
+    const token = expectedIdentityToken(archivedManifest);
+    expect(String(event.summary)).toBe(pathFreeDetectedSummaryOneIssue(token));
+    expect(eventDiagnostics(event).drift_kind).toBe(DRIFT_KIND_RELEASE_MISSING);
+    expect(eventDiagnostics(event).desired_release_identity).toBe(expectedReleaseIdentity(archivedManifest));
   });
 
   it('carries the typed fields under --launchd-plist, the mode the shipped job uses', () => {
