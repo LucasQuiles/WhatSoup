@@ -719,10 +719,11 @@ const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
  * `FIXTURE_RELEASE_NAME_*` would still pass if the basename came back, because
  * both sides of the comparison would move together.
  *
- * The issue count stays in the text. It is a property of the drift, not of the
- * release directory, so two hosts that drifted the same way still normalise to
- * one fingerprint; and the recovered form carries no count because a recovered
- * release has no issues to count.
+ * The issue count stays in the text. It is a property of the drift rather than
+ * of the release: two hosts on the same release that drift to different extents
+ * report different counts and do land in different groups, so what groups is
+ * hosts that drifted the same way. The recovered form carries no count, because
+ * a recovered release has no issues to count.
  *
  * The trailing identity token is a parameter rather than a constant because it
  * varies with the release, which is the whole point of carrying it. The literal
