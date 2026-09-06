@@ -392,7 +392,7 @@
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
     },
     {
-      "site_id": "dispatcher-storm-receipt",
+      "site_id": "dispatcher-storm-receipt-write",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "publish_storm_receipt",
       "logical_publication": "dispatcher.storm_receipt",
@@ -401,6 +401,39 @@
       "result_policy": "propagate_result",
       "result_consumer": "write_storm_digest_receipt",
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-receipt-acknowledge",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "publish_storm_receipt",
+      "logical_publication": "dispatcher.storm_receipt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "propagate_result",
+      "result_consumer": "acknowledge_storm_digest_receipt",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-receipt-reconcile",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "publish_storm_receipt",
+      "logical_publication": "dispatcher.storm_receipt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "propagate_result",
+      "result_consumer": "reconcile_storm_digest_receipts",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-storm-receipt-orphan-alert",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "publish_storm_receipt_orphan_alert",
+      "logical_publication": "dispatcher.storm_receipt_orphan_alert",
+      "kind": "event_create_once",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "publish_storm_receipt_orphan_alert",
+      "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
     },
     {
       "site_id": "dispatcher-storm-member-state",
