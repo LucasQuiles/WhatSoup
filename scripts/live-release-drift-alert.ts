@@ -253,13 +253,39 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
  * release identity, or the sentinel unchanged.
  *
  * Truncated rather than whole because the summary is human-facing incident text
- * and 64 hex characters would dominate it. Eight is a trade-off between that
- * readability and collision resistance, not a bound imposed from outside: it
- * puts 32 bits of release identity into the three dispatcher fingerprints that
- * read this text (`storm_fingerprint`, `recovery_episode_fingerprint` and
- * `recovery_duplicate_fingerprint`). Widening it is a judgement about the same
- * trade-off rather than something the redactor forbids, and it would also mean
- * moving the deliberately independent width constant in the focused test file.
+ * and 64 hex characters would dominate it. Eight trades collision resistance
+ * for that readability: it puts 32 bits of release identity into the three
+ * dispatcher fingerprints that read this text (`storm_fingerprint`,
+ * `recovery_episode_fingerprint` and `recovery_duplicate_fingerprint`).
+ *
+ * There is an on-point precedent against a short identity prefix in a grouping
+ * key, and it is cited here rather than left for a reader to find.
+ * `deploy/scripts/lib/bot_errors_redaction.py` names both widths as constants
+ * (`LEGACY_DISPLAY_DIGEST_CHARS = 8`, `LEGACY_FULL_DIGEST_CHARS = 64`), and
+ * `alert_text_for_fingerprint` renders with the 64 one because the display
+ * rendering had put identity on an eight-character prefix and two incidents
+ * sharing that prefix merged into one. A test pins that renderer
+ * (`deploy/scripts/tests/test_bot_errors_legacy_alert_content.py:784-785`).
+ * Read its scope exactly: it pins the fingerprint renderer's OWN digest field,
+ * not the summary field this token travels in, and no test asserts a width
+ * floor on the summary. The precedent is an argued analogy about entropy in a
+ * grouping key, not a constraint this change breaks.
+ *
+ * Eight is accepted anyway, for reasons specific to what this token identifies.
+ * It identifies a RELEASE, and only a handful are distinct at any one time, so a
+ * 32-bit prefix collision between two concurrently alerting releases is
+ * negligible rather than merely improbable per pair. The full 64-hex identity
+ * still rides the event's typed diagnostics (`desired_release_identity`, built
+ * in `typedDriftDiagnostics` below), so the truncation is not the only copy.
+ * The residual cost is disclosed rather than hidden: two distinct releases
+ * sharing a token would group as one incident, and no test constructs that
+ * collision.
+ *
+ * Widening is a judgement about the same trade-off rather than something the
+ * redactor forbids, and it is a THREE-site change rather than a two-site one:
+ * the slice below, the `RELEASE_IDENTITY_TOKEN_LENGTH` constant in the focused
+ * test file, and the hardcoded width in that file's anchored token-shape regex,
+ * which is a second deliberate oracle and does not read the constant.
  *
  * No redaction rule bounds the width, and that is worth stating because the
  * obvious reading is the wrong one. `PHONE_LIKE_RE`
@@ -318,10 +344,25 @@ function releaseIdentityToken(identity: string): string {
  * a comma would let the token reorder against its neighbours and make the
  * emitted text differ from the grouped text for no gain.
  *
- * Coverage limit, stated rather than implied: for `manifest-missing` and
- * `release-missing` there is no readable manifest, the identity is the sentinel,
- * and the token is therefore the same constant on every host. Discrimination is
- * restored for every drift kind except those two.
+ * Coverage limit, stated rather than implied, and it is ONE drift kind rather
+ * than two. For `manifest-missing` there is no readable manifest:
+ * `createReleaseSnapshotDriftReport` returns that kind early, before parsing
+ * anything, so `readManifestFacts` below fails its own read, the identity is the
+ * sentinel, and the token is that same constant on every host. Those events
+ * still group across unrelated releases.
+ *
+ * `release-missing` is NOT such a kind, despite the adjacent name. It is pushed
+ * inside `collectReleaseSnapshotDrift`, which is reached only after the manifest
+ * has been read and parsed, so the manifest exists and is well formed,
+ * `readManifestFacts` returns a real 64-hex identity, and the token is a
+ * per-release digest that discriminates exactly as every other kind's does.
+ * With the default manifest path the two kinds never compete: the manifest lives
+ * inside the release directory, so a missing release directory makes the
+ * manifest missing too and the kind reported is `manifest-missing`.
+ * `release-missing` is reachable through the documented `--manifest` override,
+ * and a test pins its token there as a real digest rather than the sentinel.
+ *
+ * Discrimination is restored for every drift kind except `manifest-missing`.
  *
  * The issue count stays, and it is a property of the drift rather than of the
  * release. Two hosts running the same release that drift to different extents

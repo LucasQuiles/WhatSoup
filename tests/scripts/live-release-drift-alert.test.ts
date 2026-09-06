@@ -729,14 +729,20 @@ const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
  * varies with the release, which is the whole point of carrying it. The literal
  * text around it stays hand-written for the same reason the fixture names are
  * not interpolated: only the token may move between an expectation and the
- * emitted string. Callers pass `expectedReleaseIdentity(...).slice(0, 8)`, an
+ * emitted string. Callers pass `expectedIdentityToken(...)`, which truncates an
  * oracle recomputed from the manifest on disk rather than imported from the
  * script under test, so a canonicalisation change on either side fails here.
+ * The width is named there rather than spelled again here, so this block cannot
+ * go stale against a deliberate widening.
  */
 // Deliberately a second, independent copy of the width rather than an import of
 // the literal in `releaseIdentityToken`: an oracle that took the width from the
 // code under test would move with it and could not fail on a width change. The
-// cost is that an intentional widening has to be made in both places.
+// cost is that an intentional widening is a THREE-site change, not a two-site
+// one: the slice in `releaseIdentityToken`, this constant, and the hardcoded
+// width in the anchored token-shape regex further down this file. That regex is
+// a second deliberate oracle and does not read this constant, so a coordinated
+// widening of the first two sites still fails there.
 const RELEASE_IDENTITY_TOKEN_LENGTH = 8;
 const UNKNOWN_IDENTITY_TOKEN = 'unknown';
 
