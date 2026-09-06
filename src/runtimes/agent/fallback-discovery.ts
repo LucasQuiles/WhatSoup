@@ -15,14 +15,23 @@
 //    together on quota/suspension, so provider diversity IS the ladder's
 //    resilience (incident 2026-08-15: kimi suspended + glm quota-exhausted
 //    left a 3-entry chain with a single live entry).
-//  - Within a provider, the operator pin wins, else the LAST catalogue entry
-//    (observed newest/flagship across deepseek/glm/minimax/kimi catalogues).
-//  - Candidates with real-completion 'ok' evidence rank before 'unknown';
-//    'dead' candidates are excluded from selection but reported in the basis.
-//  - Keyless free-tier gateway models are eligible ONLY for the tail slot — a
-//    weak model that needs no credential beats a chain-exhausted turn.
+//  - Within a provider, a live operator pin wins. Otherwise recent successful
+//    completion evidence wins, then stable lifecycle, validated release date,
+//    and finally the legacy later-entry tie break for metadata-free gateways.
+//  - A dead exact model does not condemn its provider: the next eligible model
+//    can represent that provider. An all-dead provider keeps one bounded
+//    recovery probe; a replaced dead sibling becomes eligible after its
+//    failure evidence expires rather than expanding the canary sweep.
+//  - A metadata-confirmed zero-cost gateway model is eligible ONLY for the
+//    tail slot — a weak keyless model beats a chain-exhausted turn.
+
+import {
+  modelCatalogReleaseDateSortKey,
+  type ModelCatalogMetadata,
+} from './providers/binary-preflight.ts';
 
 export type CandidateEvidence = 'ok' | 'dead' | 'unknown';
+export type CandidateEligibilityBasis = 'metadata' | 'legacy-heuristic' | 'operator-pin';
 
 export interface FallbackDiscoveryPolicy {
   /** Chain length cap; clamped to [1, 4] (mirrors the static-chain cap). */
@@ -64,6 +73,11 @@ const NON_CHAT_MODEL_TOKENS = [
   'moderation', 'realtime', 'transcribe', 'rerank', 'audio',
 ] as const;
 
+/** Lifecycle values that explicitly mean the model should no longer receive
+ *  automatic traffic. Preview/alpha/beta values stay eligible because they
+ *  are not an inactive claim. */
+const INACTIVE_MODEL_STATUSES = new Set(['inactive', 'deprecated', 'retired', 'disabled']);
+
 /** True when a catalogue id's model segment matches a non-chat token. */
 export function isNonChatCatalogModel(modelId: string): boolean {
   const slash = modelId.indexOf('/');
@@ -75,6 +89,10 @@ export interface DiscoveredCandidate {
   catalogProvider: string;
   model: string;
   evidence: CandidateEvidence;
+  catalogStatus: string | null;
+  releaseDate: string | null;
+  zeroCost: boolean | null;
+  eligibilityBasis: CandidateEligibilityBasis;
   freeTier: boolean;
   selected: boolean;
 }
@@ -89,6 +107,8 @@ export interface DiscoveredChainResult {
 export function deriveFallbackChainFromCatalog(opts: {
   /** `listModelCatalog` ids in catalogue order (e.g. 'glm/glm-5.2'). */
   catalogIds: readonly string[];
+  /** Shape-checked optional metadata keyed by exact catalogue id. */
+  catalogMetadata?: Readonly<Record<string, ModelCatalogMetadata>>;
   /** Runtime provider id the entries route through (e.g. 'opencode-cli'). */
   gatewayProvider: string;
   primary: { provider: string; model?: string | null };
@@ -104,35 +124,142 @@ export function deriveFallbackChainFromCatalog(opts: {
   const evidenceFor = opts.evidenceFor ?? ((): CandidateEvidence => 'unknown');
   const excluded = new Set(policy.excludeProviders);
 
-  // Group catalogue ids by provider prefix, preserving catalogue order.
-  // Non-chat models (embeddings, image/video/speech generation, …) are
-  // dropped here so BOTH the newest-per-provider pick and the free-tier tail
-  // only ever consider ids that can serve a text turn — unless the operator
-  // pinned one explicitly, which always wins over the heuristic.
-  const groups = new Map<string, string[]>();
-  for (const id of opts.catalogIds) {
+  // Group catalogue ids by provider prefix, preserving catalogue order. The
+  // ranker keeps the original position as the compatibility tie-break for
+  // metadata-free gateways; it is no longer mistaken for release chronology.
+  const groups = new Map<string, Array<{ id: string; catalogRank: number }>>();
+  for (const [catalogRank, id] of opts.catalogIds.entries()) {
     const slash = id.indexOf('/');
     if (slash <= 0 || slash === id.length - 1) continue; // malformed id
     const catalogProvider = id.slice(0, slash);
     if (excluded.has(catalogProvider)) continue;
-    if (isNonChatCatalogModel(id) && policy.preferModels[catalogProvider] !== id) continue;
     const group = groups.get(catalogProvider);
-    if (group) group.push(id);
-    else groups.set(catalogProvider, [id]);
+    if (group) group.push({ id, catalogRank });
+    else groups.set(catalogProvider, [{ id, catalogRank }]);
   }
 
-  // One candidate per provider: operator pin when live, else last (newest).
+  const evidenceTier = (evidence: CandidateEvidence): number => {
+    if (evidence === 'ok') return 0;
+    if (evidence === 'unknown') return 1;
+    return 2;
+  };
+  const lifecycleTier = (status: string | null): number => {
+    if (status === 'active' || status === 'stable' || status === 'ga') return 0;
+    if (status === 'beta' || status === 'preview') return 1;
+    if (status === 'alpha' || status === 'experimental') return 2;
+    return 3;
+  };
+
+  type RankedProviderModel = {
+    model: string;
+    catalogRank: number;
+    evidence: CandidateEvidence;
+    catalogStatus: string | null;
+    releaseDate: string | null;
+    releaseDateSortKey: string | null;
+    zeroCost: boolean | null;
+    eligibilityBasis: CandidateEligibilityBasis;
+    hasMetadataRecord: boolean;
+    pinned: boolean;
+  };
+
+  // One representative per provider. A pin wins while it is not dead. For an
+  // automatic pick, completion evidence is stronger than catalogue recency;
+  // recency is the deterministic tie-break among equally evidenced models.
   const candidates: DiscoveredCandidate[] = [];
   for (const [catalogProvider, ids] of groups) {
+    if (catalogProvider === FREE_TIER_PREFIX && !policy.includeFreeTier) continue;
     const pinned = policy.preferModels[catalogProvider];
-    const model = pinned !== undefined && ids.includes(pinned) ? pinned : ids[ids.length - 1]!;
-    const freeTier = catalogProvider === FREE_TIER_PREFIX;
-    if (freeTier && !policy.includeFreeTier) continue;
-    if (opts.gatewayProvider === opts.primary.provider && model === opts.primary.model) continue;
+    const providerModels: RankedProviderModel[] = [];
+    for (const { id, catalogRank } of ids) {
+      if (opts.gatewayProvider === opts.primary.provider && id === opts.primary.model) continue;
+      const isPinned = pinned === id;
+      const hasMetadataRecord = opts.catalogMetadata !== undefined
+        && Object.prototype.hasOwnProperty.call(opts.catalogMetadata, id);
+      const rawMetadata = opts.catalogMetadata?.[id];
+      const status = typeof rawMetadata?.status === 'string'
+        ? rawMetadata.status.trim().toLowerCase()
+        : null;
+      const rawReleaseDate = rawMetadata?.releaseDate;
+      const releaseDateSortKey = modelCatalogReleaseDateSortKey(rawReleaseDate);
+      const releaseDate = releaseDateSortKey !== null && typeof rawReleaseDate === 'string'
+        ? rawReleaseDate
+        : null;
+      const zeroCost = typeof rawMetadata?.zeroCost === 'boolean'
+        ? rawMetadata.zeroCost
+        : null;
+
+      // The opencode gateway also lists paid catalogue entries. Only a model
+      // explicitly recorded as zero-cost (or a metadata-free legacy entry)
+      // can fill the automatic keyless/free-tier reserve. A verbose record
+      // with missing/malformed cost is unknown, not free. An exact operator
+      // pin may still choose such an entry, but it is not labeled free tier.
+      if (
+        catalogProvider === FREE_TIER_PREFIX
+        && !isPinned
+        && hasMetadataRecord
+        && zeroCost !== true
+      ) continue;
+
+      let eligibilityBasis: CandidateEligibilityBasis;
+      if (isPinned) {
+        eligibilityBasis = 'operator-pin';
+      } else {
+        const explicitlyIneligible = (status !== null && INACTIVE_MODEL_STATUSES.has(status))
+          || rawMetadata?.textOutput === false
+          || rawMetadata?.toolCall === false;
+        if (explicitlyIneligible) continue;
+        if (rawMetadata?.textOutput === true && rawMetadata?.toolCall === true) {
+          eligibilityBasis = 'metadata';
+        } else {
+          if (isNonChatCatalogModel(id)) continue;
+          eligibilityBasis = 'legacy-heuristic';
+        }
+      }
+
+      providerModels.push({
+        model: id,
+        catalogRank,
+        evidence: evidenceFor(id),
+        catalogStatus: status,
+        releaseDate,
+        releaseDateSortKey,
+        zeroCost,
+        eligibilityBasis,
+        hasMetadataRecord,
+        pinned: isPinned,
+      });
+    }
+    if (providerModels.length === 0) continue;
+
+    providerModels.sort((a, b) => {
+      if (a.pinned !== b.pinned) {
+        if (a.pinned && a.evidence !== 'dead') return -1;
+        if (b.pinned && b.evidence !== 'dead') return 1;
+      }
+      const evidenceDifference = evidenceTier(a.evidence) - evidenceTier(b.evidence);
+      if (evidenceDifference !== 0) return evidenceDifference;
+      const lifecycleDifference = lifecycleTier(a.catalogStatus) - lifecycleTier(b.catalogStatus);
+      if (lifecycleDifference !== 0) return lifecycleDifference;
+      if (a.releaseDateSortKey !== b.releaseDateSortKey) {
+        if (a.releaseDateSortKey === null) return 1;
+        if (b.releaseDateSortKey === null) return -1;
+        return b.releaseDateSortKey.localeCompare(a.releaseDateSortKey);
+      }
+      return b.catalogRank - a.catalogRank;
+    });
+
+    const representative = providerModels[0]!;
+    const freeTier = catalogProvider === FREE_TIER_PREFIX
+      && (representative.zeroCost === true || !representative.hasMetadataRecord);
     candidates.push({
       catalogProvider,
-      model,
-      evidence: evidenceFor(model),
+      model: representative.model,
+      evidence: representative.evidence,
+      catalogStatus: representative.catalogStatus,
+      releaseDate: representative.releaseDate,
+      zeroCost: representative.zeroCost,
+      eligibilityBasis: representative.eligibilityBasis,
       freeTier,
       selected: false,
     });

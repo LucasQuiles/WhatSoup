@@ -134,7 +134,7 @@ describe('codex-cli', () => {
     expect(fields).toHaveLength(1);
     expect(fields[0].key).toBe('model');
     expect(fields[0].label).toBe('Model');
-    expect(fields[0].placeholder).toBe('gpt-5.4');
+    expect(fields[0].placeholder).toBe('Runtime default, or type a model ID');
     expect(fields[0].inputType).toBe('text');
   });
 
@@ -203,7 +203,7 @@ describe('gemini-cli', () => {
     const fields = getProviderConfigFields(id);
     expect(fields).toHaveLength(1);
     expect(fields[0].key).toBe('model');
-    expect(fields[0].placeholder).toBe('gemini-2.5-pro');
+    expect(fields[0].placeholder).toBe('Runtime default, or type a model ID');
   });
 
   it('shows provider badge', () => {
@@ -232,11 +232,11 @@ describe('opencode-cli', () => {
     expect(p!.type).toBe('cli');
   });
 
-  it('returns exactly 1 config field: model with claude placeholder', () => {
+  it('returns exactly 1 config field with a provider-neutral model placeholder', () => {
     const fields = getProviderConfigFields(id);
     expect(fields).toHaveLength(1);
     expect(fields[0].key).toBe('model');
-    expect(fields[0].placeholder).toBe('claude-sonnet-4-6');
+    expect(fields[0].placeholder).toBe('Runtime default, or type a model ID');
   });
 
   it('shows provider badge', () => {
@@ -277,7 +277,7 @@ describe('openai-api', () => {
 
   it('model placeholder is gpt-4o', () => {
     const fields = getProviderConfigFields(id);
-    expect(fields.find(f => f.key === 'model')!.placeholder).toBe('gpt-4o');
+    expect(fields.find(f => f.key === 'model')!.placeholder).toBe('Runtime default, or type a model ID');
   });
 
   it('baseUrl placeholder is correct', () => {
@@ -362,9 +362,9 @@ describe('anthropic-api', () => {
     expect(keys).toEqual(['model', 'baseUrl', 'apiKeyService', 'maxTokens']);
   });
 
-  it('model placeholder is claude-sonnet-4-6', () => {
+  it('uses a provider-neutral model placeholder', () => {
     const fields = getProviderConfigFields(id);
-    expect(fields.find(f => f.key === 'model')!.placeholder).toBe('claude-sonnet-4-6');
+    expect(fields.find(f => f.key === 'model')!.placeholder).toBe('Runtime default, or type a model ID');
   });
 
   it('maxTokens is a number input with correct placeholder', () => {

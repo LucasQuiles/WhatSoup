@@ -13,18 +13,16 @@
  * - Link mirrors the wizard's SSE flow: qr → QrDisplay, connected = linked.
  */
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useTheme } from '../hooks/use-theme'
 import { useToast } from '../hooks/toast-context'
+import { useProviders } from '../hooks/use-fleet'
 import { api, getApiTicket, isProductionConsole } from '../lib/api'
-import type { ProviderCatalogEntry } from '../types'
+import { DEFAULT_PROVIDER_ID } from '../lib/providers'
 import { CHANNEL_LABEL } from '../lib/transport-identity'
 import {
   CHANNEL_TILES,
   KIND_PRESETS,
   NAME_WORDLIST,
-  PROVIDER_MODELS,
-  defaultModelFor,
   rerollName,
   slugifyName,
 } from '../lib/journey'
@@ -32,8 +30,10 @@ import { StepRail, type JourneyStepId } from '../components/journey/StepRail'
 import { journeyStepLabel } from '../lib/journey'
 import { Ceremony } from '../components/journey/Ceremony'
 import { Button } from '../components/primitives/Button'
-import { SelectInput, TextArea, TextInput } from '../components/primitives/FormControl'
+import { TextArea, TextInput } from '../components/primitives/FormControl'
 import QrDisplay from '../components/QrDisplay'
+import ProviderModelInput from '../components/ProviderModelInput'
+import ProviderSelect from '../components/ProviderSelect'
 
 type LinkState =
   | { phase: 'creating' }
@@ -50,22 +50,17 @@ export default function Hatch() {
   const [kind, setKind] = useState(KIND_PRESETS.find((k) => k.hint)!)
   const [name, setName] = useState<string>(NAME_WORDLIST[0]!)
   const [soul, setSoul] = useState(kind.soulSeed)
-  const [providerId, setProviderId] = useState('claude-cli')
-  const [model, setModel] = useState(defaultModelFor('claude-cli'))
+  const [providerId, setProviderId] = useState<string>(DEFAULT_PROVIDER_ID)
+  const [model, setModel] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [adminPhone, setAdminPhone] = useState('')
   const [lineName, setLineName] = useState<string | null>(null)
   const [link, setLink] = useState<LinkState>({ phase: 'watching' })
   const esRef = useRef<EventSource | null>(null)
 
-  const { data: providers } = useQuery<ProviderCatalogEntry[]>({
-    queryKey: ['providers'],
-    queryFn: () => api.getProviders(),
-    staleTime: 300_000,
-  })
-  const credentialService =
-    providerId === 'anthropic-api' ? 'anthropic' : providerId === 'openai-api' ? 'openai' : null
-  const modelOptions = PROVIDER_MODELS[providerId] ?? []
+  const { data: providers } = useProviders()
+  const selectedProvider = providers?.find((provider) => provider.id === providerId)
+  const credentialService = selectedProvider?.credentialService ?? null
 
   useEffect(() => () => esRef.current?.close(), [])
 
@@ -261,39 +256,23 @@ export default function Hatch() {
             </div>
             <div className="journey-field">
               <label className="journey-label" htmlFor="hatch-provider">Brain</label>
-              <SelectInput
+              <ProviderSelect
                 id="hatch-provider"
                 value={providerId}
-                onChange={(e) => {
-                  setProviderId(e.target.value)
-                  setModel(defaultModelFor(e.target.value))
+                onChange={(value) => {
+                  setProviderId(value)
+                  setModel('')
                 }}
-              >
-                {(providers ?? []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.displayName}
-                  </option>
-                ))}
-              </SelectInput>
+              />
             </div>
             <div className="journey-field">
               <label className="journey-label" htmlFor="hatch-model">Model</label>
-              {modelOptions.length > 0 ? (
-                <SelectInput id="hatch-model" value={model} onChange={(e) => setModel(e.target.value)}>
-                  {modelOptions.map((m) => (
-                    <option key={m.value} value={m.value}>
-                      {m.label}
-                    </option>
-                  ))}
-                </SelectInput>
-              ) : (
-                <TextInput
-                  id="hatch-model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="model string (provider-resolved)"
-                />
-              )}
+              <ProviderModelInput
+                id="hatch-model"
+                provider={providerId}
+                value={model}
+                onChange={setModel}
+              />
             </div>
             {credentialService ? (
               <div className="journey-field">
@@ -310,8 +289,8 @@ export default function Hatch() {
                 />
               </div>
             ) : null}
-            {providerId === 'opencode-cli' ? (
-              <p className="journey-note">OpenCode resolves its key service from the model prefix at runtime — set it in Settings → API tokens.</p>
+            {selectedProvider?.needsApiKey && !credentialService ? (
+              <p className="journey-note">This provider does not advertise a fixed credential service — set its key in Settings → API tokens.</p>
             ) : null}
             <div className="journey-field">
               <label className="journey-label" htmlFor="hatch-admin">{`Your ${CHANNEL_LABEL.wa} number (admin)`}</label>

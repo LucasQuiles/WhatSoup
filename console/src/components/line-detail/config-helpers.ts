@@ -2,10 +2,7 @@
 import { validatePhone } from '../../lib/validation'
 import { isRecord } from '../../lib/type-guards'
 import { ACCESS_MODE_VALUES } from '../../lib/access-modes'
-import { CHAT_API_KEY_SERVICE_OPTIONS, PROVIDERS } from '../../lib/providers'
-
-/** Provider ids sourced from the single console catalog — never a second hardcoded list. */
-const PROVIDER_IDS = PROVIDERS.map((p) => p.id)
+import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../lib/providers'
 
 export { isRecord }
 
@@ -112,7 +109,7 @@ export const AGENT_OPTION_FIELDS: Record<string, AgentOptionFieldDefinition> = {
   // Fallback provider/model — typed so they render as editable rows in
   // ConfigEditDialog instead of falling into the read-only "agentOptions (other)"
   // JSON blob. Saved via the existing PATCH /api/lines/:name/config path.
-  'agentOptions.fallbackProvider': { type: 'enum', enum: PROVIDER_IDS },
+  'agentOptions.fallbackProvider': { type: 'string' },
   'agentOptions.fallbackModel': { type: 'string' },
 }
 
@@ -197,12 +194,8 @@ export { CONFIG_VALUE_TYPE_COLOR as TYPE_COLOR } from '../../lib/color-semantics
 export const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: [...ACCESS_MODE_VALUES],
   toolUpdateMode: ['full', 'minimal'],
-  model: ['', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   'chatOptions.openaiProviderConfig.apiKeyService': ['', ...CHAT_API_KEY_SERVICE_OPTIONS],
 }
-
-export const CUSTOM_ENUM_OPTION = '__custom__'
-export const CUSTOMIZABLE_ENUM_KEYS = new Set(['model'])
 
 export const FIELD_VALIDATORS: Record<string, (val: unknown) => string | null> = {
   adminPhones: v => Array.isArray(v) && v.length === 0

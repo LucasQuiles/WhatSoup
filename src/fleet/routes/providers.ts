@@ -2,12 +2,16 @@
 // GET /api/providers — server-side provider catalog (discovery / observability).
 //
 // The id list is derived from the backend SSOT (PROVIDER_IDS, #447) so this
-// route never maintains a second provider-id list. Per-id display metadata
-// mirrors the console catalog (console/src/lib/providers.ts) but lives here
-// because the console bundles separately and cannot import the backend module.
+// route never maintains a second provider-id list. Picker display/capability
+// metadata lives here so remote clients consume the server's current contract;
+// console-local metadata remains only for non-picker presentation.
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { systemClock } from '../../lib/clock.ts';
 import { jsonResponse } from '../../lib/http.ts';
-import { PROVIDER_IDS, type ProviderId } from '../../runtimes/agent/providers/index.ts';
+import type { ProviderCatalogEntry } from '../../lib/provider-catalogue-contract.d.ts';
+import { PROVIDER_IDS, isProviderId, type ProviderId } from '../../runtimes/agent/providers/index.ts';
+import { resolveModelCatalogue } from '../../runtimes/agent/model-catalogue-resolver.ts';
+import { getProviderBinary } from '../../runtimes/agent/session.ts';
 import {
   CREDENTIAL_PROBE_DESCRIPTORS,
   type CredentialProbeDescriptor,
@@ -44,29 +48,24 @@ const PROVIDER_META: Record<ProviderId, ProviderCatalogMeta> = {
   'anthropic-api': { displayName: 'Anthropic',  type: 'api', needsApiKey: true,  credentialService: 'anthropic' },
 };
 
-/** A single provider entry in the catalog response. */
-export interface ProviderCatalogEntry {
-  id: ProviderId;
-  displayName: string;
-  type: 'cli' | 'api';
-  needsApiKey: boolean;
-  /** Keyring service this provider's key lives under (null = native auth). */
-  credentialService: string | null;
-  /** Accepted providerConfig keys an operator may set for this provider. */
-  providerConfig: string[];
-}
+export type {
+  ProviderCatalogEntry,
+  ProviderModelsListing,
+} from '../../lib/provider-catalogue-contract.d.ts';
 
 /**
- * Accepted providerConfig fields per provider. The default provider
- * (claude-cli) has no overridable providerConfig fields; every other provider
- * accepts a `model` override, and api providers additionally accept `baseUrl`
- * and `apiKeyService`. Mirrors the console field derivation
- * (getProviderConfigFields) without importing the console module.
+ * General-console providerConfig fields per provider. Advanced runtime-only
+ * keys are intentionally outside this form surface. The default provider has
+ * no fields here; every other provider exposes `model`, API providers also
+ * expose `baseUrl` and `apiKeyService`, and the Anthropic adapter exposes
+ * `maxTokens`. The browser renders this server-owned list rather than deriving
+ * its own provider-specific field set.
  */
 function providerConfigFields(id: ProviderId, type: 'cli' | 'api'): string[] {
   if (id === 'claude-cli') return [];
   const fields = ['model'];
   if (type === 'api') fields.push('baseUrl', 'apiKeyService');
+  if (id === 'anthropic-api') fields.push('maxTokens');
   return fields;
 }
 
@@ -102,4 +101,36 @@ export const PROVIDER_VERIFY_DESCRIPTORS: Record<string, VerifyDescriptor> = CRE
 /** GET /api/providers — return the provider catalog. */
 export function handleGetProviders(_req: IncomingMessage, res: ServerResponse): void {
   jsonResponse(res, 200, buildProviderCatalog());
+}
+
+export interface ProviderModelsDeps {
+  resolveModelCatalogue: typeof resolveModelCatalogue;
+  getProviderBinary: typeof getProviderBinary;
+  nowMs: () => number;
+}
+
+const DEFAULT_PROVIDER_MODELS_DEPS: ProviderModelsDeps = {
+  resolveModelCatalogue,
+  getProviderBinary,
+  nowMs: () => systemClock.now(),
+};
+
+/** GET /api/providers/:name/models — return the provider-native live catalogue.
+ * Unknown execution providers are rejected before any probe. Managed-loop API
+ * providers do not have a binary, so their validated provider id is passed as
+ * the unused resolver discriminator rather than inventing a command. */
+export async function handleGetProviderModels(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  params: { name: string },
+  deps: ProviderModelsDeps = DEFAULT_PROVIDER_MODELS_DEPS,
+): Promise<void> {
+  if (!isProviderId(params.name)) {
+    jsonResponse(res, 404, { error: `unknown provider '${params.name}'` });
+    return;
+  }
+
+  const binary = deps.getProviderBinary(params.name) ?? params.name;
+  const listing = await deps.resolveModelCatalogue(params.name, binary, { nowMs: deps.nowMs() });
+  jsonResponse(res, 200, listing);
 }

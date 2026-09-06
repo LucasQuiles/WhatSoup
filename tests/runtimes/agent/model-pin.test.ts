@@ -3074,6 +3074,47 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(prefRows()).toHaveLength(0);
     });
 
+    it('routes the shared CLI catalogue test seam through the codex-cli drill without spawning a real binary', async () => {
+      const listFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueListFn: listFn,
+      });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => [
+        'claude-cli',
+        'codex-cli',
+      ];
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model',
+      }));
+      const brandMenu = allReplies(sentMessages).join('\n');
+      const codexRow = brandMenu.match(/^(\d+)\. Codex$/m);
+      expect(codexRow).not.toBeNull();
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: `/model ${codexRow![1]}`,
+        messageId: 'codex-drill',
+      }));
+
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Codex — pick a model:*');
+      expect(reply).toContain('gpt-5.6-sol');
+      expect(reply).toContain('gpt-5.5');
+      // This suite's session mock deliberately returns no resolved binary, so
+      // fetchProviderCatalogue falls back to the provider id. Production uses
+      // getProviderBinary('codex-cli') -> 'codex'.
+      expect(listFn).toHaveBeenCalledWith('codex-cli');
+      expect(prefRows()).toHaveLength(0);
+    });
+
     it('/model N on a MODEL leaf pins through the shared sink (verified row written)', async () => {
       const { runtime, sentMessages } = makeDrillRuntime();
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
