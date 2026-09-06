@@ -6104,9 +6104,12 @@ def storm_fingerprint_hash(fingerprint: str) -> str:
 STORM_RECEIPT_MAX_RECORDS = positive_env_int("BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS", 128)
 STORM_RECEIPT_SCHEMA_VERSION = 1
 STORM_RECEIPT_KIND = "bot_errors_storm_digest_receipt"
-# Receipt ids this process has written. reconcile_storm_digest_receipts() skips
-# them so a receipt written earlier in this same cycle is not adopted as if a
-# previous process had owed it.
+# Receipt ids this process has written and not yet proved published.
+# reconcile_storm_digest_receipts() skips them, so a receipt written earlier in
+# this same cycle is not adopted as if a previous process had owed it. An
+# acknowledged id is dropped: from then on its own publishedAtEpoch is what
+# suppresses adoption, and holding the id as well would grow this set once per
+# collapsed window for the life of a long-running dispatcher.
 _storm_receipts_written: set[str] = set()
 
 _STORM_RECEIPT_KEYS = frozenset({
@@ -6292,6 +6295,7 @@ def acknowledge_storm_digest_receipt(paths: dict[str, Path], receipt_id: str) ->
         require_all_advance([publish_storm_receipt(path, record)])
     except Exception:  # noqa: BLE001 -- see the docstring; never abort the cycle
         return False
+    _storm_receipts_written.discard(receipt_id)
     return True
 
 

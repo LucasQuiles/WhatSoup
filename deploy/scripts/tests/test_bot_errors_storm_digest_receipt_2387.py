@@ -312,9 +312,9 @@ def test_r3_receipt_survives_death_before_publication(tmp_path, storm_paths, mon
     assert receipts[0]["publishedAtEpoch"] is None, "an unpublished digest must not read as published"
     assert _digests(paths) == [], "no digest was published"
 
-    # A restart is a new process, so the in-process ledger of receipts this
-    # process wrote is empty. Clearing it is what makes the next call an
-    # adoption rather than a re-read of this process's own work.
+    # A restart is a new process, so the in-process ledger of receipts written
+    # and not yet proved published is empty. Clearing it is what makes the next
+    # call an adoption rather than a re-read of this process's own work.
     _disp._storm_receipts_written.clear()
     adopted = _disp.reconcile_storm_digest_receipts(paths)
     assert adopted == 1, f"expected one adoption, got {adopted}"
@@ -332,6 +332,9 @@ def test_r3_receipt_survives_death_before_publication(tmp_path, storm_paths, mon
     settled = _receipts(tmp_path)
     assert len(settled) == 1, "the retry must not open a second receipt"
     assert settled[0]["publishedAtEpoch"] is not None, "the page is proven, the receipt must say so"
+    # The ledger holds only ids still owed: an acknowledged receipt suppresses its
+    # own adoption through publishedAtEpoch, so the id does not accumulate.
+    assert settled[0]["receiptId"] not in _disp._storm_receipts_written
 
 
 def test_r3b_death_after_publication_yields_no_second_page(tmp_path, storm_paths, monkeypatch):
