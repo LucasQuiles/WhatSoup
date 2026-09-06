@@ -940,8 +940,15 @@ runtime-staleness cadence_receipt_error <ExceptionClassName>
 ```
 
 A producer whose receipts stop advancing while these lines appear in the
-journal has a writable-state problem, not a dead timer. A receipt that has
-stopped advancing with no such line, and refuses every later cycle, may instead
-be mode-locked: the durable reader rejects any group- or world-accessible bit
-on the receipt file, which a restore from backup or a manual copy can
-introduce.
+journal has a writable-state problem, not a dead timer. A producer whose
+receipts stop advancing with no line at all has a timer that never fired,
+because a missing or unwritten receipt reads as empty rather than as an error.
+
+Mode-lock is the first kind and not the second. The durable reader refuses any
+group- or world-accessible bit on the receipt file, which a restore from backup
+or a manual copy can introduce; the producer swallows that refusal like any
+other, so the line does appear and the receipt freezes at its last good value.
+The token carries only the exception class, so a single `DurableWriteError`
+covers a mode-locked receipt, a corrupted payload and a payload that is not a
+JSON object alike. Stat the file to separate them: `0600` and `0700` are
+accepted, `0640`, `0604` and `0660` are not.

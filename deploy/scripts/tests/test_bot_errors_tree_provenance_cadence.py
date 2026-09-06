@@ -254,3 +254,58 @@ def test_failed_refresh_is_recorded_as_refused(state_dir, monkeypatch, capsys):
     capsys.readouterr()
 
     assert _receipt()["fetchStatus"] == "refused"
+def test_a_mode_locked_receipt_reports_through_the_token_and_freezes(
+    state_dir, monkeypatch, capsys
+):
+    # The README tells operators how to read a stalled receipt, so the
+    # discriminator it names has to be the real one. Mode-lock is not the
+    # silent case: the durable reader refuses the file, the producer swallows
+    # that refusal, and the token is printed. Asserting it here keeps the prose
+    # falsifiable, and catches a future change that lets the refusal escape the
+    # swallow or drops the line.
+    #
+    # The refusal is induced rather than monkeypatched, so this exercises the
+    # real reader. A group-readable bit is what a restore from backup or a
+    # manual copy actually introduces.
+    _stub_clean_snapshot(monkeypatch)
+    monkeypatch.setattr(_mod, "emit_outbox_event", lambda event: None)
+
+    assert _mod.run_once(do_fetch=False, dry=False, reporter=True) == 0
+    capsys.readouterr()
+    frozen = _receipt()
+
+    pcr.receipt_path(TREE).chmod(0o640)
+    assert _mod.run_once(do_fetch=False, dry=False, reporter=True) == 0
+    captured = capsys.readouterr()
+
+    token_lines = [
+        line for line in captured.err.splitlines() if "cadence_receipt_error" in line
+    ]
+    # One line per failed publication, and the attempt and the success are two
+    # publications. The class is the only detail the bounded token carries.
+    assert token_lines == [
+        "tree_provenance cadence_receipt_error DurableWriteError",
+        "tree_provenance cadence_receipt_error DurableWriteError",
+    ]
+    assert _receipt() == frozen, "a refused cycle must not advance either clock"
+
+
+def test_the_reader_accepts_owner_only_modes_and_refuses_shared_ones(state_dir):
+    # The README quotes these modes to operators. If the reader ever widened,
+    # the advice would send them to stat a file that was never the problem.
+    _target = pcr.durable_json_target(
+        trusted_root=state_dir.resolve(strict=True),
+        relative_path=pcr.RECEIPT_FILENAMES[TREE],
+    )
+    pcr.record_cycle_attempt(TREE, mode=pcr.CadenceMode.EMIT)
+    receipt = pcr.receipt_path(TREE)
+
+    for mode in (0o600, 0o700):
+        receipt.chmod(mode)
+        assert pcr.observe_json(_target).payload is not None, oct(mode)
+
+    for mode in (0o640, 0o604, 0o660):
+        receipt.chmod(mode)
+        with pytest.raises(Exception) as excinfo:
+            pcr.observe_json(_target)
+        assert type(excinfo.value).__name__ == "DurableWriteError", oct(mode)
