@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "63ed4251cfba1c1ff8387ed123c862fe045654de406908f9b9c040a25c34ad9f",
+      "sha256": "de26e5e43a8f52b265de1c9c93387440b561d41b6e5818ad51abc875a109207e",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -105,7 +105,9 @@
         "STORM_RECEIPT_ORPHAN_ALERT_SOURCE",
         "dispatcher.storm_receipt_orphan_alert",
         "storm_receipt_publication_evidence",
-        "storm_receipt_digest_id"
+        "storm_receipt_digest_id",
+        "STORM_DIGEST_LEDGER_DIRS",
+        "orphanPagedAtEpoch"
       ]
     },
     {
