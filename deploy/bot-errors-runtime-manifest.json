@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "d874d4903f9dbd2481b0f8573ffb3c3071854371d3be192cabce872b211649b6",
+      "sha256": "aed11c63d8b43895430eac8ea7650c5f8d06acdb266308b6a3d380899d9e2b58",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -94,7 +94,10 @@
         "dispatcher.unrenderable_meta_alert",
         "write_unrenderable_breadcrumb",
         "reconcile_unrenderable_signals",
-        "drop_unrenderable_breadcrumbs"
+        "drop_unrenderable_breadcrumbs",
+        "delivery_outcome_unknown_escalated",
+        "outcomeUnknownEscalatedAt",
+        "HELD_DELIVERY_ESCALATE_SECONDS"
       ]
     },
     {
