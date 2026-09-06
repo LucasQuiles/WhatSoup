@@ -1,12 +1,40 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createReleaseSnapshotPlan } from '../../scripts/release-snapshot-plan.ts';
-import { checkLiveReleaseDrift, resolveReleasePathFromLaunchdPlist } from '../../scripts/live-release-drift-alert.ts';
+import {
+  checkLiveReleaseDrift,
+  containedReleaseIdentity,
+  releaseIdentityFromManifestText,
+  resolveReleasePathFromLaunchdPlist,
+  type DriftKindField,
+  type DriftKindMember,
+} from '../../scripts/live-release-drift-alert.ts';
+
+/**
+ * Control for the poisoned-parser test below. `vi.mock` is hoisted above the
+ * imports, so the control object must be hoisted with it. While failFromCall is
+ * 0 the mock is a pass-through and every other test sees the real parser.
+ */
+const parseControl = vi.hoisted(() => ({ calls: 0, failFromCall: 0 }));
+
+vi.mock('../../scripts/release-snapshot-plan.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scripts/release-snapshot-plan.ts')>();
+  return {
+    ...actual,
+    parseReleaseSnapshotManifest: (payload: unknown) => {
+      parseControl.calls += 1;
+      if (parseControl.failFromCall > 0 && parseControl.calls >= parseControl.failFromCall) {
+        throw new TypeError('poisoned identity parse');
+      }
+      return actual.parseReleaseSnapshotManifest(payload);
+    },
+  };
+});
 
 const CORRELATION_DIGEST_DOMAIN = 'whatsoup-release-drift-correlation-v1';
 
@@ -662,5 +690,441 @@ describe('live release drift alert #2458: per-invocation structured log record',
     });
 
     expect(result.record.observedAt).toBe('2026-08-21T12:34:56.000Z');
+  });
+});
+
+/**
+ * #2385 L1a. The release directory basename is an accident of a rollout, not an
+ * identity: two hosts running the same bytes under different directory names are
+ * the same release. These tests pin the typed, path-free identity the event now
+ * carries, and pin that the human-readable summary did NOT move — the summary is
+ * `storm_fingerprint` input, so changing it would re-key in-flight incidents.
+ */
+const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
+const FIXTURE_RELEASE_NAME_A = 'WhatSoup-release-alpha';
+const FIXTURE_RELEASE_NAME_B = 'WhatSoup-release-bravo';
+const FIXTURE_SOURCE_COMMIT = 'abc123def4567890';
+const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
+
+/**
+ * Summaries b0b93155 emits for these fixtures, recorded as constants in the
+ * format `alertSummary` used at b0b93155. They were confirmed against that
+ * revision by the order of work, not by a replay harness: this test was written
+ * and run BEFORE the typed fields existed, and it passed against the unmodified
+ * script (iteration-1 RED receipt 09-red-vitest, where the other two new tests
+ * failed and this one did not).
+ */
+const BASELINE_RECOVERED_SUMMARY_A = `release drift recovered: ${FIXTURE_RELEASE_NAME_A}`;
+const BASELINE_DETECTED_SUMMARY_B = `release drift detected: ${FIXTURE_RELEASE_NAME_B} (1 issue)`;
+
+/**
+ * Independent oracle for the typed identity: recomputed here from the manifest
+ * the fixture wrote, deliberately NOT imported from the script under test, so a
+ * canonicalisation change on either side fails this test instead of hiding.
+ */
+function expectedReleaseIdentity(manifestPath: string): string {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    schemaVersion: number;
+    source: { ref: string; commit: string };
+    files: Array<{ path: string; sha256: string; sizeBytes: number }>;
+    requiredOutputs: string[];
+  };
+  const canonical = JSON.stringify({
+    schemaVersion: manifest.schemaVersion,
+    sourceRef: manifest.source.ref,
+    sourceCommit: manifest.source.commit,
+    files: [...manifest.files]
+      .map((file) => ({
+        // The oracle applies the same normalisations the schema parser applies,
+        // because the identity is defined over the parsed manifest.
+        path: file.path.replace(/\\/g, '/').replace(/^\.\//, ''),
+        sha256: file.sha256.toLowerCase(),
+        sizeBytes: file.sizeBytes,
+      }))
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
+    requiredOutputs: [...manifest.requiredOutputs].sort(),
+  });
+  return createHash('sha256').update(`${RELEASE_IDENTITY_DOMAIN}|${canonical}`).digest('hex');
+}
+
+function eventDiagnostics(event: Record<string, unknown>): Record<string, string> {
+  return event.diagnostics as Record<string, string>;
+}
+
+/**
+ * Two releases built from one source tree at one commit, differing ONLY in
+ * release directory basename. `releaseName` is passed explicitly because the
+ * default derives the name from the source commit, which would make both
+ * fixtures share a basename and let the identity assertion pass by coincidence.
+ */
+function writeTwinReleases(options: { drift?: boolean } = {}): { a: string; b: string } {
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+  const sourceRoot = path.join(tmpRoot, 'source');
+  mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
+  writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"fixture"}\n', 'utf8');
+  writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const value = true;\n', 'utf8');
+
+  const build = (releaseName: string): string => {
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'HEAD',
+      sourceCommit: FIXTURE_SOURCE_COMMIT,
+      releaseRoot: path.join(tmpRoot, 'releases'),
+      releaseName,
+      buildTime: FIXTURE_BUILD_TIME,
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(
+      path.join(releasePath, 'src/main.ts'),
+      options.drift ? 'export const value = false;\n' : readFileSync(path.join(sourceRoot, 'src/main.ts')),
+      'utf8',
+    );
+    writeFileSync(
+      path.join(releasePath, '.whatsoup-release-manifest.json'),
+      `${JSON.stringify(plan.manifest, null, 2)}\n`,
+      'utf8',
+    );
+    return releasePath;
+  };
+
+  return { a: build(FIXTURE_RELEASE_NAME_A), b: build(FIXTURE_RELEASE_NAME_B) };
+}
+
+describe('live release drift alert #2385: typed drift identity on the emitted event', () => {
+  it('carries an equal typed identity for two releases that differ only in directory basename', () => {
+    const { a, b } = writeTwinReleases();
+    // Coverage assertion: without this the identity equality could hold because
+    // both fixtures are the same directory, which would prove nothing.
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(0);
+    expect(procB.status, procB.stderr).toBe(0);
+
+    const [eventA] = outboxEvents(stateDirA);
+    const [eventB] = outboxEvents(stateDirB);
+    const diagA = eventDiagnostics(eventA);
+    const diagB = eventDiagnostics(eventB);
+
+    // Positive control: a real digest, not the `unknown` sentinel, and equal to
+    // an independently recomputed expectation.
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(expectedIdentity).toMatch(/^[0-9a-f]{64}$/);
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagA.observed_release_identity).toBe(expectedIdentity);
+
+    // The property #2385 C2 needs: different basenames, one identity.
+    expect(diagB.desired_release_identity).toBe(diagA.desired_release_identity);
+    expect(diagB.observed_release_identity).toBe(diagA.observed_release_identity);
+    expect(diagA.drift_kind).toBe('none');
+    expect(diagB.drift_kind).toBe('none');
+
+    // Content-free: the typed fields name no path and no release directory.
+    const identities = [
+      diagA.desired_release_identity,
+      diagA.observed_release_identity,
+      diagB.desired_release_identity,
+      diagB.observed_release_identity,
+    ];
+    for (const value of identities) {
+      expect(value).not.toContain(path.sep);
+      expect(value).not.toContain(FIXTURE_RELEASE_NAME_A);
+      expect(value).not.toContain(FIXTURE_RELEASE_NAME_B);
+      expect(value).not.toContain(tmpRoot);
+    }
+  });
+
+  it('carries a bounded drift kind and a real desired identity on a drift alert', () => {
+    const { a, b } = writeTwinReleases({ drift: true });
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(1);
+    expect(procB.status, procB.stderr).toBe(1);
+
+    const diagA = eventDiagnostics(outboxEvents(stateDirA)[0]);
+    const diagB = eventDiagnostics(outboxEvents(stateDirB)[0]);
+
+    expect(diagA.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagB.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagB.desired_release_identity).toBe(expectedIdentity);
+    // A drifted tree's real identity would need a re-walk this leaf does not do,
+    // so observed stays the explicit `unknown` sentinel rather than a guess.
+    expect(diagA.observed_release_identity).toBe('unknown');
+    expect(diagB.observed_release_identity).toBe('unknown');
+  });
+
+  it('leaves the summary text byte-identical to what b0b93155 emitted', () => {
+    const clean = writeTwinReleases();
+    const cleanStateDir = path.join(tmpRoot, 'state-clean');
+    expect(runCli(['--release', clean.a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: cleanStateDir }).status).toBe(0);
+    expect(outboxEvents(cleanStateDir)[0].summary).toBe(BASELINE_RECOVERED_SUMMARY_A);
+
+    // afterEach only removes the LAST tmpRoot, so the first tree is removed here
+    // rather than left behind for the run.
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const drifted = writeTwinReleases({ drift: true });
+    const driftStateDir = path.join(tmpRoot, 'state-drift');
+    expect(runCli(['--release', drifted.b], { BOT_ERRORS_STATE_DIR: driftStateDir }).status).toBe(1);
+    expect(outboxEvents(driftStateDir)[0].summary).toBe(BASELINE_DETECTED_SUMMARY_B);
+  });
+});
+
+/**
+ * Type-level checks on the drift-kind types. An annotation on a constant is
+ * only an assignability check, which widening never breaks, so the two checks
+ * below are a mutual-assignability conditional and a rejection probe instead.
+ *
+ * What they catch: adding or removing a member of the issue-kind union without
+ * updating this list; retyping `DriftKindField` to `string`. What they do NOT
+ * catch: free text after the first comma in a joined value, which the field
+ * type cannot express (see its doc comment) and which the two-kind test below
+ * asserts on the emitted value instead.
+ */
+type ExpectedDriftKinds =
+  | 'release-missing'
+  | 'manifest-missing'
+  | 'manifest-release-path-mismatch'
+  | 'file-missing'
+  | 'file-type-drift'
+  | 'file-sha256-drift'
+  | 'extra-file'
+  | 'required-output-missing'
+  | 'launchd-working-directory-mismatch';
+
+type MutuallyAssignable<Left, Right> = [Left] extends [Right]
+  ? ([Right] extends [Left] ? true : never)
+  : never;
+
+const DRIFT_KINDS_ARE_EXACTLY_EXPECTED: MutuallyAssignable<DriftKindMember, ExpectedDriftKinds> = true;
+
+// A rejection probe, not an assignability check: if the field type is widened
+// to `string` this assignment compiles, the directive goes unused, and the
+// typecheck fails. It is permanent, so the expiry is a far date by convention.
+// @ts-expect-error -- DriftKindField must reject a non-member; expires 2099-12-31
+const DRIFT_KIND_FIELD_REJECTS_FREE_TEXT: DriftKindField = 'not-a-drift-kind';
+
+const DRIFT_KIND_SINGLE: DriftKindField = 'file-sha256-drift';
+const DRIFT_KIND_JOINED: DriftKindField = 'extra-file,file-sha256-drift';
+const DRIFT_KIND_MANIFEST_MISSING: DriftKindField = 'manifest-missing';
+const DRIFT_KIND_NONE: DriftKindField = 'none';
+
+describe('live release drift alert #2385: drift_kind set and order', () => {
+  it('joins several kinds in ascending order rather than reporting only the first', () => {
+    const { a } = writeTwinReleases({ drift: true });
+    // A second, different kind: a file present in the release that the manifest
+    // does not list. One drifted file alone cannot distinguish a set from its
+    // first element, nor a sorted join from an unsorted one.
+    writeFileSync(path.join(a, 'unmanifested-extra.txt'), 'extra\n', 'utf8');
+
+    // Coverage assertion: the order the checker reports these kinds in is NOT
+    // already alphabetical, so sorting is observable. Without this, dropping the
+    // sort could pass by accident.
+    const naturalOrder = checkLiveReleaseDrift({
+      repoRoot: process.cwd(),
+      releasePath: a,
+      instance: 'release-bot',
+      source: 'release-drift',
+      emit: false,
+      emitHelper: path.join(process.cwd(), 'deploy/scripts/bot-errors-emit.py'),
+      python: 'python3',
+      clearOnOk: false,
+    }).issues.map((issue) => issue.kind);
+    expect(new Set(naturalOrder).size).toBe(2);
+    expect(naturalOrder).not.toEqual([...naturalOrder].sort());
+
+    const stateDir = path.join(tmpRoot, 'state-two-kind');
+    const proc = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+
+    // Assertions on the EMITTED value, not on the expectation.
+    const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
+    const emittedMembers = String(diagnostics.drift_kind).split(',');
+    expect(emittedMembers).toHaveLength(2);
+    expect(emittedMembers).toEqual(['extra-file', 'file-sha256-drift']);
+    expect(emittedMembers).toEqual([...new Set(naturalOrder)].sort());
+    expect(diagnostics.drift_kind).toBe(DRIFT_KIND_JOINED);
+  });
+});
+
+describe('live release drift alert #2385: identity is defined over the parsed manifest', () => {
+  /**
+   * Rewrite a release manifest in a form the schema parser normalises away:
+   * `./`-prefixed file paths, uppercase hashes, and reversed file order. The
+   * release still verifies, because the drift checker reads the same parsed
+   * manifest.
+   */
+  function denormaliseManifest(releasePath: string): void {
+    const manifestPath = path.join(releasePath, '.whatsoup-release-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      files: Array<{ path: string; sha256: string; sizeBytes: number }>;
+    };
+    manifest.files = [...manifest.files]
+      .reverse()
+      .map((file) => ({ ...file, path: `./${file.path}`, sha256: file.sha256.toUpperCase() }));
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  }
+
+  it('gives a denormalised manifest the same identity as its normalised twin', () => {
+    const { a, b } = writeTwinReleases();
+    denormaliseManifest(b);
+    // Coverage assertion: the two manifest FILES really differ on disk, so an
+    // identity that hashed raw bytes or raw field values could not match.
+    const rawA = readFileSync(path.join(a, '.whatsoup-release-manifest.json'), 'utf8');
+    const rawB = readFileSync(path.join(b, '.whatsoup-release-manifest.json'), 'utf8');
+    expect(rawB).not.toBe(rawA);
+    expect(rawB).toContain('./package.json');
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    expect(runCli(['--release', a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirA }).status).toBe(0);
+    expect(runCli(['--release', b, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDirB }).status).toBe(0);
+
+    const diagA = eventDiagnostics(outboxEvents(stateDirA)[0]);
+    const diagB = eventDiagnostics(outboxEvents(stateDirB)[0]);
+    expect(diagA.desired_release_identity).toMatch(/^[0-9a-f]{64}$/);
+    expect(diagB.desired_release_identity).toBe(diagA.desired_release_identity);
+  });
+
+  it('yields the unknown sentinel for manifest text the schema parser rejects', () => {
+    const { a } = writeTwinReleases();
+    const validText = readFileSync(path.join(a, '.whatsoup-release-manifest.json'), 'utf8');
+    // Positive control: valid text really does produce a digest here, so the
+    // sentinel assertions below cannot pass because the function always fails.
+    expect(releaseIdentityFromManifestText(validText)).toMatch(/^[0-9a-f]{64}$/);
+
+    // A well-formed JSON object the schema parser rejects. Canonicalising
+    // whatever fields happen to be present would hand it a valid-looking digest
+    // that every other malformed manifest would share.
+    expect(releaseIdentityFromManifestText('{"unrelated":true}')).toBe('unknown');
+    expect(releaseIdentityFromManifestText('{')).toBe('unknown');
+    expect(releaseIdentityFromManifestText('[]')).toBe('unknown');
+  });
+
+  it('emits no event at all when the on-disk manifest is unparseable', () => {
+    const { a } = writeTwinReleases();
+    writeFileSync(path.join(a, '.whatsoup-release-manifest.json'), '{"unrelated":true}\n', 'utf8');
+
+    const stateDir = path.join(tmpRoot, 'state-invalid');
+    const proc = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDir });
+
+    // The drift checker parses the manifest before this script sees it, so an
+    // unparseable manifest is a checker_failed outcome with no event. That is
+    // why the sentinel above is pinned on the function and not on a diagnostic:
+    // on disk the branch is only reachable if the manifest is replaced between
+    // the checker's read and this script's read.
+    expect(proc.status, proc.stderr).not.toBe(0);
+    expect(parseRecordLine(proc.stdout)).toMatchObject({ outcome: 'checker_failed' });
+    expect(existsSync(path.join(stateDir, 'outbox'))).toBe(false);
+  });
+});
+
+describe('live release drift alert #2385: fail-open branches stay pinned', () => {
+  it('reports manifest-missing with both identities unknown', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+    const releasePath = path.join(tmpRoot, 'releases', 'WhatSoup-release-nomanifest');
+    mkdirSync(releasePath, { recursive: true });
+
+    const stateDir = path.join(tmpRoot, 'state-no-manifest');
+    const proc = runCli(['--release', releasePath], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+
+    const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
+    // The fail-open decision point: no manifest means no attestable identity,
+    // and the event must say so rather than omit the fields or invent a digest.
+    expect(diagnostics.drift_kind).toBe(DRIFT_KIND_MANIFEST_MISSING);
+    expect(diagnostics.desired_release_identity).toBe('unknown');
+    expect(diagnostics.observed_release_identity).toBe('unknown');
+  });
+
+  it('carries the typed fields under --launchd-plist, the mode the shipped job uses', () => {
+    const { a } = writeTwinReleases();
+    const plistPath = writeLaunchdPlist(a);
+    const stateDir = path.join(tmpRoot, 'state-plist');
+
+    // The scheduled job passes no --manifest, so the manifest is resolved from
+    // the release the plist selects.
+    const proc = runCli(['--launchd-plist', plistPath, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(0);
+
+    const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(diagnostics.drift_kind).toBe(DRIFT_KIND_NONE);
+    expect(diagnostics.desired_release_identity).toBe(expectedIdentity);
+    expect(diagnostics.observed_release_identity).toBe(expectedIdentity);
+  });
+});
+
+describe('live release drift alert #2385: an identity failure never costs the alert', () => {
+  it('degrades to the sentinel and names the error class instead of propagating', () => {
+    // The identity code re-throws anything that is not a parse or schema
+    // failure. Without the boundary that error would escape checkLiveReleaseDrift
+    // and the drift alert would never be enqueued.
+    for (const thrown of [new TypeError('boom'), new RangeError('boom')]) {
+      const contained = containedReleaseIdentity(() => {
+        throw thrown;
+      });
+      expect(contained.identity).toBe('unknown');
+      expect(contained.errorClass).toBe(thrown.constructor.name);
+      // The class name only: a message can carry a path or file content.
+      expect(contained.errorClass).not.toContain('boom');
+    }
+
+    // Positive control: the boundary is transparent when nothing throws, so the
+    // assertions above cannot pass because it always reports failure.
+    const computed = 'a'.repeat(64);
+    expect(containedReleaseIdentity(() => computed)).toEqual({ identity: computed, errorClass: null });
+  });
+
+  it('still emits the drift alert when the identity computation throws', () => {
+    const { a } = writeTwinReleases({ drift: true });
+    const stateDir = path.join(tmpRoot, 'state-identity-throws');
+    process.env.BOT_ERRORS_STATE_DIR = stateDir;
+
+    // Poison the identity path only. The drift report calls the parser through
+    // release-snapshot-plan's own internal binding, which the module mock does
+    // not intercept, so the report still succeeds on the real parser and the
+    // only intercepted call is this script's identity parse.
+    parseControl.calls = 0;
+    parseControl.failFromCall = 1;
+    let result;
+    try {
+      result = checkLiveReleaseDrift({
+        repoRoot: process.cwd(),
+        releasePath: a,
+        instance: 'release-bot',
+        source: 'release-drift',
+        emit: true,
+        emitHelper: path.join(process.cwd(), 'deploy/scripts/bot-errors-emit.py'),
+        python: 'python3',
+        clearOnOk: false,
+      });
+    } finally {
+      parseControl.failFromCall = 0;
+    }
+
+    // Coverage assertion: the poisoned call really fired, so the test cannot
+    // pass by never reaching the identity path.
+    expect(parseControl.calls, 'the identity parse must have been reached').toBe(1);
+    expect(result.alert).toMatchObject({ required: true, attempted: true, kind: 'alert', status: 0 });
+
+    const diagnostics = eventDiagnostics(outboxEvents(stateDir)[0]);
+    // The alert survives, the drift kind is intact, the identity degrades.
+    expect(diagnostics.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagnostics.desired_release_identity).toBe('unknown');
+    expect(diagnostics.observed_release_identity).toBe('unknown');
+    expect(diagnostics.release_identity_error).toBe('TypeError');
+    expect(diagnostics.release_identity_error).not.toContain('poisoned');
   });
 });
