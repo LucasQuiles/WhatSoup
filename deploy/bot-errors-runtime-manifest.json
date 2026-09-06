@@ -582,7 +582,7 @@
     },
     {
       "path": "deploy/scripts/lib/producer_cadence_receipt.py",
-      "sha256": "68871da16c820f965d41c9498c35b1c8c7b82660841ac795dbc4bd53eff96919",
+      "sha256": "3974cd69316df6715c6fe646e867d29c16bac1fcf5b58ce80297c7c62aaefdb9",
       "mustContain": [
         "CADENCE_RECEIPT_SCHEMA_VERSION",
         "lastAttemptAt",
