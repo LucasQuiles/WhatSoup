@@ -392,6 +392,17 @@
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-storm-receipt",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "publish_storm_receipt",
+      "logical_publication": "dispatcher.storm_receipt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "propagate_result",
+      "result_consumer": "write_storm_digest_receipt",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "dispatcher-storm-member-state",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "collapse_storm_group",
