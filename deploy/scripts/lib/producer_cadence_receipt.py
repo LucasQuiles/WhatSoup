@@ -297,6 +297,15 @@ def _ensure_private_dir(path: Path) -> None:
     is the only one of the two that has one: the durable reader rejects any
     group- or world-accessible bit on the parent, so a leaked mode would turn
     every later cycle into a publication refusal rather than a silent widening.
+
+    Kept as a copy rather than consolidated. There is no shared helper to
+    import: every publisher under ``deploy/scripts`` carries its own copy of
+    this body, so this is the shipped pattern rather than a fork of one. The
+    available alternative -- having the domain producers import a private
+    helper out of this module -- would make a domain guard depend on the dark
+    receipt for its own outbox directory, which is the wrong direction. The
+    state root, by contrast, IS resolved by one shared function, because there
+    a divergence desynchronises a writer from its reader.
     """
     try:
         path.lstat()

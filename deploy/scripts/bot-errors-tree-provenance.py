@@ -82,7 +82,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_envelope import new_event_fields
-from lib.state_root import DEFAULT_STATE_ROOT
+from lib.state_root import state_root
 from lib.durable_json import (
     JsonVersion,
     durable_json_target,
@@ -558,10 +558,16 @@ def tree_provenance_inventory(profile: dict[str, Any] | None = None, *, do_fetch
 # Standalone outbox emission (format mirrors health-check outbox_event()).
 # ---------------------------------------------------------------------------
 def _state_root() -> Path:
-    explicit = os.environ.get("BOT_ERRORS_STATE_DIR", "").strip()
-    if explicit:
-        return Path(explicit)
-    return DEFAULT_STATE_ROOT
+    """Resolve the state root through the one function that owns it.
+
+    This was a local copy of the plain variant, which honours the state-dir
+    variable but not the per-worker test isolation the shared resolver adds.
+    The cadence receipt resolves through the shared function, so keeping the
+    copy left one process writing its outbox and its receipt to two different
+    roots whenever a test signal was set without the variable -- the
+    writer-reader desync class #3050 and #3051 exist to close.
+    """
+    return state_root()
 
 
 def _resolve_outbox_dir() -> Path:
