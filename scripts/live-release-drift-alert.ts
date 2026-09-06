@@ -248,11 +248,144 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
   return { report, issues, ok: report.ok && issues.length === 0 };
 }
 
-function alertSummary(assessment: DriftAssessment): string {
-  const name = path.basename(assessment.report.releasePath);
-  if (assessment.ok) return `release drift recovered: ${name}`;
+/**
+ * The identity token carried in the alert text: the leading hex of the ratified
+ * release identity, or the sentinel unchanged.
+ *
+ * Truncated rather than whole because the summary is human-facing incident text
+ * and 64 hex characters would dominate it. Eight trades collision resistance
+ * for that readability: it puts 32 bits of release identity into the three
+ * dispatcher fingerprints that read this text (`storm_fingerprint`,
+ * `recovery_episode_fingerprint` and `recovery_duplicate_fingerprint`).
+ *
+ * There is an on-point precedent against a short identity prefix in a grouping
+ * key, and it is cited here rather than left for a reader to find.
+ * `deploy/scripts/lib/bot_errors_redaction.py` names both widths as constants
+ * (`LEGACY_DISPLAY_DIGEST_CHARS = 8`, `LEGACY_FULL_DIGEST_CHARS = 64`), and
+ * `alert_text_for_fingerprint` renders with the 64 one because the display
+ * rendering had put identity on an eight-character prefix and two incidents
+ * sharing that prefix merged into one. A test pins that renderer
+ * (`deploy/scripts/tests/test_bot_errors_legacy_alert_content.py:784-785`).
+ * Read its scope exactly: it pins the fingerprint renderer's OWN digest field,
+ * not the summary field this token travels in, and no test asserts a width
+ * floor on the summary. The precedent is an argued analogy about entropy in a
+ * grouping key, not a constraint this change breaks.
+ *
+ * Eight is accepted anyway, for reasons specific to what this token identifies.
+ * It identifies a RELEASE, and the fleet is expected to run only a handful
+ * of distinct releases at once, so a 32-bit prefix collision between two
+ * concurrently alerting releases is negligible under that expectation
+ * rather than merely improbable per pair. The full 64-hex identity
+ * still rides the event's typed diagnostics (`desired_release_identity`, built
+ * in `typedDriftDiagnostics` below), so the truncation is not the only copy.
+ * The residual cost is disclosed rather than hidden: two distinct releases
+ * sharing a token would group as one incident, and no test constructs that
+ * collision.
+ *
+ * Widening is a judgement about the same trade-off rather than something the
+ * redactor forbids, and it is a THREE-site change rather than a two-site one:
+ * the slice below, the `RELEASE_IDENTITY_TOKEN_LENGTH` constant in the focused
+ * test file, and the hardcoded width in that file's anchored token-shape regex,
+ * which is a second deliberate oracle and does not read the constant.
+ *
+ * No redaction rule bounds the width, and that is worth stating because the
+ * obvious reading is the wrong one. `PHONE_LIKE_RE`
+ * (`deploy/scripts/lib/bot_errors_redaction.py`) does match a long bare digit
+ * run, but `redact_phone_like_match` then declines it: the candidate has to
+ * start with `+` or contain one of `[\s().-]` before the ten-to-fifteen digit
+ * test is ever reached (`bot_errors_redaction.py:97-98`). A bare hex or digit
+ * token has neither, so it passes through at any length. No other rule reaches
+ * it either: every digest-shaped pattern there is anchored to a prefix (`AKIA`,
+ * `gh?_`, `eyJ`) that a bare hex slice does not have.
+ *
+ * What is load-bearing is where the token goes, not how long it is. It is
+ * appended last so it cannot merge with the parenthesised issue count: the
+ * parentheses and the space are separator characters `PHONE_LIKE_RE` accepts,
+ * so a token placed before the count contributes its own digits to a single
+ * candidate, and an all-digit token that reaches the ten-digit floor that way
+ * IS redacted. It is appended after a space rather than a comma so the
+ * dispatcher's `normalize_token_lists`
+ * (`deploy/scripts/bot-errors-dispatcher.py:6009-6014`) never reorders it; see
+ * `alertSummary` below for why that matters to grouping.
+ *
+ * The sentinel is passed through as the literal word, never digested. Hashing it
+ * would produce a token indistinguishable in shape from a real identity, so an
+ * operator reading the incident could not tell an attested release from one that
+ * had no readable manifest.
+ *
+ * The early return for the sentinel is a deliberate explicit contract rather
+ * than a branch the current behaviour needs. `UNKNOWN_RELEASE_IDENTITY` is
+ * seven characters, so the slice below already returns it unchanged, and
+ * deleting the guard leaves this suite green. It is kept so the intent survives
+ * a sentinel longer than the token width; no test in this file asserts it,
+ * because none can distinguish its presence.
+ */
+function releaseIdentityToken(identity: string): string {
+  if (identity === UNKNOWN_RELEASE_IDENTITY) return UNKNOWN_RELEASE_IDENTITY;
+  return identity.slice(0, 8);
+}
+
+/**
+ * The alert text, carrying the release identity but no release directory name
+ * (#2385 L1b).
+ *
+ * The summary is the only free-text input to the dispatcher's
+ * `storm_fingerprint` (source, severity, normalised summary). While it named the
+ * release directory, two hosts running the SAME bytes under different directory
+ * names produced two fingerprints and two incidents, which is exactly the
+ * correlation the path-free identity above exists to establish. The name is an
+ * accident of a rollout, so it is gone from the text.
+ *
+ * What replaces it is the identity token, and it deliberately DOES key the
+ * storm. Dropping the basename without it left the text varying only by issue
+ * count, so two unrelated releases drifting by the same amount would have
+ * grouped into one incident. The token restores that discrimination on the
+ * property that actually identifies a release. It is appended after a space, not
+ * a comma: the dispatcher's `normalize_token_lists` sorts comma-joined runs, so
+ * a comma would let the token reorder against its neighbours and make the
+ * emitted text differ from the grouped text for no gain.
+ *
+ * Coverage limit, stated rather than implied, and it is ONE drift kind rather
+ * than two. For `manifest-missing` there is no readable manifest:
+ * `createReleaseSnapshotDriftReport` returns that kind early, before parsing
+ * anything, so `readManifestFacts` below fails its own read, the identity is the
+ * sentinel, and the token is that same constant on every host. Those events
+ * still group across unrelated releases.
+ *
+ * `release-missing` is NOT such a kind, despite the adjacent name. It is pushed
+ * inside `collectReleaseSnapshotDrift`, which is reached only after the manifest
+ * has been read and parsed, so the manifest exists and is well formed,
+ * `readManifestFacts` returns a real 64-hex identity, and the token is a
+ * per-release digest that discriminates exactly as every other kind's does.
+ * With the default manifest path the two kinds never compete: the manifest lives
+ * inside the release directory, so a missing release directory makes the
+ * manifest missing too and the kind reported is `manifest-missing`.
+ * `release-missing` is reachable through the documented `--manifest` override,
+ * and a test pins its token there as a real digest rather than the sentinel.
+ *
+ * Discrimination is restored for every drift kind except `manifest-missing`,
+ * and except any event whose identity computation degrades to the sentinel:
+ * `readManifestFacts` re-reads the manifest the drift report already read, so a
+ * manifest that stops being readable or parseable in between either fails that
+ * read or leaves `releaseIdentityFromManifestText` with unparseable JSON or a
+ * rejected schema, and `containedReleaseIdentity` below degrades any unexpected
+ * error to the sentinel rather than let it suppress the alert.
+ *
+ * The issue count stays, and it is a property of the drift rather than of the
+ * release. Two hosts running the same release that drift to different extents
+ * report different counts, and those alerts do land in different groups: what
+ * groups is hosts that drifted the same way on the same release, not every host
+ * running it.
+ *
+ * Cost, accepted by the owner ruling rather than overlooked: alerts emitted
+ * before this change and alerts emitted after fingerprint differently, so one
+ * 120-second storm window at cutover groups the two texts separately.
+ */
+function alertSummary(assessment: DriftAssessment, facts: ReleaseManifestFacts): string {
+  const token = releaseIdentityToken(facts.identity);
+  if (assessment.ok) return `release drift recovered release ${token}`;
   const count = assessment.issues.length;
-  return `release drift detected: ${name} (${count} issue${count === 1 ? '' : 's'})`;
+  return `release drift detected (${count} issue${count === 1 ? '' : 's'}) release ${token}`;
 }
 
 function alertEvidence(assessment: DriftAssessment): string {
@@ -422,9 +555,16 @@ function driftKind(issues: readonly LiveReleaseDriftIssue[]): DriftKindField {
 /**
  * Typed drift facts as structured event data (#2385 L1a). They ride the emit
  * helper's existing repeatable `--diagnostic key=value` channel, which lands
- * them verbatim in the event's `diagnostics` object. The human-readable summary
- * is untouched: `storm_fingerprint` keys on source, severity and the normalized
- * summary only, so adding diagnostics cannot re-key an in-flight incident.
+ * them verbatim in the event's `diagnostics` object. This channel leaves the
+ * human-readable summary untouched: `storm_fingerprint` keys on source,
+ * severity and the normalized summary only, so adding diagnostics cannot re-key
+ * an in-flight incident.
+ *
+ * Scoped to the diagnostics channel, and only to it. L1b since put the release
+ * identity token into the summary itself, where it deliberately DOES key the
+ * storm — see `releaseIdentityToken` and `alertSummary` above. Nothing here
+ * says identity stays out of the grouping key; it says this channel is not how
+ * identity gets there.
  */
 function typedDriftDiagnostics(assessment: DriftAssessment, facts: ReleaseManifestFacts): string[] {
   // The observed tree identity is only attestable when verification passed —
@@ -454,7 +594,7 @@ function runEmit(
   facts: ReleaseManifestFacts,
 ): ReleaseAlertEmitResult {
   return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
-    summary: alertSummary(assessment),
+    summary: alertSummary(assessment, facts),
     evidence: alertEvidence(assessment),
     diagnostics: [
       `release=${assessment.report.releasePath}`,
