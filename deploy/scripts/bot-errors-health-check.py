@@ -33,7 +33,11 @@ if str(SCRIPT_DIR) not in sys.path:
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
-from lib.target_provenance import safe_observer_provenance, safe_target_provenance
+from lib.target_provenance import (
+    safe_observer_provenance,
+    safe_release_divergence,
+    safe_target_provenance,
+)
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
@@ -2544,12 +2548,23 @@ def outbox_event(
     # target instance distinct from the producer, resolve that target's own
     # provenance (fail-closed to unknown) instead of letting producer evidence
     # stand in for it.
-    event["observerProvenance"] = redact_json_value(
-        safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
-    )
+    observer_provenance = safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
+    event["observerProvenance"] = redact_json_value(observer_provenance)
     target_instance = str(event["instance"])
     if target_instance and target_instance != "bot-errors-health":
-        event["targetProvenance"] = redact_json_value(safe_target_provenance(target_instance, HOST_PLATFORM))
+        target_provenance = safe_target_provenance(target_instance, HOST_PLATFORM)
+        event["targetProvenance"] = redact_json_value(target_provenance)
+        # #2358 C9/C10: classified only where a distinct target exists to
+        # compare against. A producer-self event has no target block, so there
+        # is nothing to diverge from and no verdict to attach.
+        #
+        # Classified from the RAW blocks, matching the runner, so both
+        # producers judge the same inputs. Reading the redacted copies here
+        # would let a future redaction rule that rewrote commit-shaped text
+        # move this verdict and not the runner. Only the verdict is redacted.
+        event["releaseDivergence"] = redact_json_value(
+            safe_release_divergence(observer_provenance, target_provenance)
+        )
     if force_notify:
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "critical"
