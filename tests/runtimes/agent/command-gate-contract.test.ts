@@ -342,6 +342,11 @@ vi.mock('node:fs', async (importOriginal) => {
 // ─── Imports after mocks ─────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+} from '../../../src/runtimes/agent/runtime-stop-command.ts';
+import { GLOBAL_CONVERSATION_KEY } from '../../../src/core/conversation-key.ts';
 import { COMMAND_REGISTRY } from '../../../src/runtimes/agent/command-registry.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
@@ -462,6 +467,12 @@ describe('B22 group 1: authorization matrix', () => {
   //   /help     → gate 'none' probe (queue-routed render)
   //   /sessions → gate 'admin' probe (admin-bypass messenger path)
   //   /new      → gate 'admin-shared-scope' probe (queue-routed ack)
+  //
+  // #2949 N1 review of this matrix for the /stop append (group 2's tripwire
+  // requires it): the rows probe GATE CLASSES, one command per class, not one
+  // row per command. /stop declares gate 'admin-shared-scope' — the same class
+  // /new probes here — so it adds no new authorization semantics and needs no
+  // new row. A future entry declaring a NEW gate value does.
   type Row = {
     title: string;
     command: '/help' | '/sessions' | '/new';
@@ -571,7 +582,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     // this set, forcing its author into this file where groups 2 and 3 pick
     // the entry up automatically and the matrix in group 1 must be reviewed.
     expect([...COMMAND_REGISTRY].map((c) => c.name).sort()).toEqual(
-      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status'].sort(),
+      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status', 'stop'].sort(),
     );
   });
 
@@ -629,6 +640,409 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     },
   );
 
+  it('#2949 N1: a mid-turn /stop is never forwarded to the agent as text', async () => {
+    // The defect #2949 names: a control arriving during an active turn used to
+    // reach the provider as ordinary text and terminalize as an
+    // admission-rejected WORK turn. Registration makes it a local control, and
+    // runtime.ts returns before the enqueue block — so the provider must see
+    // exactly ONE turn (the long-running one) and never the control.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    // per_chat: the production scope for #2949 (the incident instance runs
+    // per_chat). There the provider turn runs on the per-chat TurnQueue, so the
+    // control's handler is reachable while it is in flight. In SINGLE/shared
+    // scope the turn runs inline inside _handleMessageInner, which
+    // handleMessage serializes on this.turnChain (runtime.ts:4460) — so no
+    // local command, /new included, executes mid-turn there today. That
+    // serialization is ingress ordering and belongs to leaf N2, not here.
+    const runtime = makeRuntime('per_chat', db, messenger);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    try {
+      // Hold the provider turn open so the /stop below genuinely arrives mid-turn.
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('long running work');
+
+      await runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop', content: '/stop', senderJid: ADMIN_WA,
+      }));
+      // The control's HANDLER ran while the turn was still in flight — the
+      // mid-turn admission this leaf exists to prove. Waiting on the ack
+      // instead would wait out the teardown's bounded wait, which is a
+      // different assertion (outcome taxonomy, runtime-stop-command.test.ts).
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+
+      // It never became a provider turn and never entered the outbound queue as
+      // text: exactly one turn reached the provider, and it is not the control.
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/stop');
+      expect(enqueuedTexts()).not.toContain('/stop');
+      expect(mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+        .some((w) => w.includes('no handler'))).toBe(false);
+    } finally {
+      releaseTurn();
+    }
+  });
+
+  it('#2949 N1: a mid-turn compound /stop refuses the body instead of dispatching it', async () => {
+    // Registration gave /stop a compound-body path it never had as forwarded
+    // text: `/stop\n<body>` classifies local with a compoundBody, and the
+    // #2357 B1 fall-through would dispatch that body as a NEW turn under the
+    // same inbound, moments after this command tore the session down.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = makeRuntime('per_chat', db, messenger);
+    // Durable observable: a forwarded body after the per-chat teardown throws
+    // the missing-session error before it can reach the provider mock, and the
+    // outer handler swallows that into the generic message. Only the inbound
+    // row separates "refused" from "forwarded and died on the way".
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    // A per_chat teardown deletes this chat's outbound queue, so sendDirect
+    // falls back to the messenger for anything sent after it. Read both sinks.
+    const directTexts = (): string[] => [...enqueuedTexts(), ...sentMessages.map((m) => m.text)];
+    try {
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+      // Not awaited yet: the compound path runs only AFTER the stop handler
+      // returns, and that handler is waiting on the teardown of the turn this
+      // test is holding open. Awaiting here would deadlock against the release
+      // below, so drive the release first and then await the whole command.
+      const compoundSeq = durability.journalInbound(
+        'msg-stop-compound', 'k-stop-compound', DM_CHAT, 'agent',
+      );
+      const compoundStop = runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop-compound',
+        content: '/stop\nrun this other thing instead',
+        senderJid: ADMIN_WA,
+        inboundSeq: compoundSeq,
+      }));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+      releaseTurn();
+      await compoundStop;
+
+      // handleMessage returns once the per-chat turn is queued, so the
+      // acknowledgements land after it resolves; wait for the refusal FIRST.
+      // Asserting non-dispatch before this point would pass against a mutant
+      // that emits the refusal and forwards the body anyway (codex MED-3).
+      await vi.waitFor(
+        () => expect(directTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(true),
+        { timeout: 4_000 },
+      );
+      // Settle on ORDERING, not on a sleep: a later message's turn cannot reach
+      // the provider before an earlier forwarded body would have (per-chat
+      // FIFO), so once the probe has dispatched, a forwarded body would already
+      // be visible in the same mock.
+      await runtime.handleMessage(makeMsg({
+        messageId: 'msg-settle-probe', content: 'settle probe', senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('settle probe'));
+
+      // The body never became a turn, asserted AFTER the refusal was delivered
+      // and after a later turn overtook it.
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this other thing instead');
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(2);
+      expect(directTexts()).not.toContain('run this other thing instead');
+
+      // The refusal path completes the inbound as a locally-handled command. A
+      // forwarded body would take the turn path instead and, with the session
+      // gone, strand or fail the row — this is the assertion that separates
+      // them.
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(compoundSeq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(directTexts().some((text) => text.includes('Something went wrong processing that message'))).toBe(false);
+    } finally {
+      releaseTurn();
+      duraDb.close();
+    }
+  });
+
+  it('#2949 N1: a compound /stop still completes its inbound as local_command_handled', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.sendTurn.mockClear();
+
+    try {
+      const seq = durability.journalInbound('m-stop-compound', 'k-stop-compound', DM_CHAT, 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'm-stop-compound',
+        content: '/stop\ndo this instead',
+        senderJid: ADMIN_WA,
+        inboundSeq: seq,
+      }));
+
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      // The body-retained reason belongs to a FAILED handler; this one succeeded
+      // and simply refused the body, so the plain /stop terminal must stand.
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(true);
+      expect(enqueuedTexts()).not.toContain('do this instead');
+    } finally {
+      duraDb.close();
+    }
+  });
+
+  it('#2949 N1 positive control: an unfenced compound /new still dispatches its body', async () => {
+    // The fence and its body refusal must fire ONLY while a /stop teardown is
+    // unsettled. Without this, a condition that refused every compound /new
+    // would keep the whole suite green while silently dropping user text.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    // Premise of the control: nothing is fenced right now.
+    expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false);
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'm-new-compound-unfenced',
+      content: '/new\ndo this instead',
+      senderJid: ADMIN_WA,
+    }));
+
+    // #2357 B1 intact: the command ran and its body became a turn.
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    expect(mockSession.handleNew).toHaveBeenCalledOnce();
+    expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(false);
+    expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(false);
+  });
+
+  it('#2949 N1 positive control: a compound body on another command still dispatches', async () => {
+    // Falsifies "the refusal disabled compound bodies": /status keeps the
+    // #2357 B1 behaviour, so only /stop is narrowed.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.sendTurn.mockReset().mockResolvedValue(undefined);
+
+    await sendAndDrain(runtime, makeMsg({
+      messageId: 'm-status-compound',
+      content: '/status\ndo this instead',
+      senderJid: ADMIN_WA,
+    }));
+
+    await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledWith('do this instead'));
+    expect(enqueuedTexts().some((t) => t.includes('does not take a follow-up message'))).toBe(false);
+  });
+
+  it('#2949 N1: a mid-turn /stop in SHARED scope reaches the teardown path', async () => {
+    // Pins the claim the single-only wording rests on: shared enqueues the
+    // provider turn without awaiting it, so turnChain is free and the control
+    // is handled WHILE the task runs, exactly as in per_chat.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = makeRuntime('shared', db, messenger);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    try {
+      void runtime.handleMessage(makeMsg({ content: 'long running work', senderJid: ADMIN_WA }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+
+      void runtime.handleMessage(makeMsg({
+        messageId: 'msg-stop-shared', content: '/stop', senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((c) => String(c[1] ?? ''))
+          .some((w) => w.includes('/stop received mid-turn')),
+      ).toBe(true));
+
+      expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/stop');
+    } finally {
+      releaseTurn();
+      // The stop guard is module state keyed by scopeKey, and shared scope uses
+      // the same global key as single: leaving it held would fence the /new
+      // refusal case below. Wait it out here rather than depending on order.
+      await vi.waitFor(
+        () => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false),
+        { timeout: 4_000 },
+      );
+    }
+  });
+
+  it('#2949 N1: /new is refused while a /stop teardown for the scope is unsettled', async () => {
+    // The state N1 itself created: the bounded wait returns while the teardown
+    // runs on. /new would tear down again and RESET, spawning a replacement for
+    // an unproven cancellation. The scope is put into that state through the
+    // stop command's own entry point rather than by poking module state; a
+    // runtime-driven /stop cannot be used here, because while its teardown
+    // hangs the next inbound never reaches the command switch in this harness.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stopOutcome = await runStopCommand({
+      chatJid: DM_CHAT,
+      sessionScope: 'single',
+      scopeKey: GLOBAL_CONVERSATION_KEY,
+      perChatMapKey: null,
+      teardownTimeoutMs: 5,
+      isTurnInFlight: () => true,
+      isOutboundQueuePoisoned: () => false,
+      isSessionProvablyTerminated: () => true,
+      getPerChatSession: () => undefined,
+      abortPerChatQueue: () => {},
+      disposePerChatSession: async () => {},
+      getSingleSession: () => null,
+      abortActiveQueue: () => {},
+      terminalizeTurnForInterrupt: async () => { await gate; return {}; },
+      retireTurnQueueAfterInterrupt: async () => {},
+      shutdownOperationTracker: () => {},
+      cleanupGlobalAutoCompactState: () => {},
+      shutdownSingleSession: async () => {},
+      clearSingleScopeRefs: () => {},
+      clearTurnHadVisibleOutput: () => {},
+      sendDirect: () => {},
+    });
+
+    try {
+      // The bounded wait elapsed; the teardown is detached and still unsettled.
+      expect(stopOutcome).toBe('uncertain');
+      expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(true);
+
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'msg-new-during-stop', content: '/new', senderJid: ADMIN_WA,
+      }));
+
+      expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(true);
+      // Not a silent skip: /new never ran its reset epilogue.
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await vi.waitFor(() => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false));
+    }
+  });
+
+  it('#2949 N1: a compound /new refused during a teardown does not dispatch its body', async () => {
+    // The fence refuses the command, but the body rides the same inbound. Left
+    // to the #2357 B1 fall-through it becomes a NEW turn in exactly the scope
+    // whose teardown is unproven — the replacement the fence exists to stop.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger); // single scope
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    mockSession.handleNew.mockClear();
+    mockSession.sendTurn.mockClear();
+    const directTexts = (): string[] => [
+      ...enqueuedTexts(), ...sentMessages.map((msg) => msg.text),
+    ];
+
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stopOutcome = await runStopCommand({
+      chatJid: DM_CHAT,
+      sessionScope: 'single',
+      scopeKey: GLOBAL_CONVERSATION_KEY,
+      perChatMapKey: null,
+      teardownTimeoutMs: 5,
+      isTurnInFlight: () => true,
+      isOutboundQueuePoisoned: () => false,
+      isSessionProvablyTerminated: () => true,
+      getPerChatSession: () => undefined,
+      abortPerChatQueue: () => {},
+      disposePerChatSession: async () => {},
+      getSingleSession: () => null,
+      abortActiveQueue: () => {},
+      terminalizeTurnForInterrupt: async () => { await gate; return {}; },
+      retireTurnQueueAfterInterrupt: async () => {},
+      shutdownOperationTracker: () => {},
+      cleanupGlobalAutoCompactState: () => {},
+      shutdownSingleSession: async () => {},
+      clearSingleScopeRefs: () => {},
+      clearTurnHadVisibleOutput: () => {},
+      sendDirect: () => {},
+    });
+
+    try {
+      expect(stopOutcome).toBe('uncertain');
+      expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(true);
+
+      const seq = durability.journalInbound('m-new-compound', 'k-new-compound', DM_CHAT, 'agent');
+      await sendAndDrain(runtime, makeMsg({
+        messageId: 'm-new-compound',
+        content: '/new\nrun this instead',
+        senderJid: ADMIN_WA,
+        inboundSeq: seq,
+      }));
+
+      // Both halves are answered: the command and the body it carried.
+      expect(directTexts().some((text) => text.includes('/new is refused until it settles'))).toBe(true);
+      expect(directTexts().some((text) => text.includes('Your follow-up message was not sent'))).toBe(true);
+      // And the body went nowhere.
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('run this instead');
+      expect(mockSession.handleNew).not.toHaveBeenCalled();
+      const row = duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason FROM inbound_events WHERE seq = ?',
+      ).get(seq) as { processing_status: string; terminal_reason: string | null };
+      expect(row.processing_status).toBe('complete');
+      expect(row.terminal_reason).toBe('local_command_handled');
+      expect(directTexts().some((text) => text.includes('Something went wrong processing that message'))).toBe(false);
+    } finally {
+      release();
+      await vi.waitFor(() => expect(isStopTeardownInFlight(GLOBAL_CONVERSATION_KEY)).toBe(false));
+      duraDb.close();
+    }
+  });
+
   it('a FUTURE registry entry with no switch case warns and forwards to the agent (B21-A F4b)', async () => {
     // Simulated Phase-2 append (delegating override seams): classifier admits
     // '/stats', registry serves a spec, but the switch has no case — the
@@ -674,7 +1088,7 @@ describe('B22 group 3: denied gated commands finalize terminally and reply once'
   const gatedSpecs = [...COMMAND_REGISTRY].filter((spec) => spec.gate !== 'none');
 
   it('derives at least one gated entry from the registry (derivation tripwire)', () => {
-    expect(gatedSpecs.map((s) => s.name).sort()).toEqual(['kill-session', 'new', 'sessions']);
+    expect(gatedSpecs.map((s) => s.name).sort()).toEqual(['kill-session', 'new', 'sessions', 'stop']);
     for (const spec of gatedSpecs) expect(spec.gate === 'admin' || spec.gate === 'admin-shared-scope').toBe(true);
   });
 

@@ -7,6 +7,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
+import { ProcessTreeTerminationError, type KillSessionOutcome } from '../../../src/runtimes/agent/process-tree-contract.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 import {
@@ -101,7 +102,7 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
+vi.mock('../../../src/runtimes/agent/process-tree.ts', async () => ({
   captureProcessTreeRootAuthority: vi.fn((target: { pid?: number }) => ({
     pid: target.pid ?? 0,
     parentPid: process.pid,
@@ -129,7 +130,7 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
     diagnosticState: 'complete' as const,
     diagnosticCodes: [],
   })),
-  ProcessTreeTerminationError: class ProcessTreeTerminationError extends Error {},
+  ProcessTreeTerminationError: (await import('../../../src/runtimes/agent/process-tree-contract.ts')).ProcessTreeTerminationError,
 }));
 
 vi.mock('node:fs', () => ({
@@ -8136,6 +8137,93 @@ describe('process-tree cleanup diagnostic projection', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it.each(['terminated', 'permission denied'] as const)('admits a wedged cleanup request before its later %s outcome', async (outcome) => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    let resolveCleanup!: (result: KillSessionOutcome) => void;
+    let rejectCleanup!: (error: unknown) => void;
+    const cleanup = new Promise<KillSessionOutcome>((resolve, reject) => {
+      resolveCleanup = resolve;
+      rejectCleanup = reject;
+    });
+    const internal = sm as unknown as {
+      killChildTree: (child: MockChild, signal: NodeJS.Signals) => Promise<KillSessionOutcome>;
+    };
+    const cleanupSpy = vi.spyOn(internal, 'killChildTree').mockReturnValue(cleanup);
+    mockLogger.error.mockClear();
+
+    expect(sm.reapWedgedProviderChild()).toBe(true);
+    expect(cleanupSpy).toHaveBeenCalledWith(mockChild, 'SIGKILL');
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus().pid).toBe(mockChild.pid);
+    expect(mockLogger.error).not.toHaveBeenCalled();
+
+    if (outcome === 'permission denied') {
+      rejectCleanup(new ProcessTreeTerminationError(
+        'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+        'Private cleanup detail must not reach the diagnostic',
+      ));
+      await vi.waitFor(() => expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          errorCode: 'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+          retryClass: 'permission_denied',
+        }),
+        'failed to reap wedged provider process tree',
+      ));
+    } else {
+      resolveCleanup({
+        outcome: 'terminated',
+        durationMs: 0,
+        ownedProcessCount: 1,
+        signaledProcessCount: 1,
+        ambiguousProcessCount: 0,
+        diagnosticState: 'complete',
+        diagnosticCodes: [],
+      });
+      await cleanup;
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    }
+  });
+
+  it('declines a cleanup request with a child retained after typed shutdown failure', async () => {
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      treeLivenessAssessor: vi.fn(async () => null),
+    });
+    await sm.spawnSession();
+    const failure = new ProcessTreeTerminationError(
+      'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+      'Private cleanup detail must not reach the diagnostic',
+    );
+    const internal = sm as unknown as {
+      killChildTree: (child: MockChild, signal: NodeJS.Signals) => Promise<KillSessionOutcome>;
+    };
+    const cleanupSpy = vi.spyOn(internal, 'killChildTree').mockRejectedValue(failure);
+
+    await expect(sm.shutdown(false)).rejects.toBe(failure);
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      pid: mockChild.pid,
+      providerTerminated: false,
+      durableFailureInconclusive: true,
+    });
+    cleanupSpy.mockClear();
+
+    expect(sm.reapWedgedProviderChild()).toBe(false);
+    expect(cleanupSpy).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalled();
+    expect(sm.getStatus().pid).toBe(mockChild.pid);
   });
 
   it.each([

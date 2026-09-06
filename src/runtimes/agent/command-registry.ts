@@ -184,6 +184,27 @@ export const COMMAND_REGISTRY = [
     renderContract: { asOf: false },
   },
   {
+    // #2949 N1: the preemptive control that stops the running task WITHOUT
+    // starting a new session. Registered here (not in the classifier) because
+    // LOCAL_COMMANDS derives from this table — registration is exactly what
+    // keeps /stop out of the work FIFO, where it used to arrive as ordinary
+    // text and terminalize as an admission-rejected work turn.
+    name: 'stop',
+    summary: 'stop the running task',
+    syntax: '/stop',
+    tier: 'transport-local',
+    // Same gate as /new and for the same reason (WG-5): tearing down the active
+    // turn hits SHARED session state in single/shared scope and in a per_chat
+    // group; a per_chat 1:1 DM stops only the sender's own conversation.
+    gate: 'admin-shared-scope',
+    venue: 'any', // group-permitting exactly like /new; enforced inline via sessionScope/isGroup
+    visibility: 'end-user',
+    errorClasses: ['not-authorized', 'internal'],
+    // Immediate outcome acknowledgement — one of stopped / nothing-to-stop /
+    // uncertain. No live-metric read, so no as-of stamp.
+    renderContract: { asOf: false },
+  },
+  {
     name: 'status',
     summary: 'show current session status',
     syntax: '/status',

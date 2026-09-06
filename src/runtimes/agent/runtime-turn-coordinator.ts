@@ -2397,6 +2397,17 @@ async finalizeSharedProcessorError(
     session: this.host.session,
   });
   if (result.kind !== 'terminal' && !result.mayAdvance) {
+    if (error instanceof WedgedTurnReclaimedError) {
+      // FALLBACK ONLY, mirroring the per-chat path: a reclaimed turn normally
+      // finalizes as reclaimed_by_sweep (mayAdvance) and never reaches here.
+      // Parking the ONE global queue would re-create the exact wedge the
+      // reclaim is releasing, and in shared mode it blocks every chat.
+      log.warn(
+        { scopeKey: this.runtimeTurnScopeKey(context), resultKind: result.kind },
+        'wedged-turn reclaim finalization is non-terminal — durable ownership already held by the stale-reclaim sweep; advancing queue',
+      );
+      return;
+    }
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
   }
 }

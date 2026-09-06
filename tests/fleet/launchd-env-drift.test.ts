@@ -6,9 +6,13 @@
  * Installed bot plists carry live credentials, so no report may ever contain
  * a raw environment value — several tests below assert exactly that.
  */
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { compareGovernedLaunchdEnv } from '../../src/fleet/launchd-env-drift.ts';
+import { GOVERNED_LAUNCHD_ENV_KEYS, compareGovernedLaunchdEnv } from '../../src/fleet/launchd-env-drift.ts';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf-8').digest('hex');
@@ -207,19 +211,31 @@ describe('compareGovernedLaunchdEnv', () => {
     expect(JSON.stringify(comparison)).not.toContain(sentinel);
   });
 
-  it('treats an installed plist without EnvironmentVariables as missing every expected governed key', () => {
+  it('refuses an installed plist that declares no EnvironmentVariables element', () => {
+    // DIRECTION CHANGE, deliberate and disclosed. This used to report every
+    // expected governed key as `missing` with comparable: true, so --apply
+    // proceeded against a plist whose environment the reader never found. An
+    // absent element is not "there are genuinely no keys": that claim also
+    // empties droppedNonGovernedKeys, so the apply gate sees nothing to drop
+    // and the re-render erases whatever the installed job carried. The caller
+    // must acknowledge the drop with --drop-non-governed-env instead.
+    //
+    // The RENDERED argument is unaffected: buildPlist emits the marker, its
+    // dict and PATH as unconditional array literals, so a render always carries
+    // the element and can never be refused by this rule.
     const expected = plistWithEnv({ PATH: '/usr/bin' });
     const observed = plistWithEnv(null);
 
-    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(compareGovernedLaunchdEnv(expected, observed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
 
-    expect(comparison.comparable).toBe(true);
-    expect(comparison.drift).toEqual([{
-      key: 'PATH',
-      state: 'missing',
-      expectedDigest: sha256('/usr/bin'),
-      observedDigest: null,
-    }]);
+    // Positive control: the same helper WITH an environment still compares, so
+    // the refusal is attributable to the absent element and not to the fixture.
+    expect(compareGovernedLaunchdEnv(expected, plistWithEnv({ PATH: '/usr/bin' })).comparable).toBe(true);
   });
 
   it('digests the unescaped value so XML entities compare by content', () => {
@@ -659,6 +675,433 @@ describe('compareGovernedLaunchdEnv', () => {
       const comparison = compareGovernedLaunchdEnv(plist, plist, { pathPrepend: ['/opt/bin'] });
       expect(comparison.comparable).toBe(true);
       expect(comparison.drift).toEqual([]);
+    }
+  });
+
+  // --- Every inert XML region, not only the comment (queue row 130) ---
+  //
+  // A comment, a CDATA section and a processing instruction are all inert text
+  // to the system plist parser. Only the comment was masked, so a decoy
+  // `<key>EnvironmentVariables</key><dict/>` written inside either of the other
+  // two won the marker lookup and was read as the live environment. Both decoy
+  // fixtures lint clean and `plutil -extract EnvironmentVariables json`
+  // returns the live environment for them: these are valid plists the
+  // authoritative parser reads correctly and this reader read wrongly.
+  //
+  // The scenario is operator-caused, not attacker-caused. Someone who can write
+  // the LaunchAgent can write an honest dict, so an inert-XML shape confers
+  // nothing on an attacker. What it does is let a hand-edited or hand-migrated
+  // plist pass `--apply` while its own non-governed keys are deleted with NO
+  // key named in any message.
+
+  const LIVE_BODY_WITH_NON_GOVERNED_KEY = [
+    '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+    '    <key>OPERATOR_SECRET</key><string>keep-me</string>',
+  ];
+  const INERT_DECOY_LINES = [
+    '  <key>EnvironmentVariables</key>',
+    '  <dict/>',
+  ];
+
+  it('cannot be steered by a CDATA decoy dict placed before the live one', () => {
+    // Stated as a DIFFERENTIAL, exactly like the comment cell above: the same
+    // installed plist compared twice, once with the decoy and once without, and
+    // the two results must be identical. Pinning only the post-fix value would
+    // keep passing if the reader started refusing BOTH, which is different
+    // behaviour wearing the same green.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const decoyed = honest.replace(
+      '  <key>EnvironmentVariables</key>',
+      [
+        '  <key>Notes</key>',
+        '  <string><![CDATA[',
+        ...INERT_DECOY_LINES,
+        '  ]]></string>',
+        '  <key>EnvironmentVariables</key>',
+      ].join('\n'),
+    );
+    expect(decoyed).toContain('<![CDATA['); // the fixture really carries the decoy
+
+    const decoyedComparison = compareGovernedLaunchdEnv(expected, decoyed);
+    expect(decoyedComparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
+    // And the shared value is the LIVE dict's, so neither side is the decoy's.
+    expect(decoyedComparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(decoyedComparison)).not.toContain('keep-me');
+  });
+
+  it('cannot be steered by a processing-instruction decoy dict placed before the live one', () => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const decoyed = honest.replace(
+      '  <key>EnvironmentVariables</key>',
+      ['  <?ide', ...INERT_DECOY_LINES, '  ?>', '  <key>EnvironmentVariables</key>'].join('\n'),
+    );
+    expect(decoyed).toContain('<?ide');
+
+    const decoyedComparison = compareGovernedLaunchdEnv(expected, decoyed);
+    expect(decoyedComparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
+    expect(decoyedComparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+    expect(JSON.stringify(decoyedComparison)).not.toContain('keep-me');
+  });
+
+  it('refuses a marker spelled with whitespace in its tags rather than reading an empty environment', () => {
+    // `<key >EnvironmentVariables</key >` is the same element to the system
+    // parser and a spelling a hand-edit or a migration script can produce. This
+    // reader deliberately holds ONE literal spelling, so it does not find the
+    // marker -- and the answer to "I could not find the element you are about
+    // to overwrite" is a refusal, not an empty map. Parsing the spelling
+    // instead would make this reader newly ACCEPT a file it used to refuse,
+    // which is a contract widening this change does not take.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+
+    // Positive control: the canonical spelling of the SAME body enumerates the
+    // non-governed key, so the refusal below is attributable to the spelling.
+    expect(compareGovernedLaunchdEnv(expected, honest).droppedNonGovernedKeys)
+      .toEqual(['OPERATOR_SECRET']);
+
+    const spelled = honest.replace(
+      '  <key>EnvironmentVariables</key>',
+      '  <key >EnvironmentVariables</key >',
+    );
+    const comparison = compareGovernedLaunchdEnv(expected, spelled);
+    expect(comparison).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+    expect(JSON.stringify(comparison)).not.toContain('keep-me');
+  });
+
+  it('refuses a plist that declares EnvironmentVariables twice rather than picking a precedence', () => {
+    // "Exactly one top-level EnvironmentVariables dictionary." The system parser
+    // has its own precedence for a repeated key; this reader took the FIRST and
+    // would otherwise report a decoy map the loaded job does not have.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const twice = honest.replace(
+      '  <key>EnvironmentVariables</key>',
+      [
+        '  <key>EnvironmentVariables</key>',
+        '  <dict><key>PATH</key><string>/opt/decoy-bin</string></dict>',
+        '  <key>EnvironmentVariables</key>',
+      ].join('\n'),
+    );
+
+    expect(compareGovernedLaunchdEnv(expected, twice)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+    // Positive control: one declaration of the same body still compares.
+    expect(compareGovernedLaunchdEnv(expected, honest).comparable).toBe(true);
+  });
+
+  it('refuses a canonical marker followed by an XML-whitespace-padded marker', () => {
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const mixed = honest.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict><key>PATH</key><string>/opt/decoy-bin</string></dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+
+    expect(mixed).toContain('<key>EnvironmentVariables</key>');
+    expect(mixed).toContain('<key >EnvironmentVariables</key >');
+    expect(mixed).toContain('/opt/decoy-bin');
+    expect(compareGovernedLaunchdEnv(expected, honest).droppedNonGovernedKeys)
+      .toEqual(['OPERATOR_SECRET']);
+
+    expect(compareGovernedLaunchdEnv(expected, mixed)).toEqual({
+      comparable: false,
+      reason: 'environment-variables-unparseable',
+      drift: [],
+      droppedNonGovernedKeys: [],
+    });
+  });
+
+  it('keeps refusing a CDATA value inside the body, which masking alone would have let through', () => {
+    // THE CELL THE MASK ALONE WOULD HAVE OPENED, measured rather than reasoned.
+    // The mask blanks an inert region to '-', and '-' is legal CHARACTER DATA:
+    // `<string><![CDATA[/opt/bin]]></string>` masks to `<string>` + twenty
+    // dashes + `</string>`, which the pair pattern's [^<]* value group matches.
+    // The body would then have counted as "fully consumed" and parsed to a
+    // dash-valued key -- a cell that fails closed today turned fail-open by its
+    // own fix. The whitespace rules cannot catch it, because the region is not
+    // in a whitespace-only gap; the reader refuses on a masked span
+    // INTERSECTING the body, and removing that intersection check is what makes
+    // this test fail.
+    const expected = plistWithSpelledEnv({
+      env: { PATH: '/opt/bin:/usr/bin', WHATSOUP_PATH_PREPEND: '/opt/bin' },
+    });
+    const observed = plistWithRawEnvBody([
+      '    <key>PATH</key><string>/opt/bin:/usr/bin</string>',
+      '    <key>WHATSOUP_PATH_PREPEND</key><string><![CDATA[/opt/bin]]></string>',
+    ]);
+
+    const comparison = compareGovernedLaunchdEnv(expected, observed);
+    expect(comparison.comparable).toBe(false);
+    // No masked filler ever became a value: the report carries no dash run.
+    expect(JSON.stringify(comparison)).not.toContain('--');
+  });
+
+  it('masks the earliest inert opener, so a processing instruction carrying a comment opener stays one region', () => {
+    // A processing instruction may carry '<!--' as literal text, and a comment
+    // may carry '<?'. Searching one kind before the others rather than taking
+    // the EARLIEST opener splits one region into a mismatched pair: here the
+    // '<!--' inside the instruction has no '-->', so a comment-first scan would
+    // call the file unterminated and refuse a plist the system parser loads.
+    const expected = plistWithSpelledEnv({ env: { PATH: '/opt/bin:/usr/bin' } });
+    const honest = plistWithRawEnvBody(LIVE_BODY_WITH_NON_GOVERNED_KEY);
+    const nested = honest.replace(
+      '  <key>EnvironmentVariables</key>',
+      ['  <?ide fold <!-- not a comment ?>', '  <key>EnvironmentVariables</key>'].join('\n'),
+    );
+
+    const comparison = compareGovernedLaunchdEnv(expected, nested);
+    expect(comparison).toEqual(compareGovernedLaunchdEnv(expected, honest));
+    expect(comparison.droppedNonGovernedKeys).toEqual(['OPERATOR_SECRET']);
+  });
+});
+
+// --- ONE reader contract, proved against ONE corpus (queue row 129) ---
+//
+// `src/fleet/launchd-env-drift.ts` and `deploy/scripts/bot-errors-health-check.py`
+// are two independently written parsers for the same security-sensitive file.
+// They drifted apart one hand-mirrored fix at a time -- duplicate-key refusal
+// reached both sides months apart, and a missing marker meant "empty" on one
+// side and "unreadable" on the other. The corpus below is plain .plist files in
+// one directory with a manifest naming the required answer, driven by BOTH
+// suites: this file through `compareGovernedLaunchdEnv`, and
+// `deploy/scripts/tests/test_bot_errors_health_check_provider_probe.py` through
+// `instance_plist_environment`. A divergence is then a test failure rather than
+// a discovery. The answers come from
+// docs/runbooks/launchd-governed-env-reader-contract.md.
+interface ContractCase {
+  name: string;
+  fixture: string;
+  answer: 'refuse' | 'empty' | 'map';
+  why: string;
+  environment?: Record<string, string>;
+  /**
+   * A cell deliberately left divergent, carrying the OTHER reader's answer.
+   * `environment` above stays this reader's answer, so fixing only one side
+   * turns that side's row red and forces the decision instead of hiding it.
+   */
+  openDivergence?: { id: string; python: Record<string, string> };
+}
+
+interface ContractManifest {
+  contract: string;
+  instance: string;
+  answers: readonly string[];
+  cases: readonly ContractCase[];
+}
+
+interface CorpusObservation {
+  name: string;
+  declared: ContractCase['answer'];
+  observed: string;
+  /** Serialised comparisons, so the privacy test can read what was reported. */
+  reported: string;
+}
+
+describe('launchd governed-env reader contract corpus', () => {
+  const CORPUS_DIR = fileURLToPath(new URL('../fixtures/launchd-env-plist-contract/', import.meta.url));
+
+  /**
+   * The governed key set OWNED BY THIS TEST, written as a literal.
+   *
+   * The corpus expectations are computed from this constant and never from
+   * GOVERNED_LAUNCHD_ENV_KEYS. Deriving the domain from the value under test
+   * makes the oracle follow the implementation: widen the production set
+   * wrongly and the rows that prove the widening wrong change meaning while the
+   * suite stays green. The equality assertion below pins production to it.
+   */
+  const GOVERNED_KEYS_UNDER_CONTRACT = ['CLAUDE_CONFIG_DIR', 'PATH', 'WHATSOUP_PATH_PREPEND'];
+
+  function readManifest(): ContractManifest {
+    return JSON.parse(readFileSync(path.join(CORPUS_DIR, 'manifest.json'), 'utf-8')) as ContractManifest;
+  }
+
+  /** The generator's escaping, so a declared value round-trips through a render. */
+  function escapeXmlValue(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function renderContractPlist(environment: Record<string, string>): string {
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>Label</key>',
+      '  <string>com.whatsoup.agent-alpha</string>',
+      '  <key>EnvironmentVariables</key>',
+      '  <dict>',
+      ...Object.entries(environment).flatMap(([key, value]) => [
+        `    <key>${key}</key>`,
+        `    <string>${escapeXmlValue(value)}</string>`,
+      ]),
+      '  </dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+  }
+
+  /** A render that carries a governed key, for probing a refusal or an empty map. */
+  const PROBE_RENDER = renderContractPlist({ PATH: '/opt/probe-bin:/usr/bin' });
+
+  /**
+   * Arrange, act, and RETURN the observations. Every assertion lives in a named
+   * test below rather than inside this loop, so a case that stops running shows
+   * up as a coverage failure instead of vanishing quietly.
+   */
+  function runContractCorpus(): CorpusObservation[] {
+    const manifest = readManifest();
+    return manifest.cases.map((contractCase) => {
+      const fixture = readFileSync(path.join(CORPUS_DIR, contractCase.fixture), 'utf-8');
+      const environment = contractCase.environment ?? {};
+      const reported: string[] = [];
+      const record = <T>(comparison: T): T => {
+        reported.push(JSON.stringify(comparison));
+        return comparison;
+      };
+
+      if (contractCase.answer === 'refuse') {
+        const comparison = record(compareGovernedLaunchdEnv(PROBE_RENDER, fixture));
+        return {
+          name: contractCase.name,
+          declared: contractCase.answer,
+          observed: comparison.comparable ? 'readable' : 'refuse',
+          reported: reported.join(''),
+        };
+      }
+
+      // Against a render of the DECLARED environment the reader must agree with
+      // it exactly: no governed drift (governed values compare by digest of the
+      // decoded text) and nothing dropped.
+      const mirror = record(compareGovernedLaunchdEnv(renderContractPlist(environment), fixture));
+      // Against a render carrying only the governed subset, the non-governed
+      // names the fixture declares must be the ones an apply would drop.
+      const governedOnly = Object.fromEntries(
+        Object.entries(environment).filter(([key]) => GOVERNED_KEYS_UNDER_CONTRACT.includes(key)),
+      );
+      const stripped = record(compareGovernedLaunchdEnv(renderContractPlist(governedOnly), fixture));
+      const expectedDropped = Object.keys(environment)
+        .filter((key) => !GOVERNED_KEYS_UNDER_CONTRACT.includes(key))
+        .sort();
+      const declaredPath = environment.PATH;
+      const pathValueMatches = declaredPath === undefined
+        || mirror.pathPrefix?.observedDigest === sha256(declaredPath);
+
+      let observed: string;
+      if (!mirror.comparable || !stripped.comparable) {
+        observed = 'refuse';
+      } else if (!pathValueMatches) {
+        observed = 'path-value-mismatch';
+      } else if (mirror.drift.length > 0 || mirror.droppedNonGovernedKeys.length > 0) {
+        observed = `disagrees(drift=${mirror.drift.map((entry) => `${entry.key}:${entry.state}`).join('|') || 'none'},dropped=${mirror.droppedNonGovernedKeys.join('|') || 'none'})`;
+      } else if (JSON.stringify(stripped.droppedNonGovernedKeys) !== JSON.stringify(expectedDropped)) {
+        observed = `dropped=${stripped.droppedNonGovernedKeys.join('|') || 'none'}`;
+      } else if (contractCase.answer === 'empty') {
+        // An empty map is a CLAIM that the element is there and holds nothing,
+        // so every governed key of a real render must read as missing. Without
+        // this the row would be indistinguishable from a fixture that happens to
+        // match an empty render.
+        const probe = record(compareGovernedLaunchdEnv(PROBE_RENDER, fixture));
+        observed = probe.comparable
+          && probe.drift.length === 1
+          && probe.drift[0]?.key === 'PATH'
+          && probe.drift[0]?.state === 'missing'
+          ? 'empty'
+          : 'not-empty';
+      } else {
+        observed = 'map';
+      }
+
+      return {
+        name: contractCase.name,
+        declared: contractCase.answer,
+        observed,
+        reported: reported.join(''),
+      };
+    });
+  }
+
+  it('answers every corpus fixture exactly as the manifest declares', () => {
+    const observations = runContractCorpus();
+    expect(observations.map((observation) => `${observation.name}=${observation.observed}`))
+      .toEqual(observations.map((observation) => `${observation.name}=${observation.declared}`));
+  });
+
+  // @skip-env plutil is the macOS system parser and is unavailable on other CI hosts.
+  it.skipIf(process.platform !== 'darwin')('pins the CDATA fixture validity and live dictionary with the macOS system parser', () => {
+    const fixture = path.join(CORPUS_DIR, 'cdata-decoy-before-marker.plist');
+    const lint = execFileSync('/usr/bin/plutil', ['-lint', fixture], { encoding: 'utf-8' });
+    const extracted = execFileSync(
+      '/usr/bin/plutil',
+      ['-extract', 'EnvironmentVariables', 'json', '-o', '-', fixture],
+      { encoding: 'utf-8' },
+    );
+
+    expect(lint).toContain(': OK');
+    expect(JSON.parse(extracted)).toEqual({
+      PATH: '/opt/bin:/usr/bin',
+      OPERATOR_SECRET: 'keep-me',
+    });
+  });
+
+  it('runs one case for every manifest entry', () => {
+    // COVERAGE ASSERTION, not a positive control. A positive control catches a
+    // corpus that fails to parse; only a count catches a case that silently
+    // stopped running, which is how a table-driven corpus decays into theatre.
+    const manifest = readManifest();
+    expect(manifest.cases.length).toBeGreaterThan(0);
+    expect(runContractCorpus()).toHaveLength(manifest.cases.length);
+  });
+
+  it('names exactly the fixtures the corpus directory holds', () => {
+    // The other half of coverage: a manifest entry count alone stays green when
+    // a fixture file is deleted along with its row. Reading the DIRECTORY makes
+    // an orphaned or an unlisted fixture a failure.
+    const manifest = readManifest();
+    const onDisk = readdirSync(CORPUS_DIR).filter((entry) => entry.endsWith('.plist')).sort();
+    expect(onDisk).toEqual(manifest.cases.map((contractCase) => contractCase.fixture).sort());
+  });
+
+  it('governs exactly the keys the corpus expectations are written against', () => {
+    // Pins production to the test-owned constant above, so widening
+    // GOVERNED_LAUNCHD_ENV_KEYS cannot quietly change what the corpus means.
+    expect([...GOVERNED_LAUNCHD_ENV_KEYS].sort()).toEqual([...GOVERNED_KEYS_UNDER_CONTRACT].sort());
+  });
+
+  it('reports no environment value from any corpus fixture', () => {
+    // The corpus carries a non-governed key on several fixtures. Its VALUE must
+    // never reach a comparison: non-governed keys contribute names only.
+    const reported = runContractCorpus().map((observation) => observation.reported).join('');
+    expect(reported).not.toContain('keep-me');
+  });
+
+  it('states an answer from the contract vocabulary for every case', () => {
+    // "Unspecified" is not a cell. A fixture added without deciding its answer
+    // fails here rather than being carried as an untested file.
+    const manifest = readManifest();
+    for (const contractCase of manifest.cases) {
+      expect(manifest.answers).toContain(contractCase.answer);
+      expect(contractCase.why.length).toBeGreaterThan(0);
     }
   });
 });

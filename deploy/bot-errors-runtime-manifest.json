@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "99a13266adfcf2c16d6c04be2d62c3edcb2a71844f8aa8ba5f9321db877c2591",
+      "sha256": "02d296b6865c665dd8400d3310aae07d320b8636655254d42a449eaafca899ac",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "8f2f0999c9c17deb7a8fafcbbcbcc4ce0bd4f7c9c2dfba40fc3dcdd9e6d26045",
+      "sha256": "c19965e513909e2b03c0236dfff67d8ede192d55a6fd8ea9f00f18fd91b48e39",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -227,6 +227,8 @@
         "deadman_observation_gap_line",
         "deadman_observation_gap_inventory",
         "instance_plist_environment",
+        "mask_inert_xml_regions",
+        "PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE",
         "instance_plist_governed_environment",
         "GOVERNED_PLIST_UNREADABLE",
         "GOVERNED_PLIST_NOT_APPLICABLE",

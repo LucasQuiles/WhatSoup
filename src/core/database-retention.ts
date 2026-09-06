@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import { MS_PER_DAY } from '../lib/time-units.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
+import { DEFERRED_TURN_NON_TERMINAL_STATUS_SQL } from './deferred-turn-store.ts';
 import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.ts';
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
@@ -250,6 +251,21 @@ export function runDatabaseRetention(
              FROM inbound_disposition_links
             WHERE inbound_seq = inbound_events.seq
                OR superseded_by_seq = inbound_events.seq
+         )
+         -- #3295 required behaviour 8: a deferred follower's replay envelope is
+         -- only replayable while its SOURCE inbound still exists, so a
+         -- non-terminal obligation holds that inbound regardless of age or
+         -- processing status. Deliberately scope-agnostic — the store's own
+         -- predicate is keyed by (scope, inbound_seq), but retention has no
+         -- scope to key on and must fail closed on any scope class that still
+         -- owes replay. With the deferredTurnAdmission flag off no obligation
+         -- rows exist, so this guard is vacuously true and the sweep is
+         -- unchanged.
+         AND NOT EXISTS (
+           SELECT 1
+             FROM deferred_turn_obligations
+            WHERE deferred_turn_obligations.inbound_seq = inbound_events.seq
+              AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
          )
     `).run(terminalCutoff));
 
