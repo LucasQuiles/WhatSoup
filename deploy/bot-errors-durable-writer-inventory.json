@@ -24,7 +24,8 @@
     "deploy/scripts/bot-errors-gui-session-monitor.py",
     "deploy/scripts/bot-errors-maintenance.py",
     "deploy/scripts/bot-errors-tree-provenance.py",
-    "deploy/scripts/bot_errors_cutover.py"
+    "deploy/scripts/bot_errors_cutover.py",
+    "deploy/scripts/lib/producer_cadence_receipt.py"
   ],
   "embedded_publishers": [
     "collector.REMOTE_CLAIM_SCRIPT.<module>",
@@ -1079,6 +1080,17 @@
       "result_policy": "aggregate_all",
       "result_consumer": "restore_service_to_always_on",
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "producer-cadence-receipt",
+      "script": "deploy/scripts/lib/producer_cadence_receipt.py",
+      "function": "record_cadence_receipt",
+      "logical_publication": "release_proof.producer_cadence_receipt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "record_cadence_receipt",
+      "fault_test_ids": ["cadence.receipt-failure-swallowed-tree-provenance", "cadence.receipt-failure-swallowed-runtime-staleness"]
     }
   ]
 }

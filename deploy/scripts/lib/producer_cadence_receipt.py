@@ -97,10 +97,13 @@ CLOCK_COMPATIBLE_SCHEMA_VERSIONS: frozenset[int] = frozenset(
     {CADENCE_RECEIPT_SCHEMA_VERSION}
 )
 
-# The durable-publication component label. One label for both producers: the
+# The durable-publication component label is "release_proof.producer_cadence_receipt",
+# and it is written inline at both call sites below rather than held in a
+# constant. The durability guard reads the component keyword as an AST
+# constant, so a named reference makes the publication invisible to the
+# inventory that is supposed to cover it. One label serves both producers: the
 # producer is carried in the payload, not in the component name, so the
 # operation identity stays stable across a producer rename.
-CADENCE_RECEIPT_COMPONENT = "release_proof.producer_cadence_receipt"
 
 
 class ProducerIdentity(str, Enum):
@@ -400,16 +403,19 @@ def record_cadence_receipt(
         DURABLE_WRITE_FIELD: durable_write.value,
         INVOCATION_CONTEXT_FIELD: invocation_context().value,
     }
+    # The component label is inline at both call sites, not a named constant:
+    # the durability guard resolves it as an AST constant and cannot follow a
+    # name, so a constant here would hide this publication from the inventory.
     publication_operation = operation_id(
         target,
         receipt,
-        component=CADENCE_RECEIPT_COMPONENT,
+        component="release_proof.producer_cadence_receipt",
         predecessor=observation.version,
     )
     publication = publish_state_json(
         target,
         receipt,
-        component=CADENCE_RECEIPT_COMPONENT,
+        component="release_proof.producer_cadence_receipt",
         operation_id=publication_operation,
         expected=observation.version,
         generation=(observation.version.generation or 0) + 1,
