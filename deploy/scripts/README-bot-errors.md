@@ -941,8 +941,14 @@ runtime-staleness cadence_receipt_error <ExceptionClassName>
 
 A producer whose receipts stop advancing while these lines appear in the
 journal has a writable-state problem, not a dead timer. A producer whose
-receipts stop advancing with no line at all has a timer that never fired,
-because a missing or unwritten receipt reads as empty rather than as an error.
+receipts stop advancing with no line at all is not necessarily a dead timer: it
+means nothing reached this file. Among the reasons are a timer that never
+fired, a wrapper that refused the cycle before the detector launched (a held
+lock exits 75, a bad mode file or a missing dependency exits 2), a process that
+died before its first stamp, and a state-directory override that moved the
+receipt somewhere else. A missing or unwritten receipt reads as empty rather
+than as an error, so the receipt alone cannot separate them; the unit's own
+result and the wrapper's stderr can.
 
 Mode-lock is the first kind and not the second. The durable reader refuses any
 group- or world-accessible bit on the receipt file, which a restore from backup
