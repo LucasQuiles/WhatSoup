@@ -316,7 +316,7 @@ asset within bounded alert output. Design review must compare producer-side
 prioritization with the existing structured alert projection, account for
 multiple failures and overflow, and preserve backend redaction and authored
 chat fidelity as distinct contracts. Enlarging limits or weakening D22c does
-not establish that invariant. No new production repair is selected; the
+not establish that invariant. At that investigation checkpoint no new production repair was selected; the
 existing receipt-mode issue has a different causal path.
 
 The five complete messaging/routing files were also rerun at `5e6a92a8`:
@@ -325,3 +325,54 @@ three failed-elevation diagnostics and the transformer-precedence warning.
 The private lane ledger retains raw stage receipts, exact source identities,
 proof scripts and intentional diagnostic-artifact dispositions. These local
 results do not supersede the failed release gate or establish merge readiness.
+
+## Backend evidence repair — local validation, 2026-09-06
+
+The follow-up repair uses the existing dispatcher display boundary, not a new
+producer schema or hook. Exact `daily-health` events render complete transformed
+failure lines, warning-only lines and routine context in stable priority order.
+The producer and renderer share the existing line-membership predicates; queued
+evidence order, severity, classification, incident identity and recovery remain
+unchanged. Other event sources retain the legacy formatter.
+
+The default message cap remains 5,500 characters and the evidence cap remains
+1,800. Identity, structured failure, requested action and delivery freshness are
+budgeted before evidence and optional diagnostics. The complete evidence passes
+through backend redaction before line selection, retaining multiline-secret
+confinement. Omission counts describe transformed line occurrences, not incidents
+or assets. When findings do not fit, the alert explicitly warns that coverage is
+incomplete and that the selected asset's finding may be omitted. It does not
+present a cut prefix as a complete finding. If the core cannot fit, the renderer
+returns an explicitly incomplete notice; a custom cap too small even for that
+notice raises a configuration error instead of returning a misleading alert.
+
+The final rendering file has 22 passing tests, including four property tests and
+three deterministic producer/dispatcher cases. The first fixed-case revision had
+37 tests; property-based consolidation retains its exact boundary examples and
+broadens the generated input domains. Before implementation, its first
+regression set reproduced 12 rendering failures alongside six valid controls.
+A subsequent negative control caught loss of the stale-redelivery warning; the
+warning now shares the protected core budget. Coverage includes exact evidence
+boundaries, 322 whole-message limits, Unicode expansion, multiline secrets,
+multiple/duplicate findings, legacy values and unchanged non-daily sources.
+
+The former private stage observer's essential cases are now repository tests:
+real producer and dispatcher processes retain stdout, stderr, queued events and
+delivered records. Permissive 0644/0666 files preserve the complete failure and
+basename; a valid 0600 file remains an informational clear suppressed without a
+send. All six child processes must exit successfully. These are isolated local
+tests using simulated platform inputs, not Linux-host or live-deployment proof.
+
+The unchanged shell drills passed all 147 assertions, including D22c, and the
+final full backend behavioral suite passed 2,862 tests. Both bounded runners reported
+successful outcomes without timeout. Runtime hashes were refreshed for the
+three changed Python files. Test Integrity reports zero new findings, 81 existing
+baseline findings and three existing line-location drifts; no baseline or rule
+changed. Independent production and final test reviews found no blocker; the
+production review's ambient-cap fixture finding was reproduced and fixed. The full
+release gate remains pending; these results alone do not authorize merge or
+establish deployment.
+
+The [implementation plan](../superpowers/plans/2026-09-06-daily-health-alert-evidence.md)
+records the remaining integration gates. Authored-chat output fidelity remains a
+separate contract and is not subjected to this backend evidence policy.

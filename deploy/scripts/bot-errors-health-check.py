@@ -32,6 +32,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
 from lib.target_provenance import safe_observer_provenance, safe_target_provenance
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
@@ -9099,13 +9100,10 @@ def daily() -> int:
     ]
     if tool_fail_line:
         lines.insert(0, tool_fail_line)
-    failures = [
-        line for line in lines
-        if line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line
-    ]
+    failures = [line for line in lines if daily_health_line_is_failure(line)]
     if tool_failure_entry:
         failures.append(tool_failure_entry)
-    warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
+    warnings = [line for line in lines if daily_health_line_is_warning(line)]
     severity = daily_summary_severity(failures, warnings)
     evidence = "\n".join(lines)
     critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None

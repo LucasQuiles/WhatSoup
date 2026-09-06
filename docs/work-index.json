@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-01T20:52:46Z",
+  "generated_at": "2026-09-06T01:11:43Z",
   "repo": "WhatSoup",
-  "git_head": "2f8580e531b5db34d4fddadebc860f490a4897ee",
+  "git_head": "a8dbcc2dde286584943102ab192d96b6383d9977",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 130,
+  "total": 131,
   "schema_version": 5,
   "rows": [
     {
@@ -967,6 +967,19 @@
       "supersedes_hint": null,
       "last_modified": "2026-08-27",
       "size_bytes": 1997
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md",
+      "kind": "plan",
+      "topic_raw": "2026-09-06-daily-health-alert-evidence",
+      "topic": "daily-health-alert-evidence",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "executable",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-09-06",
+      "size_bytes": 7047
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",

@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "d874d4903f9dbd2481b0f8573ffb3c3071854371d3be192cabce872b211649b6",
+      "sha256": "6597d496e8b0d9f7e9126ab6fc9a6595d8c1dc28f89539f2900d53ec0489eb0d",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c19965e513909e2b03c0236dfff67d8ede192d55a6fd8ea9f00f18fd91b48e39",
+      "sha256": "137a708caae254812af5642d45b4e8050970331a8dfb3d58cef9976677b4efb1",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -434,7 +434,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
+      "sha256": "eb750aab0f6ddb1589236027fa508dfd48a8f2d432035401015369a474e0efe0",
       "mustContain": [
         "daily_health_host_from_payload",
         "normalize_hub_host",
