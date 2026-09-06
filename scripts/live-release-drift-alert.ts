@@ -363,7 +363,13 @@ function releaseIdentityToken(identity: string): string {
  * `release-missing` is reachable through the documented `--manifest` override,
  * and a test pins its token there as a real digest rather than the sentinel.
  *
- * Discrimination is restored for every drift kind except `manifest-missing`.
+ * Discrimination is restored for every drift kind except `manifest-missing`,
+ * and except any event whose identity computation degrades to the sentinel:
+ * `readManifestFacts` re-reads the manifest the drift report already read, so a
+ * manifest that stops being readable or parseable in between either fails that
+ * read or leaves `releaseIdentityFromManifestText` with unparseable JSON or a
+ * rejected schema, and `containedReleaseIdentity` below degrades any unexpected
+ * error to the sentinel rather than let it suppress the alert.
  *
  * The issue count stays, and it is a property of the drift rather than of the
  * release. Two hosts running the same release that drift to different extents
