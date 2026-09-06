@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "d874d4903f9dbd2481b0f8573ffb3c3071854371d3be192cabce872b211649b6",
+      "sha256": "6b76e2f11f754e41e3a886addd5fb306e6e3a7c8e223c0edda9ae8b57dff6eeb",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -94,7 +94,13 @@
         "dispatcher.unrenderable_meta_alert",
         "write_unrenderable_breadcrumb",
         "reconcile_unrenderable_signals",
-        "drop_unrenderable_breadcrumbs"
+        "drop_unrenderable_breadcrumbs",
+        "STORM_RECEIPT_MAX_RECORDS",
+        "storm_window_identity",
+        "write_storm_digest_receipt",
+        "acknowledge_storm_digest_receipt",
+        "reconcile_storm_digest_receipts",
+        "dispatcher.storm_receipt"
       ]
     },
     {

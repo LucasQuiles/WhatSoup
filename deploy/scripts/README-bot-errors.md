@@ -348,6 +348,26 @@ retention, no compaction, no rewriting and no move; it only counts what is
 already there. Retention thresholds, terminal-status rewriting and any
 deletion path remain unimplemented and are gated separately (issue #2459).
 
+**Storm-collapse digest receipts (#2387).** Each collapsed window writes one
+receipt under `storm-receipts/` immediately before its digest is published, and
+the receipt is marked published only once that publication is proven, so a
+process that dies in between leaves a durable record of the page it owed. A
+receipt carries bounded counts, the severity bucket, the window identity and the
+opaque fingerprint; it carries no manifest path, no fingerprint basis, no host
+names and no summary text. The dispatcher owns their retention:
+`BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS` (default 128) bounds the retained set, the
+oldest window is evicted first, and every drop is recorded in the dispatch log
+with its window and whether its page had been proven published. Nothing outside
+that set is removed, and no incident, clear or sweep path rewrites a receipt.
+
+The stale sweep and its auto-close language still apply to storm-collapse
+incident keys. Keying a digest by its window multiplies the open-incident store
+from one storm record to one per fingerprint per window, and the sweep is
+currently the only bound on that store, so removing it for these keys without
+first supplying a replacement bound would remove the only bound there is.
+Until a follow-up supplies one, an operator record for a closed window can still
+receive stale and auto-close language.
+
 ### Controller diagnostic envelope
 
 The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new
@@ -472,7 +492,7 @@ and `deploy/bot-errors-expected-fleet.json` owns the sanitized monitoring scope.
 | Runtime lifecycle, provider, transport, and delivery events | Runtime call sites writing through `src/lib/bot-errors-outbox.ts` / `src/lib/emit-alert.ts`; generic command failures may use `bot-errors-runner.py` | Event-driven in the owning WhatSoup service | Local durable outbox; collector relays remote events; dispatcher owns dedupe, incident state, suppression, and final delivery |
 | Turn-recovery supervisor liveness | `src/runtimes/agent/turn-recovery-deadman.ts`, reading successful scan health outside the supervisor timer | Independent in-process cadence every 15 seconds, with 45-second startup grace and staleness threshold | Deadman owns checked alert/clear derivation; dispatcher owns dedupe, incident state, and delivery |
 | Remote host outbox collection | `bot-errors-collector.py` | `bot-errors-collector.service`, daemon poll every 30 seconds | Collector owns claim/ack/relay receipts; dispatcher owns the resulting incident lifecycle |
-| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, and delivery fallback |
+| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, delivery fallback, and retention of the per-window storm-collapse receipts under `storm-receipts/` |
 | Dispatcher deadman | `bot-errors-health-check.py --deadman --max-state-age 180` | `bot-errors-deadman.timer`, every 5 minutes | Health check emits the incident; dispatcher delivers it |
 | Hub-lane heartbeat and queue backlog | `bot-errors-heartbeat-watchdog.py --once` | `bot-errors-heartbeat-watchdog.timer`, every 5 minutes | Watchdog owns detection and is the only force-notify producer; dispatcher owns incident state and delivery |
 | Capability, configuration, auth-bond, provider-probe, and per-instance daily health | `bot-errors-health-check.py --daily`, wrapped by `bot-errors-runner.py` | `bot-errors-health-check.timer`, daily at 07:15 in the checked-in systemd unit | Health check owns inventory and per-instance failure/clear derivation; dispatcher owns incident state and delivery |
