@@ -276,6 +276,35 @@ def test_lock_skip_moves_neither_clock(state_dir, clock, producer):
 
 
 @pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
+def test_lock_skip_defaults_to_a_fetch_that_was_never_attempted(state_dir, producer):
+    # The default is the behaviour the tree producer already has, so it is
+    # pinned here: adding the keyword must not change what a caller that says
+    # nothing records.
+    pcr.record_lock_skip(producer, mode=pcr.CadenceMode.EMIT)
+
+    receipt = _payload(producer)
+    assert receipt["fetchStatus"] == "not_attempted"
+    assert receipt["durableWrite"] == "not_reached"
+
+
+def test_lock_skip_records_a_structurally_absent_fetch_step_when_told(state_dir):
+    # Runtime-staleness has no fetch step at all, so not_attempted would say
+    # "had one and did not use it this cycle" on the one outcome this leaf
+    # cannot reach through the producer. The recorder takes the same keyword
+    # the other three take, so the caller that knows can say so.
+    pcr.record_lock_skip(
+        RUNTIME_STALENESS,
+        mode=pcr.CadenceMode.EMIT,
+        fetch_status=pcr.FetchStatus.NOT_APPLICABLE,
+    )
+
+    receipt = _payload(RUNTIME_STALENESS)
+    assert receipt["outcome"] == "lock_skip"
+    assert receipt["fetchStatus"] == "not_applicable"
+    assert receipt["durableWrite"] == "not_reached"
+
+
+@pytest.mark.parametrize("producer", BOTH_PRODUCERS, ids=lambda p: p.value)
 def test_success_without_a_recorded_attempt_backfills_the_attempt_clock(state_dir, clock, producer):
     # The attempt receipt is publishable and therefore losable: both producers
     # swallow a receipt failure, so a cycle can reach its success stamp with no

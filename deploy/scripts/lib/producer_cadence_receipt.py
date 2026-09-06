@@ -518,6 +518,7 @@ def record_lock_skip(
     producer: ProducerIdentity,
     *,
     mode: CadenceMode,
+    fetch_status: FetchStatus = FetchStatus.NOT_ATTEMPTED,
 ) -> PublicationResult:
     """Record a cycle the shared lock refused, advancing neither clock.
 
@@ -525,6 +526,16 @@ def record_lock_skip(
     nothing was observed, so ``lastSuccessfulObservationAt`` must not either.
     ``lastInvocationAt`` still advances, which is what separates a contended
     lock from a stopped timer.
+
+    ``fetch_status`` is accepted for the same reason the other three recorders
+    accept it, and defaults to the same value this one used to hardcode. Both
+    producers funnel every receipt through a private wrapper that supplies the
+    keyword unconditionally and swallows whatever the recorder raises, so a
+    recorder missing it would turn a routed lock skip into a bounded stderr
+    token and no receipt at all. The default keeps a caller that says nothing
+    on the behaviour it already had; a producer with no fetch step to speak of
+    passes ``not_applicable``, because that absence is structural rather than
+    a choice the refused cycle made.
     """
     return record_cadence_receipt(
         producer,
@@ -533,5 +544,5 @@ def record_lock_skip(
         mode=mode,
         # The owned cycle never started, so it never owed a durable write.
         durable_write=DurableWrite.NOT_REACHED,
-        fetch_status=FetchStatus.NOT_ATTEMPTED,
+        fetch_status=fetch_status,
     )

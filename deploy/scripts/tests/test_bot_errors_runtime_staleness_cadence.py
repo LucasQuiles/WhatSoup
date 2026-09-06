@@ -255,3 +255,33 @@ def test_observe_mode_success_over_a_stopped_fleet_owes_no_durable_write(
     receipt = _receipt()
     assert receipt["outcome"] == "success"
     assert receipt["durableWrite"] == "not_owed"
+
+
+def test_the_wrapper_records_a_lock_skip_with_the_keyword_set_it_always_sends(
+    state_dir, monkeypatch, capsys
+):
+    # The wrapper supplies fetch_status on every receipt and swallows every
+    # exception, so a recorder that did not accept the keyword would print the
+    # bounded token and write nothing at all -- the silent-failure shape this
+    # leaf exists to remove, on the one outcome the leaf cannot otherwise
+    # exercise. Binding lock-skip detection to the cycle belongs to the next
+    # leaf; what is proven here is only that the keyword set the wrapper
+    # already sends is one this recorder accepts, and what it then records.
+    #
+    # The swallow is why the token assertion alone would be vacuous: it holds
+    # under a receipt that was never written. The file assertions below are
+    # what make the case discriminating.
+    _mod._record_cadence(pcr.record_lock_skip, mode=pcr.CadenceMode.EMIT)
+    captured = capsys.readouterr()
+
+    token_lines = [
+        line for line in captured.err.splitlines() if "cadence_receipt_error" in line
+    ]
+    assert token_lines == []
+    assert pcr.receipt_path(RUNTIME_STALENESS).exists()
+
+    receipt = _receipt()
+    assert receipt["outcome"] == "lock_skip"
+    assert receipt["stage"] == "pre_exec"
+    assert receipt["fetchStatus"] == "not_applicable"
+    assert receipt["durableWrite"] == "not_reached"
