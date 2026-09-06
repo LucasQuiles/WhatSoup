@@ -733,6 +733,10 @@ const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
  * oracle recomputed from the manifest on disk rather than imported from the
  * script under test, so a canonicalisation change on either side fails here.
  */
+// Deliberately a second, independent copy of the width rather than an import of
+// the literal in `releaseIdentityToken`: an oracle that took the width from the
+// code under test would move with it and could not fail on a width change. The
+// cost is that an intentional widening has to be made in both places.
 const RELEASE_IDENTITY_TOKEN_LENGTH = 8;
 const UNKNOWN_IDENTITY_TOKEN = 'unknown';
 

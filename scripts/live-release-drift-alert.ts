@@ -253,19 +253,45 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
  * release identity, or the sentinel unchanged.
  *
  * Truncated rather than whole because the summary is human-facing incident text
- * and 64 hex characters would dominate it. Eight is chosen against the
- * dispatcher's redaction rules rather than by taste: `PHONE_LIKE_RE`
- * (`deploy/scripts/lib/bot_errors_redaction.py`) matches a run of ten or more
- * characters drawn from digits and separators, so an all-digit slice of ten
- * would be rewritten in transit and the token would stop identifying anything.
- * Eight cannot reach that floor. No other redaction pattern applies: every
- * digest-shaped rule there is anchored to a prefix (`AKIA`, `gh?_`, `eyJ`) that
- * a bare hex slice does not have.
+ * and 64 hex characters would dominate it. Eight is a trade-off between that
+ * readability and collision resistance, not a bound imposed from outside: it
+ * puts 32 bits of release identity into the three dispatcher fingerprints that
+ * read this text (`storm_fingerprint`, `recovery_episode_fingerprint` and
+ * `recovery_duplicate_fingerprint`). Widening it is a judgement about the same
+ * trade-off rather than something the redactor forbids, and it would also mean
+ * moving the deliberately independent width constant in the focused test file.
+ *
+ * No redaction rule bounds the width, and that is worth stating because the
+ * obvious reading is the wrong one. `PHONE_LIKE_RE`
+ * (`deploy/scripts/lib/bot_errors_redaction.py`) does match a long bare digit
+ * run, but `redact_phone_like_match` then declines it: the candidate has to
+ * start with `+` or contain one of `[\s().-]` before the ten-to-fifteen digit
+ * test is ever reached (`bot_errors_redaction.py:97-98`). A bare hex or digit
+ * token has neither, so it passes through at any length. No other rule reaches
+ * it either: every digest-shaped pattern there is anchored to a prefix (`AKIA`,
+ * `gh?_`, `eyJ`) that a bare hex slice does not have.
+ *
+ * What is load-bearing is where the token goes, not how long it is. It is
+ * appended last so it cannot merge with the parenthesised issue count: the
+ * parentheses and the space are separator characters `PHONE_LIKE_RE` accepts,
+ * so a token placed before the count contributes its own digits to a single
+ * candidate, and an all-digit token that reaches the ten-digit floor that way
+ * IS redacted. It is appended after a space rather than a comma so the
+ * dispatcher's `normalize_token_lists`
+ * (`deploy/scripts/bot-errors-dispatcher.py:6009-6014`) never reorders it; see
+ * `alertSummary` below for why that matters to grouping.
  *
  * The sentinel is passed through as the literal word, never digested. Hashing it
  * would produce a token indistinguishable in shape from a real identity, so an
  * operator reading the incident could not tell an attested release from one that
  * had no readable manifest.
+ *
+ * The early return for the sentinel is a deliberate explicit contract rather
+ * than a branch the current behaviour needs. `UNKNOWN_RELEASE_IDENTITY` is
+ * seven characters, so the slice below already returns it unchanged, and
+ * deleting the guard leaves this suite green. It is kept so the intent survives
+ * a sentinel longer than the token width; no test in this file asserts it,
+ * because none can distinguish its presence.
  */
 function releaseIdentityToken(identity: string): string {
   if (identity === UNKNOWN_RELEASE_IDENTITY) return UNKNOWN_RELEASE_IDENTITY;
@@ -481,9 +507,16 @@ function driftKind(issues: readonly LiveReleaseDriftIssue[]): DriftKindField {
 /**
  * Typed drift facts as structured event data (#2385 L1a). They ride the emit
  * helper's existing repeatable `--diagnostic key=value` channel, which lands
- * them verbatim in the event's `diagnostics` object. The human-readable summary
- * is untouched: `storm_fingerprint` keys on source, severity and the normalized
- * summary only, so adding diagnostics cannot re-key an in-flight incident.
+ * them verbatim in the event's `diagnostics` object. This channel leaves the
+ * human-readable summary untouched: `storm_fingerprint` keys on source,
+ * severity and the normalized summary only, so adding diagnostics cannot re-key
+ * an in-flight incident.
+ *
+ * Scoped to the diagnostics channel, and only to it. L1b since put the release
+ * identity token into the summary itself, where it deliberately DOES key the
+ * storm — see `releaseIdentityToken` and `alertSummary` above. Nothing here
+ * says identity stays out of the grouping key; it says this channel is not how
+ * identity gets there.
  */
 function typedDriftDiagnostics(assessment: DriftAssessment, facts: ReleaseManifestFacts): string[] {
   // The observed tree identity is only attestable when verification passed —
