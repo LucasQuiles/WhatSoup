@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -60,6 +61,24 @@ _ENV_KEYS = [
 ]
 
 _clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
+
+
+@pytest.fixture(autouse=True)
+def _clean_receipt_ledger():
+    """Restore the dispatcher module's in-process receipt ledger after each case.
+
+    The ledger is a module global and this file mutates it, directly and through
+    the code under test. Cross-FILE leakage is impossible -- every test module
+    loads its own dispatcher module object -- but intra-file order dependence is
+    not, and the adoption assertions are only honest while the set is what the
+    case intended. Snapshot and restore in place rather than rebinding the name,
+    because the dispatcher closes over the object, not over this module's view
+    of it.
+    """
+    saved = set(_disp._storm_receipts_written)
+    yield
+    _disp._storm_receipts_written.clear()
+    _disp._storm_receipts_written.update(saved)
 
 
 @pytest.fixture()
@@ -1494,3 +1513,605 @@ def test_f10b_invariant_duplicate_delivery_leaves_the_receipt_untouched(
     assert len(state["openIncidents"]) == 1, "a duplicate delivery must not open a second record"
     record = state["openIncidents"][_disp.incident_key(digest)]
     assert record["renotifyCount"] == 1, "the second delivery is a renotify, not a new incident"
+
+
+# ---------------------------------------------------------------------------
+# Fix iteration 2. Everything below is RED at a20cf388 -- the commit the spec
+# review bounced on the re-page loop -- except where a docstring says INVARIANT
+# or FALSIFIER. Every symbol either exists at a20cf388 or is named by literal,
+# so a failure there is an AssertionError and never an AttributeError.
+# ---------------------------------------------------------------------------
+
+_ORPHAN_INTENT_FIELD = "orphanPagedAtEpoch"
+_SETTLEMENT_UNRECORDED = "storm_receipt_settlement_unrecorded"
+_INTENT_UNRECORDED = "storm_receipt_orphan_intent_unrecorded"
+_PAGE_ON_RECORD = "storm_receipt_orphan_page_on_record"
+_LEDGER_DIRS = ("outbox", "processing", "sent", "suppressed", "quarantine")
+_MALFORMED_PREFIX_SENTINEL = -1
+_FAULT_CYCLES = 4
+
+
+def _digest_incident_key(token: str) -> str:
+    """The incident key a storm digest for `token` keys to."""
+    return f"fleet|storm-collapse|storm-collapse.{token}"
+
+
+def _orphan_incident_key(token: str) -> str:
+    """The incident key the window-qualified orphan meta-alert keys to.
+
+    Built from the same parts the dispatcher stamps on an event it emits itself,
+    so this mirrors the real key rather than asserting against a copy of it.
+    """
+    machine = _disp.safe_segment(socket.gethostname())
+    return f"{machine}|bot-errors-dispatcher|{_ORPHAN_SOURCE}.{token}"
+
+
+def _lose_the_digest(paths: dict[str, Path]) -> int:
+    """Remove every queued storm digest from all five ledger directories.
+
+    The ledger form of the publication evidence has to be absent before an
+    incident-record form can be shown to decide anything on its own.
+    """
+    removed = 0
+    for key in _LEDGER_DIRS:
+        directory = paths[key]
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            if _STORM_SOURCE in path.name:
+                path.unlink()
+                removed += 1
+    return removed
+
+
+def _unpublished(state_dir: Path) -> list[dict[str, Any]]:
+    return [record for record in _receipts(state_dir) if record["publishedAtEpoch"] is None]
+
+
+def _owed_receipt(paths, tmp_path, monkeypatch, window_start: int, tag: str, ids):
+    """Collapse one window whose digest publication dies, leaving its page owed.
+
+    Returns the single receipt left unpublished, so a case can build a second
+    owed window beside a settled one.
+    """
+
+    def _die(*args, **kwargs):
+        raise _PublishFailure("the digest never reached the queue")
+
+    monkeypatch.setattr(_disp, "publish_event_json", _die)
+    with pytest.raises(_PublishFailure):
+        _collapse(
+            paths,
+            [
+                _member(ids[0], "host-a", "critical", tag, window_start),
+                _member(ids[1], "host-b", "critical", tag, window_start),
+            ],
+            window_start,
+            _disp.load_incident_state(paths),
+        )
+    monkeypatch.undo()
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    owed = _unpublished(tmp_path)
+    assert len(owed) == 1, f"exactly one page must be owed, got {len(owed)}"
+    _disp._storm_receipts_written.clear()
+    return owed[0]
+
+
+def _seed_open_incident(paths: dict[str, Path], key: str, entry: dict[str, Any]) -> None:
+    """Persist one open-incident record, so the FILE reconcile reads carries it."""
+    state = _disp.load_incident_state(paths)
+    state.setdefault("openIncidents", {})[key] = entry
+    _disp.require_all_advance([_disp.save_incident_state(paths, state)])
+    reloaded = _disp.load_incident_state(paths)
+    assert key in reloaded.get("openIncidents", {}), (
+        f"the seeded incident record must survive the state validator: {key}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F11, F12 -- R8: one orphan page per WINDOW, not one per source
+# ---------------------------------------------------------------------------
+
+def test_f11_two_orphaned_windows_page_under_two_incident_keys(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. One key for every orphan lets the renotify throttle
+    absorb the second window's page while its receipt still records it paged."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    first_start = _closed_window_start()
+    second_start = first_start - 5000
+
+    _owed_receipt(paths, tmp_path, monkeypatch, first_start, "orphan one", ("w1a", "w1b"))
+    _disp.reconcile_storm_digest_receipts(paths)
+    _owed_receipt(paths, tmp_path, monkeypatch, second_start, "orphan two", ("w2a", "w2b"))
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    orphans = _orphan_pages(paths)
+    assert len(orphans) == 2, f"each orphaned window must page, got {len(orphans)}"
+    keys = [_disp.incident_key(orphan) for orphan in orphans]
+    assert len(set(keys)) == 2, (
+        f"two orphaned windows must not share one incident key: {keys}"
+    )
+    for start in (first_start, second_start):
+        naming = [key for key in keys if str(start) in key]
+        assert len(naming) == 1, f"one key must name window {start}: {keys}"
+    # The alert SOURCE is unchanged; only the incident identity moved.
+    assert {orphan["source"] for orphan in orphans} == {_ORPHAN_SOURCE}
+    assert len({orphan["id"] for orphan in orphans}) == 2, "each window pages under its own id"
+    for orphan in orphans:
+        assert "host-a" not in _disp.format_event(orphan), "no host name may appear"
+
+
+def test_f12_an_orphan_pages_own_incident_record_is_not_publication_evidence(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388, and it pins a path R8 CREATES rather than one it found.
+
+    Window-qualifying the orphan alert makes its incident key end in the same
+    window token the digest key ends in. An unanchored suffix test would then
+    read the record left by a page reporting the digest MISSING as proof that
+    digest published, and settle the very receipt the page was about. The
+    positive control proves the digest key form still settles.
+    """
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    record = _owed_receipt(
+        paths, tmp_path, monkeypatch, window_start, "orphan evidence", ("v1", "v2")
+    )
+    token = record["receiptId"]
+    assert _disp.find_event_path_by_id(token, paths, _LEDGER_DIRS) is None, (
+        "the ledger form must be absent or this proves nothing"
+    )
+
+    _seed_open_incident(paths, _orphan_incident_key(token), {"status": "open", "openedAt": 1})
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    by_id = {receipt["receiptId"]: receipt for receipt in _receipts(tmp_path)}
+    assert by_id[token].get("settledReason") == _SETTLED_ORPHAN_PAGED, (
+        "an orphan page's own incident record must not count as proof its digest published"
+    )
+    assert len(_orphan_pages(paths)) == 1, "the window still owed exactly one page"
+
+    # Positive control: the DIGEST key form, a different window, still settles
+    # without paging, so the assertion above is about the anchor and not about
+    # the incident-record forms having stopped working.
+    control_start = window_start - 7000
+    control = _owed_receipt(
+        paths, tmp_path, monkeypatch, control_start, "orphan control", ("v3", "v4")
+    )
+    _seed_open_incident(
+        paths, _digest_incident_key(control["receiptId"]), {"status": "open", "openedAt": 1}
+    )
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    by_id = {receipt["receiptId"]: receipt for receipt in _receipts(tmp_path)}
+    assert by_id[control["receiptId"]].get("settledReason") == _SETTLED_PUBLISHED_EVIDENCE, (
+        "the digest key form must still settle its receipt without paging"
+    )
+    assert len(_orphan_pages(paths)) == 1, "the control window must not page"
+
+
+# ---------------------------------------------------------------------------
+# F13-F15, F20 -- R9 and spec MUST-1: one orphan page per window and revision
+# ---------------------------------------------------------------------------
+
+def test_f13_a_failing_settlement_write_pages_once_not_once_per_cycle(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388: four reconcile calls, four pages. A store that accepts
+    reads and refuses the settling write is the fault the spec review measured."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    _owed_receipt(paths, tmp_path, monkeypatch, window_start, "repage", ("p1", "p2"))
+
+    real_publish = _disp.publish_storm_receipt
+
+    def _refuse_the_settlement(path, receipt):
+        if receipt.get("settledReason") is not None:
+            raise OSError("the receipt store refuses the settling write")
+        return real_publish(path, receipt)
+
+    monkeypatch.setattr(_disp, "publish_storm_receipt", _refuse_the_settlement)
+    for _cycle in range(_FAULT_CYCLES):
+        _disp._storm_receipts_written.clear()
+        _disp.reconcile_storm_digest_receipts(paths)
+
+    orphans = _orphan_pages(paths)
+    assert len(orphans) == 1, (
+        f"{_FAULT_CYCLES} cycles against a refused settlement must page once, got {len(orphans)}"
+    )
+    owed = _receipts(tmp_path)
+    assert len(owed) == 1
+    assert owed[0]["publishedAtEpoch"] is None, "the settlement genuinely never landed"
+    assert owed[0].get(_ORPHAN_INTENT_FIELD) is not None, (
+        "the intent must be durable, or a page already sent cannot be told from one owed"
+    )
+    unrecorded = _records_of_type(paths, _SETTLEMENT_UNRECORDED)
+    assert len(unrecorded) == _FAULT_CYCLES, (
+        f"every lost settlement must be stated, got {len(unrecorded)}"
+    )
+    assert unrecorded[0]["details"]["orphanPaged"] is True
+    on_record = _records_of_type(paths, _PAGE_ON_RECORD)
+    assert len(on_record) == _FAULT_CYCLES - 1, (
+        f"after the first cycle the page settles from the ledger, got {len(on_record)}"
+    )
+
+
+def test_f14_a_page_whose_intent_cannot_be_recorded_is_not_sent(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388: four cycles, four pages. A store refusing EVERY write is
+    the spec reviewer's literal probe. The intent write fails closed, so nothing
+    pages at all rather than once per cycle with no record that it did."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    _owed_receipt(paths, tmp_path, monkeypatch, window_start, "intent", ("i1", "i2"))
+
+    def _refuse_every_write(path, receipt):
+        raise OSError("the receipt store refuses every write")
+
+    monkeypatch.setattr(_disp, "publish_storm_receipt", _refuse_every_write)
+    for _cycle in range(_FAULT_CYCLES):
+        _disp._storm_receipts_written.clear()
+        _disp.reconcile_storm_digest_receipts(paths)
+
+    assert _orphan_pages(paths) == [], (
+        "a page whose intent could not be recorded must not be sent"
+    )
+    refused = _records_of_type(paths, _INTENT_UNRECORDED)
+    assert len(refused) == _FAULT_CYCLES, f"every refusal must be stated, got {len(refused)}"
+    owed = _receipts(tmp_path)
+    assert owed[0].get(_ORPHAN_INTENT_FIELD) is None, "no intent was ever recorded"
+    assert owed[0]["publishedAtEpoch"] is None
+
+
+def test_f15_a_recorded_intent_settles_from_the_page_already_on_record(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. The restart case: the page went out and the process died
+    before the settlement. A second page would be a duplicate for one window."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    _owed_receipt(paths, tmp_path, monkeypatch, window_start, "restart", ("s1", "s2"))
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    first = _receipts(tmp_path)
+    assert len(_orphan_pages(paths)) == 1, "the first cycle pages once"
+    assert first[0].get(_ORPHAN_INTENT_FIELD) is not None
+    # The process died after the page and after the intent, before the settlement.
+    _unpublish(_receipt_files(tmp_path)[0])
+    _disp._storm_receipts_written.clear()
+
+    for _cycle in range(_FAULT_CYCLES):
+        _disp.reconcile_storm_digest_receipts(paths)
+
+    assert len(_orphan_pages(paths)) == 1, (
+        "a receipt carrying the intent must settle without a second page"
+    )
+    settled = _receipts(tmp_path)
+    assert settled[0].get("settledReason") == _SETTLED_ORPHAN_PAGED
+    assert settled[0]["publishedAtEpoch"] is not None
+    assert len(_records_of_type(paths, _PAGE_ON_RECORD)) == 1, (
+        "settling from a page already on record is logged as such"
+    )
+
+
+def test_f20_the_orphan_page_reports_the_adoption_that_produced_it(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. The page read the count before reconcile raised it, so it
+    said 0 adoptions while the receipt it names said 1."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    _owed_receipt(paths, tmp_path, monkeypatch, window_start, "counted", ("c1", "c2"))
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    orphans = _orphan_pages(paths)
+    assert len(orphans) == 1
+    settled = _receipts(tmp_path)[0]
+    assert settled["adoptions"] == 1
+    assert "receipt_adoptions:1" in orphans[0]["evidence"], (
+        "the page and the receipt it names must agree on the adoption count"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F16 -- R10: each of the three publication-evidence forms decides on its own
+# ---------------------------------------------------------------------------
+
+def test_f16a_an_open_incident_key_for_the_window_settles_without_paging(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. Deleting both incident-record forms left 44 tests green.
+    This is the form that decides once a digest has aged out of all five dirs."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    record = _owed_receipt(paths, tmp_path, monkeypatch, window_start, "keyform", ("k1", "k2"))
+    token = record["receiptId"]
+    assert _disp.find_event_path_by_id(token, paths, _LEDGER_DIRS) is None, (
+        "the ledger form must be absent or this proves nothing"
+    )
+
+    _seed_open_incident(paths, _digest_incident_key(token), {"status": "open", "openedAt": 1})
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    settled = _receipts(tmp_path)[0]
+    assert settled.get("settledReason") == _SETTLED_PUBLISHED_EVIDENCE, (
+        "an open incident keyed to this window is proof its page went out"
+    )
+    assert _orphan_pages(paths) == [], "evidence exists, so nothing may page"
+
+
+def test_f16b_a_force_notify_level_for_the_window_settles_without_paging(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. The second incident-record form, on its own: the key
+    below carries NO window token, so only the level can decide."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    record = _owed_receipt(paths, tmp_path, monkeypatch, window_start, "levelform", ("l1", "l2"))
+    token = record["receiptId"]
+    assert _disp.find_event_path_by_id(token, paths, _LEDGER_DIRS) is None, (
+        "the ledger form must be absent or this proves nothing"
+    )
+
+    _seed_open_incident(
+        paths,
+        "fleet|storm-collapse|storm-collapse",
+        {"status": "open", "openedAt": 1, "forceNotifyLevels": {token: 5}},
+    )
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    settled = _receipts(tmp_path)[0]
+    assert settled.get("settledReason") == _SETTLED_PUBLISHED_EVIDENCE, (
+        "a force-notify level naming this window is proof its page went out"
+    )
+    assert _orphan_pages(paths) == [], "evidence exists, so nothing may page"
+
+
+def test_f16c_the_digest_in_the_ledger_settles_without_an_incident_record(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at 93d9be77, INVARIANT at a20cf388. The third form with the incident
+    store empty, so the ledger lookup is the only thing that can decide."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    incident_state = _disp.load_incident_state(paths)
+    assert _collapse(
+        paths,
+        [
+            _member("d1", "host-a", "critical", "ledger form", window_start),
+            _member("d2", "host-b", "critical", "ledger form", window_start),
+        ],
+        window_start,
+        incident_state,
+    ) == 2
+    digest_paths = _digest_paths(paths)
+    assert len(digest_paths) == 1
+    _deliver(paths, digest_paths[0])
+    _unpublish(_receipt_files(tmp_path)[0])
+    _disp._storm_receipts_written.clear()
+
+    assert not _disp.load_incident_state(paths).get("openIncidents"), (
+        "no incident record may exist or this proves nothing"
+    )
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    settled = _receipts(tmp_path)[0]
+    assert settled.get("settledReason") == _SETTLED_PUBLISHED_EVIDENCE
+    assert _orphan_pages(paths) == [], "the digest is on record, so nothing may page"
+
+
+def test_f16d_an_incident_record_never_settles_a_superseding_revision(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. Neutralising the revision guard left 29 tests green,
+    because no case put an incident record carrying the token in front of a
+    revision-2 receipt. This one does, and the window must still page."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    incident_state = _disp.load_incident_state(paths)
+    assert _collapse(
+        paths,
+        [
+            _member("r1", "host-a", "critical", "revision guard", window_start),
+            _member("r2", "host-b", "critical", "revision guard", window_start),
+        ],
+        window_start,
+        incident_state,
+    ) == 2
+    _deliver(paths, _digest_paths(paths)[0])
+
+    def _die(*args, **kwargs):
+        raise _PublishFailure("the superseding page never reached the queue")
+
+    monkeypatch.setattr(_disp, "publish_event_json", _die)
+    with pytest.raises(_PublishFailure):
+        _collapse(
+            paths,
+            [_member("r3", "host-c", "critical", "revision guard", window_start + 5)],
+            window_start + 5,
+            incident_state,
+        )
+    monkeypatch.undo()
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+
+    owed = _receipts(tmp_path)[0]
+    assert owed.get("revision") == 2, "the superseding page must own the receipt"
+    token = owed["receiptId"]
+    assert _lose_the_digest(paths) >= 1, "the delivered first-revision digest must go"
+    assert _disp.find_event_path_by_id(token, paths, _LEDGER_DIRS) is None
+    assert _disp.find_event_path_by_id(f"{token}-v2", paths, _LEDGER_DIRS) is None
+
+    # BOTH incident-record forms, together, naming this window.
+    _seed_open_incident(
+        paths,
+        _digest_incident_key(token),
+        {"status": "open", "openedAt": 1, "forceNotifyLevels": {token: 5}},
+    )
+    _disp._storm_receipts_written.clear()
+    _disp.reconcile_storm_digest_receipts(paths)
+
+    settled = _receipts(tmp_path)[0]
+    assert settled.get("settledReason") == _SETTLED_ORPHAN_PAGED, (
+        "revision 1 incident evidence must not settle revision 2"
+    )
+    assert len(_orphan_pages(paths)) == 1, "the lost superseding page must be reported"
+
+
+def test_f17_run_once_settles_an_adopted_receipt_from_incident_state(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. Every other case calls reconcile directly, so nothing
+    pinned the ordering the bare incident-state read depends on: reconcile takes
+    no IncidentStateCycle and reads the FILE, which is correct only while it runs
+    before every pass that mutates the in-memory payload. Driving the whole cycle
+    with the settlement resting on the incident-record form pins that position."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = _closed_window_start()
+    record = _owed_receipt(paths, tmp_path, monkeypatch, window_start, "cycle", ("y1", "y2"))
+    token = record["receiptId"]
+    assert _disp.find_event_path_by_id(token, paths, _LEDGER_DIRS) is None, (
+        "the ledger form must be absent or the incident form decides nothing"
+    )
+    # The members the failed publication left behind are removed, so no
+    # re-collapse inside the cycle can settle this receipt through the collapse
+    # path. Reconciliation is then the only thing that can settle it, which is
+    # what makes the assertion below about reconcile's position in the cycle.
+    for leftover in sorted(paths["outbox"].glob("*.json")):
+        leftover.unlink()
+    _seed_open_incident(paths, _digest_incident_key(token), {"status": "open", "openedAt": 1})
+
+    _disp.run_once(8)
+
+    by_id = {receipt["receiptId"]: receipt for receipt in _receipts(tmp_path)}
+    assert by_id[token].get("settledReason") == _SETTLED_PUBLISHED_EVIDENCE, (
+        "a full cycle must settle the receipt from the incident record it reads"
+    )
+    assert _orphan_pages(paths) == [], "evidence exists, so the cycle must not page"
+
+
+# ---------------------------------------------------------------------------
+# F18 -- R11: the settled record describes the page the operator saw
+# ---------------------------------------------------------------------------
+
+def test_f18_the_absorb_refresh_rewrites_the_receipt_with_the_merged_counts(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. The absorb path acknowledged a receipt whose counts still
+    described the FRESH publication, so the settled record named a page nobody
+    was shown. FALSIFIER for the rewrite: remove it and the counts stay at two."""
+    monkeypatch.setattr(_disp, "send_whatsapp", lambda text, *a, **k: None)
+    paths = storm_paths
+    window_start = int(time.time())
+    incident_state = _disp.load_incident_state(paths)
+    assert _collapse(
+        paths,
+        [
+            _member("a1", "host-a", "critical", "absorb window", window_start),
+            _member("a2", "host-b", "critical", "absorb window", window_start),
+        ],
+        window_start,
+        incident_state,
+    ) == 2
+    fresh = _receipts(tmp_path)
+    assert len(fresh) == 1
+    assert fresh[0]["collapsedEvents"] == 2 and fresh[0]["affectedHosts"] == 2
+
+    # The digest is still queued, so the late arrivals are absorbed into it.
+    assert len(_digest_paths(paths)) == 1, "the digest must still be in flight"
+    assert _collapse(
+        paths,
+        [
+            _member("a3", "host-c", "critical", "absorb window", window_start + 1),
+            _member("a4", "host-d", "critical", "absorb window", window_start + 2),
+        ],
+        window_start,
+        incident_state,
+    ) == 2
+
+    merged = _receipts(tmp_path)
+    assert len(merged) == 1, f"one window is one receipt, got {len(merged)}"
+    assert merged[0]["affectedHosts"] == 4, (
+        f"the settled receipt must describe the refreshed page, got {merged[0]['affectedHosts']} hosts"
+    )
+    assert merged[0]["collapsedEvents"] == 4, (
+        f"the settled receipt must count what the refresh published, got {merged[0]['collapsedEvents']}"
+    )
+    assert merged[0]["publishedAtEpoch"] is not None, "the refreshed page is proven published"
+    assert merged[0].get("settledReason") == _SETTLED_PUBLICATION_PROVEN
+    digest = _digests(paths)[0]
+    assert digest["storm"]["affectedHosts"] == 4, "the receipt must match the digest it guards"
+
+
+# ---------------------------------------------------------------------------
+# F19, F21 -- folded nits, each with its own falsifier
+# ---------------------------------------------------------------------------
+
+def test_f19_a_malformed_fingerprint_is_not_an_all_zero_prefix(tmp_path, storm_paths):
+    """RED at a20cf388. Both reached the log as 0, which is the ambiguity the
+    field exists to remove: a genuine all-zero prefix and a damaged one."""
+    genuine = _disp.storm_fingerprint_prefix("0000000000000000")
+    malformed = _disp.storm_fingerprint_prefix("not-hex-at-all")
+    assert genuine == 0, "a genuine all-zero prefix is still zero"
+    assert malformed == _MALFORMED_PREFIX_SENTINEL, (
+        f"a malformed fingerprint must be distinguishable, got {malformed}"
+    )
+    # The projection admits it: negatives are clamped into the signed 53-bit
+    # range, not dropped. Proved through the real log, not by reading the range.
+    _disp.append_dispatch_log(storm_paths, {
+        "type": "storm_receipt_evicted",
+        "windowStartEpoch": 1,
+        "fingerprintPrefix": malformed,
+        "cap": 1,
+    })
+    logged = _records_of_type(storm_paths, "storm_receipt_evicted")
+    assert logged[-1]["details"]["fingerprintPrefix"] == _MALFORMED_PREFIX_SENTINEL, (
+        "the sentinel must survive the controller-log projection"
+    )
+
+
+_RESERVED_DAMAGED_ID = "storm-00112233445566aa-1700000000"
+_KEEPER_DAMAGED_ID = "storm-00112233445566bb-1700000001"
+
+
+def test_f21_an_unreadable_reserved_slot_is_counted_once_and_frees_its_ledger_id(
+    tmp_path, storm_paths, monkeypatch
+):
+    """RED at a20cf388. Two defects in one census: the reserved slot was counted
+    twice when its own file was damaged, and an unreadable eviction discarded a
+    FILENAME where the ledger holds a receipt id, so the id was never released."""
+    monkeypatch.setattr(_disp, "STORM_RECEIPT_MAX_RECORDS", 2, raising=False)
+    paths = storm_paths
+    directory = _receipt_dir(tmp_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{_RESERVED_DAMAGED_ID}.json").write_text("{not json", encoding="utf-8")
+    (directory / f"{_KEEPER_DAMAGED_ID}.json").write_text("{also not json", encoding="utf-8")
+    _disp._storm_receipts_written.add(_RESERVED_DAMAGED_ID)
+    _disp._storm_receipts_written.add(_KEEPER_DAMAGED_ID)
+
+    dropped = _disp.enforce_storm_receipt_cap(paths, reserve_id=_RESERVED_DAMAGED_ID)
+
+    assert dropped == [], f"two entries under a cap of two must evict nothing, got {dropped}"
+    assert (directory / f"{_KEEPER_DAMAGED_ID}.json").exists(), (
+        "double-counting the reserved slot evicted a file the bound had room for"
+    )
+
+    # Now force one real eviction and prove the ledger ID goes, not the filename.
+    monkeypatch.setattr(_disp, "STORM_RECEIPT_MAX_RECORDS", 1, raising=False)
+    _disp.enforce_storm_receipt_cap(paths, reserve_id=_RESERVED_DAMAGED_ID)
+    assert not (directory / f"{_KEEPER_DAMAGED_ID}.json").exists(), "the bound must be enforced"
+    assert _KEEPER_DAMAGED_ID not in _disp._storm_receipts_written, (
+        "an unreadable eviction must release the receipt id, not a filename"
+    )
