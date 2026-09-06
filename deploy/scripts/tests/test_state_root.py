@@ -118,7 +118,7 @@ def test_t5_variant_e_selfcheck_env(monkeypatch, tmp_path):
     assert sr_mod.selfcheck_state_dir() == tmp_path / "sentinel"
 
 
-# T6 -- no INDEPENDENT local state_root/default_state_dir defs remain in the 9 scripts.
+# T6 -- no INDEPENDENT local state_root/default_state_dir defs remain in the adopted scripts.
 ADOPTED_SCRIPTS = [
     "bot-errors-collector.py",
     "bot-errors-dispatcher.py",
@@ -129,6 +129,9 @@ ADOPTED_SCRIPTS = [
     "bot-errors-runner.py",
     "bot-errors-selfcheck.py",
     "bot-errors-sentinel.py",
+    # Delegates through a module-private wrapper (#2341), so the pattern below
+    # cannot see a restored copy under that name; the import check still holds.
+    "bot-errors-tree-provenance.py",
 ]
 
 

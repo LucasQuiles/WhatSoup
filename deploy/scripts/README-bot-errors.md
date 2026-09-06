@@ -865,3 +865,96 @@ exclusive with `--wrapper` and may not be repeated; combining the two, or
 repeating either flag, exits `2` before any check runs. Use it only for a
 host/context where the pilot units run without the wrapper layer, so there
 is nothing for the script to verify.
+
+### Producer cadence receipt (dark, no reader yet)
+
+Each release-proof producer owns one versioned receipt file, republished twice
+per cycle -- once at cycle start and once at the cycle's outcome -- under the
+state root the units already grant write access to, through
+`deploy/scripts/lib/producer_cadence_receipt.py`. One file per producer:
+`release-proof-cadence-tree-provenance.json` and
+`release-proof-cadence-runtime-staleness.json`. Two files keep the clocks
+independent, so a partial write of one producer cannot corrupt the other.
+
+Fields, all bounded tokens, ISO-8601 UTC stamps or integers -- no path,
+hostname, process identifier or command output ever enters a receipt:
+
+| Field | Meaning |
+| ----- | ------- |
+| `schemaVersion` | receipt schema generation; a reader that does not know the version must refuse rather than guess |
+| `producer` | systemd unit name, from a closed two-value vocabulary |
+| `producerToken` | the wrapper's `tree` / `runtime-staleness` token for the same producer |
+| `lastInvocationAt` | every call stamps this, including a skipped cycle |
+| `lastAttemptAt` | advances when the producer's owned cycle actually starts |
+| `lastSuccessfulObservationAt` | advances only after a complete observation is durably written |
+| `outcome` | `in_progress`, `success`, `probe_error`, `emit_failure`, `lock_skip` |
+| `stage` | earliest stage reached: `pre_exec`, `cycle_start`, `observation`, `durable_write`, `complete` |
+| `mode` | `emit` or `observe`, so observe-mode evidence is never read as emit-mode proof |
+| `fetchStatus` | `requested` (refresh landed), `refused` (refresh asked for and not obtained), `not_attempted` (has a fetch step, did not use it this cycle), `not_applicable` (has no fetch step at all) |
+| `durableWrite` | what became of the write the success clock rests on: `written`, `not_owed`, `failed`, `not_reached` |
+| `invocationContext` | `scheduled` when the service manager supplied an invocation identifier, `manual` when it did not, `unknown` when the variable was present but blank. Only the presence is published, never the identifier |
+
+The two clocks are separate on purpose. A producer that starts every cycle and
+fails every observation looks alive under a single clock; separating them makes
+that state readable. A cycle the shared lock refused advances neither clock and
+records `lock_skip`, so permanent lock contention shows as a stalled attempt
+clock rather than as success. No producer code path reaches `lock_skip` yet:
+the wrapper that detects lock contention is a separate change, so today that
+outcome exists in the writer and its tests only.
+
+#### Observe-mode success is weaker evidence, and unevenly so
+
+An observe-mode cycle advances the success clock in both producers, but the two
+are not symmetric and an evaluator must not weight them alike. `durableWrite`
+is the field that carries the difference.
+
+For `bot-errors-tree-provenance`, observe mode never writes anything durable.
+Emitting the outbox event is that producer's only durable write and observe
+mode skips it entirely, so every observe-mode success records
+`durableWrite: not_owed`. The success clock there means "the inspection
+completed", not "an observation was durably written".
+
+For `bot-errors-runtime-staleness`, observe mode usually still writes. The
+per-instance high-water mark is written inside the probe in both modes, so a
+cycle that observed at least one running instance records
+`durableWrite: written`. Only a cycle in which every discovered instance was
+stopped records `not_owed`, and an all-stopped fleet is an ordinary incident
+state rather than an exotic one.
+
+This matters because the installer refuses any mode but `observe` at install
+time, so an observe soak is the window in which the evaluator's dwell would be
+calibrated. Within it the tree producer's success clock is the weaker of the
+two on every cycle.
+
+Nothing reads these receipts yet. There is no watchdog check, no dwell and no
+alert -- those arrive with the evaluator, which also has to decide what a
+receipt that never appears means on a host where the units are not installed.
+Receipt failures are swallowed by both producers: a dark liveness receipt must
+never break the domain guard it observes. A swallowed failure prints one
+bounded line per failed publication on stderr, so it is greppable rather than
+silent:
+
+```
+tree_provenance cadence_receipt_error <ExceptionClassName>
+runtime-staleness cadence_receipt_error <ExceptionClassName>
+```
+
+A producer whose receipts stop advancing while these lines appear in the
+journal has a writable-state problem, not a dead timer. A producer whose
+receipts stop advancing with no line at all is not necessarily a dead timer: it
+means nothing reached this file. Among the reasons are a timer that never
+fired, a wrapper that refused the cycle before the detector launched (a held
+lock exits 75, a bad mode file or a missing dependency exits 2), a process that
+died before its first stamp, and a state-directory override that moved the
+receipt somewhere else. A missing or unwritten receipt reads as empty rather
+than as an error, so the receipt alone cannot separate them; the unit's own
+result and the wrapper's stderr can.
+
+Mode-lock is the first kind and not the second. The durable reader refuses any
+group- or world-accessible bit on the receipt file, which a restore from backup
+or a manual copy can introduce; the producer swallows that refusal like any
+other, so the line does appear and the receipt freezes at its last good value.
+The token carries only the exception class, so a single `DurableWriteError`
+covers a mode-locked receipt, a corrupted payload and a payload that is not a
+JSON object alike. Stat the file to separate them: `0600` and `0700` are
+accepted, `0640`, `0604` and `0660` are not.
