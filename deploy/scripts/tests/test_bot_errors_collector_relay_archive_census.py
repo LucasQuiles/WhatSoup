@@ -41,7 +41,11 @@ Deploy Python tests run in Linux CI; a local macOS run is an indicator only.
 """
 from __future__ import annotations
 
+import ast
+import contextlib
+import errno
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -264,7 +268,9 @@ def test_census_reports_an_unreadable_archive_directory_as_unavailable_permissio
     assert "Errno" not in stdout
 
 
-def test_census_total_stays_partial_and_counts_only_what_it_could_read(collector, tmp_path):
+def test_census_total_stays_partial_and_sums_the_directory_that_produced_numbers(
+    collector, tmp_path
+):
     root = tmp_path / "bot-errors"
     _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
     # relayed/ is absent entirely.
@@ -348,6 +354,892 @@ def test_census_counts_a_json_non_object_as_a_parse_failure(collector, tmp_path)
     assert relayed["artifactCount"] == 2
     assert relayed["parseFailureCount"] == 2
     assert relayed["sourceKindCardinality"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 1b. Entry-level failures are counted, not swallowed, and the archive
+#     directory is pinned by descriptor so the check and the use address the
+#     same inode.
+# ---------------------------------------------------------------------------
+
+# A directory that can be LISTED but whose entries cannot be STAT-ed (mode
+# 0444 -- read, no execute/search). Before this change the census reported
+# all seven of these as a healthy zero.
+_UNUSABLE_FIXTURE_ARTIFACTS = 7
+
+
+def test_census_counts_entries_it_could_not_stat_as_unusable_not_absent(collector, tmp_path):
+    """An entry-level failure is missing information, not absence.
+
+    `except OSError: continue` swallowed every entry-level error, not just
+    the ENOENT its comment described. A mode-0444 archive directory holding
+    seven real artifacts therefore reported `status: ok`, `artifactCount: 0`
+    and `total.status: ok` -- the same "unreadable is empty" conflation the
+    directory level already refuses, surviving one level down. The count of
+    entries the census could not look at has to reach the payload, and the
+    block has to stop calling itself `ok`.
+
+    Not skipped for root: the archive census suite already relies on an
+    unprivileged runner (`test_census_reports_an_unreadable_archive_directory
+    _as_unavailable_permission` chmods 0o000 and asserts the refusal), so a
+    root runner would already be failing this file before reaching here.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    os.chmod(relayed, 0o444)
+    try:
+        returncode, stdout, stderr = _run_census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+
+    assert returncode == 0, stderr
+    report = json.loads(stdout)
+    block = report["archives"]["relayed"]
+    # Never `ok` with a lower count: the block says outright that it is
+    # incomplete, and says by how much.
+    assert block["status"] == "partial"
+    assert block["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    # Nothing here was measured, so the block reports no count at all.
+    assert block["artifactCount"] is None
+    # The gap has to survive aggregation too. A consumer that reads only
+    # `total` would otherwise see a silently lower sum with no quantified
+    # gap -- exactly what this test exists to remove.
+    assert report["total"]["status"] == "partial"
+    assert report["total"]["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    assert report["total"]["artifactCount"] == 0
+    # Nothing was stat-ed, so there is no age to report. Zero here would be a
+    # claim about artifacts the census never reached, the same way a zero
+    # count would be.
+    assert block["oldestAgeSeconds"] is None
+    assert block["newestAgeSeconds"] is None
+    assert report["total"]["oldestAgeSeconds"] is None
+    assert report["total"]["newestAgeSeconds"] is None
+    # Still nothing identifying on the wire.
+    assert str(root) not in stdout
+    assert "Errno" not in stdout
+
+
+def test_census_total_sums_a_partial_directory_beside_a_complete_one(collector, tmp_path):
+    """A partial block still carries numbers, so it still contributes them.
+
+    This is the shape a retention consumer actually meets: one archive
+    directory readable, the other listable but not searchable. The total has
+    to sum what the readable side found, carry the unreadable side's gap as a
+    count rather than dropping it, and say `partial` either way. Ages and
+    source kinds come only from entries that were actually reached.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    writefail = root / "writefail-relayed"
+    _write_artifact(writefail, "d.json.1.relayed", _event(source="dispatcher_delivery"), age_seconds=_DAY)
+    _write_artifact(writefail, "e.json.2.relayed", "{not json", age_seconds=2 * _DAY)
+    os.chmod(relayed, 0o444)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+
+    blocked = report["archives"]["relayed"]
+    assert blocked["status"] == "partial"
+    assert blocked["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+    assert blocked["artifactCount"] is None
+    assert blocked["sourceKindCardinality"] is None
+
+    readable = report["archives"]["writefailRelayed"]
+    assert readable["status"] == "ok"
+    assert readable["unusableEntryCount"] == 0
+    assert readable["artifactCount"] == 2
+    assert readable["parseFailureCount"] == 1
+    assert readable["sourceKindCardinality"] == 1
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    # The readable side is summed rather than discarded ...
+    assert total["artifactCount"] == 2
+    assert total["parseFailureCount"] == 1
+    assert total["sourceKindCardinality"] == 1
+    assert total["oldestAgeSeconds"] == 2 * _DAY
+    assert total["newestAgeSeconds"] == _DAY
+    # ... and the unreadable side is reported as a size, not dropped.
+    assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS
+
+
+def test_census_never_measures_an_entry_it_could_not_open(collector, tmp_path):
+    """Size and age come off the descriptor that was read, or they do not
+    come at all.
+
+    An entry that stats but does not open (mode 000) used to be counted as an
+    artifact carrying the size and mtime of the PRE-OPEN stat -- a path-
+    resolved measurement, which is exactly what the descriptor pinning exists
+    to remove, and which the entry could have stopped matching between the
+    two calls. It is now reported as an entry the census could not look at,
+    contributing no size, no age and no artifact count. `parseFailureCount`
+    is not the bucket: that counts artifacts that were READ and did not
+    parse, and this one was never read.
+
+    Control in the same fixture: a normal entry beside it is still measured,
+    so the rule is "not opened, not measured" and not "nothing is measured".
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    path = _write_artifact(relayed, "unreadable.json.1.relayed", _event(), age_seconds=_DAY)
+    _write_artifact(relayed, "readable.json.2.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    os.chmod(path, 0o000)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(path, 0o644)
+
+    block = report["archives"]["relayed"]
+    assert block["status"] == "partial"
+    assert block["unusableEntryCount"] == 1
+    assert block["parseFailureCount"] == 0
+    # Only the readable entry is measured: one artifact, and the 1-day age of
+    # the unopened one never reaches the payload.
+    assert block["artifactCount"] == 1
+    assert block["oldestAgeSeconds"] == _HOUR
+    assert block["newestAgeSeconds"] == _HOUR
+    assert block["totalBytes"] == os.path.getsize(relayed / "readable.json.2.relayed")
+
+
+def test_census_reports_null_aggregates_when_no_entry_could_be_measured(collector, tmp_path):
+    """A directory can list and stat perfectly and still measure nothing.
+
+    Every entry failing at the open leaves `artifactCount` at zero beside a
+    non-zero unusable count -- a zero that means "I could not look", which is
+    the conflation this census refuses everywhere else. Such a directory
+    reports null aggregates and contributes none, so the total is null too
+    rather than a sum over two directories that measured nothing."""
+    root = tmp_path / "bot-errors"
+    paths = []
+    for directory, name in ((root / "relayed", "a.json.1.relayed"), (root / "writefail-relayed", "d.json.1.relayed")):
+        paths.append(_write_artifact(directory, name, _event(), age_seconds=_HOUR))
+    for path in paths:
+        os.chmod(path, 0o000)
+    try:
+        report = _census(collector, root)
+    finally:
+        for path in paths:
+            os.chmod(path, 0o644)
+
+    for label in ("relayed", "writefailRelayed"):
+        block = report["archives"][label]
+        assert block["status"] == "partial"
+        assert block["unusableEntryCount"] == 1
+        assert block["artifactCount"] is None
+        assert block["totalBytes"] is None
+        assert block["oldestAgeSeconds"] is None
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["unusableEntryCount"] == 2
+
+
+def test_census_classifies_a_vanished_entry_the_same_in_both_windows(
+    collector, tmp_path, monkeypatch
+):
+    """An entry can disappear before the stat or between the stat and the
+    open, and both are the same event: the archive moved on under a census
+    that is not holding a lock. Neither is a measurement the census failed to
+    take, so both are reported as vanished rather than as unusable, and a
+    consumer can tell a busy archive from a broken one."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.gone-before-stat.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, "b.gone-after-stat.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, "c.stays.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    real_lstat = os.lstat
+    windows: list[str] = []
+
+    def vanishing_lstat(path, *args, **kwargs):
+        if path == "a.gone-before-stat.relayed":
+            windows.append("before-stat")
+            raise OSError(errno.ENOENT, "vanished before the stat")
+        info = real_lstat(path, *args, **kwargs)
+        if path == "b.gone-after-stat.relayed":
+            windows.append("after-stat")
+            os.unlink(relayed / "b.gone-after-stat.relayed")
+        return info
+
+    monkeypatch.setattr(os, "lstat", vanishing_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert sorted(windows) == ["after-stat", "before-stat"], windows
+
+    block = report["archives"]["relayed"]
+    # One rule for both windows: neither counts as unusable.
+    assert block["vanishedEntryCount"] == 2
+    assert block["unusableEntryCount"] == 0
+    assert block["artifactCount"] == 1
+    assert report["total"]["vanishedEntryCount"] == 2
+    # And the aggregates beside them are incomplete, so the block says so:
+    # two artifacts that were in the listing are missing from the count, and
+    # a consumer reading `status` as completeness would otherwise treat a
+    # shrunken census as a whole one.
+    assert block["status"] == "partial"
+    assert report["total"]["status"] == "partial"
+
+
+def test_census_completes_when_closing_an_entry_descriptor_fails(
+    collector, tmp_path, monkeypatch
+):
+    """A failed close costs nothing; it must not cost the report.
+
+    The close of each entry descriptor ran in a `finally` with no handler, so
+    an OSError there escaped the per-entry loop and discarded the accumulated
+    report for BOTH archives -- the same class already contained for the entry
+    stat. The descriptor is released by the kernel either way, so there is
+    nothing to record per entry and nothing to reclassify: every artifact was
+    already measured before the close was attempted."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(3):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
+
+    real_open = os.open
+    real_close = os.close
+    entry_descriptors: set[int] = set()
+    refused: list[int] = []
+
+    def recording_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            # Opened relative to the archive descriptor: an ENTRY, not the
+            # archive directory itself, whose close is not under test.
+            entry_descriptors.add(descriptor)
+        return descriptor
+
+    def failing_close(descriptor):
+        if descriptor in entry_descriptors:
+            entry_descriptors.discard(descriptor)
+            # Release it for real, then report the failure the census has to
+            # survive -- injecting a leak instead would test something else.
+            real_close(descriptor)
+            refused.append(descriptor)
+            raise OSError(errno.EIO, "injected close failure")
+        return real_close(descriptor)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "close", failing_close)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert len(refused) == 4, f"expected one refused close per entry, got {refused!r}"
+
+    assert report["censusStatus"] == "ok"
+    block = report["archives"]["relayed"]
+    assert block["status"] == "ok"
+    assert block["artifactCount"] == 3
+    assert block["unusableEntryCount"] == 0
+    # The neighbouring archive is reported too: the failure cost no entry at
+    # all, let alone the whole census.
+    assert report["archives"]["writefailRelayed"]["artifactCount"] == 1
+    assert report["total"]["artifactCount"] == 4
+
+
+def test_census_total_is_null_not_zero_when_no_directory_could_be_read(collector, tmp_path):
+    """The null-not-zero promise stopped at the directory level.
+
+    With both directories unavailable the combined block summed an empty list
+    and reported `artifactCount: 0` beside `status: partial`. A retention pass
+    keyed on the number would conclude "nothing to retain" over an archive it
+    never managed to look at -- the promise the per-directory blocks make and
+    the total did not keep."""
+    root = tmp_path / "bot-errors"
+    root.mkdir(parents=True)  # neither archive directory exists
+
+    report = _census(collector, root)
+    assert report["archives"]["relayed"]["status"] == "unavailable"
+    assert report["archives"]["writefailRelayed"]["status"] == "unavailable"
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["parseFailureCount"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["unusableEntryCount"] is None
+    assert total["oldestAgeSeconds"] is None
+    assert total["newestAgeSeconds"] is None
+
+
+def test_census_total_is_null_when_every_directory_listed_but_reached_nothing(collector, tmp_path):
+    """Listability is not the test; reaching an entry is.
+
+    Both archive directories at mode 0444 list fine, so both blocks are
+    `partial` rather than `unavailable` -- and a total that keyed on status
+    summed them to `artifactCount: 0` and `totalBytes: 0`. That is the same
+    "I could not look" reported as "there is nothing there" the per-directory
+    blocks refuse. The gap itself still has to reach the total as a count,
+    which is the one number here that is not null.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    writefail = root / "writefail-relayed"
+    for index in range(_UNUSABLE_FIXTURE_ARTIFACTS):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(writefail, "d.json.1.relayed", _event(), age_seconds=_DAY)
+    os.chmod(relayed, 0o444)
+    os.chmod(writefail, 0o444)
+    try:
+        report = _census(collector, root)
+    finally:
+        os.chmod(relayed, 0o755)
+        os.chmod(writefail, 0o755)
+
+    assert report["archives"]["relayed"]["status"] == "partial"
+    assert report["archives"]["writefailRelayed"]["status"] == "partial"
+
+    total = report["total"]
+    assert total["status"] == "partial"
+    assert total["artifactCount"] is None
+    assert total["totalBytes"] is None
+    assert total["parseFailureCount"] is None
+    assert total["sourceKindCardinality"] is None
+    assert total["oldestAgeSeconds"] is None
+    assert total["newestAgeSeconds"] is None
+    # The size of what could not be looked at is the one thing that IS known.
+    assert total["unusableEntryCount"] == _UNUSABLE_FIXTURE_ARTIFACTS + 1
+
+
+# A race is not a deterministic pytest. What IS deterministic is the property
+# that removes the race: after the archive directory
+# is opened, every listing, stat and read is addressed to that DESCRIPTOR, so
+# there is no second resolution of the name for a swap to land in. The check
+# below is a static walk of the shipped script text in the same shape
+# test_bot_errors_remote_command_readonly.py uses on these constants, with
+# negative controls underneath so it cannot pass by construction.
+#
+# Scope, stated so it is not read as more than it is: this proves that no
+# filesystem call in the script resolves a path, with exactly two budgeted
+# exceptions named below -- the single directory open that PRODUCES the
+# descriptor, and the lstat that labels a refusal that has already happened.
+# The budget is over the whole population of path-resolving calls, not over
+# one spelling of it: an aggregate re-stat written as os.stat, a re-listing
+# written as os.scandir and a os.readlink are each as much a second
+# resolution as an lstat is, and each is flagged.
+_MAX_LABEL_ONLY_PATH_LSTAT_CALLS = 1
+_DIR_OPEN_FLAGS_NAME = "DIR_OPEN_FLAGS"
+_ENTRY_OPEN_FLAGS_NAME = "ENTRY_OPEN_FLAGS"
+_REQUIRED_DIR_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+# O_NOFOLLOW on the ENTRY open is what stops a name swapped for a symlink
+# between the entry stat and the entry open from being read out of the
+# archive. Dropping that one token is a live regression, so the walk checks
+# the flags actually USED at the entry open, not only that the constant
+# exists.
+_REQUIRED_ENTRY_OPEN_FLAG_TOKENS = ("O_RDONLY", "O_NOFOLLOW")
+
+# os functions that resolve a path argument against the filesystem. Purely
+# descriptor-addressed calls (fstat, read, close) and pure string handling
+# (os.path.join, os.path.basename) are not here, because neither reaches the
+# filesystem through a name.
+_PATH_RESOLVING_OS_CALLS = frozenset(
+    {
+        "stat", "lstat", "listdir", "scandir", "readlink", "open", "walk",
+        "fwalk", "access", "statvfs", "truncate", "utime", "chmod", "chown",
+        "link", "symlink", "rename", "replace", "remove", "unlink", "rmdir",
+        "mkdir", "makedirs", "removedirs", "getxattr", "listxattr", "pathconf",
+    }
+)
+# os.path helpers that stat behind the scenes.
+_PATH_RESOLVING_OSPATH_CALLS = frozenset(
+    {
+        "exists", "lexists", "isdir", "isfile", "islink", "getsize",
+        "getmtime", "getctime", "getatime", "realpath", "samefile",
+    }
+)
+
+
+def _descriptor_names(tree: ast.AST) -> set[str]:
+    """Names bound directly to an `os.open(...)` result.
+
+    Derived from the script, not named by this test, so the check is about
+    where the descriptor came from rather than what someone called it.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if not (isinstance(value.func, ast.Attribute) and value.func.attr == "open"):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _flag_expression_source(tree: ast.AST, source: str, name: str) -> str:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return ast.get_source_segment(source, node.value) or ""
+    return ""
+
+
+def _is_os_path_call(func: ast.Attribute) -> bool:
+    value = func.value
+    return (
+        isinstance(value, ast.Attribute)
+        and value.attr == "path"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "os"
+    )
+
+
+def _flags_are_acceptable(source: str, flags, constant_name: str, required: tuple) -> bool:
+    """The flags expression must be the named module-level constant, or spell
+    out every required token inline. Either way the token that matters cannot
+    be dropped without the walk seeing it."""
+    if isinstance(flags, ast.Name) and flags.id == constant_name:
+        return True
+    rendered = ast.get_source_segment(source, flags) if flags is not None else ""
+    return bool(rendered) and all(token in rendered for token in required)
+
+
+def _descriptor_pinning_violations(source: str) -> list[str]:
+    """Return a list of violation descriptions; an empty list means pinned."""
+    tree = ast.parse(source)
+    descriptors = _descriptor_names(tree)
+    violations: list[str] = []
+
+    for flag_name, required in (
+        (_DIR_OPEN_FLAGS_NAME, _REQUIRED_DIR_OPEN_FLAG_TOKENS),
+        (_ENTRY_OPEN_FLAGS_NAME, _REQUIRED_ENTRY_OPEN_FLAG_TOKENS),
+    ):
+        expression = _flag_expression_source(tree, source, flag_name)
+        if not expression:
+            violations.append(f"no module-level {flag_name} assignment")
+            continue
+        missing = [token for token in required if token not in expression]
+        if missing:
+            violations.append(f"{flag_name} is missing {missing}")
+
+    path_lstat_calls = 0
+    pinned_lstat_calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            rendered = ast.get_source_segment(source, node) or "open(...)"
+            violations.append(f"builtin open() reads by path: {rendered}")
+            continue
+        if not isinstance(func, ast.Attribute):
+            continue
+        rendered = ast.get_source_segment(source, node) or f"os.{func.attr}(...)"
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        pinned_to = keywords.get("dir_fd")
+        if pinned_to is not None and not (
+            isinstance(pinned_to, ast.Name) and pinned_to.id in descriptors
+        ):
+            violations.append(f"dir_fd is not an os.open() descriptor: {rendered}")
+
+        name = func.attr
+        if _is_os_path_call(func):
+            if name in _PATH_RESOLVING_OSPATH_CALLS:
+                violations.append(f"os.path.{name}() resolves a path: {rendered}")
+            continue
+        if name not in _PATH_RESOLVING_OS_CALLS:
+            continue
+
+        # The entry open is descriptor-relative, and the flags it actually
+        # uses are what keeps a swapped-in symlink from being followed out of
+        # the archive -- so they are checked at the call site, not only where
+        # the constant is defined.
+        if name == "open" and "dir_fd" in keywords:
+            flags = node.args[1] if len(node.args) > 1 else None
+            if not _flags_are_acceptable(
+                source, flags, _ENTRY_OPEN_FLAGS_NAME, _REQUIRED_ENTRY_OPEN_FLAG_TOKENS
+            ):
+                violations.append(
+                    f"entry os.open() does not carry {_ENTRY_OPEN_FLAGS_NAME}"
+                    f" or {list(_REQUIRED_ENTRY_OPEN_FLAG_TOKENS)}: {rendered}"
+                )
+            continue
+
+        first = node.args[0] if node.args else None
+        if "dir_fd" in keywords or (isinstance(first, ast.Name) and first.id in descriptors):
+            if name == "lstat":
+                pinned_lstat_calls += 1
+            continue
+
+        # Everything below resolves a path. Exactly two are budgeted.
+        if name == "open":
+            # Budgeted exception 1: the single open that PRODUCES the
+            # descriptor everything else is addressed to.
+            flags = node.args[1] if len(node.args) > 1 else None
+            if not _flags_are_acceptable(
+                source, flags, _DIR_OPEN_FLAGS_NAME, _REQUIRED_DIR_OPEN_FLAG_TOKENS
+            ):
+                violations.append(
+                    f"os.open() without dir_fd does not use {_DIR_OPEN_FLAGS_NAME}: {rendered}"
+                )
+            continue
+        if name == "lstat":
+            # Budgeted exception 2: the refusal label, counted below.
+            path_lstat_calls += 1
+            continue
+        if name == "listdir":
+            violations.append(f"listing is not addressed to an os.open() descriptor: {rendered}")
+            continue
+        violations.append(f"os.{name}() resolves a path: {rendered}")
+
+    if pinned_lstat_calls < 1:
+        violations.append("no os.lstat(..., dir_fd=...): archive entries are stat-ed by path")
+    if path_lstat_calls > _MAX_LABEL_ONLY_PATH_LSTAT_CALLS:
+        violations.append(
+            f"{path_lstat_calls} os.lstat() calls resolve a path; at most "
+            f"{_MAX_LABEL_ONLY_PATH_LSTAT_CALLS} (the refusal label) is allowed"
+        )
+    return violations
+
+
+# Each control is a script fragment that MUST be rejected, paired with the
+# substring of the rejection that names why. Without these the walk above
+# would pass on anything that merely lacked the shapes it looks for.
+_PINNING_NEGATIVE_CONTROLS = (
+    (
+        "listing resolved from a path",
+        "import os\nnames = sorted(os.listdir(os.path.join(root, 'relayed')))\n",
+        "listing is not addressed",
+    ),
+    (
+        "entry read through the builtin open",
+        "with open(entry, 'rb') as handle:\n    body = handle.read()\n",
+        "builtin open()",
+    ),
+    (
+        "check and use as two path lstats",
+        "import os\nfirst = os.lstat(directory)\nsecond = os.lstat(entry)\n",
+        "resolve a path",
+    ),
+    (
+        "entry stat pinned to something that is not a descriptor",
+        "import os\ninfo = os.lstat(name, dir_fd=some_other_value)\n",
+        "dir_fd is not an os.open() descriptor",
+    ),
+    (
+        "entry open keeps dir_fd but drops O_NOFOLLOW",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "entry_fd = os.open(name, os.O_RDONLY, dir_fd=fd)\n",
+        "entry os.open() does not carry",
+    ),
+    (
+        "aggregates re-stat by path with os.stat",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "again = os.stat(os.path.join(directory, name))\n",
+        "os.stat() resolves a path",
+    ),
+    (
+        "re-listing spelled os.scandir",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "for entry in os.scandir(directory):\n    pass\n",
+        "os.scandir() resolves a path",
+    ),
+    (
+        "symlink target read by path with os.readlink",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "target = os.readlink(os.path.join(directory, name))\n",
+        "os.readlink() resolves a path",
+    ),
+    (
+        "existence probed through os.path",
+        "import os\nfd = os.open(directory, DIR_OPEN_FLAGS)\n"
+        "present = os.path.isdir(directory)\n",
+        "os.path.isdir() resolves a path",
+    ),
+)
+
+
+_SWAP_TARGET_NAME = "b.swapme.relayed"
+_OUTSIDE_SOURCE_KIND = "OUTSIDEENTRYSWAPKIND"
+_OUTSIDE_AGE_SECONDS = 999_999
+
+
+def _run_census_in_process(collector, root: Path) -> dict:
+    """Execute the shipped script text in THIS process so a swap can be
+    driven from inside the syscall the script itself makes.
+
+    The subprocess helper above is the normal path and covers everything
+    else; a check-then-use window cannot be opened from outside the process
+    deterministically, and a sleep-and-hope race is not a test.
+    """
+    namespace: dict = {"__name__": "__main__"}
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            exec(compile(collector.REMOTE_ARCHIVE_CENSUS_SCRIPT, "<census>", "exec"), namespace)
+    except SystemExit as exit_exc:  # the script exits 3 on its quiet-failure path
+        raise AssertionError(f"census exited {exit_exc.code}; stdout={captured.getvalue()!r}")
+    return json.loads(captured.getvalue())
+
+
+def test_census_refuses_an_entry_swapped_for_a_symlink_after_it_was_stat_ed(
+    collector, tmp_path, monkeypatch
+):
+    """The entry-open flags are load-bearing, so an entry-level swap must be
+    exercised and not merely described.
+
+    `test_census_still_refuses_a_symlinked_entry_inside_a_real_archive` plants
+    its symlink BEFORE the run, so the entry stat rejects it and the open is
+    never reached -- which leaves the open's own O_NOFOLLOW untested. Here the
+    entry is a real file when it is stat-ed and a symlink to a file outside
+    the archive by the time it is opened. Without O_NOFOLLOW on that open the
+    census reads a file that is not in the archive and that file's mtime
+    reaches the payload as an age.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.keep.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+    outside = tmp_path / "outside-of-the-archive.json"
+    outside.write_text(_event(source=_OUTSIDE_SOURCE_KIND), encoding="utf-8")
+    os.utime(outside, (_NOW - _OUTSIDE_AGE_SECONDS, _NOW - _OUTSIDE_AGE_SECONDS))
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            # The stat has already returned a regular file; the name now
+            # points outside the archive. This is the window.
+            fired.append(path)
+            os.unlink(relayed / _SWAP_TARGET_NAME)
+            os.symlink(outside, relayed / _SWAP_TARGET_NAME)
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    # The outside file is never opened, so its producer never appears ...
+    assert block["sourceKindCardinality"] == 1
+    assert _OUTSIDE_SOURCE_KIND not in json.dumps(report)
+    # ... and its mtime never becomes an age.
+    assert block["oldestAgeSeconds"] == _HOUR
+    assert block["newestAgeSeconds"] == _HOUR
+    # The swapped entry is reported as something the census could not look
+    # at, rather than counted from the stat it took before the swap.
+    assert block["artifactCount"] == 1
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
+    assert report["total"]["unusableEntryCount"] == 1
+
+
+# The replacement is a regular file, so O_NOFOLLOW lets the open through and
+# the swap reaches the measurement itself. It is deliberately older and much
+# larger than the entry that was stat-ed, so a payload built from either one
+# is unmistakable.
+_SWAP_ORIGINAL_AGE_SECONDS = _HOUR
+_SWAP_REPLACEMENT_AGE_SECONDS = 5 * _DAY
+_SWAP_REPLACEMENT_PADDING = "x" * 4096
+
+
+def test_census_measures_the_file_it_opened_not_the_one_it_stat_ed(
+    collector, tmp_path, monkeypatch
+):
+    """Size and age come off the descriptor that was read.
+
+    The other swap fixtures put a SYMLINK in the window, which O_NOFOLLOW
+    refuses at the open, so none of them reaches the measurement. Here the
+    entry is renamed over by a different REGULAR file between the entry stat
+    and the entry open: the open succeeds, and the only thing separating the
+    two possible answers is which stat result the aggregates are built from.
+    Measuring from the pre-open stat would report the size and age of a file
+    the census never read.
+    """
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    original = _write_artifact(
+        relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_SWAP_ORIGINAL_AGE_SECONDS
+    )
+    (root / "writefail-relayed").mkdir(parents=True)
+    original_size = os.path.getsize(original)
+
+    replacement = tmp_path / "replacement-artifact.json"
+    replacement.write_text(_event(summary=_SWAP_REPLACEMENT_PADDING), encoding="utf-8")
+    replacement_mtime = _NOW - _SWAP_REPLACEMENT_AGE_SECONDS
+    os.utime(replacement, (replacement_mtime, replacement_mtime))
+    replacement_size = os.path.getsize(replacement)
+    # Coverage assertion: unless the two files differ in BOTH size and age,
+    # the assertions below cannot tell which one was measured.
+    assert replacement_size != original_size
+    assert _SWAP_REPLACEMENT_AGE_SECONDS != _SWAP_ORIGINAL_AGE_SECONDS
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            # The stat has returned the original; the name now resolves to a
+            # different regular file. This is the window.
+            fired.append(path)
+            os.rename(replacement, relayed / _SWAP_TARGET_NAME)
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 1
+    # The file that was OPENED is the one measured ...
+    assert block["totalBytes"] == replacement_size
+    assert block["oldestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+    assert block["newestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+    # ... and the pre-open stat contributes nothing.
+    assert block["totalBytes"] != original_size
+    assert block["oldestAgeSeconds"] != _SWAP_ORIGINAL_AGE_SECONDS
+    assert report["total"]["totalBytes"] == replacement_size
+    assert report["total"]["oldestAgeSeconds"] == _SWAP_REPLACEMENT_AGE_SECONDS
+
+
+def test_census_counts_an_entry_swapped_for_a_directory_as_unusable(
+    collector, tmp_path, monkeypatch
+):
+    """The other half of the same window: the name is a regular file at the
+    stat and a directory at the open, so `os.fstat` on the descriptor
+    disagrees with the stat. The entry is not an artifact and the swap the
+    census detected has to survive into the report."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    _write_artifact(relayed, "a.keep.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(relayed, _SWAP_TARGET_NAME, _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    real_lstat = os.lstat
+    fired: list[str] = []
+
+    def swapping_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if path == _SWAP_TARGET_NAME and not fired:
+            fired.append(path)
+            os.unlink(relayed / _SWAP_TARGET_NAME)
+            (relayed / _SWAP_TARGET_NAME).mkdir()
+        return info
+
+    monkeypatch.setattr(os, "lstat", swapping_lstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert fired, "the swap never fired; the fixture did not create the window"
+
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 1
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
+
+
+def test_census_contains_a_failing_entry_stat_and_still_reports_every_other_entry(
+    collector, tmp_path, monkeypatch
+):
+    """One bad entry must cost one entry, not the whole census.
+
+    The stat on the freshly opened entry sat in a try/finally with no OSError
+    handler while every neighbouring entry-level failure was contained, so a
+    single I/O error or stale handle discarded the accumulated report for
+    BOTH archive directories and returned the quiet failure payload. It fails
+    closed, but an operator loses an answer that was almost entirely
+    collected."""
+    root = tmp_path / "bot-errors"
+    relayed = root / "relayed"
+    for index in range(3):
+        _write_artifact(relayed, f"a.json.{index}.relayed", _event(), age_seconds=_HOUR)
+    _write_artifact(root / "writefail-relayed", "d.json.1.relayed", _event(), age_seconds=_DAY)
+
+    real_fstat = os.fstat
+    calls: list[int] = []
+
+    def failing_fstat(descriptor, *args, **kwargs):
+        calls.append(descriptor)
+        if len(calls) == 1:
+            raise OSError(errno.EIO, "injected entry stat failure")
+        return real_fstat(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fstat", failing_fstat)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+    assert calls, "the injected stat failure never fired"
+
+    assert report["censusStatus"] == "ok"
+    block = report["archives"]["relayed"]
+    assert block["artifactCount"] == 2
+    assert block["unusableEntryCount"] == 1
+    assert block["status"] == "partial"
+    # The neighbouring archive is untouched -- the failure cost one entry.
+    assert report["archives"]["writefailRelayed"]["status"] == "ok"
+    assert report["archives"]["writefailRelayed"]["artifactCount"] == 1
+    assert report["total"]["artifactCount"] == 3
+    assert report["total"]["unusableEntryCount"] == 1
+
+
+def test_census_refuses_a_directory_it_cannot_pin_when_an_open_flag_is_absent(
+    collector, tmp_path, monkeypatch
+):
+    """The flags are looked up with getattr so an unsupported platform does
+    not raise before the fail-quiet guard is even installed. Degrading
+    silently instead would be worse than raising: the census would keep
+    counting through a name it can neither pin nor refuse. It reports the
+    directory unavailable and still emits a well-formed payload."""
+    root = tmp_path / "bot-errors"
+    _write_artifact(root / "relayed", "a.json.1.relayed", _event(), age_seconds=_HOUR)
+    (root / "writefail-relayed").mkdir(parents=True)
+
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["census", str(root), str(_NOW)])
+    report = _run_census_in_process(collector, root)
+
+    assert report["censusStatus"] == "ok"
+    for label in ("relayed", "writefailRelayed"):
+        block = report["archives"][label]
+        assert block["status"] == "unavailable"
+        assert block["errnoClass"] == "other"
+        assert block["artifactCount"] is None
+    assert report["total"]["status"] == "partial"
+    assert report["total"]["artifactCount"] is None
+
+
+def test_census_addresses_every_read_to_a_pinned_directory_descriptor(collector):
+    """`os.lstat(directory)` then `os.listdir(directory)` were two
+    independent resolutions of the same name with nothing pinning the inode,
+    so whoever can write the archive parent could swap the directory for a
+    symlink in the window and redirect every aggregate. Opening the directory
+    once and addressing the listing, the entry stats and the entry reads to
+    that descriptor removes the window rather than narrowing it."""
+    violations = _descriptor_pinning_violations(collector.REMOTE_ARCHIVE_CENSUS_SCRIPT)
+    assert violations == [], "; ".join(violations)
+
+
+@pytest.mark.parametrize(
+    "label, fragment, expected",
+    _PINNING_NEGATIVE_CONTROLS,
+    ids=[control[0] for control in _PINNING_NEGATIVE_CONTROLS],
+)
+def test_descriptor_pinning_walk_is_not_vacuous(label, fragment, expected):
+    """Falsifier: prove the walk goes RED on each unpinned shape it claims to
+    catch, so a green run above is evidence and not an absence of triggers."""
+    violations = _descriptor_pinning_violations(fragment)
+    assert any(expected in violation for violation in violations), f"{label}: {violations!r}"
 
 
 # ---------------------------------------------------------------------------

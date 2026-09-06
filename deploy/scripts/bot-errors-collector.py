@@ -2977,7 +2977,23 @@ from stat import S_ISDIR, S_ISLNK, S_ISREG
 # symlink is refused outright ("refused_symlink") rather than followed, which
 # would walk the census out of the root entirely. Any directory that is not
 # ok makes the combined total "partial", so an incomplete answer can never be
-# mistaken for a complete one.
+# mistaken for a complete one. When NO directory could be read at all the
+# total's own aggregates are null too, for the same reason they are null per
+# directory: summing an empty list to zero would answer "I could not look"
+# with "there is nothing there".
+#
+# THE SAME RULE ONE LEVEL DOWN. An entry that cannot be stat-ed is counted in
+# "unusableEntryCount" and makes its directory "partial"; only an entry that
+# vanished between the listing and the stat is skipped, because it is not in
+# the archive any more. A directory that lists but does not permit stat --
+# mode 0444 -- would otherwise report every artifact it holds as a healthy
+# zero.
+#
+# THE DIRECTORY IS PINNED. It is opened once with O_DIRECTORY|O_NOFOLLOW and
+# every listing, stat and read is addressed to that descriptor. Two
+# resolutions of the same name would let whoever can write the archive parent
+# swap the directory for a symlink between the refusal check and the listing;
+# with one resolution there is no window to swap in.
 #
 # `now` (argv[2], optional) makes ages deterministic for a caller that needs
 # a fixed clock; empty or absent means "read the clock here".
@@ -2986,6 +3002,31 @@ ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"
 
 PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
 MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
+
+# Looked up with getattr, the way the rest of this file guards optional open
+# flags: a bare attribute here would raise at import, outside the fail-quiet
+# guard below, on a platform that lacks one. Absence is handled where the
+# census can still emit a payload -- see the refusal in census().
+O_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
+O_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
+# The archive directory is opened ONCE and every later listing, stat and read
+# is addressed to the descriptor that comes back. O_NOFOLLOW refuses a
+# symlinked archive directory inside the syscall, so the refusal and the
+# listing cannot disagree about which inode they mean.
+DIR_OPEN_FLAGS = os.O_RDONLY | O_DIRECTORY_FLAG | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG
+# Entries are opened relative to that descriptor. O_NOFOLLOW keeps a symlinked
+# entry from being read out of the archive, and O_NONBLOCK keeps a fifo
+# planted in the archive from parking the census forever.
+ENTRY_OPEN_FLAGS = os.O_RDONLY | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG | O_NONBLOCK_FLAG
+READ_CHUNK_BYTES = 65536
+# An entry that is simply GONE -- before the stat or between the stat and the
+# open, the same ENOENT either way -- is not a measurement the census failed
+# to take. The archive moved on under a census that holds no lock, so it is
+# reported separately from the entries the census could not look at, and a
+# consumer can tell a busy archive from a broken one.
+VANISHED_ENTRY_ERRNOS = (errno.ENOENT,)
 
 
 def errno_class(exc):
@@ -3009,59 +3050,166 @@ def blank_report(status, errno_name=None):
         "oldestAgeSeconds": None,
         "newestAgeSeconds": None,
         "parseFailureCount": None,
+        "unusableEntryCount": None,
+        "vanishedEntryCount": None,
         "sourceKindCardinality": None,
     }
 
 
+def refusal_report(directory, exc):
+    # Label a directory open that ALREADY failed. No descriptor exists and
+    # nothing is listed, stat-ed for an aggregate or read here; the only
+    # thing this produces is which refusal string to report.
+    code = getattr(exc, "errno", None)
+    if code == errno.ELOOP:
+        return blank_report("refused_symlink")
+    if code == errno.ENOTDIR:
+        # O_DIRECTORY collapses "is a symlink" and "is not a directory" into
+        # one errno on the BSDs (both ENOTDIR), so which of the two it was
+        # has to be recovered before the census can say. Linux reports ELOOP
+        # for the symlink and reaches this branch only for a real non-
+        # directory; either way the answer below is the same.
+        try:
+            info = os.lstat(directory)
+        except OSError as label_exc:
+            return blank_report("unavailable", errno_class(label_exc))
+        if S_ISLNK(info.st_mode):
+            return blank_report("refused_symlink")
+        if not S_ISDIR(info.st_mode):
+            # Present but not a directory: weird, not absent.
+            return blank_report("unavailable", "other")
+    return blank_report("unavailable", errno_class(exc))
+
+
+def read_entry(entry_fd):
+    chunks = []
+    while True:
+        chunk = os.read(entry_fd, READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
 def census(directory):
     # Aggregate one archive directory. Returns (report, source_kinds).
-    # The directory ITSELF is lstat-ed first: if it is a symlink, following it
+    # The directory is opened ONCE, with O_NOFOLLOW so a symlinked archive
+    # directory is refused by the kernel rather than followed -- following it
     # would let whoever controls the remote root redirect the census at any
-    # directory on the host.
-    try:
-        dir_info = os.lstat(directory)
-    except OSError as exc:
-        return blank_report("unavailable", errno_class(exc)), set()
-    if S_ISLNK(dir_info.st_mode):
-        return blank_report("refused_symlink"), set()
-    if not S_ISDIR(dir_info.st_mode):
+    # directory on the host. Everything after this point is addressed to the
+    # descriptor, so there is no second resolution of the name for a swap
+    # between the check and the use to land in.
+    if not (O_DIRECTORY_FLAG and O_NOFOLLOW_FLAG):
+        # Without both flags the name can be neither pinned nor refused, and
+        # a census that cannot keep that promise must not count through an
+        # unpinned name as though it could.
         return blank_report("unavailable", "other"), set()
+    try:
+        fd = os.open(directory, DIR_OPEN_FLAGS)
+    except OSError as exc:
+        return refusal_report(directory, exc), set()
+    try:
+        return census_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
+def census_descriptor(fd):
+    # One rule for every entry: it is MEASURED only if it was opened and
+    # stat-ed through the descriptor. An entry that vanished is counted as
+    # vanished, an entry that could not be looked at is counted as unusable,
+    # and neither contributes a size, an age or an artifact count -- a number
+    # taken from a name the census did not go on to read is exactly the
+    # path-resolved measurement the descriptor pinning exists to remove.
     count = 0
     total_bytes = 0
     oldest = None
     newest = None
     parse_failures = 0
+    unusable = 0
+    vanished = 0
     source_kinds = set()
     try:
-        names = sorted(os.listdir(directory))
+        names = sorted(os.listdir(fd))
     except OSError as exc:
         # Unreadable is NOT empty.
         return blank_report("unavailable", errno_class(exc)), set()
     for name in names:
-        entry = os.path.join(directory, name)
         try:
-            info = os.lstat(entry)
-        except OSError:
-            # Vanished between listing and stat -- it is not in the archive now.
+            info = os.lstat(name, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone before the stat.
+                vanished += 1
+                continue
+            # Every OTHER entry-level failure is information the census did
+            # not get: a directory that lists but does not permit stat (mode
+            # 0444, say) would otherwise report its whole contents as a
+            # healthy zero. Count what could not be looked at, and let the
+            # block below say it is incomplete.
+            unusable += 1
             continue
         # lstat + S_ISREG, so a symlink is never followed out of the archive
         # and a nested directory is never descended into.
         if not S_ISREG(info.st_mode):
             continue
-        count += 1
-        total_bytes += info.st_size
-        age = int(round(now - info.st_mtime))
-        oldest = age if oldest is None else max(oldest, age)
-        newest = age if newest is None else min(newest, age)
         try:
-            with open(entry, "rb") as handle:
-                record = json.loads(handle.read().decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            # Unreadable or not JSON: still a present artifact occupying
-            # bytes and ageing, so it is counted AND flagged. Skipping it
-            # would under-report exactly the artifacts worth knowing about.
-            parse_failures += 1
+            entry_fd = os.open(name, ENTRY_OPEN_FLAGS, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone between the stat and the open. The SAME event as the
+                # branch above, so it gets the same answer: the window it
+                # fell through is an implementation detail, not something an
+                # operator should have to reason about.
+                vanished += 1
+                continue
+            # Present but not openable -- mode 000, or now a symlink that
+            # O_NOFOLLOW refuses to follow out of the archive. It is NOT
+            # measured: the pre-open stat resolved a name the census never
+            # went on to read, and a size or an age taken from it is a claim
+            # about an object that may already have changed.
+            unusable += 1
             continue
+        try:
+            try:
+                entry_info = os.fstat(entry_fd)
+            except OSError:
+                # Contained per entry, like every other entry-level failure.
+                # Letting this escape would discard the accumulated report for
+                # BOTH archives over one stale handle or one I/O error.
+                unusable += 1
+                continue
+            if not S_ISREG(entry_info.st_mode):
+                # Swapped for a non-file between the stat and the open. The
+                # descriptor, not the name, is what got counted -- so it is
+                # not counted as an artifact, and the swap the census DID
+                # detect is reported rather than dropped.
+                unusable += 1
+                continue
+            # Size and age come off the DESCRIPTOR that was read, not off a
+            # name that could have been repointed since.
+            count += 1
+            total_bytes += entry_info.st_size
+            age = int(round(now - entry_info.st_mtime))
+            oldest = age if oldest is None else max(oldest, age)
+            newest = age if newest is None else min(newest, age)
+            try:
+                record = json.loads(read_entry(entry_fd).decode("utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Unreadable or not JSON: still a present artifact occupying
+                # bytes and ageing, so it is counted AND flagged. Skipping it
+                # would under-report exactly the artifacts worth knowing about.
+                parse_failures += 1
+                continue
+        finally:
+            try:
+                os.close(entry_fd)
+            except OSError:
+                # The kernel releases the descriptor whether or not close
+                # reports an error, so there is nothing to record and nothing
+                # to reclassify -- the entry was measured before this point.
+                # Letting it escape would discard the accumulated report for
+                # BOTH archives, the way the entry stat once did.
+                pass
         if not isinstance(record, dict):
             # `[]` and `"text"` are valid JSON but not event records.
             parse_failures += 1
@@ -3069,42 +3217,96 @@ def census(directory):
         kind = record.get("source")
         if isinstance(kind, str) and kind:
             source_kinds.add(kind)
-    report = {
-        "status": "ok",
-        "errnoClass": None,
-        "artifactCount": count,
-        "totalBytes": total_bytes,
-        "oldestAgeSeconds": oldest,
-        "newestAgeSeconds": newest,
-        "parseFailureCount": parse_failures,
-        # Cardinality only -- how MANY distinct producers are represented,
-        # never which ones.
-        "sourceKindCardinality": len(source_kinds),
-    }
+    # A directory whose entries were not all readable is reported as partial,
+    # never as ok with a lower count.
+    status = "partial" if (unusable or vanished) else "ok"
+    if status == "partial" and not count:
+        # It listed, and possibly stat-ed, and measured NOTHING. A zero here
+        # would say "there is nothing there" about entries the census never
+        # managed to open, so the aggregates are null and the counts of what
+        # it could not look at carry the whole answer.
+        report = blank_report(status)
+    else:
+        report = {
+            "status": status,
+            "errnoClass": None,
+            "artifactCount": count,
+            "totalBytes": total_bytes,
+            "oldestAgeSeconds": oldest,
+            "newestAgeSeconds": newest,
+            "parseFailureCount": parse_failures,
+            # Cardinality only -- how MANY distinct producers are
+            # represented, never which ones.
+            "sourceKindCardinality": len(source_kinds),
+        }
+    # How many entries were listed but could not be looked at, and how many
+    # were gone. Zero in both is a claim that the aggregates are complete.
+    report["unusableEntryCount"] = unusable
+    report["vanishedEntryCount"] = vanished
+    if report["artifactCount"] is None:
+        # Nothing was measured, so no producer was seen either.
+        source_kinds = set()
     return report, source_kinds
 
 
+def produced_numbers(report):
+    # A directory contributes to the sums exactly when it produced a number
+    # of its own. Every block that measured nothing -- unavailable, refused,
+    # or listed-but-never-measured -- already reports a null count, so there
+    # is one test here and not a second vocabulary of statuses to keep in
+    # step with the first.
+    return report["artifactCount"] is not None
+
+
+def gap_total(reports, field):
+    # Summed across EVERY directory that measured a gap, including one that
+    # contributed no other number. Dropping these with the sums would hide
+    # the size of what could not be looked at.
+    values = [r[field] for r in reports if r[field] is not None]
+    return sum(values) if values else None
+
+
 def combine(reports, kind_sets):
-    # Only directories that were actually read contribute numbers. If any
-    # directory is not ok the total is "partial", so a caller can never read
-    # an incomplete sum as a complete one.
-    readable = [r for r in reports if r["status"] == "ok"]
-    oldest_values = [r["oldestAgeSeconds"] for r in readable if r["oldestAgeSeconds"] is not None]
-    newest_values = [r["newestAgeSeconds"] for r in readable if r["newestAgeSeconds"] is not None]
+    # If any directory is not ok the total is "partial", so a caller can
+    # never read an incomplete sum as a complete one.
+    numeric = [r for r in reports if produced_numbers(r)]
+    complete = [r for r in reports if r["status"] == "ok"]
+    status = "ok" if len(complete) == len(reports) else "partial"
+    gaps = {
+        "unusableEntryCount": gap_total(reports, "unusableEntryCount"),
+        "vanishedEntryCount": gap_total(reports, "vanishedEntryCount"),
+    }
+    if not numeric:
+        # NOTHING was measured. A zero here would answer "I could not look"
+        # with "there is nothing there" -- the conflation every directory
+        # block already refuses, and the one a retention pass would act on.
+        return dict(
+            status=status,
+            artifactCount=None,
+            totalBytes=None,
+            oldestAgeSeconds=None,
+            newestAgeSeconds=None,
+            parseFailureCount=None,
+            sourceKindCardinality=None,
+            **gaps,
+        )
+    oldest_values = [r["oldestAgeSeconds"] for r in numeric if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in numeric if r["newestAgeSeconds"] is not None]
     union = set()
     for report, kinds in zip(reports, kind_sets):
-        if report["status"] == "ok":
+        if produced_numbers(report):
             union |= kinds
-    return {
-        "status": "ok" if len(readable) == len(reports) else "partial",
-        "artifactCount": sum(r["artifactCount"] for r in readable),
-        "totalBytes": sum(r["totalBytes"] for r in readable),
-        "oldestAgeSeconds": max(oldest_values) if oldest_values else None,
-        "newestAgeSeconds": min(newest_values) if newest_values else None,
-        "parseFailureCount": sum(r["parseFailureCount"] for r in readable),
+    return dict(
+        status=status,
+        artifactCount=sum(r["artifactCount"] for r in numeric),
+        totalBytes=sum(r["totalBytes"] for r in numeric),
+        oldestAgeSeconds=max(oldest_values) if oldest_values else None,
+        newestAgeSeconds=min(newest_values) if newest_values else None,
+        parseFailureCount=sum(r["parseFailureCount"] for r in numeric),
         # Union, not a sum: a producer present in both archives is one kind.
-        "sourceKindCardinality": len(union),
-    }
+        sourceKindCardinality=len(union),
+        **gaps,
+    )
 
 
 try:
