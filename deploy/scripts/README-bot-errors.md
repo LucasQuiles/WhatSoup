@@ -598,13 +598,22 @@ tell which it is.
 **Aged-out holds.** A hold is unbounded in disposition but not in silence. Once
 a held record has sat for `BOT_ERRORS_INCIDENT_STALE_SECONDS` (the dispatcher's
 existing stale-incident clock, default 24 h, reused here rather than given a
-second knob), the next reclaim pass logs one `delivery_outcome_unknown_escalated`
+second knob; unset it takes its value from
+`BOT_ERRORS_INCIDENT_ESCALATE_SECONDS`, so setting that one alone moves this
+bound too), the next reclaim pass logs one `delivery_outcome_unknown_escalated`
 line at `error` level, above the `warning` of the first signal. Age is measured
 from `delivery.outcomeUnknownAt`, never from file mtime. Like the first signal it
 is anonymous and bounded (`attempts`, `held`), and it is once-only: the record
 carries `delivery.outcomeUnknownEscalatedAt`, committed in the same durable
-publication as the line it announces, so no restart re-emits it. The escalation
-changes nothing else. The record stays in `processing/` at
+publication as the line it announces, so no restart re-emits it. As with the
+first signal the line is written before that publication, so an escalation
+whose publication does not reach disk is retried and logs the line again:
+expect at most one duplicate line per retried escalation, and never a second
+escalation on the record. Once-only means once per HOLD, not once per record:
+the dispatcher clears `delivery.outcomeUnknownEscalatedAt` whenever it takes a
+new hold, so a record that was released and then held again escalates once more
+after the new hold outlives the bound; releasing still edits status and nothing
+else. The escalation changes nothing else. The record stays in `processing/` at
 `delivery.status = outcome_unknown`, and is still never re-sent, dead-lettered
 or auto-disposed. Only an operator disposes of a held item, by the two
 procedures above. A record whose `outcomeUnknownAt` cannot be read as an

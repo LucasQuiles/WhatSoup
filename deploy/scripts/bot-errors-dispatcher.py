@@ -4094,6 +4094,19 @@ def mark_outcome_unknown(event: dict[str, Any], reason: str) -> dict[str, Any]:
         delivery[DELIVERY_HELD_AT_FIELD] = now_iso()
         delivery[DELIVERY_HELD_REASON_FIELD] = truncate(redact(reason), 500)
         delivery["nextAttemptAtEpoch"] = 0
+        # #2424: a NEW hold gets a NEW bound. The age basis above restarts the
+        # clock, so the previous hold's escalation stamp must not outlive it: a
+        # stamp that did would keep held_delivery_escalation_due False forever
+        # and leave this record able to sit held and silent for the rest of its
+        # life -- the condition the bound exists to end, reached by the ordinary
+        # release-and-re-hold round trip. An operator who released the record
+        # followed the runbook, where status is the only field the release
+        # edits, so clearing this stamp is the dispatcher's job and not theirs.
+        # DELIVERY_HELD_SIGNAL_FIELD is deliberately NOT cleared: it records
+        # that a hold has been announced at all, and re-announcing the first
+        # signal for a record an operator is already handling is the noise the
+        # once-only stamp exists to stop.
+        delivery.pop(DELIVERY_HELD_ESCALATED_FIELD, None)
     return event
 
 
@@ -8170,8 +8183,18 @@ def escalate_held_delivery(
     held record's state; this is the named entry point for the reclaim pass and
     the guard that keeps an unexpired hold out of that function entirely.
 
-    Returns True when this call emitted the escalation.
+    Returns True when this call took the escalation path (no caller reads it).
     """
+    if not is_held_delivery(event):
+        # #2424: held_delivery_escalation_due answers a question about TIME,
+        # not about disposition. A released record still carries the hold
+        # instant its release did not clear, so the age predicate says due
+        # while the record is queued, and hold_ambiguous_send would park it
+        # again -- flipping a queued alert back to held and rewriting its age
+        # basis, the one thing the paragraph above promises never happens.
+        # Unreachable through the single caller, whose own guard runs first;
+        # the promise is made here, so it is kept here.
+        return False
     if not held_delivery_escalation_due(event, current):
         return False
     hold_ambiguous_send(paths, claimed, event, AMBIGUOUS_CRASH_REASON, current=current)
