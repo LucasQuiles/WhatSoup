@@ -77,6 +77,7 @@ FILES=(
   # set from the parsed import graph -- never from this array.
   "deploy/scripts/lib/durable_json.py"
   "deploy/scripts/lib/health_reader.py"
+  "deploy/scripts/lib/producer_cadence_receipt.py"
   "deploy/scripts/lib/queue_age.py"
   "deploy/scripts/lib/sentinel_pin.py"
   "deploy/scripts/lib/state_files.py"
