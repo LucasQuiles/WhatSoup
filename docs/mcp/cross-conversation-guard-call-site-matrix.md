@@ -220,12 +220,18 @@ None of the following is pinned by this matrix.
 
 ## Deferred obligations
 
-- The unbound-global cell is also pinned by a conditional assertion at
-  `tests/integration/scope-injection.test.ts:439-455`, which wraps its only
-  assertion in `if (result.isError)` and so passes whether the call succeeded or
-  failed for an unrelated reason. Cell M5 pins that behaviour unconditionally
-  here, but the weak assertion in the other file is untouched, because a
-  concurrent change owns that file.
+- Discharged on main. At the base anchor above, the unbound-global cell was
+  also pinned by a conditional assertion in
+  `tests/integration/scope-injection.test.ts`, which wrapped its only assertion
+  in `if (result.isError)` and so passed whether the call succeeded or failed
+  for an unrelated reason. The concurrent change that owned that file has since
+  landed, replacing that case with
+  `unbound global session reaches the caller-supplied chatJid — pins the fail-open cross-conversation guard at base`.
+  Its assertions are unconditional and positive: the underlying `chatModify` ran
+  exactly once against the caller-supplied target, `result.isError` is
+  undefined, and the success payload echoes that target. Cell M5 continues to
+  pin the same behaviour here. This bullet is the only place in this document
+  that describes main rather than the base anchor.
 - No decision record yet states whether the two guards keep two failure channels
   or converge on one. Bead CQ-28
   (`docs/reviews/code-quality-dedup-simplify-20260619/`) still recommends
