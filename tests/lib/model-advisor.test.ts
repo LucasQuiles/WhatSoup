@@ -5,16 +5,13 @@ const alertFns = vi.hoisted(() => ({
   clearAlertSource: vi.fn(() => true),
 }));
 
-const logger = vi.hoisted(() => ({
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
+const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => logger,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
