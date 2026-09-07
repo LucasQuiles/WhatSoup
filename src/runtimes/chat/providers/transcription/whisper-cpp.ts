@@ -7,7 +7,7 @@ import type { TranscriptionProvider } from './types.ts';
 
 const log = createChildLogger('whisper-cpp');
 // env-allowed: host-level model path and explicit binary override; ambient toolchain
-const DEFAULT_MODEL = process.env.WHATSOUP_WHISPER_CPP_MODEL ?? join(homedir(), '.local/share/whatsoup/models/whisper.cpp/ggml-small.bin');
+export const DEFAULT_MODEL = process.env.WHATSOUP_WHISPER_CPP_MODEL ?? join(homedir(), '.local/share/whatsoup/models/whisper.cpp/ggml-small.bin');
 
 function resolveWhisperCli(): string | null {
   // env-allowed: host-level model path and explicit binary override; ambient toolchain
