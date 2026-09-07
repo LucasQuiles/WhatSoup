@@ -232,6 +232,32 @@ describe('automatic operator catch-up reconciler', () => {
     ]);
   });
 
+  it('reports an unexpected closure failure as an error skip and still charges the attempt', () => {
+    // Foreign-key enforcement is a precondition of the closure primitive, not a
+    // proof-shape rejection, so its message is deliberately absent from
+    // BENIGN_CLOSURE_REJECTIONS and has to surface as `error` for the caller to
+    // alert on. The fixture is seeded with enforcement ON so the source rows and
+    // their disposition links are valid; only the reconciler pass sees it OFF.
+    installFixture({ echoed: true });
+    db.raw.exec('PRAGMA foreign_keys = OFF');
+
+    try {
+      const report = reconcileOperatorCatchupRecoveries(db.raw);
+
+      // The attempt counter is charged before the closure is tried, so an
+      // erroring group spends the attempt budget even though nothing closed.
+      expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+      expect(report.skips).toEqual([
+        expect.objectContaining({ reason: 'error', nSourceSeqs: 2 }),
+      ]);
+      // Fail-closed: an unexpected error closes nothing and leaves both pending.
+      expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+      expect(linkRows('recovery_pending_operator_catchup')).toHaveLength(2);
+    } finally {
+      db.raw.exec('PRAGMA foreign_keys = ON');
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Fixture: two crash-failed source inbounds pending catch-up, plus a later
   // catch-up inbound whose terminal reply is (optionally) echoed — mirrors

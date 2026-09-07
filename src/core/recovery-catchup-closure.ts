@@ -384,7 +384,11 @@ export const RECONCILE_EXAMINATION_MULTIPLIER = 20;
 export interface ReconcileOperatorCatchupParams {
   /** Ledger actor recorded on auto-closed links. Defaults to 'auto_reconciler'. */
   actor?: string;
-  /** Max distinct (plan, conversation) groups processed per invocation. */
+  /**
+   * Max closure attempts per invocation. A group with no catch-up candidate
+   * does not charge it; up to `groupLimit * RECONCILE_EXAMINATION_MULTIPLIER`
+   * groups are examined per pass.
+   */
   groupLimit?: number;
 }
 
@@ -500,7 +504,9 @@ export function reconcileOperatorCatchupRecoveries(
     seqs: number[];
   }>();
   for (const row of rows) {
-    const key = `${row.plan_id} ${row.conversation_key}`;
+    // The separator is U+0000, written as an escape so line tools do not
+    // treat this file as binary.
+    const key = `${row.plan_id}\x00${row.conversation_key}`;
     let bucket = groups.get(key);
     if (!bucket) {
       // Rows are ordered by inbound_seq, so this is the earliest source's chat.

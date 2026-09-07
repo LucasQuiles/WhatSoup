@@ -76,14 +76,26 @@ still attempted whenever that chat has a candidate and then fails closed as
 
 `groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps closure
 *attempts*, not groups looked at: a group with no candidate is skipped without
-charging it, so a closable group is no longer starved by unattemptable ones
-sorting ahead of it. A second budget keeps the pass bounded — at most
+charging it. A second budget keeps the pass bounded — at most
 `groupLimit × RECONCILE_EXAMINATION_MULTIPLIER` (20) groups are examined per
-pass. Groups are enumerated in a stable `recovery_plan_id` order, so this raises
-the starvation threshold rather than removing it: a prefix of more than
-`groupLimit × 20` candidate-less groups still hides the groups behind it. The
-budgets bound the per-group candidate probe and closure attempt; the enumeration
-query itself still reads every open pending link.
+pass. Groups are enumerated in a stable `recovery_plan_id` order, so the budgets
+raise the starvation threshold rather than removing it. Two classes of
+unattemptable group sort ahead of a closable one, with different thresholds:
+
+| Prefix class | Groups that hide the next one | Budget charged |
+| --- | --- | --- |
+| No catch-up candidate | `groupLimit × 20` (1000 by default) | examination |
+| Candidate the closure always rejects | `groupLimit` (50 by default) | attempt |
+
+The examination cap is tested before the counter is charged, so a prefix of
+*exactly* `groupLimit × 20` candidate-less groups already hides the next group.
+A group whose candidate is permanently rejected charges the attempt budget
+before the closure is tried, so it starves a closable group twenty times sooner
+than the candidate-less class. Neither case is reported: the report carries no
+truncation signal for a pass that stopped on either budget. Both are properties
+of the selection order, unchanged by this PR. The budgets bound the per-group
+candidate probe and closure attempt; the enumeration query itself still reads
+every open pending link.
 
 ### Test coverage of the fail-closed path
 
