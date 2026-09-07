@@ -35,10 +35,13 @@ For each open pending `(recovery_plan_id, conversation_key)` group it:
 
 1. Reads the exact set of still-open source seqs (`superseded_by_seq IS NULL`,
    not already closed).
-2. Finds the **earliest later inbound** in that conversation that carries a
-   *unique* delivery proof — `MIN(target_seq)` from the fail-closed
+2. Finds the **earliest later inbound on the sources' own `chat_jid`** that
+   carries a *unique* delivery proof — `MIN(target_seq)` from the fail-closed
    `operator_catchup_delivery_proofs` view (`HAVING COUNT(*) = 1`) with
-   `target_seq > max(source seqs)`.
+   `target_seq > max(source seqs)`. The chat filter mirrors the closure trigger,
+   which requires `target.chat_jid = source.chat_jid` for every source: a proof
+   from another chat under the same `conversation_key` can never close the
+   group, so picking one would wedge the group on every pass.
 3. Calls `closeOperatorCatchupRecoveryRaw` **verbatim** with
    `actor = 'auto_reconciler'` and an `auto://catchup-delivery-proof:seq=<n>`
    evidence reference.
@@ -64,7 +67,23 @@ catch-up reply) simply stay pending — which is correct.
 
 Groups whose source inbounds span multiple `chat_jid`s cannot be covered by a
 single catch-up (the trigger requires `target.chat_jid = source.chat_jid` for
-every source); those fail closed as `closure_rejected` and remain pending.
+every source). Selection uses the earliest source's chat, so such a group is
+still attempted whenever that chat has a candidate and then fails closed as
+`closure_rejected`; with no candidate there it is reported as
+`no_catchup_candidate`. Either way it remains pending.
+
+### Bounding a pass
+
+`groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps closure
+*attempts*, not groups looked at: a group with no candidate is skipped without
+charging it, so a closable group is no longer starved by unattemptable ones
+sorting ahead of it. A second budget keeps the pass bounded — at most
+`groupLimit × RECONCILE_EXAMINATION_MULTIPLIER` (20) groups are examined per
+pass. Groups are enumerated in a stable `recovery_plan_id` order, so this raises
+the starvation threshold rather than removing it: a prefix of more than
+`groupLimit × 20` candidate-less groups still hides the groups behind it. The
+budgets bound the per-group candidate probe and closure attempt; the enumeration
+query itself still reads every open pending link.
 
 ### Test coverage of the fail-closed path
 
