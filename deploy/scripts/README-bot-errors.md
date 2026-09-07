@@ -623,6 +623,26 @@ both yield no age basis, and the dispatcher stays silent rather than page on a
 guess or on a host-local reading. If you hand-edit a held record, keep the
 trailing `Z`.
 
+**Two residuals of the escalation, disclosed and not fixed here.**
+
+The dispatch log is best-effort. If the escalation's log append degrades while
+its publication succeeds, the record ends up carrying
+`delivery.outcomeUnknownEscalatedAt` with no escalation line anywhere, and no
+later pass repeats it. The first-signal path has the same shape, but the
+consequence differs: a lost first signal still leaves the escalation to come,
+while the escalation is the last signal that record will emit. Read
+`processing/` rather than the log when you need to know what is held.
+
+The escalating reclaim pass reads the record, then takes a fresh observation
+and publishes the held copy. The dispatcher's lock excludes a second
+dispatcher; it does not bind an operator. So an operator who moves a record out
+of `processing/` by either procedure above -- release to `outbox/`, or a move
+to `dead-letter/` -- inside that read-to-publish interval, on the one pass that
+escalates that record, can find the held copy written back into `processing/`,
+and the queue signals then stay raised. The window is sub-second and opens once
+per hold, after the bound. Before disposing of a record older than the bound,
+stop the dispatcher or wait for the escalation line.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and

@@ -3989,10 +3989,10 @@ def is_held_delivery(event: dict[str, Any]) -> bool:
 def delivery_held_epoch(event: dict[str, Any]) -> int | None:
     """When the hold was taken, as a UTC epoch, or None if it cannot be read.
 
-    The hold instant is the only honest age basis: it is written once, in the
-    same durable publication as the held status, and is never rewritten. File
-    mtime is not a substitute -- any later publication of the same record would
-    reset it and the bound would never expire.
+    The hold instant is the only honest age basis: within a hold it is
+    written once, in the same durable publication as the held status, and
+    never rewritten. A release and re-hold restamps it and clears the
+    escalation stamp (mark_outcome_unknown). File mtime is not a substitute.
     """
     delivery = event.get("delivery")
     if not isinstance(delivery, dict):
@@ -8080,7 +8080,7 @@ def hold_ambiguous_send(
     taken, and one louder one if the hold outlives HELD_DELIVERY_ESCALATE_SECONDS.
     `reason` describes the FIRST hold only and is ignored for a record that is
     already held. Each signal is committed with its own once-only stamp in the
-    same publication that carries it, so no crash can emit either one twice.
+    same publication that carries it, so no crash can commit either one twice.
     When nothing changed -- a hold still inside the bound, or one already
     escalated -- the function returns without publishing, so a parked record
     cannot burn a durable generation on every cycle for the rest of its life.
