@@ -12,7 +12,9 @@
 #       stale/fresh observation)
 #   1   detector event-write failure (propagated)
 #   2   usage error, invalid/missing mode, missing dependency or detector
-#   75  lock contention: cycle skipped, recorded on stderr
+#   75  lock contention: cycle skipped, recorded on stderr and in the
+#       producer's cadence receipt as a pre-exec lock_skip that advances
+#       neither cadence clock
 #
 # Early environment failures (e.g. an unwritable state dir at mkdir -p) also
 # surface as a nonzero exit before the lock is ever taken. Detector exit
@@ -90,6 +92,15 @@ fi
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "release-proof: lock held; skipping cycle ($COMPONENT)" >&2
+  # The refused cycle is the one outcome no detector can record: the exec below
+  # never happens, so nothing else knows this cycle existed. Stamp it here,
+  # before exec, through the producers' own receipt writer, which records
+  # lock_skip and advances neither cadence clock. The receipt is dark liveness
+  # evidence and exit 75 is a coordination contract, so a failed receipt is
+  # reduced to a bounded stderr token by the writer and its status is discarded
+  # here rather than allowed to change what this cycle reports.
+  PYTHONPATH="$BUNDLE_ROOT/deploy/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lib.producer_cadence_receipt lock-skip "$COMPONENT" "$MODE" || true
   exit 75
 fi
 

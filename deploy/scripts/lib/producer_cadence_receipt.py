@@ -62,6 +62,7 @@ from __future__ import annotations
 from enum import Enum
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Any, Callable, Mapping
 
@@ -546,3 +547,74 @@ def record_lock_skip(
         durable_write=DurableWrite.NOT_REACHED,
         fetch_status=fetch_status,
     )
+
+
+# The wrapper's way in (#2341 leaf 2)
+# -----------------------------------
+# The scheduler wrapper is shell, takes the shared lock itself and replaces its
+# own process with the detector, so the refused cycle is the one outcome no
+# producer process can ever observe: the detector that would record it is never
+# started. The wrapper therefore needs an entry point of its own, and this is
+# it. It passes its own component token and its already-validated mode, and
+# nothing else: the producer vocabulary, the receipt filenames and the clock
+# rules stay owned by this module.
+
+TOKEN_IDENTITIES: Mapping[str, ProducerIdentity] = {
+    token: producer for producer, token in WRAPPER_TOKENS.items()
+}
+
+# What a refused cycle may say about a refresh it never reached. The tree
+# producer has a fetch step it did not use this cycle; the runtime-staleness
+# producer has none at all and records that structural absence on every receipt
+# it writes. Reporting the absence as a per-cycle choice would be a claim about
+# a producer with nothing to choose.
+LOCK_SKIP_FETCH_STATUS: Mapping[ProducerIdentity, FetchStatus] = {
+    ProducerIdentity.TREE_PROVENANCE: FetchStatus.NOT_ATTEMPTED,
+    ProducerIdentity.RUNTIME_STALENESS: FetchStatus.NOT_APPLICABLE,
+}
+
+
+def record_wrapper_lock_skip(token: str, mode: str) -> None:
+    """Record the wrapper's pre-exec lock skip, absorbing any failure.
+
+    Mirrors the private receipt wrapper both producers already carry: a receipt
+    that cannot be written degrades to one bounded stderr token and never
+    changes the caller's own outcome. Here that outcome is the wrapper's exit
+    75, which is a coordination contract rather than an error, so a receipt
+    failure must not disturb it. The token carries the exception class only --
+    a traceback would put filesystem paths on the operator surface this receipt
+    admits none of.
+    """
+    try:
+        producer = TOKEN_IDENTITIES[token]
+        record_lock_skip(
+            producer,
+            mode=CadenceMode(mode),
+            fetch_status=LOCK_SKIP_FETCH_STATUS[producer],
+        )
+    except Exception as exc:  # defensive: never disturb a coordination exit
+        print(
+            f"release_proof cadence_receipt_error {type(exc).__name__}",
+            file=sys.stderr,
+        )
+
+
+def _main(argv: list[str]) -> int:
+    """``python3 -m lib.producer_cadence_receipt lock-skip <token> <mode>``.
+
+    The subcommand is spelled out rather than implied so this entry point stays
+    scoped to the one pre-exec outcome the wrapper owns; every other outcome
+    belongs to a producer process that can observe it.
+    """
+    if len(argv) != 3 or argv[0] != "lock-skip":
+        print(
+            "usage: producer_cadence_receipt lock-skip <producer-token> <mode>",
+            file=sys.stderr,
+        )
+        return 2
+    record_wrapper_lock_skip(argv[1], argv[2])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

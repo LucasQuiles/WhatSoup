@@ -898,9 +898,11 @@ The two clocks are separate on purpose. A producer that starts every cycle and
 fails every observation looks alive under a single clock; separating them makes
 that state readable. A cycle the shared lock refused advances neither clock and
 records `lock_skip`, so permanent lock contention shows as a stalled attempt
-clock rather than as success. No producer code path reaches `lock_skip` yet:
-the wrapper that detects lock contention is a separate change, so today that
-outcome exists in the writer and its tests only.
+clock rather than as success. The scheduler wrapper writes that receipt itself,
+before it would launch a detector: it holds the lock, and the detector that
+would otherwise record the cycle is never started. Its stage is `pre_exec` and
+its `lastInvocationAt` advances, which is what separates a contended lock from
+a stopped timer.
 
 #### Observe-mode success is weaker evidence, and unevenly so
 
@@ -937,16 +939,22 @@ silent:
 ```
 tree_provenance cadence_receipt_error <ExceptionClassName>
 runtime-staleness cadence_receipt_error <ExceptionClassName>
+release_proof cadence_receipt_error <ExceptionClassName>
 ```
+
+The third line is the wrapper's own, printed when the pre-exec lock-skip receipt
+could not be written. Its cycle still exits 75, because the coordination outcome
+does not depend on the receipt.
 
 A producer whose receipts stop advancing while these lines appear in the
 journal has a writable-state problem, not a dead timer. A producer whose
 receipts stop advancing with no line at all is not necessarily a dead timer: it
 means nothing reached this file. Among the reasons are a timer that never
-fired, a wrapper that refused the cycle before the detector launched (a held
-lock exits 75, a bad mode file or a missing dependency exits 2), a process that
-died before its first stamp, and a state-directory override that moved the
-receipt somewhere else. A missing or unwritten receipt reads as empty rather
+fired, a wrapper that refused the cycle before it could reach the receipt (a bad
+mode file or a missing dependency exits 2, both of them before the lock), a
+process that died before its first stamp, and a state-directory override that
+moved the receipt somewhere else. A held lock is no longer one of them: exit 75
+now stamps `lock_skip` and advances only `lastInvocationAt`. A missing or unwritten receipt reads as empty rather
 than as an error, so the receipt alone cannot separate them; the unit's own
 result and the wrapper's stderr can.
 
