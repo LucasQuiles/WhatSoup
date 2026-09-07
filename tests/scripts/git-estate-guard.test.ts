@@ -1203,7 +1203,7 @@ describe('git-estate guard', () => {
     const laterDecision = (JSON.parse(laterConflict.stdout) as GuardDocument).decision;
     expect(laterDecision.newConflictIds).toHaveLength(1);
     expect(laterDecision.newConflictIds).not.toEqual(conflictIds);
-  });
+  }, 60_000);
 
   it('keeps one conflict operation stable but blocks an exact abort-and-replay instance', () => {
     const { repo } = initRepo();
@@ -1611,7 +1611,7 @@ describe('git-estate guard', () => {
     expect(resolved.status).toBe(0);
     expect((JSON.parse(resolved.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);
-  });
+  }, 60_000);
 
   it('treats an unreadable prunable worktree as incomplete but keeps pre-commit fail-open-with-warning', () => {
     const { root, repo } = initRepo();

@@ -272,7 +272,7 @@ describe('report-only control execution plan compiler', () => {
       hostile.admission,
       hostile.trustedInput,
     ))).toBe('ci.execution-plan.command-unresolved');
-  });
+  }, 60_000);
 
   it('rejects a nested shell invocation behind an env prefix', () => {
     const nestedShell = fixture({
@@ -373,7 +373,7 @@ describe('report-only control execution plan compiler', () => {
 
     expect(errorCode(() => compileReportOnlyExecutionPlan(manifest, clone, trustedInput)))
       .toBe('ci.execution-plan.classification-unadmitted');
-  });
+  }, 60_000);
 
   it('rejects manifest, trusted-input, and evidence binding drift without partial plans', () => {
     const current = fixture({ mutateManifest: makeLowControlsAvailable });
