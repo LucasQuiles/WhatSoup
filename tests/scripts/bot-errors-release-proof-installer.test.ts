@@ -4,7 +4,7 @@ import {
   readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -12,15 +12,58 @@ const INSTALLER = join(process.cwd(), 'deploy/scripts/install-bot-errors-release
 const SYNTH_HOST = 'rp-test-host';
 const tmp = trackTmpDirs('rp-');
 
-const BUNDLE_FILES = [
-  'deploy/scripts/bot-errors-release-proof-run.sh',
-  'deploy/scripts/bot-errors-tree-provenance.py',
-  'deploy/scripts/bot-errors-runtime-staleness.py',
-  'deploy/scripts/bot-errors-emit.py',
-  'deploy/scripts/lib/__init__.py',
-  'deploy/scripts/lib/bot_errors_envelope.py',
-  'deploy/scripts/lib/bot_errors_redaction.py',
-];
+/**
+ * The installer's own BUNDLE_FILES array, parsed rather than restated.
+ *
+ * A second copy of the list here would let the bundle and the fixture drift apart in the
+ * one direction that matters: a file added to the installer but not to the fixture makes
+ * the fixture's source tree incomplete, and a file removed from the installer would still
+ * be asserted present. The fixture therefore ships exactly what the installer ships. The
+ * expectations that must NOT move with the installer are written out literally below.
+ */
+function installerBundleFiles(): string[] {
+  const text = readFileSync(INSTALLER, 'utf8');
+  const match = /BUNDLE_FILES=\(\n(.*?)\n\)/s.exec(text);
+  if (!match) throw new Error('installer BUNDLE_FILES=( ... ) array not found — this parser is stale');
+  const entries = match[1]
+    .split('\n')
+    .map((line) => line.trim().replace(/^"|"$/g, ''))
+    .filter((line) => line && !line.startsWith('#'));
+  if (!entries.includes('deploy/scripts/bot-errors-release-proof-run.sh')) {
+    throw new Error('installer BUNDLE_FILES parsed without the runner — this parser is stale');
+  }
+  return entries;
+}
+
+const BUNDLE_FILES = installerBundleFiles();
+
+/** Everything outside lib/ that the units can run, in either shipped language. */
+const SHIPPED_ENTRY_POINTS = BUNDLE_FILES.filter(
+  (rel) => (rel.endsWith('.py') || rel.endsWith('.sh')) && !rel.startsWith('deploy/scripts/lib/'),
+);
+
+/** The subset the import probe can execute directly. */
+const SHIPPED_PYTHON_ENTRY_POINTS = SHIPPED_ENTRY_POINTS.filter((rel) => rel.endsWith('.py'));
+
+/**
+ * Names of the library modules a source file reaches.
+ *
+ * Both shipped languages are covered, because both can put a module on the bundle's
+ * critical path. Python reaches it with an import statement. Shell reaches the same
+ * package without one, either by running it as a module or by naming its file, and a
+ * walk that only understood import statements would call such a module unreachable and
+ * let it fall out of the bundle.
+ */
+function libImports(repoRelativePath: string): string[] {
+  const text = readFileSync(join(process.cwd(), repoRelativePath), 'utf8');
+  if (repoRelativePath.endsWith('.sh')) {
+    return [
+      ...[...text.matchAll(/-m\s+lib\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]),
+      ...[...text.matchAll(/lib\/([A-Za-z_][A-Za-z0-9_]*)\.py/g)].map((m) => m[1]),
+    ];
+  }
+  return [...text.matchAll(/^\s*(?:from|import)\s+lib\.([A-Za-z_][A-Za-z0-9_]*)/gm)].map((m) => m[1]);
+}
 const UNIT_FILES = [
   'bot-errors-tree-provenance.service',
   'bot-errors-tree-provenance.timer',
@@ -153,7 +196,7 @@ function fixtureGit(root: string, args: string[]): string {
   return result.stdout.trim();
 }
 
-function makeFixture(): Fixture {
+function makeFixture(opts: { realSources?: boolean } = {}): Fixture {
   const root = tmp.make('install');
   const home = join(root, 'home');
   const source = join(root, 'source');
@@ -168,7 +211,13 @@ function makeFixture(): Fixture {
 
   const entries: Array<{ path: string; sha256: string; mustContain: string[] }> = [];
   for (const rel of BUNDLE_FILES) {
-    const body = `# synthetic ${rel}\n`;
+    // Synthetic bodies keep the mutation, rollback and verify cases cheap: those assert on
+    // the installer's own behaviour and never run what it ships. A case that runs the
+    // shipped code needs the real bytes, which is what realSources supplies.
+    const body = opts.realSources
+      ? readFileSync(join(process.cwd(), rel), 'utf8')
+      : `# synthetic ${rel}\n`;
+    mkdirSync(dirname(join(source, rel)), { recursive: true });
     writeFileSync(join(source, rel), body);
     entries.push({ path: rel, sha256: sha256(body), mustContain: [] });
   }
@@ -407,6 +456,78 @@ describe('installer preflight and dry-run', () => {
     expect(text).not.toContain('expectTreeProvenance');
     expect(text).not.toContain('health-profile');
     expect(text).not.toContain('bot-errors-health-check');
+  });
+});
+
+// The bundle is a closed file set: verify_materialized_bundle refuses an installed tree
+// whose file list differs from BUNDLE_FILES at all, and the unit's ExecStart points at
+// that tree. So a module a shipped entry point imports and the bundle does not carry is
+// not a degraded feature, it is a producer that dies at import on every timer fire.
+describe('installer bundle import closure', () => {
+  it('ships every library module the shipped entry points import, transitively', () => {
+    const shipped = new Set(BUNDLE_FILES);
+    // Guards the walk below against a silently empty input: no entry points means the
+    // closure is empty and every assertion after it would hold vacuously.
+    expect(SHIPPED_ENTRY_POINTS.length).toBeGreaterThan(0);
+
+    const reachable = new Set<string>();
+    const queue = SHIPPED_ENTRY_POINTS.flatMap((rel) => libImports(rel));
+    while (queue.length > 0) {
+      const module = queue.pop() as string;
+      if (reachable.has(module)) continue;
+      reachable.add(module);
+      const rel = `deploy/scripts/lib/${module}.py`;
+      if (existsSync(join(process.cwd(), rel))) queue.push(...libImports(rel));
+    }
+    expect(reachable.size).toBeGreaterThan(0);
+
+    const missing = [...reachable]
+      .map((module) => `deploy/scripts/lib/${module}.py`)
+      .filter((rel) => !shipped.has(rel))
+      .sort();
+    expect(missing).toEqual([]);
+    // The package marker is not reached by an import statement and would fall out of a
+    // closure-only check, while `lib.<module>` resolves only inside a package.
+    expect(shipped.has('deploy/scripts/lib/__init__.py')).toBe(true);
+  });
+
+  // Written out rather than derived, so an edit that drops one of these from the
+  // installer fails on a named expectation instead of on a set the installer itself
+  // supplied. These four are the modules the receipt work put on the producers' import
+  // path; the first two were already reachable through the event emitter before that.
+  it('names the shared state and receipt modules the producers import', () => {
+    for (const module of ['durable_json', 'producer_cadence_receipt', 'state_files', 'state_root']) {
+      expect(BUNDLE_FILES).toContain(`deploy/scripts/lib/${module}.py`);
+    }
+  });
+
+  it('installs a bundle whose shipped entry points import cleanly from the bundle root', () => {
+    const fx = makeFixture({ realSources: true });
+    installOk(fx);
+    const python3 = resolveHostTool('python3');
+    const bundleScripts = join(fx.home, '.local/lib/whatsoup/release-proof/current/deploy/scripts');
+
+    expect(SHIPPED_PYTHON_ENTRY_POINTS.length).toBeGreaterThan(0);
+    for (const rel of SHIPPED_PYTHON_ENTRY_POINTS) {
+      const entryPoint = join(bundleScripts, rel.replace('deploy/scripts/', ''));
+      // No PYTHONPATH is set, deliberately: each entry point puts its own directory on
+      // sys.path before importing, which is how the unit reaches the package too. Setting
+      // one here would make the package resolvable by a route the real invocation lacks.
+      // --help is the cheapest argument every entry point accepts, and it is handled
+      // AFTER the module-level imports, so an unshipped module fails here exactly as it
+      // would on the timer's first fire.
+      const res = spawnSync(python3, [entryPoint, '--help'], {
+        encoding: 'utf8',
+        timeout: CHILD_TIMEOUT_MS,
+        env: { ...process.env, HOME: fx.home, BOT_ERRORS_STATE_DIR: join(fx.home, 'state') },
+      });
+      assertNotTimedOut(`import probe ${rel}`, res);
+      // Asserted on the error class rather than on one module name: which import fails
+      // first depends on statement order inside the entry point, which this test has no
+      // business pinning.
+      expect(`${rel}: ${res.stderr}`).not.toContain('ModuleNotFoundError');
+      expect(res.status, `${rel}: ${res.stderr}`).toBe(0);
+    }
   });
 });
 
