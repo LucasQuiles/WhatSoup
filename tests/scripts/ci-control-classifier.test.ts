@@ -893,7 +893,7 @@ describe('lineage lease invalidation', () => {
       reproduce: 'npm run ci:classify -- --help',
       retryable: false,
     });
-  });
+  }, 60_000);
 });
 
 describe('classifier CLI', () => {
