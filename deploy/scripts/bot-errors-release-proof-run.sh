@@ -12,9 +12,14 @@
 #       stale/fresh observation)
 #   1   detector event-write failure (propagated)
 #   2   usage error, invalid/missing mode, missing dependency or detector
-#   75  lock contention: cycle skipped, recorded on stderr and in the
+#   75  lock contention: cycle skipped. The skip is always recorded on
+#       stderr, and the exit status is 75 whether or not a receipt lands.
+#       When the receipt library resolves, the cycle is also stamped in the
 #       producer's cadence receipt as a pre-exec lock_skip that advances
-#       neither cadence clock
+#       neither cadence clock. On a bundle whose allowlist does not carry
+#       the writer and its imports, no receipt is written and the
+#       interpreter's own "No module named" line, carrying an absolute
+#       filesystem path, appears on stderr instead.
 #
 # Early environment failures (e.g. an unwritable state dir at mkdir -p) also
 # surface as a nonzero exit before the lock is ever taken. Detector exit
