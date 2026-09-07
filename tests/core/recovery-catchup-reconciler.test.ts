@@ -209,17 +209,27 @@ describe('automatic operator catch-up reconciler', () => {
         chat: `blocked-${tag}@g.us`,
       });
     }
-    installFixture({
+    const closable = installFixture({
       echoed: true, planId: 'plan-zz-closable', conversationKey: 'conv-zz', chat: 'zz@g.us',
     });
 
-    const report = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+    const capped = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
 
-    expect(report).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 20 });
+    expect(capped).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 20 });
     // The cap is deliberate: the closable group waits for a later pass rather
     // than the pass scanning an unbounded backlog to reach it.
     expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
     expect(linkRows('recovery_pending_operator_catchup')).toHaveLength(44);
+
+    // The cap is the only thing that stopped the pass: the same fixture with a
+    // budget of two allows forty examinations, and the closable group closes.
+    const roomier = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 2 });
+
+    expect(roomier).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 21 });
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([
+      { inbound_seq: closable.sourceSeqs[0], superseded_by_seq: closable.catchupSeq },
+      { inbound_seq: closable.sourceSeqs[1], superseded_by_seq: closable.catchupSeq },
+    ]);
   });
 
   // -------------------------------------------------------------------------
