@@ -37,6 +37,36 @@ function installerBundleFiles(): string[] {
 
 const BUNDLE_FILES = installerBundleFiles();
 
+/**
+ * The bundle set this file expects the installer to ship, written out in full.
+ *
+ * BUNDLE_FILES follows the installer, which is what the fixture needs: it must lay down
+ * exactly what the installer ships. But a list that follows the installer cannot police it.
+ * Every expectation built on BUNDLE_FILES moves with it — the fixture loop, the entry-point
+ * list, the import-closure denominator — so dropping an entry the installer carries shrinks
+ * the question asked instead of failing the answer, and the suite stays green while the
+ * bundle loses a file. Before this list existed, an entry survived that only two ways: by
+ * being named literally somewhere below, or by being a library module the closure walk
+ * reaches from the repository tree and reports missing. The two producers were neither.
+ *
+ * This literal is the part that does not move. Changing the bundle means changing it here
+ * too, in the same commit, by hand, which is the point: a person decides that the bundle
+ * gained or lost a file, rather than the guard adopting whatever the installer now says.
+ */
+const EXPECTED_BUNDLE_FILES = [
+  'deploy/scripts/bot-errors-release-proof-run.sh',
+  'deploy/scripts/bot-errors-tree-provenance.py',
+  'deploy/scripts/bot-errors-runtime-staleness.py',
+  'deploy/scripts/bot-errors-emit.py',
+  'deploy/scripts/lib/__init__.py',
+  'deploy/scripts/lib/bot_errors_envelope.py',
+  'deploy/scripts/lib/bot_errors_redaction.py',
+  'deploy/scripts/lib/durable_json.py',
+  'deploy/scripts/lib/producer_cadence_receipt.py',
+  'deploy/scripts/lib/state_files.py',
+  'deploy/scripts/lib/state_root.py',
+];
+
 /** Everything outside lib/ that the units can run, in either shipped language. */
 const SHIPPED_ENTRY_POINTS = BUNDLE_FILES.filter(
   (rel) => (rel.endsWith('.py') || rel.endsWith('.sh')) && !rel.startsWith('deploy/scripts/lib/'),
@@ -456,6 +486,31 @@ describe('installer preflight and dry-run', () => {
     expect(text).not.toContain('expectTreeProvenance');
     expect(text).not.toContain('health-profile');
     expect(text).not.toContain('bot-errors-health-check');
+  });
+});
+
+describe('installer bundle membership', () => {
+  // Compared as sets rather than as a sequence, deliberately: the order of the installer's
+  // array is not a contract and a reorder ships the same bundle, so failing on it would
+  // train the next reader to re-sort the expectation without reading it. Membership is the
+  // contract, and it is the thing a dropped or added entry changes.
+  it('ships exactly the expected bundle set, so an added or dropped entry fails here', () => {
+    const expected = new Set(EXPECTED_BUNDLE_FILES);
+    const actual = new Set(BUNDLE_FILES);
+    // A duplicate on either side collapses into its set and would hide the very entry this
+    // case exists to notice, so the collapse is checked before the sets are compared.
+    expect(EXPECTED_BUNDLE_FILES.length, 'EXPECTED_BUNDLE_FILES lists a path twice').toBe(expected.size);
+    expect(BUNDLE_FILES.length, 'the installer lists a path in BUNDLE_FILES twice').toBe(actual.size);
+
+    // Reported as one labelled line per entry, in both directions, so the failure tells the
+    // next reader which file moved and which way rather than printing two sets to diff.
+    const drift = [
+      ...[...actual].filter((rel) => !expected.has(rel)).sort()
+        .map((rel) => `added to the installer, absent from EXPECTED_BUNDLE_FILES: ${rel}`),
+      ...[...expected].filter((rel) => !actual.has(rel)).sort()
+        .map((rel) => `removed from the installer, still expected here: ${rel}`),
+    ];
+    expect(drift).toEqual([]);
   });
 });
 
