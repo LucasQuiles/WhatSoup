@@ -260,12 +260,16 @@ function migrateLegacyMarkers(): void {
   }
 }
 
-function markerPayload(source: string): Record<string, unknown> {
+function markerPayload(source: string, detail?: Record<string, unknown>): Record<string, unknown> {
   // Stamped through the Clock SSOT (#2200) rather than a direct `new Date()`: this
   // value is only ever read by an operator inspecting the file, but src/ has exactly
   // one sanctioned wall-clock reader, and going through it is what makes the stamp
   // drivable to a known instant in tests instead of untestable.
-  return { source, setAt: systemClock.nowIso() };
+  //
+  // `detail` is spread FIRST so the envelope fields always win: a caller cannot
+  // shadow `source` or `setAt` and make a marker describe a key it is not filed
+  // under.
+  return { ...detail, source, setAt: systemClock.nowIso() };
 }
 
 /**
@@ -293,6 +297,59 @@ export function loadRecoveryMarkers(): Set<string> {
   return markers;
 }
 
+/**
+ * Outcome of reading one marker's stored payload.
+ *
+ * The three failures are kept apart because they call for opposite handling:
+ * `missing` is the normal end of a marker's life, `invalid` means bytes were
+ * read and can never be interpreted, and `unreadable` means nothing is known
+ * about the bytes at all — so they must not be deleted.
+ */
+export type RecoveryMarkerRead =
+  | { state: 'missing' }
+  | { state: 'unreadable' }
+  | { state: 'invalid' }
+  | { state: 'ok'; payload: Record<string, unknown> };
+
+/**
+ * Read the payload stored with one marker, discriminating why a read failed.
+ *
+ * `loadRecoveryMarkers` answers "did this source have an alert" from filenames
+ * alone, which is all a producer needs when it can rebuild its own state. A
+ * producer re-emitting an alert whose enqueue was rejected cannot: the row it
+ * speaks for is terminal and gone from every query, so the fields it needs live
+ * only here (#2387).
+ *
+ * Collapsing the failures into one null value is what let a caller treat corrupt
+ * bytes as "already discharged" and drop the obligation silently. The legacy
+ * aggregate plane holds no per-key payload (its values are `true`), so a key that
+ * survives only there reads `missing`.
+ *
+ * Total: an over-long key, a permission error and a deleted directory all land on
+ * a state rather than a throw, so a caller iterating markers cannot be aborted by
+ * one bad entry.
+ */
+export function readRecoveryMarkerState(source: string): RecoveryMarkerRead {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(markerFilePath(source), 'utf-8');
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'missing' }
+      : { state: 'unreadable' };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { state: 'invalid' };
+  }
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? { state: 'ok', payload: parsed as Record<string, unknown> }
+    : { state: 'invalid' };
+}
+
 function mutationErrorCode(error: unknown): string {
   return typeof error === 'object' && error !== null && 'code' in error
     ? String((error as NodeJS.ErrnoException).code ?? 'unknown')
@@ -308,15 +365,24 @@ function logMutationFailure(operation: 'set' | 'clear', startedAtMs: number, err
   }, 'recovery authority mutation failed');
 }
 
-/** Write a marker indicating *source* has an active alert. */
-export function setRecoveryMarker(source: string): void {
+/**
+ * Write a marker indicating *source* has an active alert.
+ *
+ * *detail* is optional producer state stored alongside the marker and read back
+ * with `readRecoveryMarkerState`. Presence remains the truth for `loadRecoveryMarkers`,
+ * which never interprets values; detail exists for the producer that must
+ * RE-EMIT the alert it could not enqueue and therefore needs more than "an alert
+ * was owed" (#2387). Keep it small and free of message content — these files are
+ * durable state, not an event log.
+ */
+export function setRecoveryMarker(source: string, detail?: Record<string, unknown>): void {
   const startedAtMs = performance.now();
   try {
     forceEnsurePrivateDirectorySync(markerDirPath(), 'recovery authority state');
     // Atomic temp-file + rename on a path unique to this key. Two processes
     // setting the same key converge on "present", which is the intended meaning;
     // distinct keys never touch the same path, so no lock is required.
-    writePrivateJsonMarkerSync(markerFilePath(source), markerPayload(source), {
+    writePrivateJsonMarkerSync(markerFilePath(source), markerPayload(source, detail), {
       label: 'recovery authority marker',
     });
   } catch (error) {
