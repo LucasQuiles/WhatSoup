@@ -104,8 +104,11 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
       }),
       // Present so the wedged-lane release's intentional-kill step is
       // OBSERVABLE (the real SessionManager reaps a live provider child here).
-      // A no-op: these doubles own no child process.
-      reapWedgedProviderChild: vi.fn(),
+      // Kills nothing, but reports the real method's return contract: `true`
+      // is the ordinary real-process wedge (a child was killed). The
+      // managed-provider cases override it with `false`, which is what the
+      // real session returns when it holds no child at all (#3374 C7).
+      reapWedgedProviderChild: vi.fn(() => true),
       clearTurnWatchdog: vi.fn(),
       tickWatchdog: vi.fn(),
       trackToolStart: vi.fn(),
@@ -451,6 +454,17 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   }
 
   /**
+   * Evidence string of the one wedged-lane release alert. #3374 C7: whether a
+   * provider child was actually reaped is read off the emitted operator record
+   * rather than inferred from the call, so an untruthful record fails here.
+   */
+  function wedgeReleaseEvidence(): string {
+    const alerts = wedgeReleaseAlerts() as unknown[][];
+    expect(alerts).toHaveLength(1);
+    return alerts[0]![3] as string;
+  }
+
+  /**
    * Spy on the coordinator call the release makes. Its argument is a freshly
    * constructed WedgedTurnReclaimedError, so "never called" is direct evidence
    * that no such error was constructed — arguments evaluate at call time.
@@ -696,6 +710,57 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       dispatchScheduled('Successor after reclamation.', 12);
       await waitForInFlightTurn((t) => t.includes('Successor after reclamation.'));
     });
+
+    // #3374 C7 — the managed-provider wedge. `reapWedgedProviderChild` returns
+    // false when the session holds no local child (`this.child === null`),
+    // which is every managed-loop provider: nothing is killed and the remote
+    // request is left outstanding. The lane release itself still has to happen
+    // (settlement never depended on a child existing), but the operator record
+    // must not read as a reap that took place.
+    // Call site: the per-chat reclaim loop in releaseWedgedReclaimedLanes.
+    it('cell 7 reclamation MANAGED PROVIDER: a release that reaped no child says so (#3374 C7)', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      session.reapWedgedProviderChild.mockReturnValue(false);
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      // The reap ran and reported that it killed nothing.
+      expect(session.reapWedgedProviderChild).toHaveBeenCalledTimes(1);
+      expect(wedgeReleaseEvidence()).toContain('reap=reap_skipped_no_child');
+
+      // Release is still unconditional: the lane is freed either way.
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
+    });
+
+    // NEGATIVE CONTROL for the record above: a lane whose provider child WAS
+    // reaped keeps the reaped wording, so the new detail cannot be a constant
+    // and cannot be the release's only spelling.
+    it('cell 7 reclamation NEGATIVE: a release that DID reap a child is not labelled skipped (#3374 C7 control)', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      session.reapWedgedProviderChild.mockReturnValue(true);
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(session.reapWedgedProviderChild).toHaveBeenCalledTimes(1);
+      expect(wedgeReleaseEvidence()).toContain('reap=reaped_child');
+      expect(wedgeReleaseEvidence()).not.toContain('reap_skipped_no_child');
+
+      await vi.waitFor(() => {
+        expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
+    });
   });
 
   // ─── shared mode — one session + one global FIFO for every chat ───────────
@@ -788,6 +853,57 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       await vi.waitFor(() => {
         expect(globalQueue().activeTurn ?? null).toBeNull();
       }, { timeout: GAP_PROBE_BOUND_MS });
+    });
+
+    // #3374 C7 — the managed-provider wedge. `reapWedgedProviderChild` returns
+    // false when the session holds no local child (`this.child === null`),
+    // which is every managed-loop provider: nothing is killed and the remote
+    // request is left outstanding. The lane release itself still has to happen
+    // (settlement never depended on a child existing), but the operator record
+    // must not read as a reap that took place.
+    // Call site: releaseWedgedReclaimedGlobalLane, the shared/single mirror.
+    it('cell 7 reclamation MANAGED PROVIDER: a shared-lane release that reaped no child says so (#3374 C7)', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      session.reapWedgedProviderChild.mockReturnValue(false);
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      // The reap ran and reported that it killed nothing.
+      expect(session.reapWedgedProviderChild).toHaveBeenCalledTimes(1);
+      expect(wedgeReleaseEvidence()).toContain('reap=reap_skipped_no_child');
+
+      // Release is still unconditional: the lane is freed either way.
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
+    });
+
+    // NEGATIVE CONTROL for the record above: a lane whose provider child WAS
+    // reaped keeps the reaped wording, so the new detail cannot be a constant
+    // and cannot be the release's only spelling.
+    it('cell 7 reclamation NEGATIVE: a shared-lane release that DID reap a child is not labelled skipped (#3374 C7 control)', async () => {
+      const seq = dispatchScheduled();
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      session.reapWedgedProviderChild.mockReturnValue(true);
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn?.sourceMessageId).toMatch(/^agentjob-5-/);
+      }, { timeout: 4_000 });
+
+      backdate(seq, '-25 hours');
+      expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
+
+      expect(session.reapWedgedProviderChild).toHaveBeenCalledTimes(1);
+      expect(wedgeReleaseEvidence()).toContain('reap=reaped_child');
+      expect(wedgeReleaseEvidence()).not.toContain('reap_skipped_no_child');
+
+      await vi.waitFor(() => {
+        expect(globalQueue().activeTurn ?? null).toBeNull();
+      }, { timeout: 4_000 });
     });
 
     // NEGATIVE CONTROL for the release above. The 24h grace is NOT the

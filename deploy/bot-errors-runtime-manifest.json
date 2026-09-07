@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "99a13266adfcf2c16d6c04be2d62c3edcb2a71844f8aa8ba5f9321db877c2591",
+      "sha256": "e2fb98c8a9d9fa15d205167cf59853331f02660ce583ebc079fde73615523d1b",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b3ccfc334344984a19408244a74a57732f7264752e7889d59905da1f828466bc",
+      "sha256": "d874d4903f9dbd2481b0f8573ffb3c3071854371d3be192cabce872b211649b6",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -128,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "24a0d7d3b0e81119cec835accfef2f12626dde99b0563e3c00d0677c02cdff1b",
+      "sha256": "000ae75c796d672d292f01a987404f2144fc10b1438a03ac9039190fa3a64721",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -291,7 +291,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "8e3a3fa0aa5a0a00c6161ca6b61ea6afabb9adc46e10869553097b2e291f9a3b",
+      "sha256": "223e1964611637e5da6c481f10eeb74f184c6bd94cef05251d95d995d71c1f9e",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -610,12 +610,14 @@
     },
     {
       "path": "deploy/scripts/lib/target_provenance.py",
-      "sha256": "0676829670b431e4957167cc8b7a83ebbe7ac310bc70fe283e8d161275bfc298",
+      "sha256": "a70157970a058ce06a7959e453aa24bfb5868e871843cc3c3bb5337e8dc89ebe",
       "mustContain": [
         "TARGET_PROVENANCE_SCHEMA_VERSION",
         "class TargetProbes:",
         "def resolve_target_provenance(",
         "def observer_provenance_block(",
+        "def classify_release_divergence(",
+        "def safe_release_divergence(",
         "def safe_target_provenance(",
         "def safe_observer_provenance(",
         "def unit_for_instance(",

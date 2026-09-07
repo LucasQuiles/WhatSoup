@@ -298,6 +298,56 @@ quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
 
+### Relay archive census (read-only)
+
+`remote_archive_census()` in `bot-errors-collector.py` reports how much
+terminal relay archive a remote host is holding, without reading any of it
+aloud. It scans exactly the two archive directories the collector's own
+remote scripts write under the given root — `relayed/` and
+`writefail-relayed/` — and reports each of them, plus a combined total, as
+eight aggregates: artifact count, total bytes, oldest and newest artifact age
+in seconds, the number of artifacts that no longer parse as a JSON event
+record, the number of listed entries the census could not look at, the number
+that were already gone, and the number of distinct producer source kinds (a
+cardinality, not the values).
+Nothing else under the root is scanned, so archive volume is
+never conflated with live `outbox/` backlog. No symlink is ever followed, at
+either level: an archive directory that is itself a symlink is refused with
+status `refused_symlink` and contributes nothing, and inside a real archive
+directory only regular files are counted, so a symlinked entry and a nested
+directory are both skipped.
+
+**An unavailable directory is never reported as an empty one.** A directory
+the census could not list reports status `unavailable` with an errno class of
+`permission`, `missing` or `other`, and every one of its aggregates is null
+rather than zero — "nothing to retain" and "I cannot see what is there" drive
+opposite operator decisions. An entry the census could not look at is
+reported in `unusableEntryCount` and an entry that was already gone in
+`vanishedEntryCount`; neither contributes a count, a size or an age, because
+every aggregate comes from an entry that was opened and measured through the
+descriptor, so a directory that measured nothing reports null aggregates and
+`partial` rather than a zero. The archive directory is opened once with
+`O_DIRECTORY|O_NOFOLLOW` so every listing, stat and read is addressed to that
+descriptor rather than to a name that could be repointed between the check
+and the use. A non-zero count in either column makes the block `partial`,
+including one that is only `vanishedEntryCount`: entries that were in the
+listing are missing from the aggregates beside it, so the block cannot call
+itself complete. Whenever any directory is not `ok`, the combined total
+carries status `partial` and sums only the directories that produced a count,
+including a zero, so an incomplete answer cannot be mistaken for a complete
+one; when none produced one, the total's aggregates are null rather than
+zero, beside the counts of what could not be looked at and what was gone.
+The output carries no host, account, instance, user, message text, path,
+errno message or identifier, and the failure path is deliberately quiet for
+the same reason — a census whose traceback prints the remote root would
+defeat its own purpose. Arguments are parsed inside that guard, so even a
+malformed clock argument yields the fixed failed payload and a non-zero exit
+rather than a traceback naming what was passed. **The census deletes
+nothing.** It performs no
+retention, no compaction, no rewriting and no move; it only counts what is
+already there. Retention thresholds, terminal-status rewriting and any
+deletion path remain unimplemented and are gated separately (issue #2459).
+
 ### Controller diagnostic envelope
 
 The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new
@@ -484,6 +534,66 @@ with a bounded registry error class and does not invent per-field severity.
 The registry is both deployer-managed and SHA-pinned in
 `deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
 shipping the matching registry fails the local manifest and deployer guards.
+
+## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
+
+The dispatcher sends to the chat transport before it can record that the send
+succeeded. If the process dies in that window, or the response is lost, nothing
+on disk proves whether the operator was paged. The transport supplies no
+idempotency key, so a resend cannot be deduplicated remotely and would page a
+second time for one incident.
+
+Such an event is **held** rather than resent: its durable `delivery.status`
+becomes `outcome_unknown`, it stays in `processing/`, and it is exempt from the
+reclaim pass that returns other claimed files to `outbox/`. A held event is
+never archived under `sent/` and is never dropped.
+
+**How a held event surfaces.** Three signals fire, none of which names the
+event:
+
+- one record in `logs/dispatch.jsonl` with record kind
+  `delivery_outcome_unknown_held`. It is written before the durable record is
+  published, so a hold whose publication does not reach disk is retried and
+  logs the line again: expect at most one duplicate line per retried hold, and
+  never a duplicate send. Once the record is on disk the line is not repeated,
+  including across restarts. It is deliberately anonymous: the controller log
+  projects unlisted strings away, so it carries bounded metadata (`attempts`,
+  `held`) and no event id. Read `processing/` to find out which item is held;
+- the health check's `processing` queue line, which warns at 1 entry for 60 s
+  and goes critical at 10 entries for 300 s, and stays critical for as long as
+  the file is parked;
+- the heartbeat watchdog's `queue:processing` alert.
+
+**Inspect.** Held events are the files in `processing/` whose
+`delivery.status` reads `outcome_unknown`. Each also carries
+`delivery.outcomeUnknownAt` and a redacted, truncated
+`delivery.outcomeUnknownReason`.
+
+The dispatcher writes these records as compact JSON, so the pattern must not
+assume a space after the colon:
+
+```bash
+grep -lE '"status": ?"outcome_unknown"' "$BOT_ERRORS_STATE_DIR"/processing/*
+```
+
+**Release for a re-send.** Only after confirming from the BOT ERRORS chat that
+the alert never arrived. Set `delivery.status` back to `"queued"` and move the
+file into `outbox/` under its original name (the `.json.<pid>.processing`
+suffix drops back to `.json`). The next cycle treats it as an ordinary queued
+event. Its attempt counter is kept, but the backoff is **reset**: recording the
+hold clears `nextAttemptAtEpoch`, so a released item is retried on the next
+cycle rather than waiting out the delay its attempt count would otherwise
+impose. Status is the only field to edit — the dispatcher clears its internal
+send marker on the next attempt.
+
+**Dead-letter.** If the alert did arrive, or is no longer actionable, move the
+file into `dead-letter/` with the `.dead_letter.json` suffix the exhausted-retry
+path uses. It leaves `processing/` and is not delivered.
+
+A held event occupies a `processing/` slot until an operator acts, which is why
+the queue signals above stay raised. They report that the queue is not draining;
+they do not distinguish a held item from a backlog, so read `processing/` to
+tell which it is.
 
 ## Test suites + CI gates
 
