@@ -500,8 +500,9 @@ describe('ConnectionManager auth-bond edge coverage', () => {
    * execution falls through to this read immediately after the restore renamed
    * a tree into place — a first look at fresh state.
    *
-   * The fixture therefore puts the transient issue on the PREFLIGHT path with a
-   * restore that did not defer, which is the shape the gate above cannot cover.
+   * The fixture therefore puts the transient issue on the PREFLIGHT path behind
+   * a restore that succeeded — the shape the gate above cannot cover, and one
+   * `restoreLatestIfNeeded` actually returns.
    */
   it('does not page or load the auth state when the preflight read is transient', async () => {
     vi.useFakeTimers();
@@ -511,14 +512,24 @@ describe('ConnectionManager auth-bond edge coverage', () => {
         issues: ['creds_json_read_transient:EAGAIN'],
       });
       mockAuth.snapshot = transientSnapshot;
-      // A restore that did NOT defer, so the earlier gate cannot be what
-      // produces the result: the run reaches the preflight either way.
+      // The restore SUCCEEDED, which is both the producible shape and the
+      // reachable one. Its success return carries no `deferred` field and the
+      // connect path records the success without returning, so the run falls
+      // through to this second read — a first look at a tree the restore has
+      // just renamed into place, which is where a transient open is most
+      // likely rather than least.
+      //
+      // Pairing a transient snapshot with 'auto-restore disabled' would be a
+      // combination restoreLatestIfNeeded cannot return, because its transient
+      // branch precedes its auto-restore branch. A fixture the guard cannot
+      // produce would leave this test pinning a code shape rather than a
+      // reachable path.
       mockAuth.restore = {
-        attempted: false,
-        restored: false,
-        source: null,
+        attempted: true,
+        restored: true,
+        source: '/tmp/auth-backup/latest',
         snapshot: transientSnapshot,
-        error: 'auto-restore disabled',
+        error: null,
       };
 
       const { mockSock } = makeMockSocket();
@@ -534,6 +545,9 @@ describe('ConnectionManager auth-bond edge coverage', () => {
       // never runs, and no socket is created off them.
       expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
       expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+      // The sequence, not just the gate: the restore reported success and the
+      // very next read was still unfinished, which is the window this covers.
+      expect(lifecycleEventCount(manager, 'auth_restore_succeeded')).toBe(1);
       // The disclosure and the arranged retry, so the attempt is not silent
       // and a later definite read gets to decide.
       expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
