@@ -39,6 +39,14 @@ export const AUTO_COMPACT_SUCCESS_COOLDOWN_MS = 5 * MS_PER_MINUTE;
 // A scope eligible again inside this window after a successful compact is a
 // rapid re-arm: the compact completed but was operationally ineffective.
 export const AUTO_COMPACT_RAPID_REARM_WINDOW_MS = 5 * MS_PER_MINUTE;
+// #3523: consecutive-rapid-rearm ceiling. Once a scope has re-armed auto-compact
+// this many times in a row without effect, /compact is proven unable to bring the
+// context back under threshold (a compaction livelock). Re-arming a (K+1)th
+// /compact would loop forever, so the runtime stops looping and escalates — for
+// resident '::scheduled-agent-job' scopes, to a hard session reset (fresh
+// session_id + dropped resumable checkpoint) rather than another ineffective
+// compact. Reuses the existing consecutiveRapidRearms counter; not a parallel one.
+export const AUTO_COMPACT_CONVERGENCE_LIMIT = 3;
 export const AUTO_COMPACT_BACKOFF_TIERS_MS = [
   AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
   15 * MS_PER_MINUTE,

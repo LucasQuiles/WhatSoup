@@ -84,6 +84,7 @@ import {
   AMBIGUOUS_SESSION_MAX_AGE_MS,
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
+  RESIDENT_TURN_PROGRESS_DEADLINE_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
@@ -206,7 +207,11 @@ import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-id
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
 import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
 import { CrashTracker } from './crash-tracker.ts';
-import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
+import {
+  AutoCompactController,
+  AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
+  AUTO_COMPACT_CONVERGENCE_LIMIT,
+} from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
 import {
   PendingSystemResultTracker,
@@ -1379,6 +1384,26 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    // #3523 layer 1: compaction convergence guard. Once a scope has rapid-re-armed
+    // auto-compact AUTO_COMPACT_CONVERGENCE_LIMIT consecutive times, /compact is
+    // proven unable to shrink the context below threshold — arming another one just
+    // loops forever. For a resident '::scheduled-agent-job' scope (which accretes
+    // context across firings and cannot shrink) escalate to a hard session reset
+    // instead of another ineffective compact. Reuses the existing
+    // consecutiveRapidRearms counter — no parallel bookkeeping. Placed AFTER the
+    // rapid-rearm reset above (so a scope that has since recovered — last success
+    // now outside the rapid-rearm window — has its counter cleared to 0 and is not
+    // escalated) but BEFORE the cooldown gate (so a still-wedged scope escalates
+    // immediately instead of waiting out the escalating backoff, up to an hour).
+    const consecutiveRapidRearms = this.autoCompact.consecutiveRapidRearms.get(scopeKey) ?? 0;
+    if (
+      consecutiveRapidRearms >= AUTO_COMPACT_CONVERGENCE_LIMIT
+      && isScheduledAgentJobMapKey(scopeKey)
+    ) {
+      this.escalateCompactionLivelock(session, scopeKey, rowId, consecutiveRapidRearms);
+      return;
+    }
+
     const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
     if (cooldownUntil !== undefined) {
       if (now < cooldownUntil) return;
@@ -1436,6 +1461,41 @@ export class AgentRuntime implements Runtime {
       await this.settleFailedSystemTurnDispatch(session, scopeKey, compactLease, err);
     }).catch((err) => {
       log.error({ err, scopeKey, rowId }, 'auto compact failed to quarantine ambiguous dispatch');
+    });
+  }
+
+  /**
+   * #3523 layer 1: break a compaction livelock on a resident
+   * '::scheduled-agent-job' scope. When /compact has proven unable to bring the
+   * context back under threshold AUTO_COMPACT_CONVERGENCE_LIMIT times in a row,
+   * re-arming another compact would loop forever. The only convergent action is a
+   * hard session reset — session.handleNew() ends the current session (dropping
+   * its resumable checkpoint) and spawns a fresh one with a new session_id, so the
+   * accreted context is discarded rather than repeatedly (and futilely) compacted.
+   * The auto-compact bookkeeping for the scope is cleared so the fresh session
+   * starts from a clean baseline.
+   */
+  private escalateCompactionLivelock(
+    session: SessionManager,
+    scopeKey: string,
+    rowId: number,
+    consecutiveRapidRearms: number,
+  ): void {
+    log.error(
+      { scopeKey, rowId, consecutiveRapidRearms, limit: AUTO_COMPACT_CONVERGENCE_LIMIT },
+      'auto compact convergence limit reached — hard-resetting scheduled-agent-job session (compaction livelock)',
+    );
+    emitAlertChecked(
+      this.instanceName,
+      'auto_compact_convergence_reset',
+      'Auto-compact convergence limit reached',
+      `scope=${scopeKey} consecutiveRapidRearms=${consecutiveRapidRearms} — hard-resetting the scheduled-agent-job session (context cannot shrink via /compact)`,
+    );
+    // Drop all auto-compact bookkeeping for the scope so the fresh session is not
+    // immediately re-classified as rapid-re-arming off the old counters.
+    this.autoCompact.cleanupScope(scopeKey);
+    void session.handleNew().catch((err) => {
+      log.error({ err, scopeKey, rowId }, 'compaction-livelock hard reset failed');
     });
   }
 
@@ -1666,14 +1726,28 @@ export class AgentRuntime implements Runtime {
 
     const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
     const classified = classifyActiveSessions(this.db, this.durability);
+    const now = systemClock.now();
     for (const session of classified) {
       if (residentRowIds.has(session.id)) {
+        // #3523 layer 2: the resident exemption is liveness-gated. A current-process
+        // resident manager is only spared zombie disposition while it is making turn
+        // progress. A resident wedged between turns (e.g. a compaction livelock, or a
+        // manager whose child crashed but whose row is still mapped) would otherwise
+        // be protected forever and never self-clear. When it is NOT progressing, fall
+        // through to the classification's normal stale_live/stale_dead disposition
+        // instead of skipping.
+        if (this.isResidentManagerMakingProgress(session.id, now)) {
+          log.warn(
+            { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
+              reason: session.reason, providerSessionId: session.sessionId },
+            'skipping zombie-session disposition for current-process resident manager');
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          continue;
+        }
         log.warn(
           { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
             reason: session.reason, providerSessionId: session.sessionId },
-          'skipping zombie-session disposition for current-process resident manager');
-        if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-        continue;
+          'resident manager making no turn progress — allowing zombie-session disposition');
       }
       switch (session.classification) {
         case 'stale_dead':
@@ -1744,6 +1818,44 @@ export class AgentRuntime implements Runtime {
       }
     }
     return proactiveResumeBlockedConversationKeys;
+  }
+
+  /**
+   * #3523 layer 2: is the current-process resident manager backing this
+   * agent_sessions row actually making turn progress? Only a progressing resident
+   * earns the zombie-sweep exemption. Progress means: a turn is in flight, OR a
+   * turn completed within RESIDENT_TURN_PROGRESS_DEADLINE_MS — AND the scope is not
+   * stuck re-arming auto-compact past AUTO_COMPACT_CONVERGENCE_LIMIT (a compaction
+   * livelock keeps a turn perpetually "in flight" yet makes no real progress, so
+   * that signal overrides turnInFlight). Fails SAFE: when the manager cannot be
+   * located or has no usable timing evidence, it is treated as progressing so a
+   * healthy resident is never reaped on missing data.
+   */
+  private isResidentManagerMakingProgress(rowId: number, now: number): boolean {
+    let mapKey: string | undefined;
+    let session: SessionManager | undefined;
+    for (const [key, candidate] of this.chatSessions) {
+      if (candidate.getDbRowId() === rowId) {
+        mapKey = key;
+        session = candidate;
+        break;
+      }
+    }
+    if (session === undefined || mapKey === undefined) return true; // unknown → protect
+
+    // A scope wedged re-arming auto-compact past the convergence limit is
+    // livelocked, not progressing — even if a /compact turn shows as in flight.
+    const rearms = this.autoCompact.consecutiveRapidRearms.get(mapKey) ?? 0;
+    if (rearms >= AUTO_COMPACT_CONVERGENCE_LIMIT) return false;
+
+    const st = session.getStatus();
+    if (st.turnInFlight === true) return true; // actively working a turn
+
+    const lastProgressTs = st.lastMessageAt ?? st.startedAt;
+    if (!lastProgressTs) return true; // no timing evidence → protect
+    const parsed = Date.parse(lastProgressTs);
+    if (!Number.isFinite(parsed)) return true; // unparseable → protect
+    return now - parsed <= RESIDENT_TURN_PROGRESS_DEADLINE_MS;
   }
 
   /**

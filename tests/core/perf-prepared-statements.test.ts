@@ -84,7 +84,11 @@ describe('prepared statement caching', () => {
     // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
     // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
     // for reconcileContinuityCandidates() reuse.)
-    expect(prepareSpy).toHaveBeenCalledTimes(152);
+    // (+1 vs 152, #3523 layer 3: anyCheckpointForConversation — the
+    // same-namespace checkpoint existence probe that distinguishes a real
+    // row/checkpoint divergence from a clean cross-namespace no-op on close —
+    // prepared once in the constructor and reused per close.)
+    expect(prepareSpy).toHaveBeenCalledTimes(153);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

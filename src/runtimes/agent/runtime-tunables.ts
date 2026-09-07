@@ -27,6 +27,15 @@ export const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_
 export const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', MS_PER_DAY); // 24h
 export const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 export const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * MS_PER_MINUTE); // 5m
+// #3523: the zombie sweep exempts a current-process resident manager from
+// disposition, but that exemption used to be unconditional — a resident wedged
+// between turns (e.g. a compaction livelock) was protected forever and never
+// self-cleared. The exemption is now liveness-gated: a resident is only spared
+// while it is making turn progress (a turn in flight, or a turn completed within
+// this deadline, and not stuck re-arming auto-compact). A resident that has made
+// no turn progress for longer than this falls through to the normal
+// stale_live/stale_dead disposition instead of being permanently protected.
+export const RESIDENT_TURN_PROGRESS_DEADLINE_MS = envPositiveInt('WHATSOUP_RESIDENT_TURN_PROGRESS_DEADLINE_MS', 30 * MS_PER_MINUTE); // 30m
 
 export const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 

@@ -271,6 +271,28 @@ describe('classifyActiveSessions', () => {
     expect(results[0].reason).toContain('no session_checkpoint');
   });
 
+  it('classifies a checkpoint-less session with a DEAD pid as stale_dead (#3523 layer 4)', () => {
+    // A checkpoint-less agent_sessions row whose owning process is gone can never
+    // be resumed (no durable checkpoint) — it is definitively stale, not the
+    // "do-not-touch" ambiguous bucket. Before this it stayed 'active' forever
+    // because the no-checkpoint branch never ran a liveness probe.
+    insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: '12345@s.whatsapp.net' });
+
+    const results = classifyActiveSessions(db, durability, allDead);
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('stale_dead');
+    expect(results[0].reason).toContain('no session_checkpoint');
+    expect(results[0].reason).toContain('PID 1000 dead');
+  });
+
+  it('keeps a checkpoint-less session with an ALIVE pid ambiguous (no regression)', () => {
+    insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: '12345@s.whatsapp.net' });
+
+    const results = classifyActiveSessions(db, durability, allOwned);
+    expect(results[0].classification).toBe('ambiguous');
+    expect(results[0].reason).toContain('no session_checkpoint');
+  });
+
   it('classifies sessions without chat_jid as ambiguous', () => {
     insertSession({ claudePid: 1000, sessionId: 'ses-1' });
 
