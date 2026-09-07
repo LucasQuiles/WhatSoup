@@ -361,11 +361,16 @@ a superseding page that never did. A receipt carries bounded counts, the
 severity bucket, the window identity and the opaque fingerprint; it carries no
 manifest path, no fingerprint basis, no host names and no summary text.
 
-**The receipt write fails closed: a receipt store that cannot be written blocks
-storm digests entirely.** That is deliberate -- the whole value of the record is
-that it exists before the page does -- but it means an unwritable
-`storm-receipts/` stops storm collapse from paging at all. The acknowledgement
-and the adoption both fail open, so neither can wedge a cycle.
+**The receipt write fails closed, and it fails the whole cycle: a receipt
+store that cannot be written stops the dispatcher before it delivers
+anything.** That is deliberate -- the whole value of the record is that it
+exists before the page does -- but the blast radius is wider than storm
+collapse: the collapse sweep runs before the delivery loop and nothing catches
+the error on the way out, so an unwritable `storm-receipts/` aborts the cycle
+and nothing pages at all that cycle, storm or not. Under the daemon the
+failure is recorded and logged, the interval is slept and the next cycle
+retries; the process does not exit. The acknowledgement and the adoption both
+fail open, so neither can wedge a cycle.
 
 A receipt an earlier process left unpublished is adopted at the start of a
 cycle, and the adoption always terminates. If the dispatcher's own record of the
