@@ -607,10 +607,13 @@ is anonymous and bounded (`attempts`, `held`), and it is once-only: the record
 carries `delivery.outcomeUnknownEscalatedAt`, committed in the same durable
 publication as the line it announces. As with the first signal the line is
 written before that publication, so an escalation whose publication does not
-reach disk is retried and logs the line again: expect at most one duplicate
-line per retried escalation, and never a second escalation for that hold. Once
-the stamp is on disk the line is not repeated for that hold, including across
-restarts. Once-only means once per HOLD, not once per record: the dispatcher
+reach disk is retried and logs the line again: expect one duplicate line per
+retried escalation. That is a cost per retry, not a cap on the total, because
+a publication that keeps failing keeps the record due and keeps it retrying --
+the retry residual below gives the shape of that. There is never a second
+escalation for a hold whose publication reached disk: once the stamp is on
+disk the line is not repeated for that hold, including across restarts.
+Once-only means once per HOLD, not once per record: the dispatcher
 clears `delivery.outcomeUnknownEscalatedAt` whenever it takes a new hold, so a
 record that was released and then held again escalates once more after the new
 hold outlives the bound; releasing still edits status and nothing else. The
@@ -623,7 +626,7 @@ both yield no age basis, and the dispatcher stays silent rather than page on a
 guess or on a host-local reading. If you hand-edit a held record, keep the
 trailing `Z`.
 
-**Two residuals of the escalation, disclosed and not fixed here.**
+**Three residuals of the escalation, disclosed and not fixed here.**
 
 The dispatch log is best-effort. If the escalation's log append degrades while
 its publication succeeds, the record ends up carrying
@@ -639,9 +642,31 @@ dispatcher; it does not bind an operator. So an operator who moves a record out
 of `processing/` by either procedure above -- release to `outbox/`, or a move
 to `dead-letter/` -- inside that read-to-publish interval, on the one pass that
 escalates that record, can find the held copy written back into `processing/`,
-and the queue signals then stay raised. The window is sub-second and opens once
-per hold, after the bound. Before disposing of a record older than the bound,
-stop the dispatcher or wait for the escalation line.
+and the queue signals then stay raised. The window opens once per hold, after
+the bound. How long it stays open is not established here: the interval spans
+one log append, one observation and one durable publication, so its length is a
+property of the host's filesystem and sync latency rather than of this change,
+and nothing here measures it.
+
+Before disposing of a record older than the bound, stop the dispatcher. That is
+the only safe procedure. Do not wait for the escalation line: the line is
+appended before the write-back publication, so it marks the start of the
+interval, not its end. What marks the end is the record's own
+`delivery.outcomeUnknownEscalatedAt` stamp -- and waiting for that stamp is not
+a procedure either, because the dispatcher can still be mid-publication on a
+later record.
+
+**The retry residual.** The escalation line is appended before the publication
+that makes the stamp durable, so a publication that keeps failing never makes
+it durable. The record stays due, and every reclaim pass appends the escalation
+line and then a `delivery_escalation_publication_failed` line: two
+`error`-level lines per record per cycle, without bound, for as long as the
+failure lasts. The per-retry cost named earlier in this section is true of one
+retry and is not a cap on the total. A full or read-only durable volume
+produces this for every held record past the bound at once. The smallest fixes
+are to gate the escalation line on the publication having succeeded, or to add
+a failure-count stamp so the retry backs off; both change behaviour and are out
+of scope here.
 
 ## Test suites + CI gates
 

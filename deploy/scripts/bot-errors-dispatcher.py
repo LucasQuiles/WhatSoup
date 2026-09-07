@@ -8167,7 +8167,7 @@ def hold_ambiguous_send(
 def escalate_held_delivery(
     paths: dict[str, Path], claimed: Path, event: dict[str, Any], current: int
 ) -> bool:
-    """Report a hold that has outlived the bound, LOUDER, exactly once (#2424).
+    """Report a hold that has outlived the bound, LOUDER (#2424).
 
     The disposition does not change and must not: the record stays held, in
     processing/, at the same status, never re-sent, never dead-lettered, never
@@ -8176,14 +8176,14 @@ def escalate_held_delivery(
     an alert nobody can prove was delivered never needs to be. The only thing
     that changes at expiry is how loudly the dispatcher says so.
 
-    The escalation is stamped on the record rather than counted in memory, so
-    one held item cannot re-signal every cycle and a restart cannot signal a
-    second time. The stamping, the signal and the publication all live in
-    hold_ambiguous_send, which is the single durable publication site for a
-    held record's state; this is the named entry point for the reclaim pass and
-    the guard that keeps an unexpired hold out of that function entirely.
+    Once per hold is enforced by the escalation stamp hold_ambiguous_send
+    writes, not by this function: that is the single durable publication site
+    for a held record's state, and the stamp keeps a later cycle or a restart
+    silent. This is the named entry point for the reclaim pass.
 
-    Returns True when this call took the escalation path (no caller reads it).
+    Returns True when the record was held, was due, and the publication call
+    returned; it does not promise this pass escalated. A held record with no
+    first-signal stamp gets that signal now and escalates on a later pass.
     """
     if not is_held_delivery(event):
         # #2424: held_delivery_escalation_due answers a question about TIME,
