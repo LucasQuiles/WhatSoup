@@ -372,7 +372,9 @@ export async function fetchAnthropicModelIdsWithStatus(
     headers = { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' };
   }
 
-  const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic');
+  // Interactive `/config model` resolution — retries stay off (transient
+  // failures fall back to the static catalog immediately, no startup stall).
+  const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic', { retryTransient: false });
   if (result.failure) {
     return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
   }
@@ -402,7 +404,9 @@ export type OpenAIModelsResult =
 export async function fetchOpenAIModelIdsWithStatus(): Promise<OpenAIModelsResult> {
   const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
   if (!openaiKey) return { status: 'no-key' };
-  const result = await fetchModelIds(OPENAI_MODELS_URL, { Authorization: `Bearer ${openaiKey}` }, 'openai');
+  // Interactive `/config model` resolution — retries stay off (see the
+  // Anthropic sibling above; falls back to the static catalog immediately).
+  const result = await fetchModelIds(OPENAI_MODELS_URL, { Authorization: `Bearer ${openaiKey}` }, 'openai', { retryTransient: false });
   if (result.failure) {
     return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
   }
