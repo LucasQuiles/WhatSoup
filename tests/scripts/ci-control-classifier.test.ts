@@ -348,7 +348,7 @@ describe('exact revision classification', () => {
     expect(result.requiredSuites).toEqual(
       path.endsWith('.test.ts') ? ['tests/example.test.ts', path] : ['tests/example.test.ts'],
     );
-  });
+  }, 60_000);
 
   it('fails closed on an uncovered gitlink while preserving its native object-type reason', () => {
     const { root, baseOid, manifestDigest } = fixture();

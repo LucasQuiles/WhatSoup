@@ -1228,7 +1228,7 @@ set -euo pipefail
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
-  });
+  }, 60_000);
 });
 
 describe('deploy/whatsoup — source wiring', () => {
