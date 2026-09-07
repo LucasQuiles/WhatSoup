@@ -5,11 +5,12 @@ the closed producer vocabulary, and the clock rules. The per-producer wiring is
 tested in test_bot_errors_tree_provenance_cadence.py and
 test_bot_errors_runtime_staleness_cadence.py.
 
-The lock-skip case is proven HERE at the writer API and nowhere else in this
-leaf: the wrapper that detects lock contention is out of scope for leaf 1, so
-no producer code path reaches lock_skip yet. This file proves the writer
-refuses to move either clock for that outcome; it does not prove the wrapper
-calls it.
+The lock-skip case is proven HERE at the writer API and, since the scheduler
+wrapper gained its pre-exec receipt call, at that call site too: the wrapper
+reaches lock_skip before it would replace itself with a detector, and the
+test_wrapper_lock_skip_* cases below cover that entry point. This file proves
+both that the writer refuses to move either clock for that outcome and that
+the wrapper's own path records it.
 """
 from __future__ import annotations
 

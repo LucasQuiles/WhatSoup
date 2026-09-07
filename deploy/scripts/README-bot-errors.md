@@ -972,10 +972,11 @@ fails every observation looks alive under a single clock; separating them makes
 that state readable. A cycle the shared lock refused advances neither clock and
 records `lock_skip`, so permanent lock contention shows as a stalled attempt
 clock rather than as success. The scheduler wrapper writes that receipt itself,
-before it would launch a detector: it holds the lock, and the detector that
-would otherwise record the cycle is never started. Its stage is `pre_exec` and
-its `lastInvocationAt` advances, which is what separates a contended lock from
-a stopped timer.
+before it would launch a detector: the lock it asked for was denied to it and
+another process holds it, so the cycle never reaches the detector launch and no
+detector can record that the cycle existed. Its stage is `pre_exec` and its
+`lastInvocationAt` advances, which is what separates a contended lock from a
+stopped timer.
 
 #### Observe-mode success is weaker evidence, and unevenly so
 
@@ -1015,9 +1016,13 @@ runtime-staleness cadence_receipt_error <ExceptionClassName>
 release_proof cadence_receipt_error <ExceptionClassName>
 ```
 
-The third line is the wrapper's own, printed when the pre-exec lock-skip receipt
-could not be written. Its cycle still exits 75, because the coordination outcome
-does not depend on the receipt.
+The third line is the wrapper's own, printed when the module is present on the
+host and the pre-exec lock-skip receipt could not be written. A bundle built
+before the installer change that ships the receipt library does not carry the
+module at all; there the interpreter reports `No module named` for it on stderr
+instead, on a line that carries an absolute filesystem path. In both cases the
+cycle still exits 75, because the coordination outcome does not depend on the
+receipt.
 
 A producer whose receipts stop advancing while these lines appear in the
 journal has a writable-state problem, not a dead timer. A producer whose
@@ -1027,9 +1032,11 @@ fired, a wrapper that refused the cycle before it could reach the receipt (a bad
 mode file or a missing dependency exits 2, both of them before the lock), a
 process that died before its first stamp, and a state-directory override that
 moved the receipt somewhere else. A held lock is no longer one of them: exit 75
-now stamps `lock_skip` and advances only `lastInvocationAt`. A missing or unwritten receipt reads as empty rather
-than as an error, so the receipt alone cannot separate them; the unit's own
-result and the wrapper's stderr can.
+normally stamps `lock_skip` and advances only `lastInvocationAt`, and when the
+receipt write fails or the bundle does not carry the writer, no receipt lands
+and the stderr line for that cycle is the only trace. A missing or unwritten
+receipt reads as empty rather than as an error, so the receipt alone cannot
+separate them; the unit's own result and the wrapper's stderr can.
 
 Mode-lock is the first kind and not the second. The durable reader refuses any
 group- or world-accessible bit on the receipt file, which a restore from backup
