@@ -629,8 +629,20 @@ describe('cross-conversation guard call-site matrix (3457) — un-armed fold', (
 
     // The un-armed fallback compares the RAW LID digits against the
     // phone-folded session key, so the session's own conversation is
-    // rejected. The fallback errs toward rejection, never toward admitting
-    // a foreign conversation.
+    // rejected. The fallback errs toward rejection EXCEPT where the target's
+    // LID local part, after the `:device` strip, is identical to the
+    // session's phone-folded key: `toConversationKey` in
+    // `src/core/conversation-key.ts` handles the personal and LID domains in
+    // ONE switch arm and returns the bare local part for both, so those two
+    // keys coincide and the comparison ADMITS instead. Where such a LID is
+    // MAPPED to a different phone the admitted target is a foreign
+    // conversation, and the armed fold would have resolved that mapped LID to
+    // its phone and rejected — so the fallback is not strictly the more
+    // conservative of the two. For an UNMAPPED LID the armed fold shares the
+    // collision rather than closing it: `resolvePhoneFromJid` in
+    // `src/core/access-list.ts` falls back to the bare LID digits when the
+    // mapping misses. Whether any live LID collides with a session phone this
+    // way is NOT established here; the collision is a property of the fold.
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('does not match session conversation');
     expect(result.content[0].text).toContain(`resolves to conversation "${PIN_LID}"`);
