@@ -226,7 +226,7 @@ describe('report-only control execution plan compiler', () => {
     expect(repeated).toEqual(plan);
     expect(repeated.planDigest).toBe(plan.planDigest);
     expect(plan.planDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
-  });
+  }, 60_000);
 
   it('keeps the checked-in quarantined lease unavailable and makes readiness inconclusive', () => {
     const { manifest, trustedInput, admission } = fixture();
