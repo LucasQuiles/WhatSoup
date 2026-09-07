@@ -35,20 +35,35 @@ export const AUTH_BOND_READ_PERSISTENT_CLASS = 'auth_bond_read_persistent';
  *
  * Lives here, in the policy module every side already imports, because EVERY
  * place that draws a DESTRUCTIVE or PAGING conclusion from a non-'present'
- * bond must not draw it from an indefinite read. There are four:
+ * bond must not draw it from an indefinite read. There are five, and four of
+ * them consult this predicate:
  *
  * - AuthBondGuard's restore path, which renames the live auth root away;
  * - AuthBondGuard's capture path, whose failure result is paged as a confirmed
  *   repair;
  * - ConnectionManager's connect preflight, which pages the same alert and then
  *   loads an auth state reader that initialises fresh credentials;
- * - classifyAuthFailure, which pages on local corruption.
+ * - classifyAuthFailure, which pages on local corruption;
+ * - ConnectionManager's QR handler, `handleConnectionUpdate` in
+ *   src/transport/connection.ts, which takes a live inspect() and pages
+ *   'qr-required' from it. THIS ONE IS NOT GATED, deliberately and only so far
+ *   as the page itself goes: a QR event is independent evidence that the
+ *   credential did not authenticate, so the alert is earned no matter how the
+ *   read went. What is NOT earned is the integrity verdict attached to it.
+ *   `localAuthBondFailureCriticalAsset` derives confidence 'confirmed' for any
+ *   snapshot that is not clean-and-present, so a transient read produces a
+ *   confirmed credential_integrity claim from an observation that established
+ *   nothing. It compounds: `localAuthAlertEmitted` allows one such page per
+ *   process and clears only on a verified send, so a transient-classified page
+ *   can hold the slot ahead of the accurate one. KNOWN RESIDUAL with a
+ *   follow-up; not addressed here.
  *
  * Sharing one predicate is what stops a new transient reason being added to one
- * and forgotten in the others. This list named only the first and last of the
- * four for a release, and the two it left out drew exactly the conclusions it
- * exists to prevent — so keep it complete, and treat a new consumer of a
- * non-'present' status as needing an entry here rather than a local test.
+ * and forgotten in the others. This list named only the first and fourth of the
+ * five for a release, and two of the three it left out drew exactly the
+ * conclusions it exists to prevent — so keep it complete, and treat a new
+ * consumer of a non-'present' status as needing an entry here rather than a
+ * local test.
  *
  * Implemented over `transientAuthReadIssue` rather than scanning the prefix
  * list a second time, so the question "is there one" and the question "which
