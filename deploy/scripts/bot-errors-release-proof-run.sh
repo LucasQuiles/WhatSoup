@@ -101,9 +101,12 @@ if ! flock -n 9; then
   # never happens, so nothing else knows this cycle existed. Stamp it here,
   # before exec, through the producers' own receipt writer, which records
   # lock_skip and advances neither cadence clock. The receipt is dark liveness
-  # evidence and exit 75 is a coordination contract, so a failed receipt is
-  # reduced to a bounded stderr token by the writer and its status is discarded
-  # here rather than allowed to change what this cycle reports.
+  # evidence and exit 75 is a coordination contract, so the call's status is
+  # discarded here rather than allowed to change what this cycle reports. What
+  # reaches stderr on failure depends on the bundle: once the module imports,
+  # the writer reduces the failure to a bounded token; on a bundle whose
+  # allowlist lacks the receipt library the module never resolves, so nothing
+  # in it runs and the interpreter's own message goes to stderr instead.
   PYTHONPATH="$BUNDLE_ROOT/deploy/scripts${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -m lib.producer_cadence_receipt lock-skip "$COMPONENT" "$MODE" || true
   exit 75
