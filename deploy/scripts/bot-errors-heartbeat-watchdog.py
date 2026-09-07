@@ -104,6 +104,7 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "collector_roster",
     "browser_debug",
     "wedge_signature",
+    "turn_failure_rate",
     "supervision_deadman",
     "clock_skew",
 })
@@ -1447,6 +1448,152 @@ def wedge_signature_problems() -> dict[str, str]:
     return problems
 
 
+def turn_failure_window_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", 1800)
+
+
+def turn_failure_min_count() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MIN_COUNT", 3)
+
+
+def turn_failure_max_chats_reported() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MAX_CHATS", 5)
+
+
+def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """conversation_key -> shared session_id for the scheduled/interactive
+    session-sharing collision that yields "Exact ... could not be closed"
+    terminal failures. An interactive per_chat checkpoint and its
+    ``::scheduled-agent-job`` sibling MUST NOT share one claude session; when
+    they do, whichever scope finalizes first closes the shared agent_sessions
+    row and the other scope's exact-identity close matches zero rows and throws.
+    Read-only; returns {} when session_checkpoints is absent."""
+    try:
+        rows = conn.execute(
+            "SELECT i.conversation_key, i.session_id "
+            "FROM session_checkpoints i "
+            "JOIN session_checkpoints s ON s.session_id = i.session_id "
+            "WHERE i.session_status = 'active' AND s.session_status = 'active' "
+            "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
+            "AND s.conversation_key LIKE '%::scheduled-agent-job' "
+            "AND i.session_id IS NOT NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
+def turn_failure_rate_problems() -> dict[str, str]:
+    """Per-instance terminal turn-failure-rate probe.
+
+    Sibling of :func:`wedge_signature_problems`, which by contract only fires on
+    NONTERMINAL inbound rows. Turns that error and are marked terminal ``failed``
+    (``inbound_events.processing_status='failed'``) drain cleanly and are
+    invisible to every other check: the process is up, WhatsApp is connected,
+    /health is 200, and the queue is empty — yet the chat is silently failing
+    every real turn. This probe alerts when a single conversation accumulates at
+    least BOT_ERRORS_TURN_FAILURE_MIN_COUNT terminal failures within
+    BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS, and enriches the packet with the
+    per-conversation ``failure_class`` split plus the scheduled/interactive
+    session-sharing collision when present.
+
+    Dark by default: runs only when ``turn_failure_rate`` is explicitly listed
+    in BOT_ERRORS_WATCHDOG_CHECKS. Read-only toward the product runtime: SQLite
+    is opened mode=ro with query_only ON (the live database is WAL)."""
+    problems: dict[str, str] = {}
+    now = now_epoch()
+    window = turn_failure_window_seconds()
+    min_count = turn_failure_min_count()
+    max_chats = turn_failure_max_chats_reported()
+    for item in expected_local_services():
+        name = item["name"]
+        key = f"turn_failure:{name}"
+        collision_key = f"session_collision:{name}"
+        db_path = wedge_db_root() / name / "bot.db"
+        if not db_path.exists():
+            problems[key] = (
+                f"turn-failure probe misconfigured: instance={name} database missing: {db_path}"
+            )
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                has_inbound = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='inbound_events'"
+                ).fetchone()
+                if not has_inbound:
+                    problems[key] = (
+                        f"turn-failure probe found no inbound_events table: "
+                        f"instance={name} db={db_path}"
+                    )
+                    continue
+                rows = conn.execute(
+                    "SELECT conversation_key, "
+                    "COALESCE(failure_class, 'unknown') AS fc, COUNT(*) AS n "
+                    "FROM inbound_events "
+                    "WHERE processing_status = 'failed' "
+                    "AND received_at IS NOT NULL "
+                    "AND strftime('%s', received_at) IS NOT NULL "
+                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) <= ? "
+                    "GROUP BY conversation_key, fc",
+                    (now, window),
+                ).fetchall()
+                collisions = session_collision_map(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            problems[key] = (
+                f"turn-failure probe failed: instance={name} error={str(exc)[:160]}"
+            )
+            continue
+        # Session-sharing collision is a zero-false-positive structural defect:
+        # an interactive per_chat checkpoint and its ``::scheduled-agent-job``
+        # sibling must never share a claude session. When they do, the exact
+        # lifecycle-close guards throw ("Exact ... could not be closed") on every
+        # interactive turn. Alert on it directly — independent of failure rate,
+        # since real user turns arrive too sparsely to reliably cross a rate gate.
+        if collisions:
+            collision_details = "; ".join(
+                f"ck={conv_key} shared_session_id={session_id}"
+                for conv_key, session_id in sorted(collisions.items())[:max_chats]
+            )
+            problems[collision_key] = (
+                f"session-sharing collision: instance={name} "
+                f"affected_chats={len(collisions)} {collision_details}"
+            )
+        # Aggregate per conversation: total failures + failure_class split.
+        per_chat: dict[str, dict[str, int]] = {}
+        for conv_key, fc, n in rows:
+            bucket = per_chat.setdefault(str(conv_key), {})
+            bucket[str(fc)] = bucket.get(str(fc), 0) + int(n)
+        offending = [
+            (conv_key, sum(split.values()), split)
+            for conv_key, split in per_chat.items()
+            if sum(split.values()) >= min_count
+        ]
+        if not offending:
+            continue
+        offending.sort(key=lambda entry: entry[1], reverse=True)
+        details = []
+        for conv_key, total, split in offending[:max_chats]:
+            classes = ",".join(
+                f"{cls}:{count}"
+                for cls, count in sorted(split.items(), key=lambda kv: kv[1], reverse=True)
+            )
+            detail = f"ck={conv_key} failed={total} classes={classes}"
+            if conv_key in collisions:
+                detail += f" session_collision session_id={collisions[conv_key]}"
+            details.append(detail)
+        problems[key] = (
+            f"turn-failure rate: instance={name} window_seconds={window} "
+            f"min_count={min_count} affected_chats={len(offending)} "
+            + "; ".join(details)
+        )
+    return problems
+
+
 def supervision_max_age_seconds() -> float:
     raw = os.environ.get("BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS", "7200")
     try:
@@ -2373,6 +2520,9 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append(BROWSER_DEBUG_PREFIX)
     if "wedge_signature" in checks:
         prefixes.append("wedge:")
+    if "turn_failure_rate" in checks:
+        prefixes.append("turn_failure:")
+        prefixes.append("session_collision:")
     if "supervision_deadman" in checks:
         prefixes.append("supervision_deadman")
     if "clock_skew" in checks:
@@ -2495,6 +2645,8 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         problems.update(browser_debug_problems())
     if "wedge_signature" in checks:
         problems.update(wedge_signature_problems())
+    if "turn_failure_rate" in checks:
+        problems.update(turn_failure_rate_problems())
     if "supervision_deadman" in checks:
         problems.update(supervision_deadman_problems())
     if "clock_skew" in checks:
