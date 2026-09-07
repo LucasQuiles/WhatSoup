@@ -701,6 +701,79 @@ the queue signals above stay raised. They report that the queue is not draining;
 they do not distinguish a held item from a backlog, so read `processing/` to
 tell which it is.
 
+**Aged-out holds.** A hold is unbounded in disposition but not in silence. Once
+a held record has sat for `BOT_ERRORS_INCIDENT_STALE_SECONDS` (the dispatcher's
+existing stale-incident clock, default 24 h, reused here rather than given a
+second knob; unset it takes its value from
+`BOT_ERRORS_INCIDENT_ESCALATE_SECONDS`, so setting that one alone moves this
+bound too), the next reclaim pass logs one `delivery_outcome_unknown_escalated`
+line at `error` level, above the `warning` of the first signal. Age is measured
+from `delivery.outcomeUnknownAt`, never from file mtime. Like the first signal it
+is anonymous and bounded (`attempts`, `held`), and it is once-only: the record
+carries `delivery.outcomeUnknownEscalatedAt`, committed in the same durable
+publication as the line it announces. As with the first signal the line is
+written before that publication, so an escalation whose publication does not
+reach disk is retried and logs the line again: expect one duplicate line per
+retried escalation. That is a cost per retry, not a cap on the total, because
+a publication that keeps failing keeps the record due and keeps it retrying --
+the retry residual below gives the shape of that. There is never a second
+escalation for a hold whose publication reached disk: once the stamp is on
+disk the line is not repeated for that hold, including across restarts.
+Once-only means once per HOLD, not once per record: the dispatcher
+clears `delivery.outcomeUnknownEscalatedAt` whenever it takes a new hold, so a
+record that was released and then held again escalates once more after the new
+hold outlives the bound; releasing still edits status and nothing else. The
+escalation changes nothing else. The record stays in `processing/` at
+`delivery.status = outcome_unknown`, and is still never re-sent, dead-lettered
+or auto-disposed. Only an operator disposes of a held item, by the two
+procedures above. A record whose `outcomeUnknownAt` cannot be read as an
+unambiguous UTC instant is never escalated: unparseable and zone-less stamps
+both yield no age basis, and the dispatcher stays silent rather than page on a
+guess or on a host-local reading. If you hand-edit a held record, keep the
+trailing `Z`.
+
+**Three residuals of the escalation, disclosed and not fixed here.**
+
+The dispatch log is best-effort. If the escalation's log append degrades while
+its publication succeeds, the record ends up carrying
+`delivery.outcomeUnknownEscalatedAt` with no escalation line anywhere, and no
+later pass repeats it. The first-signal path has the same shape, but the
+consequence differs: a lost first signal still leaves the escalation to come,
+while the escalation is the last signal that record will emit. Read
+`processing/` rather than the log when you need to know what is held.
+
+The escalating reclaim pass reads the record, then takes a fresh observation
+and publishes the held copy. The dispatcher's lock excludes a second
+dispatcher; it does not bind an operator. So an operator who moves a record out
+of `processing/` by either procedure above -- release to `outbox/`, or a move
+to `dead-letter/` -- inside that read-to-publish interval, on the one pass that
+escalates that record, can find the held copy written back into `processing/`,
+and the queue signals then stay raised. The window opens once per hold, after
+the bound. How long it stays open is not established here: the interval spans
+one log append, one observation and one durable publication, so its length is a
+property of the host's filesystem and sync latency rather than of this change,
+and nothing here measures it.
+
+Before disposing of a record older than the bound, stop the dispatcher. That is
+the only safe procedure. Do not wait for the escalation line: the line is
+appended before the write-back publication, so it marks the start of the
+interval, not its end. What marks the end is the record's own
+`delivery.outcomeUnknownEscalatedAt` stamp -- and waiting for that stamp is not
+a procedure either, because the dispatcher can still be mid-publication on a
+later record.
+
+**The retry residual.** The escalation line is appended before the publication
+that makes the stamp durable, so a publication that keeps failing never makes
+it durable. The record stays due, and every reclaim pass appends the escalation
+line and then a `delivery_escalation_publication_failed` line: two
+`error`-level lines per record per cycle, without bound, for as long as the
+failure lasts. The per-retry cost named earlier in this section is true of one
+retry and is not a cap on the total. A full or read-only durable volume
+produces this for every held record past the bound at once. The smallest fixes
+are to gate the escalation line on the publication having succeeded, or to add
+a failure-count stamp so the retry backs off; both change behaviour and are out
+of scope here.
+
 ## Test suites + CI gates
 
 Two independent pytest-runner scripts gate `deploy/scripts/tests/` in `quality.yml`, and
