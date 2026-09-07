@@ -442,15 +442,28 @@ describe('ConnectionManager auth-bond edge coverage', () => {
       expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
       expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(0);
 
-      // Control: the SAME invalid snapshot, declined for a non-deferred reason,
-      // does reach the preflight and does page. This is what makes the zero
-      // above a property of the abort rather than of the fixture.
+      // Control: an invalid snapshot on the same path, declined for a
+      // non-deferred reason, does reach the preflight and does page. This is
+      // what makes the zero above a property of the abort rather than of the
+      // fixture.
+      //
+      // The control fixture is invalid WITHOUT a transient issue, and that is
+      // load-bearing. The preflight has its own transient gate (see the test
+      // below), so a transient control would defer as well and could no longer
+      // demonstrate that anything ever pages. `creds_json_invalid_json` is a
+      // DEFINITE read of a broken credential, which is precisely the condition
+      // that may page.
       alertCalls.length = 0;
+      const definiteInvalidSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_invalid_json'],
+      });
+      mockAuth.snapshot = definiteInvalidSnapshot;
       mockAuth.restore = {
         attempted: false,
         restored: false,
         source: null,
-        snapshot: transientSnapshot,
+        snapshot: definiteInvalidSnapshot,
         error: 'auto-restore disabled',
       };
       const { mockSock } = makeMockSocket();
@@ -465,6 +478,112 @@ describe('ConnectionManager auth-bond edge coverage', () => {
       expect(
         String((controlAlerts[0]?.[5] as { failure?: { code?: unknown } })?.failure?.code ?? ''),
       ).toMatch(/^WA_AUTH_BOND_LOCAL_/);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same defect one read later — the preflight, which was unguarded.
+   *
+   * The restore answers one read. The connect path then takes a SECOND,
+   * independent live read and acts on it: it pages `WA_AUTH_BOND_LOCAL_*` on an
+   * invalid status and loads the auth state. A transient open on that read
+   * produces the same non-'present' status that says nothing about the
+   * credential, so both conclusions were drawn from an unfinished read — the
+   * paging one asserts an integrity verdict nothing established, and the load
+   * hands an unreadable credential to a reader that initialises fresh ones.
+   *
+   * Reachability does not need a race. The restore's success return carries no
+   * `deferred` field and the connect path does not return on `restored`, so
+   * execution falls through to this read immediately after the restore renamed
+   * a tree into place — a first look at fresh state.
+   *
+   * The fixture therefore puts the transient issue on the PREFLIGHT path with a
+   * restore that did not defer, which is the shape the gate above cannot cover.
+   */
+  it('does not page or load the auth state when the preflight read is transient', async () => {
+    vi.useFakeTimers();
+    try {
+      const transientSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_read_transient:EAGAIN'],
+      });
+      mockAuth.snapshot = transientSnapshot;
+      // A restore that did NOT defer, so the earlier gate cannot be what
+      // produces the result: the run reaches the preflight either way.
+      mockAuth.restore = {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: transientSnapshot,
+        error: 'auto-restore disabled',
+      };
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      // The paging half: an unfinished read must not assert integrity.
+      expect(alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      )).toHaveLength(0);
+      // The destructive half: the reader that initialises fresh credentials
+      // never runs, and no socket is created off them.
+      expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+      // The disclosure and the arranged retry, so the attempt is not silent
+      // and a later definite read gets to decide.
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+      expect(manager.getConnectionState()).toMatchObject({
+        state: 'reconnecting',
+        reconnectAttempts: 1,
+      });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Coverage assertion for the test above: the deferral is a property of the
+   * TRANSIENT issue, not of every invalid preflight. A definite invalid read on
+   * the identical path still pages and still loads, so a gate that swallowed
+   * every non-'present' preflight would fail here.
+   */
+  it('still pages and loads on a preflight that read the credential definitely', async () => {
+    vi.useFakeTimers();
+    try {
+      const definiteInvalidSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_invalid_json'],
+      });
+      mockAuth.snapshot = definiteInvalidSnapshot;
+      mockAuth.restore = {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: definiteInvalidSnapshot,
+        error: 'auto-restore disabled',
+      };
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      const localBondAlerts = alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      );
+      expect(localBondAlerts.length).toBeGreaterThanOrEqual(1);
+      expect(
+        String((localBondAlerts[0]?.[5] as { failure?: { code?: unknown } })?.failure?.code ?? ''),
+      ).toMatch(/^WA_AUTH_BOND_LOCAL_/);
+      expect(vi.mocked(useMultiFileAuthState)).toHaveBeenCalled();
+      expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(1);
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(0);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

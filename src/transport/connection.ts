@@ -17,6 +17,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
+import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
   buildEffectiveClientReceipt,
@@ -883,6 +884,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       const preflight = this.authBond.inspect();
+
+      // The SECOND read, and it needs the same gate as the first.
+      //
+      // The restore above answers one read. This is an independent live read
+      // taken immediately after it, on a tree the restore may have just
+      // renamed into place, so it is a first look at fresh state rather than a
+      // re-read of a settled one. A transient open here produces the same
+      // non-'present' status that says nothing about the credential, and
+      // without this gate the run continued past it twice over: it paged a
+      // local auth-bond failure, which asserts something about the
+      // credential's INTEGRITY that an unfinished read never established, and
+      // then loaded the auth state, whose reader initialises FRESH credentials
+      // when the existing ones cannot be read.
+      //
+      // Same deferral as the withheld restore above: no page, no load, and the
+      // retry put on the reconnect policy so a later definite read decides.
+      if (hasTransientAuthReadIssue(preflight.issues)) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: preflight,
+          note: 'auth bond preflight read was transient',
+        });
+        this.log.warn(
+          { issues: preflight.issues },
+          'auth bond preflight read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
+      }
+
       if (preflight.status !== 'present') {
         this.recordCredentialLifecycle('auth_preflight_invalid', { authBond: preflight });
       }
@@ -2501,7 +2532,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         authBond: result.snapshot,
         note: result.error ?? 'credential-write-in-flight',
       });
-      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred while credential write settles');
+      // Two conditions defer a capture now — a credential write still in
+      // flight and a read that did not finish — so the reason is carried in
+      // `error` rather than asserted by this line.
+      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
       return;
     }
     this.lastAuthSnapshotFailedAt = Date.now();

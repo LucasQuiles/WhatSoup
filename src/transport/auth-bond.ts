@@ -1443,6 +1443,22 @@ export class AuthBondGuard {
       return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
     if (snapshot.status !== 'present' || !snapshot.treeHash) {
+      // A transient read is not grounds for a repair alert either.
+      //
+      // The restore is the destructive consumer of a non-'present' bond; this
+      // is the PAGING one. The failure below reports deferred: false, and
+      // connection.ts turns that into a local auth-bond alert whose asset
+      // carries recoverability 'manual_repair_required' and confidence
+      // 'confirmed' — a verdict on the credential's integrity that a read
+      // which never finished cannot support, and one /health contradicts at
+      // the same moment by classifying the same issue as non-terminal.
+      //
+      // Deferring is also the useful answer rather than only the safe one:
+      // capture() retries a deferred attempt, so a transient that clears is
+      // captured on the next look instead of being logged as a repair.
+      if (hasTransientAuthReadIssue(snapshot.issues)) {
+        return this.deferTransientCapture(reason, snapshot);
+      }
       const freshAgeMs = this.freshInvalidCredentialAgeMs(snapshot);
       if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
         return this.deferFreshInvalidCapture(reason, freshAgeMs, 'auth bond credential write still in flight');
@@ -1551,6 +1567,33 @@ export class AuthBondGuard {
       deferred: true,
       path: null,
       error: `${message}: age_ms=${ageMs}`,
+    };
+  }
+
+  /**
+   * Withhold a capture whose credential could not be read to a verdict.
+   *
+   * Disclosed through the SAME deferral fields as the fresh-write grace, and
+   * deliberately not through `lastCaptureError`: that field is what the failure
+   * branch writes and what the health surface reads back, so writing it here
+   * would report a withheld attempt as a capture that failed.
+   *
+   * No age is recorded. The fresh-write grace has one — the credential's mtime
+   * — and a transient read has none that means the same thing. The streak age
+   * belongs to the read, not to this attempt, and reporting it in a field named
+   * for the grace would invite the two to be compared.
+   */
+  private deferTransientCapture(reason: string, snapshot: AuthBondSnapshot): AuthBondCaptureResult {
+    this.lastCaptureDeferredAt = this.now().toISOString();
+    this.lastCaptureDeferredReason = reason;
+    this.lastCaptureDeferredAgeMs = null;
+    return {
+      ok: false,
+      snapshot: this.inspect(),
+      captured: false,
+      deferred: true,
+      path: null,
+      error: `auth bond read was transient; capture withheld pending a definite read: ${transientAuthReadIssue(snapshot.issues) ?? 'unknown'}`,
     };
   }
 

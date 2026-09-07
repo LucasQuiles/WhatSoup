@@ -33,12 +33,22 @@ export const AUTH_BOND_READ_PERSISTENT_CLASS = 'auth_bond_read_persistent';
 /**
  * Does this auth-bond snapshot carry a transient read?
  *
- * Lives here, in the policy module both sides already import, because the two
- * places that draw a DESTRUCTIVE or PAGING conclusion from a non-'present'
- * bond must not draw it from an indefinite read: AuthBondGuard's restore path,
- * which renames the live auth root away, and classifyAuthFailure, which pages
- * on local corruption. Sharing one predicate is what stops a new transient
- * reason being added to one and forgotten in the other.
+ * Lives here, in the policy module every side already imports, because EVERY
+ * place that draws a DESTRUCTIVE or PAGING conclusion from a non-'present'
+ * bond must not draw it from an indefinite read. There are four:
+ *
+ * - AuthBondGuard's restore path, which renames the live auth root away;
+ * - AuthBondGuard's capture path, whose failure result is paged as a confirmed
+ *   repair;
+ * - ConnectionManager's connect preflight, which pages the same alert and then
+ *   loads an auth state reader that initialises fresh credentials;
+ * - classifyAuthFailure, which pages on local corruption.
+ *
+ * Sharing one predicate is what stops a new transient reason being added to one
+ * and forgotten in the others. This list named only the first and last of the
+ * four for a release, and the two it left out drew exactly the conclusions it
+ * exists to prevent — so keep it complete, and treat a new consumer of a
+ * non-'present' status as needing an entry here rather than a local test.
  *
  * Implemented over `transientAuthReadIssue` rather than scanning the prefix
  * list a second time, so the question "is there one" and the question "which

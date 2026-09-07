@@ -1560,6 +1560,102 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
   });
 
   /**
+   * The same gate on the OTHER conclusion drawn from a non-'present' bond.
+   *
+   * The restore is the destructive consumer; capture is the paging one. Its
+   * failure branch reported `deferred: false` for any non-'present' status, and
+   * the connect path turns that into a local auth-bond alert whose asset
+   * carries `recoverability: 'manual_repair_required'` and
+   * `confidence: 'confirmed'` — a claim about the credential's integrity that a
+   * read which never finished cannot support. It needs no race: any scheduled
+   * capture that catches a transient open produced it, while /health reported
+   * the identical condition as non-terminal. Two surfaces disagreed about one
+   * read.
+   *
+   * A deferral is also the useful answer here rather than merely the safe one:
+   * capture retries a deferred attempt, so a transient that clears is captured
+   * on the next look instead of being logged as a repair.
+   */
+  it('defers the capture on a transient read instead of reporting a failure', async () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    const stateRoot = join(root, 'state');
+    const credsPath = join(authDir, 'creds.json');
+    writeAuth(authDir);
+
+    // Programmable, so one guard sees the transient regime, the definite one
+    // that follows it, and the definite FAILURE that must still be a failure.
+    const inject = { transient: true };
+    let credsOpens = 0;
+    const mod = await importGuardWithFsMock((actual) => ({
+      openSync: vi.fn((
+        path: Parameters<FsModule['openSync']>[0],
+        flags: Parameters<FsModule['openSync']>[1],
+        mode?: Parameters<FsModule['openSync']>[2],
+      ) => {
+        if (String(path) === credsPath) {
+          credsOpens += 1;
+          if (inject.transient) {
+            throw Object.assign(new Error('EAGAIN: resource temporarily unavailable, open'), { code: 'EAGAIN' });
+          }
+        }
+        return actual.openSync(path, flags, mode as any);
+      }) as unknown as FsModule['openSync'],
+    }));
+
+    const guard = new mod.AuthBondGuard({
+      authDir,
+      stateRoot,
+      instanceName: 'transient-capture-bot',
+      // capture() retries a deferred attempt; zero delay keeps that loop real
+      // without spending its wall-clock wait inside the test.
+      captureRetryDelayMs: 0,
+    });
+
+    const deferred = guard.capture('scheduled');
+
+    expect(deferred.ok).toBe(false);
+    expect(deferred.captured).toBe(false);
+    expect(deferred.path).toBeNull();
+    // The machine-readable half. Prose in `error` is not something the connect
+    // path can branch on, and `deferred` is the field that keeps it off the
+    // alert.
+    expect(deferred.deferred).toBe(true);
+    expect(deferred.error).toContain('transient');
+    // Coverage assertion: the deferral is for the transient read under test and
+    // not for some other early exit, each of which reports deferred: false.
+    expect(deferred.snapshot.issues).toContain('creds_json_read_transient:EAGAIN');
+    // Disclosed AS a deferral. lastCaptureError is what the failure branch
+    // writes and what the health surface reads back, so leaving it null is the
+    // difference between "not now" and "this capture failed".
+    expect(deferred.snapshot.backup.lastCaptureDeferredReason).toBe('scheduled');
+    expect(deferred.snapshot.backup.lastCaptureError).toBeNull();
+    // Retried rather than returned on the first look. That is what makes the
+    // deferral a retry rather than a silent skip.
+    expect(credsOpens).toBeGreaterThan(1);
+
+    // The next DEFINITE read decides, and here it decides the credential is
+    // fine — so the capture the transient deferred actually happens.
+    inject.transient = false;
+    const captured = guard.capture('scheduled');
+    expect(captured.ok).toBe(true);
+    expect(captured.captured).toBe(true);
+    expect(captured.deferred).toBe(false);
+    expect(captured.snapshot.status).toBe('present');
+
+    // Control: a definite non-'present' read is still a failure, so the gate is
+    // keyed on the transient issue rather than on any non-'present' status. A
+    // gate that swallowed every failing capture would fail here.
+    actualFs.rmSync(credsPath);
+    const failed = guard.capture('scheduled');
+    expect(failed.ok).toBe(false);
+    expect(failed.deferred).toBe(false);
+    expect(failed.error).toContain('auth bond is missing');
+    expect(failed.snapshot.issues).toContain('creds_json_missing');
+    expect(failed.snapshot.backup.lastCaptureError).toContain('auth bond is missing');
+  });
+
+  /**
    * SHOULD-3 — a failed restore re-enters the convergence path.
    *
    * markTreeStale('auth-restore-started') cancels the successor that a cold
