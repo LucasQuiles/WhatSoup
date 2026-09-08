@@ -730,7 +730,11 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain('affected_hosts: 13');
     expect(rendered).toContain('affected_host_list:');
     hosts.forEach((host) => expect(rendered).toContain(host));
-    expect(rendered).toContain('storm_manifest:');
+    // #2387: the digest text no longer names the manifest path. The path is
+    // private topology and nothing reads it programmatically, so it must not
+    // reach the operator page. What ties the page to its window is the window
+    // identity, asserted below against the manifest the same window wrote.
+    expect(rendered).not.toContain('storm_manifest:');
     expect(rendered).toContain('requested_action: Q investigate');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_queued"');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_collapsed"');
@@ -742,12 +746,23 @@ describe('bot-errors-dispatcher', () => {
       entries: unknown[];
       entriesCollapsed: unknown[];
       hosts: string[];
+      fingerprint: string;
+      windowStartEpoch: number;
     };
     expect(manifest.affectedHosts).toBe(13);
     expect(manifest.entries).toHaveLength(13);
     expect(manifest.entriesCollapsed).toHaveLength(13);
     expect(manifest.hosts).toHaveLength(13);
     hosts.forEach((host) => expect(manifest.hosts).toContain(host));
+    // The window identity the dispatcher mints is fingerprint plus window start,
+    // and it qualifies the digest's incident key so two windows of one storm
+    // cannot collapse onto a single incident record. Built from the manifest's
+    // own parts rather than from its digest id, because a superseded window's
+    // digest id gains a revision suffix while the key qualifier never does.
+    expect(manifest.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(Number.isInteger(manifest.windowStartEpoch)).toBe(true);
+    const windowIdentity = `storm-${manifest.fingerprint}-${manifest.windowStartEpoch}`;
+    expect(rendered).toContain(`incident_key: fleet|storm-collapse|storm-collapse.${windowIdentity}`);
   });
 
   it('does not merge distinct storm fingerprints', () => {
