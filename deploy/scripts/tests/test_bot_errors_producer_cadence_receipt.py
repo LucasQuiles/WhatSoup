@@ -5,11 +5,12 @@ the closed producer vocabulary, and the clock rules. The per-producer wiring is
 tested in test_bot_errors_tree_provenance_cadence.py and
 test_bot_errors_runtime_staleness_cadence.py.
 
-The lock-skip case is proven HERE at the writer API and nowhere else in this
-leaf: the wrapper that detects lock contention is out of scope for leaf 1, so
-no producer code path reaches lock_skip yet. This file proves the writer
-refuses to move either clock for that outcome; it does not prove the wrapper
-calls it.
+The lock-skip case is proven HERE at the writer API and, since the scheduler
+wrapper gained its pre-exec receipt call, at that call site too: the wrapper
+reaches lock_skip before it would replace itself with a detector, and the
+test_wrapper_lock_skip_* cases below cover that entry point. This file proves
+both that the writer refuses to move either clock for that outcome and that
+the wrapper's own path records it.
 """
 from __future__ import annotations
 
@@ -458,3 +459,72 @@ def test_published_receipt_survives_the_strict_durable_reader(state_dir):
     observation = durable_json.observe_json(target)
     assert observation.payload is not None
     assert observation.payload["producer"] == TREE.value
+
+
+# --- wrapper-facing entry point (#2341 leaf 2) -------------------------------
+#
+# The scheduler wrapper is bash and holds the shared lock itself, so the refused
+# cycle is the one outcome no producer process can ever record. These cases pin
+# the entry point it calls; the wrapper actually calling it is proven end to end
+# in tests/scripts/bot-errors-release-proof-run.test.ts.
+
+
+@pytest.mark.parametrize(
+    ("token", "producer", "fetch_status"),
+    [
+        ("tree", TREE, "not_attempted"),
+        ("runtime-staleness", RUNTIME_STALENESS, "not_applicable"),
+    ],
+    ids=["tree", "runtime-staleness"],
+)
+def test_wrapper_lock_skip_records_a_pre_exec_skip_for_each_producer(
+    state_dir, clock, token, producer, fetch_status
+):
+    pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.OBSERVE)
+    pcr.record_cycle_success(
+        producer, mode=pcr.CadenceMode.OBSERVE, durable_write=pcr.DurableWrite.NOT_OWED
+    )
+    before = _payload(producer)
+    skip_stamp = clock.advance()
+
+    pcr.record_wrapper_lock_skip(token, "observe")
+
+    receipt = _payload(producer)
+    assert receipt["producer"] == producer.value
+    assert receipt["outcome"] == "lock_skip"
+    assert receipt["stage"] == "pre_exec"
+    assert receipt["mode"] == "observe"
+    # The tree producer has a refresh step this cycle never reached; the
+    # runtime-staleness producer has none at all, and its own receipts say so.
+    # Reporting that structural absence as a per-cycle choice would be a claim
+    # about a producer with nothing to choose.
+    assert receipt["fetchStatus"] == fetch_status
+    assert receipt["lastAttemptAt"] == before["lastAttemptAt"]
+    assert receipt["lastSuccessfulObservationAt"] == before["lastSuccessfulObservationAt"]
+    assert receipt["lastInvocationAt"] == skip_stamp
+
+
+def test_wrapper_lock_skip_before_any_attempt_leaves_the_attempt_clock_null(state_dir):
+    # #2341 leaf 2, R4: a producer whose first-ever cycle is refused has never
+    # attempted anything, and the receipt says so with a null rather than a
+    # stamp. The lock skip is the only path that can publish a first receipt
+    # with no attempt behind it, so this is where that null is pinned.
+    pcr.record_wrapper_lock_skip("tree", "observe")
+
+    receipt = _payload(TREE)
+    assert receipt["lastAttemptAt"] is None
+    assert receipt["lastSuccessfulObservationAt"] is None
+    assert receipt["lastInvocationAt"]
+
+
+def test_wrapper_lock_skip_reduces_an_unusable_argument_to_a_bounded_token(state_dir, capsys):
+    # The wrapper's exit 75 is a coordination contract, so a receipt it cannot
+    # write must not change it, and a traceback would put filesystem paths on an
+    # operator surface this receipt admits none of. Same degradation both
+    # producers already use for their own receipt failures.
+    pcr.record_wrapper_lock_skip("not-a-producer", "observe")
+
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "release_proof cadence_receipt_error KeyError"
+    assert not pcr.receipt_path(TREE).exists()
+    assert not pcr.receipt_path(RUNTIME_STALENESS).exists()
