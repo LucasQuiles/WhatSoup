@@ -17,6 +17,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
+import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
   buildEffectiveClientReceipt,
@@ -140,6 +141,7 @@ export type CredentialLifecycleEventName =
   | 'connect_start'
   | 'auth_restore_succeeded'
   | 'auth_restore_failed'
+  | 'auth_restore_deferred'
   | 'auth_preflight_invalid'
   | 'baileys_version'
   | 'socket_created'
@@ -852,7 +854,66 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.log.error({ error: restore.error, source: restore.source }, 'auth bond restore failed');
       }
 
+      // A restore withheld on a transient read has to be RETRIED, and this is
+      // the only path that can retry it. The guard refuses to act on a "not
+      // now" read, which is correct, but the activation used to continue
+      // regardless: it loaded the auth state, and the auth-state reader
+      // initialises FRESH CREDENTIALS when the existing ones cannot be read or
+      // parsed, so a credential that was merely unreadable for one open could
+      // be replaced by an empty one and taken to QR — after which nothing
+      // schedules another attempt. A /health read cannot rescue this: it
+      // re-reads the credential but never calls the restore.
+      //
+      // So abort BEFORE the auth state is loaded and put the retry on the
+      // existing reconnect policy. `transientReadPersistent` changes the
+      // health classification only; elapsed time cannot turn an unreadable
+      // credential into a definite absence or corruption verdict. Activation
+      // remains deferred until a later connect attempt gets a definite read.
+      if (restore.deferred === true) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: restore.snapshot,
+          note: restore.error ?? 'auth bond read was transient',
+        });
+        this.log.warn(
+          { error: restore.error },
+          'auth bond read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
+      }
+
       const preflight = this.authBond.inspect();
+
+      // The SECOND read, and it needs the same gate as the first.
+      //
+      // The restore above answers one read. This is an independent live read
+      // taken immediately after it, on a tree the restore may have just
+      // renamed into place, so it is a first look at fresh state rather than a
+      // re-read of a settled one. A transient open here produces the same
+      // non-'present' status that says nothing about the credential, and
+      // without this gate the run continued past it twice over: it paged a
+      // local auth-bond failure, which asserts something about the
+      // credential's INTEGRITY that an unfinished read never established, and
+      // then loaded the auth state, whose reader initialises FRESH credentials
+      // when the existing ones cannot be read.
+      //
+      // Same deferral as the withheld restore above: no page, no load, and the
+      // retry put on the reconnect policy so a later definite read decides.
+      if (hasTransientAuthReadIssue(preflight.issues)) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: preflight,
+          note: 'auth bond preflight read was transient',
+        });
+        this.log.warn(
+          { issues: preflight.issues },
+          'auth bond preflight read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
+      }
+
       if (preflight.status !== 'present') {
         this.recordCredentialLifecycle('auth_preflight_invalid', { authBond: preflight });
       }
@@ -881,7 +942,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       installThirdPartyConsoleRedaction();
 
       const { state } = await useMultiFileAuthState(config.authDir);
-      const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
+      // Invalidate at the rename, not after the save promise settles: the
+      // saver renames and only then chmods, so a chmod failure used to leave
+      // committed credentials that the digest cache never heard about.
+      const saveCredsAtomically = createAtomicCredsSaver(
+        config.authDir,
+        () => state.creds,
+        () => { this.authBond.invalidateTreeCache('creds-file-committed'); },
+      );
       const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
       this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
       this.recordCredentialLifecycle('baileys_version', {
@@ -902,7 +970,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         logger: baileysLogger as any,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          keys: this.invalidatingKeyStore(
+            makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          ),
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       };
@@ -1536,8 +1606,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
+  /**
+   * Live connection state. Walks the auth tree inline, every call.
+   *
+   * This method is a SECURITY AND DELIVERY input, not an observability one, and
+   * it is deliberately not cached. src/core/scheduler.ts:466 uses it as a
+   * fail-closed de-link gate: when `connected` is false it holds scheduled rows
+   * for an instance whose auth bond reads 'missing' or 'invalid', and processes
+   * them otherwise. Serving that decision from a cache means a stale-clean
+   * digest lets a de-linked instance burn its retry budget on rows the live
+   * check would have preserved. An earlier revision of this branch made exactly
+   * that mistake by switching this getter wholesale.
+   *
+   * Observability readers want getHealthConnectionState() instead.
+   */
   getConnectionState(): ConnectionStateSnapshot {
-    const authBond = this.authBond.inspect();
+    return this.buildConnectionState(this.authBond.inspect());
+  }
+
+  /**
+   * Connection state for the /health projection only.
+   *
+   * Identical in shape to getConnectionState, but the auth-bond tree digest is
+   * served from the off-request cache. This is the one seam the P42 cost fix
+   * needs, and confining it here keeps every non-observability caller live.
+   */
+  getHealthConnectionState(): ConnectionStateSnapshot {
+    return this.buildConnectionState(this.authBond.inspectCached());
+  }
+
+  private buildConnectionState(authBond: AuthBondSnapshot): ConnectionStateSnapshot {
     return {
       state: this.connectionState,
       connected: this.connectionState === 'connected' && this.botJid !== null,
@@ -1740,6 +1838,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (events['creds.update']) {
         try {
           await saveCreds();
+          // No invalidation here: the saver's post-rename commit hook already
+          // fired at the moment the bytes became visible, which is strictly
+          // earlier and survives a failure in the chmod that follows.
           this.clearAuthSnapshotSettledTimer();
           this.lastCredsUpdateAt = Date.now();
           this.credsUpdateCount += 1;
@@ -1759,6 +1860,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (this.hasAuthKeyMaterialChurnSignal(events)) {
+        // Deliberately no cache invalidation here. Event names are a guess at
+        // when key material was written, and a wrong guess fails in both
+        // directions: this list fires on every inbound batch whether or not the
+        // key store was touched, and Baileys writes keys from paths that emit
+        // none of it (an outbound send calls authState.keys.set directly). The
+        // digest is invalidated at the key-store seam itself, in
+        // invalidatingKeyStore below.
         this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
@@ -2187,6 +2295,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.startKeepalive(sock);
       this.captureAuthBondSnapshot('connection-open');
       this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
+      // Start the first off-thread walk now rather than letting the earliest
+      // health poll be the one to find an empty cache.
+      void this.authBond.warmTreeCache();
       this.persistConnectionRuntimeState('connection_open');
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
@@ -2421,7 +2532,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         authBond: result.snapshot,
         note: result.error ?? 'credential-write-in-flight',
       });
-      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred while credential write settles');
+      // Two conditions defer a capture now — a credential write still in
+      // flight and a read that did not finish — so the reason is carried in
+      // `error` rather than asserted by this line.
+      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
       return;
     }
     this.lastAuthSnapshotFailedAt = Date.now();
@@ -2432,6 +2546,67 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     });
     this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
     this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+  }
+
+  /**
+   * Wrap the Signal key store so every write invalidates the auth-bond digest.
+   *
+   * This is the seam the filesystem mutation actually happens at. Baileys calls
+   * `authState.keys.set` directly from its outbound send path, which emits no
+   * socket event at all, so an event-name heuristic could never have covered it.
+   *
+   * Exactly ONE invalidation per write, taken AFTER it. An earlier revision also
+   * marked before the write, on the theory that it stopped a refresh starting
+   * mid-write. It did the opposite: the pre-mark started a walk, the post-mark
+   * bumped the generation microseconds later, and the walk was then fenced off
+   * and published nothing — so every key write bought a full tree walk that was
+   * discarded by construction. The generation fence alone already prevents a
+   * walk that began before the write from describing the tree after it.
+   */
+  private invalidatingKeyStore<T extends object>(keys: T): T {
+    const guard = this.authBond;
+    // Never let observability break a key write. Mirrors the credential saver's
+    // commit hook, which is the same hazard on the same change.
+    const mark = (seam: string): void => {
+      try {
+        guard.invalidateTreeCache(`key-store-${seam}`);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest invalidation failed after key-store write',
+        );
+      }
+    };
+    const wrap = (fn: (...args: unknown[]) => unknown, seam: string) =>
+      function (this: unknown, ...args: unknown[]): unknown {
+        const result = fn.apply(this, args);
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+          return Promise.resolve(result).finally(() => { mark(seam); });
+        }
+        mark(seam);
+        return result;
+      };
+
+    // Wrapping mutates the store in place, which depends on the members being
+    // writable own properties. Baileys returns a plain object literal today, so
+    // this holds — but this call sits inline in the socket config, so a frozen
+    // or accessor-only member would throw here in strict module code and fail
+    // the whole connect. Losing the digest invalidation is a far smaller harm
+    // than losing the connection, so a refusal degrades rather than propagates.
+    const store = keys as Record<string, unknown>;
+    for (const seam of ['set', 'clear'] as const) {
+      const original = store[seam];
+      if (typeof original !== 'function') continue;
+      try {
+        store[seam] = wrap(original as (...args: unknown[]) => unknown, seam);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest will not track this key-store seam; member is not writable',
+        );
+      }
+    }
+    return keys;
   }
 
   private hasAuthKeyMaterialChurnSignal(events: Record<string, unknown>): boolean {
@@ -2450,6 +2625,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private scheduleSettledAuthBondSnapshot(reason: string): void {
+    // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
+    // method's seven call sites are 'outbound-send-settled', which fires per
+    // send and does not change key material.
+    //
+    // Invalidation no longer REMOVES the digest — it marks the last observation
+    // stale and keeps serving it, so the old reason given here (a null
+    // tree_hash and an empty issue list on the next request) has not been the
+    // consequence since that fail-open was closed. The reason that still holds
+    // is cost and noise: each invalidation bumps the generation, fences off any
+    // walk in flight, and queues a successor, so invalidating per send buys a
+    // full tree walk per send and reports every send as a tree change. That is
+    // the churn the refresh floor exists to absorb, and it should not be
+    // manufactured here in the first place. Invalidation belongs at the two
+    // events that actually write key material, below.
     if (this.authSnapshotSettledTimer !== null) return;
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;
