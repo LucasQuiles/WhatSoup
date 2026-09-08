@@ -1000,6 +1000,14 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompact: AutoCompactController;
 
   /**
+   * #3523 (iteration 1): scope keys with a wedged-resident hard reset in flight.
+   * One reset per scope at a time, so the compaction-livelock escalation and the
+   * zombie sweep's non-progressing-resident disposition can never drive the same
+   * manager through two concurrent lifecycle transitions.
+   */
+  private readonly wedgedResidentResets = new Set<string>();
+
+  /**
    * Post-turn event gate — tracks mapKeys where a 'result' event has been
    * processed but no new user message has arrived yet. Events arriving while
    * the gate is active are SDK-injected artifacts (system-reminders that
@@ -1338,9 +1346,25 @@ export class AgentRuntime implements Runtime {
     const totalCombined = snapshot.totalInputTokens + snapshot.totalCacheReadTokens;
     const lastCompactCombined = snapshot.lastCompactInputTokens + snapshot.lastCompactCacheReadTokens;
     const inputSinceCompact = Math.max(0, totalCombined - lastCompactCombined);
-    if (inputSinceCompact < this.autoCompactInputTokens) return;
-
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+    const overAutoCompactThreshold = inputSinceCompact >= this.autoCompactInputTokens;
+
+    // #3523 layer 1 (iteration 1): record whether the LAST compaction converged.
+    // This is the first eligibility evaluation after a compact_boundary (the
+    // turn-result handler calls recordAutoCompactSuccess and finishAutoCompact on
+    // the boundary turn itself and does NOT re-enter this method — see
+    // runtime-turn-result-handler.ts:597-609), so `inputSinceCompact` here is
+    // measured against the post-compaction baseline markSessionCompacted just set.
+    // Still at or above threshold means /compact did not shrink the context.
+    // Deliberately BEFORE the rapid-rearm block below, which deletes lastSuccessAt
+    // whenever the turn lands outside the 5-minute window: that deletion is why the
+    // rapid-rearm counter can never accumulate at the incident's ~30-minute cadence.
+    // Skipped while a compact is in flight — that turn's tokens are not a verdict.
+    const compactedAt = this.autoCompact.lastSuccessAt.get(scopeKey);
+    if (compactedAt !== undefined && !this.autoCompact.waiters.has(scopeKey)) {
+      this.autoCompact.recordCompactionOutcome(scopeKey, compactedAt, overAutoCompactThreshold);
+    }
+    if (!overAutoCompactThreshold) return;
 
     // Rollout bootstrap: existing sessions that already accumulated past the
     // threshold before this knob was enabled would otherwise fire /compact
@@ -1384,23 +1408,35 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // #3523 layer 1: compaction convergence guard. Once a scope has rapid-re-armed
-    // auto-compact AUTO_COMPACT_CONVERGENCE_LIMIT consecutive times, /compact is
-    // proven unable to shrink the context below threshold — arming another one just
+    // #3523 layer 1: compaction convergence guard. Once /compact is proven unable
+    // to bring a scope's context back under threshold, arming another one just
     // loops forever. For a resident '::scheduled-agent-job' scope (which accretes
     // context across firings and cannot shrink) escalate to a hard session reset
-    // instead of another ineffective compact. Reuses the existing
-    // consecutiveRapidRearms counter — no parallel bookkeeping. Placed AFTER the
-    // rapid-rearm reset above (so a scope that has since recovered — last success
-    // now outside the rapid-rearm window — has its counter cleared to 0 and is not
-    // escalated) but BEFORE the cooldown gate (so a still-wedged scope escalates
-    // immediately instead of waiting out the escalating backoff, up to an hour).
+    // instead of another ineffective compact.
+    //
+    // Iteration 1 (#3527 review S1/M1/codex-3): the PRIMARY signal is
+    // consecutiveNonConvergentCompactions, which counts compactions after which
+    // the context was STILL over threshold on the very next evaluation. It is
+    // independent of inter-turn timing, so it accumulates at the incident's
+    // ~30-minute cadence — where consecutiveRapidRearms cannot, because the
+    // rapid-rearm reset above deletes it on every out-of-window turn. The
+    // rapid-rearm counter is RETAINED as a second, sufficient trigger: it is the
+    // interactive-cadence form of the same livelock (a user who keeps talking
+    // inside the 5-minute window), and dropping it would lose that coverage.
+    // Placed AFTER the rapid-rearm reset (a scope that has since recovered has
+    // that counter cleared to 0) but BEFORE the cooldown gate (a still-wedged
+    // scope escalates immediately instead of waiting out the backoff, up to an hour).
     const consecutiveRapidRearms = this.autoCompact.consecutiveRapidRearms.get(scopeKey) ?? 0;
+    const nonConvergentCompactions =
+      this.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey) ?? 0;
     if (
-      consecutiveRapidRearms >= AUTO_COMPACT_CONVERGENCE_LIMIT
+      (this.autoCompact.isCompactionNonConvergent(scopeKey)
+        || consecutiveRapidRearms >= AUTO_COMPACT_CONVERGENCE_LIMIT)
       && isScheduledAgentJobMapKey(scopeKey)
     ) {
-      this.escalateCompactionLivelock(session, scopeKey, rowId, consecutiveRapidRearms);
+      void this.escalateCompactionLivelock(
+        session, scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
+      );
       return;
     }
 
@@ -1469,34 +1505,103 @@ export class AgentRuntime implements Runtime {
    * '::scheduled-agent-job' scope. When /compact has proven unable to bring the
    * context back under threshold AUTO_COMPACT_CONVERGENCE_LIMIT times in a row,
    * re-arming another compact would loop forever. The only convergent action is a
-   * hard session reset — session.handleNew() ends the current session (dropping
-   * its resumable checkpoint) and spawns a fresh one with a new session_id, so the
-   * accreted context is discarded rather than repeatedly (and futilely) compacted.
-   * The auto-compact bookkeeping for the scope is cleared so the fresh session
-   * starts from a clean baseline.
+   * hard session reset — the session ends (dropping its resumable checkpoint) and
+   * a fresh one spawns with a new session_id, so the accreted context is discarded
+   * rather than repeatedly (and futilely) compacted.
+   *
+   * Iteration 1 (#3527 review codex-1/M2/S6): the reset is AWAITED through the
+   * owned-reset/generation path (resetWedgedResidentSession → resetOwnedPerChatSession),
+   * and the auto-compact bookkeeping is cleared and the admin alert emitted only
+   * AFTER it settles. A FAILED reset therefore keeps the convergence counters, so
+   * the next eligibility evaluation retries the escalation instead of needing K
+   * fresh accumulations, and the alert body reports the outcome rather than the
+   * attempt.
    */
-  private escalateCompactionLivelock(
+  private async escalateCompactionLivelock(
     session: SessionManager,
     scopeKey: string,
     rowId: number,
     consecutiveRapidRearms: number,
-  ): void {
+    nonConvergentCompactions: number,
+  ): Promise<void> {
     log.error(
-      { scopeKey, rowId, consecutiveRapidRearms, limit: AUTO_COMPACT_CONVERGENCE_LIMIT },
+      {
+        scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
+        limit: AUTO_COMPACT_CONVERGENCE_LIMIT,
+      },
       'auto compact convergence limit reached — hard-resetting scheduled-agent-job session (compaction livelock)',
     );
+    const reset = await this.resetWedgedResidentSession(
+      scopeKey, session, 'compaction-livelock', { rowId },
+    );
+    if (reset === 'reset') {
+      // Drop all auto-compact bookkeeping for the scope so the fresh session is not
+      // immediately re-classified as non-convergent off the old counters. Only on a
+      // PROVEN reset: clearing it on a failed one would discard the evidence that
+      // triggers the retry.
+      this.autoCompact.cleanupScope(scopeKey);
+    }
+    if (reset === 'in_progress') return; // an earlier escalation owns this scope
     emitAlertChecked(
       this.instanceName,
       'auto_compact_convergence_reset',
       'Auto-compact convergence limit reached',
-      `scope=${scopeKey} consecutiveRapidRearms=${consecutiveRapidRearms} — hard-resetting the scheduled-agent-job session (context cannot shrink via /compact)`,
+      `scope=${scopeKey} consecutiveRapidRearms=${consecutiveRapidRearms} `
+      + `nonConvergentCompactions=${nonConvergentCompactions} — hard reset of the `
+      + `scheduled-agent-job session ${reset === 'reset' ? 'SUCCEEDED' : 'FAILED (will retry on the next turn)'} `
+      + '(context cannot shrink via /compact)',
     );
-    // Drop all auto-compact bookkeeping for the scope so the fresh session is not
-    // immediately re-classified as rapid-re-arming off the old counters.
-    this.autoCompact.cleanupScope(scopeKey);
-    void session.handleNew().catch((err) => {
-      log.error({ err, scopeKey, rowId }, 'compaction-livelock hard reset failed');
-    });
+  }
+
+  /**
+   * #3523 layers 1+2 (iteration 1): the single serialized hard-reset path for a
+   * wedged resident session, shared by the compaction-livelock escalation and by
+   * the zombie sweep's non-progressing-resident disposition.
+   *
+   * Serialization has three parts. (a) `wedgedResidentResets` admits one reset per
+   * scope at a time, so a sweep and an escalation cannot both drive one manager.
+   * (b) `resetOwnedPerChatSession` is the runtime's OWNED reset: it aborts the
+   * chat's turn, advances the ownership generation, awaits shutdown and proven
+   * process exit, re-checks ownership, then spawns — so a turn dispatched
+   * concurrently loses the generation check instead of interleaving lifecycle
+   * transitions (the defect in the fire-and-forget `void session.handleNew()`).
+   * (c) the call is AWAITED, so callers observe the outcome.
+   *
+   * Returns 'reset' on a proven fresh session, 'failed' when the reset threw (the
+   * caller keeps its evidence and blocks/retries), or 'in_progress' when another
+   * reset already owns this scope.
+   */
+  private async resetWedgedResidentSession(
+    mapKey: string,
+    session: SessionManager,
+    trigger: 'compaction-livelock' | 'no-turn-progress',
+    logFields: Record<string, unknown>,
+  ): Promise<'reset' | 'failed' | 'in_progress'> {
+    if (this.wedgedResidentResets.has(mapKey)) {
+      log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset already in progress — skipping');
+      return 'in_progress';
+    }
+    this.wedgedResidentResets.add(mapKey);
+    try {
+      const chatJid = this.chatQueues.get(mapKey)?.targetChatJid;
+      if (chatJid === undefined) {
+        // No outbound queue for the scope: the owned per-chat reset cannot be
+        // addressed. Fall back to the manager's own reset, still AWAITED inside
+        // this barrier so the caller observes the outcome and no second reset
+        // can interleave. Weaker than the owned path (no generation advance).
+        log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
+        await session.handleNew();
+      } else {
+        await this.resetOwnedPerChatSession(mapKey, chatJid, session);
+      }
+      log.warn({ ...logFields, mapKey, trigger }, 'wedged resident session hard-reset');
+      return 'reset';
+    } catch (err) {
+      log.error({ err, ...logFields, mapKey, trigger }, 'wedged-resident hard reset failed');
+      return 'failed';
+    } finally {
+      this.wedgedResidentResets.delete(mapKey);
+    }
   }
 
   /**
@@ -1748,6 +1853,32 @@ export class AgentRuntime implements Runtime {
           { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
             reason: session.reason, providerSessionId: session.sessionId },
           'resident manager making no turn progress — allowing zombie-session disposition');
+        // #3523 layer 2 (iteration 1, review H1/S2): 'authoritative_live' is the
+        // classification the incident's own journal records for the livelocked
+        // row — its child process IS alive and DOES match the active checkpoint,
+        // so every disposition arm below is a no-op for it (the switch only
+        // re-adds the conversation key to the proactive-resume block set, exactly
+        // what the old unconditional exemption did). A non-progressing
+        // authoritative resident must therefore be dispositioned HERE, by the
+        // same serialized owned reset the compaction-livelock escalation uses, so
+        // the incident's state (authoritative_live + no turn progress past the
+        // deadline) ends in a fresh, usable session instead of a log line.
+        // Every other classification keeps its existing disposition below.
+        if (session.classification === 'authoritative_live') {
+          const entry = this.findResidentManagerForRow(session.id);
+          const outcome = entry === undefined
+            ? 'failed' as const
+            : await this.resetWedgedResidentSession(
+                entry.mapKey, entry.session, 'no-turn-progress',
+                { id: session.id, conversationKey: session.conversationKey, providerSessionId: session.sessionId },
+              );
+          if (outcome !== 'reset' && session.conversationKey) {
+            // The reset did not settle cleanly — the old session may still hold
+            // the conversation, so keep proactive resume blocked for this key.
+            proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          }
+          continue;
+        }
       }
       switch (session.classification) {
         case 'stale_dead':
@@ -1832,21 +1963,17 @@ export class AgentRuntime implements Runtime {
    * healthy resident is never reaped on missing data.
    */
   private isResidentManagerMakingProgress(rowId: number, now: number): boolean {
-    let mapKey: string | undefined;
-    let session: SessionManager | undefined;
-    for (const [key, candidate] of this.chatSessions) {
-      if (candidate.getDbRowId() === rowId) {
-        mapKey = key;
-        session = candidate;
-        break;
-      }
-    }
-    if (session === undefined || mapKey === undefined) return true; // unknown → protect
+    const entry = this.findResidentManagerForRow(rowId);
+    if (entry === undefined) return true; // unknown → protect
+    const { mapKey, session } = entry;
 
     // A scope wedged re-arming auto-compact past the convergence limit is
     // livelocked, not progressing — even if a /compact turn shows as in flight.
+    // Both convergence signals count: the rapid-rearm counter (interactive
+    // cadence) and the non-convergence streak (any cadence — see #3527 S1/M1).
     const rearms = this.autoCompact.consecutiveRapidRearms.get(mapKey) ?? 0;
     if (rearms >= AUTO_COMPACT_CONVERGENCE_LIMIT) return false;
+    if (this.autoCompact.isCompactionNonConvergent(mapKey)) return false;
 
     const st = session.getStatus();
     if (st.turnInFlight === true) return true; // actively working a turn
@@ -1856,6 +1983,20 @@ export class AgentRuntime implements Runtime {
     const parsed = Date.parse(lastProgressTs);
     if (!Number.isFinite(parsed)) return true; // unparseable → protect
     return now - parsed <= RESIDENT_TURN_PROGRESS_DEADLINE_MS;
+  }
+
+  /**
+   * Locate the current-process resident SessionManager backing an agent_sessions
+   * row, with the scope key it is mapped under. Extracted so the liveness gate and
+   * the non-progressing disposition resolve the same manager from the same map.
+   */
+  private findResidentManagerForRow(
+    rowId: number,
+  ): { mapKey: string; session: SessionManager } | undefined {
+    for (const [mapKey, candidate] of this.chatSessions) {
+      if (candidate.getDbRowId() === rowId) return { mapKey, session: candidate };
+    }
+    return undefined;
   }
 
   /**

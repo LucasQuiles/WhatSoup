@@ -24,18 +24,24 @@ function insertSession(fields: {
   chatJid?: string;
   status?: string;
   provider?: string;
+  /** The row's own persistence namespace (SessionManager.conversationKey). */
+  workspaceKey?: string;
+  messageCount?: number;
 }): number {
   const result = db.raw.prepare(`
     INSERT INTO agent_sessions (
-      session_id, claude_pid, started_in_directory, chat_jid, status, provider, started_at
+      session_id, claude_pid, started_in_directory, chat_jid, status, provider,
+      workspace_key, message_count, started_at
     )
-    VALUES (?, ?, '/tmp', ?, ?, ?, datetime('now'))
+    VALUES (?, ?, '/tmp', ?, ?, ?, ?, ?, datetime('now'))
   `).run(
     fields.sessionId ?? null,
     fields.claudePid,
     fields.chatJid ?? null,
     fields.status ?? 'active',
     fields.provider ?? 'claude-cli',
+    fields.workspaceKey ?? null,
+    fields.messageCount ?? 0,
   );
   return Number(result.lastInsertRowid);
 }
@@ -283,6 +289,73 @@ describe('classifyActiveSessions', () => {
     expect(results[0].classification).toBe('stale_dead');
     expect(results[0].reason).toContain('no session_checkpoint');
     expect(results[0].reason).toContain('PID 1000 dead');
+  });
+
+  it('keeps a checkpoint-less pid-0 row of a NON-PERSISTENT provider ambiguous (#3527 F3)', () => {
+    // #3527 review H2. defaultPidOwnershipChecker maps pid <= 0 to dead, and
+    // agent_sessions.claude_pid is legitimately null/0 for a provider with no
+    // durable child process (managed_loop / spawn_per_turn). Without an
+    // executionMode gate — which every sibling branch of the classifier has —
+    // such a logically-live row is classified stale_dead and orphaned on the
+    // next sweep, on any host running a non-persistent provider, with no
+    // connection to scheduled-agent-job at all. The real default checker is used
+    // deliberately (no injected checker): the pid-0 verdict is the finding.
+    insertSession({
+      claudePid: 0, sessionId: 'ses-api', chatJid: '12345@s.whatsapp.net',
+      provider: 'anthropic-api', messageCount: 7,
+    });
+
+    const results = classifyActiveSessions(db, durability);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('ambiguous');
+    expect(results[0].reason).toContain('no session_checkpoint');
+  });
+
+  it('still classifies a checkpoint-less pid-0 row of a PERSISTENT provider stale_dead (#3527 F3 no-regression)', () => {
+    // The gate must not disarm layer 4 where the pid IS the session's identity.
+    insertSession({
+      claudePid: 0, sessionId: 'ses-cli', chatJid: '12345@s.whatsapp.net',
+      provider: 'claude-cli', messageCount: 7,
+    });
+
+    const results = classifyActiveSessions(db, durability);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe('stale_dead');
+  });
+
+  it('classifies a namespaced scheduled row against its OWN checkpoint, not the chat\'s interactive one (#3527 F6)', () => {
+    // #3527 review codex-2, CONFIRMED from source: agent_sessions.workspace_key
+    // holds the session's persistence namespace (session.ts:1578 —
+    // '<key>::scheduled-agent-job' for a scheduled job, runtime.ts:10019-10020),
+    // while chat_jid is the plain delivery JID for both. Grouping by chat_jid
+    // alone put both rows in one group behind the INTERACTIVE checkpoint, so the
+    // scheduled row could never match it: pid mismatch -> stale_live -> SIGTERM
+    // once the resident exemption lapsed, even though its own checkpoint was
+    // valid and active.
+    insertSession({
+      claudePid: 1000, sessionId: 'ses-interactive', chatJid: '12345@s.whatsapp.net',
+      workspaceKey: '12345', messageCount: 4,
+    });
+    insertSession({
+      claudePid: 2000, sessionId: 'ses-scheduled', chatJid: '12345@s.whatsapp.net',
+      workspaceKey: '12345::scheduled-agent-job', messageCount: 9,
+    });
+    durability.upsertSessionCheckpoint('12345', {
+      claudePid: 1000, sessionId: 'ses-interactive', sessionStatus: 'active',
+    });
+    durability.upsertSessionCheckpoint('12345::scheduled-agent-job', {
+      claudePid: 2000, sessionId: 'ses-scheduled', sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, ownedPids(1000, 2000));
+
+    const scheduled = results.find((r) => r.sessionId === 'ses-scheduled');
+    const interactive = results.find((r) => r.sessionId === 'ses-interactive');
+    expect(scheduled?.classification).toBe('authoritative_live');
+    expect(interactive?.classification).toBe('authoritative_live');
+    expect(scheduled?.conversationKey).toBe('12345::scheduled-agent-job');
   });
 
   it('keeps a checkpoint-less session with an ALIVE pid ambiguous (no regression)', () => {

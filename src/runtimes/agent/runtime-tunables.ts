@@ -35,7 +35,20 @@ export const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RES
 // this deadline, and not stuck re-arming auto-compact). A resident that has made
 // no turn progress for longer than this falls through to the normal
 // stale_live/stale_dead disposition instead of being permanently protected.
-export const RESIDENT_TURN_PROGRESS_DEADLINE_MS = envPositiveInt('WHATSOUP_RESIDENT_TURN_PROGRESS_DEADLINE_MS', 30 * MS_PER_MINUTE); // 30m
+//
+// Iteration 1 (#3527 review H3/S5/V5) — reconciled against the residency policy.
+// The default was 30m, HALF of SESSION_IDLE_MS and equal to
+// ZOMBIE_SESSION_SWEEP_INTERVAL_MS, so a merely-idle resident that the runtime
+// deliberately keeps for a full hour lost its exemption on the first sweep after
+// 30 minutes — and, with the authoritative_live disposition added in the same
+// iteration, that now RESETS the session rather than doing nothing. Timing alone
+// must not act before the runtime's own residency policy says a session is idle,
+// so the default is SESSION_IDLE_MS. Positive livelock evidence is unaffected and
+// still acts immediately: consecutiveNonConvergentCompactions (or the
+// rapid-rearm counter) at AUTO_COMPACT_CONVERGENCE_LIMIT makes
+// isResidentManagerMakingProgress false regardless of this deadline. Operators
+// wanting the older, more aggressive timing set the env override below.
+export const RESIDENT_TURN_PROGRESS_DEADLINE_MS = envPositiveInt('WHATSOUP_RESIDENT_TURN_PROGRESS_DEADLINE_MS', SESSION_IDLE_MS); // 1h (tracks SESSION_IDLE_MS)
 
 export const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 

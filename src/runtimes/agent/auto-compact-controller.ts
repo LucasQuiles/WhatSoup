@@ -81,6 +81,25 @@ export class AutoCompactController {
   readonly consecutiveRapidRearms = new Map<string, number>();
   /** Scopes to measure on their next turn for post-compact effectiveness. */
   readonly measureNextTurn = new Set<string>();
+  /**
+   * #3523 layer 1 (iteration 1): scope → count of consecutive compactions that
+   * did NOT converge. A compaction is non-convergent when the FIRST auto-compact
+   * eligibility evaluation after it still finds inputSinceCompact at or above the
+   * threshold — i.e. the compact ran and the context did not shrink below the
+   * trigger point. Unlike consecutiveRapidRearms this counter measures
+   * compaction effectiveness directly and is INDEPENDENT of inter-turn timing,
+   * so it accumulates at any cadence (the incident in #3523 re-fired every ~30
+   * minutes, always outside AUTO_COMPACT_RAPID_REARM_WINDOW_MS, so the
+   * rapid-rearm counter was deleted every cycle and could never reach the limit).
+   */
+  readonly consecutiveNonConvergentCompactions = new Map<string, number>();
+  /**
+   * Scope → the lastSuccessAt epoch whose convergence verdict has already been
+   * recorded. Exactly ONE verdict per compaction: the first post-compaction
+   * evaluation decides it, so ordinary productive turns later in the same
+   * compaction epoch cannot increment the streak.
+   */
+  readonly compactionOutcomeRecordedForCompactAt = new Map<string, number>();
   /** Scope → in-flight auto-compact waiter (promise + resolve + timeout timer). */
   readonly waiters = new Map<string, AutoCompactWaiter>();
 
@@ -195,6 +214,49 @@ export class AutoCompactController {
     );
   }
 
+  /**
+   * #3523 layer 1 (iteration 1): record the convergence verdict of the most
+   * recent successful compaction for a scope, at the FIRST auto-compact
+   * eligibility evaluation that follows it.
+   *
+   * `stillOverThreshold` is the trigger's own `inputSinceCompact >= threshold`
+   * measurement taken against the post-compaction baseline. True means the
+   * compaction did not bring the context back under the trigger point — the
+   * livelock signal. False means it did, and the streak is cleared.
+   *
+   * Deduped on `compactedAt` so exactly one verdict is recorded per compaction:
+   * an ordinary productive turn that crosses the threshold LATER in the same
+   * compaction epoch cannot increment the streak, because that epoch's verdict
+   * was already taken (and, if the compaction converged, the streak was cleared).
+   * A single productive turn that happens to be over threshold on the very next
+   * turn does increment by one; escalation still needs
+   * AUTO_COMPACT_CONVERGENCE_LIMIT consecutive non-convergent compactions.
+   */
+  recordCompactionOutcome(scopeKey: string, compactedAt: number, stillOverThreshold: boolean): void {
+    if (this.compactionOutcomeRecordedForCompactAt.get(scopeKey) === compactedAt) return;
+    this.compactionOutcomeRecordedForCompactAt.set(scopeKey, compactedAt);
+    if (!stillOverThreshold) {
+      this.consecutiveNonConvergentCompactions.delete(scopeKey);
+      return;
+    }
+    const next = (this.consecutiveNonConvergentCompactions.get(scopeKey) ?? 0) + 1;
+    this.consecutiveNonConvergentCompactions.set(scopeKey, next);
+    log.warn(
+      { scopeKey, consecutiveNonConvergentCompactions: next, compactedAt },
+      'auto compact did not converge — context still over threshold on the first turn after the compact',
+    );
+  }
+
+  /**
+   * True once a scope has run AUTO_COMPACT_CONVERGENCE_LIMIT consecutive
+   * non-convergent compactions: /compact is proven unable to shrink this
+   * context, so arming another one loops forever.
+   */
+  isCompactionNonConvergent(scopeKey: string): boolean {
+    return (this.consecutiveNonConvergentCompactions.get(scopeKey) ?? 0)
+      >= AUTO_COMPACT_CONVERGENCE_LIMIT;
+  }
+
   recordAutoCompactNextTurnIfNeeded(
     scopeKey: string,
     inputTokens: number | undefined,
@@ -233,6 +295,8 @@ export class AutoCompactController {
     this.lastSuccessAt.delete(scopeKey);
     this.rapidRearmRecordedForSuccessAt.delete(scopeKey);
     this.consecutiveRapidRearms.delete(scopeKey);
+    this.consecutiveNonConvergentCompactions.delete(scopeKey);
+    this.compactionOutcomeRecordedForCompactAt.delete(scopeKey);
     this.measureNextTurn.delete(scopeKey);
     this.finishAutoCompact(scopeKey);
     this.clearSilentCompact(scopeKey);
@@ -266,6 +330,19 @@ export class AutoCompactController {
       this.consecutiveRapidRearms.delete(oldKey);
       this.consecutiveRapidRearms.set(newKey, consecutiveRapidRearms);
     }
+    // #3523 layer 1: the non-convergence streak and its per-compaction dedupe
+    // travel with the scope for the same reason the rapid-rearm counter does —
+    // a JID-alias rekey is the same conversation, not a fresh context.
+    const nonConvergent = this.consecutiveNonConvergentCompactions.get(oldKey);
+    if (nonConvergent !== undefined) {
+      this.consecutiveNonConvergentCompactions.delete(oldKey);
+      this.consecutiveNonConvergentCompactions.set(newKey, nonConvergent);
+    }
+    const outcomeRecordedAt = this.compactionOutcomeRecordedForCompactAt.get(oldKey);
+    if (outcomeRecordedAt !== undefined) {
+      this.compactionOutcomeRecordedForCompactAt.delete(oldKey);
+      this.compactionOutcomeRecordedForCompactAt.set(newKey, outcomeRecordedAt);
+    }
     if (this.measureNextTurn.has(oldKey)) {
       this.measureNextTurn.delete(oldKey);
       this.measureNextTurn.add(newKey);
@@ -292,6 +369,8 @@ export class AutoCompactController {
     this.lastSuccessAt.clear();
     this.rapidRearmRecordedForSuccessAt.clear();
     this.consecutiveRapidRearms.clear();
+    this.consecutiveNonConvergentCompactions.clear();
+    this.compactionOutcomeRecordedForCompactAt.clear();
     this.measureNextTurn.clear();
   }
 }

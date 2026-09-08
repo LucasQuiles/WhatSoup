@@ -104,7 +104,7 @@ interface LifecycleStatements {
   endPreInitAgentSession: PreparedStatement;
   closeExactSessionCheckpoints: PreparedStatement;
   closePreInitCheckpoint: PreparedStatement;
-  anyCheckpointForConversation: PreparedStatement;
+  resumableCheckpointForConversation: PreparedStatement;
   updateSessionCheckpointsStatusBySessionId: PreparedStatement;
   agentSessionRowAlreadyInStatusForProvider: PreparedStatement;
   updateExactSessionCheckpointStatus: PreparedStatement;
@@ -332,8 +332,18 @@ export class SessionLifecycleStore {
             updated_at = datetime('now')
         WHERE conversation_key = ? AND session_id IS NULL
       `),
-      anyCheckpointForConversation: prepare(`
-        SELECT 1 FROM session_checkpoints WHERE conversation_key = ? LIMIT 1
+      // #3523 layer 3 (iteration 1, #3527 review S3/codex-4): the status filter is
+      // load-bearing. session_checkpoints is UNIQUE(conversation_key) (database.ts:266)
+      // and no code path deletes a row — rows are upserted and retired by status
+      // update — so an unfiltered existence probe is true forever for any namespace
+      // that has EVER held a checkpoint, which made the clean no-op unreachable for
+      // the incident's chat. Only a RESUMABLE row (the same set durability.ts's
+      // getResumableCheckpoints uses: 'active' or 'suspended') is a checkpoint the
+      // close was obliged to close; an orphaned/ended leftover is not.
+      resumableCheckpointForConversation: prepare(`
+        SELECT 1 FROM session_checkpoints
+        WHERE conversation_key = ? AND session_status IN ('active', 'suspended')
+        LIMIT 1
       `),
       updateSessionCheckpointsStatusBySessionId: prepare(`
         UPDATE session_checkpoints
@@ -791,9 +801,9 @@ export class SessionLifecycleStore {
           );
       if (Number(checkpointResult.changes) < 1) {
         // #3523 layer 3: a 0-change checkpoint close is only an invariant
-        // violation when a checkpoint for THIS conversation namespace exists but
-        // did not match the closed session (row/checkpoint divergence). When NO
-        // checkpoint exists under this conversation key at all, the resumable
+        // violation when a RESUMABLE checkpoint for THIS conversation namespace
+        // exists but did not match the closed session (row/checkpoint divergence).
+        // When this namespace holds no resumable checkpoint, the resumable
         // checkpoint (if any) lives under a different namespace — e.g. an
         // interactive turn closing while only a '::scheduled-agent-job'
         // checkpoint exists. There is nothing to close in this namespace, so it
@@ -802,9 +812,18 @@ export class SessionLifecycleStore {
         // turn (incl /new) once a resident scheduled job wedged the chat. The
         // agent row above already closed; the foreign-namespace checkpoint is
         // deliberately left untouched.
-        const sameNamespaceCheckpointExists = this.statements
-          .anyCheckpointForConversation.get(params.conversationKey);
-        if (sameNamespaceCheckpointExists) {
+        //
+        // Iteration 1 (#3527 review S3/codex-4): "resumable" — not "any" — is what
+        // makes the no-op reachable. Checkpoint rows are unique per conversation
+        // key and are never deleted, only retired by status, so an existence probe
+        // with no status filter is permanently true for every namespace that ever
+        // held a session, and the clean path could never run for the incident's
+        // chat. A retired ('orphaned'/'ended') same-namespace row is not something
+        // this close failed to close. A same-namespace row still 'active' or
+        // 'suspended' IS, and still throws.
+        const sameNamespaceResumableCheckpointExists = this.statements
+          .resumableCheckpointForConversation.get(params.conversationKey);
+        if (sameNamespaceResumableCheckpointExists) {
           throw new Error('Exact session checkpoint lifecycle could not be closed');
         }
         log.info(
@@ -814,7 +833,7 @@ export class SessionLifecycleStore {
             conversationKey: params.conversationKey,
             status: params.status,
           },
-          'session lifecycle close: no checkpoint under this conversation namespace — clean no-op (resumable checkpoint, if any, is namespaced elsewhere)',
+          'session lifecycle close: no resumable checkpoint under this conversation namespace — clean no-op (resumable checkpoint, if any, is namespaced elsewhere)',
         );
       }
     });
