@@ -631,6 +631,60 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(agentRow(db, rowId).status).toBe('ended');
   });
 
+  it('is a clean no-op when the only checkpoint lives under a different namespace (#3523 layer 3)', () => {
+    // Interactive turn on conversationKey 'iso-base' whose agent row closes fine,
+    // but the sole resumable checkpoint lives under the '::scheduled-agent-job'
+    // namespace (a resident scheduled job holds the chat). No checkpoint exists
+    // under the interactive conversation key, so the checkpoint-close matches 0
+    // rows. That is NOT an invariant violation — there is nothing to close in
+    // this namespace — so it must be a clean no-op that lets a fresh session
+    // start, never the fatal "checkpoint lifecycle could not be closed" throw
+    // that surfaced "Something went wrong" on every interactive turn (incl /new).
+    const rowId = insertAgentRow(db, 'iso-session', 'active', 'iso-base');
+    durability.upsertSessionCheckpoint('iso-base::scheduled-agent-job', {
+      sessionId: 'scheduled-session',
+      sessionStatus: 'active',
+    });
+
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'iso-session',
+      provider: 'claude-cli',
+      conversationKey: 'iso-base',
+      status: 'ended',
+    })).not.toThrow();
+
+    // The agent row still closed (its close matched); the foreign-namespace
+    // checkpoint must be left completely untouched (no cross-namespace leak).
+    expect(agentRow(db, rowId).status).toBe('ended');
+    expect(durability.getSessionCheckpoint('iso-base::scheduled-agent-job')?.session_status).toBe('active');
+    expect(durability.getSessionCheckpoint('iso-base')).toBeUndefined();
+  });
+
+  it('still throws when a same-namespace checkpoint exists but does not match the closed session (#3523 layer 3 invariant)', () => {
+    // A checkpoint DOES exist under the exact conversation key being closed, but
+    // its session_id differs from the row's — the row and its own checkpoint have
+    // diverged. This is a genuine invariant violation (a resumable checkpoint for
+    // THIS namespace was left open) and must still throw, not be waved through as
+    // a foreign-namespace no-op.
+    const rowId = insertAgentRow(db, 'match-ns-session', 'active', 'match-ns');
+    durability.upsertSessionCheckpoint('match-ns', {
+      sessionId: 'a-diverged-session',
+      sessionStatus: 'active',
+    });
+
+    expect(() => durability.closeSessionLifecycle({
+      agentSessionRowId: rowId,
+      providerSessionId: 'match-ns-session',
+      provider: 'claude-cli',
+      conversationKey: 'match-ns',
+      status: 'ended',
+    })).toThrow(/exact session checkpoint lifecycle could not be closed/i);
+    // The diverged checkpoint must be untouched (throw rolls back the transaction).
+    expect(durability.getSessionCheckpoint('match-ns')?.session_status).toBe('active');
+    expect(agentRow(db, rowId).status).toBe('active');
+  });
+
   it('reconciles an exact orphaned logical session during graceful shutdown', () => {
     const rowId = insertAgentRow(
       db,

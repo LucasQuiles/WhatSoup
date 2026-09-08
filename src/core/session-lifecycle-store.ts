@@ -104,6 +104,7 @@ interface LifecycleStatements {
   endPreInitAgentSession: PreparedStatement;
   closeExactSessionCheckpoints: PreparedStatement;
   closePreInitCheckpoint: PreparedStatement;
+  anyCheckpointForConversation: PreparedStatement;
   updateSessionCheckpointsStatusBySessionId: PreparedStatement;
   agentSessionRowAlreadyInStatusForProvider: PreparedStatement;
   updateExactSessionCheckpointStatus: PreparedStatement;
@@ -330,6 +331,9 @@ export class SessionLifecycleStore {
             checkpoint_version = checkpoint_version + 1,
             updated_at = datetime('now')
         WHERE conversation_key = ? AND session_id IS NULL
+      `),
+      anyCheckpointForConversation: prepare(`
+        SELECT 1 FROM session_checkpoints WHERE conversation_key = ? LIMIT 1
       `),
       updateSessionCheckpointsStatusBySessionId: prepare(`
         UPDATE session_checkpoints
@@ -785,7 +789,34 @@ export class SessionLifecycleStore {
             params.conversationKey,
             params.providerSessionId,
           );
-      requireChanges(checkpointResult, 'Exact session checkpoint lifecycle could not be closed');
+      if (Number(checkpointResult.changes) < 1) {
+        // #3523 layer 3: a 0-change checkpoint close is only an invariant
+        // violation when a checkpoint for THIS conversation namespace exists but
+        // did not match the closed session (row/checkpoint divergence). When NO
+        // checkpoint exists under this conversation key at all, the resumable
+        // checkpoint (if any) lives under a different namespace — e.g. an
+        // interactive turn closing while only a '::scheduled-agent-job'
+        // checkpoint exists. There is nothing to close in this namespace, so it
+        // is a clean idempotent no-op that lets a fresh session start, NOT the
+        // fatal throw that surfaced "Something went wrong" on every interactive
+        // turn (incl /new) once a resident scheduled job wedged the chat. The
+        // agent row above already closed; the foreign-namespace checkpoint is
+        // deliberately left untouched.
+        const sameNamespaceCheckpointExists = this.statements
+          .anyCheckpointForConversation.get(params.conversationKey);
+        if (sameNamespaceCheckpointExists) {
+          throw new Error('Exact session checkpoint lifecycle could not be closed');
+        }
+        log.info(
+          {
+            agentSessionRowId: params.agentSessionRowId,
+            provider: params.provider,
+            conversationKey: params.conversationKey,
+            status: params.status,
+          },
+          'session lifecycle close: no checkpoint under this conversation namespace — clean no-op (resumable checkpoint, if any, is namespaced elsewhere)',
+        );
+      }
     });
   }
 

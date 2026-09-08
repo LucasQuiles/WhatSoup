@@ -30,7 +30,15 @@ const testsRoot = resolve(repoRoot, 'tests');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // To raise it, update this constant AND explain why in the commit message.
-const EXPECT_ANYTHING_BUDGET = 66;
+// (+5 vs 66, #3523: runtime-edge-coverage.test.ts covers the compaction-livelock
+// defense layers. Its 9 expect.anything() are all legitimate positional fillers —
+// the DurabilityEngine/db handle passed as arg 1 to markOrphaned /
+// restoreOrphanedResidentSessionStatus / getRecentMessages (the assertions pin the
+// trailing args: row id 42, mapKey, retention 30), and the payload/detail args of
+// two `.not.toHaveBeenCalledWith(...)` negative assertions where matching ANY value
+// is exactly the intent. Tightening these to objectContaining would add no coverage
+// and couple the tests to opaque handles.)
+const EXPECT_ANYTHING_BUDGET = 71;
 
 function collectTestFiles(): string[] {
   // Node 22+ readdirSync recursive (replaces the phantom-dep tinyglobby that #2909 purged).

@@ -203,6 +203,24 @@ export function classifyActiveSessions(
 
     if (!checkpoint) {
       for (const session of sessions) {
+        // #3523 layer 4: a checkpoint-less 'active' row whose owning process is
+        // gone can never be resumed (there is no durable checkpoint to resume
+        // from), so it is definitively stale — not the "do-not-touch" ambiguous
+        // bucket. Before this the no-checkpoint branch never ran a liveness
+        // probe, so such rows sat 'active' forever (resolveAmbiguousAgeFallback
+        // only orphans zero-message rows past the age threshold, leaving a
+        // checkpoint-less dead-pid row with messages permanently unreconciled).
+        // A live PID stays ambiguous — we still cannot safely reap a running
+        // process with no checkpoint to compare against.
+        const pidCheck = pidChecker(session.claude_pid);
+        if (!pidCheck.alive) {
+          results.push({
+            ...sessionFields(session, convKey),
+            classification: 'stale_dead',
+            reason: `no session_checkpoint for this conversation; PID ${session.claude_pid} dead`,
+          });
+          continue;
+        }
         results.push({
           ...sessionFields(session, convKey),
           classification: 'ambiguous',
