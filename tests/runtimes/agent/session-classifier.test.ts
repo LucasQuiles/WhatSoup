@@ -326,7 +326,7 @@ describe('classifyActiveSessions', () => {
   });
 
   it('classifies a namespaced scheduled row against its OWN checkpoint, not the chat\'s interactive one (#3527 F6)', () => {
-    // #3527 review codex-2, CONFIRMED from source: agent_sessions.workspace_key
+    // #3527 review cross-model finding 2, CONFIRMED from source: agent_sessions.workspace_key
     // holds the session's persistence namespace (session.ts:1578 —
     // '<key>::scheduled-agent-job' for a scheduled job, runtime.ts:10019-10020),
     // while chat_jid is the plain delivery JID for both. Grouping by chat_jid

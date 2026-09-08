@@ -906,9 +906,15 @@ describe('AgentRuntime edge coverage', () => {
     // switch changed nothing but the log line. A non-progressing authoritative
     // resident must actually be dispositioned: the owned per-chat reset, which
     // ends the wedged session and spawns a fresh one.
+    //
+    // Iteration 2 (F9): the scope is the incident's own '::scheduled-agent-job'
+    // map key. The reset arm is now gated on that predicate, matching #3523 AC1
+    // and layer 1's escalation gate; the non-scheduled case has its own negative
+    // control below.
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
     const state = view(runtime);
     const session = makeSession();
+    const mapKey = 'resident::scheduled-agent-job';
     const wedgedSince = new Date(Date.now() - 90 * 60 * 1000).toISOString();
     session.getDbRowId.mockReturnValue(42 as never);
     session.getStatus.mockReturnValue({
@@ -923,15 +929,17 @@ describe('AgentRuntime edge coverage', () => {
     } as never);
     // Registered through the ownership seam, not a bare map write: the reset path
     // is generation-checked and refuses an unowned manager.
-    state.setOwnedPerChatSession('resident', session);
-    state.chatQueues.set('resident', makeQueue('resident@s.whatsapp.net'));
+    state.setOwnedPerChatSession(mapKey, session);
+    state.chatQueues.set(mapKey, makeQueue('resident@s.whatsapp.net'));
     runtime.setDurability({} as never);
     const { markOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
     const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
     vi.mocked(markOrphaned).mockClear();
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 42, sessionId: 'ses-resident', claudePid: 123,
-      chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      // After F6 the classifier groups by the row's own workspace_key, so a
+      // scheduled row's conversation key IS the scheduled scope key.
+      chatJid: 'resident@s.whatsapp.net', conversationKey: mapKey, status: 'active',
       classification: 'authoritative_live',
       reason: 'matches active checkpoint (pid=123, sessionId=ses-resident)',
       startedAt: null, messageCount: 3,
@@ -944,7 +952,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(session.shutdown).toHaveBeenCalledWith(false);
     expect(session.spawnSession).toHaveBeenCalledTimes(1);
     // A reset session is usable, so proactive resume is NOT blocked for its key.
-    expect(blocked.has('resident')).toBe(false);
+    expect(blocked.has(mapKey)).toBe(false);
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ id: 42, classification: 'authoritative_live' }),
       'resident manager making no turn progress — allowing zombie-session disposition',
@@ -957,6 +965,7 @@ describe('AgentRuntime edge coverage', () => {
     const runtime = makeRuntime({ sessionScope: 'per_chat' });
     const state = view(runtime);
     const session = makeSession();
+    const mapKey = 'resident-2::scheduled-agent-job'; // F9: reset is scheduled-scope only
     const wedgedSince = new Date(Date.now() - 90 * 60 * 1000).toISOString();
     session.getDbRowId.mockReturnValue(43 as never);
     session.getStatus.mockReturnValue({
@@ -965,13 +974,13 @@ describe('AgentRuntime edge coverage', () => {
       durableFailureClosed: false,
     } as never);
     session.shutdown.mockRejectedValueOnce(new Error('shutdown refused') as never);
-    state.setOwnedPerChatSession('resident-2', session);
-    state.chatQueues.set('resident-2', makeQueue('resident-2@s.whatsapp.net'));
+    state.setOwnedPerChatSession(mapKey, session);
+    state.chatQueues.set(mapKey, makeQueue('resident-2@s.whatsapp.net'));
     runtime.setDurability({} as never);
     const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 43, sessionId: 'ses-resident-2', claudePid: 123,
-      chatJid: 'resident-2@s.whatsapp.net', conversationKey: 'resident-2', status: 'active',
+      chatJid: 'resident-2@s.whatsapp.net', conversationKey: mapKey, status: 'active',
       classification: 'authoritative_live', reason: 'matches active checkpoint',
       startedAt: null, messageCount: 3,
     }]);
@@ -979,10 +988,56 @@ describe('AgentRuntime edge coverage', () => {
     const blocked = await state.sweepStaleAgentSessions();
 
     expect(session.spawnSession).not.toHaveBeenCalled();
-    expect(blocked.has('resident-2')).toBe(true);
+    expect(blocked.has(mapKey)).toBe(true);
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
       expect.objectContaining({ id: 43 }),
       'wedged-resident hard reset failed',
+    );
+  });
+
+  it('leaves a non-scheduled non-progressing authoritative_live resident unreset (#3527 F9)', async () => {
+    // The adversarial lens A0/A1 = the spec lens N1. Issue #3523 AC1 restricts the
+    // hard reset to '::scheduled-agent-job' scopes, and layer 1's escalation is
+    // already gated on that predicate. Iteration 1's sweep arm carried no such gate,
+    // so an ordinary interactive chat whose scope latched a non-convergence streak
+    // could have its in-flight turn aborted and its resumable checkpoint dropped.
+    // The sweep must leave a non-scheduled resident alone: no shutdown, no respawn,
+    // no session-local reset — the exemption lapse is logged and the key keeps the
+    // pre-existing proactive-resume block disposition.
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    const mapKey = 'interactive-chat';
+    const wedgedSince = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    session.getDbRowId.mockReturnValue(44 as never);
+    session.getStatus.mockReturnValue({
+      active: true, pid: null, sessionId: 'ses-interactive', startedAt: wedgedSince,
+      messageCount: 3, lastMessageAt: wedgedSince, // 90m > RESIDENT_TURN_PROGRESS_DEADLINE_MS (1h)
+      turnInFlight: false, durableFailureClosed: false,
+    } as never);
+    // Ownership AND a chat queue are registered, so the owned reset path would
+    // SUCCEED here without the scope gate. The defect this test catches is a reset
+    // that happens, not a reset that throws for want of a fixture.
+    state.setOwnedPerChatSession(mapKey, session);
+    state.chatQueues.set(mapKey, makeQueue('interactive-chat@s.whatsapp.net'));
+    runtime.setDurability({} as never);
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
+      id: 44, sessionId: 'ses-interactive', claudePid: 123,
+      chatJid: 'interactive-chat@s.whatsapp.net', conversationKey: mapKey, status: 'active',
+      classification: 'authoritative_live', reason: 'matches active checkpoint',
+      startedAt: null, messageCount: 3,
+    }]);
+
+    const blocked = await state.sweepStaleAgentSessions();
+
+    expect(session.shutdown).not.toHaveBeenCalled();
+    expect(session.spawnSession).not.toHaveBeenCalled();
+    expect(session.handleNew).not.toHaveBeenCalled();
+    expect(blocked.has(mapKey)).toBe(true);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 44, mapKey, trigger: 'no-turn-progress' }),
+      'non-progressing resident is not a scheduled-agent-job scope — exemption lapsed without a hard reset',
     );
   });
 
@@ -2069,6 +2124,64 @@ describe('AgentRuntime edge coverage', () => {
     );
   });
 
+  it('drives the layer-1 escalation through the OWNED reset when a chat queue exists (#3527 F14)', async () => {
+    // The adversarial lens A8 = the spec lens R1. The test above reaches the reset
+    // through the no-chat-queue FALLBACK (session.handleNew), which advances no
+    // ownership generation. Production registers an outbound queue per session map
+    // key, so a real '::scheduled-agent-job' scope takes the OWNED path instead:
+    // abort the chat's turn, advance the ownership generation, await shutdown and
+    // proven process exit, then spawn. That path was executed only from the sweep
+    // side; this covers it for the layer-1 trigger. The fallback test is kept.
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-owned::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null, // no live child to await in this harness
+      sessionId: 'compact-session',
+      startedAt: new Date().toISOString(),
+      messageCount: 5,
+      lastMessageAt: new Date().toISOString(),
+      turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(78 as never);
+    // Registered through the ownership seam: resetOwnedPerChatSession refuses an
+    // unowned manager, so a bare map write would prove nothing.
+    state.setOwnedPerChatSession(scopeKey, session);
+    const queue = makeQueue('sched-owned@s.whatsapp.net');
+    state.chatQueues.set(scopeKey, queue);
+    vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+      totalInputTokens: 200,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70,
+      lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
+    });
+    const nowMs = Date.now();
+    state.autoCompact.consecutiveRapidRearms.set(scopeKey, 3);
+    state.autoCompact.lastSuccessAt.set(scopeKey, nowMs);
+    state.autoCompact.rapidRearmRecordedForSuccessAt.set(scopeKey, nowMs);
+
+    state.maybeStartAutoCompact(session, scopeKey);
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+
+    // The OWNED path ran, not the session-local fallback.
+    expect(session.handleNew).not.toHaveBeenCalled();
+    expect(queue.abortTurn).toHaveBeenCalledTimes(1);
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(state.autoCompact.consecutiveRapidRearms.has(scopeKey)).toBe(false);
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      'test',
+      'auto_compact_convergence_reset',
+      'Auto-compact convergence limit reached',
+      expect.stringContaining('SUCCEEDED'),
+    );
+  });
+
   it('escalates a 30-minute-cadence livelock the rapid-rearm counter can never see (#3527 F2)', async () => {
     // #3527 review S1 = M1. The published head gated escalation on
     // consecutiveRapidRearms, which runtime.ts deletes on every eligibility
@@ -2121,7 +2234,7 @@ describe('AgentRuntime edge coverage', () => {
   });
 
   it('does not escalate on a single productive over-threshold turn (#3527 F2 false-positive guard)', async () => {
-    // codex finding 3, the opposite direction: productive work can push the first
+    // cross-model finding 3, the opposite direction: productive work can push the first
     // post-compaction turn over the threshold once. One spike must not escalate,
     // and the NEXT compaction that does converge clears the streak, so isolated
     // spikes cannot accumulate into a reset of a healthy session.

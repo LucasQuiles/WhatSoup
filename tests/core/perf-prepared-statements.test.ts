@@ -84,9 +84,9 @@ describe('prepared statement caching', () => {
     // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
     // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
     // for reconcileContinuityCandidates() reuse.)
-    // (+1 vs 152, #3523 layer 3: anyCheckpointForConversation — the
-    // same-namespace checkpoint existence probe that distinguishes a real
-    // row/checkpoint divergence from a clean cross-namespace no-op on close —
+    // (+1 vs 152, #3523 layer 3: resumableCheckpointForConversation — the
+    // same-namespace RESUMABLE checkpoint existence probe that distinguishes a
+    // real row/checkpoint divergence from a clean cross-namespace no-op on close —
     // prepared once in the constructor and reused per close.)
     expect(prepareSpy).toHaveBeenCalledTimes(153);
     prepareSpy.mockClear();
