@@ -1414,7 +1414,7 @@ export class AgentRuntime implements Runtime {
     // context across firings and cannot shrink) escalate to a hard session reset
     // instead of another ineffective compact.
     //
-    // Iteration 1 (#3527 review S1/M1/codex-3): the PRIMARY signal is
+    // Iteration 1 (#3527 review S1/M1/cross-model finding 3): the PRIMARY signal is
     // consecutiveNonConvergentCompactions, which counts compactions after which
     // the context was STILL over threshold on the very next evaluation. It is
     // independent of inter-turn timing, so it accumulates at the incident's
@@ -1436,7 +1436,14 @@ export class AgentRuntime implements Runtime {
     ) {
       void this.escalateCompactionLivelock(
         session, scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
-      );
+      ).catch((err: unknown) => {
+        // Iteration 2 (the adversarial lens A2). The reset inside the escalation
+        // catches its own errors, but the bookkeeping cleanup and the alert emission
+        // that follow it do not. Without this handler a throw there becomes an
+        // unhandledRejection, which main.ts treats as fatal and force-exits on — so a
+        // livelock guard could take the whole runtime down. Contained and logged.
+        log.error({ err, scopeKey, rowId }, 'compaction livelock escalation failed');
+      });
       return;
     }
 
@@ -1509,7 +1516,7 @@ export class AgentRuntime implements Runtime {
    * a fresh one spawns with a new session_id, so the accreted context is discarded
    * rather than repeatedly (and futilely) compacted.
    *
-   * Iteration 1 (#3527 review codex-1/M2/S6): the reset is AWAITED through the
+   * Iteration 1 (#3527 review cross-model finding 1/M2/S6): the reset is AWAITED through the
    * owned-reset/generation path (resetWedgedResidentSession → resetOwnedPerChatSession),
    * and the auto-compact bookkeeping is cleared and the admin alert emitted only
    * AFTER it settles. A FAILED reset therefore keeps the convergence counters, so
@@ -1864,14 +1871,36 @@ export class AgentRuntime implements Runtime {
         // the incident's state (authoritative_live + no turn progress past the
         // deadline) ends in a fresh, usable session instead of a log line.
         // Every other classification keeps its existing disposition below.
+        //
+        // Iteration 2 (the adversarial lens A0/A1 = the spec lens N1): the hard
+        // reset is gated on the SCHEDULED scope, the same predicate layer 1's
+        // escalation already carries, because #3523 AC1 restricts it to
+        // '::scheduled-agent-job' scopes. Ungated, this arm aborted the in-flight
+        // turn and dropped the resumable checkpoint of ANY per-chat scope whose
+        // convergence streak had latched — the convergence gates in
+        // isResidentManagerMakingProgress deliberately outrank turnInFlight (the
+        // incident's compact turn is perpetually in flight), so an ordinary
+        // interactive chat could be reset mid-turn. A non-scheduled resident that
+        // stops progressing loses its exemption and keeps the pre-existing
+        // disposition for this classification: proactive resume stays blocked for
+        // the key, and the lapse is logged rather than acted on.
         if (session.classification === 'authoritative_live') {
           const entry = this.findResidentManagerForRow(session.id);
-          const outcome = entry === undefined
-            ? 'failed' as const
-            : await this.resetWedgedResidentSession(
-                entry.mapKey, entry.session, 'no-turn-progress',
-                { id: session.id, conversationKey: session.conversationKey, providerSessionId: session.sessionId },
-              );
+          if (entry === undefined || !isScheduledAgentJobMapKey(entry.mapKey)) {
+            log.warn(
+              {
+                id: session.id, conversationKey: session.conversationKey,
+                mapKey: entry?.mapKey ?? null, trigger: 'no-turn-progress',
+              },
+              'non-progressing resident is not a scheduled-agent-job scope — exemption lapsed without a hard reset',
+            );
+            if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+            continue;
+          }
+          const outcome = await this.resetWedgedResidentSession(
+            entry.mapKey, entry.session, 'no-turn-progress',
+            { id: session.id, conversationKey: session.conversationKey, providerSessionId: session.sessionId },
+          );
           if (outcome !== 'reset' && session.conversationKey) {
             // The reset did not settle cleanly — the old session may still hold
             // the conversation, so keep proactive resume blocked for this key.

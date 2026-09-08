@@ -686,7 +686,7 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
   });
 
   it('is a clean no-op when the same-namespace checkpoint is retired and the resumable one is foreign (#3527 F4)', () => {
-    // #3527 review S3/codex-4. This is the incident's actual shape and, before the
+    // #3527 review S3/cross-model finding 4. This is the incident's actual shape and, before the
     // status filter, it was UNREACHABLE: session_checkpoints is UNIQUE per
     // conversation_key and no code path deletes a row, so any chat that ever ran an
     // interactive session keeps a bare-JID row forever. An unfiltered existence

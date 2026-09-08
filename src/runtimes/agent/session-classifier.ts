@@ -183,17 +183,18 @@ export function classifyActiveSessions(
 
   for (const session of activeSessions) {
     let convKey: string | null = null;
-    // #3523 (iteration 1, #3527 review codex-2): group and look up by the row's OWN
+    // #3523 (iteration 1, the cross-model lens): group and look up by the row's OWN
     // persistence namespace when it has one. A scheduled-agent-job session persists
-    // its checkpoint under '<conversationKey>::scheduled-agent-job' (runtime.ts:10019-10020
-    // sessionConversationKey, session.ts:1578 workspaceKey) while its chat_jid is the
-    // plain delivery JID. Deriving the lookup key from chat_jid alone put a scheduled
-    // row and an interactive row for one chat into ONE group with a SINGLE checkpoint,
-    // so at most one could match and the other was classified against a checkpoint that
-    // was never its own — pid mismatch, stale_live, SIGTERM once the resident exemption
-    // lapsed. workspace_key is exactly the key the row's checkpoint is written under,
-    // and it is what session-db.ts:166 already joins checkpoints on. For an interactive
-    // row it equals toConversationKey(chat_jid), so nothing else changes.
+    // its checkpoint under '<conversationKey>::scheduled-agent-job' (built by
+    // sessionConversationKey in runtime.ts and stored as workspaceKey in session.ts)
+    // while its chat_jid is the plain delivery JID. Deriving the lookup key from
+    // chat_jid alone put a scheduled row and an interactive row for one chat into ONE
+    // group with a SINGLE checkpoint, so at most one could match and the other was
+    // classified against a checkpoint that was never its own — pid mismatch,
+    // stale_live, SIGTERM once the resident exemption lapsed. workspace_key is exactly
+    // the key the row's checkpoint is written under, and it is what the checkpoint join
+    // in session-db.ts already uses. For an interactive row it equals
+    // toConversationKey(chat_jid), so nothing else changes.
     if (session.workspace_key) {
       convKey = session.workspace_key;
     } else if (session.chat_jid) {

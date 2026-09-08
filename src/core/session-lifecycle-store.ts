@@ -332,14 +332,21 @@ export class SessionLifecycleStore {
             updated_at = datetime('now')
         WHERE conversation_key = ? AND session_id IS NULL
       `),
-      // #3523 layer 3 (iteration 1, #3527 review S3/codex-4): the status filter is
-      // load-bearing. session_checkpoints is UNIQUE(conversation_key) (database.ts:266)
-      // and no code path deletes a row — rows are upserted and retired by status
+      // #3523 layer 3 (iteration 1, the spec and cross-model lenses): the status
+      // filter is load-bearing. session_checkpoints is UNIQUE(conversation_key) in the
+      // schema and no code path deletes a row — rows are upserted and retired by status
       // update — so an unfiltered existence probe is true forever for any namespace
       // that has EVER held a checkpoint, which made the clean no-op unreachable for
-      // the incident's chat. Only a RESUMABLE row (the same set durability.ts's
-      // getResumableCheckpoints uses: 'active' or 'suspended') is a checkpoint the
-      // close was obliged to close; an orphaned/ended leftover is not.
+      // the incident's chat. Only a row in the resumable STATUS set ('active' or
+      // 'suspended') is a checkpoint the close was obliged to close; an orphaned/ended
+      // leftover is not.
+      //
+      // Iteration 2 (the adversarial lens A5): this is the same session_status set
+      // getResumableCheckpoints in durability.ts admits, not the same row set.
+      // getResumableCheckpoints additionally requires session_id IS NOT NULL and
+      // excludes quarantined rows, so this probe is strictly BROADER — it can report a
+      // divergence for a row that getResumableCheckpoints would skip. That direction is
+      // deliberate: it fails closed, throwing where the narrower set would stay silent.
       resumableCheckpointForConversation: prepare(`
         SELECT 1 FROM session_checkpoints
         WHERE conversation_key = ? AND session_status IN ('active', 'suspended')
@@ -813,7 +820,7 @@ export class SessionLifecycleStore {
         // agent row above already closed; the foreign-namespace checkpoint is
         // deliberately left untouched.
         //
-        // Iteration 1 (#3527 review S3/codex-4): "resumable" — not "any" — is what
+        // Iteration 1 (#3527 review S3/cross-model finding 4): "resumable" — not "any" — is what
         // makes the no-op reachable. Checkpoint rows are unique per conversation
         // key and are never deleted, only retired by status, so an existence probe
         // with no status filter is permanently true for every namespace that ever
