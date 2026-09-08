@@ -55,6 +55,13 @@ interface ActiveSessionRow {
   started_at: string | null;
   message_count: number | null;
   provider: string | null;
+  /**
+   * The row's own persistence namespace — SessionManager.conversationKey, which
+   * is the scheduled-agent-job map key for a scheduled session and the plain
+   * conversation key for an interactive one (session.ts:1578). This is the key
+   * the row's session_checkpoints row is written under.
+   */
+  workspace_key: string | null;
 }
 
 interface CheckpointInfo {
@@ -163,7 +170,7 @@ export function classifyActiveSessions(
 ): ClassifiedSession[] {
   const activeSessions = db.raw
     .prepare(
-      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count, provider FROM agent_sessions WHERE status = 'active'`,
+      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count, provider, workspace_key FROM agent_sessions WHERE status = 'active'`,
     )
     .all() as unknown as ActiveSessionRow[];
 
@@ -176,7 +183,20 @@ export function classifyActiveSessions(
 
   for (const session of activeSessions) {
     let convKey: string | null = null;
-    if (session.chat_jid) {
+    // #3523 (iteration 1, #3527 review codex-2): group and look up by the row's OWN
+    // persistence namespace when it has one. A scheduled-agent-job session persists
+    // its checkpoint under '<conversationKey>::scheduled-agent-job' (runtime.ts:10019-10020
+    // sessionConversationKey, session.ts:1578 workspaceKey) while its chat_jid is the
+    // plain delivery JID. Deriving the lookup key from chat_jid alone put a scheduled
+    // row and an interactive row for one chat into ONE group with a SINGLE checkpoint,
+    // so at most one could match and the other was classified against a checkpoint that
+    // was never its own — pid mismatch, stale_live, SIGTERM once the resident exemption
+    // lapsed. workspace_key is exactly the key the row's checkpoint is written under,
+    // and it is what session-db.ts:166 already joins checkpoints on. For an interactive
+    // row it equals toConversationKey(chat_jid), so nothing else changes.
+    if (session.workspace_key) {
+      convKey = session.workspace_key;
+    } else if (session.chat_jid) {
       try {
         convKey = toConversationKey(session.chat_jid);
       } catch {
@@ -212,8 +232,19 @@ export function classifyActiveSessions(
         // checkpoint-less dead-pid row with messages permanently unreconciled).
         // A live PID stays ambiguous — we still cannot safely reap a running
         // process with no checkpoint to compare against.
+        //
+        // Iteration 1 (#3527 review H2): gate on executionMode FIRST, exactly as
+        // the sibling branches below do (:242, :257). claude_pid is only a
+        // session's identity for a 'persistent_session' provider. A spawn-per-turn
+        // or managed-loop provider has no durable child, so its claude_pid is
+        // legitimately null/0 while the session is logically live — and
+        // defaultPidOwnershipChecker maps pid <= 0 to dead (:94-96). Without this
+        // gate a checkpoint-less pid-0 row of a non-persistent provider was
+        // classified stale_dead and orphaned on the next sweep. An unknown
+        // provider (mode === null) also fails safe to ambiguous.
+        const mode = executionMode(session.provider);
         const pidCheck = pidChecker(session.claude_pid);
-        if (!pidCheck.alive) {
+        if (mode === 'persistent_session' && !pidCheck.alive) {
           results.push({
             ...sessionFields(session, convKey),
             classification: 'stale_dead',

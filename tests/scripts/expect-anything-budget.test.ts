@@ -31,14 +31,22 @@ const testsRoot = resolve(repoRoot, 'tests');
 // Ratchet ceiling: the count may only stay the same or decrease.
 // To raise it, update this constant AND explain why in the commit message.
 // (+5 vs 66, #3523: runtime-edge-coverage.test.ts covers the compaction-livelock
-// defense layers. Its 9 expect.anything() are all legitimate positional fillers —
-// the DurabilityEngine/db handle passed as arg 1 to markOrphaned /
-// restoreOrphanedResidentSessionStatus / getRecentMessages (the assertions pin the
-// trailing args: row id 42, mapKey, retention 30), and the payload/detail args of
-// two `.not.toHaveBeenCalledWith(...)` negative assertions where matching ANY value
-// is exactly the intent. Tightening these to objectContaining would add no coverage
-// and couple the tests to opaque handles.)
-const EXPECT_ANYTHING_BUDGET = 71;
+// defense layers. It ADDS 5 expect.anything() (the file goes from 4 to 9 — the 9 is
+// the post-change file total, not the delta; an earlier revision of this comment and
+// of commit 34d0a7a4's message stated the total as if it were the addition). All 5
+// are legitimate positional fillers — the DurabilityEngine/db handle passed as arg 1
+// to markOrphaned (the assertions pin the trailing arg: row id 42), and the
+// payload/detail args of two `.not.toHaveBeenCalledWith(...)` negative assertions
+// where matching ANY value is exactly the intent. Tightening these to
+// objectContaining would add no coverage and couple the tests to opaque handles.)
+// (+2 vs 71, #3523 iteration 1: the layer-1 false-positive guard
+// ('does not escalate on a single productive over-threshold turn') asserts that NO
+// auto_compact_convergence_reset alert was emitted. emitAlert's title and detail are
+// free-form strings the assertion deliberately does not pin — the invariant is the
+// absence of the call for that instance and source id — so both trailing args are
+// expect.anything(). Same shape as the pre-existing scope-gating negative directly
+// above it; nothing weaker than the assertion it mirrors.)
+const EXPECT_ANYTHING_BUDGET = 73;
 
 function collectTestFiles(): string[] {
   // Node 22+ readdirSync recursive (replaces the phantom-dep tinyglobby that #2909 purged).

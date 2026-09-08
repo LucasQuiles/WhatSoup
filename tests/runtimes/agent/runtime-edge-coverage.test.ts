@@ -374,8 +374,11 @@ type RuntimeView = {
     cooldownUntil: Map<string, number>;
     consecutiveRapidRearms: Map<string, number>;
     rapidRearmRecordedForSuccessAt: Map<string, number>;
+    consecutiveNonConvergentCompactions: Map<string, number>;
+    compactionOutcomeRecordedForCompactAt: Map<string, number>;
     ineffective: number;
   };
+  setOwnedPerChatSession(mapKey: string, session: unknown): void;
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
   replayTurnOnFallback(args: unknown): Promise<void>;
@@ -890,6 +893,96 @@ describe('AgentRuntime edge coverage', () => {
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ id: 42, providerSessionId: 'ses-resident' }),
       'skipping zombie-session disposition for current-process resident manager',
+    );
+  });
+
+  it('hard-resets a non-progressing authoritative_live resident instead of only logging (#3527 F1)', async () => {
+    // #3527 review H1 = spec S2. This is the incident's OWN classification: the
+    // journal records the livelocked row as authoritative_live, because its child
+    // process is alive and does match the active checkpoint. Every arm of the
+    // disposition switch is a no-op for that value — 'authoritative_live' only
+    // re-adds the conversation key to the proactive-resume block set, which is
+    // exactly what the old unconditional exemption did — so falling through to the
+    // switch changed nothing but the log line. A non-progressing authoritative
+    // resident must actually be dispositioned: the owned per-chat reset, which
+    // ends the wedged session and spawns a fresh one.
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    const wedgedSince = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    session.getDbRowId.mockReturnValue(42 as never);
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null, // no live child to await in this harness
+      sessionId: 'ses-resident',
+      startedAt: wedgedSince,
+      messageCount: 3,
+      lastMessageAt: wedgedSince, // 90m > RESIDENT_TURN_PROGRESS_DEADLINE_MS (1h)
+      turnInFlight: false,
+      durableFailureClosed: false,
+    } as never);
+    // Registered through the ownership seam, not a bare map write: the reset path
+    // is generation-checked and refuses an unowned manager.
+    state.setOwnedPerChatSession('resident', session);
+    state.chatQueues.set('resident', makeQueue('resident@s.whatsapp.net'));
+    runtime.setDurability({} as never);
+    const { markOrphaned } = await import('../../../src/runtimes/agent/session-db.ts');
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    vi.mocked(markOrphaned).mockClear();
+    vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
+      id: 42, sessionId: 'ses-resident', claudePid: 123,
+      chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      classification: 'authoritative_live',
+      reason: 'matches active checkpoint (pid=123, sessionId=ses-resident)',
+      startedAt: null, messageCount: 3,
+    }]);
+
+    const blocked = await state.sweepStaleAgentSessions();
+
+    // The disposition ACTED: the wedged session was shut down and a fresh one
+    // spawned, so the chat ends the sweep with a usable session.
+    expect(session.shutdown).toHaveBeenCalledWith(false);
+    expect(session.spawnSession).toHaveBeenCalledTimes(1);
+    // A reset session is usable, so proactive resume is NOT blocked for its key.
+    expect(blocked.has('resident')).toBe(false);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 42, classification: 'authoritative_live' }),
+      'resident manager making no turn progress — allowing zombie-session disposition',
+    );
+  });
+
+  it('blocks proactive resume when the non-progressing authoritative_live reset fails (#3527 F1/F5)', async () => {
+    // A failed reset must be observable, not swallowed: the old session may still
+    // hold the conversation, so the sweep keeps proactive resume blocked for it.
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime);
+    const session = makeSession();
+    const wedgedSince = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    session.getDbRowId.mockReturnValue(43 as never);
+    session.getStatus.mockReturnValue({
+      active: true, pid: null, sessionId: 'ses-resident-2', startedAt: wedgedSince,
+      messageCount: 3, lastMessageAt: wedgedSince, turnInFlight: false,
+      durableFailureClosed: false,
+    } as never);
+    session.shutdown.mockRejectedValueOnce(new Error('shutdown refused') as never);
+    state.setOwnedPerChatSession('resident-2', session);
+    state.chatQueues.set('resident-2', makeQueue('resident-2@s.whatsapp.net'));
+    runtime.setDurability({} as never);
+    const { classifyActiveSessions } = await import('../../../src/runtimes/agent/session-classifier.ts');
+    vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
+      id: 43, sessionId: 'ses-resident-2', claudePid: 123,
+      chatJid: 'resident-2@s.whatsapp.net', conversationKey: 'resident-2', status: 'active',
+      classification: 'authoritative_live', reason: 'matches active checkpoint',
+      startedAt: null, messageCount: 3,
+    }]);
+
+    const blocked = await state.sweepStaleAgentSessions();
+
+    expect(session.spawnSession).not.toHaveBeenCalled();
+    expect(blocked.has('resident-2')).toBe(true);
+    expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 43 }),
+      'wedged-resident hard reset failed',
     );
   });
 
@@ -1960,7 +2053,9 @@ describe('AgentRuntime edge coverage', () => {
     state.autoCompact.rapidRearmRecordedForSuccessAt.set(scopeKey, nowMs);
 
     state.maybeStartAutoCompact(session, scopeKey);
-    await Promise.resolve();
+    // The escalation is now AWAITED end-to-end (reset settles, then bookkeeping is
+    // cleared, then the alert is emitted), so drain more than one microtask.
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
 
     // No further /compact armed; the session was hard-reset and the scope cleared.
     expect(session.sendTurn).not.toHaveBeenCalled();
@@ -1971,6 +2066,115 @@ describe('AgentRuntime edge coverage', () => {
       'auto_compact_convergence_reset',
       'Auto-compact convergence limit reached',
       expect.stringContaining(scopeKey),
+    );
+  });
+
+  it('escalates a 30-minute-cadence livelock the rapid-rearm counter can never see (#3527 F2)', async () => {
+    // #3527 review S1 = M1. The published head gated escalation on
+    // consecutiveRapidRearms, which runtime.ts deletes on every eligibility
+    // evaluation that lands outside the 5-minute rapid-rearm window. The incident
+    // re-fired every ~30 minutes (a compact is the LAST action of each firing), so
+    // that counter was reset every cycle and the limit was unreachable. This drives
+    // the incident's real cadence: three compactions, each followed 30 minutes
+    // later by a first post-compaction evaluation that is STILL over threshold
+    // (the context did not shrink). The rapid-rearm counter stays 0 throughout —
+    // that assertion is the finding — and the non-convergence streak escalates.
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-cadence::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'compact-session',
+      startedAt: new Date().toISOString(), messageCount: 5,
+      lastMessageAt: new Date().toISOString(), turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(91 as never);
+
+    for (let firing = 1; firing <= 3; firing += 1) {
+      // A compact completed at the end of the previous firing...
+      state.autoCompact.lastSuccessAt.set(scopeKey, Date.now());
+      // ...and the job fires again 30 minutes later — always outside the window.
+      vi.setSystemTime(new Date(Date.now() + 30 * 60 * 1000));
+      // Hold the cooldown open so cycles that do not escalate stop at the cooldown
+      // gate rather than arming a /compact this unit harness cannot dispatch.
+      state.autoCompact.cooldownUntil.set(scopeKey, Date.now() + 60_000);
+      // The context did not shrink: still over threshold on the first turn after.
+      vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+        totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+        lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+      });
+      state.maybeStartAutoCompact(session, scopeKey);
+      for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    }
+
+    // The old signal never moved at this cadence — this is why the guard was dead.
+    expect(state.autoCompact.consecutiveRapidRearms.get(scopeKey) ?? 0).toBe(0);
+    // The new signal reached the limit and the escalation ran to completion.
+    expect(session.sendTurn).not.toHaveBeenCalled();
+    expect(session.handleNew).toHaveBeenCalledTimes(1);
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      'test',
+      'auto_compact_convergence_reset',
+      'Auto-compact convergence limit reached',
+      expect.stringContaining('nonConvergentCompactions=3'),
+    );
+  });
+
+  it('does not escalate on a single productive over-threshold turn (#3527 F2 false-positive guard)', async () => {
+    // codex finding 3, the opposite direction: productive work can push the first
+    // post-compaction turn over the threshold once. One spike must not escalate,
+    // and the NEXT compaction that does converge clears the streak, so isolated
+    // spikes cannot accumulate into a reset of a healthy session.
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-productive::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true, pid: 123, sessionId: 'compact-session',
+      startedAt: new Date().toISOString(), messageCount: 5,
+      lastMessageAt: new Date().toISOString(), turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(92 as never);
+
+    // Firing 1: one productive spike over the threshold.
+    state.autoCompact.lastSuccessAt.set(scopeKey, Date.now());
+    vi.setSystemTime(new Date(Date.now() + 30 * 60 * 1000));
+    state.autoCompact.cooldownUntil.set(scopeKey, Date.now() + 60_000);
+    vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+      totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+    });
+    state.maybeStartAutoCompact(session, scopeKey);
+    expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey)).toBe(1);
+
+    // Firing 2: the compaction converged — the next evaluation is under threshold.
+    state.autoCompact.lastSuccessAt.set(scopeKey, Date.now());
+    vi.setSystemTime(new Date(Date.now() + 30 * 60 * 1000));
+    vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+      totalInputTokens: 90, totalOutputTokens: 0, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+    });
+    state.maybeStartAutoCompact(session, scopeKey);
+    expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scopeKey)).toBe(false);
+
+    // Firing 3: another isolated spike. Streak is back to 1, not 3.
+    state.autoCompact.lastSuccessAt.set(scopeKey, Date.now());
+    vi.setSystemTime(new Date(Date.now() + 30 * 60 * 1000));
+    state.autoCompact.cooldownUntil.set(scopeKey, Date.now() + 60_000);
+    vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+      totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+    });
+    state.maybeStartAutoCompact(session, scopeKey);
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+
+    expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey)).toBe(1);
+    expect(session.handleNew).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalledWith(
+      'test',
+      'auto_compact_convergence_reset',
+      expect.anything(),
+      expect.anything(),
     );
   });
 
