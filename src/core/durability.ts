@@ -98,6 +98,7 @@ import type {
   RequeueTurnRecoveryJobResult,
   RenewTurnRecoveryClaimResult,
   TurnRecoveryAssignmentFence,
+  TurnRecoveryAdmissionState,
   TurnRecoveryClaimFence,
   TurnRecoveryEnumerationPage,
   TurnRecoveryJobPersistenceParams,
@@ -2055,6 +2056,14 @@ export class DurabilityEngine {
     options?: { excludeJobId?: number },
   ): boolean {
     return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    return this.turnRecovery.getTurnRecoveryAdmissionStateForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
