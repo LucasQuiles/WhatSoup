@@ -25,7 +25,7 @@ cells below are the map of what would move.
 | Fold | `canonicalConversationKeyResolver` if armed, else bare `toConversationKey` `:744-746` | `canonicalConversationKey(..., deps.dbWrapper)` `:278`, always |
 | Fold arming | sole production site `src/mcp/tools/messaging.ts:221` | holds its own database handle |
 | Rejects by | `reject(...)` `:756-760`, plain text | `throw new Error` `:283`, returned as a JSON error envelope |
-| Failure code / stage | `authorization_denied` / `authorization` | `returned_error` / `handler` (`registry.ts:858-859` defaults) |
+| Failure code / stage | `authorization_denied` / `authorization` | `returned_error` / `handler`, but NOT by escaping the handler — see "How the messaging guard reaches `returned_error` / `handler`" below |
 | Disposition | `not_retryable` / `recover` | `unknown` / `inspect` |
 | Actor receipt written first | no, the call is dropped before `registry.ts:805-824` | yes, the handler already ran |
 
@@ -40,6 +40,42 @@ so neither divergence admits a send.
 | Registry target validation | `validation_rejected` | `validation` | `not_retryable` | `none` | `src/core/durability-evidence-contract.ts:49` |
 | Handler-returned error | `returned_error` | `handler` | `unknown` | `inspect` | `src/core/durability-evidence-contract.ts:57` |
 | No failure | none, `status = complete` | | | | |
+
+### How the messaging guard reaches `returned_error` / `handler`
+
+The `registry.ts:858-859` defaults that produce `returned_error` / `handler`
+apply to a RETURNED error payload. The messaging guard does not return one. It
+THROWS, from two sites inside `assertConversationMatch`:
+`src/mcp/tools/messaging.ts:283` on a conversation mismatch, and `:280` on a
+`chatJid` that does not canonicalize at all.
+
+An `Error` that escapes the handler never reaches those defaults. It is caught
+at `src/mcp/registry.ts:876` and classified by `classifyThrownToolFailure`
+(`registry.ts:885`), which maps any `Error` to `handler_failed` / `handler`
+(`src/core/durability-evidence-contract.ts:140`) — a different failure code and
+a different disposition, `not_retryable` / `inspect`
+(`durability-evidence-contract.ts:56`).
+
+The guard lands on `returned_error` / `handler` only because two catch blocks
+inside the handler match on the error MESSAGE TEXT and convert the throw into an
+`errorResult`, which is what the registry then sees as a returned payload:
+`src/mcp/tools/messaging.ts:314` (dry run) and `:395` (live send). Both test the
+same predicate,
+
+```
+err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))
+```
+
+whose two prefixes are exactly the two the guard's two throw sites produce.
+
+**The guard's error string is load-bearing for the failure channel this document
+publishes.** Change either message prefix without changing both catch
+predicates, or move the throw outside those `try` blocks, and every
+messaging-guard cell moves from `returned_error` / `handler` to
+`handler_failed` / `handler` with no other visible difference. Cells M3, M4 and
+M9d assert the failure code, so they would turn red. M8 would not defend it: its
+`returned_error` comes from the typed-error branch above the prefix match
+(`messaging.ts:304-313` dry run, `:385-394` live), not from the guard.
 
 ## The matrix
 
@@ -75,8 +111,9 @@ Two things the rows above do not carry in a column:
   reads both keys and rejects either, so a `to` target would be rejected by the
   same line; that variant is pinned by no test here.
 - M10 and its control run against `probe_injected_send`, a fixture
-  injected-target tool declared in the test file
-  (`tests/integration/cross-conversation-guard-matrix.test.ts:143-155`), not
+  injected-target tool built by `probeInjectedTool` in the test file
+  (`tests/integration/cross-conversation-guard-matrix.test.ts`, declared at
+  `:152` at the time of writing; the function name is the stable anchor), not
   against `send_message`. `registerMessagingTools` is the sole production arming
   site for the canonical fold (`src/mcp/tools/messaging.ts:221`), so a registry
   holding a real `send_message` always has the fold armed and the un-armed cell
