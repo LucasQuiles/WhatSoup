@@ -359,7 +359,7 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M7 — chat-scoped, alias target supplied
-  //      NEITHER guard runs; `to` is stripped (registry.ts:717) before the
+  //      NEITHER guard runs; `to` is stripped (registry.ts:716) before the
   //      handler, so the alias never resolves.
   // =========================================================================
   it('M7 chat-scoped session with an alias target: the alias is stripped and the send goes to deliveryJid', async () => {
