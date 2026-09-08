@@ -440,11 +440,12 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "12bb97ecaa8c17ab429ddc03da78997cd7ba98a724f47724df3ba60e4a6680e4",
+      "sha256": "1a050fa4cdcb2ba8c23e3f78678598919faa7db4d2f052910496107ede317ee8",
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload"
+        "daemon-reload",
+        "deploy/scripts/lib/producer_cadence_receipt.py"
       ]
     },
     {
