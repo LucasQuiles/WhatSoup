@@ -43,6 +43,17 @@ const ALERT_SOURCE = 'model-currency';
 const LIVE_SCAN_ALERT_SOURCE = 'model-currency-live-scan';
 const CHECK_INTERVAL_MS = MS_PER_DAY;
 const FETCH_TIMEOUT_MS = 5_000;
+// Backoff between retries of a transient model-list fetch failure. One length
+// entry per retry, so a vendor must fail 3 times before it degrades the scan.
+const FETCH_RETRY_BACKOFF_MS = [2_000, 8_000];
+// The scan competes with connection setup for the event loop at boot; a wall-clock
+// abort timer trips on a sub-second endpoint if it fires mid-cold-start. Wait for
+// startup to settle before the first scan.
+const STARTUP_SCAN_DELAY_MS = 60_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
+}
 
 let cachedAdvisories: ModelAdvisory[] = [];
 let cachedLiveScan: LiveModelScanStatus | null = null;
@@ -67,6 +78,11 @@ export interface LiveModelScanStatus {
   attemptedVendors: string[];
   degradedVendors: LiveModelFetchFailure[];
   fetchedCount: number;
+}
+
+export interface LiveModelFetchOptions {
+  /** Retry transient vendor-list failures. Reserved for the background monitor. */
+  retryTransient?: boolean;
 }
 
 export interface ModelCurrencyCheckResult {
@@ -107,18 +123,23 @@ interface ModelsListResponse {
   data?: Array<{ id?: unknown }>;
 }
 
-async function fetchModelIds(
+/** 408/429 and 5xx are transient for this idempotent Models API GET. */
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function fetchModelIdsOnce(
   url: string,
   headers: Record<string, string>,
   vendor: string,
-): Promise<VendorModelFetchResult> {
+): Promise<VendorModelFetchResult & { retryable: boolean }> {
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
-      log.warn({ vendor, status: res.status }, 'models API returned non-OK; using static catalog');
       return {
         ids: [],
         failure: { vendor, status: res.status, reason: `HTTP ${res.status}` },
+        retryable: isRetryableStatus(res.status),
       };
     }
     const body = (await res.json()) as ModelsListResponse;
@@ -126,15 +147,45 @@ async function fetchModelIds(
       .map((m) => m.id)
       .filter((id): id is string => typeof id === 'string');
     log.debug({ vendor, count: ids.length }, 'live model list fetched');
-    return { ids, failure: null };
+    return { ids, failure: null, retryable: false };
   } catch (err) {
+    // Timeouts, aborts and socket errors are transient by nature — worth a retry.
     const reason = sanitizeFetchFailureReason(err);
-    log.warn({ vendor, err: reason }, 'models API unreachable; using static catalog');
     return {
       ids: [],
       failure: { vendor, reason },
+      retryable: true,
     };
   }
+}
+
+async function fetchModelIds(
+  url: string,
+  headers: Record<string, string>,
+  vendor: string,
+  options: LiveModelFetchOptions,
+): Promise<VendorModelFetchResult> {
+  let last: VendorModelFetchResult & { retryable: boolean };
+  for (let attempt = 0; ; attempt += 1) {
+    last = await fetchModelIdsOnce(url, headers, vendor);
+    if (!last.failure) return { ids: last.ids, failure: null };
+    if (!options.retryTransient || !last.retryable || attempt >= FETCH_RETRY_BACKOFF_MS.length) break;
+    const delayMs = FETCH_RETRY_BACKOFF_MS[attempt];
+    log.debug({ vendor, attempt: attempt + 1, delayMs }, 'model list fetch failed; retrying');
+    await sleep(delayMs);
+  }
+  if (last.failure.status !== undefined) {
+    log.warn(
+      { vendor, status: last.failure.status },
+      'models API returned non-OK; retries exhausted or disabled; using static catalog',
+    );
+  } else {
+    log.warn(
+      { vendor, err: last.failure.reason },
+      'models API unreachable; retries exhausted or disabled; using static catalog',
+    );
+  }
+  return { ids: last.ids, failure: last.failure };
 }
 
 function sanitizeFetchFailureReason(err: unknown): string {
@@ -144,7 +195,9 @@ function sanitizeFetchFailureReason(err: unknown): string {
     .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}\b/gi, 'Bearer [redacted]');
 }
 
-export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+export async function fetchLiveModelIdsWithStatus(
+  options: LiveModelFetchOptions = {},
+): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
   const fetches: Promise<VendorModelFetchResult>[] = [];
   const attemptedVendors: string[] = [];
   const anthropicKey = resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' });
@@ -154,6 +207,7 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
       'https://api.anthropic.com/v1/models?limit=100',
       { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
       'anthropic',
+      options,
     ));
   }
   const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
@@ -163,6 +217,7 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
       'https://api.openai.com/v1/models',
       { Authorization: `Bearer ${openaiKey}` },
       'openai',
+      options,
     ));
   }
   const results = await Promise.all(fetches);
@@ -185,8 +240,8 @@ export async function fetchLiveModelIdsWithStatus(): Promise<{ ids: string[]; li
 }
 
 /** Fetch currently-served model IDs from vendors we have credentials for. */
-export async function fetchLiveModelIds(): Promise<string[]> {
-  return (await fetchLiveModelIdsWithStatus()).ids;
+export async function fetchLiveModelIds(options: LiveModelFetchOptions = {}): Promise<string[]> {
+  return (await fetchLiveModelIdsWithStatus(options)).ids;
 }
 
 /** A vendor Models-API failure classified by HTTP CONCEPT, not render vocabulary
@@ -317,7 +372,9 @@ export async function fetchAnthropicModelIdsWithStatus(
     headers = { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' };
   }
 
-  const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic');
+  // Interactive `/config model` resolution — retries stay off (transient
+  // failures fall back to the static catalog immediately, no startup stall).
+  const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic', { retryTransient: false });
   if (result.failure) {
     return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
   }
@@ -347,7 +404,9 @@ export type OpenAIModelsResult =
 export async function fetchOpenAIModelIdsWithStatus(): Promise<OpenAIModelsResult> {
   const openaiKey = resolveApiKey({ envVar: 'OPENAI_API_KEY' });
   if (!openaiKey) return { status: 'no-key' };
-  const result = await fetchModelIds(OPENAI_MODELS_URL, { Authorization: `Bearer ${openaiKey}` }, 'openai');
+  // Interactive `/config model` resolution — retries stay off (see the
+  // Anthropic sibling above; falls back to the static catalog immediately).
+  const result = await fetchModelIds(OPENAI_MODELS_URL, { Authorization: `Bearer ${openaiKey}` }, 'openai', { retryTransient: false });
   if (result.failure) {
     return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
   }
@@ -368,8 +427,10 @@ export async function fetchOpenAIModelIdsWithStatus(): Promise<OpenAIModelsResul
 const LIVE_IDS_CACHE_TTL_MS = CHECK_INTERVAL_MS;
 let liveIdsCache: { fetchedAt: number; ids: string[]; liveScan: LiveModelScanStatus } | null = null;
 
-async function refreshLiveModelIdsCache(): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
-  const result = await fetchLiveModelIdsWithStatus();
+async function refreshLiveModelIdsCache(
+  options: LiveModelFetchOptions = {},
+): Promise<{ ids: string[]; liveScan: LiveModelScanStatus }> {
+  const result = await fetchLiveModelIdsWithStatus(options);
   liveIdsCache = { fetchedAt: Date.now(), ...result };
   return result;
 }
@@ -457,7 +518,7 @@ export async function checkModelCurrencyStatus(
   // Force-refresh (not read-through) so the startup check and each daily tick
   // re-resolve symbolic values against a fresh vendor list, priming the shared
   // cache that point-of-use resolution reads.
-  const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache();
+  const { ids: liveIds, liveScan } = await refreshLiveModelIdsCache({ retryTransient: true });
   const advisories: ModelAdvisory[] = [];
   for (const [role, modelId] of Object.entries(models)) {
     if (!isNonEmptyString(modelId)) continue;
@@ -651,6 +712,8 @@ export function startModelCurrencyMonitor(
       log.warn({ err: reason }, 'model currency check failed');
     }
   };
-  void run();
-  setInterval(() => { void run(); }, CHECK_INTERVAL_MS).unref();
+  setTimeout(() => {
+    void run();
+    setInterval(() => { void run(); }, CHECK_INTERVAL_MS).unref();
+  }, STARTUP_SCAN_DELAY_MS).unref();
 }
