@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { redactBotErrorsText } from '../src/lib/bot-errors-outbox.ts';
+import { redactText } from '../src/lib/redaction-text.ts';
 
 // BEAD-052 redaction-parity corpus. Ground truth is the Python SSOT
 // (deploy/scripts/lib/bot_errors_redaction.py); the matching pytest
@@ -61,6 +62,7 @@ describe('redaction parity corpus (TS side)', () => {
     it(`${row.id} (${row.class})`, () => {
       expect(expected, `row ${row.id} must declare expected_ts or expected`).toBeTypeOf('string');
       expect(redactBotErrorsText(row.input)).toBe(expected);
+      expect(redactText(row.input)).toBe(expected);
     });
   }
 
