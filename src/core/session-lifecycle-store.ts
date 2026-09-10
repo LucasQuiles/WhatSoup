@@ -144,10 +144,12 @@ function requireChanges(result: { changes: number | bigint }, message: string): 
  * row/session or row/conversation identity.
  */
 export class SessionLifecycleStore {
+  private readonly db: Database;
   private readonly statements: LifecycleStatements;
   private readonly transact: TransactionRunner;
 
-  constructor(private readonly db: Database) {
+  constructor(db: Database) {
+    this.db = db;
     this.transact = getTransactionRunner(db);
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
