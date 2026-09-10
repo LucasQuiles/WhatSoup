@@ -61,6 +61,7 @@ function recoveryCounts(
     orphanTransfers: 0,
     echoConflicts: 0,
     openRecoveries: 0,
+    blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     ...overrides,
   };
 }
@@ -334,6 +335,7 @@ describe('runtime turn finalization recovery health', () => {
         orphanTransfers: 0,
         echoConflicts: 1,
         openRecoveries: 0,
+        blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
       });
       const runtime = new AgentRuntime(db, makeMessenger().messenger, 'echo-conflict-health', {
         sessionScope: 'per_chat',
