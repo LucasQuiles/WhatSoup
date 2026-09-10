@@ -24,7 +24,8 @@ import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
 import { hasVisibleToolText } from './tool-update.ts';
-import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
+import { markdownToWhatsApp, repairChunkFormatting, splitMessage } from './whatsapp-format.ts';
+export { MAX_CHUNKS } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
@@ -154,15 +155,6 @@ const FRIENDLY_CATEGORY_META: Record<ToolCategory, { label: string; emoji: strin
   cancelled: { label: 'Skipped',          emoji: '⏭️' },
 };
 
-const MAX_MESSAGE_LENGTH = 4000;
-// QR-126: hard cap on how many chunks a single reply may fan out into. Without it,
-// splitMessage emits ceil(len / MAX_MESSAGE_LENGTH) messages, so a prompt-injected
-// max-length agent reply becomes single-turn message amplification — group spam plus a
-// WhatsApp anti-spam / bot-ban availability risk (a crafted reply reaches ~64 chunks).
-// At the cap the bot delivers MAX_CHUNKS-1 full content chunks (~44 KB) followed by a
-// visible truncation notice; the tail is dropped rather than flooding the chat.
-export const MAX_CHUNKS = 12;
-const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
 export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
@@ -316,42 +308,6 @@ function preprocessText(text: string): string {
     .replace(/^- \[ \] /gim, '▫︎ ');
   out = markdownToWhatsApp(out);
   return out;
-}
-
-/** Split a string into chunks that fit within maxLen characters. */
-function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string[] {
-  if (text.length <= maxLen) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > maxLen) {
-    let splitAt = remaining.lastIndexOf('\n\n', maxLen);
-    if (splitAt <= 0) {
-      splitAt = remaining.lastIndexOf(' ', maxLen);
-    }
-    if (splitAt <= 0) {
-      splitAt = maxLen;
-    }
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-
-  if (remaining.length > 0) {
-    chunks.push(remaining);
-  }
-
-  // QR-126: bound the fan-out. repairChunkFormatting (the sole downstream transform in
-  // both send paths) only rewrites existing chunks in place — it never adds chunks — so
-  // capping here bounds the number of WhatsApp messages actually sent. Keep the first
-  // MAX_CHUNKS-1 content chunks and replace the tail with a single visible notice.
-  if (chunks.length > MAX_CHUNKS) {
-    return [...chunks.slice(0, MAX_CHUNKS - 1), CHUNK_TRUNCATION_NOTICE];
-  }
-
-  return chunks;
 }
 
 /** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
