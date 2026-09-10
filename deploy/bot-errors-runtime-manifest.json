@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "6597d496e8b0d9f7e9126ab6fc9a6595d8c1dc28f89539f2900d53ec0489eb0d",
+      "sha256": "ac54cd2fd8a565a159f16b02620ac053dfd7c7fe71a05c29035b74e05abf6b64",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -94,7 +94,23 @@
         "dispatcher.unrenderable_meta_alert",
         "write_unrenderable_breadcrumb",
         "reconcile_unrenderable_signals",
-        "drop_unrenderable_breadcrumbs"
+        "drop_unrenderable_breadcrumbs",
+        "delivery_outcome_unknown_escalated",
+        "outcomeUnknownEscalatedAt",
+        "HELD_DELIVERY_ESCALATE_SECONDS",
+        "STORM_RECEIPT_MAX_RECORDS",
+        "storm_window_identity",
+        "write_storm_digest_receipt",
+        "acknowledge_storm_digest_receipt",
+        "reconcile_storm_digest_receipts",
+        "dispatcher.storm_receipt",
+        "settledReason",
+        "STORM_RECEIPT_ORPHAN_ALERT_SOURCE",
+        "dispatcher.storm_receipt_orphan_alert",
+        "storm_receipt_publication_evidence",
+        "storm_receipt_digest_id",
+        "STORM_DIGEST_LEDGER_DIRS",
+        "orphanPagedAtEpoch"
       ]
     },
     {
@@ -282,11 +298,13 @@
     },
     {
       "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
+      "sha256": "509a0ebc4ff98a180e63bd0da93b6cdb85f8f8c83cd1dbf04cda2cc162d0a66e",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",
-        "flock -n 9"
+        "flock -n 9",
+        "lib.producer_cadence_receipt",
+        "lock-skip"
       ]
     },
     {
@@ -300,10 +318,16 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "13253e5d6ecdf220f99ad043f03120dc809c4afa0cbb7c6b9ec70c4838c41c22",
+      "sha256": "8a56429036464893d4993040c9ddd445dd8c219f9e2879262064837a3f98111f",
       "mustContain": [
         "Runtime code-staleness monitor",
-        "runtime_stale"
+        "runtime_stale",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -333,11 +357,18 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "fb19de0a00dc98673c9b4230f005004906eb23b6206eb8167f9e1a574c647ee7",
+      "sha256": "778ec173f93e8530baf019bd2784d8809301280d66b50c7c39170866298be02a",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
-        "def redact_path_segment"
+        "def redact_path_segment",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "_cadence_fetch_status",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -409,11 +440,12 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "12bb97ecaa8c17ab429ddc03da78997cd7ba98a724f47724df3ba60e4a6680e4",
+      "sha256": "1a050fa4cdcb2ba8c23e3f78678598919faa7db4d2f052910496107ede317ee8",
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload"
+        "daemon-reload",
+        "deploy/scripts/lib/producer_cadence_receipt.py"
       ]
     },
     {
@@ -568,6 +600,20 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/producer_cadence_receipt.py",
+      "sha256": "c6052cfb0529317bd68a99f9ce52ab3d181ed10442a76aca0362b8a41e4e2c94",
+      "mustContain": [
+        "CADENCE_RECEIPT_SCHEMA_VERSION",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "lock_skip",
+        "ProducerIdentity",
+        "invocationContext",
+        "not_applicable",
+        "record_wrapper_lock_skip"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/queue_age.py",
       "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
       "mustContain": [
@@ -716,7 +762,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "a7580eae76cb91f3a192a6a3a72135865daba33ac263a263142f494f3d9adef6",
+      "sha256": "c337522837ae0cf72d69a4eac4a0af1bc6373801a422b68cf0abe4e847db94b9",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

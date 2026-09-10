@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -694,28 +694,73 @@ describe('live release drift alert #2458: per-invocation structured log record',
 });
 
 /**
- * #2385 L1a. The release directory basename is an accident of a rollout, not an
- * identity: two hosts running the same bytes under different directory names are
- * the same release. These tests pin the typed, path-free identity the event now
- * carries, and pin that the human-readable summary did NOT move — the summary is
- * `storm_fingerprint` input, so changing it would re-key in-flight incidents.
+ * #2385 L1a and L1b. The release directory basename is an accident of a rollout,
+ * not an identity: two hosts running the same bytes under different directory
+ * names are the same release. L1a put the typed, path-free identity on the event.
+ * L1b took the basename out of the human-readable summary, which is
+ * `storm_fingerprint` input, so those two hosts now normalise to one fingerprint
+ * and land in one incident group instead of two.
+ *
+ * Re-keying was the accepted cost, not an oversight: alerts carrying the old text
+ * and alerts carrying the new one fingerprint differently, so the owner ruling
+ * accepted one 120-second storm window split across both texts at cutover.
  */
 const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
 const FIXTURE_RELEASE_NAME_A = 'WhatSoup-release-alpha';
 const FIXTURE_RELEASE_NAME_B = 'WhatSoup-release-bravo';
 const FIXTURE_SOURCE_COMMIT = 'abc123def4567890';
+/** A second commit, so two fixtures can be genuinely different releases. */
+const FIXTURE_SOURCE_COMMIT_OTHER = '0f1e2d3c4b5a6978';
 const FIXTURE_BUILD_TIME = '2026-06-14T06:00:00.000Z';
 
 /**
- * Summaries b0b93155 emits for these fixtures, recorded as constants in the
- * format `alertSummary` used at b0b93155. They were confirmed against that
- * revision by the order of work, not by a replay harness: this test was written
- * and run BEFORE the typed fields existed, and it passed against the unmodified
- * script (iteration-1 RED receipt 09-red-vitest, where the other two new tests
- * failed and this one did not).
+ * The summary text `alertSummary` emits after L1b, pinned byte-for-byte and
+ * deliberately not derived from either fixture name: a constant built from
+ * `FIXTURE_RELEASE_NAME_*` would still pass if the basename came back, because
+ * both sides of the comparison would move together.
+ *
+ * The issue count stays in the text. It is a property of the drift rather than
+ * of the release: two hosts on the same release that drift to different extents
+ * report different counts and do land in different groups, so what groups is
+ * hosts that drifted the same way. The recovered form carries no count, because
+ * a recovered release has no issues to count.
+ *
+ * The trailing identity token is a parameter rather than a constant because it
+ * varies with the release, which is the whole point of carrying it. The literal
+ * text around it stays hand-written for the same reason the fixture names are
+ * not interpolated: only the token may move between an expectation and the
+ * emitted string. Callers pass `expectedIdentityToken(...)`, which truncates an
+ * oracle recomputed from the manifest on disk rather than imported from the
+ * script under test, so a canonicalisation change on either side fails here.
+ * The width is named there rather than spelled again here, so this block cannot
+ * go stale against a deliberate widening.
  */
-const BASELINE_RECOVERED_SUMMARY_A = `release drift recovered: ${FIXTURE_RELEASE_NAME_A}`;
-const BASELINE_DETECTED_SUMMARY_B = `release drift detected: ${FIXTURE_RELEASE_NAME_B} (1 issue)`;
+// Deliberately a second, independent copy of the width rather than an import of
+// the literal in `releaseIdentityToken`: an oracle that took the width from the
+// code under test would move with it and could not fail on a width change. The
+// cost is that an intentional widening is a THREE-site change, not a two-site
+// one: the slice in `releaseIdentityToken`, this constant, and the hardcoded
+// width in the anchored token-shape regex further down this file. That regex is
+// a second deliberate oracle and does not read this constant, so a coordinated
+// widening of the first two sites still fails there.
+const RELEASE_IDENTITY_TOKEN_LENGTH = 8;
+const UNKNOWN_IDENTITY_TOKEN = 'unknown';
+
+function pathFreeRecoveredSummary(token: string): string {
+  return `release drift recovered release ${token}`;
+}
+
+function pathFreeDetectedSummaryOneIssue(token: string): string {
+  return `release drift detected (1 issue) release ${token}`;
+}
+
+function expectedIdentityToken(manifestPath: string): string {
+  const identity = expectedReleaseIdentity(manifestPath);
+  // Coverage assertion on the oracle itself: a truncation of an empty or
+  // sentinel identity would make every summary expectation below vacuous.
+  expect(identity).toMatch(/^[0-9a-f]{64}$/);
+  return identity.slice(0, RELEASE_IDENTITY_TOKEN_LENGTH);
+}
 
 /**
  * Independent oracle for the typed identity: recomputed here from the manifest
@@ -752,12 +797,29 @@ function eventDiagnostics(event: Record<string, unknown>): Record<string, string
 }
 
 /**
+ * The issue count read from the event's evidence blob, which `alertEvidence`
+ * builds independently of `alertSummary`. Reading the count back out of the
+ * summary would make any test that compares counts an assertion about the
+ * string it is trying to explain.
+ */
+function eventIssueCount(event: Record<string, unknown>): number {
+  const evidence = JSON.parse(String(event.evidence)) as { issueCount: number };
+  return evidence.issueCount;
+}
+
+/**
  * Two releases built from one source tree at one commit, differing ONLY in
  * release directory basename. `releaseName` is passed explicitly because the
  * default derives the name from the source commit, which would make both
  * fixtures share a basename and let the identity assertion pass by coincidence.
+ *
+ * `sourceCommit` is an option because the identity is defined over the manifest
+ * and excludes `release.path`, so every default fixture in this file has the
+ * SAME identity no matter which tmp directory it lands in. A test that needs two
+ * genuinely different releases therefore has to move a field the identity reads;
+ * the commit is the cheapest one.
  */
-function writeTwinReleases(options: { drift?: boolean } = {}): { a: string; b: string } {
+function writeTwinReleases(options: { drift?: boolean; sourceCommit?: string } = {}): { a: string; b: string } {
   tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
   const sourceRoot = path.join(tmpRoot, 'source');
   mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
@@ -768,7 +830,7 @@ function writeTwinReleases(options: { drift?: boolean } = {}): { a: string; b: s
     const plan = createReleaseSnapshotPlan({
       sourceRoot,
       sourceRef: 'HEAD',
-      sourceCommit: FIXTURE_SOURCE_COMMIT,
+      sourceCommit: options.sourceCommit ?? FIXTURE_SOURCE_COMMIT,
       releaseRoot: path.join(tmpRoot, 'releases'),
       releaseName,
       buildTime: FIXTURE_BUILD_TIME,
@@ -865,19 +927,152 @@ describe('live release drift alert #2385: typed drift identity on the emitted ev
     expect(diagB.observed_release_identity).toBe('unknown');
   });
 
-  it('leaves the summary text byte-identical to what b0b93155 emitted', () => {
+  it('emits the path-free summary byte-exactly on both the clear and the alert', () => {
     const clean = writeTwinReleases();
+    const cleanToken = expectedIdentityToken(path.join(clean.a, '.whatsoup-release-manifest.json'));
     const cleanStateDir = path.join(tmpRoot, 'state-clean');
     expect(runCli(['--release', clean.a, '--clear-on-ok'], { BOT_ERRORS_STATE_DIR: cleanStateDir }).status).toBe(0);
-    expect(outboxEvents(cleanStateDir)[0].summary).toBe(BASELINE_RECOVERED_SUMMARY_A);
+    expect(outboxEvents(cleanStateDir)[0].summary).toBe(pathFreeRecoveredSummary(cleanToken));
 
     // afterEach only removes the LAST tmpRoot, so the first tree is removed here
     // rather than left behind for the run.
     rmSync(tmpRoot, { recursive: true, force: true });
     const drifted = writeTwinReleases({ drift: true });
+    const driftToken = expectedIdentityToken(path.join(drifted.b, '.whatsoup-release-manifest.json'));
     const driftStateDir = path.join(tmpRoot, 'state-drift');
     expect(runCli(['--release', drifted.b], { BOT_ERRORS_STATE_DIR: driftStateDir }).status).toBe(1);
-    expect(outboxEvents(driftStateDir)[0].summary).toBe(BASELINE_DETECTED_SUMMARY_B);
+    expect(outboxEvents(driftStateDir)[0].summary).toBe(pathFreeDetectedSummaryOneIssue(driftToken));
+  });
+
+  /**
+   * #2385 L1b, the grouping property itself. The byte-exact test above pins one
+   * host's text; this one pins that the text does not vary with the release
+   * directory, which is what lets the dispatcher collapse two hosts into one
+   * incident.
+   */
+  it('emits one path-free summary for two hosts whose release directories differ', () => {
+    const { a, b } = writeTwinReleases({ drift: true });
+    // Coverage assertion: equal summaries would prove nothing about the basename
+    // if the two fixtures shared a directory name.
+    expect(path.basename(a)).not.toBe(path.basename(b));
+
+    const stateDirA = path.join(tmpRoot, 'state-a');
+    const stateDirB = path.join(tmpRoot, 'state-b');
+    const procA = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDirA });
+    const procB = runCli(['--release', b], { BOT_ERRORS_STATE_DIR: stateDirB });
+    expect(procA.status, procA.stderr).toBe(1);
+    expect(procB.status, procB.stderr).toBe(1);
+
+    const [eventA] = outboxEvents(stateDirA);
+    const [eventB] = outboxEvents(stateDirB);
+    const summaryA = String(eventA.summary);
+    const summaryB = String(eventB.summary);
+
+    // Coverage assertion, and it must come first: every `not.toContain` below
+    // passes on an empty string or on the literal `undefined`, so the text is
+    // pinned to a real value before anything is asserted absent from it.
+    const token = expectedIdentityToken(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(summaryA).toBe(pathFreeDetectedSummaryOneIssue(token));
+    // The property the dispatcher groups on: same release, two directory names,
+    // one text. The identity token is part of that text, so it has to be equal
+    // as well as present, otherwise it would re-split the group it was added to
+    // discriminate.
+    expect(summaryB).toBe(summaryA);
+    expect(summaryA).toContain(` release ${token}`);
+
+    for (const summary of [summaryA, summaryB]) {
+      expect(summary).not.toContain(FIXTURE_RELEASE_NAME_A);
+      expect(summary).not.toContain(FIXTURE_RELEASE_NAME_B);
+      // No filesystem path segment of any kind, not merely these two fixtures.
+      expect(summary).not.toContain(path.sep);
+      expect(summary).not.toContain(tmpRoot);
+    }
+
+    // Negative control: taking the name out of the text left the typed fields
+    // untouched. They are the only identity channel on the event, so a summary
+    // that went path-free by dropping identity information altogether would
+    // fail here.
+    const diagA = eventDiagnostics(eventA);
+    const diagB = eventDiagnostics(eventB);
+    const expectedIdentity = expectedReleaseIdentity(path.join(a, '.whatsoup-release-manifest.json'));
+    expect(expectedIdentity).toMatch(/^[0-9a-f]{64}$/);
+    expect(diagA.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagB.drift_kind).toBe(DRIFT_KIND_SINGLE);
+    expect(diagA.desired_release_identity).toBe(expectedIdentity);
+    expect(diagB.desired_release_identity).toBe(expectedIdentity);
+    // A drifted tree's real identity would need a re-walk this leaf does not do,
+    // so observed stays the explicit sentinel, unchanged from L1a.
+    expect(diagA.observed_release_identity).toBe('unknown');
+    expect(diagB.observed_release_identity).toBe('unknown');
+  });
+
+  /**
+   * The other half of the grouping property. The test above proves one release
+   * under two directory names collapses to one text; this one proves two
+   * DIFFERENT releases do not collapse, which is what the identity token buys
+   * back. The issue count is held equal on purpose, because the count is the
+   * only other varying part of the text and would otherwise separate the two
+   * summaries on its own and prove nothing about the token.
+   */
+  it('separates two different releases whose drift produces the same issue count', () => {
+    const first = writeTwinReleases({ drift: true });
+    const firstToken = expectedIdentityToken(path.join(first.a, '.whatsoup-release-manifest.json'));
+    const firstStateDir = path.join(tmpRoot, 'state-first');
+    const procFirst = runCli(['--release', first.a], { BOT_ERRORS_STATE_DIR: firstStateDir });
+    expect(procFirst.status, procFirst.stderr).toBe(1);
+    const [eventFirst] = outboxEvents(firstStateDir);
+    const summaryFirst = String(eventFirst.summary);
+    const countFirst = eventIssueCount(eventFirst);
+
+    // afterEach only removes the LAST tmpRoot, so everything read from the first
+    // tree is captured above, before the tree goes away.
+    rmSync(tmpRoot, { recursive: true, force: true });
+
+    // A different commit is a different release: the identity reads
+    // `source.commit`, and it reads no path, so moving the tmp directory alone
+    // would have produced the same identity twice.
+    const second = writeTwinReleases({ drift: true, sourceCommit: FIXTURE_SOURCE_COMMIT_OTHER });
+    const secondToken = expectedIdentityToken(path.join(second.a, '.whatsoup-release-manifest.json'));
+    const secondStateDir = path.join(tmpRoot, 'state-second');
+    const procSecond = runCli(['--release', second.a], { BOT_ERRORS_STATE_DIR: secondStateDir });
+    expect(procSecond.status, procSecond.stderr).toBe(1);
+    const [eventSecond] = outboxEvents(secondStateDir);
+    const summarySecond = String(eventSecond.summary);
+
+    // Coverage assertions before the inequality: two releases that shared an
+    // identity, or drifts of unequal size, would make the difference below
+    // prove something other than what this test claims.
+    expect(firstToken).not.toBe(secondToken);
+    expect(countFirst).toBe(eventIssueCount(eventSecond));
+    expect(summaryFirst).toBe(pathFreeDetectedSummaryOneIssue(firstToken));
+    expect(summarySecond).toBe(pathFreeDetectedSummaryOneIssue(secondToken));
+    // The two expectations above already pin every byte, so this states the
+    // consequence the dispatcher cares about rather than adding coverage.
+    expect(summarySecond).not.toBe(summaryFirst);
+  });
+
+  /**
+   * The token is a truncation of the typed field, not a second digest computed
+   * on its own. If the two ever diverge, an operator correlating the incident
+   * text against the event diagnostics is silently reading two different
+   * releases, which is worse than carrying no token at all.
+   */
+  it('carries a token that is exactly the first eight hex of the typed desired identity', () => {
+    const { a } = writeTwinReleases({ drift: true });
+    const stateDir = path.join(tmpRoot, 'state-token-width');
+    const proc = runCli(['--release', a], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+
+    const [event] = outboxEvents(stateDir);
+    const summary = String(event.summary);
+    const identity = eventDiagnostics(event).desired_release_identity;
+    expect(identity).toMatch(/^[0-9a-f]{64}$/);
+
+    // Anchored at the end and width-bounded, so a longer slice, a shorter one or
+    // a trailing path segment all fail here rather than being absorbed.
+    const match = /^release drift detected \(1 issue\) release ([0-9a-f]{8})$/.exec(summary);
+    expect(match, `summary did not match the pinned token shape: ${summary}`).not.toBeNull();
+    expect(match![1]).toBe(identity.slice(0, RELEASE_IDENTITY_TOKEN_LENGTH));
   });
 });
 
@@ -918,6 +1113,7 @@ const DRIFT_KIND_FIELD_REJECTS_FREE_TEXT: DriftKindField = 'not-a-drift-kind';
 const DRIFT_KIND_SINGLE: DriftKindField = 'file-sha256-drift';
 const DRIFT_KIND_JOINED: DriftKindField = 'extra-file,file-sha256-drift';
 const DRIFT_KIND_MANIFEST_MISSING: DriftKindField = 'manifest-missing';
+const DRIFT_KIND_RELEASE_MISSING: DriftKindField = 'release-missing';
 const DRIFT_KIND_NONE: DriftKindField = 'none';
 
 describe('live release drift alert #2385: drift_kind set and order', () => {
@@ -1046,6 +1242,76 @@ describe('live release drift alert #2385: fail-open branches stay pinned', () =>
     expect(diagnostics.drift_kind).toBe(DRIFT_KIND_MANIFEST_MISSING);
     expect(diagnostics.desired_release_identity).toBe('unknown');
     expect(diagnostics.observed_release_identity).toBe('unknown');
+  });
+
+  /**
+   * The documented coverage limit of the identity token, pinned as behaviour so
+   * a later change cannot quietly start emitting a digest of the sentinel. With
+   * no manifest there is nothing to attest, so the token is the literal
+   * sentinel and every such event across every host shares one summary. The
+   * token restores per-release discrimination for every kind EXCEPT the ones
+   * that cannot read a manifest, and this is that exception.
+   */
+  it('puts the unknown sentinel in the summary, not a digest, when the manifest cannot be read', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-live-release-drift-alert-'));
+    const releaseName = 'WhatSoup-release-nomanifest';
+    const releasePath = path.join(tmpRoot, 'releases', releaseName);
+    mkdirSync(releasePath, { recursive: true });
+
+    const stateDir = path.join(tmpRoot, 'state-no-manifest-summary');
+    const proc = runCli(['--release', releasePath], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+
+    const [event] = outboxEvents(stateDir);
+    const summary = String(event.summary);
+    // Equality first: the absence assertions below all pass on an empty string.
+    expect(summary).toBe(pathFreeDetectedSummaryOneIssue(UNKNOWN_IDENTITY_TOKEN));
+    expect(eventDiagnostics(event).desired_release_identity).toBe(UNKNOWN_IDENTITY_TOKEN);
+    // The sentinel branch is still bound by the path-free rule of this leaf.
+    expect(summary).not.toContain(releaseName);
+    expect(summary).not.toContain(path.sep);
+    expect(summary).not.toContain(tmpRoot);
+  });
+
+  /**
+   * The other half of the documented coverage limit, and the half that is easy
+   * to get wrong from the kind name alone. `release-missing` reads a manifest:
+   * the issue is pushed inside `collectReleaseSnapshotDrift`, which runs only
+   * after the report has read and parsed the manifest, so the identity is a real
+   * 64-hex digest and the token discriminates between releases exactly as it
+   * does for a content drift. Without this test the comment's claim that the
+   * sentinel covers one kind rather than two rests on reading alone.
+   *
+   * The kind is only reachable through the documented `--manifest` override.
+   * With the default path the manifest lives inside the release directory, so a
+   * missing release directory makes the manifest missing too and the report
+   * returns `manifest-missing` before this branch is ever considered.
+   *
+   * The manifest is moved out of the release before the release is moved aside,
+   * so `manifest.release.path` still names the now-absent directory. An override
+   * naming a manifest built for some other path would add a
+   * `manifest-release-path-mismatch` issue and change the count the summary
+   * carries, which is why the record's issue-kind map is pinned exactly rather
+   * than the count being assumed from the fixture.
+   */
+  it('carries a real per-release token for release-missing rather than the sentinel', () => {
+    const { a } = writeTwinReleases();
+    const archivedManifest = path.join(tmpRoot, 'archived-manifest.json');
+    renameSync(path.join(a, '.whatsoup-release-manifest.json'), archivedManifest);
+    renameSync(a, path.join(tmpRoot, 'release-moved-aside'));
+
+    const stateDir = path.join(tmpRoot, 'state-release-missing');
+    const proc = runCli(['--release', a, '--manifest', archivedManifest], { BOT_ERRORS_STATE_DIR: stateDir });
+    expect(proc.status, proc.stderr).toBe(1);
+    expect(parseRecordLine(proc.stdout).issueKinds).toEqual({ 'release-missing': 1 });
+
+    const [event] = outboxEvents(stateDir);
+    // The oracle asserts the full 64-hex shape before truncating, so a sentinel
+    // identity cannot make the summary expectation below pass vacuously.
+    const token = expectedIdentityToken(archivedManifest);
+    expect(String(event.summary)).toBe(pathFreeDetectedSummaryOneIssue(token));
+    expect(eventDiagnostics(event).drift_kind).toBe(DRIFT_KIND_RELEASE_MISSING);
+    expect(eventDiagnostics(event).desired_release_identity).toBe(expectedReleaseIdentity(archivedManifest));
   });
 
   it('carries the typed fields under --launchd-plist, the mode the shipped job uses', () => {

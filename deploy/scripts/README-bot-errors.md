@@ -348,6 +348,117 @@ retention, no compaction, no rewriting and no move; it only counts what is
 already there. Retention thresholds, terminal-status rewriting and any
 deletion path remain unimplemented and are gated separately (issue #2459).
 
+**Storm-collapse digest receipts (#2387).** Each collapsed window writes one
+receipt under `storm-receipts/` immediately before every digest it publishes --
+the first one, every superseding revision, and every in-flight refresh that
+absorbs late arrivals into a queued digest -- and the receipt is marked
+published only once that publication is proven, so a process that dies in
+between leaves a durable record of the page it owed. A refresh rewrites the
+receipt with the counts it is about to publish, so the settled record describes
+the page an operator was actually shown. The receipt names the
+revision it is owed for, so evidence that the first page went out cannot settle
+a superseding page that never did. A receipt carries bounded counts, the
+severity bucket, the window identity and the opaque fingerprint; it carries no
+manifest path, no fingerprint basis, no host names and no summary text.
+
+**The receipt write fails closed, and it fails the whole cycle: a receipt
+store that cannot be written stops the dispatcher before it delivers
+anything.** That is deliberate -- the whole value of the record is that it
+exists before the page does -- but the blast radius is wider than storm
+collapse: the collapse sweep runs before the delivery loop and nothing catches
+the error on the way out, so an unwritable `storm-receipts/` aborts the cycle
+and nothing pages at all that cycle, storm or not. Under the daemon the
+failure is recorded and logged, the interval is slept and the next cycle
+retries; the process does not exit. The acknowledgement and the adoption both
+fail open, so neither can wedge a cycle.
+
+A receipt an earlier process left unpublished is adopted at the start of a
+cycle, and the adoption always terminates. If the dispatcher's own record of the
+window shows its digest was published, the receipt is settled without paging. If
+the window is still open, it is left to the re-collapse and counted once per
+process. If the window has closed with no such evidence, one content-free orphan
+alert is published for it -- the same bounded fields the receipt carries, no
+path and no host names -- and the receipt is settled behind that page.
+
+**"Published" here means the digest reached the dispatcher's own record of
+digest events, quarantine included -- not that an operator was shown it.** The
+receipt guards the publication, which is the irreversible move; delivery is a
+separate concern with its own record.
+
+That orphan page goes out **at most once per window and revision, for as long as
+that page remains in the dispatcher's own record**. The intent
+to page is written to the receipt before the page exists, and the page carries an
+id derived from the window, so the next cycle can find it in the dispatcher's own
+record and settle from it rather than paging again. If the page is pruned from
+every one of those directories while its receipt is still owed, the window can
+page a second time; that needs two independent faults, a settlement write that
+kept failing and a retention pass that removed the page. A settlement write that
+fails after the page went out is stated in the dispatch log and does not produce a
+second page. A page whose intent could not be written is not sent at all, and
+that refusal is stated too: an unrecorded page is one nothing can account for
+afterwards, which is the failure this record exists to prevent. So no fault path
+turns one owed page into **a page** every cycle.
+
+Two faults are known residuals rather than closed here, and the sentence above is
+scoped to the page for that reason. While a settlement write keeps failing, the
+receipt is never settled, so the dispatch log gains two records every cycle for
+that receipt even though the page itself does not repeat; on a bounded log that
+slowly evicts unrelated diagnostics. And when the orphan alert's own publication
+fails, nothing is written anywhere: no page, no dispatch record, and the adoption
+count on disk stops advancing, so that window is dropped in silence and re-adopted
+on every following cycle.
+
+Unlike the unrenderable meta-alert it otherwise mirrors, the orphan alert's
+incident identity is qualified by its window. That pattern makes one claim per
+source and lets the renotify throttle absorb repeats; this one makes a **durable
+per-window claim**, so a second orphaned window absorbed into the first one's
+incident would leave a receipt recording a page that never reached an operator.
+Each orphaned window therefore opens its own incident and pages once, and the
+throttle applies within a window rather than across windows. That identity opens a
+second key family in the open-incident store, one entry per orphaned window,
+alongside the per-window digest keys and under the same deferred bound described
+below.
+
+The dispatcher owns retention: `BOT_ERRORS_STORM_RECEIPT_MAX_RECORDS`
+(default 128) bounds the store, and the census is every data entry in it, so a
+damaged or wrong-shape file counts toward the bound and is evicted rather than
+persisting uncollectable. **The store is single-purpose.** Anything placed under
+`storm-receipts/` that is not a receipt becomes an eviction candidate once the
+bound is reached, where before it would have been ignored indefinitely; the only
+boundary is the durable writer's own internals (the parent lock and the
+temporary files), which the census excludes and never unlinks. Unreadable
+entries are evicted first, oldest by
+modification time; valid receipts follow, oldest window first. The receipt being
+written is never an eviction candidate and its slot is reserved before it
+exists, so the bound cannot destroy the record for the page that is publishing
+next. **A drop can still remove another window's receipt whose page has not been
+published yet**; that is the price of a hard bound, and every drop is recorded
+in the dispatch log with its window, its fingerprint prefix and whether its page
+had been proven published. An eviction that cannot unlink is recorded too, so a
+store that has stopped accepting deletions shows up as a stated bound violation
+rather than as an absence. Nothing outside the store is removed, and no
+incident, clear or sweep path rewrites a receipt.
+
+On the first cycle after this change lands, the one surviving open-incident
+record under the unqualified `fleet|storm-collapse|storm-collapse` key is folded
+into whichever window key is processed first, carrying that record's opened
+time, its renotify and suppressed counters and its force-notify history. A
+brand-new window's record can therefore be dated well before the window it
+labels. This happens once; the alternative is an orphaned record only the stale
+sweep could close. Separately, a deployment that has extended the inhibition map
+by environment to name `storm-collapse` as a symptom of some root source will
+find that entry no longer matches a digest, because the digest's incident source
+is now window-qualified. The shipped map names no storm source, so this affects
+overrides only.
+
+The stale sweep and its auto-close language still apply to storm-collapse
+incident keys. Keying a digest by its window multiplies the open-incident store
+from one storm record to one per fingerprint per window, and the sweep is
+currently the only bound on that store, so removing it for these keys without
+first supplying a replacement bound would remove the only bound there is.
+Until a follow-up supplies one, an operator record for a closed window can still
+receive stale and auto-close language.
+
 ### Controller diagnostic envelope
 
 The q-loop, collector, dispatcher, heartbeat watchdog, and deadman write new
@@ -472,7 +583,7 @@ and `deploy/bot-errors-expected-fleet.json` owns the sanitized monitoring scope.
 | Runtime lifecycle, provider, transport, and delivery events | Runtime call sites writing through `src/lib/bot-errors-outbox.ts` / `src/lib/emit-alert.ts`; generic command failures may use `bot-errors-runner.py` | Event-driven in the owning WhatSoup service | Local durable outbox; collector relays remote events; dispatcher owns dedupe, incident state, suppression, and final delivery |
 | Turn-recovery supervisor liveness | `src/runtimes/agent/turn-recovery-deadman.ts`, reading successful scan health outside the supervisor timer | Independent in-process cadence every 15 seconds, with 45-second startup grace and staleness threshold | Deadman owns checked alert/clear derivation; dispatcher owns dedupe, incident state, and delivery |
 | Remote host outbox collection | `bot-errors-collector.py` | `bot-errors-collector.service`, daemon poll every 30 seconds | Collector owns claim/ack/relay receipts; dispatcher owns the resulting incident lifecycle |
-| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, and delivery fallback |
+| Durable dispatch and notification delivery | `bot-errors-dispatcher.py` | `bot-errors-dispatcher.service`, daemon poll every 30 seconds | Dispatcher is the sole owner of dedupe keys, throttling, renotify, storm collapse, incident open/clear state, delivery fallback, and retention of the per-window storm-collapse receipts under `storm-receipts/` |
 | Dispatcher deadman | `bot-errors-health-check.py --deadman --max-state-age 180` | `bot-errors-deadman.timer`, every 5 minutes | Health check emits the incident; dispatcher delivers it |
 | Hub-lane heartbeat and queue backlog | `bot-errors-heartbeat-watchdog.py --once` | `bot-errors-heartbeat-watchdog.timer`, every 5 minutes | Watchdog owns detection and is the only force-notify producer; dispatcher owns incident state and delivery |
 | Capability, configuration, auth-bond, provider-probe, and per-instance daily health | `bot-errors-health-check.py --daily`, wrapped by `bot-errors-runner.py` | `bot-errors-health-check.timer`, daily at 07:15 in the checked-in systemd unit | Health check owns inventory and per-instance failure/clear derivation; dispatcher owns incident state and delivery |
@@ -594,6 +705,79 @@ A held event occupies a `processing/` slot until an operator acts, which is why
 the queue signals above stay raised. They report that the queue is not draining;
 they do not distinguish a held item from a backlog, so read `processing/` to
 tell which it is.
+
+**Aged-out holds.** A hold is unbounded in disposition but not in silence. Once
+a held record has sat for `BOT_ERRORS_INCIDENT_STALE_SECONDS` (the dispatcher's
+existing stale-incident clock, default 24 h, reused here rather than given a
+second knob; unset it takes its value from
+`BOT_ERRORS_INCIDENT_ESCALATE_SECONDS`, so setting that one alone moves this
+bound too), the next reclaim pass logs one `delivery_outcome_unknown_escalated`
+line at `error` level, above the `warning` of the first signal. Age is measured
+from `delivery.outcomeUnknownAt`, never from file mtime. Like the first signal it
+is anonymous and bounded (`attempts`, `held`), and it is once-only: the record
+carries `delivery.outcomeUnknownEscalatedAt`, committed in the same durable
+publication as the line it announces. As with the first signal the line is
+written before that publication, so an escalation whose publication does not
+reach disk is retried and logs the line again: expect one duplicate line per
+retried escalation. That is a cost per retry, not a cap on the total, because
+a publication that keeps failing keeps the record due and keeps it retrying --
+the retry residual below gives the shape of that. There is never a second
+escalation for a hold whose publication reached disk: once the stamp is on
+disk the line is not repeated for that hold, including across restarts.
+Once-only means once per HOLD, not once per record: the dispatcher
+clears `delivery.outcomeUnknownEscalatedAt` whenever it takes a new hold, so a
+record that was released and then held again escalates once more after the new
+hold outlives the bound; releasing still edits status and nothing else. The
+escalation changes nothing else. The record stays in `processing/` at
+`delivery.status = outcome_unknown`, and is still never re-sent, dead-lettered
+or auto-disposed. Only an operator disposes of a held item, by the two
+procedures above. A record whose `outcomeUnknownAt` cannot be read as an
+unambiguous UTC instant is never escalated: unparseable and zone-less stamps
+both yield no age basis, and the dispatcher stays silent rather than page on a
+guess or on a host-local reading. If you hand-edit a held record, keep the
+trailing `Z`.
+
+**Three residuals of the escalation, disclosed and not fixed here.**
+
+The dispatch log is best-effort. If the escalation's log append degrades while
+its publication succeeds, the record ends up carrying
+`delivery.outcomeUnknownEscalatedAt` with no escalation line anywhere, and no
+later pass repeats it. The first-signal path has the same shape, but the
+consequence differs: a lost first signal still leaves the escalation to come,
+while the escalation is the last signal that record will emit. Read
+`processing/` rather than the log when you need to know what is held.
+
+The escalating reclaim pass reads the record, then takes a fresh observation
+and publishes the held copy. The dispatcher's lock excludes a second
+dispatcher; it does not bind an operator. So an operator who moves a record out
+of `processing/` by either procedure above -- release to `outbox/`, or a move
+to `dead-letter/` -- inside that read-to-publish interval, on the one pass that
+escalates that record, can find the held copy written back into `processing/`,
+and the queue signals then stay raised. The window opens once per hold, after
+the bound. How long it stays open is not established here: the interval spans
+one log append, one observation and one durable publication, so its length is a
+property of the host's filesystem and sync latency rather than of this change,
+and nothing here measures it.
+
+Before disposing of a record older than the bound, stop the dispatcher. That is
+the only safe procedure. Do not wait for the escalation line: the line is
+appended before the write-back publication, so it marks the start of the
+interval, not its end. What marks the end is the record's own
+`delivery.outcomeUnknownEscalatedAt` stamp -- and waiting for that stamp is not
+a procedure either, because the dispatcher can still be mid-publication on a
+later record.
+
+**The retry residual.** The escalation line is appended before the publication
+that makes the stamp durable, so a publication that keeps failing never makes
+it durable. The record stays due, and every reclaim pass appends the escalation
+line and then a `delivery_escalation_publication_failed` line: two
+`error`-level lines per record per cycle, without bound, for as long as the
+failure lasts. The per-retry cost named earlier in this section is true of one
+retry and is not a cap on the total. A full or read-only durable volume
+produces this for every held record past the bound at once. The smallest fixes
+are to gate the escalation line on the publication having succeeded, or to add
+a failure-count stamp so the retry backs off; both change behaviour and are out
+of scope here.
 
 ## Test suites + CI gates
 
@@ -865,3 +1049,111 @@ exclusive with `--wrapper` and may not be repeated; combining the two, or
 repeating either flag, exits `2` before any check runs. Use it only for a
 host/context where the pilot units run without the wrapper layer, so there
 is nothing for the script to verify.
+
+### Producer cadence receipt (dark, no reader yet)
+
+Each release-proof producer owns one versioned receipt file, republished twice
+per cycle -- once at cycle start and once at the cycle's outcome -- under the
+state root the units already grant write access to, through
+`deploy/scripts/lib/producer_cadence_receipt.py`. One file per producer:
+`release-proof-cadence-tree-provenance.json` and
+`release-proof-cadence-runtime-staleness.json`. Two files keep the clocks
+independent, so a partial write of one producer cannot corrupt the other.
+
+Fields, all bounded tokens, ISO-8601 UTC stamps or integers -- no path,
+hostname, process identifier or command output ever enters a receipt:
+
+| Field | Meaning |
+| ----- | ------- |
+| `schemaVersion` | receipt schema generation; a reader that does not know the version must refuse rather than guess |
+| `producer` | systemd unit name, from a closed two-value vocabulary |
+| `producerToken` | the wrapper's `tree` / `runtime-staleness` token for the same producer |
+| `lastInvocationAt` | every call stamps this, including a skipped cycle |
+| `lastAttemptAt` | advances when the producer's owned cycle actually starts |
+| `lastSuccessfulObservationAt` | advances only after a complete observation is durably written |
+| `outcome` | `in_progress`, `success`, `probe_error`, `emit_failure`, `lock_skip` |
+| `stage` | earliest stage reached: `pre_exec`, `cycle_start`, `observation`, `durable_write`, `complete` |
+| `mode` | `emit` or `observe`, so observe-mode evidence is never read as emit-mode proof |
+| `fetchStatus` | `requested` (refresh landed), `refused` (refresh asked for and not obtained), `not_attempted` (has a fetch step, did not use it this cycle), `not_applicable` (has no fetch step at all) |
+| `durableWrite` | what became of the write the success clock rests on: `written`, `not_owed`, `failed`, `not_reached` |
+| `invocationContext` | `scheduled` when the service manager supplied an invocation identifier, `manual` when it did not, `unknown` when the variable was present but blank. Only the presence is published, never the identifier |
+
+The two clocks are separate on purpose. A producer that starts every cycle and
+fails every observation looks alive under a single clock; separating them makes
+that state readable. A cycle the shared lock refused advances neither clock and
+records `lock_skip`, so permanent lock contention shows as a stalled attempt
+clock rather than as success. The scheduler wrapper writes that receipt itself,
+before it would launch a detector: the lock it asked for was denied to it and
+another process holds it, so the cycle never reaches the detector launch and no
+detector can record that the cycle existed. Its stage is `pre_exec` and its
+`lastInvocationAt` advances, which is what separates a contended lock from a
+stopped timer.
+
+#### Observe-mode success is weaker evidence, and unevenly so
+
+An observe-mode cycle advances the success clock in both producers, but the two
+are not symmetric and an evaluator must not weight them alike. `durableWrite`
+is the field that carries the difference.
+
+For `bot-errors-tree-provenance`, observe mode never writes anything durable.
+Emitting the outbox event is that producer's only durable write and observe
+mode skips it entirely, so every observe-mode success records
+`durableWrite: not_owed`. The success clock there means "the inspection
+completed", not "an observation was durably written".
+
+For `bot-errors-runtime-staleness`, observe mode usually still writes. The
+per-instance high-water mark is written inside the probe in both modes, so a
+cycle that observed at least one running instance records
+`durableWrite: written`. Only a cycle in which every discovered instance was
+stopped records `not_owed`, and an all-stopped fleet is an ordinary incident
+state rather than an exotic one.
+
+This matters because the installer refuses any mode but `observe` at install
+time, so an observe soak is the window in which the evaluator's dwell would be
+calibrated. Within it the tree producer's success clock is the weaker of the
+two on every cycle.
+
+Nothing reads these receipts yet. There is no watchdog check, no dwell and no
+alert -- those arrive with the evaluator, which also has to decide what a
+receipt that never appears means on a host where the units are not installed.
+Receipt failures are swallowed by both producers: a dark liveness receipt must
+never break the domain guard it observes. A swallowed failure prints one
+bounded line per failed publication on stderr, so it is greppable rather than
+silent:
+
+```
+tree_provenance cadence_receipt_error <ExceptionClassName>
+runtime-staleness cadence_receipt_error <ExceptionClassName>
+release_proof cadence_receipt_error <ExceptionClassName>
+```
+
+The third line is the wrapper's own, printed when the module is present on the
+host and the pre-exec lock-skip receipt could not be written. A bundle built
+before the installer change that ships the receipt library does not carry the
+module at all; there the interpreter reports `No module named` for it on stderr
+instead, on a line that carries an absolute filesystem path. In both cases the
+cycle still exits 75, because the coordination outcome does not depend on the
+receipt.
+
+A producer whose receipts stop advancing while these lines appear in the
+journal has a writable-state problem, not a dead timer. A producer whose
+receipts stop advancing with no line at all is not necessarily a dead timer: it
+means nothing reached this file. Among the reasons are a timer that never
+fired, a wrapper that refused the cycle before it could reach the receipt (a bad
+mode file or a missing dependency exits 2, both of them before the lock), a
+process that died before its first stamp, and a state-directory override that
+moved the receipt somewhere else. A held lock is no longer one of them: exit 75
+normally stamps `lock_skip` and advances only `lastInvocationAt`, and when the
+receipt write fails or the bundle does not carry the writer, no receipt lands
+and the stderr line for that cycle is the only trace. A missing or unwritten
+receipt reads as empty rather than as an error, so the receipt alone cannot
+separate them; the unit's own result and the wrapper's stderr can.
+
+Mode-lock is the first kind and not the second. The durable reader refuses any
+group- or world-accessible bit on the receipt file, which a restore from backup
+or a manual copy can introduce; the producer swallows that refusal like any
+other, so the line does appear and the receipt freezes at its last good value.
+The token carries only the exception class, so a single `DurableWriteError`
+covers a mode-locked receipt, a corrupted payload and a payload that is not a
+JSON object alike. Stat the file to separate them: `0600` and `0700` are
+accepted, `0640`, `0604` and `0660` are not.

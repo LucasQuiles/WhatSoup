@@ -699,6 +699,15 @@ if service_mode == "inspection_only":
 # alert at logout time, so the watchdog stays silent (no duplicate page) and
 # simply declines to restart. Mirrors `authFailureIsUnhealthy` in
 # src/core/health.ts; the class is surfaced at whatsapp.connection.auth_failure_class.
+#
+# `auth_bond_read_persistent` is deliberately ABSENT from this tuple. It means
+# the credential could not be READ for longer than the stale-risk bound, which
+# is not evidence that it is broken — a restart may well clear the read fault,
+# so this class must fall through to the ordinary restart policy below. Routing
+# an unreadable credential to "human relink required" would suppress the one
+# recovery that could work. This list is an allowlist, so the fall-through is
+# automatic; it is named here because a future editor tempted to add it should
+# read this first.
 TERMINAL_AUTH_FAILURES = (
     "pairing_required",
     "serverside_logout_irreversible",
