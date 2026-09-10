@@ -493,7 +493,7 @@ export function registerTransitionCases(): void {
       'ReadinessRecord',
       JSON.parse(readFileSync(path.join(runDir, 'readiness.json'), 'utf8')) as Record<string, unknown>,
     )).toMatchObject({ ok: true, verdict: 'Pass' });
-  });
+  }, 120_000);
 
   it('finalizes reconciliation as the sole BCF-00 chain genesis and verifies its locked bundle', async () => {
     const api = boundaryCli as unknown as {

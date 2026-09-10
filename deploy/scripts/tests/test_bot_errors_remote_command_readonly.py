@@ -6,8 +6,8 @@ read-only." Existing collector tests (test_bot_errors_collector_backoff.py,
 test_bot_errors_collector_reachability.py) patch `ssh_json_lines` and
 `resolve_ssh_host_targets` themselves -- which bypasses the exact argv/stdin
 assembly this harness targets (`remote_python_command`, `ssh_command`,
-`tailscale_status_command`, `tailscale_ping_command`, and the four
-`REMOTE_*_SCRIPT` payloads). No existing test intercepts the real
+`tailscale_status_command`, `tailscale_ping_command`, and every
+module-level `REMOTE_*_SCRIPT` payload). No existing test intercepts the real
 `subprocess.run` boundary for these builders, so no test previously proved
 what argv/stdin those builders actually hand to the OS.
 
@@ -16,7 +16,7 @@ false-RED / false-GREEN failure mode a check like this invites):
 
   - The literal argv handed to `subprocess.run()` for every host-facing call
     the collector makes (ssh config lookup, Tailscale status, Tailscale ping,
-    and the four ssh-piped Python scripts) must never carry a mutating verb
+    and the ssh-piped Python scripts) must never carry a mutating verb
     (rm, mv, kill, systemctl, launchctl, docker, git, curl, chmod, ...) and
     must never set `shell=True`. This is proven against the REAL production
     functions, imported live from bot-errors-collector.py, by patching
@@ -26,10 +26,15 @@ false-RED / false-GREEN failure mode a check like this invites):
     executable with `--subject`/`--body` args, not a remote command. This is
     asserted explicitly so "dispatcher/collector" scope is not silently
     narrowed to collector-only without saying so.
-  - The four `REMOTE_*_SCRIPT` payloads piped to `ssh ... python3 -` DO
-    mutate a filesystem (`os.replace`/`mkdir`/`chmod`/`unlink`) -- that is the
-    collector's actual job (atomically relay outbox files between the
-    collector-owned outbox/relay-processing/relayed/writefail directories).
+  - The `REMOTE_*_SCRIPT` payloads piped to `ssh ... python3 -` are a mixed
+    population. The relay scripts DO mutate a filesystem
+    (`os.replace`/`mkdir`/`chmod`/`unlink`) -- that is the collector's actual
+    job (atomically relay outbox files between the collector-owned
+    outbox/relay-processing/relayed/writefail directories). Two are pure
+    reads: REMOTE_CLAIM_STAT_SCRIPT (does a claim still exist?) and
+    REMOTE_ARCHIVE_CENSUS_SCRIPT (#2459 archive aggregates). The scan below
+    is the same for both kinds -- it bounds what a script COULD do, and does
+    not certify which ones actually mutate.
     This harness does not claim those scripts are inert. It proves, via a
     static AST walk of each script constant, that (a) none of them import or
     call anything that could escalate past file-relay (no subprocess/socket/
@@ -368,7 +373,9 @@ def test_dispatcher_email_fallback_is_a_local_executable_not_a_remote_command(di
 
 
 # ---------------------------------------------------------------------------
-# 7. Static AST scan of the four REMOTE_*_SCRIPT payloads piped over stdin.
+# 7. Static AST scan of every module-level REMOTE_*_SCRIPT payload piped over
+#    stdin (the population is derived from the collector, not assumed -- see
+#    the coverage ratchet below the checklist).
 #
 # These scripts DO mutate a filesystem by design (the collector's job is to
 # atomically relay outbox files) -- this scan does not claim otherwise. It
@@ -424,10 +431,73 @@ def _scan_remote_script(script_text: str) -> list[str]:
     return violations
 
 
-# Not a fuzzable input domain -- this is a closed checklist over the four
-# real, named script constants the collector actually pipes over stdin, not
-# an arbitrary-input property, so a loop (not @given) is the honest shape.
-_REMOTE_SCRIPT_NAMES = ("REMOTE_CLAIM_SCRIPT", "REMOTE_ACK_SCRIPT", "REMOTE_WRITEFAIL_CLAIM_SCRIPT", "REMOTE_WRITEFAIL_ACK_SCRIPT")
+# Not a fuzzable input domain -- this is a closed checklist over the real,
+# named script constants the collector actually pipes over stdin, not an
+# arbitrary-input property, so a loop (not @given) is the honest shape. The
+# checklist is hand-written so a reader can see what is covered, but it is no
+# longer hand-TRUSTED: test_remote_script_names_covers_every_module_level_remote_script
+# below asserts it equals every module-level REMOTE_*_SCRIPT on the collector,
+# so a script cannot be added without landing here (#2459).
+_REMOTE_SCRIPT_NAMES = (
+    "REMOTE_CLAIM_SCRIPT",
+    "REMOTE_ACK_SCRIPT",
+    "REMOTE_WRITEFAIL_CLAIM_SCRIPT",
+    "REMOTE_WRITEFAIL_ACK_SCRIPT",
+    "REMOTE_CLAIM_STAT_SCRIPT",
+    "REMOTE_ARCHIVE_CENSUS_SCRIPT",
+)
+
+
+def _module_level_remote_script_names(module) -> set[str]:
+    """Every module-level `REMOTE_*_SCRIPT` constant on `module`.
+
+    This is the discovery half of the coverage ratchet below: it derives the
+    real population from the module instead of trusting the hand-maintained
+    tuple, so a script added tomorrow is discovered whether or not anyone
+    remembered to register it here.
+    """
+    return {name for name in dir(module) if name.startswith("REMOTE_") and name.endswith("_SCRIPT")}
+
+
+def test_remote_script_names_covers_every_module_level_remote_script(collector):
+    """#2459 ratchet: the checklist must be the WHOLE population, not a subset.
+
+    The tuple above was hand-maintained and had silently fallen behind: it
+    listed four scripts while the collector defined five, so
+    REMOTE_CLAIM_STAT_SCRIPT was piped to a remote host having never been
+    scanned by the AST guard. Any future script -- a census, a retention
+    probe -- would escape the same way. Asserting set equality against the
+    module makes registration mandatory rather than remembered.
+    """
+    derived = _module_level_remote_script_names(collector)
+    # Coverage assertion, not just equality: if a rename ever moved the
+    # constants off the REMOTE_*_SCRIPT convention, `derived` would go empty
+    # and a bare equality check against a likewise-emptied tuple could pass
+    # while scanning nothing at all.
+    assert len(derived) >= 6, f"remote-script discovery found only {sorted(derived)}"
+    assert derived == set(_REMOTE_SCRIPT_NAMES), (
+        "every module-level REMOTE_*_SCRIPT must be registered in "
+        f"_REMOTE_SCRIPT_NAMES; unregistered: {sorted(derived - set(_REMOTE_SCRIPT_NAMES))}; "
+        f"stale entries: {sorted(set(_REMOTE_SCRIPT_NAMES) - derived)}"
+    )
+    assert len(_REMOTE_SCRIPT_NAMES) == len(set(_REMOTE_SCRIPT_NAMES)), "duplicate entry in the checklist"
+
+
+def test_remote_script_names_ratchet_catches_an_unregistered_script():
+    """Falsifier: prove the ratchet actually goes RED when a new remote script
+    is added without registering it -- the exact regression it exists for."""
+
+    class _StubCollector:
+        pass
+
+    stub = _StubCollector()
+    for name in _REMOTE_SCRIPT_NAMES:
+        setattr(stub, name, "pass\n")
+    setattr(stub, "REMOTE_FUTURE_UNREGISTERED_SCRIPT", "pass\n")
+
+    derived = _module_level_remote_script_names(stub)
+    assert "REMOTE_FUTURE_UNREGISTERED_SCRIPT" in derived
+    assert derived != set(_REMOTE_SCRIPT_NAMES)
 
 
 def test_remote_script_cannot_escalate_past_file_relay(collector):

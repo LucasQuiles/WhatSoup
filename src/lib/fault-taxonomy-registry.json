@@ -1000,6 +1000,11 @@
     }
   },
   "sourceDispositions": {
+    "auto_compact_convergence_reset": {
+      "disposition": "scheduled_agent_job_compaction_livelock_resolved_by_session_hard_reset_context_discarded_no_operator_action",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-edge-coverage.test.ts"
+    },
     "agent_turn_admission_rejected": {
       "disposition": "undispatched_journaled_turn_requires_owner_resend_no_automatic_replay",
       "owner": "src/runtimes/agent/runtime-turn-coordinator.ts",
