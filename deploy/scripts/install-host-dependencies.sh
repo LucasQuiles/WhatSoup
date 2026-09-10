@@ -113,8 +113,11 @@ case "$node_policy" in
   *) usage; exit 2 ;;
 esac
 
-platform="$(whatsoup_normalize_platform "$(uname -s 2>/dev/null)" 2>/dev/null || true)"
-[ -n "$platform" ] || { echo "host dependency installer: unsupported platform" >&2; exit 2; }
+if ! platform="$(whatsoup_first_line uname -s)" ||
+   ! platform="$(whatsoup_normalize_platform "$platform")"; then
+  echo "host dependency installer: unsupported platform" >&2
+  exit 2
+fi
 
 if [ -z "$manager" ]; then
   if [ "$platform" = "darwin" ]; then

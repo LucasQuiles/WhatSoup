@@ -1858,6 +1858,37 @@ def test_probe_path_fresh_mtime_accepted(tmp_path: Path):
     assert result.get("healthy") is True
 
 
+def test_probe_path_missing_at_freshness_check_is_not_healthy(tmp_path: Path):
+    spec = _mod.HostSpec(host="host-a", probe_path=tmp_path / "missing-probe.json")
+    assert _mod.default_pull_probe(spec, now=1000.0) == {
+        "reachable": False, "healthy": False, "class": "invalid_probe",
+    }
+
+
+@pytest.mark.parametrize("error_type", [OSError, PermissionError])
+def test_probe_stat_error_does_not_trust_a_healthy_payload(tmp_path: Path, monkeypatch, error_type):
+    probe = _write_json(tmp_path / "probe.json", {"reachable": True, "healthy": True})
+    real_stat = Path.stat
+
+    def blocked_stat(path, *args, **kwargs):
+        if path == probe:
+            raise error_type("fixture stat failure")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", blocked_stat)
+    spec = _mod.HostSpec(host="host-a", probe_path=probe)
+    assert _mod.default_pull_probe(spec, now=1000.0) == {
+        "reachable": False,
+        "healthy": False,
+        "class": "probe_stat_error",
+        "error": f"stat_error:{error_type.__name__}",
+    }
+
+
+def test_unconfigured_pull_probe_does_not_invent_health():
+    assert _mod.default_pull_probe(_mod.HostSpec(host="host-a"), now=1000.0) == {}
+
+
 def test_probe_path_no_now_preserves_legacy_passthrough(tmp_path: Path):
     """Calling default_pull_probe without `now` (legacy callers) keeps the old
     no-gate behavior so existing direct unit tests are unaffected."""
@@ -2145,6 +2176,24 @@ def test_prune_action_outbox_missing_dir_returns_zero(tmp_path: Path):
     # Outbox directory never created -> depth 0, no error.
     assert not _mod.action_outbox_dir(config).exists()
     assert _mod.prune_action_outbox(config) == 0
+
+
+def test_prune_action_outbox_scan_error_is_reported_without_removing_work(tmp_path: Path, monkeypatch, capsys):
+    config = _config(tmp_path, _hosts_file(tmp_path, [{"host": "host-a"}]), action_outbox_retention=0)
+    outbox = _mod.action_outbox_dir(config)
+    pending = _write_json(outbox / "pending.json", {"pending": True})
+    real_scandir = os.scandir
+
+    def blocked_scan(path):
+        if path == outbox:
+            raise PermissionError("fixture scan blocked")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", blocked_scan)
+    # Zero is the existing failure return, not evidence that the outbox is empty.
+    assert _mod.prune_action_outbox(config) == 0
+    assert json.loads(pending.read_text(encoding="utf-8")) == {"pending": True}
+    assert "action outbox scan failed: PermissionError" in capsys.readouterr().err
 
 
 def test_prune_action_outbox_survives_stat_and_unlink_errors(tmp_path: Path, monkeypatch):
@@ -4227,6 +4276,21 @@ def _intent_ledger(config) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8")).get("intents") or {}
+
+
+def test_retirement_intent_loader_counts_non_object_entries_and_preserves_valid_pins(tmp_path: Path):
+    config = _config(tmp_path, _hosts_file(tmp_path, [{"host": "host-a"}]))
+    valid = {"firstAttemptEpoch": 999.0, "contentBinding": "retained-binding"}
+    path = _write_json(_mod.retirement_intent_path(config), {
+        "intents": {"invalid": ["not", "an", "object"], "valid": valid},
+    })
+    before = path.read_bytes()
+
+    intents, discarded = _mod.load_retirement_intents(config)
+
+    assert discarded == 1
+    assert intents == {"valid": valid}
+    assert path.read_bytes() == before
 
 
 def test_the_episode_discriminator_holds_across_a_retry_and_moves_across_episodes(

@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 130
+**Total entries:** 131
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | doc=1, handoff=8, plan=64, review=4, spec=52, state=1 |
-| Status | active=32, closed=4, completed=38, deferred=7, pending=15, unknown=34 |
-| Status source | body-marker=109, fallback=20, state-md-status=1 |
+| Kind | doc=1, handoff=8, plan=65, review=4, spec=52, state=1 |
+| Status | active=33, closed=4, completed=38, deferred=7, pending=15, unknown=34 |
+| Status source | body-marker=110, fallback=20, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (32)
+### Active (33)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -51,6 +51,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-launchd-restart-policy-2682.md` | plan | launchd-restart-policy-2682 | body-marker |
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | watchdog-auth-required-contract | body-marker |
 | `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | outbound-queue-quiescence-containment | body-marker |
+| `docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md` | plan | daily-health-alert-evidence | body-marker |
 | `docs/superpowers/specs/2026-07-09-wall-to-wall-audit-remediation-design.md` | spec | wall-to-wall-audit-remediation-design | body-marker |
 | `docs/superpowers/specs/2026-07-11-central-hub-release-proof-pilot-design.md` | spec | central-hub-release-proof-pilot-design | body-marker |
 | `docs/superpowers/specs/2026-07-15-headless-fallback-runtime-alignment-design.md` | spec | headless-fallback-runtime-alignment-design | body-marker |
@@ -169,7 +170,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-07-16-boundary-core-history-mining.md` | handoff | pending | body-marker | boundary-core-history-mining | 2026-07-16 |  |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | unknown | fallback | incident-control-plane-finder-report | 2026-07-28 |  |
 
-### docs/superpowers/plans  _(64 entries)_
+### docs/superpowers/plans  _(65 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -237,6 +238,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | plan | completed | body-marker | recovery-authority-store-concurrency-containment | 2026-08-22 |  |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | unknown | fallback | anonymous-health-projection-ceiling | 2026-08-21 |  |
 | `docs/superpowers/plans/2026-08-27-p8b-admission-invariant.md` | plan | completed | body-marker | p8b-admission-invariant | 2026-08-27 |  |
+| `docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md` | plan | active | body-marker | daily-health-alert-evidence | 2026-09-05 |  |
 
 ### docs/superpowers/reviews  _(4 entries)_
 
@@ -317,4 +319,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-09-01T20:52:46Z from commit `2f8580e531b5db34d4fddadebc860f490a4897ee`
+- Generated at 2026-09-06T02:19:38Z from commit `9cb87031a93cdb2dea86cb48122c2eb40be5efd7`

@@ -5,9 +5,8 @@ import { CHANNEL_LABEL } from './transport-identity.js'
  * Channel display names come from the transport-identity home (hygiene law).
  *
  * What lives here vs the server: kind presets and the name wordlist are
- * journey-local by design (14-onboarding §1/§3); providers and models wire
- * to the real catalog endpoint (GET /api/providers) with curated model
- * lists per the wizard precedent (the catalog does not enumerate models).
+ * journey-local by design (14-onboarding §1/§3). Providers and provider-native
+ * models come from the fleet catalogue APIs, outside this vocabulary module.
  */
 
 /** Step-1 kind presets (14-onboarding §1: 4 archetype cards, one hint). */
@@ -74,31 +73,6 @@ export function slugifyName(display: string): string {
     .replace(/^-+|-+$/g, '')
     .replace(/^[^a-z]+/, '')
     .slice(0, 30)
-}
-
-/** Curated model options per provider id (wizard precedent: the catalog
- *  does not enumerate models). Free-text fallback for CLI providers whose
- *  model strings are runtime-resolved. */
-export const PROVIDER_MODELS: Record<string, Array<{ value: string; label: string }>> = {
-  'claude-cli': [
-    { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
-    { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
-    { value: 'claude-haiku-4-5-20251001', label: 'claude-haiku-4-5' },
-  ],
-  'anthropic-api': [
-    { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
-    { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
-    { value: 'claude-haiku-4-5-20251001', label: 'claude-haiku-4-5' },
-  ],
-  'openai-api': [
-    { value: 'gpt-4.1', label: 'gpt-4.1' },
-    { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini' },
-    { value: 'gpt-4.1-nano', label: 'gpt-4.1-nano' },
-  ],
-}
-
-export function defaultModelFor(providerId: string): string {
-  return PROVIDER_MODELS[providerId]?.[0]?.value ?? ''
 }
 
 /** Channel tiles: only baileys is API-creatable today (createLine has no

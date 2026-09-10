@@ -78,22 +78,22 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
 
   executable(join(bin, 'uname'), [
     'case "${1:-}" in',
-    '  -s) printf "%s\\n" "${FAKE_PLATFORM:-Darwin}" ;;',
+    '  -s) printf "%s\\n" "${FAKE_PLATFORM:-Darwin}"; exit "${FAKE_PLATFORM_EXIT:-0}" ;;',
     '  -m) printf "%s\\n" "${FAKE_MACHINE:-arm64}" ;;',
     '  *) printf "%s\\n" "${FAKE_PLATFORM:-Darwin}" ;;',
     'esac',
   ].join('\n'));
   executable(join(bin, 'sysctl'), [
     'case "$*" in',
-    '  *hw.optional.arm64*) printf "%s\\n" "${FAKE_ARM64_CAPABLE:-1}" ;;',
+    '  *hw.optional.arm64*) printf "%s\\n" "${FAKE_ARM64_CAPABLE:-1}"; exit "${FAKE_ARM64_EXIT:-0}" ;;',
     '  *sysctl.proc_translated*) printf "%s\\n" "${FAKE_TRANSLATED:-0}" ;;',
     '  *) exit 1 ;;',
     'esac',
   ].join('\n'));
   executable(join(bin, 'node'), [
     'case "${1:-}" in',
-    '  -v|--version) printf "v%s\\n" "${FAKE_NODE_VERSION:-24.15.0}" ;;',
-    '  -p) printf "%s\\n" "${FAKE_NODE_ARCH:-arm64}" ;;',
+    '  -v|--version) printf "v%s\\n" "${FAKE_NODE_VERSION:-24.15.0}"; exit "${FAKE_NODE_VERSION_EXIT:-0}" ;;',
+    '  -p) printf "%s\\n" "${FAKE_NODE_ARCH:-arm64}"; exit "${FAKE_NODE_ARCH_EXIT:-0}" ;;',
     '  *) exit 0 ;;',
     'esac',
   ].join('\n'));
@@ -152,6 +152,118 @@ afterEach(() => {
 });
 
 describe('portable host capability doctor', () => {
+  it.each([
+    ['npm', 'npm', '11.12.1'],
+    ['git', 'git', 'git version 2.50.0'],
+    ['python', 'python3.12', 'Python 3.12.11'],
+    ['rg', 'rg', 'ripgrep 14.1.1'],
+    ['zsh', 'zsh', 'zsh 5.9'],
+    ['shellcheck', 'shellcheck', 'ShellCheck 0.10.0'],
+    ['timeout', 'gtimeout', 'timeout (GNU coreutils) 9.7'],
+  ])('does not accept %s version output from a failed child', (id, name, version) => {
+    const fx = fixture();
+    executable(join(fx.bin, name), `printf '%s\\n' '${version}'\nexit 17`);
+
+    const result = runDoctor(fx, ['--profile', 'release', '--json']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.receipt?.outcome).toBe('inconclusive');
+    expect(record(result.receipt, id)?.status).toBe('inconclusive');
+  });
+
+  it.each(['FAKE_NODE_VERSION_EXIT', 'FAKE_NODE_ARCH_EXIT', 'FAKE_ARM64_EXIT'])(
+    'does not accept plausible Node evidence when %s is nonzero',
+    (variable) => {
+      const result = runDoctor(fixture({ [variable]: '19' }), ['--profile', 'runtime', '--json']);
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+      expect(result.receipt?.outcome).toBe('inconclusive');
+      expect(record(result.receipt, 'node')?.status).toBe('inconclusive');
+    },
+  );
+
+  it.each(['', '   '])('does not treat empty probe output %j as available', (output) => {
+    const fx = fixture();
+    tool(fx.bin, 'npm', output);
+
+    const result = runDoctor(fx, ['--profile', 'runtime', '--json']);
+
+    expect(result.status).toBe(2);
+    expect(result.receipt?.outcome).toBe('inconclusive');
+    expect(record(result.receipt, 'npm')?.status).toBe('inconclusive');
+  });
+
+  it('does not treat signal-terminated probe output as available', () => {
+    const fx = fixture();
+    executable(join(fx.bin, 'npm'), "printf '%s\\n' '11.12.1'\nkill -TERM \"$$\"");
+
+    const result = runDoctor(fx, ['--profile', 'runtime', '--json']);
+
+    expect(result.status).toBe(2);
+    expect(result.receipt?.outcome).toBe('inconclusive');
+    expect(record(result.receipt, 'npm')?.status).toBe('inconclusive');
+  });
+
+  it('does not accept a failed capability output formatter', () => {
+    const fx = fixture();
+    fx.env.WHATSOUP_TEST_REAL_SED = resolveHostTool('sed');
+    unlinkSync(join(fx.bin, 'sed'));
+    executable(join(fx.bin, 'sed'), [
+      'probe_output="$(cat)"',
+      'if [ "$probe_output" = "11.12.1" ]; then',
+      '  printf "%s\\n" "$probe_output"',
+      '  exit 23',
+      'fi',
+      'exec "$WHATSOUP_TEST_REAL_SED" "$@" <<< "$probe_output"',
+    ].join('\n'));
+
+    const result = runDoctor(fx, ['--profile', 'runtime', '--json']);
+
+    expect(result.status).toBe(2);
+    expect(result.receipt?.outcome).toBe('inconclusive');
+    expect(record(result.receipt, 'npm')?.status).toBe('inconclusive');
+  });
+
+  it('rejects a failed platform output formatter before emitting capability records', () => {
+    const fx = fixture();
+    unlinkSync(join(fx.bin, 'sed'));
+    executable(join(fx.bin, 'sed'), "printf '%s\\n' 'Darwin'\nexit 23");
+
+    const result = runDoctor(fx, ['--profile', 'runtime', '--json']);
+
+    expect(result.status).toBe(2);
+    expect(result.receipt).toBeNull();
+    expect(result.stderr).toContain('unsupported or unreadable platform');
+  });
+
+  it.each([
+    { options: [] },
+    { options: ['-e'] },
+    { options: ['-o', 'pipefail'] },
+    { options: ['-e', '-o', 'pipefail'] },
+  ])(
+    'preserves the originating child exit with caller options $options',
+    ({ options }) => {
+      const result = spawnSync('/bin/bash', [
+        ...options,
+        '-c',
+        '. "$1"; whatsoup_first_line /bin/bash -c \'printf "plausible\\n"; exit 17\'',
+        'probe',
+        join(repoRoot, 'deploy/lib/host-capabilities.sh'),
+      ], { encoding: 'utf8' });
+
+      expect(result.status, result.stderr).toBe(17);
+    },
+  );
+
+  it('rejects plausible platform output from a failed discovery command', () => {
+    const result = runDoctor(fixture({ FAKE_PLATFORM_EXIT: '17' }), ['--profile', 'runtime', '--json']);
+
+    expect(result.status).toBe(2);
+    expect(result.receipt).toBeNull();
+    expect(result.stderr).toContain('unsupported or unreadable platform');
+  });
+
   it('passes a complete Darwin runtime profile with exact native Node', () => {
     const result = runDoctor(fixture(), ['--profile', 'runtime', '--json']);
 

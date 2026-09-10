@@ -7,8 +7,6 @@ import {
   CHAT_OPTION_FIELDS,
   CONFIG_EXCLUDE_KEYS,
   CONFIG_PATH_KEYS,
-  CUSTOM_ENUM_OPTION,
-  CUSTOMIZABLE_ENUM_KEYS,
   ENUM_OPTIONS,
   FIELD_VALIDATORS,
   TYPE_COLOR,
@@ -260,6 +258,8 @@ describe('static config tables', () => {
     expect(AGENT_OPTION_FIELDS['agentOptions.sandboxPerChat']).toEqual({ type: 'boolean' });
     expect(AGENT_OPTION_FIELDS['agentOptions.pluginDirs']).toEqual({ type: 'array' });
     expect(AGENT_OPTION_FIELDS['agentOptions.mcp.inheritUserConfig']).toEqual({ type: 'boolean' });
+    expect(AGENT_OPTION_FIELDS['agentOptions.fallbackProvider']).toEqual({ type: 'string' });
+    expect(AGENT_OPTION_FIELDS['agentOptions.fallbackModel']).toEqual({ type: 'string' });
     // All declared field paths must start with the `agentOptions.` prefix that
     // buildConfigEntries strips when descending into the agentOptions sub-tree.
     for (const key of Object.keys(AGENT_OPTION_FIELDS)) {
@@ -286,15 +286,7 @@ describe('static config tables', () => {
     expect(ENUM_OPTIONS.accessMode).toEqual(['self_only', 'allowlist', 'open_dm', 'groups_only']);
     expect(ENUM_OPTIONS.toolUpdateMode).toEqual(['full', 'minimal']);
     expect(ENUM_OPTIONS['chatOptions.openaiProviderConfig.apiKeyService']).toEqual(['', ...CHAT_API_KEY_SERVICE_OPTIONS]);
-    // Model list begins with an empty string sentinel so the UI can clear the value.
-    expect(ENUM_OPTIONS.model[0]).toBe('');
-    expect(ENUM_OPTIONS.model).toContain('claude-opus-4-6');
-  });
-
-  it('CUSTOM_ENUM_OPTION sentinel and CUSTOMIZABLE_ENUM_KEYS are wired together', () => {
-    expect(CUSTOM_ENUM_OPTION).toBe('__custom__');
-    expect(CUSTOMIZABLE_ENUM_KEYS.has('model')).toBe(true);
-    expect(CUSTOMIZABLE_ENUM_KEYS.has('accessMode')).toBe(false);
+    expect(ENUM_OPTIONS).not.toHaveProperty('model');
   });
 });
 

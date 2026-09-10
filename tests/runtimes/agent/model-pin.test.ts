@@ -28,6 +28,11 @@ import type {
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
+
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
   type CapturedCrashInfo = {
     exitCode: number | null;
@@ -3007,9 +3012,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // credential): `/model <provider>` already rejects it at SET time (F07,
       // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
       // the direct selector could pin a route that hard-fails or silently falls
-      // back. `absentService` mirrors the provider-id F07 test — no keychain
-      // dependency (the service is absent from every store → credential null).
-      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      // back. The shared process mock supplies an empty keyring result; the
+      // isolated file stores and unknown service keep other sources absent.
+      const absentService = 'wa-test-absent-model-pin';
       cfgAny().agentProviderConfig = { apiKeyService: absentService };
       cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
@@ -3071,6 +3076,47 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).toContain('kimi/kimi-k3');
       expect(reply).toContain('glm/glm-5.2');
       expect(listFn).toHaveBeenCalled();
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('routes the shared CLI catalogue test seam through the codex-cli drill without spawning a real binary', async () => {
+      const listFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueListFn: listFn,
+      });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => [
+        'claude-cli',
+        'codex-cli',
+      ];
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model',
+      }));
+      const brandMenu = allReplies(sentMessages).join('\n');
+      const codexRow = brandMenu.match(/^(\d+)\. Codex$/m);
+      expect(codexRow).not.toBeNull();
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: `/model ${codexRow![1]}`,
+        messageId: 'codex-drill',
+      }));
+
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Codex — pick a model:*');
+      expect(reply).toContain('gpt-5.6-sol');
+      expect(reply).toContain('gpt-5.5');
+      // This suite's session mock deliberately returns no resolved binary, so
+      // fetchProviderCatalogue falls back to the provider id. Production uses
+      // getProviderBinary('codex-cli') -> 'codex'.
+      expect(listFn).toHaveBeenCalledWith('codex-cli');
       expect(prefRows()).toHaveLength(0);
     });
 

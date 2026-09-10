@@ -2,8 +2,15 @@
  * ModelAuthStep — passive/chat/agent view dispatch, tabbed models, API key input toggle & errors.
  * @vitest-environment jsdom
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+const getProviderModels = vi.fn()
+
+vi.mock('../../console/src/lib/api', () => ({
+  api: { getProviderModels: (...args: unknown[]) => getProviderModels(...args) },
+}))
 
 const ModelAuthStep = (await import('../../console/src/components/wizard/ModelAuthStep')).default
 
@@ -14,17 +21,60 @@ interface RenderOpts {
 
 function renderStep(opts: RenderOpts = {}) {
   const onChange = vi.fn<(patch: Record<string, unknown>) => void>()
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const view = render(
-    <ModelAuthStep
-      data={opts.data ?? {}}
-      onChange={onChange}
-      errors={opts.errors ?? {}}
-    />,
+    <QueryClientProvider client={client}>
+      <ModelAuthStep
+        data={opts.data ?? {}}
+        onChange={onChange}
+        errors={opts.errors ?? {}}
+      />
+    </QueryClientProvider>,
   )
   return { onChange, ...view }
 }
 
+beforeEach(() => {
+  getProviderModels.mockReset()
+  getProviderModels.mockImplementation(async (provider: string) => ({
+    status: 'ok',
+    ids: provider === 'openai-api'
+      ? ['openai/future-chat', 'openai/future-small']
+      : ['anthropic/future-opus', 'anthropic/future-fast'],
+    sourceLabel: `${provider} live test catalogue`,
+    asOfLabel: 'just now',
+  }))
+})
+
 afterEach(() => cleanup())
+
+describe('ModelAuthStep — live model catalogue', () => {
+  it('loads each active provider catalogue and keeps every role manually editable', async () => {
+    renderStep({ data: { type: 'chat' } })
+
+    await waitFor(() => expect(getProviderModels).toHaveBeenCalledWith('anthropic-api'))
+    const conversation = screen.getByLabelText('Conversation') as HTMLInputElement
+    await waitFor(() => expect(conversation.getAttribute('list')).not.toBeNull())
+    const anthropicList = document.getElementById(conversation.getAttribute('list')!)!
+    expect(Array.from(anthropicList.querySelectorAll('option')).map((option) => option.value))
+      .toEqual(['anthropic/future-opus', 'anthropic/future-fast'])
+
+    fireEvent.change(conversation, { target: { value: 'private/new-model' } })
+    expect(getProviderModels).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    await waitFor(() => expect(getProviderModels).toHaveBeenCalledWith('openai-api'))
+    const fallback = screen.getByLabelText('Fallback / Conversation') as HTMLInputElement
+    expect(fallback.disabled).toBe(false)
+  })
+
+  it('uses the CLI-authenticated catalogue for an agent using an existing CLI session', async () => {
+    renderStep({ data: { type: 'agent', authMethod: 'oauth' } })
+
+    await waitFor(() => expect(getProviderModels).toHaveBeenCalledWith('claude-cli'))
+    expect(getProviderModels).not.toHaveBeenCalledWith('anthropic-api')
+  })
+})
 
 describe('ModelAuthStep — view dispatch by data.type', () => {
   it('renders the passive view (no inputs, no tabs) when type=passive', () => {
@@ -57,55 +107,48 @@ describe('ModelAuthStep — view dispatch by data.type', () => {
   })
 })
 
-describe('ModelAuthStep — role selects are label↔input associated via <Field> (W2-S5)', () => {
+describe('ModelAuthStep — role inputs are label↔input associated via <Field> (W2-S5)', () => {
   // Decisive a11y proof of the Field migration: getByLabelText resolves the role
-  // label to its <select> via the Field-provided htmlFor wiring. Before the
-  // migration these Anthropic/OpenAI role selects had a raw <label> with NO
+  // label to its editable catalogue input via Field-provided htmlFor wiring. Before the
+  // migration these Anthropic/OpenAI role controls had a raw <label> with NO
   // htmlFor, so getByLabelText could not find them (this test would fail).
-  it('resolves each Anthropic role label to its select element by accessible name', () => {
+  it('resolves each Anthropic role label to its editable input by accessible name', () => {
     renderStep({ data: { type: 'chat' } })
 
-    const conversation = screen.getByLabelText('Conversation') as HTMLSelectElement
-    const extraction = screen.getByLabelText('Extraction') as HTMLSelectElement
-    const validation = screen.getByLabelText('Validation') as HTMLSelectElement
+    const conversation = screen.getByLabelText('Conversation') as HTMLInputElement
+    const extraction = screen.getByLabelText('Extraction') as HTMLInputElement
+    const validation = screen.getByLabelText('Validation') as HTMLInputElement
 
-    expect(conversation.tagName).toBe('SELECT')
-    expect(extraction.tagName).toBe('SELECT')
-    expect(validation.tagName).toBe('SELECT')
-    // The associated select carries the committed per-role default value.
-    expect(conversation.value).toBe('claude-sonnet-4-6')
+    expect(conversation.tagName).toBe('INPUT')
+    expect(extraction.tagName).toBe('INPUT')
+    expect(validation.tagName).toBe('INPUT')
+    expect(conversation.value).toBe('')
   })
 
-  it('resolves each OpenAI role label to its select element after switching tabs', () => {
+  it('resolves each OpenAI role label to its editable input after switching tabs', () => {
     renderStep({ data: { type: 'chat' } })
 
     fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
 
-    const fallback = screen.getByLabelText('Fallback / Conversation') as HTMLSelectElement
-    const extraction = screen.getByLabelText('Extraction') as HTMLSelectElement
-    const validation = screen.getByLabelText('Validation') as HTMLSelectElement
+    const fallback = screen.getByLabelText('Fallback / Conversation') as HTMLInputElement
+    const extraction = screen.getByLabelText('Extraction') as HTMLInputElement
+    const validation = screen.getByLabelText('Validation') as HTMLInputElement
 
-    expect(fallback.tagName).toBe('SELECT')
-    expect(extraction.tagName).toBe('SELECT')
-    expect(validation.tagName).toBe('SELECT')
-    // OpenAI selects default to '' with a leading "None" option.
+    expect(fallback.tagName).toBe('INPUT')
+    expect(extraction.tagName).toBe('INPUT')
+    expect(validation.tagName).toBe('INPUT')
     expect(fallback.value).toBe('')
-    expect(within(fallback).getByText('None')).toBeDefined()
+    expect(fallback.placeholder).toContain('None / runtime default')
   })
 })
 
 describe('ModelAuthStep — chat view: Anthropic tab is active by default', () => {
-  it('shows all three Anthropic role selects with default-model values', () => {
+  it('leaves all three Anthropic roles on runtime defaults until explicitly selected', () => {
     renderStep({ data: { type: 'chat' } })
 
-    expect(screen.getByText('Conversation')).toBeDefined()
-    expect(screen.getByText('Extraction')).toBeDefined()
-    expect(screen.getByText('Validation')).toBeDefined()
-    const selects = screen.getAllByRole('combobox')
-    expect(selects.length).toBeGreaterThanOrEqual(3)
-    // Conversation default = claude-sonnet-4-6; haiku is in the option list for the others.
-    expect((selects[0] as HTMLSelectElement).value).toBe('claude-sonnet-4-6')
-    expect((selects[1] as HTMLSelectElement).value).toBe('claude-haiku-4-5-20251001')
+    expect((screen.getByLabelText('Conversation') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('Extraction') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('Validation') as HTMLInputElement).value).toBe('')
   })
 
   it('exposes an Anthropic API Key input with sk-ant placeholder masked by default', () => {
@@ -138,7 +181,7 @@ describe('ModelAuthStep — chat view: Anthropic tab is active by default', () =
 })
 
 describe('ModelAuthStep — chat view: switching tabs', () => {
-  it('reveals the OpenAI panel with optional "None" first option after clicking the OpenAI tab', () => {
+  it('reveals the OpenAI panel with an empty runtime-default value after clicking the OpenAI tab', () => {
     renderStep({ data: { type: 'chat' } })
 
     fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
@@ -146,10 +189,9 @@ describe('ModelAuthStep — chat view: switching tabs', () => {
     expect(screen.getByText('Fallback / Conversation')).toBeDefined()
     const openaiKey = screen.getByPlaceholderText('sk-...') as HTMLInputElement
     expect(openaiKey).toBeDefined()
-    // OpenAI selects default to '' and offer a "None" option.
-    const selects = screen.getAllByRole('combobox') as HTMLSelectElement[]
-    expect(selects[0].value).toBe('')
-    expect(within(selects[0]).getByText('None')).toBeDefined()
+    const fallback = screen.getByLabelText('Fallback / Conversation') as HTMLInputElement
+    expect(fallback.value).toBe('')
+    expect(fallback.placeholder).toContain('None / runtime default')
   })
 
   it('hides the Anthropic API key input when the OpenAI tab is active', () => {
@@ -163,18 +205,15 @@ describe('ModelAuthStep — chat view: switching tabs', () => {
 })
 
 describe('ModelAuthStep — chat view: change events bubble to onChange', () => {
-  it('emits a models patch (with all roles preserved) when an Anthropic select changes', () => {
+  it('emits only explicitly chosen model roles when an Anthropic input changes', () => {
     const { onChange } = renderStep({ data: { type: 'chat' } })
 
-    const conversation = screen.getAllByRole('combobox')[0] as HTMLSelectElement
-    fireEvent.change(conversation, { target: { value: 'claude-opus-4-6' } })
+    const conversation = screen.getByLabelText('Conversation') as HTMLInputElement
+    fireEvent.change(conversation, { target: { value: 'private/new-model' } })
 
     expect(onChange).toHaveBeenCalledTimes(1)
     const patch = onChange.mock.calls[0][0] as { models: Record<string, string> }
-    expect(patch.models.conversation).toBe('claude-opus-4-6')
-    // Other defaults are spread in.
-    expect(patch.models.extraction).toBe('claude-haiku-4-5-20251001')
-    expect(patch.models.validation).toBe('claude-haiku-4-5-20251001')
+    expect(patch.models).toEqual({ conversation: 'private/new-model' })
   })
 
   it('emits an apiKey patch when the Anthropic key input receives input', () => {
@@ -420,16 +459,14 @@ describe('ModelAuthStep — committed data is reflected (controlled inputs)', ()
     })
 
     expect((screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement).value).toBe('sk-ant-committed')
-    const anthSelects = screen.getAllByRole('combobox') as HTMLSelectElement[]
-    expect(anthSelects[0].value).toBe('claude-opus-4-6')
-    expect(anthSelects[1].value).toBe('claude-sonnet-4-6')
-    expect(anthSelects[2].value).toBe('claude-opus-4-6')
+    expect((screen.getByLabelText('Conversation') as HTMLInputElement).value).toBe('claude-opus-4-6')
+    expect((screen.getByLabelText('Extraction') as HTMLInputElement).value).toBe('claude-sonnet-4-6')
+    expect((screen.getByLabelText('Validation') as HTMLInputElement).value).toBe('claude-opus-4-6')
 
     fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
-    const openaiSelects = screen.getAllByRole('combobox') as HTMLSelectElement[]
-    expect(openaiSelects[0].value).toBe('gpt-4.1')
-    expect(openaiSelects[1].value).toBe('gpt-4.1-mini')
-    expect(openaiSelects[2].value).toBe('gpt-4.1-nano')
+    expect((screen.getByLabelText('Fallback / Conversation') as HTMLInputElement).value).toBe('gpt-4.1')
+    expect((screen.getByLabelText('Extraction') as HTMLInputElement).value).toBe('gpt-4.1-mini')
+    expect((screen.getByLabelText('Validation') as HTMLInputElement).value).toBe('gpt-4.1-nano')
     expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('OPENAI_FAKE_COMMITTED')
   })
 })

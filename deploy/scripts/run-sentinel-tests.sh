@@ -8,17 +8,17 @@ trap 'rm -rf "$tmp"' EXIT
 echo "== pytest runner guard =="
 bash deploy/scripts/tests/test_pytest_runner.sh
 echo "== pin lib coverage gate =="
-"${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[0]}" --cov=sentinel_pin --cov-branch --cov-fail-under=98 --import-mode=importlib -q
+run_pytest_coverage "$tmp/pin-coverage.out" "${CURATED_SENTINEL_TEST_FILES[0]}" --cov=sentinel_pin
 echo "== host selfcheck coverage gate =="
-"${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[1]}" --cov=bot_errors_selfcheck --cov-branch --cov-fail-under=98 --import-mode=importlib -q
+run_pytest_coverage "$tmp/selfcheck-coverage.out" "${CURATED_SENTINEL_TEST_FILES[1]}" --cov=bot_errors_selfcheck
 echo "== fleet sentinel coverage gate =="
-"${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[2]}" --cov=bot_errors_sentinel --cov-branch --cov-fail-under=98 --import-mode=importlib -q
+run_pytest_coverage "$tmp/sentinel-coverage.out" "${CURATED_SENTINEL_TEST_FILES[2]}" --cov=bot_errors_sentinel
 echo "== heartbeat watchdog central-liveness gate =="
 "${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[3]}" --import-mode=importlib -q
 echo "== redaction parity gate (BEAD-052) =="
 "${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[4]}" --import-mode=importlib -q
 echo "== gui-session-monitor coverage gate =="
-"${PYTEST_CMD[@]}" "${CURATED_SENTINEL_TEST_FILES[5]}" --cov=bot_errors_gui_session_monitor --cov-branch --cov-fail-under=98 --import-mode=importlib -q
+run_pytest_coverage "$tmp/gui-coverage.out" "${CURATED_SENTINEL_TEST_FILES[5]}" --cov=bot_errors_gui_session_monitor
 echo "== shared runtime PATH contract =="
 bash deploy/scripts/tests/test_runtime_path_prepend.sh | tee "$tmp/runtime_path_prepend.out" | grep -q RUNTIME_PATH_PREPEND_TEST_OK || { echo "runtime path prepend FAIL"; cat "$tmp/runtime_path_prepend.out"; exit 1; }
 echo "== deployer pin mode =="

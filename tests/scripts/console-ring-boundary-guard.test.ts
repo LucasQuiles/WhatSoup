@@ -30,7 +30,11 @@ const CONSOLE_SRC = path.join(process.cwd(), 'console', 'src');
  * belongs in the PR discussion, not in a quiet import line.
  */
 const BASELINE: Readonly<Record<string, readonly string[]>> = {
-  'console/src/types.ts': ['src/core/mark-read-types.ts'],
+  'console/src/types.ts': [
+    'src/core/mark-read-types.ts',
+    // Declaration-only wire vocabulary shared by the fleet response and console.
+    'src/lib/provider-catalogue-contract.d.ts',
+  ],
   'console/src/lib/providers.ts': [
     'src/lib/provider-ids.json',
     'src/lib/provider-ids.ts',

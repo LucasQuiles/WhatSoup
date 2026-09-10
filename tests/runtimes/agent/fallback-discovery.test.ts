@@ -12,6 +12,7 @@ import {
   isNonChatCatalogModel,
   type CandidateEvidence,
 } from '../../../src/runtimes/agent/fallback-discovery.ts';
+import type { ModelCatalogMetadata } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 
 const LIVE_CATALOG = [
   'opencode/big-pickle',
@@ -48,12 +49,14 @@ const GATEWAY = 'opencode-cli';
 
 function derive(opts: {
   catalogIds?: readonly string[];
+  catalogMetadata?: Readonly<Record<string, ModelCatalogMetadata>>;
   policy?: Parameters<typeof deriveFallbackChainFromCatalog>[0]['policy'];
   evidenceFor?: (id: string) => CandidateEvidence;
   primary?: { provider: string; model?: string | null };
 }) {
   return deriveFallbackChainFromCatalog({
     catalogIds: opts.catalogIds ?? LIVE_CATALOG,
+    ...(opts.catalogMetadata ? { catalogMetadata: opts.catalogMetadata } : {}),
     gatewayProvider: GATEWAY,
     primary: opts.primary ?? PRIMARY,
     ...(opts.policy ? { policy: opts.policy } : {}),
@@ -62,7 +65,7 @@ function derive(opts: {
 }
 
 describe('deriveFallbackChainFromCatalog', () => {
-  it('selects one model per keyed provider — the last (newest) catalogue entry — in catalogue order', () => {
+  it('selects one model per keyed provider using the legacy later-entry tie break', () => {
     const { entries } = derive({ policy: { maxEntries: 4, includeFreeTier: false } });
     expect(entries).toEqual([
       { provider: GATEWAY, model: 'deepseek/deepseek-v4-pro' },
@@ -91,7 +94,7 @@ describe('deriveFallbackChainFromCatalog', () => {
     ]);
   });
 
-  it('ranks canary-ok providers ahead of unknown and excludes dead ones', () => {
+  it('ranks canary-ok providers ahead of unknown and replaces exact dead models', () => {
     const evidence: Record<string, CandidateEvidence> = {
       'kimi/kimi-k3': 'dead',
       'glm/glm-5.2': 'dead',
@@ -104,7 +107,198 @@ describe('deriveFallbackChainFromCatalog', () => {
     expect(entries.map((e) => e.model)).toEqual([
       'minimax/MiniMax-M3',
       'deepseek/deepseek-v4-pro',
+      'glm/glm-5.1',
     ]);
+  });
+
+  it('uses release metadata instead of assuming the last catalogue id is newest', () => {
+    const catalogIds = ['openai/gpt-5.6', 'openai/o3-pro'];
+    const catalogMetadata = {
+      'openai/gpt-5.6': {
+        status: 'active', releaseDate: '2026-08-15', textOutput: true, toolCall: true,
+      },
+      'openai/o3-pro': {
+        status: 'active', releaseDate: '2025-06-10', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries, basis } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'openai/gpt-5.6' }]);
+    expect(basis[0]).toMatchObject({
+      model: 'openai/gpt-5.6',
+      releaseDate: '2026-08-15',
+      eligibilityBasis: 'metadata',
+    });
+  });
+
+  it('ranks valid month-precision release dates without treating them as unknown', () => {
+    const catalogIds = ['glm/new-month', 'glm/older-day'];
+    const catalogMetadata = {
+      'glm/new-month': {
+        status: 'active', releaseDate: '2026-08', textOutput: true, toolCall: true,
+      },
+      'glm/older-day': {
+        status: 'active', releaseDate: '2026-07-31', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'glm/new-month' }]);
+  });
+
+  it('prefers an active stable model over a newer beta model when evidence is equal', () => {
+    const catalogIds = ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash-vision-exp'];
+    const catalogMetadata = {
+      'deepseek/deepseek-v4-pro': {
+        status: 'active', releaseDate: '2026-08-12', textOutput: true, toolCall: true,
+      },
+      'deepseek/deepseek-v4-flash-vision-exp': {
+        status: 'beta', releaseDate: '2026-08-21', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'deepseek/deepseek-v4-pro' }]);
+  });
+
+  it('excludes explicitly inactive, non-text-output, and non-tool-capable models', () => {
+    const catalogIds = [
+      'inactive/newest',
+      'notext/newest',
+      'notool/newest',
+      'eligible/current',
+    ];
+    const catalogMetadata = {
+      'inactive/newest': {
+        status: 'inactive', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+      'notext/newest': {
+        status: 'active', releaseDate: '2026-09-01', textOutput: false, toolCall: true,
+      },
+      'notool/newest': {
+        status: 'active', releaseDate: '2026-09-01', textOutput: true, toolCall: false,
+      },
+      'eligible/current': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries, basis } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 4, includeFreeTier: false },
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'eligible/current' }]);
+    expect(basis.map((candidate) => candidate.model)).toEqual(['eligible/current']);
+  });
+
+  it('falls through an exact dead model to the next eligible model from that provider', () => {
+    const catalogIds = ['glm/glm-5.1', 'glm/glm-5.2'];
+    const catalogMetadata = {
+      'glm/glm-5.1': {
+        status: 'active', releaseDate: '2026-07-01', textOutput: true, toolCall: true,
+      },
+      'glm/glm-5.2': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+      evidenceFor: (id) => (id === 'glm/glm-5.2' ? 'dead' : 'unknown'),
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-5.1' }]);
+  });
+
+  it('prefers a proven completion over a newer unknown model from the same provider', () => {
+    const catalogIds = ['minimax/MiniMax-M2.7', 'minimax/MiniMax-M3'];
+    const catalogMetadata = {
+      'minimax/MiniMax-M2.7': {
+        status: 'active', releaseDate: '2026-06-01', textOutput: true, toolCall: true,
+      },
+      'minimax/MiniMax-M3': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+      evidenceFor: (id) => (id.endsWith('M2.7') ? 'ok' : 'unknown'),
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'minimax/MiniMax-M2.7' }]);
+  });
+
+  it('retains the established later-entry tie break for equal or missing release dates', () => {
+    const catalogIds = ['glm/glm-a', 'glm/glm-b'];
+    const catalogMetadata = {
+      'glm/glm-a': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'glm/glm-b': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    expect(derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
+    expect(derive({
+      catalogIds,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
+  });
+
+  it('lets an exact operator pin bypass automatic capability eligibility unless it is dead', () => {
+    const catalogIds = ['openai/gpt-5.6', 'openai/gpt-realtime-2.1'];
+    const catalogMetadata = {
+      'openai/gpt-5.6': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'openai/gpt-realtime-2.1': {
+        status: 'inactive', releaseDate: '2026-09-01', textOutput: false, toolCall: false,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const policy = {
+      maxEntries: 1,
+      includeFreeTier: false,
+      preferModels: { openai: 'openai/gpt-realtime-2.1' },
+    };
+
+    const pinned = derive({ catalogIds, catalogMetadata, policy });
+    expect(pinned.entries).toEqual([{ provider: GATEWAY, model: 'openai/gpt-realtime-2.1' }]);
+    expect(pinned.basis[0]).toMatchObject({ eligibilityBasis: 'operator-pin' });
+
+    const deadPin = derive({
+      catalogIds,
+      catalogMetadata,
+      policy,
+      evidenceFor: (id) => (id.endsWith('realtime-2.1') ? 'dead' : 'unknown'),
+    });
+    expect(deadPin.entries).toEqual([{ provider: GATEWAY, model: 'openai/gpt-5.6' }]);
   });
 
   it('appends exactly one free-tier model as the tail entry', () => {
@@ -114,12 +308,64 @@ describe('deriveFallbackChainFromCatalog', () => {
     expect(entries.slice(0, 3).every((e) => !e.model.startsWith('opencode/'))).toBe(true);
   });
 
-  it('excludes the primary route from the chain (self-fallback rule)', () => {
+  it('does not reserve a paid gateway model as the free-tier tail when cost metadata exists', () => {
+    const catalogIds = ['deepseek/current', 'opencode/free-model', 'opencode/newer-paid-model'];
+    const catalogMetadata = {
+      'deepseek/current': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'opencode/free-model': {
+        status: 'active', releaseDate: '2026-07-01', textOutput: true, toolCall: true, zeroCost: true,
+      },
+      'opencode/newer-paid-model': {
+        status: 'active', releaseDate: '2026-09-01', textOutput: true, toolCall: true, zeroCost: false,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries, basis } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 2, includeFreeTier: true },
+    });
+
+    expect(entries).toEqual([
+      { provider: GATEWAY, model: 'deepseek/current' },
+      { provider: GATEWAY, model: 'opencode/free-model' },
+    ]);
+    expect(basis.find((candidate) => candidate.freeTier)).toMatchObject({
+      model: 'opencode/free-model',
+      zeroCost: true,
+    });
+  });
+
+  it('does not infer zero cost from the gateway prefix when a verbose record lacks valid cost', () => {
+    const catalogIds = ['deepseek/current', 'opencode/cost-unknown'];
+    const catalogMetadata = {
+      'deepseek/current': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'opencode/cost-unknown': {
+        status: 'active', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    const { entries, basis } = derive({
+      catalogIds,
+      catalogMetadata,
+      policy: { maxEntries: 2, includeFreeTier: true },
+    });
+
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'deepseek/current' }]);
+    expect(basis).not.toContainEqual(expect.objectContaining({ model: 'opencode/cost-unknown' }));
+  });
+
+  it('excludes the exact primary route while retaining another model from its provider', () => {
     const { entries } = derive({
       primary: { provider: GATEWAY, model: 'deepseek/deepseek-v4-pro' },
       policy: { maxEntries: 4, includeFreeTier: false },
     });
     expect(entries.map((e) => e.model)).toEqual([
+      'deepseek/deepseek-v4-flash',
       'glm/glm-5.2',
       'kimi/kimi-k3',
       'minimax/MiniMax-M3',
@@ -183,7 +429,7 @@ describe('deriveFallbackChainFromCatalog', () => {
 });
 
 // Live 2026-08-16 finding: credentialed gateways list EVERY model a key
-// unlocks; the newest-per-provider pick then lands on embeddings (openai tail
+// unlocks; the old later-entry pick then lands on embeddings (openai tail
 // = text-embedding-ada-002) or video generators (google tail = veo-3.1-*) —
 // models that can never serve a text turn.
 describe('non-chat catalogue filtering', () => {

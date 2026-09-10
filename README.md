@@ -250,7 +250,8 @@ The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the 
 | `POST` | `/api/lines/:name/groups/:jid/requests` | Approve or reject pending join requests |
 | `GET` | `/api/lid-mappings` | List cross-instance LID to phone JID mappings |
 | `POST` | `/api/lid-mappings/sync` | Sync LID mappings from another instance |
-| `GET` | `/api/providers` | List the agent provider catalog and per-provider availability |
+| `GET` | `/api/providers` | List server-supported agent providers and their console configuration capabilities |
+| `GET` | `/api/providers/:name/models` | Read the selected provider's runtime model-catalogue receipt and provenance |
 | `GET` | `/api/lines/:name/provider-status` | Provider readiness + fallback status for one instance |
 | `PUT` | `/api/credentials/:name` | Store a provider credential (write-only) |
 | `DELETE` | `/api/credentials/:name` | Delete a stored provider credential |
@@ -351,7 +352,7 @@ The fleet server's health poller probes each instance every 5 seconds and tracks
 
 ## Providers & Credentials
 
-The agent runtime supports a catalog of providers (`src/lib/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the catalog and availability.
+The agent runtime supports a catalog of providers (`src/lib/provider-ids.json`): `claude-cli` (default), `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, and `anthropic-api`. An instance configures a primary provider and an optional fallback chain; primary-model probes verify usability before routing, and `GET /api/lines/:name/provider-status` reports per-instance readiness and fallback state. `GET /api/providers` lists the server-supported execution adapters. `GET /api/providers/:name/models` asks the selected adapter for its current provider-native model catalogue and returns explicit source, capture-age, or unavailability metadata; callers may still supply a provider-native model ID when a catalogue is incomplete or unavailable.
 
 Provider credentials are **write-only**: `PUT /api/credentials/:name` stores a secret, `POST /api/credentials/:name/verify` checks it against its provider, `DELETE /api/credentials/:name` removes it, and `GET /api/credentials/:name` deliberately returns `405` — credentials are never read back through the API. Secrets live in the keyring (or env) per the [Configuration Reference](docs/configuration.md).
 

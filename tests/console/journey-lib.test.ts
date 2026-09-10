@@ -7,8 +7,6 @@ import {
   CHANNEL_TILES,
   KIND_PRESETS,
   NAME_WORDLIST,
-  PROVIDER_MODELS,
-  defaultModelFor,
   rerollName,
   slugifyName,
 } from '../../console/src/lib/journey'
@@ -62,14 +60,5 @@ describe('slugifyName (server rule: /^[a-z][a-z0-9-]*$/, 2–30)', () => {
   })
   it('caps at 30 chars', () => {
     expect(slugifyName('A'.repeat(40)).length).toBeLessThanOrEqual(30)
-  })
-})
-
-describe('PROVIDER_MODELS', () => {
-  it('curated lists exist for the model-enumerated providers; default is the first entry', () => {
-    expect(PROVIDER_MODELS['claude-cli']!.length).toBeGreaterThan(0)
-    expect(PROVIDER_MODELS['openai-api']!.length).toBe(3)
-    expect(defaultModelFor('claude-cli')).toBe(PROVIDER_MODELS['claude-cli']![0]!.value)
-    expect(defaultModelFor('codex-cli')).toBe('') // honest empty — free text
   })
 })

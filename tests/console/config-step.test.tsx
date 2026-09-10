@@ -9,10 +9,51 @@
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ReactElement, ReactNode } from 'react'
+
+const getProviderModels = vi.fn()
+const getProviders = vi.fn()
+
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    getProviders: (...args: unknown[]) => getProviders(...args),
+    getProviderModels: (...args: unknown[]) => getProviderModels(...args),
+  },
+}))
+
 import ConfigStep from '../../console/src/components/wizard/ConfigStep'
 
 afterEach(() => cleanup())
+
+beforeEach(() => {
+  getProviders.mockReset()
+  getProviders.mockResolvedValue([
+    { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+    { id: 'codex-cli', displayName: 'Codex', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: ['model'] },
+    { id: 'gemini-cli', displayName: 'Gemini', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: ['model'] },
+    { id: 'opencode-cli', displayName: 'OpenCode', type: 'cli', needsApiKey: true, credentialService: null, providerConfig: ['model'] },
+    { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+    { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, credentialService: 'anthropic', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+    { id: 'new-adapter', displayName: 'New Adapter', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: ['model'] },
+  ])
+  getProviderModels.mockReset()
+  getProviderModels.mockResolvedValue({
+    status: 'ok',
+    ids: ['anthropic/future-opus', 'anthropic/future-fast'],
+    sourceLabel: 'live test catalogue',
+    asOfLabel: 'just now',
+  })
+})
+
+function render(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  )
+  return rtlRender(ui, { wrapper: Wrapper })
+}
 
 interface RenderOpts {
   initialData?: Record<string, unknown>
@@ -114,7 +155,37 @@ describe('ConfigStep — real React handler wiring', () => {
   // Contract 6: side effects on provider switch (providerConfig reset)
   // ──────────────────────────────────────────────────────────────────────
   describe('handleProviderChange wiring', () => {
-    it('select onChange fires handleProviderChange and resets providerConfig', () => {
+    it('renders the server-reported provider catalogue without a compiled option list', async () => {
+      renderConfigStep()
+      openPermissionsTab()
+
+      const select = screen.getByLabelText('Provider') as HTMLSelectElement
+      await waitFor(() => expect(Array.from(select.options).map((option) => option.value)).toEqual([
+        'claude-cli',
+        'codex-cli',
+        'gemini-cli',
+        'opencode-cli',
+        'openai-api',
+        'anthropic-api',
+        'new-adapter',
+      ]))
+    })
+
+    it('derives fields for a newly reported adapter from server capability metadata', async () => {
+      renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'sage',
+          agentOptions: { provider: 'new-adapter', providerConfig: {} },
+        },
+      })
+      openPermissionsTab()
+
+      await waitFor(() => expect(getProviders).toHaveBeenCalledTimes(1))
+      expect(await screen.findByText('Model')).toBeDefined()
+    })
+
+    it('select onChange fires handleProviderChange and resets providerConfig', async () => {
       const { onChange } = renderConfigStep({
         initialData: {
           type: 'agent',
@@ -128,7 +199,7 @@ describe('ConfigStep — real React handler wiring', () => {
       openPermissionsTab()
       onChange.mockClear()
 
-      const select = screen.getByDisplayValue('Anthropic') as HTMLSelectElement
+      const select = await waitFor(() => screen.getByDisplayValue('Anthropic') as HTMLSelectElement)
       fireEvent.change(select, { target: { value: 'codex-cli' } })
 
       expect(onChange).toHaveBeenCalledTimes(1)
@@ -137,7 +208,7 @@ describe('ConfigStep — real React handler wiring', () => {
       expect(patch.agentOptions.providerConfig).toEqual({})
     })
 
-    it('re-selecting the current provider is a no-op (same-value early return)', () => {
+    it('re-selecting the current provider is a no-op (same-value early return)', async () => {
       const { onChange } = renderConfigStep({
         initialData: {
           type: 'agent',
@@ -148,7 +219,7 @@ describe('ConfigStep — real React handler wiring', () => {
       openPermissionsTab()
       onChange.mockClear()
 
-      const select = screen.getByDisplayValue('Anthropic') as HTMLSelectElement
+      const select = await waitFor(() => screen.getByDisplayValue('Anthropic') as HTMLSelectElement)
       fireEvent.change(select, { target: { value: 'anthropic-api' } })
 
       // handleProviderChange must early-return: zero onChange calls
@@ -202,6 +273,25 @@ describe('ConfigStep — real React handler wiring', () => {
   // Contract 3: empty-string / undefined deletion via real TextInput
   // ──────────────────────────────────────────────────────────────────────
   describe('handleProviderConfigOption — TextInput sanitization', () => {
+    it('uses provider-native live suggestions without restricting manual entry', async () => {
+      renderConfigStep({
+        initialData: {
+          type: 'agent',
+          name: 'sage',
+          agentOptions: { provider: 'anthropic-api', providerConfig: {} },
+        },
+      })
+      openPermissionsTab()
+
+      const modelInput = screen.getByLabelText('Model') as HTMLInputElement
+      await waitFor(() => expect(getProviderModels).toHaveBeenCalledWith('anthropic-api'))
+      await waitFor(() => expect(modelInput.getAttribute('list')).not.toBeNull())
+      const list = document.getElementById(modelInput.getAttribute('list')!)!
+      expect(Array.from(list.querySelectorAll('option')).map((option) => option.value))
+        .toEqual(['anthropic/future-opus', 'anthropic/future-fast'])
+      expect(modelInput.disabled).toBe(false)
+    })
+
     it('typing a value sets the key in providerConfig', () => {
       const { onChange } = renderConfigStep({
         initialData: {
@@ -213,8 +303,7 @@ describe('ConfigStep — real React handler wiring', () => {
       openPermissionsTab()
       onChange.mockClear()
 
-      // The Model field renders as TextInput; find by placeholder
-      const modelInput = screen.getByPlaceholderText('claude-sonnet-4-6') as HTMLInputElement
+      const modelInput = screen.getByLabelText('Model') as HTMLInputElement
       fireEvent.change(modelInput, { target: { value: 'claude-opus-4' } })
 
       expect(onChange).toHaveBeenCalledTimes(1)

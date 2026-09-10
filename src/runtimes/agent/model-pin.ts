@@ -541,7 +541,7 @@ export function recordRouteModelPin(
  * (decideModelPinResolution, config-surface.ts — the SSOT) needs to
  * consume it. The catalogue probes are injectable
  * (modelCatalogueListFn/modelCatalogueAnthropicFn on AgentRuntimeOptions,
- * mirroring resolveModelCatalogue's own listFn/anthropicFn seam) so a test
+ * mirroring resolveModelCatalogue's CLI-list/anthropicFn seam) so a test
  * never spawns the real binary or hits the real keychain.
  *
  * Acts on decideModelPinResolution's verdict against the just-written
@@ -562,7 +562,7 @@ export function recordRouteModelPin(
  * The ONE provider-catalogue fetch preamble both the pin-time verify
  * ({@link verifyModelPinAgainstCatalogue}) and the drill Level-2 render
  * (`sendModelDrillModelLevel`) need: resolve the provider binary, then fetch
- * via the injectable listFn/anthropicFn seam (a test never spawns a binary or
+ * via the injectable CLI-list/anthropicFn seam (a test never spawns a binary or
  * hits the keychain). Callers diverge AFTER on the returned listing (verify
  * runs decideModelPinResolution; the drill renders it). Slice-3 forward-reuse.
  */
@@ -574,6 +574,7 @@ async function fetchProviderCatalogue(
   return resolveModelCatalogue(providerId, binary, {
     nowMs: Date.now(),
     listFn: port.modelCatalogueListFn,
+    codexFn: port.modelCatalogueListFn,
     anthropicFn: port.modelCatalogueAnthropicFn,
   });
 }
