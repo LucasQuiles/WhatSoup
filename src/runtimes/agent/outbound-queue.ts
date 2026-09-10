@@ -90,6 +90,7 @@ interface TurnEvidenceFlush {
 }
 
 interface QueuedOutboundChunk {
+  readonly preAdmissionNotice?: true;
   readonly text: string;
   readonly role: OutboundMessageRole;
   readonly turnId: string | undefined;
@@ -370,6 +371,8 @@ function formatElapsed(ms: number): string {
 export interface IOutboundQueue {
   lastActivity?: number;
   enqueueText(text: string, role?: OutboundMessageRole): void;
+  /** Optional capability: a durable notice independent of the current turn. */
+  enqueuePreAdmissionNotice?(text: string, sourceInboundSeq: number | undefined): boolean;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
   enqueueStreamingText(text: string, role?: OutboundMessageRole, onCommit?: () => void): void;
   /** Commit buffered streaming text at the outbound-queue delivery boundary. */
@@ -793,6 +796,22 @@ export class OutboundQueue implements IOutboundQueue {
     this.flushStreamBuffer();
     this.markVisibleTextDelivered();
     this.enqueuePreparedText(text, attribution);
+  }
+
+  enqueuePreAdmissionNotice(text: string, sourceInboundSeq: number | undefined): boolean {
+    if (!this.durability || this.isPoisoned() || !isNonEmptyString(text)) return false;
+    if (this.rejectPostClosureEnqueue()) return false;
+    // Preserve the active turn's buffered/deferred text and delivery evidence.
+    this.enqueuePreparedText(text, {
+      preAdmissionNotice: true,
+      role: 'lifecycle',
+      turnId: undefined,
+      turnEvidenceEpoch: undefined,
+      chatJid: this.deliveryJid,
+      conversationKey: this.conversationKey,
+      sourceInboundSeq,
+    });
+    return true;
   }
 
   private enqueuePreparedText(
@@ -1669,18 +1688,20 @@ export class OutboundQueue implements IOutboundQueue {
     chunk: string,
     attribution: OutboundAttribution,
   ): void {
-    if (this.suppressDuplicateTerminalText(chunk, attribution.chatJid)) {
+    if (!attribution.preAdmissionNotice && this.suppressDuplicateTerminalText(chunk, attribution.chatJid)) {
       return;
     }
     // PR-E telemetry: count every message actually enqueued this turn (content
     // AND status). NEVER gates a send — crossing the high-volume watermark logs
     // ONCE for PR-G/observability so a pure-content runaway is visible even
     // though E deliberately never drops content.
-    this.turnTotalCount++;
-    if (this.turnTotalCount === HIGH_VOLUME_TURN_WATERMARK) {
-      log.warn({ chatJid: attribution.chatJid, count: this.turnTotalCount }, 'high-volume turn');
+    if (!attribution.preAdmissionNotice) {
+      this.turnTotalCount++;
+      if (this.turnTotalCount === HIGH_VOLUME_TURN_WATERMARK) {
+        log.warn({ chatJid: attribution.chatJid, count: this.turnTotalCount }, 'high-volume turn');
+      }
+      this.lastActivity = Date.now();
     }
-    this.lastActivity = Date.now();
     this.sendQueue.push({ text: chunk, ...attribution });
     if (!this.sending) {
       this.drainQueue();
@@ -1776,7 +1797,7 @@ export class OutboundQueue implements IOutboundQueue {
         replayPolicy: 'unsafe',
         sourceInboundSeq: chunk.sourceInboundSeq,
       });
-      this.lastOpId = opId;
+      if (!chunk.preAdmissionNotice) this.lastOpId = opId;
       this.recordTurnOp(chunk, opId);
       this.durability.markSending(opId);
     }
@@ -1832,7 +1853,7 @@ export class OutboundQueue implements IOutboundQueue {
             (lastEvidence?.logical_attempt_count ?? 0) + 1,
           );
         }
-        this.lastSubmittedTextDedupeKey = textDedupeKey;
+        if (!chunk.preAdmissionNotice) this.lastSubmittedTextDedupeKey = textDedupeKey;
         return;
       } catch (err) {
         lastEvidence = classifyOutboundFailure(err, {
