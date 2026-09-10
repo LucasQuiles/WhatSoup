@@ -803,7 +803,7 @@ export class SessionLifecycleStore {
           providerSessionId: string | null;
           provider: string;
           status: string;
-        } | null } = { state: 'UNKNOWN', row: null };
+        } | null };
         try {
           const row = this.db.raw.prepare(`
             SELECT id AS agentSessionRowId, session_id AS providerSessionId, provider, status
@@ -814,6 +814,7 @@ export class SessionLifecycleStore {
             : { state: 'ROW_FOUND', row };
         } catch {
           // Diagnostic failure must not replace the original lifecycle rejection.
+          observed = { state: 'UNKNOWN', row: null };
         }
         throw new Error('Exact active agent session row could not be closed', {
           cause: {
