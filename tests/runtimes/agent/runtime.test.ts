@@ -693,6 +693,27 @@ describe('isUsageLimitMessage', () => {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime', () => {
+  it.each([false, true])('attributes a pre-admission outer-catch notice to its request namespace (scheduled: %s)', async (scheduled) => {
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { sessionScope: 'per_chat' });
+    await runtime.start();
+    const msg = makeMsg({ content: 'fixture input', inboundSeq: 99, isSyntheticJob: scheduled });
+    const state = runtime as unknown as {
+      _handleMessageInner: (message: IncomingMessage) => Promise<void>;
+      resolvePerChatMapKey: (chatJid: string) => string;
+      chatQueues: Map<string, IOutboundQueue>;
+    };
+    const baseKey = state.resolvePerChatMapKey(msg.chatJid);
+    const targetKey = scheduled ? `${baseKey}::scheduled-agent-job` : baseKey;
+    const notice = vi.fn(() => true);
+    const wrongNotice = vi.fn(() => true);
+    state.chatQueues.set(targetKey, { ...mockQueue, enqueuePreAdmissionNotice: notice });
+    state.chatQueues.set(scheduled ? baseKey : `${baseKey}::scheduled-agent-job`, { ...mockQueue, enqueuePreAdmissionNotice: wrongNotice });
+    vi.spyOn(state, '_handleMessageInner').mockRejectedValueOnce(new Error('fixture pre-admission failure'));
+    await sendAndDrain(runtime, msg);
+    expect(notice).toHaveBeenCalledWith('Something went wrong processing that message. Try again?', 99);
+    expect(wrongNotice).not.toHaveBeenCalled();
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     capturedOnEventRef.current = null;
@@ -11092,13 +11113,21 @@ describe('AgentRuntime', () => {
 
   // ─── AE1: Group Resume Suppression ───────────────────────────────────────────
   describe('AE1 — group resume suppression', () => {
-    it('skips proactive resume for group checkpoints and marks them ended, resumes DMs normally', async () => {
+    it('preserves group checkpoints without proactive work and resumes DMs normally', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
       mockSession.spawnSession.mockImplementation(() => new Promise<void>(() => {}));
 
+      const groupCheckpoint = completedCheckpoint({
+        conversationKey: '111111100000000001_at_g.us',
+        deliveryJid: '111111100000000001@g.us',
+        deliveryNamespace: 'g.us',
+        scope: 'per_chat',
+        sessionId: 'group-sess-1',
+      });
+      const retainedGroup = structuredClone(groupCheckpoint);
       const mockDurability = {
         getResumableCheckpoints: vi.fn(() => [
           { conversation_key: '111111100000000001_at_g.us' },
@@ -11106,13 +11135,7 @@ describe('AgentRuntime', () => {
         ]),
         getSessionCheckpoint: vi.fn((key: string) => {
           if (key === '111111100000000001_at_g.us') {
-            return completedCheckpoint({
-              conversationKey: key,
-              deliveryJid: '111111100000000001@g.us',
-              deliveryNamespace: 'g.us',
-              scope: 'per_chat',
-              sessionId: 'group-sess-1',
-            });
+            return groupCheckpoint;
           }
           if (key === '15551230006') {
             return completedCheckpoint({
@@ -11131,20 +11154,10 @@ describe('AgentRuntime', () => {
 
       await runtime.start();
 
-      // Group checkpoint must be tombstoned as 'ended'
-      expect(mockDurability.upsertSessionCheckpoint).toHaveBeenCalledWith(
-        '111111100000000001_at_g.us',
-        { sessionStatus: 'ended' },
-      );
-
-      // DM must have triggered spawnSession (session was created)
-      expect(mockSession.spawnSession).toHaveBeenCalledTimes(1);
-
-      // Group must NOT have triggered spawnSession
-      const spawnCalls = mockSession.spawnSession.mock.calls;
-      // spawnSession is called on a SessionManager instance, not with the key directly —
-      // verify it was called exactly once (for the DM) and not twice (which would mean group was also resumed)
-      expect(spawnCalls).toHaveLength(1);
+      expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalled();
+      expect(groupCheckpoint).toEqual(retainedGroup);
+      expect(mockSession.spawnSession).toHaveBeenCalledExactlyOnceWith('dm-sess-1');
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
     });
 
     it('DM-only resume works normally when no group checkpoints present', async () => {
@@ -12589,6 +12602,7 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_JOURNALED_FAST_ANSWER',
         hasSecret: true,
       });
+      mockQueue.targetChatJid = '5678@s.whatsapp.net';
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
@@ -12623,6 +12637,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].chatJid).toBe('5678@s.whatsapp.net');
       expect(mockSession.waitForProviderTurnToTerminalize).not.toHaveBeenCalled();
       mockSession.sendTurn.mockClear();
       eventHandlers.get('pollVoteReceived')!({
@@ -13047,6 +13062,7 @@ describe('AgentRuntime', () => {
 
     it('terminalizes a fully collected typed poll answer before reinjecting the structured answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_FULL_DURABILITY', hasSecret: true });
+      mockQueue.targetChatJid = '5678@s.whatsapp.net';
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
@@ -13079,6 +13095,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].chatJid).toBe('5678@s.whatsapp.net');
       mockSession.sendTurn.mockClear();
       replyGuarantee.arm.mockClear();
 

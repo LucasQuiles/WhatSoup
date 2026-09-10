@@ -272,6 +272,7 @@ export function makeQueueMock(targetChatJid: string): IOutboundQueue {
 
 export function makeTerminalDurabilityMock() {
   return {
+    getSessionCheckpoint: vi.fn(() => undefined),
     getOutboundDeliverySnapshot: vi.fn(),
     finalizeTurnTerminal: vi.fn(() => ({
       applied: true,

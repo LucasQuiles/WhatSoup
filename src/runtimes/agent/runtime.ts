@@ -65,6 +65,8 @@ import {
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
+  assertCheckpointRoutePolicyCompatible,
+  type ProviderCheckpointRoutePolicy,
   type ProviderBoundaryMode,
   type ProviderDataPolicy,
 } from '../../core/provider-data-policy.ts';
@@ -101,6 +103,7 @@ import {
   backfillWorkspaceKeys,
   markOrphaned,
   getResumableSessionForChat,
+  resolveResumableAgentSession,
   accumulateSessionTokens,
   insertTokenEvent,
   accumulateTokensWithEvent,
@@ -4240,6 +4243,13 @@ export class AgentRuntime implements Runtime {
           continue;
         }
 
+        // Group work waits for an admitted inbound or scheduled turn. Its retained
+        // checkpoint must survive startup, including the scheduled namespace.
+        if (isGroupConversationKey(cp.conversation_key)) {
+          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
+          continue;
+        }
+
         const resumeIdentity = this.checkpointResumeIdentity(full, 'per_chat');
         if (!resumeIdentity) {
           const admissionReason = this.completedDeliveryIdentityAdmissionReason(full, 'per_chat');
@@ -4260,16 +4270,6 @@ export class AgentRuntime implements Runtime {
           continue;
         }
         const chatJid = resumeIdentity.deliveryJid;
-
-        // AE1: Skip group conversations — groups should not be proactively resumed.
-        // Agents in groups are orchestrated via @mentions. Proactive resume bypasses
-        // the ingest pipeline's sibling filter (access-policy.ts:121-124), causing
-        // unsolicited messages. Group sessions start fresh on the next @mention.
-        if (isGroupConversationKey(cp.conversation_key) || isGroupJid(chatJid)) {
-          log.info({ conversationKey: cp.conversation_key }, 'skipping proactive resume — group chat');
-          this.durability.upsertSessionCheckpoint(cp.conversation_key, { sessionStatus: 'ended' });
-          continue;
-        }
 
         // Skip stale sessions — don't resume conversations that have been inactive for over 60 minutes.
         // Without this, every restart tries to resurrect days-old sessions and fires unsolicited messages.
@@ -4903,7 +4903,8 @@ export class AgentRuntime implements Runtime {
         }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
-        if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
+        const admittedFailure = this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq);
+        if (admittedFailure) {
           // Coordinator owns terminal persistence and reply-guarantee disarm.
         } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
@@ -4912,7 +4913,20 @@ export class AgentRuntime implements Runtime {
         }
         // Notify user of failure
         if (!wedgedReclaim) {
-          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+          const text = 'Something went wrong processing that message. Try again?';
+          if (admittedFailure) {
+            this.sendDirect(msg.chatJid, text);
+          } else {
+            void sendDirectForPort(this.chatTransportHost, msg.chatJid, text, false, {
+              sourceInboundSeq: msg.inboundSeq,
+              mapKey: this.sessionScope === 'per_chat'
+                ? resolveAgentTurnMapKey(
+                    this.resolvePerChatMapKey(msg.chatJid),
+                    msg.isSyntheticJob === true && !this.sandboxPerChat,
+                  )
+                : undefined,
+            });
+          }
         }
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
@@ -5706,6 +5720,64 @@ export class AgentRuntime implements Runtime {
     // currentTurnChatJid is cleared in handleEvent('result')
   }
 
+  private lazyPerChatResumeTarget(
+    session: SessionManager,
+    chatJid: string,
+    mapKey: string | undefined,
+    actorJid?: string,
+  ): { id: number; session_id: string } | null {
+    if (this.sessionScope !== 'per_chat' || this.sandboxPerChat || !this.durability
+      || mapKey === undefined) return null;
+    if (this.chatSessions.get(mapKey) !== session) {
+      throw new Error('Lazy resume manager no longer owns the conversation');
+    }
+    const scheduled = isScheduledAgentJobMapKey(mapKey);
+    const expectedMapKey = resolveAgentTurnMapKey(this.resolvePerChatMapKey(chatJid), scheduled);
+    if (mapKey !== expectedMapKey) throw new Error('Lazy resume conversation namespace mismatch');
+    const conversationKey = canonicalConversationKey(chatJid, this.db);
+    const persistenceKey = scheduled ? mapKey : conversationKey;
+    const checkpoint = this.durability.getSessionCheckpoint(persistenceKey);
+    if (!checkpoint || checkpoint.session_status === 'ended' || checkpoint.session_id === null) return null;
+    const status = session.getStatus();
+    // Retained context cannot enter the fresh path after an admitted manager fails.
+    if (session.getDbRowId() !== null || status.startedAt !== null
+      || status.sessionId !== null || !status.providerTerminated
+      || status.durableFailureClosed || status.durableFailureInconclusive) {
+      throw new Error('Retained context cannot be adopted by this session manager');
+    }
+    const owner = this.sessionOwnership.get(mapKey);
+    if (!owner || owner.state !== 'starting' || owner.generation !== 1) {
+      throw new Error('Retained context requires a newly claimed session manager');
+    }
+    // The storage namespace is checked above; completed delivery identity names the destination.
+    const identity = this.checkpointResumeIdentity({ ...checkpoint, conversation_key: conversationKey }, 'per_chat');
+    if (!identity || identity.deliveryJid !== chatJid
+      || !['active', 'suspended', 'orphaned'].includes(checkpoint.session_status)) {
+      throw new Error('Retained checkpoint is not admissible for lazy resume');
+    }
+    const provider = session.getProviderId();
+    const resumable = getResumableSessionForChat(this.db, persistenceKey, provider);
+    if (!resumable || resumable.session_id !== checkpoint.session_id) {
+      throw new Error('Retained checkpoint has no safely resumable session row');
+    }
+    // Resolve without row ID first so a second retained owner cannot be hidden by exact-row selection.
+    const resolved = resolveResumableAgentSession(this.db, {
+      provider, providerSessionId: resumable.session_id,
+    });
+    if (resolved.id !== resumable.id || resolved.workspace_key !== persistenceKey) throw new Error('Lazy resume session row ownership mismatch');
+    const route = this.resolveRouteForTurn(chatJid, actorJid);
+    if (route.provider !== provider || route.model !== session.getModelRef()) {
+      throw new Error('Lazy resume manager route changed before admission');
+    }
+    const watchdog: unknown = checkpoint.watchdog_state ? JSON.parse(checkpoint.watchdog_state) : null;
+    const policy = watchdog && typeof watchdog === 'object' && !Array.isArray(watchdog)
+      ? (watchdog as Record<string, unknown>)['providerRoutePolicy'] : null;
+    assertCheckpointRoutePolicyCompatible(route,
+      policy && typeof policy === 'object' && !Array.isArray(policy)
+        ? policy as ProviderCheckpointRoutePolicy : null);
+    return resumable;
+  }
+
   /**
    * Shared helper: spawn session if needed, send the turn, and handle the
    * STDIN_WRITE_TIMEOUT error consistently across all non-shared modes.
@@ -5768,6 +5840,7 @@ export class AgentRuntime implements Runtime {
       this.settleAbandonedRespawn(effectiveMapKey);
     }
     if (wasInactive) {
+      const resumeTarget = this.lazyPerChatResumeTarget(session, chatJid, effectiveMapKey, actorJid);
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -5787,9 +5860,13 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
-      await session.shutdown();
+      if (!resumeTarget) await session.shutdown();
       if (dispatchCancelled()) return;
-      await session.spawnSession();
+      if (resumeTarget) {
+        await session.spawnSession(resumeTarget.session_id, resumeTarget.id);
+      } else {
+        await session.spawnSession();
+      }
       spawnedForTurn = true;
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
@@ -5815,7 +5892,7 @@ export class AgentRuntime implements Runtime {
 
       // Fresh spawns merge recent context into the active turn; see context-handoff.ts.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
-      if (!resumeFailedOwnsContext) {
+      if (!resumeTarget && !resumeFailedOwnsContext) {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
