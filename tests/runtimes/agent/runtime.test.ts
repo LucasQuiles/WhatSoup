@@ -12602,6 +12602,7 @@ describe('AgentRuntime', () => {
         waMessageId: 'POLL_JOURNALED_FAST_ANSWER',
         hasSecret: true,
       });
+      mockQueue.targetChatJid = '5678@s.whatsapp.net';
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
 
@@ -12636,6 +12637,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].chatJid).toBe('5678@s.whatsapp.net');
       expect(mockSession.waitForProviderTurnToTerminalize).not.toHaveBeenCalled();
       mockSession.sendTurn.mockClear();
       eventHandlers.get('pollVoteReceived')!({
@@ -13060,6 +13062,7 @@ describe('AgentRuntime', () => {
 
     it('terminalizes a fully collected typed poll answer before reinjecting the structured answer', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_FULL_DURABILITY', hasSecret: true });
+      mockQueue.targetChatJid = '5678@s.whatsapp.net';
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const durability = { completeInbound: vi.fn(), ...makeTerminalDurabilityMock() };
@@ -13092,6 +13095,7 @@ describe('AgentRuntime', () => {
       });
 
       await vi.waitFor(() => expect(pollSends.length).toBe(1));
+      expect(pollSends[0].chatJid).toBe('5678@s.whatsapp.net');
       mockSession.sendTurn.mockClear();
       replyGuarantee.arm.mockClear();
 
