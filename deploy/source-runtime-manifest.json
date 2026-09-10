@@ -53,7 +53,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "1a889a489322dc006ad89818f5e980a7556c6eafcc7e41a7817ea90370fa5824",
+      "sha256": "7ad6fd3809fdfae6457de8c2b22a5c14de1e2ef640b328f134b9f60009cc5508",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -83,9 +83,11 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "ecb712a8b56a8cdc2d94cf2597bff3fe7991279f3a7fe5ca7674d10aa6387300",
+      "sha256": "f91f73b4971a91392305e923638036cf8fb743a895e8e1e35f2249050fa1244c",
       "mustContain": [
-        "composeWithExactLineDedup"
+        "composeWithExactLineDedup",
+        "managedTerminationUnknown",
+        "providerTerminated"
       ],
       "importGraph": true
     },

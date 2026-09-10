@@ -152,8 +152,23 @@ function runOpenCodeFallbackProbeInventory(
     '    assert child_env.get("PATH") == "/fixture/bin:/usr/bin:/bin"',
     '    assert child_env.get("MINIMAX_API_KEY") == "fixture-minimax-key"',
     '    assert child_env.get("WHATSOUP_INSTANCE") == "agent-alpha"',
-    '    assert child_env.get("WHATSOUP_MCP_SOCKET") == "/fixture/workspace/.claude/whatsoup.sock"',
-    '    assert child_cwd == "/fixture/workspace"',
+    // The workspace and the synthesized socket belong to the FUNCTIONAL probe,
+    // which drives a real session. The three capability surfaces (version, help,
+    // run help) only ask the binary what it supports, so they run from a fresh
+    // directory the probe owns with no socket. Asserted per surface rather than
+    // once for all four, which is what this harness used to do.
+    '    capability = dry_stdout_env in {',
+    '        "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",',
+    '        "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",',
+    '        "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",',
+    '    }',
+    '    if capability:',
+    '        assert "WHATSOUP_MCP_SOCKET" not in child_env, dry_stdout_env',
+    '        assert child_cwd != "/fixture/workspace", dry_stdout_env',
+    '        assert child_cwd and os.path.isdir(child_cwd), dry_stdout_env',
+    '    else:',
+    '        assert child_env.get("WHATSOUP_MCP_SOCKET") == "/fixture/workspace/.claude/whatsoup.sock"',
+    '        assert child_cwd == "/fixture/workspace"',
     '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT":',
     '        return "1.2.3", "", 0, False',
     '    if dry_stdout_env in {"BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT", "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT"}:',
@@ -5172,6 +5187,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '0',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: "You've hit your weekly limit · resets Jun 16, 10pm (America/New_York)",
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
@@ -5558,11 +5586,17 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'loaded = """gui/501/com.whatsoup.agent-alpha = {\n\tenvironment = {\n\t\tPATH => /loaded/first:/loaded/second\n\t\tHOME => /fixture\n\t}\n}"""',
-      'print(json.dumps({"parsed": m.launchctl_environment_path(loaded), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
+      // launchctl_environment_path was a one-line wrapper with no production
+      // caller; it is gone and its parse assertion is carried here, driving the
+      // surviving readers directly: launchctl_environment for the block parse,
+      // environment_provider_path for the PATH accessor.
+      'parsed_env = m.launchctl_environment(loaded)',
+      'print(json.dumps({"parsed": m.environment_provider_path(parsed_env), "home": parsed_env.get("HOME"), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
     ].join('\n'))) as Record<string, unknown>;
 
     expect(result).toEqual({
       parsed: '/loaded/first:/loaded/second',
+      home: '/fixture',
       match: true,
       mismatch: false,
     });
@@ -5603,7 +5637,7 @@ print(m.probe_health(9092))
     const lines = JSON.parse(python([
       importHealthModulePrelude(),
       'import json',
-      'm.instance_provider_path = lambda name: "/runtime/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/runtime/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/runtime/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/runtime/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {"opencodeProviderProbeCommand": "/gui-only/bin/opencode"}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
@@ -5618,7 +5652,7 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'm.HOST_PLATFORM = "darwin"',
-      'm.instance_provider_path = lambda name: "/generated/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/generated/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/loaded/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
@@ -6252,6 +6286,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain: "/Users/testuser/Library/Keychains/login.keychain-db"\\n"svce"<blob>="Claude_Credential-fixture"',
@@ -6669,6 +6716,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6786,6 +6846,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6919,6 +6992,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -7054,6 +7140,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '36',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDERR: 'security: SecKeychainSearchCopyNext: User interaction is not allowed.',

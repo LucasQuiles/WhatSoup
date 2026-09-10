@@ -93,11 +93,15 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // runtime consumer.
   // src/fleet/incidents/* graduated 2026-07-28: the Plan-2 ingestion surface
   // (POST /api/signals in src/fleet/index.ts) is their production importer.
+  // src/lib/bounded-timeout.ts graduated 2026-09-02: the F2a pin-receipt send
+  // in src/runtimes/agent/model-pin.ts (the #2121 A2 follow-up) bounds its
+  // await with withBoundedTimeout, which makes it the first PRODUCTION
+  // importer of the #1816 primitive. Removed from the list below per this
+  // guard's own stale-check, which force-graduates an entry once it is wired.
   // 24h-window primitives (#1871 inventory): landed test-only-wired, pending
   // wiring or removal per each owning issue. Wiring is out of scope for #1871.
   { path: 'src/fleet/bot-errors-schedule-matrix.ts', issue: '#2749', reason: 'S8 matrix lands test-wired; the health-poller integration (S9c fleet remainder) is its runtime importer and lands next in the slice train' },
   { path: 'src/core/retry-runner.ts', issue: '#1817', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/bounded-timeout.ts', issue: '#1816', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/credential-diagnostics.ts', issue: '#1813', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/fallback-transition.ts', issue: '#1820', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },

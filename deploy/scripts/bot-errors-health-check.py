@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -32,7 +32,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
-from lib.target_provenance import safe_observer_provenance, safe_target_provenance
+from lib.target_provenance import (
+    safe_observer_provenance,
+    safe_release_divergence,
+    safe_target_provenance,
+)
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
@@ -42,6 +46,7 @@ from lib.controller_log import (
 )
 from lib.durable_json import (
     JsonVersion,
+    PublicationResult,
     durable_json_target,
     observe_json,
     operation_id,
@@ -1303,6 +1308,233 @@ def _durable_target(path: Path):
     )
 
 
+# The strict durable reader (lib/durable_json.observe_json) forbids any bit in
+# 0o077 on a private leaf. Kept as a named constant so a repair and its tests
+# cannot drift onto the writer's 0o600 by accident: they are different values
+# answering different questions.
+LEGACY_RECEIPT_FORBIDDEN_MODE_BITS = 0o077
+LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS = 0o022
+LEGACY_RECEIPT_MODE_EVIDENCE_FIELD = "legacyReceiptModeRepairedFrom"
+
+LEGACY_RECEIPT_REFUSAL_SYMLINK = "symlink"
+LEGACY_RECEIPT_REFUSAL_NOT_REGULAR = "not_regular"
+LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER = "foreign_owner"
+LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS = "multiple_links"
+LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE = "parent_writable"
+LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK = "parent_symlink"
+LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE = "parent_unreadable"
+LEGACY_RECEIPT_REFUSAL_UNOPENABLE = "unopenable"
+LEGACY_RECEIPT_REFUSAL_UNSUPPORTED = "unsupported_capability"
+
+
+class LegacyReceiptRepair(NamedTuple):
+    """Outcome of one legacy durable-receipt mode repair attempt.
+
+    ``previous_mode`` is set only when a repair actually happened, so it doubles
+    as the evidence of the pre-repair state. ``refusal`` is one of the
+    LEGACY_RECEIPT_REFUSAL_* codes; both fields are None when there was nothing
+    to repair.
+    """
+
+    previous_mode: int | None
+    refusal: str | None
+
+
+class _ReceiptParentUnusable(Exception):
+    """Internal: the receipt's parent cannot be opened without following a link.
+
+    ``refusal`` is a LEGACY_RECEIPT_REFUSAL_* code, or None when the parent is
+    merely absent, which is a silent no-op rather than a refusal.
+    """
+
+    def __init__(self, refusal: str | None) -> None:
+        super().__init__(refusal or "absent")
+        self.refusal = refusal
+
+
+def _classify_parent_component_failure(component: str, *, dir_fd: int) -> str:
+    """Name the reason a parent component could not be opened as a directory.
+
+    O_NOFOLLOW|O_DIRECTORY reports ENOTDIR for a symlink on darwin and ELOOP on
+    linux, and ENOTDIR also covers a plain file, so the errno alone cannot say
+    which it was. The open is still the security boundary; this lstat only
+    labels the refusal, so a race here downgrades the message, never the guard.
+    """
+    try:
+        component_stat = os.stat(component, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+    if stat.S_ISLNK(component_stat.st_mode):
+        return LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+
+
+def _resolved_receipt_parent(path: Path) -> Path:
+    """Resolve the receipt's parent exactly as the reader resolves its root.
+
+    _durable_target() builds the reader's target with
+    ``path.parent.resolve(strict=True)``, so a symlinked ancestor above the
+    state root, such as a linked home directory, is transparent to the reader:
+    it publishes through the link. The repair must resolve identically or it
+    would refuse on hosts the reader is happy with, and the repair would then
+    be permanently inert exactly where a legacy receipt still needs it.
+
+    The state directory ITSELF being a symlink is a different case. This
+    resolution accepts it and the leaf is repaired, but publication does not
+    get that far: record_daily_health_receipt() calls ensure_private_dir(),
+    which refuses a symlinked private directory outright. Such a host is
+    repaired and still fails to publish.
+
+    Keep this expression in lockstep with _durable_target above. It is written
+    out rather than reusing that function because _durable_target() also calls
+    ensure_private_dir(), which must not run before the repair has judged the
+    state root.
+    """
+    return path.parent.resolve(strict=True)
+
+
+def _open_receipt_parent(resolved_parent: Path) -> int:
+    """Open an already-resolved parent directory without traversing a symlink.
+
+    Walks the resolved absolute path one component at a time from the
+    filesystem root under O_NOFOLLOW|O_DIRECTORY, mirroring the strict reader's
+    _open_target_parent (lib/durable_json.py), which walks its own resolved
+    trusted_root the same way. Reimplemented here rather than imported because
+    that helper is private and durable_json.py is out of scope.
+
+    Resolution has already removed every symlink, so parent_symlink refuses
+    only when a component was replaced by a symlink between the resolution and
+    this walk. That race is the whole point of re-verifying under O_NOFOLLOW
+    instead of trusting the resolved string.
+
+    The caller owns the returned descriptor and must close it.
+    """
+    anchor = resolved_parent
+    try:
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        # Descriptor exhaustion (EMFILE/ENFILE) reaches even this open. The
+        # caller handles _ReceiptParentUnusable only, so an escaping OSError
+        # would abort the cycle instead of refusing the repair.
+        raise _ReceiptParentUnusable(LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE) from exc
+    try:
+        for component in anchor.parts[1:]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                raise _ReceiptParentUnusable(None) from exc
+            except OSError as exc:
+                raise _ReceiptParentUnusable(
+                    _classify_parent_component_failure(component, dir_fd=descriptor)
+                ) from exc
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
+    """Clear group and other permission bits from a pre-adoption durable leaf.
+
+    ensure_private_dir() re-applies 0700 to the state directory on every cycle,
+    but nothing repaired the leaf. A receipt written before the strict durable
+    reader was adopted therefore keeps its permissive mode forever and
+    observe_json() rejects it on every subsequent cycle, so the daily cycle
+    never publishes (#3501).
+
+    This is deliberately narrower than the best-effort
+    ``try: path.chmod(0o600) except OSError: pass`` idiom used elsewhere in this
+    script. A permissive mode on a state file is exactly the condition an
+    attacker would have exploited, so ownership is proven before the mode is
+    narrowed, and every guard is evaluated against the same descriptor that is
+    then chmod'ed, so the inode that was checked and the inode that is modified
+    cannot differ.
+
+    The parent is resolved exactly as the reader resolves its trusted root, so
+    a symlinked ancestor is transparent to both, and the resolved path is then
+    re-verified by walking its components under O_NOFOLLOW before the leaf is
+    opened relative to that proven descriptor.
+
+    Refusal is silent about the mode: it never chmods, never raises, and leaves
+    the leaf byte- and mode-identical, so the strict reader downstream remains
+    the sole authority on whether the leaf may be used.
+
+    The parent_writable refusal holds for one cycle only, and not because the
+    root is guaranteed to change. ensure_private_dir() ATTEMPTS to narrow the
+    state root after this returns and suppresses its own chmod errors, so on a
+    root this process cannot chmod the refusal simply repeats. The next cycle
+    re-checks the root mode either way, and repairs the leaf only if the
+    narrowing took effect and the leaf passes the remaining guards. The owner
+    guard is what protects against a foreign plant; a plant by the executing
+    uid itself is outside this threat model.
+    """
+    if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
+    try:
+        resolved_parent = _resolved_receipt_parent(path)
+    except FileNotFoundError:
+        # No state root yet, so no legacy leaf. Not a refusal: a fresh install
+        # must not log one every cycle.
+        return LegacyReceiptRepair(None, None)
+    except (OSError, RuntimeError):
+        # RuntimeError covers a symlink loop reported by resolve() rather than
+        # by errno.
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE)
+    try:
+        parent_fd = _open_receipt_parent(resolved_parent)
+    except _ReceiptParentUnusable as exc:
+        # refusal None means the parent is simply absent: no leaf, no repair,
+        # and no log line on a fresh install.
+        return LegacyReceiptRepair(None, exc.refusal)
+    try:
+        parent_stat = os.stat(parent_fd)
+        if stat.S_IMODE(parent_stat.st_mode) & LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE)
+        try:
+            # Opened relative to the walked parent descriptor, so the leaf is
+            # resolved in the directory this function proved, not by re-walking
+            # the path. O_NONBLOCK so a FIFO planted at the receipt path fails
+            # the regular-file guard instead of blocking the daily cycle forever
+            # on open(); it is ignored for the regular file expected here.
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return LegacyReceiptRepair(None, None)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_SYMLINK)
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+        try:
+            leaf_stat = os.stat(descriptor)
+            if not stat.S_ISREG(leaf_stat.st_mode):
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_NOT_REGULAR)
+            if leaf_stat.st_uid != os.getuid():
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER)
+            if leaf_stat.st_nlink != 1:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS)
+            previous_mode = stat.S_IMODE(leaf_stat.st_mode)
+            if not previous_mode & LEGACY_RECEIPT_FORBIDDEN_MODE_BITS:
+                return LegacyReceiptRepair(None, None)
+            try:
+                os.chmod(descriptor, previous_mode & ~LEGACY_RECEIPT_FORBIDDEN_MODE_BITS)
+            except OSError:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+            return LegacyReceiptRepair(previous_mode, None)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_fd)
+
+
 def safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
     return (cleaned or "unknown")[:80]
@@ -2315,12 +2547,23 @@ def outbox_event(
     # target instance distinct from the producer, resolve that target's own
     # provenance (fail-closed to unknown) instead of letting producer evidence
     # stand in for it.
-    event["observerProvenance"] = redact_json_value(
-        safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
-    )
+    observer_provenance = safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
+    event["observerProvenance"] = redact_json_value(observer_provenance)
     target_instance = str(event["instance"])
     if target_instance and target_instance != "bot-errors-health":
-        event["targetProvenance"] = redact_json_value(safe_target_provenance(target_instance, HOST_PLATFORM))
+        target_provenance = safe_target_provenance(target_instance, HOST_PLATFORM)
+        event["targetProvenance"] = redact_json_value(target_provenance)
+        # #2358 C9/C10: classified only where a distinct target exists to
+        # compare against. A producer-self event has no target block, so there
+        # is nothing to diverge from and no verdict to attach.
+        #
+        # Classified from the RAW blocks, matching the runner, so both
+        # producers judge the same inputs. Reading the redacted copies here
+        # would let a future redaction rule that rewrote commit-shaped text
+        # move this verdict and not the runner. Only the verdict is redacted.
+        event["releaseDivergence"] = redact_json_value(
+            safe_release_divergence(observer_provenance, target_provenance)
+        )
     if force_notify:
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "critical"
@@ -4232,12 +4475,159 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return "opencode"
 
 
-def instance_provider_path(name: str) -> str | None:
-    dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
-    if dry_path is not None:
-        return dry_path.strip() or None
-    if HOST_PLATFORM != "darwin":
-        return os.environ.get("PATH") or None
+# The answer this reader owes for every input shape -- refuse, empty or map --
+# is docs/runbooks/launchd-governed-env-reader-contract.md, and
+# src/fleet/launchd-env-drift.ts reads the same file to the same contract. Both
+# are held to one corpus at tests/fixtures/launchd-env-plist-contract/. Change
+# the contract before changing either reader.
+PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
+# Duplicate detection covers the canonical marker and the measured variant
+# where either key tag has only XML whitespace before ">". It does not claim
+# general XML equivalence, and the canonical literal above remains the only
+# marker that selects a dictionary to parse.
+PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE = re.compile(
+    r"<key[ \t\r\n]*>EnvironmentVariables</key[ \t\r\n]*>"
+)
+# The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
+# `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
+# reader, so matching the literal "<dict>" made the nested-dict guard below miss
+# every other spelling: the block still truncated at the first `</dict>` and a
+# governed key declared AFTER the nested dict read as absent rather than as
+# unknown. The lookahead keeps a hypothetical `<dictionary>` out.
+# DETECTION is broad: any dict opening token at all, whatever it carries.
+PLIST_DICT_OPEN_TOKEN_RE = re.compile(r"<dict(?=[ \t\r\n/>])")
+# What this reader will PARSE is narrow: plain, whitespace-padded and
+# self-closing. An attributed dict is REFUSED rather than consumed. Consuming to
+# the first ">" would end the token early on a legal `<dict a="x>y">`, and the
+# remainder of the opening tag would then be read as body pairs -- a first-wins
+# injection of a governed key from inside a tag. plist(5) dicts carry no
+# attributes, so refusing costs nothing and fails closed.
+PLIST_DICT_OPEN_RE = re.compile(r"<dict[ \t\r\n]*(/?)>")
+PLIST_DICT_CLOSE_RE = re.compile(r"</dict[ \t\r\n]*>")
+# XML whitespace is exactly these four characters. Python's \s and .strip() also
+# accept \x0b, \x0c and the Unicode spaces, which the system plist parser
+# rejects -- so a plist this reader called well-formed could be one launchd
+# refuses to load.
+PLIST_XML_SPACE = " \t\r\n"
+PLIST_ENV_PAIR_RE = re.compile(
+    r"<key>([^<]*)</key>[ \t\r\n]*<string>([^<]*)</string>"
+)
+
+
+# The XML region kinds this reader must never read as markup, as
+# (opener, closer) pairs. A comment, a CDATA section and a processing
+# instruction are all inert text to the system plist parser: an
+# EnvironmentVariables marker, a Label or a dict spelled inside one is not a
+# marker, a Label or a dict, however legal the surrounding file is.
+PLIST_INERT_XML_REGIONS = (
+    ("<!--", "-->"),
+    ("<![CDATA[", "]]>"),
+    ("<?", "?>"),
+)
+
+
+def mask_inert_xml_regions(raw: str) -> tuple[str, list[tuple[int, int]]] | None:
+    """Blank every inert XML region, PRESERVING LENGTH, and REPORT where.
+
+    None if a region is unterminated. Returns (masked_text, spans).
+
+    Comments alone were covered before, and TWO guards were defeated by that,
+    both measured on the pre-fix code rather than reasoned about:
+
+      the Label guard. A commented-out Label naming this instance, above a real
+      Label naming a DIFFERENT one, was accepted: the reader returned the other
+      instance's environment for agent-alpha. That guard exists precisely so an
+      unrelated or planted plist at the expected pathname is never parsed, and
+      one comment turned it off.
+
+      the EnvironmentVariables marker. A commented-out decoy dict before the
+      live one won the ``find``, so the decoy's body was read as the environment
+      and the live dict never looked at.
+
+    A CDATA section and a processing instruction are the same defect in two
+    further spellings, and they were still live text here: a decoy
+    ``<key>EnvironmentVariables</key><dict/>`` inside either one, placed ahead
+    of the live dict, was read as an empty environment. Both spellings lint
+    clean and ``plutil -extract EnvironmentVariables json`` returns the REAL
+    environment for them.
+
+    MASKED, not deleted: length is preserved, so every offset below still
+    indexes the real text and no offset map has to be kept honest. '-' is not
+    XML whitespace, so an inert region in a whitespace-only GAP still fails the
+    checks that require whitespace there. '-' also carries no ambiguity as
+    filler, because ``--`` cannot appear inside a well-formed XML comment, and
+    it starts no token this reader searches for.
+
+    THE SPANS ARE RETURNED BECAUSE THE FILLER IS NOT ENOUGH ON ITS OWN, and
+    that is measured rather than reasoned. In a whitespace-only gap '-' is
+    correctly rejected, but in CHARACTER DATA it is perfectly legal: masking
+    ``<string><![CDATA[/opt/bin]]></string>`` yields a run of dashes that the
+    pair pattern's ``[^<]*`` group matches happily. A body that fails closed
+    today -- the literal "<" of ``<![CDATA[`` ends ``[^<]*``, the pair never
+    matches, and the body is not fully consumed -- would have started parsing to
+    a dash-valued key. The caller therefore refuses on span INTERSECTION with
+    the block, which keeps the cdata_value and cdata_key_name cells closed by a
+    rule instead of by a filler character's side effect.
+
+    The EARLIEST opener wins at each step, not the first kind in the tuple: a
+    processing instruction can carry ``<!--`` as literal text, and a comment can
+    carry ``<?``.
+
+    An unterminated opener is not well-formed XML. It used to be ignored, so
+    everything after it was parsed as live markup; it is refused now.
+
+    Applied once, to the whole file, BEFORE the Label search -- not just before
+    the marker search. Fixing the marker alone would leave the Label decoy.
+
+    A DOCTYPE internal subset is NOT masked. plist(5) files carry an external
+    DOCTYPE with no internal subset, and inventing a fourth region kind for a
+    shape the generator never emits would widen this reader for nothing.
+    """
+    out: list[str] = []
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        open_at = -1
+        opener_length = 0
+        closer = ""
+        for candidate_opener, candidate_closer in PLIST_INERT_XML_REGIONS:
+            at = raw.find(candidate_opener, cursor)
+            if at < 0:
+                continue
+            if open_at < 0 or at < open_at:
+                open_at = at
+                opener_length = len(candidate_opener)
+                closer = candidate_closer
+        if open_at < 0:
+            out.append(raw[cursor:])
+            return ("".join(out), spans)
+        close_at = raw.find(closer, open_at + opener_length)
+        if close_at < 0:
+            return None
+        end = close_at + len(closer)
+        out.append(raw[cursor:open_at])
+        out.append("-" * (end - open_at))
+        spans.append((open_at, end))
+        cursor = end
+
+
+def intersects_inert_region(
+    spans: list[tuple[int, int]], start: int, end: int
+) -> bool:
+    """True when [start, end) overlaps any masked region by at least one byte."""
+    return any(span_start < end and start < span_end for span_start, span_end in spans)
+
+
+def instance_plist_environment(name: str) -> dict[str, str] | None:
+    """Read the WHOLE EnvironmentVariables map out of a generated instance plist.
+
+    One reader for every governed key the probe checks (PATH and
+    WHATSOUP_PATH_PREPEND today), so a second key cannot arrive with a second
+    copy of these guards: regular non-symlink file, bounded size, and a Label
+    that matches the instance, so an unrelated or planted plist at the expected
+    pathname is never parsed. None means "no readable generated plist", which
+    every caller must treat as unknown rather than as absence of drift.
+    """
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"com.whatsoup.{name}.plist"
     try:
         plist_stat = plist_path.lstat()
@@ -4248,23 +4638,190 @@ def instance_provider_path(name: str) -> str | None:
         raw = plist_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+    # Masked FIRST: every search below -- Label, marker, dict bounds, body --
+    # must see comments, CDATA sections and processing instructions as inert
+    # filler rather than as live markup.
+    masked = mask_inert_xml_regions(raw)
+    if masked is None:
+        return None
+    raw, inert_spans = masked
     label_match = re.search(
         r"<key>Label</key>\s*<string>(.*?)</string>", raw, re.DOTALL
     )
     if label_match is None or html.unescape(label_match.group(1)) != f"com.whatsoup.{name}":
         return None
-    environment_match = re.search(
-        r"<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>", raw, re.DOTALL
-    )
-    if environment_match is None:
+    marker = raw.find(PLIST_ENVIRONMENT_KEY_MARKER)
+    if marker < 0:
         return None
-    path_match = re.search(
-        r"<key>PATH</key>\s*<string>(.*?)</string>", environment_match.group(1), re.DOTALL
-    )
-    if path_match is None:
+    after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
+    # Count only the canonical and XML-whitespace-padded key tags promised by
+    # this detector. A second match is ambiguous to this narrow reader, so it
+    # refuses rather than reporting a block the system parser may not load.
+    if len(PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE.findall(raw)) > 1:
         return None
-    value = html.unescape(path_match.group(1)).strip()
-    return value or None
+    token_match = PLIST_DICT_OPEN_TOKEN_RE.search(raw, after_marker)
+    if token_match is None:
+        return None
+    # Only whitespace may separate the key from its value element; anything else
+    # means this dict belongs to some later key, not to EnvironmentVariables.
+    #
+    # PLIST_XML_SPACE, not a bare .strip(). Python's .strip() also removes
+    # U+00A0, form feed and vertical tab, which the system plist parser rejects
+    # -- so this gap was the one place left where this reader could call a plist
+    # well-formed that launchd refuses to load. The body-consumption checks below
+    # already used the XML set; this makes the whole reader agree with itself,
+    # and agree with the TypeScript comparator it mirrors.
+    if raw[after_marker:token_match.start()].strip(PLIST_XML_SPACE):
+        return None
+    # The token is located broadly and then must match the narrow form EXACTLY
+    # where it was found, so an attributed dict is refused here rather than
+    # skipped over in favour of some later plain one.
+    open_match = PLIST_DICT_OPEN_RE.match(raw, token_match.start())
+    if open_match is None:
+        return None
+    # `<dict/>` is a well-formed EMPTY map, not an unreadable plist. Saying
+    # "unreadable" there misnames the operator's problem; the governed-PATH
+    # absence check downstream reports it accurately instead.
+    if open_match.group(1):
+        return {}
+    close_match = PLIST_DICT_CLOSE_RE.search(raw, open_match.end())
+    if close_match is None:
+        return None
+    # AN INERT REGION INSIDE THE BLOCK IS NOT CONTENT THIS READER MAY CONSUME.
+    # The mask blanks it to '-', and '-' is legal character data, so a masked
+    # CDATA value satisfies the pair pattern's ``[^<]*`` group and a block that
+    # fails closed today would parse to a dash-valued key. Measured on the
+    # cdata_value and cdata_key_name cells. The whitespace checks below still
+    # catch a region in a gap; this catches one in character data, which they
+    # cannot.
+    if intersects_inert_region(inert_spans, open_match.end(), close_match.start()):
+        return None
+    block = raw[open_match.end():close_match.start()]
+    # The block ends at the FIRST </dict>, so a nested dict truncates the map and
+    # makes a declared key read as absent. The TypeScript comparator
+    # (src/fleet/launchd-env-drift.ts) refuses outright in that case; match it and
+    # report unknown rather than hand back a partial map.
+    if PLIST_DICT_OPEN_TOKEN_RE.search(block) is not None:
+        return None
+    # THE BODY MUST BE FULLY CONSUMED BY THE PAIRS.
+    #
+    # Extracting adjacent key/string pairs and ignoring the rest is what made a
+    # governed key vanish: any token interposed between a key and its string, or
+    # any entry the pattern does not model, left the pair unmatched and the key
+    # simply absent from the map. Absent on both sides is the benign cell, so the
+    # probe reported agreement while launchd loaded the value. The system parser
+    # accepts all of these spellings; this reader must not silently disagree with
+    # it. So every byte of the body is accounted for: whatever is not a matched
+    # pair and not XML whitespace makes the plist UNREADABLE.
+    #
+    # This is a general rule rather than a list of known-bad tokens, because the
+    # failure is structural. It covers at least a CDATA value, a comment or a
+    # processing instruction between a key and its string, whitespace inside the
+    # </key> or <string> tag, an unpaired key, and a non-string value such as
+    # <data> -- launchd's EnvironmentVariables is a dictionary of STRINGS, so a
+    # non-string value there is a schema violation and refusing it is correct.
+    environment: dict[str, str] = {}
+    consumed = 0
+    for match in PLIST_ENV_PAIR_RE.finditer(block):
+        if block[consumed:match.start()].strip(PLIST_XML_SPACE):
+            return None
+        key = html.unescape(match.group(1))
+        # A duplicate key is refused rather than resolved. This reader took the
+        # FIRST occurrence and the TypeScript comparator took the LAST, so the
+        # two disagreed about the same file; neither precedence is defensible
+        # against a parser that has its own. Refusing settles it on both sides.
+        if key in environment:
+            return None
+        # NOT stripped. plist(5) <string> content is significant, and the
+        # TypeScript comparator keeps the value as written, so stripping here
+        # made the two readers disagree about the same file. Every consumer of
+        # this map reaches values through environment_value(), which applies the
+        # "empty or whitespace-only reads as absent" policy at the accessor
+        # where it belongs.
+        environment[key] = html.unescape(match.group(2))
+        consumed = match.end()
+    if block[consumed:].strip(PLIST_XML_SPACE):
+        return None
+    return environment
+
+
+def environment_value(environment: dict[str, str] | None, key: str) -> str | None:
+    """Single accessor for ONE governed value out of ANY environment map.
+
+    The generated plist, `launchctl print` output and the loaded job all answer
+    the same question, so they share one reader rather than each carrying its
+    own `.get(...)`. Empty and whitespace-only read as absent: launchctl drops
+    empty-valued keys, and an empty PATH entry would otherwise mean the current
+    directory.
+    """
+    if not environment:
+        return None
+    value = environment.get(key)
+    if value is None:
+        return None
+    return value.strip() or None
+
+
+def environment_provider_path(environment: dict[str, str] | None) -> str | None:
+    """Provider PATH out of any environment map."""
+    return environment_value(environment, "PATH")
+
+
+def instance_provider_path(name: str) -> str | None:
+    dry_path = os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH")
+    if dry_path is not None:
+        return dry_path.strip() or None
+    if HOST_PLATFORM != "darwin":
+        return os.environ.get("PATH") or None
+    return environment_provider_path(instance_plist_environment(name))
+
+
+GOVERNED_PLIST_READABLE = "readable"
+GOVERNED_PLIST_NOT_APPLICABLE = "not_applicable"
+GOVERNED_PLIST_UNREADABLE = "unreadable"
+
+
+def instance_plist_governed_environment(name: str) -> tuple[str, dict[str, str] | None]:
+    """(state, environment) for the governed checks. THREE states, not two.
+
+    These used to collapse into one None, and that collapse was a fail-open: a
+    caller could not tell "there is no LaunchAgent surface here" from "there is
+    one and I could not read it", so it treated both as "no drift" and the
+    default provider reported healthy on a missing, planted, oversized,
+    symlinked, wrongly-labelled or unreadable plist while opencode failed
+    closed on the same fixture.
+
+      not_applicable -- benign. No LaunchAgent surface exists (systemd host) or
+        the dry-run PATH override is active. The governed checks genuinely do
+        not apply and resolution proceeds unchanged.
+
+        EXACTLY TWO conditions reach this state, and stubbing the probe's OUTPUT
+        is not one of them. BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT and
+        BOT_ERRORS_DRY_PROVIDER_PROBE_RC replace what the CHILD PROCESS returns;
+        they are consumed by provider_command_output and say nothing about
+        whether this host has a LaunchAgent surface or whether that surface is
+        readable. They used to be read here too, which made either variable
+        leaking into a deployed environment silently switch off every check
+        below: a missing, planted, symlinked or wrongly-labelled plist still
+        reported healthy. A test affordance may shape what the probe EXECUTES
+        and what it READS BACK; it may never decide whether a fail-closed path
+        applies. Suites that stub the probe pin HOST_PLATFORM and Path.home
+        themselves, which is also what keeps them from diverging between a Linux
+        runner and a macOS one.
+      unreadable -- NOT benign. This is darwin, a plist is expected, and the
+        parser refused it. Its docstring already says None means UNKNOWN, so
+        callers must fail closed rather than read it as absence of drift.
+      readable -- the whole map, read once per probe run so two governed keys
+        can never come from two different states of the same file.
+    """
+    if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
+        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
+    if HOST_PLATFORM != "darwin":
+        return (GOVERNED_PLIST_NOT_APPLICABLE, None)
+    environment = instance_plist_environment(name)
+    if environment is None:
+        return (GOVERNED_PLIST_UNREADABLE, None)
+    return (GOVERNED_PLIST_READABLE, environment)
 
 
 def launchctl_environment(output: str) -> dict[str, str]:
@@ -4282,10 +4839,6 @@ def launchctl_environment(output: str) -> dict[str, str]:
         )
         if match.group(2).strip()
     }
-
-
-def launchctl_environment_path(output: str) -> str | None:
-    return launchctl_environment(output).get("PATH")
 
 
 def loaded_instance_environment(name: str) -> dict[str, str]:
@@ -4313,10 +4866,6 @@ def loaded_instance_environment(name: str) -> dict[str, str]:
     return launchctl_environment(proc.stdout) if proc.returncode == 0 else {}
 
 
-def loaded_instance_provider_path(name: str) -> str | None:
-    return loaded_instance_environment(name).get("PATH")
-
-
 def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
     inherited_path = environment.get("PATH", "").strip()
     if os.environ.get("BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH") is not None:
@@ -4332,18 +4881,24 @@ def effective_instance_provider_path(environment: dict[str, str]) -> str | None:
             node = str(Path(home) / ".nvm" / "versions" / "node" / f"v{nvmrc_version}" / "bin" / "node")
     if not inherited_path or not home or not node:
         return None
+    # The launcher passes the governed prepend as the helper's 4th argument
+    # (whatsoup_export_runtime_path reads WHATSOUP_PATH_PREPEND). Passing only
+    # three here made the probe compose a DIFFERENT effective PATH than the
+    # service, so the two sides could resolve different provider binaries.
+    path_prepend = environment.get("WHATSOUP_PATH_PREPEND", "").strip()
     helper = REPO_ROOT / "deploy" / "lib" / "runtime-path.sh"
     try:
         proc = subprocess.run(
             [
                 "/bin/bash",
                 "-c",
-                '. "$1"; whatsoup_effective_runtime_path "$2" "$3" "$4"',
+                '. "$1"; whatsoup_effective_runtime_path "$2" "$3" "$4" "$5"',
                 "runtime-path",
                 str(helper),
                 home,
                 node,
                 inherited_path,
+                path_prepend,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -4364,11 +4919,187 @@ def instance_provider_path_match(generated_path: str | None, loaded_path: str | 
     return bool(generated_path and loaded_path and generated_path == loaded_path)
 
 
-def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
+def instance_provider_path_prepend_match(
+    plist_prepend: str | None,
+    loaded_prepend: str | None,
+) -> bool:
+    """Compare the governed prepend the plist declares against the loaded job's.
+
+    Both absent counts as EQUAL: a host with no service.pathPrepend renders no
+    key and launchd loads none, which is agreement rather than drift. Empty and
+    whitespace-only normalise to absent because launchctl drops empty-valued
+    keys, so an empty rendered value would otherwise never compare equal to
+    itself.
+    """
+    return (plist_prepend or "").strip() == (loaded_prepend or "").strip()
+
+
+def path_starts_with_entries(path_value: str | None, prefix_value: str | None) -> bool:
+    """True when every entry of prefix_value leads path_value, entry by entry.
+
+    Split into entries rather than compared as a string prefix: a string
+    comparison would accept "/pin/binary" as satisfying a "/pin/bin" prefix.
+    Empty entries are compared, not filtered out, so this agrees with
+    pathStartsWithEntries in src/fleet/launchd-env-drift.ts on a hand-edited
+    value like "/a::/b" instead of quietly accepting a PATH the TypeScript
+    comparator rejects.
+    """
+    if not prefix_value:
+        return True
+    prefix_entries = prefix_value.split(":")
+    return (path_value or "").split(":")[: len(prefix_entries)] == prefix_entries
+
+
+REGENERATE_LAUNCHAGENT_REMEDIATION = (
+    "regenerate_and_reload_the_instance_launchagent"
+    "_or_verify_launchctl_print_output_parses"
+)
+
+
+def generated_provider_path_absence_failure(
+    name: str,
+    provider: str,
+    target: str,
+) -> str:
+    """Path-free refusal shared by both providers when a readable plist has no PATH."""
+    return (
+        f"FAIL provider_probe {name}: provider={provider} target={target} "
+        "failure_class=provider_runtime_path_unavailable "
+        "reason=generated_path_absent governed_path_entries=0 "
+        f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+    )
+
+
+def plist_unreadable_failure(name: str, provider: str, target: str) -> str:
+    """Path-free refusal shared by both providers for an unreadable plist.
+
+    A plist is expected here and the parser refused it: missing, planted,
+    wrongly labelled, symlinked, oversized or unreadable.
+
+    SHARED, and that is the point. The two branches described this one state
+    two different ways -- the default provider named the plist, opencode
+    reported provider_runtime_path_mismatch -- so an operator running both on
+    one host was told to regenerate the LaunchAgent for one instance and to
+    repair a PATH for the other, for the same fault. Whichever they did first
+    was wrong for the other. One function means the classes cannot drift apart
+    again without a diff here.
+
+    Path-free like its sibling: the opencode line used to carry the governed
+    PATH's directory, and a refusal an operator cannot act on is not worth a
+    filesystem path in a health report.
+    """
+    return (
+        f"FAIL provider_probe {name}: provider={provider} target={target} "
+        "failure_class=provider_runtime_plist_unreadable "
+        f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+    )
+
+
+def governed_prepend_failure_class(
+    plist_environment: dict[str, str] | None,
+    loaded_environment: dict[str, str],
+) -> str | None:
+    """Governed-prepend failure class shared by EVERY provider probe, or None.
+
+    claude-cli is the default agentOptions.provider, so wiring this check into
+    the opencode probe alone would leave the default provider unchecked. Both
+    values come from one already-read plist map, so a regenerate landing mid-run
+    cannot make the PATH and the prepend disagree by accident. A None
+    plist_environment means the governed surfaces are not real here and the
+    check is skipped rather than guessed.
+    """
+    if plist_environment is None:
+        return None
+    declared = environment_value(plist_environment, "WHATSOUP_PATH_PREPEND")
+    if not instance_provider_path_prepend_match(
+        declared,
+        loaded_environment.get("WHATSOUP_PATH_PREPEND"),
+    ):
+        return "provider_runtime_path_prepend_mismatch"
+    # A declared prepend that does not lead the plist's OWN PATH means the two
+    # rendered surfaces of one config fact disagree, so the launcher and the
+    # probe would compose different effective PATHs from a single plist.
+    if declared and not path_starts_with_entries(
+        environment_provider_path(plist_environment),
+        declared,
+    ):
+        return "provider_runtime_path_prepend_inconsistent"
+    return None
+
+
+def probe_directory_is_outside_workspace(probe_cwd: str, workspace: str) -> bool:
+    """True when probe_cwd is neither the workspace nor inside it.
+
+    Creating the probe directory under a system temporary root does not PROVE it
+    sits outside the instance workspace: TMPDIR can be set to a path within the
+    workspace, and either path can traverse a symlink into the other. Both sides
+    are resolved before comparison, and the caller fails closed when this is
+    False -- an unattended probe must never fall back into the agent's own
+    directory, which is the condition the neutral directory exists to guarantee.
+    """
+    try:
+        probe = os.path.realpath(probe_cwd)
+        target = os.path.realpath(workspace)
+    except OSError:
+        return False
+    if probe == target or probe.startswith(target.rstrip(os.sep) + os.sep):
+        return False
+    # String comparison alone is not enough on a case-INSENSITIVE volume, which
+    # is the macOS default: "/fixture/Work" and "/fixture/work" name one
+    # directory, realpath preserves whichever spelling it was given, and the
+    # prefix test then calls a probe directory "outside" a workspace it is
+    # actually inside -- the permissive direction. os.path.normcase is NOT the
+    # remedy: on POSIX it is the identity function, so it would look like a fix
+    # and change nothing. Ask the FILESYSTEM instead, walking the probe's
+    # ancestors and comparing by inode.
+    #
+    # Existence is decided ONCE, before the walk. A configured workspace that
+    # does not exist cannot contain anything, so the probe is outside it and the
+    # check does not apply -- refusing there would refuse EVERY probe on such an
+    # instance, which is the regression this control already had to fix once.
+    # Disclosed rather than silent: an absent configured workspace is reported
+    # as "outside", not as a containment failure.
+    if not os.path.exists(target):
+        return True
+    # From here the workspace EXISTS, so an unreadable identity is a fact about
+    # this process, not about the paths: a permission error, a transient mount
+    # failure, or the path being replaced mid-walk. Swallowing it and continuing
+    # let the loop run out at the filesystem root and answer "outside", which
+    # spawns the provider -- a fail-OPEN branch inside a containment control, and
+    # the opposite of what the realpath failure above does. Any OSError now
+    # refuses, which is the same direction as every other arm of this function.
+    current = probe
+    while True:
+        try:
+            if os.path.samefile(current, target):
+                return False
+        except OSError:
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return True
+        current = parent
+
+
+def configured_agent_workspace_cwd(data: dict[str, Any]) -> str | None:
+    """The CONFIGURED agent workspace, or None when the instance declares none.
+
+    agent_workspace_cwd falls back to the home directory so a spawn always has a
+    working directory. The containment check must NOT use that fallback: with no
+    configured workspace there is no agent directory to keep the probe out of,
+    and on a host whose TMPDIR sits under $HOME the fallback would make every
+    probe refuse. The distinction only this function can make is "configured"
+    versus "defaulted", so the check asks here and skips itself when the answer
+    is None.
+    """
     configured = agent_options_from_config(data).get("cwd")
     if isinstance(configured, str) and configured.strip():
         return str(Path(configured.strip()).expanduser())
-    return str(Path.home())
+    return None
+
+
+def agent_workspace_cwd(data: dict[str, Any], name: str) -> str:
+    return configured_agent_workspace_cwd(data) or str(Path.home())
 
 
 def opencode_runtime_context_problem(data: dict[str, Any]) -> str | None:
@@ -4463,8 +5194,11 @@ def opencode_functional_probe_args(command: str, data: dict[str, Any], target: s
     return args
 
 
-OPENCODE_FUNCTIONAL_ENV_KEYS = (
+COMMON_FUNCTIONAL_ENV_KEYS = (
     "PATH",
+    # Without this the child environment drops the governed prepend and the
+    # functional probe resolves a different binary than the service does.
+    "WHATSOUP_PATH_PREPEND",
     "HOME",
     "USER",
     "SHELL",
@@ -4477,6 +5211,61 @@ OPENCODE_FUNCTIONAL_ENV_KEYS = (
     "TMPDIR",
 )
 
+# The service can select a per-instance configuration/authentication root for
+# the default provider, and the probe is meant to exercise that same identity.
+# Provider credentials stay excluded.
+CLAUDE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS + ("CLAUDE_CONFIG_DIR",)
+
+# The opencode probe child must never be WIDER than the production opencode
+# child. buildOpenCodeBaseChildEnv (src/runtimes/agent/providers/child-env.ts) is
+# a separate positive allowlist whose contract is that Claude-specific auth and
+# config variables never enter it; CLAUDE_CONFIG_DIR reached this probe only
+# because one shared tuple served both providers. Splitting the tuple keeps the
+# probe inside the production envelope.
+#
+# WHATSOUP_PATH_PREPEND is the one deliberate difference from that production
+# child: the probe exists to prove PATH parity, so it must carry the governed
+# prepend the launcher uses. It is not an auth or config variable.
+OPENCODE_FUNCTIONAL_ENV_KEYS = COMMON_FUNCTIONAL_ENV_KEYS
+
+
+def governed_child_environment(
+    provider_path: str | None = None,
+    name: str | None = None,
+    child_cwd: str | None = None,
+    base_env: dict[str, str] | None = None,
+    env_keys: tuple[str, ...] = OPENCODE_FUNCTIONAL_ENV_KEYS,
+) -> dict[str, str]:
+    """Allowlisted child environment carrying the GOVERNED provider PATH.
+
+    Shared by every provider probe. The binary is selected from the governed
+    PATH, so it must also RUN under that PATH: otherwise a `#!/usr/bin/env node`
+    wrapper resolves its interpreter from the probe process's PATH and the probe
+    exercises the right executable under the wrong runtime.
+
+    Deliberately carries NO provider credential. opencode layers its own on top
+    of this; claude-cli authenticates out of band, and handing it another
+    provider's API key would be both wrong and a credential leak into a child
+    that has no use for it.
+
+    env_keys is the caller's allowlist, and it defaults to the NARROWER of the
+    two: a new probe that forgets to name one gets the common set, never a set
+    widened by whichever provider happened to need more.
+    """
+    source_env = base_env if base_env is not None else os.environ
+    child_env = {
+        key: value
+        for key in env_keys
+        if (value := source_env.get(key)) is not None
+    }
+    if provider_path:
+        child_env["PATH"] = provider_path
+    if name:
+        child_env["WHATSOUP_INSTANCE"] = name
+    if child_cwd:
+        child_env["WHATSOUP_MCP_SOCKET"] = str(Path(child_cwd) / ".claude" / "whatsoup.sock")
+    return child_env
+
 
 def opencode_functional_probe_env(
     data: dict[str, Any],
@@ -4487,18 +5276,13 @@ def opencode_functional_probe_env(
     child_cwd: str | None = None,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    source_env = base_env if base_env is not None else os.environ
-    child_env = {
-        key: value
-        for key in OPENCODE_FUNCTIONAL_ENV_KEYS
-        if (value := source_env.get(key)) is not None
-    }
-    if provider_path:
-        child_env["PATH"] = provider_path
-    if name:
-        child_env["WHATSOUP_INSTANCE"] = name
-    if child_cwd:
-        child_env["WHATSOUP_MCP_SOCKET"] = str(Path(child_cwd) / ".claude" / "whatsoup.sock")
+    child_env = governed_child_environment(
+        provider_path,
+        name,
+        child_cwd,
+        base_env,
+        env_keys=OPENCODE_FUNCTIONAL_ENV_KEYS,
+    )
     model = provider_model_from_config(data, target)
     service = opencode_key_service_from_config(data, target)
     env_key = service_env_var(service) if service else None
@@ -4516,7 +5300,24 @@ def opencode_provider_probe_inventory(
     provider: str,
     target: str = "primary",
 ) -> list[str]:
-    generated_provider_path = instance_provider_path(name)
+    # ONE plist read per probe run; every governed key is derived from this map.
+    plist_state, plist_environment = instance_plist_governed_environment(name)
+    if plist_state == GOVERNED_PLIST_READABLE:
+        generated_provider_path = environment_provider_path(plist_environment)
+        if generated_provider_path is None:
+            return [generated_provider_path_absence_failure(name, provider, target)]
+    elif plist_state == GOVERNED_PLIST_NOT_APPLICABLE:
+        # Preserve legacy resolution when governed checking is intentionally
+        # not applicable; some stubbed Darwin fixtures may still read a plist.
+        generated_provider_path = instance_provider_path(name)
+    else:
+        # UNREADABLE. This used to fall through with generated_provider_path
+        # None, which reached instance_provider_path_match, compared None
+        # against the loaded PATH and reported provider_runtime_path_mismatch --
+        # a PATH remediation for a plist fault, and a different answer than the
+        # default provider gave for the identical state. Refuse here, in the
+        # same terms, before anything downstream can rename the cause.
+        return [plist_unreadable_failure(name, provider, target)]
     loaded_environment = loaded_instance_environment(name)
     loaded_provider_path = loaded_environment.get("PATH")
     effective_provider_path = effective_instance_provider_path(loaded_environment)
@@ -4547,7 +5348,15 @@ def opencode_provider_probe_inventory(
         return [(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
             "failure_class=provider_runtime_path_mismatch "
-            "remediation=regenerate_and_reload_the_instance_launchagent"
+            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+        )]
+
+    prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
+    if prepend_failure:
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            f"failure_class={prepend_failure} "
+            f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
         )]
     if effective_provider_path is None:
         return [(
@@ -4573,34 +5382,100 @@ def opencode_provider_probe_inventory(
             "remediation=run_a_context_bound_provider_canary_for_this_instance"
         )]
 
+    # The three capability probes below ask the binary what it is and what it
+    # supports. None of them starts a session, so none needs the instance
+    # workspace or its tool socket, and both were reaching them only because
+    # they shared the functional probe's child env and cwd. They run from a
+    # fresh directory the probe owns, on the same governed PATH allowlist with
+    # no socket synthesized. The FUNCTIONAL probe below is unchanged: it does
+    # drive a real session against the instance's own context.
+    # The same environment the functional probe gets, minus the socket: passing
+    # no child_cwd is what suppresses the synthesized WHATSOUP_MCP_SOCKET. The
+    # configured provider credential is deliberately RETAINED here. Whether a
+    # capability probe needs one is a real question, but it is a different
+    # question from where these three run, and narrowing it belongs to its own
+    # change with its own evidence.
+    diagnostic_env = opencode_functional_probe_env(
+        data,
+        target,
+        timeout_seconds,
+        effective_provider_path,
+        name,
+        None,
+        loaded_environment,
+    )
     try:
-        version_stdout, version_stderr, version_rc, _ = provider_command_output(
-            [command, "--version"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
-        help_stdout, help_stderr, help_rc, _ = provider_command_output(
-            [command, "--help"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
-        run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
-            [command, "run", "--help"],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
-            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
-            child_env=child_env,
-            child_cwd=child_cwd,
-        )
+        with tempfile.TemporaryDirectory(prefix="whatsoup-opencode-diagnostic-") as diagnostic_cwd:
+            configured_workspace = configured_agent_workspace_cwd(data)
+            if configured_workspace is not None and not probe_directory_is_outside_workspace(
+                diagnostic_cwd, configured_workspace
+            ):
+                return [(
+                    f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+                    "failure_class=provider_probe_directory_unsafe "
+                    "remediation=set_TMPDIR_outside_the_instance_workspace"
+                )]
+            version_stdout, version_stderr, version_rc, _ = provider_command_output(
+                [command, "--version"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
+            help_stdout, help_stderr, help_rc, _ = provider_command_output(
+                [command, "--help"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
+            run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
+                [command, "run", "--help"],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
+                "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
+                child_env=diagnostic_env,
+                child_cwd=diagnostic_cwd,
+            )
+    except OSError as exc:
+        # Same discrimination as the default provider's arm. An OS-level failure
+        # here means either the binary itself is gone or unrunnable -- which the
+        # compatibility class and its upgrade remediation describe correctly --
+        # or something the probe brought with it failed, such as the temporary
+        # directory this range added. Reporting the second as
+        # provider_compatibility_unsupported tells an operator to upgrade
+        # opencode when opencode is fine, so the two are separated by whether
+        # the failing file IS the command.
+        #
+        # OSError, not FileNotFoundError. ENOENT was only the errno that had
+        # been noticed: a PermissionError or an ENOSPC out of the same tempdir
+        # path fell through to the catch-all below, which answers the
+        # compatibility class unconditionally. Measured -- an unwritable temp
+        # root reported "[Errno 13] Permission denied ... failure_class=
+        # provider_compatibility_unsupported remediation=
+        # install_or_upgrade_opencode_modern_run_cli". The claude-cli arm's own
+        # catch-all already answers provider_probe_failed for exactly this, so
+        # this closes an asymmetry between two arms of one function rather than
+        # setting new policy. An OSError carrying no filename cannot be the
+        # command either, and lands on the environment class, which is the
+        # safer of the two to be wrong about: it asks the operator to look at
+        # the probe host instead of at a provider that may be fine.
+        if exc.filename == command:
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+                f"failure_class=provider_compatibility_unsupported error={redact_evidence_string(str(exc), 180)} "
+                "remediation=install_or_upgrade_opencode_modern_run_cli"
+            )]
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            f"failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)} "
+            "remediation=repair_the_probe_environment_and_retry"
+        )]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         return [(
             f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
@@ -5725,34 +6600,230 @@ def provider_probe_target_inventory(
     if provider != "claude-cli":
         return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)} target={target}"]
 
-    command = (
+    # claude-cli is the DEFAULT agentOptions.provider, so it gets the governed
+    # plist-state check, both prepend checks, and the effective-PATH derivation
+    # the opencode probe gets. It does NOT get the generated-vs-loaded PATH
+    # EQUALITY gate: instance_provider_path_match has one call site, in the
+    # opencode inventory. Here a governed PATH that cannot supply the binary is
+    # reported as provider_runtime_path_unavailable with a reason, not as its own
+    # mismatch class. Reading the plist once here keeps both governed keys on one
+    # file state.
+    plist_state, plist_environment = instance_plist_governed_environment(name)
+    if (
+        plist_state == GOVERNED_PLIST_READABLE
+        and environment_provider_path(plist_environment) is None
+    ):
+        return [generated_provider_path_absence_failure(name, provider, target)]
+    loaded_environment = loaded_instance_environment(name)
+
+    # The runtime-path gate is a statement about the SERVICE's PATH, not about
+    # which binary the probe happens to run, so it is evaluated BEFORE and
+    # independently of any operator override. It used to live inside
+    # `if not command:`, which let a configured providerProbeCommand silently
+    # disable it while the docs promised it unconditionally.
+    effective_provider_path = effective_instance_provider_path(loaded_environment)
+    # executable_candidate is only ever given a real path here: called with None
+    # it widens to BOT_ERRORS_PROVIDER_BIN_DIRS and an npm-global guess, which
+    # is the opencode discovery contract, not this one.
+    runtime_command = (
+        executable_candidate("claude", effective_provider_path)
+        if effective_provider_path
+        else None
+    )
+    runtime_path_unavailable = False
+    unavailable_reason = "unknown"
+    if plist_state == GOVERNED_PLIST_READABLE:
+        # A readable plist and a governed PATH that cannot supply the binary.
+        # TWO distinct causes: the environment yielded no effective PATH at all
+        # (job unloaded, launchctl print failed), or it composed and simply
+        # holds no claude. The second used to fall through to shutil.which and
+        # report status=ok naming a binary outside the prepend, ~/.local/bin,
+        # the pinned node dir and the plist PATH, one the service cannot run.
+        if effective_provider_path is None or runtime_command is None:
+            runtime_path_unavailable = True
+            unavailable_reason = (
+                "effective_path_uncomposable"
+                if effective_provider_path is None
+                else "no_claude_on_governed_path"
+            )
+
+    # An operator-configured probe command still chooses WHICH binary is
+    # probed; it does not exempt the service's PATH from the gate above.
+    configured_command = (
         profile_string(item, "providerProbeCommand")
         or profile_string(profile, "providerProbeCommand")
-        or shutil.which("claude")
-        or "claude"
     )
+    command = configured_command or runtime_command or shutil.which("claude") or "claude"
+
+    prepend_failure = governed_prepend_failure_class(plist_environment, loaded_environment)
+    if plist_state == GOVERNED_PLIST_UNREADABLE:
+        # Treating an unreadable plist as "no drift" reported the default
+        # provider healthy while opencode failed closed on the identical state.
+        # Both now fail closed through one shared refusal, so the operator is
+        # told the plist is the problem rather than the PATH, and is told it in
+        # the same words whichever provider the instance runs.
+        return [plist_unreadable_failure(name, provider, target)]
+    if prepend_failure or runtime_path_unavailable:
+        # These two lines deliberately carry NO command and no PATH element.
+        # The command here is either irrelevant to the failure (the prepend
+        # cases) or, worse, a binary resolved from the PROBE's own PATH that the
+        # service cannot execute -- so printing it publishes the probe host's
+        # filesystem layout while adding nothing an operator can act on. The
+        # actionable facts are the class, which cause fired, and how many
+        # entries the governed PATH offered. Matches the module's redaction
+        # stance for paths (see credential_path_ref / path_fingerprint).
+        if prepend_failure:
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} target={target} "
+                f"failure_class={prepend_failure} "
+                f"remediation={REGENERATE_LAUNCHAGENT_REMEDIATION}"
+            )]
+        governed_entry_count = len(
+            [entry for entry in (effective_provider_path or "").split(":") if entry]
+        )
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} target={target} "
+            "failure_class=provider_runtime_path_unavailable "
+            f"reason={unavailable_reason} governed_path_entries={governed_entry_count} "
+            "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
+        )]
     timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))
     if timeout_seconds is None:
         timeout_seconds = int_or_none(profile.get("providerProbeTimeoutSeconds")) or 15
     timeout_seconds = max(1, min(timeout_seconds, 60))
 
+    # Run the provider in the environment it was SELECTED from. Passing none
+    # meant the binary came from the governed PATH but executed under the probe
+    # process's PATH and HOME, so an interpreter-resolving wrapper could pick a
+    # different runtime than the service uses.
+    #
+    # The WORKSPACE is a different question, and the answer is no. This probe is
+    # an unattended one-shot diagnostic; the instance workspace carries the
+    # agent's own project-local .claude surface, written with bypassPermissions
+    # and tool allowances (src/core/settings-template.ts), and a child started
+    # there adopts them. Nothing the probe checks needs that directory: the
+    # binary is already resolved to an absolute path out of the governed PATH
+    # above, and PATH parity travels in child_env, not in the working directory.
+    # So the probe runs from a fresh directory it owns and throws away.
+    #
+    # The synthesized WHATSOUP_MCP_SOCKET goes with it. Handing a diagnostic the
+    # instance's tool socket widens it by the same route the workspace cwd did,
+    # and no check here reads the socket.
+    child_env = governed_child_environment(
+        effective_provider_path,
+        name,
+        None,
+        loaded_environment,
+        env_keys=CLAUDE_FUNCTIONAL_ENV_KEYS,
+    )
+
+    # The probe no longer runs from the instance workspace, so a RELATIVE command
+    # would resolve against a different directory than it used to. Resolve it
+    # against the GOVERNED PATH only, so argv[0] names the binary the service
+    # would run wherever the probe stands.
+    #
+    # There is deliberately NO ambient fallback. Resolving a bare command from
+    # the health check's own PATH produces an absolute argv[0], and an absolute
+    # argv[0] executes regardless of the child environment's PATH -- so a
+    # configured bare probe command that is absent from the governed PATH would
+    # run an ungoverned binary and report ITS health as the service's. An
+    # unresolvable name stays bare and reaches the spawn bare, which fails
+    # closed, exactly as it did before this resolution step existed.
+    # glm-2. `resolved_on_governed_path` is PROVENANCE, not a gate, and
+    # os.path.isabs was standing in for "came from the governed PATH". Both ways
+    # argv[0] becomes absolute here can be ungoverned when no governed PATH
+    # composed: the selection above falls back to shutil.which("claude"), which
+    # searches THIS process's PATH, and shutil.which(command, path=None) below
+    # silently does the same for a configured bare command -- path=None does not
+    # mean "no path", it means "the caller's PATH". Neither is a statement about
+    # the SERVICE's PATH, yet both used to record one, so a probe reported an
+    # ungoverned binary's health as the service's under a governed label.
+    #
+    # When no effective PATH composed, nothing resolved here is governed,
+    # whatever shape argv[0] has. The legacy chain still RUNS -- on a host with
+    # no LaunchAgent surface that chain is the contract, and a host that has one
+    # has already refused above with provider_runtime_path_unavailable. What
+    # changes is only that the probe stops claiming governance it does not have,
+    # and says so on the line.
+    if effective_provider_path is None:
+        resolved_on_governed_path = False
+    else:
+        resolved_on_governed_path = os.path.isabs(command)
+        if not resolved_on_governed_path:
+            candidate = shutil.which(command, path=effective_provider_path)
+            if candidate:
+                command = candidate
+                resolved_on_governed_path = True
+
+    # glm-2. Provenance of argv[0], stated rather than left to be inferred from
+    # a field's absence. Added only in the ungoverned case, so a governed run's
+    # line is byte-identical and no existing reader has to learn a new field.
+    #
+    # Defined HERE, before the try, rather than beside the post-spawn report:
+    # the exception arms below return without reaching that section, and a
+    # timeout or an ENOENT against a binary chosen by the WRONG PATH is exactly
+    # when an operator most needs to know which PATH chose it.
+    resolution_note = (
+        "" if resolved_on_governed_path else " command_resolution=ambient_not_governed"
+    )
     timed_out = False
     try:
-        stdout, stderr, rc, timed_out = provider_command_output(
-            [command, "--print", "Return exactly OK."],
-            timeout_seconds,
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT",
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_STDERR",
-            "BOT_ERRORS_DRY_PROVIDER_PROBE_RC",
-        )
+        with tempfile.TemporaryDirectory(prefix="whatsoup-provider-probe-") as probe_cwd:
+            configured_workspace = configured_agent_workspace_cwd(data)
+            if configured_workspace is not None and not probe_directory_is_outside_workspace(
+                probe_cwd, configured_workspace
+            ):
+                return [(
+                    f"FAIL provider_probe {name}: provider={provider} target={target} "
+                    "failure_class=provider_probe_directory_unsafe "
+                    "remediation=set_TMPDIR_outside_the_instance_workspace"
+                )]
+            stdout, stderr, rc, timed_out = provider_command_output(
+                [command, "--print", "Return exactly OK."],
+                timeout_seconds,
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT",
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_STDERR",
+                "BOT_ERRORS_DRY_PROVIDER_PROBE_RC",
+                child_env=child_env,
+                child_cwd=probe_cwd,
+            )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         rc = 124
         timed_out = True
+    except FileNotFoundError as exc:
+        # ENOENT reaches here from THREE places, and only one of them is a
+        # statement about the governed PATH:
+        #   the command never resolved, so argv[0] arrived bare -- that one;
+        #   the temporary directory could not be created, e.g. TMPDIR absent;
+        #   the command resolved and ran but its shebang interpreter is missing.
+        #
+        # exc.filename alone cannot separate them: a missing interpreter reports
+        # the SCRIPT's path, which is argv[0], exactly as an unresolvable command
+        # reports its own name. Measured, not assumed. The discriminator that
+        # does work is whether resolution against the governed PATH succeeded, so
+        # that is recorded at the resolution step and consulted here; the
+        # filename check keeps a failed temporary directory out of the branch.
+        if not resolved_on_governed_path and exc.filename == command:
+            # The line carries no command on purpose: a name the governed PATH
+            # cannot supply tells an operator nothing and publishes the probe
+            # host's layout, which is this module's redaction stance for the
+            # whole provider_runtime_path_* family.
+            governed_entry_count = len(
+                [entry for entry in (effective_provider_path or "").split(":") if entry]
+            )
+            return [(
+                f"FAIL provider_probe {name}: provider={provider} target={target} "
+                "failure_class=provider_runtime_path_unavailable "
+                f"reason=command_not_on_governed_path governed_path_entries={governed_entry_count} "
+                "remediation=repair_the_shared_runtime_path_helper_and_node_pin"
+            )]
+        safe_command = redact_evidence_string(command, 120)
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}{resolution_note}"]
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         safe_command = redact_evidence_string(command, 120)
-        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}{resolution_note}"]
 
     combined = "\n".join(part for part in [stdout, stderr] if part)
     failure_class = classify_provider_probe_failure(combined, rc, timed_out)
@@ -5804,11 +6875,11 @@ def provider_probe_target_inventory(
         live_fragments = live_evidence.get("fragments")
         if isinstance(live_fragments, list) and live_fragments:
             line += " " + " ".join(str(fragment) for fragment in live_fragments)
-        return [line]
+        return [line + resolution_note]
     line = f"provider_probe {name}: provider={provider} target={target} command={safe_command} status=ok rc={rc}"
     if output_excerpt:
         line += f" output={output_excerpt}"
-    return [line]
+    return [line + resolution_note]
 
 
 def fleet_api_endpoint(raw_url: str) -> str:
@@ -6285,36 +7356,206 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
 }
 
 
-def active_whatsoup_service_names() -> set[str]:
-    dry_services = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
-    if dry_services is not None:
-        return {
-            item.strip().removeprefix("com.whatsoup.")
-            for item in dry_services.split(",")
-            if item.strip()
-        }
-    if HOST_PLATFORM == "darwin" or is_wsl():
-        try:
-            proc = subprocess.run(
-                ["launchctl", "list"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return set()
-        names: set[str] = set()
-        for line in proc.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            pid, label = parts[0], parts[-1]
-            if pid == "-" or not label.startswith("com.whatsoup."):
-                continue
-            names.add(label.removeprefix("com.whatsoup."))
-        return names
+# Typed active-service inventory read (#2486).
+#
+# A bare `set[str]` return cannot distinguish a healthy host running zero
+# WhatSoup services from a host whose service manager could not be read at
+# all: a missing binary, a timeout, a nonzero exit and an unreadable answer
+# all collapsed to `set()`, and profile completeness then reported full
+# coverage over an inventory that was never observed.
+#
+# The vocabulary follows the absent-vs-unobservable split this script already
+# makes for the MCP tool inventory (#2408, TOOL_PROBE_FAILURE_OUTCOMES /
+# `FAIL required_tools_probe: outcome=...`) and the typed subprocess outcome of
+# email_fallback_outcome (#2425). The result mirrors StateReadResult in
+# lib/controller_state.py: an immutable record carrying a closed-vocabulary
+# status plus the counts a reader needs to classify it.
+#
+# NamedTuple, not @dataclass: every python suite loads this script through
+# importlib WITHOUT registering it in sys.modules, and under
+# `from __future__ import annotations` the dataclass decorator resolves each
+# string annotation via sys.modules[cls.__module__] -- which is None here, so
+# a dataclass raises at import time in the tests. StateReadResult can use one
+# because lib.controller_state is imported normally.
+ServiceInventoryStatus = Literal[
+    "observed",
+    "partial",
+    "unavailable_missing_binary",
+    "unavailable_timeout",
+    "unavailable_nonzero_exit",
+    "malformed",
+]
+
+# An observation older than this cannot report coverage. Nothing on this path
+# persists a reading today, so the live value is always ~0; the bound exists so
+# a future cached inventory cannot go green on a stale one (#2486 C8).
+SERVICE_INVENTORY_MAX_AGE_SECONDS = 300
+
+
+class ServiceInventoryObservation(NamedTuple):
+    """One active-WhatSoup-service inventory read and how far it can be trusted.
+
+    `names` carries every positively observed service and is empty whenever
+    nothing usable was read, so a caller that iterates it can never act on an
+    inventory that was not seen. A `partial` read keeps its names: they were
+    observed, and hiding them would let one unreadable record conceal every
+    rogue service. It still cannot PROVE coverage, which is why the counts are
+    carried separately -- a collapsing set cannot report that a record was
+    unreadable or repeated.
+    """
+
+    status: ServiceInventoryStatus
+    backend: str
+    count: int
+    unreadable_lines: int
+    duplicate_labels: int
+    observed_at_monotonic: float
+    names: frozenset[str] = frozenset()
+
+    @property
+    def is_observed(self) -> bool:
+        return self.status == "observed"
+
+    def age_seconds(self, *, now: float | None = None) -> float:
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - self.observed_at_monotonic)
+
+    def is_fresh(self, *, now: float | None = None) -> bool:
+        return self.age_seconds(now=now) <= SERVICE_INVENTORY_MAX_AGE_SECONDS
+
+    def can_report_coverage(self, *, now: float | None = None) -> bool:
+        """True only for a read that was both observed and is still current."""
+        return self.is_observed and self.is_fresh(now=now)
+
+    def evidence_fields(self, *, now: float | None = None) -> str:
+        """Render the bounded receipt fields for daily-health evidence (#2486 C10).
+
+        Status, backend, counts and freshness only. Service names stay private
+        inputs to local comparison: `names` is never rendered here, and neither
+        is any host, account, user, path, process, instance or topology value.
+        """
+        return (
+            f"status={self.status} backend={self.backend} count={self.count} "
+            f"unreadable_lines={self.unreadable_lines} "
+            f"duplicate_labels={self.duplicate_labels} "
+            f"observed_age_s={int(self.age_seconds(now=now))} "
+            f"fresh={'true' if self.is_fresh(now=now) else 'false'}"
+        )
+
+
+# The discriminating tokens each backend's records are recognised by. A record
+# cut inside one of these keeps its field count and stops matching, so only a
+# token-level comparison can tell truncation from a job that is not ours.
+_LAUNCHCTL_LABEL_PREFIX = "com.whatsoup."
+_SYSTEMCTL_UNIT_PREFIX = "whatsoup@"
+_SYSTEMCTL_UNIT_SUFFIX = ".service"
+
+
+def _unterminated_record_count(stdout: str) -> int:
+    """1 when the stream stopped before its last record was terminated.
+
+    Every record a service manager writes ends in a newline, so output that
+    does not is output that was cut in transit. This catches the truncation a
+    per-record check cannot see: a final record severed inside an instance
+    name still parses, and would otherwise report a shorter inventory.
+    """
+    return 1 if stdout and not stdout.endswith("\n") else 0
+
+
+def _service_inventory_unavailable(
+    status: ServiceInventoryStatus, backend: str
+) -> ServiceInventoryObservation:
+    return ServiceInventoryObservation(
+        status=status,
+        backend=backend,
+        count=0,
+        unreadable_lines=0,
+        duplicate_labels=0,
+        observed_at_monotonic=time.monotonic(),
+    )
+
+
+def _service_inventory_observed(
+    backend: str, names: set[str], unreadable_lines: int, duplicate_labels: int
+) -> ServiceInventoryObservation:
+    """Classify a completed rc=0 read.
+
+    A duplicate label cannot occur on a healthy service manager, and a record
+    this parser could not read means the answer was not fully understood, so
+    either one costs the read its `observed` status. It does not cost the read
+    the names it did parse: `partial` reports an incomplete inventory that
+    still cannot prove coverage, and `malformed` is reserved for a read that
+    yielded nothing usable at all.
+    """
+    unusable = unreadable_lines + duplicate_labels
+    if not unusable:
+        status: ServiceInventoryStatus = "observed"
+    elif names:
+        status = "partial"
+    else:
+        status = "malformed"
+    return ServiceInventoryObservation(
+        status=status,
+        backend=backend,
+        count=len(names),
+        unreadable_lines=unreadable_lines,
+        duplicate_labels=duplicate_labels,
+        observed_at_monotonic=time.monotonic(),
+        names=frozenset(names),
+    )
+
+
+def _launchctl_service_observation() -> ServiceInventoryObservation:
+    backend = "launchctl"
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _service_inventory_unavailable("unavailable_missing_binary", backend)
+    except subprocess.TimeoutExpired:
+        return _service_inventory_unavailable("unavailable_timeout", backend)
+    # A failed command's stdout is not an observation: residual output from a
+    # nonzero exit used to be parsed as though the read had succeeded.
+    if proc.returncode != 0:
+        return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
+    names: set[str] = set()
+    unreadable_lines = _unterminated_record_count(proc.stdout)
+    duplicate_labels = 0
+    for line in proc.stdout.splitlines():
+        # A blank line carries no record, so it is not evidence of truncation.
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            # PID/Status/Label is the whole grammar; fewer fields means the
+            # stream was cut mid-record or came from another manager.
+            unreadable_lines += 1
+            continue
+        pid, label = parts[0], parts[-1]
+        if _LAUNCHCTL_LABEL_PREFIX.startswith(label):
+            # The field count is intact but the label stops inside our own
+            # prefix, so this record was cut mid-token rather than belonging
+            # to another job. A skip here would read as a shorter inventory.
+            unreadable_lines += 1
+            continue
+        if pid == "-" or not label.startswith(_LAUNCHCTL_LABEL_PREFIX):
+            continue
+        name = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
+        if name in names:
+            duplicate_labels += 1
+            continue
+        names.add(name)
+    return _service_inventory_observed(backend, names, unreadable_lines, duplicate_labels)
+
+
+def _systemctl_service_observation() -> ServiceInventoryObservation:
+    backend = "systemctl"
     try:
         proc = subprocess.run(
             ["systemctl", "--user", "list-units", "--type=service", "--state=running", "--no-legend"],
@@ -6324,19 +7565,100 @@ def active_whatsoup_service_names() -> set[str]:
             timeout=3,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return set()
-    names = set()
+    except FileNotFoundError:
+        return _service_inventory_unavailable("unavailable_missing_binary", backend)
+    except subprocess.TimeoutExpired:
+        return _service_inventory_unavailable("unavailable_timeout", backend)
+    if proc.returncode != 0:
+        return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
+    names: set[str] = set()
+    unreadable_lines = _unterminated_record_count(proc.stdout)
+    duplicate_labels = 0
     for line in proc.stdout.splitlines():
-        unit = line.split(maxsplit=1)[0] if line.split() else ""
-        if unit.startswith("whatsoup@") and unit.endswith(".service"):
-            names.add(unit.removeprefix("whatsoup@").removesuffix(".service"))
-    return names
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            # A --no-legend row carries UNIT LOAD ACTIVE SUB DESCRIPTION.
+            unreadable_lines += 1
+            continue
+        unit = parts[0]
+        if unit.startswith(_SYSTEMCTL_UNIT_PREFIX) and not unit.endswith(
+            _SYSTEMCTL_UNIT_SUFFIX
+        ):
+            # The query filters --type=service, so one of our units that does
+            # not end in .service was cut inside its own token.
+            unreadable_lines += 1
+            continue
+        if not (
+            unit.startswith(_SYSTEMCTL_UNIT_PREFIX)
+            and unit.endswith(_SYSTEMCTL_UNIT_SUFFIX)
+        ):
+            continue
+        name = unit.removeprefix(_SYSTEMCTL_UNIT_PREFIX).removesuffix(
+            _SYSTEMCTL_UNIT_SUFFIX
+        )
+        if name in names:
+            duplicate_labels += 1
+            continue
+        names.add(name)
+    return _service_inventory_observed(backend, names, unreadable_lines, duplicate_labels)
 
 
-def unprofiled_service_inventory(root: Path, expected_names: set[str]) -> list[str]:
+def active_whatsoup_service_observation() -> ServiceInventoryObservation:
+    dry_services = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
+    if dry_services is not None:
+        # A declared test injection is an observation by construction; wrapping
+        # it keeps every caller on one result type instead of a bare set.
+        dry_names = frozenset(
+            item.strip().removeprefix("com.whatsoup.")
+            for item in dry_services.split(",")
+            if item.strip()
+        )
+        return ServiceInventoryObservation(
+            status="observed",
+            backend="dry_env",
+            count=len(dry_names),
+            unreadable_lines=0,
+            duplicate_labels=0,
+            observed_at_monotonic=time.monotonic(),
+            names=dry_names,
+        )
+    if HOST_PLATFORM == "darwin" or is_wsl():
+        return _launchctl_service_observation()
+    return _systemctl_service_observation()
+
+
+def unprofiled_service_inventory(
+    root: Path,
+    expected_names: set[str],
+    observation: ServiceInventoryObservation | None = None,
+) -> list[str]:
+    """Report active WhatSoup services that no health profile declares.
+
+    A reading that cannot prove coverage emits one typed FAIL line, so profile
+    completeness never reads an unreadable inventory as full coverage (#2486).
+    A `partial` reading emits that line AND still compares the names it did
+    observe: an incomplete read must not become a hiding place for a rogue
+    service. A reading that is no longer current is refused outright, because
+    a stale name proves nothing about what is running now.
+
+    `observation` lets a caller pass a reading it already holds. No production
+    caller does, so the freshness gate is reachable in production only through
+    the reading this function takes itself, which is always current; the gate
+    is what a future cached reading would have to pass. Nothing is persisted.
+    """
+    reading = active_whatsoup_service_observation() if observation is None else observation
+    unusable_line = (
+        "FAIL profile_coverage_service_inventory: "
+        "inventory not usable for profile coverage " + reading.evidence_fields()
+    )
+    if not reading.is_fresh():
+        return [unusable_line]
     lines: list[str] = []
-    for name in sorted(active_whatsoup_service_names()):
+    if not reading.can_report_coverage():
+        lines.append(unusable_line)
+    for name in sorted(reading.names):
         if name in expected_names:
             continue
         if (
@@ -7374,6 +8696,40 @@ def tool_inventory(profile: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     )
 
 
+def deadman_observation_gap_line(
+    deadman_state: dict[str, Any], now_epoch: int, window_seconds: int = 86_400
+) -> str | None:
+    """Render the deadman's last observed gap for the daily check.
+
+    ``deadman()`` persists ``lastCheckGapSeconds`` / ``lastCheckGapAt`` when
+    two of its graced checks were further apart than twice the timer cadence
+    (a suspend, a stopped timer, a starved scheduler). Without a reader the
+    record was write-only. It is rendered while younger than ``window_seconds``
+    and omitted once older; an unparseable timestamp, or one from the future
+    (a forward clock step), is rendered rather than hidden. Informational: a
+    late deadman is a scheduler signal, not a fault of the service it watches.
+    """
+    gap = deadman_state.get("lastCheckGapSeconds")
+    at = deadman_state.get("lastCheckGapAt")
+    if isinstance(gap, bool) or not isinstance(gap, int) or gap <= 0 or not isinstance(at, str):
+        return None
+    try:
+        age = int(now_epoch - parse_iso_epoch(at))
+    except Exception:  # noqa: BLE001 - a malformed stamp is reported, not hidden
+        return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds=unparseable"
+    if age > window_seconds:
+        return None
+    return f"deadman_last_observation_gap: seconds={gap} at={at} age_seconds={age}"
+
+
+def deadman_observation_gap_inventory() -> list[str]:
+    try:
+        line = deadman_observation_gap_line(load_deadman_state(), current_epoch())
+    except Exception as exc:  # noqa: BLE001 - the daily check must not die on its own record
+        return [f"deadman_last_observation_gap: unreadable ({str(exc)[:120]})"]
+    return [line] if line else []
+
+
 def queue_inventory() -> list[str]:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
@@ -7636,8 +8992,13 @@ def tree_provenance_inventory(profile: dict[str, Any]) -> list[str]:
         return [f"WARN tree_provenance: inventory_error {str(exc)[:160]}"]
 
 
-def record_daily_health_receipt(event_path: Path, severity: str) -> None:
-    """Write a durable receipt after queuing a daily-health event."""
+def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationResult:
+    """Write a durable receipt after queuing a daily-health event.
+
+    Returns the publication result so a caller can inspect the advanced
+    generation, which is carried in the result rather than in the receipt
+    payload. The daily() call site ignores it.
+    """
     root = state_root()
     receipt_path = root / "daily-health-receipt.json"
     receipt = {
@@ -7646,6 +9007,35 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         "emittedAt": now_iso(),
         "eventPath": str(event_path),
     }
+    # Before ensure_private_dir(), which re-applies 0700 to the state root: a
+    # root that is group- or world-writable is the reason the leaf may have been
+    # planted, and narrowing it first would erase that signal before the repair's
+    # parent guard could read it (#3501).
+    repair = repair_legacy_private_receipt_mode(receipt_path)
+    if repair.refusal is not None:
+        # The writable-parent refusal is not durable and the log line must not
+        # imply that it is: ensure_private_dir() below ATTEMPTS to narrow the
+        # root. It suppresses its own chmod errors, so the narrowing is not
+        # guaranteed and the next cycle re-checks the mode either way.
+        deferral = (
+            " (holds for this cycle only: ensure_private_dir then attempts to"
+            " narrow the state root to 0700, suppressing any failure, so the"
+            " next cycle re-checks the root mode and repairs the leaf only if"
+            " the narrowing took effect and the leaf passes the owner,"
+            " regular-file, single-link and non-symlinked-parent guards)"
+            if repair.refusal == LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE
+            else ""
+        )
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repair refused: "
+            f"{repair.refusal}{deferral}\n"
+        )
+    elif repair.previous_mode is not None:
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repaired from "
+            f"{repair.previous_mode:04o}\n"
+        )
+        receipt[LEGACY_RECEIPT_MODE_EVIDENCE_FIELD] = f"{repair.previous_mode:04o}"
     ensure_private_dir(root)
     target = _durable_target(receipt_path)
     observation = observe_json(target)
@@ -7664,6 +9054,7 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         generation=(observation.version.generation or 0) + 1,
     )
     require_advance(publication)
+    return publication
 
 
 def daily() -> int:
@@ -7705,6 +9096,7 @@ def daily() -> int:
         *alert_target_inventory(profile),
         *dns_inventory(profile),
         *boot_inventory(),
+        *deadman_observation_gap_inventory(),
         *rustdesk_inventory(profile),
         *source_update_inventory(profile),
         *runtime_manifest_inventory(profile),
@@ -7835,7 +9227,292 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> int:
+# Cadence the shipped schedulers run the deadman at: deploy/bot-errors-deadman.timer
+# (OnUnitActiveSec=5m) and the deadman agent in deploy/scripts/install-bot-errors-launchd.sh
+# (StartInterval 300). Twice this is both the threshold above which a gap between
+# consecutive graced checks is reported as an observation gap (lastCheckGapSeconds /
+# check_gap_seconds=) and the cap on how much one late interval credits the grace
+# streak, so the default must track those files; test_bot_errors_deadman_grace_attribution.py
+# pins it.
+DEADMAN_CHECK_INTERVAL_SECONDS = 300
+
+_LINUX_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _host_boot_id() -> str | None:
+    """A clock-independent identity for the current host boot, or None if unknown.
+
+    Linux exposes a per-boot UUID; macOS exposes a per-boot session UUID. Neither
+    moves when the wall clock steps, which ``now - uptime`` (and macOS
+    ``kern.boottime``, which tracks the calendar) would.
+    """
+    dry = os.environ.get("BOT_ERRORS_DRY_HOST_BOOT_ID")
+    if dry is not None:
+        return dry or None
+    if HOST_PLATFORM == "darwin":
+        try:
+            proc = subprocess.run(
+                ["sysctl", "-n", "kern.bootsessionuuid"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            value = (proc.stdout or "").strip()
+            return f"bootsession:{value}" if value else None
+        except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
+            return None
+    try:
+        value = _LINUX_BOOT_ID_PATH.read_text(encoding="utf-8").strip()
+        return f"boot_id:{value}" if value else None
+    except Exception:  # noqa: BLE001 - unknown boot identity is handled by the caller.
+        return None
+
+
+def _host_monotonic_seconds() -> int | None:
+    """Seconds since boot on a clock that keeps counting through sleep and never
+    steps: Linux CLOCK_BOOTTIME, macOS CLOCK_MONOTONIC (which continues across
+    sleep on Darwin). Shared by every process on the boot, so consecutive deadman
+    runs can measure the interval between them without trusting the wall clock.
+    None when unavailable; the caller falls back to clamped wall time."""
+    dry = os.environ.get("BOT_ERRORS_DRY_HOST_MONOTONIC_SECONDS")
+    if dry is not None:
+        # A test knob, so a bad value degrades to the wall-clock fallback and
+        # never crashes the deadman (OverflowError on "inf") or poisons the
+        # record (a negative value would classify the next record corrupt).
+        try:
+            parsed = float(dry)
+        except ValueError:
+            return None
+        if parsed != parsed or parsed in (float("inf"), float("-inf")) or parsed < 0:
+            return None
+        return int(parsed)
+    clock = getattr(time, "CLOCK_MONOTONIC", None) if HOST_PLATFORM == "darwin" else getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        return int(time.clock_gettime(clock))
+    except Exception:  # noqa: BLE001 - unavailable clock is handled by the caller.
+        return None
+
+
+_GRACE_STREAK_FIELDS = (
+    "graceStreakSince",
+    "graceStreakSeenAt",
+    "graceStreakBootId",
+    "graceStreakSeenMonotonic",
+    "graceStreakAccumulated",
+    "graceStreakGapForgiven",
+)
+_UNKNOWN_BOOT = "unknown"
+
+
+def _grace_streak_record_state(deadman_state: dict[str, Any]) -> str:
+    """Classify the persisted grace-streak record before it is consumed.
+
+    ``absent``: no field at all (grace was not active last check, or first
+    run). ``partial``: some fields (an upgrade or an older writer); it re-seeds
+    silently. ``valid``: every field present and usable. ``corrupt``: every
+    field present but at least one unusable (a bool or non-positive epoch, a
+    non-string boot identity, a negative accumulator, a non-bool flag). A
+    corrupt record still re-seeds so the next check is normal, but the check
+    that finds it refuses grace: a continuity record this deadman did not
+    write validly cannot vouch for a fresh restart, and re-seeding to zero
+    would make grace credible again for a whole max_state_age.
+    """
+    present = [f for f in _GRACE_STREAK_FIELDS if f in deadman_state]
+    if not present:
+        return "absent"
+    if len(present) < len(_GRACE_STREAK_FIELDS):
+        return "partial"
+
+    def _int(value: Any, minimum: int) -> bool:
+        return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
+
+    seen_mono = deadman_state.get("graceStreakSeenMonotonic")
+    valid = (
+        _int(deadman_state.get("graceStreakSince"), 1)
+        and _int(deadman_state.get("graceStreakSeenAt"), 1)
+        and isinstance(deadman_state.get("graceStreakBootId"), str)
+        and (seen_mono is None or _int(seen_mono, 0))
+        and _int(deadman_state.get("graceStreakAccumulated"), 0)
+        and isinstance(deadman_state.get("graceStreakGapForgiven"), bool)
+    )
+    return "valid" if valid else "corrupt"
+
+
+def _note_grace_streak(
+    deadman_state: dict[str, Any],
+    grace_active: bool,
+    now_epoch: int,
+    boot_id: str | None,
+    monotonic_now: int | None,
+    gap_cap_seconds: int,
+) -> tuple[int, bool, int | None]:
+    """Track how long restart grace has been continuously active across checks.
+
+    Returns ``(streak_seconds, dirty, observation_gap_seconds)``. A single
+    observation cannot tell a fresh restart from a restart loop when there is no
+    state age to bound grace with; the streak is the deadman's own memory of
+    that, persisted in deadman-state.json.
+
+    The streak is the sum of the intervals the deadman actually observed, on the
+    boot's monotonic clock (wall time, clamped at zero, when that is unavailable),
+    so a wall-clock step in either direction is neither a re-seed nor a corrupt
+    record. An interval longer than ``gap_cap_seconds`` (twice the timer cadence)
+    credits nothing the first time -- a suspend or a stopped timer is not observed
+    grace, and the first check after it must not page a dispatcher that has only
+    had seconds -- but consecutive long intervals each credit the cap, so a deadman
+    that keeps running late still reports a restart loop within a few checks
+    instead of re-seeding forever. Only a different boot identity re-seeds: the
+    boot ended the process the previous grace belonged to. An unknown identity
+    cannot disprove continuity and a missed alarm is the worse error, so it
+    continues. A record missing any field, or carrying a corrupt epoch (bool or
+    non-positive), re-seeds; the caller classifies the record first
+    (``_grace_streak_record_state``) so a corrupt one also refuses grace for
+    the check that found it.
+
+    The interval is returned so the caller can report it: the deadman's own
+    absence is a signal, not something to absorb.
+    """
+    if not grace_active:
+        present = [f for f in _GRACE_STREAK_FIELDS if f in deadman_state]
+        for f in present:
+            deadman_state.pop(f, None)
+        return 0, bool(present), None
+
+    seen = deadman_state.get("graceStreakSeenAt")
+    recorded_boot = deadman_state.get("graceStreakBootId")
+    seen_mono = deadman_state.get("graceStreakSeenMonotonic")
+    accumulated = deadman_state.get("graceStreakAccumulated")
+    forgiven = deadman_state.get("graceStreakGapForgiven")
+    complete = _grace_streak_record_state(deadman_state) == "valid"
+    same_boot = boot_id is None or recorded_boot == _UNKNOWN_BOOT or recorded_boot == boot_id
+    if not complete or not same_boot:
+        deadman_state["graceStreakSince"] = int(now_epoch)
+        deadman_state["graceStreakSeenAt"] = int(now_epoch)
+        deadman_state["graceStreakBootId"] = boot_id if boot_id is not None else _UNKNOWN_BOOT
+        deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+        deadman_state["graceStreakAccumulated"] = 0
+        deadman_state["graceStreakGapForgiven"] = False
+        return 0, True, None
+    if monotonic_now is not None and isinstance(seen_mono, int) and monotonic_now >= seen_mono:
+        interval = int(monotonic_now - seen_mono)
+    else:
+        interval = max(0, int(now_epoch - seen))
+    if interval > gap_cap_seconds:
+        credit = gap_cap_seconds if forgiven else 0
+        forgiven = True
+    else:
+        credit = interval
+        forgiven = False
+    accumulated = int(accumulated) + credit
+    deadman_state["graceStreakSeenAt"] = int(now_epoch)
+    deadman_state["graceStreakSeenMonotonic"] = monotonic_now
+    deadman_state["graceStreakAccumulated"] = accumulated
+    deadman_state["graceStreakGapForgiven"] = forgiven
+    if boot_id is not None and recorded_boot == _UNKNOWN_BOOT:
+        deadman_state["graceStreakBootId"] = boot_id
+    return accumulated, True, interval
+
+
+def _grace_still_credible(
+    grace_reason: str | None,
+    grace_streak_seconds: int,
+    max_state_age: int,
+) -> bool:
+    """Whether an open restart window still excuses a branch with no cycle timestamp.
+
+    ``state_missing`` and ``cycle_incomplete`` cannot be attributed by age the
+    way ``cycle_stale`` is: a restart legitimately follows an arbitrarily old
+    heartbeat (an outage long enough to matter was reported as
+    ``service_inactive`` by the checks that ran during it), and a state file
+    with no ``cycleCompletedAt`` carries
+    no cycle time to compare the restart against. Bounding those branches by
+    the restart age reported every fresh restart whose heartbeat predated it,
+    which ``tests/scripts/bot-errors-health-check.test.ts`` pins as graced.
+
+    The evidence of a restart loop there is grace itself: a unit that keeps
+    restarting has grace active on every check, so the deadman's persisted
+    streak (the observed grace intervals summed on the boot's monotonic clock,
+    see ``_note_grace_streak``) keeps growing. Grace that has been continuously
+    active for longer than ``max_state_age`` is a loop, not a fresh start, and
+    stops excusing anything.
+    """
+    if not grace_reason:
+        return False
+    return grace_streak_seconds <= max_state_age
+
+
+def _restart_explains_cycle_age(
+    cycle_age_seconds: int,
+    restart_age: int | None,
+    restart_grace: int,
+) -> bool:
+    """Whether a recent restart can actually account for this cycle staleness.
+
+    Restart grace exists to cover the window in which a freshly started
+    dispatcher has not yet completed its first cycle. It is keyed on service
+    uptime, but the condition it suppresses is measured on the *state* -- so
+    on its own it says nothing about whether the staleness is attributable to
+    the restart.
+
+    That gap is load-bearing: a dispatcher in a restart loop has
+    ``service_uptime <= restart_grace`` on every check, so grace is always
+    active and ``cycle_stale`` can never be raised. The deadman is then
+    silenced by exactly the symptom it exists to detect, and an indefinitely
+    broken dispatcher reports ``deadman grace ok``.
+
+    A restart that happened ``restart_age`` seconds ago can only explain a
+    cycle that has been stale for about that long (plus the grace window
+    itself). Older staleness predates the restart and must be reported.
+
+    ``restart_age`` must be measured on the clock that granted grace: service
+    uptime for an active unit, state-change age for a unit that is not active.
+    Bounding a state-change grace by uptime silenced a unit that restart-loops
+    without ever re-entering active (uptime stale or unknown, change age
+    always small). ``deadman`` passes the granting age, so ``None`` is not
+    reachable while grace is active; it is kept for direct callers, where
+    unknown age means attribution is impossible and grace stands rather than
+    manufacturing an alert from missing evidence.
+    """
+    if restart_age is None:
+        return True
+    return cycle_age_seconds <= restart_age + restart_grace
+
+
+def _cycle_stale_should_report(
+    cycle_age_seconds: int,
+    max_state_age: int,
+    grace_reason: str | None,
+    restart_age: int | None,
+    restart_grace: int,
+) -> bool:
+    """Whether cycle staleness is reportable: stale, and not excused by a restart.
+
+    The decision is factored out of ``deadman`` so it is directly testable.
+    Leaving it inline meant a test could cover ``_restart_explains_cycle_age``
+    while the call site silently reverted to an unconditional
+    ``if not grace_reason`` and every test still passed -- the same shape as
+    the guard defect this change exists to close, where the check was correct
+    but not in the path that mattered.
+    """
+    if cycle_age_seconds <= max_state_age:
+        return False
+    if not grace_reason:
+        return True
+    return not _restart_explains_cycle_age(
+        cycle_age_seconds, restart_age, restart_grace
+    )
+
+
+def deadman(
+    max_state_age: int,
+    restart_grace: int,
+    cooldown_seconds: int,
+    check_interval: int = DEADMAN_CHECK_INTERVAL_SECONDS,
+) -> int:
     root = state_root()
     state = root / DISPATCHER_STATE
     active_members: dict[str, dict[str, Any]] = {}
@@ -7855,30 +9532,76 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     service_status = service_is_active(DISPATCHER_SERVICE)
     service_uptime, service_state_change_age = service_restart_ages(DISPATCHER_SERVICE)
     grace_reason = None
+    # Age of the event that granted grace, on the clock that granted it. The
+    # staleness bound below must use this age, not service_uptime: a unit that
+    # restart-loops without re-entering active keeps its state-change age under
+    # grace on every check while ActiveEnterTimestamp stays stale or unset.
+    grace_age: int | None = None
     if service_status != "active":
         if service_state_change_age is not None and service_state_change_age <= restart_grace:
             grace_reason = f"service_state_change_age_seconds={service_state_change_age}"
+            grace_age = service_state_change_age
         else:
             active_members["service_inactive"] = {"status": _bounded_service_status(service_status)}
     elif service_uptime is not None and service_uptime <= restart_grace:
         grace_reason = f"service_uptime_seconds={service_uptime}"
+        grace_age = service_uptime
+    deadman_state = load_deadman_state()
+    migrate_deadman_state(deadman_state, now_epoch)
+    # Classified before _note_grace_streak re-seeds it: a corrupt continuity
+    # record cannot vouch for this check (see _grace_streak_record_state).
+    streak_record = _grace_streak_record_state(deadman_state)
+    gap_threshold = 2 * (check_interval if check_interval > 0 else DEADMAN_CHECK_INTERVAL_SECONDS)
+    grace_streak_seconds, streak_dirty, observation_gap = _note_grace_streak(
+        deadman_state, grace_reason is not None, now_epoch, _host_boot_id(), _host_monotonic_seconds(), gap_threshold
+    )
+    grace_refused = grace_reason is not None and streak_record == "corrupt"
+    # The deadman's own absence is a signal: a gap between consecutive graced
+    # checks longer than two timer intervals is persisted and printed, never
+    # silently absorbed into the streak. The record is durable (lastCheckGapAt
+    # dates it) and is replaced only by the next gap, so the daily check can
+    # read it; a check at the normal cadence does not erase it.
+    check_gap_note = ""
+    if observation_gap is not None and observation_gap > gap_threshold:
+        deadman_state["lastCheckGapSeconds"] = observation_gap
+        deadman_state["lastCheckGapAt"] = epoch_to_iso(now_epoch)
+        check_gap_note = f" check_gap_seconds={observation_gap}"
+        streak_dirty = True
     if not state.exists():
-        if not grace_reason:
-            active_members["state_missing"] = {}
+        # No state file carries no age to bound grace with, so a restart loop
+        # that never writes state would be excused on every check. The
+        # deadman's own record of how long grace has been continuously active
+        # is the only evidence left: grace that has outlived max_state_age is
+        # a restart loop, not a fresh start.
+        if grace_refused or not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age):
+            detail: dict[str, Any] = {"grace_streak_seconds": grace_streak_seconds} if grace_reason else {}
+            if grace_refused:
+                detail["grace_refused"] = "corrupt_streak_record"
+            active_members["state_missing"] = detail
     elif cycle_completed_at is None:
         # State exists but has no cycleCompletedAt — the last cycle did not
         # complete (crash between start and end). Treat as stale unless the
-        # state file was just written by the crash handler (within grace).
-        if state_age is not None and state_age > restart_grace and not grace_reason:
-            active_members["cycle_incomplete"] = {"state_age_seconds": state_age}
-    elif cycle_completed_at > max_state_age:
-        if not grace_reason:
-            active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
+        # state file was just written by the crash handler (within grace) or a
+        # restart window is open. The heartbeat's age is not attributable to
+        # the restart (a restart legitimately follows an old heartbeat), so the
+        # window is bounded by the grace streak instead: grace that has stayed
+        # open longer than max_state_age is a restart loop that never
+        # completes a cycle.
+        if (
+            state_age is not None
+            and state_age > restart_grace
+            and (grace_refused or not _grace_still_credible(grace_reason, grace_streak_seconds, max_state_age))
+        ):
+            detail = {"state_age_seconds": state_age}
+            if grace_refused:
+                detail["grace_refused"] = "corrupt_streak_record"
+            active_members["cycle_incomplete"] = detail
+    elif _cycle_stale_should_report(
+        cycle_completed_at, max_state_age, grace_reason, grace_age, restart_grace
+    ):
+        active_members["cycle_stale"] = {"cycle_age_seconds": cycle_completed_at}
     if not SOCKET_PATH or not Path(SOCKET_PATH).exists():
         active_members["socket_missing"] = {}
-
-    deadman_state = load_deadman_state()
-    migrate_deadman_state(deadman_state, now_epoch)
 
     onset_text = {"value": None}
 
@@ -7906,7 +9629,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
         attempt_onset=attempt_onset,
         attempt_recovery=attempt_recovery,
     )
-    if result["dirty"]:
+    if result["dirty"] or streak_dirty:
         save_deadman_state(deadman_state)
     for payload, level in result["logs"]:
         append_deadman_log(payload, level=level)
@@ -7927,7 +9650,7 @@ def deadman(max_state_age: int, restart_grace: int, cooldown_seconds: int) -> in
     elif result["exitCode"] == 0:
         if grace_reason:
             state_detail = state_age if state_age is not None else "missing"
-            print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}")
+            print(f"deadman grace ok: service={service_status} {grace_reason} dispatcher_state_age_seconds={state_detail}{check_gap_note}")
         else:
             print("deadman ok")
     if onset_text["value"]:
@@ -7946,6 +9669,12 @@ def main() -> int:
     parser.add_argument("--verified-at", default=now_iso())
     parser.add_argument("--max-state-age", type=int, default=180)
     parser.add_argument("--restart-grace", type=int, default=30)
+    parser.add_argument(
+        "--check-interval",
+        type=int,
+        default=DEADMAN_CHECK_INTERVAL_SECONDS,
+        help="seconds between deadman timer runs (OnUnitActiveSec); twice this is the observation-gap report threshold (check_gap_seconds / lastCheckGapSeconds) and the cap one late interval credits the restart-grace streak",
+    )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
     args = parser.parse_args()
 
@@ -7969,7 +9698,7 @@ def main() -> int:
     if args.daily:
         return daily()
     if args.deadman:
-        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown)
+        return deadman(args.max_state_age, args.restart_grace, args.deadman_cooldown, args.check_interval)
     return daily()
 
 

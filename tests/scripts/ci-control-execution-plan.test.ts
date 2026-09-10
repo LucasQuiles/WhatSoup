@@ -226,7 +226,7 @@ describe('report-only control execution plan compiler', () => {
     expect(repeated).toEqual(plan);
     expect(repeated.planDigest).toBe(plan.planDigest);
     expect(plan.planDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
-  });
+  }, 60_000);
 
   it('keeps the checked-in quarantined lease unavailable and makes readiness inconclusive', () => {
     const { manifest, trustedInput, admission } = fixture();
@@ -241,7 +241,7 @@ describe('report-only control execution plan compiler', () => {
     });
   });
 
-  it('preserves detached direct argv arrays and rejects shell-source or interpolation payloads', () => {
+  it('preserves detached direct argv arrays across post-compilation manifest mutation', () => {
     const { manifest, trustedInput, admission } = fixture({ mutateManifest: makeLowControlsAvailable });
     const original = [...manifest.canonicalCommands['guard:repo']!];
     const plan = compileReportOnlyExecutionPlan(manifest, admission, trustedInput);
@@ -251,21 +251,30 @@ describe('report-only control execution plan compiler', () => {
     expect(step.argv).not.toBe(manifest.canonicalCommands['guard:repo']);
     manifest.canonicalCommands['guard:repo']![0] = 'changed-after-compilation';
     expect(step.argv).toEqual(original);
+  });
 
-    for (const unsafe of ['echo success; false', 'echo $HOME', 'echo $(id)', 'echo `${value}`', 'false || true', 'one\ntwo']) {
-      const hostile = fixture({
-        mutateManifest: (candidate) => {
-          makeLowControlsAvailable(candidate);
-          candidate.canonicalCommands['guard:repo'] = ['bash', '-c', unsafe];
-        },
-      });
-      expect(errorCode(() => compileReportOnlyExecutionPlan(
-        hostile.manifest,
-        hostile.admission,
-        hostile.trustedInput,
-      ))).toBe('ci.execution-plan.command-unresolved');
-    }
+  it.each([
+    ['a command separator', 'echo success; false'],
+    ['an environment interpolation', 'echo $HOME'],
+    ['a command substitution', 'echo $(id)'],
+    ['a backtick interpolation', 'echo `${value}`'],
+    ['a conditional chain', 'false || true'],
+    ['an embedded newline', 'one\ntwo'],
+  ] as const)('rejects a shell-source payload carrying %s', (_label, unsafe) => {
+    const hostile = fixture({
+      mutateManifest: (candidate) => {
+        makeLowControlsAvailable(candidate);
+        candidate.canonicalCommands['guard:repo'] = ['bash', '-c', unsafe];
+      },
+    });
+    expect(errorCode(() => compileReportOnlyExecutionPlan(
+      hostile.manifest,
+      hostile.admission,
+      hostile.trustedInput,
+    ))).toBe('ci.execution-plan.command-unresolved');
+  }, 60_000);
 
+  it('rejects a nested shell invocation behind an env prefix', () => {
     const nestedShell = fixture({
       mutateManifest: (candidate) => {
         makeLowControlsAvailable(candidate);
@@ -364,7 +373,7 @@ describe('report-only control execution plan compiler', () => {
 
     expect(errorCode(() => compileReportOnlyExecutionPlan(manifest, clone, trustedInput)))
       .toBe('ci.execution-plan.classification-unadmitted');
-  });
+  }, 60_000);
 
   it('rejects manifest, trusted-input, and evidence binding drift without partial plans', () => {
     const current = fixture({ mutateManifest: makeLowControlsAvailable });

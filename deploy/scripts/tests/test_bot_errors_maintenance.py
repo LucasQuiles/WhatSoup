@@ -26,10 +26,17 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 _CLI = Path(__file__).resolve().parents[1] / "bot-errors-maintenance.py"
@@ -96,8 +103,7 @@ def _clear(source: str = "instance_logged_out", *, machine: str = _MACHINE, inst
     return evt
 
 
-def _empty_state() -> dict:
-    return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+_empty_state = dispatcher_fixtures.empty_state
 
 
 def _write_window(tmp_path: Path, *, machine: str, instance: str, expires_at: int, reason: str | None = None) -> None:

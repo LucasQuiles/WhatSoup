@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
@@ -173,3 +176,424 @@ def redact_json_value(value: Any, redact_text) -> Any:
     if isinstance(value, dict):
         return {str(key): redact_json_value(item, redact_text) for key, item in value.items()}
     return value
+
+
+# ---------------------------------------------------------------------------
+# #2386 — legacy confined alert-content compatibility reader
+# ---------------------------------------------------------------------------
+# The TypeScript producer's confineAlertContent boundary replaced the
+# operator-visible `summary`/`evidence` strings with a three-key confinement
+# envelope. Two serialisations reach this consumer:
+#   * the live mapping {"failureClass": str, "length": int, "correlationDigest": str}
+#   * a baked `repr` string, produced wherever that mapping reached str()
+# The baked form appears in TWO key orders, so every matcher below is
+# key-order-insensitive. A matcher pinned to one order is blind to the other and
+# silently under-reports. Only one of the two comes from the producer, which
+# builds the object literal in failureClass order and serialises it with
+# insertion order preserved; the alphabetical form arises on this side, from
+# sort_keys round-trips through persisted state. Order-insensitive matching is
+# required either way -- both forms are in the corpus -- but the second order is
+# ours, not the producer's.
+#
+# Rendering is deliberately restricted to the EXACT three-key shape. An arbitrary
+# mapping is never rendered: its values could be anything, and printing them would
+# defeat the confinement boundary this envelope exists to enforce. Unknown shapes
+# get a fixed sentinel and are quarantined by the caller.
+#
+# This reader never evaluates queue text and never parses it as JSON. The repr is
+# matched structurally and its three typed values are read out of the regex match,
+# so a hostile string is inert here. A source-scan test enforces that.
+
+LEGACY_CONFINED_KEYS = frozenset({"failureClass", "length", "correlationDigest"})
+
+# The CLOSED failure-class vocabulary the producer can emit (#2386). The
+# confinement envelope has exactly one constructor, `confineAlertContent` in
+# src/lib/alert-evidence.ts, and its class always comes from `extractFailureClass`
+# there: either one of the six standard Error subclasses matched verbatim, one of
+# the nine fixed labels, the "none" sentinel for empty content, or the "unknown"
+# fallback. Nothing else can reach this reader from that producer.
+#
+# A lexical grammar is NOT enough on its own. "single-line ASCII token under N
+# characters" still admits an unregistered, content-bearing token, and this value
+# is interpolated into operator-visible text and into a quarantine meta-alert, so
+# an unregistered class is exactly the content channel this issue exists to close.
+# Membership in this set implies the lexical rules as well: every member is a
+# single-line ASCII token of at most 21 characters, which a test asserts rather
+# than a redundant second check asserting it at runtime.
+#
+# Kept in sync with the producer by test_producer_failure_class_vocabulary_parity,
+# which parses alert-evidence.ts and fails on drift in either direction.
+
+# The one class token this READER synthesises rather than reads. It is not a
+# producer vocabulary member: `confineAlertContent` cannot emit it. It is the
+# class of a mapping that never claimed to be the confinement envelope at all --
+# the shape every out-of-repo producer emits, of which the live corpus carries
+# 54 delivered events across 30 producer identities since 2026-07-04.
+#
+# It is declared on the producer side too, at the bottom of alert-evidence.ts, so
+# the vocabulary keeps ONE registry that the parity test checks in both
+# directions. A token declared only here would be exactly the drift that test
+# exists to catch.
+UNCONFINED_OBJECT_CLASS = "unconfined_object"
+
+LEGACY_FAILURE_CLASSES = frozenset({
+    # Standard Error subclasses, returned as the matched text.
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "EvalError",
+    "URIError",
+    # Fixed labels.
+    "Error",
+    "provider_unknown",
+    "provider_timeout",
+    "provider_rate_limited",
+    "provider_auth_failure",
+    "finalization_failed",
+    "runtime_verify_failed",
+    "bundle_mismatch",
+    "preflight_failed",
+    # Sentinel for empty content, and the extractor's fallback.
+    "none",
+    "unknown",
+    # Synthesised by this reader, never emitted by the producer.
+    UNCONFINED_OBJECT_CLASS,
+})
+
+# A character count, not an arbitrary integer. The upper bound is the largest
+# integer JavaScript represents exactly, so a value the producer could not have
+# produced is rejected rather than rendered. Negative counts are meaningless; the
+# repr grammar cannot express one, but a live mapping can carry one.
+LEGACY_MIN_CONFINED_LENGTH = 0
+LEGACY_MAX_CONFINED_LENGTH = 2 ** 53 - 1
+
+UNRENDERABLE_ALERT_CONTENT = "[unrenderable alert content]"
+
+_LEGACY_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+# One `'key': value` pair of the envelope's repr. Values are typed at the pair
+# level: a single-quoted literal or a bare integer. `[^'{}]*` keeps a pair from
+# swallowing a brace, so the three-pair bound below cannot be defeated by a
+# nested structure.
+#
+# The digit run is BOUNDED at 19. CPython refuses int(str) past 4300 digits, and
+# _parse_baked_repr converts before it validates keys, so an unbounded run let a
+# queue string raise ValueError from inside the render path -- which has no guard
+# above it, so one such event aborted the whole dispatcher cycle and stayed in the
+# outbox to re-poison the next one. A character count cannot need 19 digits, so an
+# over-long run is simply not this envelope and falls through to the text path.
+# The bound must appear in BOTH grammars below: bounding only the parser would
+# leave the scan matching and the parser still converting.
+_REPR_PAIR = r"'[A-Za-z][A-Za-z0-9_]*': (?:'[^'{}]*'|\d{1,19})"
+
+# Anchored: the whole string is one brace group holding EXACTLY three pairs, in
+# any order. Key identity and value typing are verified by _parse_baked_repr
+# after the match, which is what rejects a duplicate key or a four-key repr.
+_BAKED_REPR_RE = re.compile(r"\A\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2}\}\Z")
+
+# Same grammar, unanchored: finds an envelope embedded in surrounding operator
+# text. Persisted incident state carries prefixed forms (an escalation prefix
+# concatenated onto a baked envelope), so rendering must reach those too.
+_BAKED_REPR_SCAN_RE = re.compile(r"\{" + _REPR_PAIR + r"(?:, " + _REPR_PAIR + r"){2}\}")
+
+_REPR_PAIR_PARTS_RE = re.compile(
+    r"'(?P<key>[A-Za-z][A-Za-z0-9_]*)': (?:'(?P<text>[^'{}]*)'|(?P<number>\d{1,19}))"
+)
+
+
+# What an OPERATOR reads is the 8-character prefix; it is a display convenience.
+# What decides INCIDENT IDENTITY is the full digest. Those are different jobs and
+# they get different renderings: collapsing identity onto 32 bits merges distinct
+# incidents, which is a silent loss, so the fingerprint path takes all 64 chars.
+LEGACY_DISPLAY_DIGEST_CHARS = 8
+LEGACY_FULL_DIGEST_CHARS = 64
+
+
+def _legacy_confined_mapping_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
+    """Render a live confinement-envelope mapping, or None if it is not one."""
+    if not isinstance(value, dict):
+        return None
+    if frozenset(value.keys()) != LEGACY_CONFINED_KEYS:
+        return None
+    failure_class = value.get("failureClass")
+    length = value.get("length")
+    digest = value.get("correlationDigest")
+    if not isinstance(failure_class, str):
+        return None
+    # #2386: a class outside the producer's closed vocabulary is not a class, it
+    # is unvalidated content wearing the field's name. Fail closed so it is
+    # quarantined and signalled rather than interpolated into operator text.
+    if failure_class not in LEGACY_FAILURE_CLASSES:
+        return None
+    # bool is an int subclass; a boolean is not a character count.
+    if isinstance(length, bool) or not isinstance(length, int):
+        return None
+    if not LEGACY_MIN_CONFINED_LENGTH <= length <= LEGACY_MAX_CONFINED_LENGTH:
+        return None
+    if not isinstance(digest, str) or not _LEGACY_DIGEST_RE.match(digest):
+        return None
+    return f"{failure_class} - {length} chars - digest {digest[:digest_chars]}"
+
+
+# The canonical serialisation an UNCONFINED mapping is measured and digested by.
+# It is pinned, not incidental: the character count and the digest are the only
+# two things that cross the boundary, so both must be reproducible from the value
+# alone and independent of Python's dict insertion order.
+#
+# `default=str` is a totality guard, not a rendering choice. Nothing it produces
+# is ever emitted -- only the LENGTH of this text and a digest OF it leave this
+# function -- so a value json cannot encode changes the count, never the
+# confinement.
+#
+# `sort_keys`, `separators` and `default` are the row-164 packet's serialisation.
+# `ensure_ascii` is json's own default and is stated here rather than inherited,
+# because a future default change would silently move every count and digest.
+_UNCONFINED_JSON_ARGS: dict[str, Any] = {
+    "sort_keys": True,
+    "separators": (",", ":"),
+    "ensure_ascii": True,
+    "default": str,
+}
+
+def _unconfined_serialisation(value: Any) -> str | None:
+    """Canonical text for a mapping that does NOT claim to be the envelope.
+
+    Returns None for three distinct cases, all of which mean "not a synthesisable
+    mapping":
+
+    * a non-Mapping -- #3452's symmetric rule stands, a list or an int or a bool
+      is still unrenderable and still quarantined;
+    * a mapping whose key set IS ``LEGACY_CONFINED_KEYS`` -- that value CLAIMS to
+      be the envelope, so it is validated or quarantined on the envelope's own
+      terms. Synthesising over it would silently accept a malformed envelope,
+      which is the one shape #3452 was right to fail closed on;
+    * a value this cannot serialise at all.
+
+    Never raises. This runs inside the dispatcher's render path, which has no
+    guard above it: a raised exception there aborts the whole cycle and leaves the
+    event in the outbox to re-poison the next one.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        if frozenset(value.keys()) == LEGACY_CONFINED_KEYS:
+            return None
+        return json.dumps(dict(value), **_UNCONFINED_JSON_ARGS)
+    except Exception:  # noqa: BLE001 -- rendering must never abort a dispatch cycle
+        return None
+
+
+def is_renderable_unconfined_mapping(value: Any) -> bool:
+    """Whether ``alert_text`` can render this mapping without leaking it.
+
+    Serialisation only, no digest. The envelope check runs on EVERY queue event
+    and only needs to know whether a rendering EXISTS, so it does not pay for one
+    it will not use. Keeping the two questions in separate functions is also what
+    guarantees they cannot disagree.
+    """
+    return _unconfined_serialisation(value) is not None
+
+
+def unconfined_mapping_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
+    """Synthesise a confinement string for a mapping that is not the envelope.
+
+    The output is the same ``"{class} - {n} chars - digest {hex}"`` form the
+    confinement envelope renders as, so an operator reads one shape rather than
+    two. What it is NOT is the same measurement: ``n`` is the length of the
+    canonical serialisation this reader built, not of any original content, so it
+    is not comparable to an envelope's producer-supplied ``length``. The class
+    token says which of the two it is.
+
+    No key and no value crosses the boundary -- only a count and a digest -- so
+    #2386's metadata-only contract holds for a mapping the producer never
+    confined, exactly as it holds for one the producer did.
+    """
+    serialised = _unconfined_serialisation(value)
+    if serialised is None:
+        return None
+    # sha256 of the canonical serialisation, as the row-164 packet specifies. It
+    # is a correlation digest for grouping, never a secret: it is one-way, only 8
+    # of its characters are displayed, and the 64-character form exists solely so
+    # alert_text_for_fingerprint keeps full incident-identity entropy -- the same
+    # width the envelope path already carries, so that slice needs no special case.
+    digest = hashlib.sha256(serialised.encode("utf-8")).hexdigest()
+    return f"{UNCONFINED_OBJECT_CLASS} - {len(serialised)} chars - digest {digest[:digest_chars]}"
+
+
+def _parse_baked_repr(text: str) -> dict[str, Any] | None:
+    """Read the three typed values out of a matched repr, or None.
+
+    Structural only -- the values come from regex groups, never from evaluating
+    the string. Rejects a duplicate key, which the three-pair bound alone allows.
+    """
+    parsed: dict[str, Any] = {}
+    for match in _REPR_PAIR_PARTS_RE.finditer(text):
+        key = match.group("key")
+        if key in parsed:
+            return None
+        number = match.group("number")
+        parsed[key] = int(number) if number is not None else match.group("text")
+    if frozenset(parsed.keys()) != LEGACY_CONFINED_KEYS:
+        return None
+    return parsed
+
+
+def _baked_repr_to_text(
+    text: str, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
+    """Render one exact baked-repr string, or None if it is not one."""
+    if not _BAKED_REPR_RE.match(text):
+        return None
+    parsed = _parse_baked_repr(text)
+    if parsed is None:
+        return None
+    return _legacy_confined_mapping_to_text(parsed, digest_chars=digest_chars)
+
+
+def legacy_confined_to_text(
+    value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str | None:
+    """Canonical operator string for the legacy confinement envelope.
+
+    Accepts the live mapping or an exact baked-repr string, in either key order.
+    Returns None for every other value, including a mapping with an extra or
+    missing key, a non-hex or short digest, and a non-integer length.
+    """
+    rendered = _legacy_confined_mapping_to_text(value, digest_chars=digest_chars)
+    if rendered is not None:
+        return rendered
+    if isinstance(value, str):
+        return _baked_repr_to_text(value, digest_chars=digest_chars)
+    return None
+
+
+def _is_malformed_legacy_span(span: str) -> bool:
+    """True when a matched span IS this envelope's shape but not a valid one.
+
+    The three-pair grammar alone only says "a brace group holding three typed
+    pairs"; this adds "and its keys are exactly the legacy envelope's three". A
+    brace group carrying three unrelated keys is ordinary operator text and is
+    left alone, which is what keeps the rule from swallowing prose.
+    """
+    parsed = _parse_baked_repr(span)
+    if parsed is None:
+        return False
+    return _legacy_confined_mapping_to_text(parsed) is None
+
+
+def has_malformed_legacy_confined_repr(value: Any) -> bool:
+    """True when a string carries a structurally legacy envelope that is invalid.
+
+    Structural, never evaluated: the span comes from the same bounded grammar the
+    renderer matches, and its three values are read out of regex groups, so
+    nothing here executes the string or decodes it permissively. The scan is
+    unanchored, so a span nested inside a larger mapping is found wherever it sits
+    and the answer cannot depend on the key order of whatever wraps it.
+    """
+    if not isinstance(value, str):
+        return False
+    return any(
+        _is_malformed_legacy_span(match.group(0))
+        for match in _BAKED_REPR_SCAN_RE.finditer(value)
+    )
+
+
+def _render_embedded_baked_reprs(
+    text: str, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS
+) -> str:
+    """Replace every embedded envelope repr with its canonical string.
+
+    Surrounding operator text is preserved, so a persisted
+    "ESCALATED still open: {...}" row renders readably instead of leaking a repr.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        span = match.group(0)
+        rendered = _baked_repr_to_text(span, digest_chars=digest_chars)
+        if rendered is not None:
+            return rendered
+        if _is_malformed_legacy_span(span):
+            # #2386: this IS the envelope's shape and its values are outside the
+            # bounds. Handing it back verbatim left the invalid class and the
+            # digest-shaped field in operator-visible text; it is confined
+            # material the consumer cannot render, not prose that happens to
+            # contain braces, so it gets the same fixed sentinel a live mapping
+            # of the same kind gets. Surrounding text is preserved.
+            return UNRENDERABLE_ALERT_CONTENT
+        return span
+
+    return _BAKED_REPR_SCAN_RE.sub(replace, text)
+
+
+def alert_text(value: Any, *, digest_chars: int = LEGACY_DISPLAY_DIGEST_CHARS) -> str:
+    """The single funnel every alert-content read passes through.
+
+    A string renders as itself, with any embedded envelope repr replaced by its
+    canonical form. The live envelope mapping renders canonically. A mapping that
+    never claimed to be that envelope renders as a SYNTHESISED confinement string
+    carrying only a class, a count and a digest. Anything else -- a list, a
+    number, a boolean, or a mapping wearing the envelope's exact keys with values
+    outside its bounds -- renders as the fixed sentinel and is never printed, so
+    an unexpected shape cannot leak through the boundary.
+    """
+    if value is None:
+        return ""
+    rendered = legacy_confined_to_text(value, digest_chars=digest_chars)
+    if rendered is not None:
+        return rendered
+    if isinstance(value, str):
+        return _render_embedded_baked_reprs(value, digest_chars=digest_chars)
+    synthesised = unconfined_mapping_to_text(value, digest_chars=digest_chars)
+    if synthesised is not None:
+        return synthesised
+    return UNRENDERABLE_ALERT_CONTENT
+
+
+def alert_text_for_fingerprint(value: Any) -> str:
+    """Render for IDENTITY, not for display: the full 64-hex digest.
+
+    storm_fingerprint, recovery_episode_fingerprint and recovery_duplicate_
+    fingerprint group incidents by this text. Feeding them the display rendering
+    put identity on the 8-character prefix, so two incidents sharing a prefix
+    merged into one -- a regression against the pre-confinement behaviour, where
+    the summary carried the whole digest. Everything else about the rendering is
+    identical, so grouping is unchanged apart from the restored entropy.
+    """
+    return alert_text(value, digest_chars=LEGACY_FULL_DIGEST_CHARS)
+
+
+def alert_text_kind(value: Any) -> str:
+    """Telemetry label for one alert-content value.
+
+    One of "string", "legacy_object", "baked_repr", "unconfined_object",
+    "unrenderable". Callers count these per event; an event can carry more than
+    one kind across its fields, so the counters are never summed.
+
+    "unconfined_object" is its own label rather than a reuse of "unrenderable"
+    because the two now mean opposite things to a caller: "unrenderable" is the
+    quarantine signal -- the dispatcher folds it into queueUnrenderable alongside
+    the pending-quarantine count and names the field in the operator meta-alert --
+    while an unconfined object is DELIVERED. Labelling a delivered event
+    unrenderable would report a dropped alert that was never dropped.
+    """
+    if value is None:
+        return "string"
+    if _legacy_confined_mapping_to_text(value) is not None:
+        return "legacy_object"
+    if isinstance(value, str):
+        # Checked BEFORE "baked_repr": a malformed span also changes under
+        # rendering, and labelling it as a readable legacy form would tell
+        # telemetry the opposite of what happened to it.
+        if has_malformed_legacy_confined_repr(value):
+            return "unrenderable"
+        if _BAKED_REPR_SCAN_RE.search(value) and _render_embedded_baked_reprs(value) != value:
+            return "baked_repr"
+        return "string"
+    if is_renderable_unconfined_mapping(value):
+        return UNCONFINED_OBJECT_CLASS
+    return "unrenderable"

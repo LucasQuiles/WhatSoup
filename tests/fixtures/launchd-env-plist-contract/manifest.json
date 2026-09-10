@@ -1,0 +1,145 @@
+{
+  "contract": "docs/runbooks/launchd-governed-env-reader-contract.md",
+  "instance": "agent-alpha",
+  "answers": [
+    "refuse",
+    "empty",
+    "map"
+  ],
+  "cases": [
+    {
+      "name": "honest_live_dict",
+      "fixture": "honest-live-dict.plist",
+      "answer": "map",
+      "why": "The control. A plain dict with one governed and one non-governed key must enumerate both, so every refusal below is attributable to its own shape.",
+      "environment": {
+        "PATH": "/opt/bin:/usr/bin",
+        "OPERATOR_SECRET": "keep-me"
+      }
+    },
+    {
+      "name": "comment_decoy_before_marker",
+      "fixture": "comment-decoy-before-marker.plist",
+      "answer": "map",
+      "why": "A commented-out decoy dict ahead of the live one is inert text. The reader must answer exactly as it does for honest-live-dict.",
+      "environment": {
+        "PATH": "/opt/bin:/usr/bin",
+        "OPERATOR_SECRET": "keep-me"
+      }
+    },
+    {
+      "name": "cdata_decoy_before_marker",
+      "fixture": "cdata-decoy-before-marker.plist",
+      "answer": "map",
+      "why": "Row 130. The CDATA decoy is character data inside a Notes string, which keeps this fixture valid while leaving the decoy inert. The macOS system parser lints the fixture and extracts the declared live environment. Before the fix the marker inside the section won the lookup and the empty decoy was read as the environment, so an apply deleted OPERATOR_SECRET without naming it.",
+      "environment": {
+        "PATH": "/opt/bin:/usr/bin",
+        "OPERATOR_SECRET": "keep-me"
+      }
+    },
+    {
+      "name": "processing_instruction_decoy_before_marker",
+      "fixture": "processing-instruction-decoy-before-marker.plist",
+      "answer": "map",
+      "why": "Row 130, the same defect spelled as a processing instruction.",
+      "environment": {
+        "PATH": "/opt/bin:/usr/bin",
+        "OPERATOR_SECRET": "keep-me"
+      }
+    },
+    {
+      "name": "alternate_root_key_spelling",
+      "fixture": "alternate-root-key-spelling.plist",
+      "answer": "refuse",
+      "why": "Row 130. `<key >` is the same element to the system parser, and both readers hold ONE literal spelling of the marker. Refusing is the fail-closed answer: parsing it would make these readers newly ACCEPT a file they used to refuse, which is a contract widening this change does not take. Before the fix the TypeScript comparator answered \"empty\" here and the apply gate proceeded."
+    },
+    {
+      "name": "environment_variables_declared_twice",
+      "fixture": "environment-variables-declared-twice.plist",
+      "answer": "refuse",
+      "why": "Two canonical EnvironmentVariables declarations must refuse. The macOS system parser selects the last, while both readers previously parsed the first. This positional detector does not claim document-depth validation."
+    },
+    {
+      "name": "mixed_marker_spellings",
+      "fixture": "mixed-marker-spellings.plist",
+      "answer": "refuse",
+      "why": "A canonical declaration followed by a declaration whose key tags carry XML whitespace before > must refuse. The duplicate detector covers those measured tag forms only; the canonical literal remains the only form that selects a block. Before the fix both readers parsed the first block while the macOS system parser loaded the second."
+    },
+    {
+      "name": "environment_variables_absent",
+      "fixture": "environment-variables-absent.plist",
+      "answer": "refuse",
+      "why": "An absent element is not an empty environment. The reader cannot claim \"there are genuinely no keys\" about an element it never found, and on the apply surface that claim empties the dropped-key list."
+    },
+    {
+      "name": "unterminated_comment",
+      "fixture": "unterminated-comment.plist",
+      "answer": "refuse",
+      "why": "Not well-formed XML at all. It used to be ignored, so every byte after the opener parsed as live markup."
+    },
+    {
+      "name": "self_closing_dict",
+      "fixture": "self-closing-dict.plist",
+      "answer": "empty",
+      "why": "The one shape that yields an EMPTY map rather than a refusal: the element is present and genuinely holds nothing, so every governed key is missing and the drift rows say so accurately.",
+      "environment": {}
+    },
+    {
+      "name": "nested_dict_in_body",
+      "fixture": "nested-dict-in-body.plist",
+      "answer": "refuse",
+      "why": "The body truncates at the first </dict>, so a key declared after the nested dict reads as absent. Refusing beats handing back a partial map."
+    },
+    {
+      "name": "attributed_dict",
+      "fixture": "attributed-dict.plist",
+      "answer": "refuse",
+      "why": "Detected broadly, parsed narrowly. Consuming to the first \">\" would end the token early on a legal `<dict a=\"x>y\">` and read the rest of the opening tag as body pairs. plist(5) dicts carry no attributes, so refusing costs nothing."
+    },
+    {
+      "name": "duplicate_key",
+      "fixture": "duplicate-key.plist",
+      "answer": "refuse",
+      "why": "The TypeScript comparator took the LAST occurrence and the Python reader took the FIRST, so the two disagreed about one file. Refusing settles it on both sides."
+    },
+    {
+      "name": "cdata_value_in_body",
+      "fixture": "cdata-value-in-body.plist",
+      "answer": "refuse",
+      "why": "THE CELL THE MASK ALONE WOULD HAVE OPENED. Masking a CDATA section to \"-\" makes its content legal character data, which the pair pattern's [^<]* group matches, so this body would have become \"fully consumed\" and parsed to a dash-valued key. Both readers refuse on a masked span intersecting the body, which is why this row belongs in the corpus rather than only in the reader tests."
+    },
+    {
+      "name": "five_xml_entities",
+      "fixture": "five-xml-entities.plist",
+      "answer": "map",
+      "why": "The five XML predefined entities are the set the generator emits and both readers decode. A governed value compares by digest of the DECODED text, so the two readers must decode identically.",
+      "environment": {
+        "CLAUDE_CONFIG_DIR": "/opt/a<b>c\"d'e&f"
+      }
+    },
+    {
+      "name": "numeric_character_reference",
+      "fixture": "numeric-character-reference.plist",
+      "answer": "map",
+      "why": "OPEN DIVERGENCE, pinned rather than resolved. The TypeScript reader decodes exactly the five predefined entities and leaves a numeric character reference as written; the Python reader uses html.unescape and resolves it. Closing this needs BOTH a widening of one reader and a narrowing of the other on a security-sensitive parser, which is its own change with its own disclosure. This row records the divergence so a unilateral change to either side breaks the corpus instead of passing unnoticed.",
+      "environment": {
+        "CLAUDE_CONFIG_DIR": "/opt/roots/a&#47;b"
+      },
+      "openDivergence": {
+        "id": "entity-decoding",
+        "python": {
+          "CLAUDE_CONFIG_DIR": "/opt/roots/a/b"
+        }
+      }
+    },
+    {
+      "name": "value_with_surrounding_whitespace",
+      "fixture": "value-with-surrounding-whitespace.plist",
+      "answer": "map",
+      "why": "plist(5) <string> content is significant, so the value is kept exactly as written. The Python reader used to strip it here, which made the two readers disagree about one file; the \"empty or whitespace-only reads as absent\" policy belongs at environment_value(), not in the parser.",
+      "environment": {
+        "CLAUDE_CONFIG_DIR": " /opt/roots/agent "
+      }
+    }
+  ]
+}

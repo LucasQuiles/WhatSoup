@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "deploy/lib/runtime-path.sh",
-      "sha256": "0884f949aae18fb55c41a3052a90ee71cbf2074e5f05d6fecd3bc266e0662bdc",
+      "sha256": "2bbeae2e5af3bb34878b42588df7a30a73416bfd966a84db4b854d52567d17ce",
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
@@ -14,7 +14,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "6b53086e01b3d8b86b620c15f17d84c5ece4df6bf8d98fab5d80766f87b672cd",
+      "sha256": "e2fb98c8a9d9fa15d205167cf59853331f02660ce583ebc079fde73615523d1b",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -33,12 +33,14 @@
         "tailscale_ping_command",
         "collector_remote_unreachable",
         "REGISTERED_ALERT_SOURCES",
-        "configuration_retired"
+        "configuration_retired",
+        "allow-empty-roster",
+        "cannot be combined with --daemon"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "2c791d7e16dd86243d5d001f86488a998280e2c6a90c5e5b3823bdd61bbc912b",
+      "sha256": "c0ed4ead5b8688d66779bc43333f80a4d9070142fa64981f730c82f396126275",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -63,7 +65,52 @@
         "degradation_causes_from_event",
         "degradationCauseDispositions",
         "autocloseHoldReleasedAt",
-        "autocloseHoldReleasedReason"
+        "autocloseHoldReleasedReason",
+        "conversation_scope_is_unrepresented",
+        "CONVERSATION_SCOPED_SOURCES",
+        "event_conversation_scope(event)",
+        "storm_unrepresented",
+        "CONVERSATION_SCOPE_TAG",
+        "record_conversation_scope_delivered",
+        "CONVERSATION_SCOPE_OVERFLOW_KEY",
+        "sweep_conversation_scopes",
+        "tombstonesDroppedAt",
+        "conversation_scopes_have_overflowed(incident_state, current)",
+        "mark_incident_sent(event, replay_state)",
+        "_reject_bare_write_if_adopted",
+        "_incident_state_is_adopted",
+        "_reject_bare_write_over_envelope",
+        "INCIDENT_CYCLE_REQUIRED_EXIT",
+        "_AdoptionLock",
+        "event_text",
+        "record_legacy_alert_content",
+        "legacyAlertContent",
+        "note_unrenderable_quarantine",
+        "flush_unrenderable_quarantine_telemetry",
+        "event_fingerprint_text",
+        "ack_unrenderable_quarantine_telemetry",
+        "queue_unrenderable_meta_alerts",
+        "unrenderable_alert_signal",
+        "dispatcher.unrenderable_meta_alert",
+        "write_unrenderable_breadcrumb",
+        "reconcile_unrenderable_signals",
+        "drop_unrenderable_breadcrumbs",
+        "delivery_outcome_unknown_escalated",
+        "outcomeUnknownEscalatedAt",
+        "HELD_DELIVERY_ESCALATE_SECONDS",
+        "STORM_RECEIPT_MAX_RECORDS",
+        "storm_window_identity",
+        "write_storm_digest_receipt",
+        "acknowledge_storm_digest_receipt",
+        "reconcile_storm_digest_receipts",
+        "dispatcher.storm_receipt",
+        "settledReason",
+        "STORM_RECEIPT_ORPHAN_ALERT_SOURCE",
+        "dispatcher.storm_receipt_orphan_alert",
+        "storm_receipt_publication_evidence",
+        "storm_receipt_digest_id",
+        "STORM_DIGEST_LEDGER_DIRS",
+        "orphanPagedAtEpoch"
       ]
     },
     {
@@ -97,7 +144,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "37eb44bb5ad87d14b391dd9e677270e3c695c26dcef85ab76de7abe5b05c9aec",
+      "sha256": "000ae75c796d672d292f01a987404f2144fc10b1438a03ac9039190fa3a64721",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -176,7 +223,43 @@
         "required_tools_lifecycle",
         "save_tool_inventory_state",
         "MCP_TOOL_INVENTORY_UNOBSERVED",
-        "MCP_REQUIRED_TOOLS_MISSING"
+        "MCP_REQUIRED_TOOLS_MISSING",
+        "_restart_explains_cycle_age",
+        "_cycle_stale_should_report",
+        "_note_grace_streak",
+        "_grace_still_credible",
+        "graceStreakSeenAt",
+        "DEADMAN_CHECK_INTERVAL_SECONDS",
+        "_host_boot_id",
+        "graceStreakBootId",
+        "lastCheckGapSeconds",
+        "_host_monotonic_seconds",
+        "graceStreakSeenMonotonic",
+        "graceStreakAccumulated",
+        "graceStreakGapForgiven",
+        "_grace_streak_record_state",
+        "lastCheckGapAt",
+        "grace_refused",
+        "deadman_observation_gap_line",
+        "deadman_observation_gap_inventory",
+        "instance_plist_environment",
+        "mask_inert_xml_regions",
+        "PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE",
+        "instance_plist_governed_environment",
+        "GOVERNED_PLIST_UNREADABLE",
+        "GOVERNED_PLIST_NOT_APPLICABLE",
+        "provider_runtime_plist_unreadable",
+        "governed_child_environment",
+        "environment_value",
+        "environment_provider_path",
+        "generated_provider_path_absence_failure",
+        "reason=generated_path_absent",
+        "governed_prepend_failure_class",
+        "instance_provider_path_prepend_match",
+        "path_starts_with_entries",
+        "WHATSOUP_PATH_PREPEND",
+        "provider_runtime_path_prepend_mismatch",
+        "provider_runtime_path_prepend_inconsistent"
       ]
     },
     {
@@ -215,16 +298,18 @@
     },
     {
       "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
+      "sha256": "509a0ebc4ff98a180e63bd0da93b6cdb85f8f8c83cd1dbf04cda2cc162d0a66e",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",
-        "flock -n 9"
+        "flock -n 9",
+        "lib.producer_cadence_receipt",
+        "lock-skip"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "8e3a3fa0aa5a0a00c6161ca6b61ea6afabb9adc46e10869553097b2e291f9a3b",
+      "sha256": "223e1964611637e5da6c481f10eeb74f184c6bd94cef05251d95d995d71c1f9e",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -233,10 +318,16 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runtime-staleness.py",
-      "sha256": "13253e5d6ecdf220f99ad043f03120dc809c4afa0cbb7c6b9ec70c4838c41c22",
+      "sha256": "8a56429036464893d4993040c9ddd445dd8c219f9e2879262064837a3f98111f",
       "mustContain": [
         "Runtime code-staleness monitor",
-        "runtime_stale"
+        "runtime_stale",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -249,19 +340,35 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "075137829d4d072bbd23282c58e8731c910d20f7a5642f64a28c17b58c3f8573",
+      "sha256": "dd3666fcc979685aacc926f5cd4e62a38268fe0fc8665a37cbcd927ccb853c52",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
-        "DEFAULT_HYSTERESIS_CYCLES"
+        "DEFAULT_HYSTERESIS_CYCLES",
+        "configuration_retired",
+        "retire_unconfigured_hosts",
+        "RETIRED_HOST_TOMBSTONE_MAX",
+        "reconcile_retirement_intents",
+        "enforce_retired_host_tombstone_cap",
+        "qRemediationDisposition",
+        "episodeSeq",
+        "retirement_action_guard_hosts",
+        "require_retirement_binding_match"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "fb19de0a00dc98673c9b4230f005004906eb23b6206eb8167f9e1a574c647ee7",
+      "sha256": "778ec173f93e8530baf019bd2784d8809301280d66b50c7c39170866298be02a",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
-        "def redact_path_segment"
+        "def redact_path_segment",
+        "producer_cadence_receipt",
+        "record_cycle_attempt",
+        "record_cycle_success",
+        "_cadence_fetch_status",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "CADENCE_RECEIPT_SCHEMA_VERSION"
       ]
     },
     {
@@ -333,11 +440,12 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "12bb97ecaa8c17ab429ddc03da78997cd7ba98a724f47724df3ba60e4a6680e4",
+      "sha256": "1a050fa4cdcb2ba8c23e3f78678598919faa7db4d2f052910496107ede317ee8",
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload"
+        "daemon-reload",
+        "deploy/scripts/lib/producer_cadence_receipt.py"
       ]
     },
     {
@@ -367,7 +475,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "79be73a209d502108ff78edb2fa248b9010bb04d911309b375760fa980d34760",
+      "sha256": "90d9df751f501ee4582382618f7f769737ae705778173a7db7ed6fe951dbc883",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -375,12 +483,14 @@
         "class EventClassification",
         "classify_event",
         "normalize_event",
-        "new_event_fields"
+        "new_event_fields",
+        "_require_renderable_alert_content",
+        "unrenderable_alert_content"
       ]
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "274316080daac4fb1949e357e2d1688938a9d44fb63330ed2bef524ef73f4301",
+      "sha256": "26b1afe5b7f57420bb90b28bf97cbe83168c3402c76d845f8777923f3722548d",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -388,7 +498,15 @@
         "AUTHORIZATION_BEARER_RE",
         "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
-        "PEM_PRIVATE_KEY_RE"
+        "PEM_PRIVATE_KEY_RE",
+        "LEGACY_CONFINED_KEYS",
+        "_BAKED_REPR_RE",
+        "legacy_confined_to_text",
+        "alert_text",
+        "alert_text_kind",
+        "alert_text_for_fingerprint",
+        "LEGACY_FULL_DIGEST_CHARS",
+        "has_malformed_legacy_confined_repr"
       ]
     },
     {
@@ -482,6 +600,20 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/producer_cadence_receipt.py",
+      "sha256": "c6052cfb0529317bd68a99f9ce52ab3d181ed10442a76aca0362b8a41e4e2c94",
+      "mustContain": [
+        "CADENCE_RECEIPT_SCHEMA_VERSION",
+        "lastAttemptAt",
+        "lastSuccessfulObservationAt",
+        "lock_skip",
+        "ProducerIdentity",
+        "invocationContext",
+        "not_applicable",
+        "record_wrapper_lock_skip"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/queue_age.py",
       "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
       "mustContain": [
@@ -524,12 +656,14 @@
     },
     {
       "path": "deploy/scripts/lib/target_provenance.py",
-      "sha256": "0676829670b431e4957167cc8b7a83ebbe7ac310bc70fe283e8d161275bfc298",
+      "sha256": "a70157970a058ce06a7959e453aa24bfb5868e871843cc3c3bb5337e8dc89ebe",
       "mustContain": [
         "TARGET_PROVENANCE_SCHEMA_VERSION",
         "class TargetProbes:",
         "def resolve_target_provenance(",
         "def observer_provenance_block(",
+        "def classify_release_divergence(",
+        "def safe_release_divergence(",
         "def safe_target_provenance(",
         "def safe_observer_provenance(",
         "def unit_for_instance(",
@@ -581,19 +715,54 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "4a0215bdf4a7ad9223beeabb7268a3f1bd1c16eabd979234b0e81aee51ea2ffc",
+      "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail",
-        "confineAlertContent"
+        "confineAlertContent",
+        "confineConversationScope"
+      ]
+    },
+    {
+      "path": "src/lib/alert-evidence.ts",
+      "sha256": "751cfb1f9bad824edb6353491dfe258735bf3f0ad8b2a3dea9ffe4451ea75bf1",
+      "mustContain": [
+        "ConfinedAlertContent",
+        "confineAlertContent",
+        "confineConversationScope",
+        "CONVERSATION_SCOPE_TAG",
+        "bot-errors-evidence:"
+      ]
+    },
+    {
+      "path": "src/lib/private-fs.ts",
+      "sha256": "405975415cbbb023b19d8497afb6c3be09e411611b4dc79623f95b2c17faf60c",
+      "mustContain": [
+        "forceEnsurePrivateDirectorySync",
+        "fsyncDirectory"
+      ]
+    },
+    {
+      "path": "src/lib/redaction-patterns.ts",
+      "sha256": "dc4910405e7cf44b597cea67411f45bbc06487b37c679fff8e0ad00c75f583c1",
+      "mustContain": [
+        "jidPattern"
+      ]
+    },
+    {
+      "path": "src/lib/type-guards.ts",
+      "sha256": "a5c720ed58c8bea11774cbc4d5eb1edb4fc7bbce4cabdd36dde74bdcc2e58e92",
+      "mustContain": [
+        "asNonEmptyString",
+        "isRecord"
       ]
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "9fc3b76731275c7c9a7a152619b20bb54c7244e5c976bf20263a42485b738316",
+      "sha256": "c337522837ae0cf72d69a4eac4a0af1bc6373801a422b68cf0abe4e847db94b9",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

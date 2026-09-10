@@ -193,7 +193,21 @@ instance `config.json` `service` block (schema:
   are neither created nor copied by rendering.
 - `service.pathPrepend` → directories prepended, in order, ahead of the
   generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
-  `$HOME/.local/bin` so an opencode fallback binary resolves under launchd).
+  `$HOME/.local/bin` so an opencode fallback binary resolves under launchd), and
+  the same list joined with `:` into a second governed key
+  `WHATSOUP_PATH_PREPEND`. The launcher receives one already-joined `PATH` and
+  cannot tell a governed prefix from an ambient entry, so the dedicated key is
+  what makes the prepend outrank `$HOME/.local/bin` at runtime. Omitted or empty
+  renders neither surface. Never hand-edit the key: it is governed, so `--apply`
+  overwrites it, and an empty segment in a hand-set value makes the shared
+  runtime helper fail closed with a `FATAL:` line rather than start the instance
+  with the current directory on its PATH. The prepend outranks the pinned Node
+  directory as well as `$HOME/.local/bin`, so a `node` binary placed in it
+  shadows the `WHATSOUP_NODE` pin for every child process that resolves `node`
+  from `PATH`; the launcher is unaffected because it calls Node by absolute
+  path. The shared helper itself has no platform guard and is sourced on both
+  operating systems, so the colon collapse and the fail-closed empty-segment
+  path apply on Linux hosts too even though nothing renders the key there.
 
 Every render path — the first install after pairing and
 `reconcile-launchd-restart-policy` — resolves the block through the validated
@@ -204,13 +218,15 @@ renders the historical byte-identical plist.
 ### Checking governed-env drift
 
 The dry-run reconciler compares the fresh render against the installed plist on
-the governed keys (`CLAUDE_CONFIG_DIR`, `PATH`) by key and SHA-256 value digest.
+the governed keys (`CLAUDE_CONFIG_DIR`, `PATH`, `WHATSOUP_PATH_PREPEND`) by key
+and SHA-256 value digest.
 Installed bot plists carry live credentials, so values are never printed:
 
 ```bash
 npm run reconcile-launchd-restart-policy -- --instance <instance>
 # governed env drift: CLAUDE_CONFIG_DIR missing expected=sha256:… observed=absent
 # governed env drift: PATH mismatch expected=sha256:… observed=sha256:…
+# governed env drift: WHATSOUP_PATH_PREPEND missing expected=sha256:… observed=absent   ← service.pathPrepend configured, installed plist predates the governed key: reconcile --apply
 # governed env: PATH configured prefix satisfied; tail differs from this shell's PATH (expected=sha256:… observed=sha256:…) — --apply bakes this shell's PATH tail
 # governed env: installed PATH present but not config-owned (no service.pathPrepend configured) — cannot verify PATH ownership; --apply bakes this shell's PATH (expected=sha256:… observed=sha256:…)
 # installed plist has 2 non-governed EnvironmentVariables keys (MINIMAX_API_KEY, WHATSOUP_HEALTH_TOKEN) that --apply will drop

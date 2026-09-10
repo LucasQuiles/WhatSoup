@@ -12,6 +12,18 @@ import type { PresenceCache } from './presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from './connection.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 
+/**
+ * Optional observability projection of the connection state.
+ *
+ * Separate from getConnectionState because that one is a delivery-gate input
+ * and must stay live. Transports without an auth bond (SMS, Signal, iMessage)
+ * do not implement this; callers fall back to getConnectionState, which costs
+ * them nothing because they have no tree to walk.
+ */
+export interface HealthConnectionStateReader {
+  getHealthConnectionState?(): ConnectionStateSnapshot;
+}
+
 export function isFullyConnected(
   snapshot: { connected: unknown; state: unknown },
 ): boolean {

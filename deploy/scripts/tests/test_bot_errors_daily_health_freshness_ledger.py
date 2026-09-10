@@ -17,13 +17,18 @@ Hostnames here are neutral placeholders; the logic is host-name agnostic.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -38,12 +43,7 @@ _HOST_B = "relay-bravo"
 _MACHINE = "Example-Machine"
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+_load = dispatcher_fixtures.load_module_from_path
 
 
 # Loaded once; state_root() reads BOT_ERRORS_STATE_DIR live per call, so per-test

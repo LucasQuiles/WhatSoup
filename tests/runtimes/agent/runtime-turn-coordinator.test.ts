@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeTurnCoordinator, type RuntimeTurnCoordinatorPort } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-double.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AttemptOutcome } from '../../../src/runtimes/agent/turn-terminal.ts';
@@ -42,12 +43,12 @@ function context() {
 }
 
 function makeCoordinator(): RuntimeTurnCoordinator {
-  const host = {
+  const host = coordinatorPortDouble({
     instanceName: 'bookkeeping-test',
     runtimeTurnSupervisor: {
       scopeKey: vi.fn(() => 'per_chat:15550190099'),
-    },
-  } as unknown as RuntimeTurnCoordinatorPort;
+    } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+  });
   return new RuntimeTurnCoordinator(host);
 }
 
@@ -134,6 +135,9 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       'Journaled agent turn rejected before dispatch',
       expect.stringContaining('inbound_seq=41 reason=queue_closed automatic_replay=false'),
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: '15550190099' },
     );
   });
 

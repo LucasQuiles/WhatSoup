@@ -546,6 +546,79 @@ describe('keep receipt id (F2a reply-threading)', () => {
     expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
   });
 
+  // A1 (#2121 follow-up) — promotion CONSUMES the receipt. The compare-and-set
+  // used to set scope/expires_at/updated_at and leave the id behind, so a
+  // sticky row went on authenticating replies to the very receipt that made it
+  // sticky: every later threaded affirmative was intercepted and answered
+  // "already kept" instead of reaching the agent. A permanent pin has nothing
+  // left to confirm, so it must hold no receipt.
+  it('promotion clears the receipt id it consumed', () => {
+    setPreference(db, pref({ updatedAt: 1_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBe(RECEIPT);
+
+    const result = promoteToSticky(db, CHAT_A, SENDER_A, 1_500);
+    expect(result.outcome).toBe('promoted');
+    // The promotion is one atomic write: scope, expiry and the consumed
+    // receipt move together, and the RETURNED preference describes the row
+    // that now exists — a caller renders its reply from it.
+    expect(result.preference).toMatchObject({ scope: 'sticky', expiresAt: null, keepReceiptMessageId: null });
+    // S4: the returned id is READ BACK from the row, so it cannot report
+    // "consumed" while the row still holds one. Proven by agreement with a
+    // direct read of the store rather than by the literal above alone.
+    expect(result.preference?.keepReceiptMessageId).toBe(getKeepReceiptMessageId(db, CHAT_A));
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toMatchObject({
+      scope: 'sticky',
+      expiresAt: null,
+      keepReceiptMessageId: null,
+    });
+  });
+
+  // The other half of the same invariant, and the reason clearing at promotion
+  // alone is not enough: a re-confirm of an ALREADY-sticky pin still renders a
+  // keep-promising echo (owner-render-format.ts prints "reply keep to make it
+  // permanent" on every branch), so the capture path can be reached with a
+  // sticky row underneath. Refusing the write here makes "a receipt id exists
+  // only on a pin that can still be promoted" a store invariant rather than a
+  // property of who happens to call.
+  it('a sticky row cannot acquire a receipt id', () => {
+    setPreference(db, pref({ scope: 'sticky', updatedAt: 1_000, expiresAt: null }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+    // A no-op, not a partial write: the sticky row is otherwise untouched.
+    expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toMatchObject({
+      scope: 'sticky',
+      expiresAt: null,
+      updatedAt: 1_000,
+      keepReceiptMessageId: null,
+    });
+  });
+
+  // Item 5 (#2121 follow-up, cross-model bench) — the INSTALLED BASE. The
+  // writer guard and the promotion clear only govern rows this version writes.
+  // A row the previous unguarded writer stamped, and which has since become
+  // sticky, still carries an id in the column; answering it would let an old
+  // receipt authenticate a threaded affirmative on a permanent pin. Seeded
+  // with a raw UPDATE precisely because the fixed writer now refuses it: this
+  // is base's state reproduced, not a state the current code can reach.
+  it('a legacy sticky row that still carries a receipt id answers null', () => {
+    setPreference(db, pref({ scope: 'sticky', updatedAt: 1_000, expiresAt: null }));
+    db.raw
+      .prepare(`UPDATE chat_model_preference SET keep_receipt_message_id = ? WHERE chat_jid = ? AND sender_jid = ?`)
+      .run(RECEIPT, CHAT_A, SENDER_A);
+    const storedId = (): unknown => (db.raw
+      .prepare(`SELECT keep_receipt_message_id AS id FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+      .get(CHAT_A, SENDER_A) as { id: unknown } | undefined)?.id;
+    // Coverage assertion: the legacy value really is in the column, so the
+    // read below is exercising the repair rather than an empty cell.
+    expect(storedId()).toBe(RECEIPT);
+
+    // Repaired on READ — no migration, no write, and the stored byte is left
+    // exactly as found.
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+    expect(storedId()).toBe(RECEIPT);
+  });
+
   it('capturing against an absent row is a no-op, never an insert', () => {
     recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT);
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
@@ -562,5 +635,50 @@ describe('keep receipt id (F2a reply-threading)', () => {
       .run(CHAT_A, SENDER_A);
     expect(getPreference(db, CHAT_A, SENDER_A, NOW)).toBeNull();
     expect(getKeepReceiptMessageId(db, CHAT_A)).toBeNull();
+  });
+});
+
+/**
+ * MED-1 (#2121 follow-up) — the "same winning row" invariant, which both
+ * modules document as load-bearing and neither pinned with a test.
+ * `getKeepReceiptMessageId` authenticates a threaded confirmation and
+ * `promoteToSticky` performs it; if they ever resolved DIFFERENT rows, a reply
+ * could authenticate against one sender's receipt while the promotion targeted
+ * another's. Both read the chat's latest row across every sender, expired rows
+ * included, so the cases below are the ones where a plausible-wrong
+ * implementation (read the confirming sender's own row; apply the expiry
+ * filter) would disagree — not a tautological "call both and compare".
+ */
+describe('the receipt reader and the promoter resolve the same winning row (MED-1)', () => {
+  const RECEIPT_A = 'WA-RECEIPT-FOR-SENDER-A';
+  const RECEIPT_B = 'WA-RECEIPT-FOR-SENDER-B';
+
+  it("reports the WINNER's receipt, not the confirming sender's own", () => {
+    // B pinned first, A pinned later: A's row wins the chat on updated_at.
+    setPreference(db, pref({ senderJid: SENDER_B, updatedAt: 1_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_B, RECEIPT_B);
+    setPreference(db, pref({ senderJid: SENDER_A, updatedAt: 2_000, expiresAt: 5_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT_A);
+
+    // A per-sender read would answer RECEIPT_B for a confirmation sent by B.
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBe(RECEIPT_A);
+    // And the promoter agrees about who owns that row: holding a receipt id of
+    // one's own is not authority over the chat's winning pin.
+    expect(promoteToSticky(db, CHAT_A, SENDER_B, 1_500).outcome).toBe('actor_mismatch');
+    expect(promoteToSticky(db, CHAT_A, SENDER_A, 1_500).outcome).toBe('promoted');
+  });
+
+  it('keeps pointing at an EXPIRED winner, which is what the promoter refuses', () => {
+    // B's row is still live; A's newer row has lapsed.
+    setPreference(db, pref({ senderJid: SENDER_B, updatedAt: 1_000, expiresAt: 9_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_B, RECEIPT_B);
+    setPreference(db, pref({ senderJid: SENDER_A, updatedAt: 2_000, expiresAt: 3_000 }));
+    recordKeepReceiptMessageId(db, CHAT_A, SENDER_A, RECEIPT_A);
+
+    // An expiry-FILTERED reader would fall back to B's live row and answer
+    // RECEIPT_B here, authenticating a confirmation the promoter then refuses
+    // as `expired` — the two would be describing different pins.
+    expect(getKeepReceiptMessageId(db, CHAT_A)).toBe(RECEIPT_A);
+    expect(promoteToSticky(db, CHAT_A, SENDER_A, 4_000).outcome).toBe('expired');
   });
 });

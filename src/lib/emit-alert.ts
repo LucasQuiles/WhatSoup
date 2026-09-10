@@ -79,6 +79,17 @@ export interface AlertEmissionResult {
   outboxError?: string;
 }
 
+/**
+ * Optional, append-only emission modifiers. Every field is absent by default
+ * and absent from the emitted event when unset, so adding one never changes
+ * the shape an existing source produces.
+ */
+export interface AlertEmissionOptions {
+  renotify?: boolean;
+  /** Raw conversation identifier; confined to a digest by the event builder. */
+  conversationKey?: string;
+}
+
 export interface AlertEmissionContext {
   instance: string;
   source: string;
@@ -223,6 +234,7 @@ function captureToAlertSink(
     severity: BotErrorsSeverity;
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
     renotify?: boolean;
+    conversationKey?: string;
   },
 ): AlertEmissionResult {
   try {
@@ -273,18 +285,23 @@ export function emitAlert(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
-  opts?: { renotify?: boolean },
+  opts?: AlertEmissionOptions,
 ): AlertEmissionResult {
   // Issue #2386: confine evidence and summary to bounded metadata BEFORE
   // any sink dispatch. This ensures the legacy fallback path, dry-run sink,
   // and durable outbox all receive the same safe representation.
   const renotify = opts?.renotify === true;
+  // The raw key is confined to a digest inside the event builder, so every
+  // transport that goes through it sees only the bounded value. It is NOT
+  // forwarded to the legacy spawn path below, which deliberately ships a
+  // fixed {failureClass, source, reason} JSON and nothing else.
+  const conversationKey = opts?.conversationKey;
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify });
+    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify });
+    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);
@@ -503,9 +520,10 @@ export function emitAlertChecked(
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   strict?: boolean,
+  opts?: AlertEmissionOptions,
 ): boolean {
   return observeAlertEmission(
-    emitAlert(instance, source, summary, evidence, severity, criticalAsset),
+    emitAlert(instance, source, summary, evidence, severity, criticalAsset, opts),
     { instance, source, operation: 'alert' },
     strict,
   );

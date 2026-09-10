@@ -26,14 +26,20 @@ All tests exercise the REAL dispatcher module (importlib load + the pass + on-di
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 TEST_ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
@@ -42,17 +48,7 @@ TEST_ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_test_env():
-    saved = {k: os.environ.get(k) for k in TEST_ENV_KEYS}
-    for k in TEST_ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+_clean_test_env = dispatcher_fixtures.make_env_scrub_fixture(TEST_ENV_KEYS)
 
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
@@ -121,11 +117,7 @@ def _iso(epoch: int) -> str:
     )
 
 
-def _write_event(paths: dict[str, Path], filename: str, event: dict[str, Any]) -> Path:
-    path = paths["outbox"] / filename
-    path.write_text(json.dumps(event), encoding="utf-8")
-    path.chmod(0o600)
-    return path
+_write_event = dispatcher_fixtures.write_outbox_event
 
 
 def test_no_open_incident_pair_persists_freshness_before_terminal_move(tmp_path):

@@ -897,7 +897,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false, providerTerminated: true });
 
     await sm.spawnSession();
 
@@ -914,7 +914,7 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false, providerTerminated: true });
   });
 
   it('watchdog rearming is separate from provider turn ownership', async () => {
@@ -1188,6 +1188,7 @@ describe('SessionManager', () => {
       turnInFlight: false,
       durableFailureClosed: false,
       durableFailureInconclusive: false,
+      providerTerminated: true,
     });
   });
 
@@ -1220,6 +1221,7 @@ describe('SessionManager', () => {
       turnInFlight: false,
       durableFailureClosed: false,
       durableFailureInconclusive: false,
+      providerTerminated: false,
     });
   });
 
@@ -6268,6 +6270,207 @@ describe('session.ts uncovered-branch coverage', () => {
     await sm.spawnSession();
     await sm.shutdown(false);
     expect(shutdownSpy).toHaveBeenCalledWith('end');
+  });
+
+  // --- providerTerminated for a managed-loop provider mid-shutdown.
+  //     `shutdown()` clears `active` at its top, before either handle is
+  //     released, and a managed-loop provider never assigns a child — so a
+  //     cleared flag plus a null pid is NOT a termination proof for this
+  //     provider kind. Only releasing the managed handle is. Driven through a
+  //     real SessionManager because that is the surface the per-chat eviction
+  //     guard reads; a stubbed status could report anything.
+
+  it('reports providerTerminated false while the managed provider handle is still held', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let releaseManagedShutdown: (() => void) | undefined;
+    const shutdownSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'shutdown')
+      .mockImplementation(() => new Promise<void>((resolve) => {
+        releaseManagedShutdown = resolve;
+      }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+
+    // Live managed session: no child was ever spawned, so the null pid alone
+    // must not read as terminated.
+    expect((sm as unknown as { child: unknown }).child).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const shuttingDown = sm.shutdown(true);
+    // `shutdown()` reaches the managed-provider race synchronously (no child to
+    // kill first), so the handle is already being released here.
+    expect(shutdownSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
+
+    const midShutdown = sm.getStatus();
+    expect(midShutdown.active).toBe(false);
+    expect(midShutdown.pid).toBeNull();
+    expect(midShutdown.providerTerminated).toBe(false);
+
+    releaseManagedShutdown?.();
+    await shuttingDown;
+
+    // The handle is released only after its shutdown promise settles; that is
+    // the moment the flag is allowed to flip.
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
+  // --- F3(1): a managed kill that THROWS is not a termination proof.
+  //     `crashManagedProviderSession` clears the handle as part of cleanup, and
+  //     the interface permits `kill()` to fail (providers/types.ts). If the
+  //     handle is cleared regardless, `providerTerminated` claims a release that
+  //     never happened, and the per-chat eviction guard that reads it would
+  //     detach a conversation whose provider may still be running.
+
+  it('does not report the provider terminated when the managed kill throws during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-throw', generation: 1 };
+    const killSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'kill')
+      .mockImplementation(() => { throw new Error('managed kill failed'); });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('kill failure probe')).toBe(true);
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    // Nothing released the handle, so termination is unproven, not proven.
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: false });
+  });
+
+  it('reports the provider terminated when the managed kill succeeds during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-ok', generation: 1 };
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('clean kill probe')).toBe(true);
+
+    // Positive counterpart: the flag must still flip when the kill DID release
+    // the handle, so the guard above cannot be satisfied by pinning it false.
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
+  it('clears the unproven-termination flag when a new managed session spawns', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generationIdentity = { managerId: 'managed-flag-reset', generation: 1 };
+    let killThrows = true;
+    vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {
+      if (killThrows) throw new Error('managed kill failed');
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash: vi.fn(),
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+
+    expect(crash('kill failure probe')).toBe(true);
+    expect(sm.getStatus().providerTerminated).toBe(false);
+
+    // A new incarnation owns a fresh handle and must not inherit the previous
+    // one's unknown termination — otherwise the flag wedges the chat forever.
+    killThrows = false;
+    await sm.spawnSession();
+    expect(sm.getStatus()).toMatchObject({ active: true, providerTerminated: false });
+    expect(crash('clean kill probe')).toBe(true);
+    expect(sm.getStatus().providerTerminated).toBe(true);
+  });
+
+  it('does not report the provider terminated while a managed turn is still in flight', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generationIdentity = { managerId: 'managed-turn-pending', generation: 1 };
+    let releaseTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    // Models a tool call the loop has already entered: aborting the HTTP request
+    // does not cancel it, so the turn promise stays pending past the crash.
+    const sendTurnSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'sendTurn')
+      .mockImplementation(() => turnGate);
+    vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash: vi.fn(),
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+
+    const turn = sm.sendTurn('hello managed provider');
+    let settled = false;
+    void turn.then(() => { settled = true; }, () => { settled = true; });
+    expect(sendTurnSpy).toHaveBeenCalledTimes(1);
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('managed provider turn watchdog fired')).toBe(true);
+
+    // The crash cleared the handle AND `turnInFlight`, so neither answers
+    // whether the tool call is still running. Termination is not proven.
+    expect(settled).toBe(false);
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      turnInFlight: false,
+      providerTerminated: false,
+    });
+
+    releaseTurn?.();
+    await expect(turn).rejects.toThrow();
+
+    // Settled, so the proof is available again.
+    expect(sm.getStatus().providerTerminated).toBe(true);
   });
 
   // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child

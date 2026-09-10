@@ -65,6 +65,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/check-fleet-bot-hardening-parity.test.ts',
   'tests/scripts/bot-errors-simulation-matrix.test.ts',
   'tests/scripts/check-bot-errors-runtime-manifest.test.ts',
+  'tests/scripts/deployer-import-closure.test.ts',
   'tests/scripts/bot-errors-critical-surface-audit.test.ts',
   'tests/scripts/doc-drift-check.test.ts',
   'tests/scripts/public-surface-drift-check.test.ts',

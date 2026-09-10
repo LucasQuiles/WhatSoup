@@ -2946,6 +2946,452 @@ def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
     return proc.stdout.strip() == "present"
 
 
+REMOTE_ARCHIVE_CENSUS_SCRIPT = r"""
+import json, os, sys, time
+import errno
+from stat import S_ISDIR, S_ISLNK, S_ISREG
+
+# #2459 C3: read-only census of the terminal relay archive.
+#
+# Reports how much archive exists, how old it is and how much of it no longer
+# parses -- as aggregates only. It never deletes, moves, renames or rewrites
+# anything, and it never echoes the root it was pointed at, an artifact name,
+# a source value or any payload field. The answer an operator gets is a
+# handful of numbers, which is the whole point: the alternative (listing the
+# directory by hand) puts host, account, instance, user and message text on
+# a terminal.
+#
+# Scope: exactly the two directories this collector's own remote scripts
+# write under the given root -- relayed/ (REMOTE_ACK_SCRIPT) and
+# writefail-relayed/ (REMOTE_WRITEFAIL_ACK_SCRIPT). Sibling directories
+# (outbox/, relay-processing/) hold live queue state, not archive, and
+# conflating the two is the confusion this census exists to remove. Nested
+# directories are not walked. The other writefail terminal locations the
+# writefail script falls back to (home, TMPDIR, /tmp) are deliberately NOT
+# scanned: they are outside the root the caller named.
+#
+# UNAVAILABLE IS NOT EMPTY. A directory the census could not list reports
+# status "unavailable" with an errno CLASS, never a count of zero: "nothing
+# to retain" and "I cannot see what is there" drive opposite decisions, and a
+# later retention pass leans on this instrument. A directory that is itself a
+# symlink is refused outright ("refused_symlink") rather than followed, which
+# would walk the census out of the root entirely. Any directory that is not
+# ok makes the combined total "partial", so an incomplete answer can never be
+# mistaken for a complete one. When NO directory could be read at all the
+# total's own aggregates are null too, for the same reason they are null per
+# directory: summing an empty list to zero would answer "I could not look"
+# with "there is nothing there".
+#
+# THE SAME RULE ONE LEVEL DOWN. An entry that cannot be stat-ed is counted in
+# "unusableEntryCount" and makes its directory "partial"; only an entry that
+# vanished between the listing and the stat is skipped, because it is not in
+# the archive any more. A directory that lists but does not permit stat --
+# mode 0444 -- would otherwise report every artifact it holds as a healthy
+# zero.
+#
+# THE DIRECTORY IS PINNED. It is opened once with O_DIRECTORY|O_NOFOLLOW and
+# every listing, stat and read is addressed to that descriptor. Two
+# resolutions of the same name would let whoever can write the archive parent
+# swap the directory for a symlink between the refusal check and the listing;
+# with one resolution there is no window to swap in.
+#
+# `now` (argv[2], optional) makes ages deterministic for a caller that needs
+# a fixed clock; empty or absent means "read the clock here".
+
+ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"))
+
+PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
+MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
+
+# Looked up with getattr, the way the rest of this file guards optional open
+# flags: a bare attribute here would raise at import, outside the fail-quiet
+# guard below, on a platform that lacks one. Absence is handled where the
+# census can still emit a payload -- see the refusal in census().
+O_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
+O_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
+# The archive directory is opened ONCE and every later listing, stat and read
+# is addressed to the descriptor that comes back. O_NOFOLLOW refuses a
+# symlinked archive directory inside the syscall, so the refusal and the
+# listing cannot disagree about which inode they mean.
+DIR_OPEN_FLAGS = os.O_RDONLY | O_DIRECTORY_FLAG | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG
+# Entries are opened relative to that descriptor. O_NOFOLLOW keeps a symlinked
+# entry from being read out of the archive, and O_NONBLOCK keeps a fifo
+# planted in the archive from parking the census forever.
+ENTRY_OPEN_FLAGS = os.O_RDONLY | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG | O_NONBLOCK_FLAG
+READ_CHUNK_BYTES = 65536
+# An entry that is simply GONE -- before the stat or between the stat and the
+# open, the same ENOENT either way -- is not a measurement the census failed
+# to take. The archive moved on under a census that holds no lock, so it is
+# reported separately from the entries the census could not look at, and a
+# consumer can tell a busy archive from a broken one.
+VANISHED_ENTRY_ERRNOS = (errno.ENOENT,)
+
+
+def errno_class(exc):
+    # An errno CLASS, never the errno message: strerror can embed the path.
+    code = getattr(exc, "errno", None)
+    if code in PERMISSION_ERRNOS:
+        return "permission"
+    if code in MISSING_ERRNOS:
+        return "missing"
+    return "other"
+
+
+def blank_report(status, errno_name=None):
+    # Every aggregate is null, not zero. A zero here would be a claim about
+    # content the census never managed to look at.
+    return {
+        "status": status,
+        "errnoClass": errno_name,
+        "artifactCount": None,
+        "totalBytes": None,
+        "oldestAgeSeconds": None,
+        "newestAgeSeconds": None,
+        "parseFailureCount": None,
+        "unusableEntryCount": None,
+        "vanishedEntryCount": None,
+        "sourceKindCardinality": None,
+    }
+
+
+def refusal_report(directory, exc):
+    # Label a directory open that ALREADY failed. No descriptor exists and
+    # nothing is listed, stat-ed for an aggregate or read here; the only
+    # thing this produces is which refusal string to report.
+    code = getattr(exc, "errno", None)
+    if code == errno.ELOOP:
+        return blank_report("refused_symlink")
+    if code == errno.ENOTDIR:
+        # O_DIRECTORY collapses "is a symlink" and "is not a directory" into
+        # one errno on the BSDs (both ENOTDIR), so which of the two it was
+        # has to be recovered before the census can say. Linux reports ELOOP
+        # for the symlink and reaches this branch only for a real non-
+        # directory; either way the answer below is the same.
+        try:
+            info = os.lstat(directory)
+        except OSError as label_exc:
+            return blank_report("unavailable", errno_class(label_exc))
+        if S_ISLNK(info.st_mode):
+            return blank_report("refused_symlink")
+        if not S_ISDIR(info.st_mode):
+            # Present but not a directory: weird, not absent.
+            return blank_report("unavailable", "other")
+    return blank_report("unavailable", errno_class(exc))
+
+
+def read_entry(entry_fd):
+    chunks = []
+    while True:
+        chunk = os.read(entry_fd, READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def census(directory):
+    # Aggregate one archive directory. Returns (report, source_kinds).
+    # The directory is opened ONCE, with O_NOFOLLOW so a symlinked archive
+    # directory is refused by the kernel rather than followed -- following it
+    # would let whoever controls the remote root redirect the census at any
+    # directory on the host. Everything after this point is addressed to the
+    # descriptor, so there is no second resolution of the name for a swap
+    # between the check and the use to land in.
+    if not (O_DIRECTORY_FLAG and O_NOFOLLOW_FLAG):
+        # Without both flags the name can be neither pinned nor refused, and
+        # a census that cannot keep that promise must not count through an
+        # unpinned name as though it could.
+        return blank_report("unavailable", "other"), set()
+    try:
+        fd = os.open(directory, DIR_OPEN_FLAGS)
+    except OSError as exc:
+        return refusal_report(directory, exc), set()
+    try:
+        return census_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
+def census_descriptor(fd):
+    # One rule for every entry: it is MEASURED only if it was opened and
+    # stat-ed through the descriptor. An entry that vanished is counted as
+    # vanished, an entry that could not be looked at is counted as unusable,
+    # and neither contributes a size, an age or an artifact count -- a number
+    # taken from a name the census did not go on to read is exactly the
+    # path-resolved measurement the descriptor pinning exists to remove.
+    count = 0
+    total_bytes = 0
+    oldest = None
+    newest = None
+    parse_failures = 0
+    unusable = 0
+    vanished = 0
+    source_kinds = set()
+    try:
+        names = sorted(os.listdir(fd))
+    except OSError as exc:
+        # Unreadable is NOT empty.
+        return blank_report("unavailable", errno_class(exc)), set()
+    for name in names:
+        try:
+            info = os.lstat(name, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone before the stat.
+                vanished += 1
+                continue
+            # Every OTHER entry-level failure is information the census did
+            # not get: a directory that lists but does not permit stat (mode
+            # 0444, say) would otherwise report its whole contents as a
+            # healthy zero. Count what could not be looked at, and let the
+            # block below say it is incomplete.
+            unusable += 1
+            continue
+        # lstat + S_ISREG, so a symlink is never followed out of the archive
+        # and a nested directory is never descended into.
+        if not S_ISREG(info.st_mode):
+            continue
+        try:
+            entry_fd = os.open(name, ENTRY_OPEN_FLAGS, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone between the stat and the open. The SAME event as the
+                # branch above, so it gets the same answer: the window it
+                # fell through is an implementation detail, not something an
+                # operator should have to reason about.
+                vanished += 1
+                continue
+            # Present but not openable -- mode 000, or now a symlink that
+            # O_NOFOLLOW refuses to follow out of the archive. It is NOT
+            # measured: the pre-open stat resolved a name the census never
+            # went on to read, and a size or an age taken from it is a claim
+            # about an object that may already have changed.
+            unusable += 1
+            continue
+        try:
+            try:
+                entry_info = os.fstat(entry_fd)
+            except OSError:
+                # Contained per entry, like every other entry-level failure.
+                # Letting this escape would discard the accumulated report for
+                # BOTH archives over one stale handle or one I/O error.
+                unusable += 1
+                continue
+            if not S_ISREG(entry_info.st_mode):
+                # Swapped for a non-file between the stat and the open. The
+                # descriptor, not the name, is what got counted -- so it is
+                # not counted as an artifact, and the swap the census DID
+                # detect is reported rather than dropped.
+                unusable += 1
+                continue
+            # Size and age come off the DESCRIPTOR that was read, not off a
+            # name that could have been repointed since.
+            count += 1
+            total_bytes += entry_info.st_size
+            age = int(round(now - entry_info.st_mtime))
+            oldest = age if oldest is None else max(oldest, age)
+            newest = age if newest is None else min(newest, age)
+            try:
+                record = json.loads(read_entry(entry_fd).decode("utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Unreadable or not JSON: still a present artifact occupying
+                # bytes and ageing, so it is counted AND flagged. Skipping it
+                # would under-report exactly the artifacts worth knowing about.
+                parse_failures += 1
+                continue
+        finally:
+            try:
+                os.close(entry_fd)
+            except OSError:
+                # The kernel releases the descriptor whether or not close
+                # reports an error, so there is nothing to record and nothing
+                # to reclassify -- the entry was measured before this point.
+                # Letting it escape would discard the accumulated report for
+                # BOTH archives, the way the entry stat once did.
+                pass
+        if not isinstance(record, dict):
+            # `[]` and `"text"` are valid JSON but not event records.
+            parse_failures += 1
+            continue
+        kind = record.get("source")
+        if isinstance(kind, str) and kind:
+            source_kinds.add(kind)
+    # A directory whose entries were not all readable is reported as partial,
+    # never as ok with a lower count.
+    status = "partial" if (unusable or vanished) else "ok"
+    if status == "partial" and not count:
+        # It listed, and possibly stat-ed, and measured NOTHING. A zero here
+        # would say "there is nothing there" about entries the census never
+        # managed to open, so the aggregates are null and the counts of what
+        # it could not look at carry the whole answer.
+        report = blank_report(status)
+    else:
+        report = {
+            "status": status,
+            "errnoClass": None,
+            "artifactCount": count,
+            "totalBytes": total_bytes,
+            "oldestAgeSeconds": oldest,
+            "newestAgeSeconds": newest,
+            "parseFailureCount": parse_failures,
+            # Cardinality only -- how MANY distinct producers are
+            # represented, never which ones.
+            "sourceKindCardinality": len(source_kinds),
+        }
+    # How many entries were listed but could not be looked at, and how many
+    # were gone. Zero in both is a claim that the aggregates are complete.
+    report["unusableEntryCount"] = unusable
+    report["vanishedEntryCount"] = vanished
+    if report["artifactCount"] is None:
+        # Nothing was measured, so no producer was seen either.
+        source_kinds = set()
+    return report, source_kinds
+
+
+def produced_numbers(report):
+    # A directory contributes to the sums exactly when it produced a number
+    # of its own. Every block that measured nothing -- unavailable, refused,
+    # or listed-but-never-measured -- already reports a null count, so there
+    # is one test here and not a second vocabulary of statuses to keep in
+    # step with the first.
+    return report["artifactCount"] is not None
+
+
+def gap_total(reports, field):
+    # Summed across EVERY directory that measured a gap, including one that
+    # contributed no other number. Dropping these with the sums would hide
+    # the size of what could not be looked at.
+    values = [r[field] for r in reports if r[field] is not None]
+    return sum(values) if values else None
+
+
+def combine(reports, kind_sets):
+    # If any directory is not ok the total is "partial", so a caller can
+    # never read an incomplete sum as a complete one.
+    numeric = [r for r in reports if produced_numbers(r)]
+    complete = [r for r in reports if r["status"] == "ok"]
+    status = "ok" if len(complete) == len(reports) else "partial"
+    gaps = {
+        "unusableEntryCount": gap_total(reports, "unusableEntryCount"),
+        "vanishedEntryCount": gap_total(reports, "vanishedEntryCount"),
+    }
+    if not numeric:
+        # NOTHING was measured. A zero here would answer "I could not look"
+        # with "there is nothing there" -- the conflation every directory
+        # block already refuses, and the one a retention pass would act on.
+        return dict(
+            status=status,
+            artifactCount=None,
+            totalBytes=None,
+            oldestAgeSeconds=None,
+            newestAgeSeconds=None,
+            parseFailureCount=None,
+            sourceKindCardinality=None,
+            **gaps,
+        )
+    oldest_values = [r["oldestAgeSeconds"] for r in numeric if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in numeric if r["newestAgeSeconds"] is not None]
+    union = set()
+    for report, kinds in zip(reports, kind_sets):
+        if produced_numbers(report):
+            union |= kinds
+    return dict(
+        status=status,
+        artifactCount=sum(r["artifactCount"] for r in numeric),
+        totalBytes=sum(r["totalBytes"] for r in numeric),
+        oldestAgeSeconds=max(oldest_values) if oldest_values else None,
+        newestAgeSeconds=min(newest_values) if newest_values else None,
+        parseFailureCount=sum(r["parseFailureCount"] for r in numeric),
+        # Union, not a sum: a producer present in both archives is one kind.
+        sourceKindCardinality=len(union),
+        **gaps,
+    )
+
+
+try:
+    # argv is read INSIDE the guard. A bad clock argument or a missing root
+    # raises here, and an escaping traceback would echo argv -- which carries
+    # the remote root -- onto stderr.
+    root = os.path.expanduser(sys.argv[1])
+    now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
+    archives = {}
+    reports = []
+    kind_sets = []
+    for label, dirname in ARCHIVE_DIRS:
+        report, kinds = census(os.path.join(root, dirname))
+        archives[label] = report
+        reports.append(report)
+        kind_sets.append(kinds)
+    payload = {
+        "schemaVersion": 1,
+        "censusStatus": "ok",
+        "generatedAtEpoch": int(now),
+        "archives": archives,
+        "total": combine(reports, kind_sets),
+    }
+    print(json.dumps(payload, sort_keys=True))
+except Exception:
+    # Fail closed and fail QUIET: the caller sees a non-zero exit and an
+    # explicit failed status, never a path, an argument or an exception string.
+    print(json.dumps({"schemaVersion": 1, "censusStatus": "failed"}, sort_keys=True))
+    sys.exit(3)
+"""
+
+
+def remote_archive_census(host: str, remote_root: str, timeout: int, now: float | None = None) -> dict[str, Any]:
+    """#2459 C3: read-only, privacy-safe census of the remote relay archive.
+
+    The acknowledged-claim archive lives on the REMOTE host (REMOTE_ACK_SCRIPT
+    moves claims under the remote root), so no local scan can cover it -- see
+    the LOCAL_EVENT_LIFECYCLE_DIR_NAMES note below. This probe answers how
+    much of it there is, how old it is and how much of it no longer parses,
+    without moving or deleting anything and without surfacing a host,
+    account, instance, user, message, path or identifier.
+
+    EVERY route out of this function names the host and nothing else. Unlike
+    the other remote helpers the failure paths deliberately do NOT append
+    `proc.stderr`: the census's own stderr can name the remote root, and a
+    probe whose failure mode leaks the path defeats the privacy property that
+    is the reason it exists. `subprocess.TimeoutExpired` needs the same care
+    for a different reason -- it carries the assembled argv, whose last
+    argument IS the remote root -- so it is caught and re-raised host-only,
+    `from None` so the original is not chained back onto the traceback.
+
+    A census that did not complete is an error, never an empty report: an
+    empty stdout parses to `{}`, and returning that would answer "I could not
+    look" with "there is nothing there" -- the same conflation the script side
+    refuses per-directory.
+
+    `now` pins the clock the ages are measured against; None reads the remote
+    clock. Returns the parsed aggregate report.
+    """
+    args = [remote_root, "" if now is None else str(int(now))]
+    try:
+        proc = subprocess.run(
+            remote_python_command(host, args),
+            input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh archive-census {host} timed out") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh archive-census {host} failed rc={proc.returncode}")
+    try:
+        report = json.loads(proc.stdout.strip() or "{}")
+    except ValueError:
+        raise RuntimeError(f"ssh archive-census {host} returned unparseable output") from None
+    if not isinstance(report, dict):
+        raise RuntimeError(f"ssh archive-census {host} returned a non-object report")
+    if report.get("censusStatus") != "ok":
+        raise RuntimeError(f"ssh archive-census {host} did not complete")
+    return report
+
+
 def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
     proc = subprocess.run(
         remote_python_command(host, [claim, remote_root, action]),
@@ -4392,15 +4838,60 @@ def main() -> int:
     parser.add_argument("--alert-cooldown", type=int, default=900)
     parser.add_argument("--recovery-successes", type=int, default=default_recovery_successes())
     parser.add_argument("--daemon", action="store_true")
+    parser.add_argument("--allow-empty-roster", action="store_true")
     args = parser.parse_args()
 
-    remotes = args.remote or [r for r in os.environ.get("BOT_ERRORS_RELAY_REMOTES", "").split(",") if r]
-    if not remotes:
+    if args.daemon and args.allow_empty_roster:
+        # A declared-empty retirement is one-shot by definition, so this pair is
+        # refused at the usage boundary rather than reconciled. Parked in a
+        # unit's ExecStart it would look harmless while a roster existed and
+        # degrade the moment one emptied: the cycle would succeed, exit, and be
+        # restarted on the service manager's schedule, rewriting state every
+        # cycle instead of retiring once. Checked first because it reads only
+        # argv, so the answer cannot depend on the environment, and checked
+        # above the state session, so the ledger is never opened.
+        print(
+            "--allow-empty-roster is a one-shot retirement and cannot be combined with --daemon",
+            file=sys.stderr,
+        )
+        return 64
+    # None (never set, or an environment file that failed to load) is NOT the
+    # same as "" (an operator emptying the list), and reading with a default
+    # collapses the two. Keep the distinction: only a PRESENT variable can be
+    # declared empty.
+    roster_env = os.environ.get("BOT_ERRORS_RELAY_REMOTES")
+    remotes = args.remote or [r for r in (roster_env or "").split(",") if r]
+    declared_empty_roster = args.allow_empty_roster and roster_env is not None
+    if not remotes and not declared_empty_roster:
+        # Unchanged fail-closed default, now covering one more case. An absent
+        # or unreadable poll list is inconclusive configuration, not a decision
+        # to poll nothing, and that stays true when --allow-empty-roster is
+        # standing: the flag declares an EMPTY roster, never a MISSING one, so
+        # a broken environment file cannot retire the whole ledger. EX_USAGE,
+        # and no state work at all.
         print("no remotes configured", file=sys.stderr)
         return 64
     best_effort_remotes = set(args.best_effort_remote or [])
     recovery_successes = max(1, int(args.recovery_successes))
     try:
+        # A declared empty roster is a retirement, not a poll: it runs exactly
+        # one cycle so prune_state_to_configured_remotes can disposition every
+        # open record the departed remotes still own, then stops. The two
+        # guards above make that exact, so no third check is needed here:
+        # reaching this line with args.daemon set proves the roster is
+        # non-empty, because --daemon over an empty roster is either the
+        # fail-closed 64 or the refused combination. The cycle reaches the
+        # state session and nothing else, because _run_once_with_state's only
+        # work between the prune and the save is `for remote in remotes`, so an
+        # empty roster performs no remote, probe, claim or acknowledgement
+        # effect. It is not silent, though: the prune emits one info-severity
+        # observation per retired (remote, source) pair, which the dispatcher
+        # delivers as a BOT INFO line. That is not one per open record --
+        # acknowledgement membership is digest-keyed and collapses to a single
+        # disposition per remote carrying the count of records it retires.
+        # An unregistered bucket key still fails the whole cycle
+        # closed, which matters most here: retiring every remote at once is the
+        # widest reach the pruning validation pass ever has.
         if args.daemon:
             run_daemon(
                 remotes,

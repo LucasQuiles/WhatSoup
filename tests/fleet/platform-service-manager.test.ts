@@ -76,7 +76,39 @@ function launchdAbsentError(message = 'no service'): Error & { code: number } {
   return Object.assign(new Error(message), { code: 3 });
 }
 
-function generatedPlistIdentity(name = 'agent'): string {
+/**
+ * A plist carrying the generated identity — and, by default, an
+ * EnvironmentVariables dict, because every repo-generated plist has one:
+ * buildPlist emits the key, its dict and PATH as UNCONDITIONAL array literals.
+ * A fixture without one is not a shape this repo produces.
+ *
+ * That matters here because the governed-env reader refuses an installed plist
+ * whose EnvironmentVariables element it cannot find: an env-less fixture would
+ * make every apply-path test below refuse for a reason none of them is about.
+ * `environment: null` builds that shape deliberately, for the one test that
+ * needs a plist the reader cannot enumerate.
+ *
+ * The block goes AFTER </array>: the identity predicate requires Label to be
+ * followed directly by ProgramArguments.
+ */
+function generatedPlistIdentity(
+  name = 'agent',
+  options: { environment?: Record<string, string> | null } = {},
+): string {
+  const environment = options.environment === undefined
+    ? { PATH: '/usr/bin' }
+    : options.environment;
+  const envBlock = environment === null
+    ? []
+    : [
+        '<key>EnvironmentVariables</key>',
+        '<dict>',
+        ...Object.entries(environment).flatMap(([key, value]) => [
+          `<key>${key}</key>`,
+          `<string>${value}</string>`,
+        ]),
+        '</dict>',
+      ];
   return [
     '<plist>',
     '<key>Label</key>',
@@ -86,6 +118,7 @@ function generatedPlistIdentity(name = 'agent'): string {
     `<string>${SERVICE_HOME}/.local/bin/whatsoup</string>`,
     `<string>${name}</string>`,
     '</array>',
+    ...envBlock,
     '</plist>',
   ].join('\n');
 }
@@ -127,6 +160,17 @@ let SERVICE_HOME: string;
 const realFsPromise = vi.importActual<typeof import('node:fs')>('node:fs');
 const realPathPromise = vi.importActual<typeof import('node:path')>('node:path');
 const realOsPromise = vi.importActual<typeof import('node:os')>('node:os');
+
+/**
+ * Reads one EnvironmentVariables value back out of a rendered plist. The
+ * generated plist puts a KeepAlive dict BEFORE EnvironmentVariables, so the
+ * block is anchored on its own key rather than on the first <dict>.
+ */
+function readPlistEnv(plist: string, key: string): string | undefined {
+  const envBlock = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(plist)?.[1];
+  if (envBlock === undefined) return undefined;
+  return new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`).exec(envBlock)?.[1];
+}
 
 describe('platform service managers', () => {
   beforeEach(async () => {
@@ -802,14 +846,24 @@ describe('platform service managers', () => {
     setPlatform('darwin');
     const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
     // Simulates the hand-patched-plist class this feature adopts BEFORE the
-    // prepend is config-owned: nothing is configured, so the prefix is
+    // prepend is config-owned: nothing is configured, so the PATH prefix is
     // trivially satisfied and only the tail differs from this shell's PATH.
     const observed = buildPlist('agent', { pathPrepend: [`${SERVICE_HOME}/hand-patched-bin`] });
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 
-    expect(result.governedEnvDrift?.drift).toEqual([]);
+    // WHATSOUP_PATH_PREPEND is a governed key, so an installed value with no
+    // config source is reported as governed `extra` drift rather than being
+    // invisible. Before it was governed the same hand-added key counted as a
+    // non-governed drop and refused --apply; now --apply overwrites it. Value
+    // still never leaves the comparator: digest only, asserted below.
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'extra',
+      expectedDigest: null,
+      observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
     expect(result.governedEnvDrift?.pathPrefix).toEqual({
       configured: false,
       satisfied: true,
@@ -828,8 +882,71 @@ describe('platform service managers', () => {
 
     const result = await reconcileLaunchdPlist('agent', { dryRun: true });
 
-    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`)).toEqual(['PATH:mismatch']);
+    // Both governed surfaces disagree: the composed PATH and the governed
+    // prepend key that now carries the same config fact on its own.
+    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`))
+      .toEqual(['PATH:mismatch', 'WHATSOUP_PATH_PREPEND:mismatch']);
     expect(result.governedEnvDrift?.pathPrefix).toMatchObject({ configured: true, satisfied: false });
+  });
+
+  it('renders the governed PATH prepend as its own environment key without changing PATH composition', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    // env-allowed in test: buildPlist reads the generating shell's PATH as the
+    // ambient tail, so it has to be pinned for an exact-equality assertion.
+    process.env.PATH = '/loaded/bin';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin', '/fixture/second/bin'] });
+
+      expect(rendered).toContain('    <key>WHATSOUP_PATH_PREPEND</key>');
+      expect(readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND')).toBe('/fixture/pin/bin:/fixture/second/bin');
+      // PATH composition is untouched: still `prepend:ambient`.
+      expect(readPlistEnv(rendered, 'PATH')).toBe('/fixture/pin/bin:/fixture/second/bin:/loaded/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it('renders both governed PATH surfaces from one config fact', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    const previousNode = process.env.WHATSOUP_NODE;
+    process.env.PATH = '/loaded/bin';
+    process.env.WHATSOUP_NODE = '/fixture/node/bin/node';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin'] });
+      const servicePath = readPlistEnv(rendered, 'PATH');
+      const governedPrepend = readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND');
+
+      // These two are what the renderer actually decides, and they are what made
+      // this test red on base. launchd injects both, and deploy/lib/runtime-path.sh
+      // composes "$prepend:$home/.local/bin:$node_dir:$inherited", so the governed
+      // prepend appears TWICE in the effective PATH and first match wins. That
+      // composition is proven executably in
+      // deploy/scripts/tests/test_runtime_path_prepend.sh, which runs the real
+      // helper; node:child_process is mocked here, so re-joining the pieces in
+      // this file would only assert a literal against itself.
+      expect(servicePath).toBe('/fixture/pin/bin:/loaded/bin');
+      expect(governedPrepend).toBe('/fixture/pin/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousNode === undefined) delete process.env.WHATSOUP_NODE;
+      else process.env.WHATSOUP_NODE = previousNode;
+    }
+  });
+
+  it('renders byte-identical output when no path prepend is configured', async () => {
+    setPlatform('darwin');
+    const { buildPlist } = await importPlatform();
+    const baseline = buildPlist('agent');
+
+    expect(baseline).not.toContain('WHATSOUP_PATH_PREPEND');
+    expect(buildPlist('agent', {})).toBe(baseline);
+    expect(buildPlist('agent', { pathPrepend: [] })).toBe(baseline);
   });
 
   it('refuses an apply that would drop installed non-governed keys unless the drop is acknowledged', async () => {
@@ -872,10 +989,168 @@ describe('platform service managers', () => {
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
   });
 
+  it('refuses mixed canonical and XML-whitespace-padded declarations before any apply mutation', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const observed = rendered.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict>',
+        '    <key>PATH</key>',
+        '    <string>/opt/decoy-bin</string>',
+        '  </dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+    expect(observed).not.toBe(rendered);
+    expect(observed).toContain('<key>EnvironmentVariables</key>');
+    expect(observed).toContain('<key >EnvironmentVariables</key >');
+    expect(observed).toContain('/opt/decoy-bin');
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const launchctlCalls = childProcessMocks.execFile.mock.calls
+      .filter(([command]) => command === 'launchctl').length;
+    expect({
+      refused: thrown instanceof LaunchdReconcileRefusedError,
+      writeCalls: fsMocks.writeFileSync.mock.calls.length,
+      renameCalls: fsMocks.renameSync.mock.calls.length,
+      unlinkCalls: fsMocks.unlinkSync.mock.calls.length,
+      launchctlCalls,
+    }).toEqual({
+      refused: true,
+      writeCalls: 0,
+      renameCalls: 0,
+      unlinkCalls: 0,
+      launchctlCalls: 0,
+    });
+  });
+
+  it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Before the key was governed this same plist refused --apply as a
+    // non-governed drop. Governing it means --apply now OVERWRITES an
+    // operator's hand-set value. That is the disclosed live behaviour change,
+    // and it needs a positive assertion, not just an empty droppedNonGovernedKeys.
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>\n    <string>/opt/hand-added-bin</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).not.toContain('hand-added-bin');
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('refuses an apply when a credential key is hidden behind interposed markup', async () => {
+    // The apply-level consequence of the silent-absence class, and the reason it
+    // is a MUST rather than a probe nit. Pair-extraction dropped the credential
+    // key from the parsed map, droppedNonGovernedKeys came back empty, and the
+    // apply concluded there was nothing to drop -- then regenerated the plist
+    // and deleted the credential. The outer dict is spelled `<dict >`, which
+    // this branch newly made parseable, so the cell is reachable rather than
+    // hypothetical.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent')
+      .replace('  <key>EnvironmentVariables</key>\n  <dict>', '  <key>EnvironmentVariables</key>\n  <dict >')
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key><!-- rotated 2026-08 --><string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // The refusal must happen BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('refuses an apply when a commented-out decoy dict hides the live one', async () => {
+    // HIGH-1 at apply level, which is where the damage is. The comparator read
+    // the marker INSIDE the comment, parsed the decoy's body as the installed
+    // environment, and never looked at the live dict -- so
+    // droppedNonGovernedKeys came back empty, the apply concluded there was
+    // nothing to drop, regenerated the plist and deleted the credential.
+    //
+    // The decoy body is deliberately IDENTICAL to the fresh render, so before
+    // the fix the comparison was not merely wrong, it was clean: no drift, no
+    // dropped keys, nothing for an operator to notice.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    // Vacuity guard: the slice really is the environment block, so a pass
+    // cannot come from commenting out nothing at all.
+    expect(environmentBlock).toContain('<key>EnvironmentVariables</key>');
+    expect(environmentBlock).toContain('<key>HOME</key>');
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // Refused BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('names the hidden key in the dry-run report rather than reporting an all-clear', async () => {
+    // The reporting half of the row above. A refusal alone would satisfy the
+    // apply assertion even if the comparator had merely become unparseable; the
+    // operator has to be told WHICH key the comment was hiding.
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.droppedNonGovernedKeys).toEqual(['OPERATOR_API_KEY']);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('fixture-not-a-real-key');
+  });
+
   it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
     setPlatform('darwin');
     const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();
-    const observed = `${generatedPlistIdentity()}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
+    // `environment: null` so this fixture carries exactly ONE marker: with the
+    // helper's default dict it would carry two, and the refusal would come from
+    // the duplicate-declaration rule rather than from the unterminated dict this
+    // test names. Same green, different behaviour.
+    const observed = `${generatedPlistIdentity('agent', { environment: null })}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
     mockReads({ plist: observed, config: { name: 'agent' } });
 
     await expect(reconcileLaunchdPlist('agent', { dryRun: false })).rejects.toThrow(LaunchdReconcileRefusedError);

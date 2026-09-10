@@ -1191,7 +1191,10 @@ def publish(target, payload):
     expect(result.status).toBe(0);
     expect(parsed.status).toBe('pass');
     expect(parsed.findings).toEqual([]);
-  });
+    // The guard scans the checked-in Python estate (about 2 s on an idle host); under the hosted
+    // full-suite battery it exceeded vitest's default 10 s once (run 33709157404, 2026-09-03), so
+    // this spawn gets a bound that covers a loaded runner without hiding a real hang.
+  }, 60_000);
 
   it.each(durablePublisherScripts)('%s consumes shared durable publication outcomes', (script) => {
     const text = readFileSync(script, 'utf8');

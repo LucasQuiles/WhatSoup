@@ -43,12 +43,19 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -137,11 +144,7 @@ def _executable_fallback(tmp_path: Path) -> str:
     return str(script)
 
 
-def _dispatch_log_records(paths: dict[str, Path]) -> list[dict[str, Any]]:
-    log_path = paths["logs"] / "dispatch.jsonl"
-    if not log_path.exists():
-        return []
-    return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+_dispatch_log_records = dispatcher_fixtures.dispatch_log_records
 
 
 def _dispatch_log_types(paths: dict[str, Path]) -> list[str]:

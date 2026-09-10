@@ -399,6 +399,18 @@ function latestRowIncludingExpired(db: Database, chatJid: string): PreferenceRow
  *
  * Idempotent and lossless: an absent row (pruned, /reset between the send and
  * this write) affects zero rows and is a no-op, never an insert.
+ *
+ * A1 (#2121 follow-up) — the `expires_at IS NOT NULL` clause makes "a receipt
+ * id exists only on a pin that can still be promoted" a STORE invariant rather
+ * than a property of who happens to call. It matters because a re-confirm of an
+ * already-sticky pin still renders a keep-promising echo
+ * (`renderPinPreferenceOutcome` prints "reply keep to make it permanent" on
+ * every branch), so this function IS reachable with a sticky row underneath.
+ * Attaching an id there would re-arm exactly the interception that clearing the
+ * id at promotion exists to end. Like the absent-row case it affects zero rows
+ * and is a silent no-op: the receipt has already been sent, and the widened
+ * tokens simply fall through to the agent — the module's documented
+ * fail-closed degrade.
  */
 export function recordKeepReceiptMessageId(
   db: Database,
@@ -409,7 +421,7 @@ export function recordKeepReceiptMessageId(
   db.raw
     .prepare(
       `UPDATE chat_model_preference SET keep_receipt_message_id = ?
-       WHERE chat_jid = ? AND sender_jid = ?`,
+       WHERE chat_jid = ? AND sender_jid = ? AND expires_at IS NOT NULL`,
     )
     .run(messageId, chatJid, senderJid);
 }
@@ -426,9 +438,21 @@ export function recordKeepReceiptMessageId(
  * outcomes; this function only answers "which receipt".
  *
  * Returns null when there is no row, or the row never captured an id.
+ *
+ * A STICKY winning row (`expires_at IS NULL`) always answers null, whatever the
+ * column holds. The writer already refuses to stamp a sticky row and promotion
+ * consumes the id, so for rows written by this version the check is redundant —
+ * its job is the INSTALLED BASE. A row stamped by the previous unguarded writer
+ * and since promoted still carries an id, and reading it back would let an old
+ * receipt authenticate a threaded affirmative long after the pin became
+ * permanent: the interception this work removes, surviving the upgrade. Deciding
+ * it on READ repairs every such row without a migration and without a write,
+ * and makes "a receipt id is only ever answered for a pin that can still be
+ * promoted" true of the whole store rather than only of rows written since.
  */
 export function getKeepReceiptMessageId(db: Database, chatJid: string): string | null {
   const raw = latestRowIncludingExpired(db, chatJid);
+  if (raw && raw.expires_at === null) return null;
   const id = raw?.keep_receipt_message_id;
   return typeof id === 'string' && id !== '' ? id : null;
 }
@@ -458,6 +482,15 @@ export function getKeepReceiptMessageId(db: Database, chatJid: string): string |
  * are set together in the same statement — the store's own invariant
  * (`scope=sticky ⇔ expires_at IS NULL`, see the module doc above) can never
  * be split across two writes.
+ *
+ * A1 (#2121 follow-up): the same statement CONSUMES the receipt
+ * (`keep_receipt_message_id = NULL`). A promoted pin is permanent and has
+ * nothing left to confirm, so leaving its id behind only let the sticky row go
+ * on authenticating replies to the receipt that made it sticky — every later
+ * threaded `confirm`/`yes`/`pin` was intercepted and answered "already kept"
+ * instead of reaching the agent. Cleared in the SAME atomic write, for the same
+ * reason scope and expiry are: a promotion must never be observable with the
+ * receipt still attached.
  */
 export function promoteToSticky(
   db: Database,
@@ -490,12 +523,27 @@ export function promoteToSticky(
   const result = db.raw
     .prepare(
       `UPDATE chat_model_preference
-         SET scope = 'sticky', expires_at = NULL, updated_at = ?
+         SET scope = 'sticky', expires_at = NULL, updated_at = ?, keep_receipt_message_id = NULL
        WHERE chat_jid = ? AND sender_jid = ? AND updated_at = ?`,
     )
     .run(updatedAt, winning.chatJid, winning.senderJid, winning.updatedAt);
   if (result.changes !== 1) {
     return { outcome: 'superseded', preference: null };
   }
-  return { outcome: 'promoted', preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt } };
+  // S4 (#2121 follow-up review): the receipt id is READ BACK from the row the
+  // UPDATE just wrote, not asserted as a literal null. A literal would keep
+  // reporting "consumed" even if the clause above stopped clearing it, so the
+  // returned object could stay correct while the store was wrong — exactly the
+  // divergence a caller rendering from this object would not survive. No
+  // caller reads the field today; reading it back is what keeps that safe.
+  const promotedRow = db.raw
+    .prepare(`SELECT ${PREFERENCE_COLUMNS} FROM chat_model_preference WHERE chat_jid = ? AND sender_jid = ?`)
+    .get(winning.chatJid, winning.senderJid) as PreferenceRow | undefined;
+  const keepReceiptMessageId = typeof promotedRow?.keep_receipt_message_id === 'string'
+    ? promotedRow.keep_receipt_message_id
+    : null;
+  return {
+    outcome: 'promoted',
+    preference: { ...winning, scope: 'sticky', expiresAt: null, updatedAt, keepReceiptMessageId },
+  };
 }

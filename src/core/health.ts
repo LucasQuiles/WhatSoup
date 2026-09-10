@@ -14,10 +14,14 @@ import {
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import { isFullyConnected } from '../transport/runtime-connection.ts';
+import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_BOND_READ_PERSISTENT_CLASS,
+  DEFAULT_FRESH_INVALID_GRACE_MS,
+  hasTransientAuthReadIssue,
+} from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -178,44 +182,11 @@ const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Ob
   lastSendAt: null,
 });
 
-/**
- * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
- * failure (e.g. `no such table`) must not re-log on every ~5 s poll forever —
- * one observed instance emitted 24,613 identical lines over 34 h, another
- * 40,005. The degraded-state latch still fires every poll (the SIGNAL), but the
- * LOG is emitted on the 1st failure and then only at power-of-two counts,
- * turning O(polls) log lines into O(log polls) while a permanent error can never
- * become an unbounded storm.
- */
-export class ProbeErrorThrottle {
-  private readonly failures = new Map<string, number>();
-
-  /**
-   * Record a probe failure for `key`. Returns the running failure count when
-   * this occurrence should be logged (the 1st, then powers of two), or `null`
-   * to suppress it.
-   */
-  onFailure(key: string): number | null {
-    const n = (this.failures.get(key) ?? 0) + 1;
-    this.failures.set(key, n);
-    // Powers of two (and 1) satisfy (n & (n - 1)) === 0.
-    return (n & (n - 1)) === 0 ? n : null;
-  }
-
-  /**
-   * Record a probe success for `key`. Returns the number of accumulated
-   * failures cleared (0 when the probe was already healthy).
-   */
-  onSuccess(key: string): number {
-    const n = this.failures.get(key) ?? 0;
-    if (n > 0) this.failures.delete(key);
-    return n;
-  }
-
-  reset(): void {
-    this.failures.clear();
-  }
-}
+// Re-exported from its leaf module so consumers that must not pull this
+// file's import graph (which reaches the transport layer) can share the one
+// implementation instead of spelling the same throttle a second time.
+export { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
+import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 
 const probeErrorThrottle = new ProbeErrorThrottle();
 
@@ -287,6 +258,40 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
   // on fallbackActiveUntil !== null; every sibling literal is its own
   // independently probed condition and stays non-provable.
   'runtime.provider_fallback_active',
+]);
+
+/** Status reasons that must never arm the degradation latch because each one
+ * clears itself when its condition is repaired, so no latch is needed to keep a
+ * real problem visible. Membership is NOT "any runtime reason" — it is the
+ * narrow class below, and admitting a reason on a looser reading would open a
+ * genuine silence hole.
+ *
+ * MEMBERSHIP RULE, restated because it is the thing a future candidate is
+ * judged against: a reason belongs here if and only if its condition is
+ * SETTLED by the repair that fixes it, so the reason disappears on its own once
+ * the system is healthy again. Being a runtime reason is not sufficient.
+ *
+ * The two members satisfy it by different mechanisms, and the distinction is
+ * the point:
+ *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
+ *     every poll (the runtime walks its session map), so a still-broken map
+ *     degrades again immediately.
+ *   - `runtime.per_chat_respawn_abandoned` is NOT re-derived from live state.
+ *     It is backed by a retention map emptied when the chat serves again by
+ *     either route — the next inbound message respawns an inactive session in
+ *     place, or is simply served by one that never went inactive — or when a
+ *     new owned session is indexed for it, and it also expires on age.
+ *     Admitted here because it self-clears on repair, not because it is
+ *     re-probed.
+ *
+ * Why either needs it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn
+ * in an unrelated chat proves nothing about a per-chat ownership map — so a
+ * latch carrying one could never be released by the only release channel that
+ * exists, and the instance would report degraded until process restart even
+ * after the runtime had repaired itself and its own snapshot read healthy. */
+export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'runtime.per_chat_session_without_owner',
+  'runtime.per_chat_respawn_abandoned',
 ]);
 
 /** The primary route the latch release compares a receipt against: the
@@ -487,6 +492,10 @@ export type HealthDegradationCause =
   // and a mismatch never hides behind "unknown").
   | 'credential_identity_mismatch'
   | 'credential_identity_unverifiable'
+  // per-chat dispatch-ownership conditions: named and deliberate, so they do not
+  // belong in the unclassified fall-through below.
+  | 'per_chat_session_without_owner'
+  | 'per_chat_respawn_abandoned'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
@@ -584,6 +593,11 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   // verdict (runtime.agent.accountIdentity.status).
   credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
   credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
+  // per-chat dispatch ownership: both conditions are named, deliberate and
+  // directly re-probed, so each carries its own cause rather than landing in the
+  // fall-through where an operator cannot separate it from a genuine unknown.
+  per_chat_session_without_owner: { reasonTwins: ['runtime.per_chat_session_without_owner'] },
+  per_chat_respawn_abandoned: { reasonTwins: ['runtime.per_chat_respawn_abandoned'] },
   // the fall-through when the agent runtime is degraded for a reason no named
   // cause covers: the degradedReasons without a cause of their own, plus the
   // bare marker used when the runtime reported no reasons at all.
@@ -907,7 +921,14 @@ type AuthFailureClass =
   | 'serverside_logout_irreversible'
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
-  | 'auth_bond_at_risk';
+  | 'auth_bond_at_risk'
+  // A credential that has been UNREADABLE for longer than the stale-risk
+  // bound. Deliberately its own class rather than a local-corruption one:
+  // nothing on this path establishes corruption, and the corruption classes
+  // carry terminal consequences — the unrestorable one takes /health to 503
+  // and tells the watchdog a human relink is required. See
+  // AUTH_BOND_READ_PERSISTENT_CLASS.
+  | typeof AUTH_BOND_READ_PERSISTENT_CLASS;
 
 type DisconnectClass =
   | 'none'
@@ -929,6 +950,22 @@ function emptyRecentDisconnects(): ConnectionRecentDisconnects {
     lastStatusCode: null,
     byReason: {},
   };
+}
+
+/**
+ * Read connection state for the health projection.
+ *
+ * Prefers the transport's observability projection, which serves the auth-bond
+ * tree digest from an off-request cache. Falls back to the live getter for
+ * transports that have no such projection — they carry no auth tree, so the
+ * live call is already cheap for them. health.ts is the ONLY caller of the
+ * cached projection; scheduler.ts and main.ts keep the live one.
+ */
+function readHealthConnectionState(
+  connectionManager: HealthDeps['connectionManager'],
+): ConnectionStateSnapshot {
+  const reader = connectionManager as HealthConnectionStateReader;
+  return reader.getHealthConnectionState?.() ?? connectionManager.getConnectionState();
 }
 
 function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
@@ -956,6 +993,44 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
     file_count: authBond.fileCount,
     total_bytes: authBond.totalBytes,
+    // P42 — the tree digest is no longer computed during this request, so say
+    // where it came from. 'live' is the pre-cache behaviour and reports age 0;
+    // 'stale' is a completed walk that an event invalidated or that is past its
+    // max age, still reported because it is the best evidence available;
+    // 'absent' means no walk has finished yet and the three tree fields above
+    // are null for that reason rather than because the tree is unreadable.
+    // An 'absent' or long-stale digest also forces `status` to 'unknown', so a
+    // consumer reading status alone cannot mistake it for a healthy tree.
+    digest_source: authBond.treeProvenance?.source ?? 'live',
+    digest_age_ms: authBond.treeProvenance ? authBond.treeProvenance.ageMs : 0,
+    digest_refresh_in_flight: authBond.treeProvenance?.refreshInFlight ?? false,
+    digest_refresh_count: authBond.treeProvenance?.refreshCount ?? null,
+    // How the last refresh attempt ended. 'incomplete' and 'failed' keep the
+    // previous digest and let it age, so this is the field that distinguishes a
+    // digest that is merely old from one that cannot be replaced.
+    digest_refresh_outcome: authBond.treeProvenance?.lastRefreshKind ?? 'live',
+    digest_refresh_reason: authBond.treeProvenance?.lastRefreshReason ?? null,
+    // Queued-but-not-started, reported separately from the last COMPLETED
+    // attempt. Without these two, a reader immediately after a floor-blocked
+    // invalidation sees a successful outcome and no refresh in flight, which
+    // together read as "nothing is happening" while a walk is queued.
+    digest_refresh_scheduled: authBond.treeProvenance?.refreshScheduled ?? false,
+    digest_next_refresh_eligible_ms: authBond.treeProvenance?.nextRefreshEligibleInMs ?? null,
+    // Walks started, including ones that did not publish. digest_refresh_count
+    // counts only publications, so the pair separates cost from progress.
+    digest_refresh_attempts: authBond.treeProvenance?.refreshAttemptCount ?? null,
+    // Why auth_failure_class can read 'auth_bond_read_persistent' next to an
+    // issue whose whole meaning is "not right now". Without these three the two
+    // readings contradict each other and the response carries nothing to
+    // reconcile them: the issue list has no age, and the flag that changed the
+    // class was internal. The reason names the ONE transient issue the streak
+    // belongs to — a different reason starts a new streak — and the age is that
+    // streak's, in milliseconds. Both are process-local: a restart starts the
+    // streak over, so a small age on a long-running fault means the process is
+    // young, not that the fault is.
+    transient_read_persistent: authBond.transientReadPersistent ?? false,
+    transient_read_reason: authBond.transientReadReason ?? null,
+    transient_read_age_ms: authBond.transientReadAgeMs ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
@@ -1017,6 +1092,38 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 
   const authBond = connectionState.authBond;
   if (!authBond) return 'none';
+
+  // No current tree evidence is not the same as evidence of a clean tree. This
+  // must be tested BEFORE both branches below: the fresh-credential-write guard
+  // would return 'none' and read the unknown tree as healthy, and the
+  // not-'present' branch would report it as local corruption, which it is not.
+  // 'auth_bond_at_risk' degrades (200) rather than paging, which is the right
+  // severity for "the walk has not landed yet".
+  if (authBond.status === 'unknown') return 'auth_bond_at_risk';
+
+  // A read that could not establish the credential has not earned 'none'. Sits
+  // with the 'unknown' check and BEFORE the fresh-write debounce for the reason
+  // that comment gives: degrading costs nothing inside the write window, while
+  // a false clean there lands in exactly the window a restore may act on.
+  //
+  // Bounded in TIME the same way 'unknown' is, and bounded ONLY in what it
+  // reports. Past the guard's treeStaleRiskMs the class becomes
+  // 'auth_bond_read_persistent', which names the fault instead of leaving it
+  // indistinguishable from a fresh one. It must NOT fall through to the
+  // not-'present' branch below: that reports 'local_corruption_*', and the
+  // unrestorable half takes /health to 503 and matches the watchdog's terminal
+  // set, so a credential nobody could READ would suppress the restart that
+  // might clear the read fault. Both halves stay degraded at HTTP 200; the
+  // difference between them is only that the second one is explainable, which
+  // is what the serialized transient_read_* fields on the auth_bond block are
+  // for. The tracking lives on the guard because a transient prefix is issue
+  // text with no age of its own, and this must be one shared bound across live
+  // and cached reads.
+  if (hasTransientAuthReadIssue(authBond.issues)) {
+    return authBond.transientReadPersistent
+      ? AUTH_BOND_READ_PERSISTENT_CLASS
+      : 'auth_bond_at_risk';
+  }
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 
@@ -1846,6 +1953,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    // #1753 rem-1 excluded this request's own cost from this request's reading
+    // by snapshotting first. That is not enough: the window is 20 samples at
+    // 500 ms, so the PREVIOUS request's block sits inside it and, at any poll
+    // cadence faster than one request per 5 s, requests contaminate each
+    // other's readings. Bracketing the handler tells the sampler which spans
+    // were the observer's, so the exclusion covers the whole window.
+    //
+    // Scoped to GET /health deliberately. A slow POST /send is real work
+    // blocking the loop and must keep showing up in the gauge.
+    const endObserverSpan = loopLagSampler.beginObserverSpan();
+
     try {
       const startupNotification = deps.getStartupNotificationHealth?.()
         ?? NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH;
@@ -1861,7 +1979,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
       if (!hasHealthAuth(req, healthAuth)) {
-        const cs = deps.connectionManager.getConnectionState();
+        const cs = readHealthConnectionState(deps.connectionManager);
         const publicConnected = isFullyConnected(cs);
         const publicRecovering =
           cs.state === 'connecting'
@@ -1946,7 +2064,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           'abandoned',
           'unreadable',
         ].includes(memoryConsolidation.state);
-      const connectionState = deps.connectionManager.getConnectionState();
+      const connectionState = readHealthConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
       const disconnectClass = classifyDisconnect(connectionState);
@@ -2581,6 +2699,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         : undefined;
       if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
       else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
+      // Registering a cause is not enough to emit one: the derived membership
+      // below only suppresses the fall-through. Both per-chat ownership counts
+      // reach the wire through the runtime details block, so name them here.
+      if (positiveRuntimeCounter('perChatSessionsWithoutOwner')) {
+        addDegradationCause('per_chat_session_without_owner');
+      }
+      if (positiveRuntimeCounter('perChatRespawnAbandoned')) {
+        addDegradationCause('per_chat_respawn_abandoned');
+      }
       // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
       // cause registry: a newly registered runtime-scoped cause classifies
       // itself here without an edit to this guard.
@@ -2641,7 +2768,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //     early-degraded evidence on an unhealthy-verdict evaluation arms
       //     nothing — is exactly base behavior for every unhealthy verdict.
       const realReasons = statusReasons.filter(
-        (reason) => reason !== 'degradation_silence_unproven' && reason !== 'unclassified',
+        (reason) => reason !== 'degradation_silence_unproven'
+          && reason !== 'unclassified'
+          // Directly re-probed reasons never arm and are never latched: no
+          // release channel could ever clear them, so latching one pins the
+          // instance degraded past its own repair. See
+          // DIRECTLY_REPROBED_STATUS_REASONS.
+          && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason),
       );
       if (realReasons.length > 0) {
         const existingLatch = recentlyDegraded.get(deps.instanceName);
@@ -2836,6 +2969,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           lag_p95_ms: loopLag.p95LagMs,
           sample_count: loopLag.sampleCount,
           locally_starved: loopLag.locallyStarved,
+          // Health-handler time ALREADY subtracted from the lag figures above.
+          // Published so a consumer can see what the observer cost; subtracting
+          // it a second time double-counts.
+          observer_cost_ms: loopLag.observerCostMs,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
           discontinuity_count: loopLag.discontinuityCount,
           lag_min_ms: loopLag.minLagMs,
@@ -2872,6 +3009,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       log.error({ err }, 'health check failed');
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error' }));
+    } finally {
+      // finally, not a trailing call: the handler has early returns (the public
+      // envelope) and a catch, and an unclosed span would leak observer time
+      // into every later interval.
+      endObserverSpan();
     }
   });
 

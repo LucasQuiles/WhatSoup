@@ -1,8 +1,17 @@
 // #3374/#3295 family — admission-rejection diagnosability (2026-08-29 q DM
 // wedge). Every pre-dispatch admission throw was a bare `new Error`, and the
-// log sanitizer reduces errors to `{errorClass}` — so a wedged scope logged
-// `errorClass:"Error"` for two hours and the throw site could not be
-// identified post-hoc (in-memory state destroyed by the recovering restart).
+// log sanitizer at that time reduced errors to `{errorClass}` — so a wedged
+// scope logged `errorClass:"Error"` for two hours and the throw site could not
+// be identified post-hoc (in-memory state destroyed by the recovering
+// restart).
+//
+// The sanitizer no longer reduces an Error to its class name. It also retains
+// a bounded, pattern-scrubbed `errorMessage`, an `errorCode` when `code` is a
+// string or a number, and the `cause`. The typed classes stay load-bearing
+// even so: a class name is a structured discriminator that is never scrubbed,
+// while a message is free text the masking can only clean by shape and the
+// budget can truncate or refuse outright.
+//
 // These tests pin the fix: TYPED admission errors whose class names survive
 // the sanitizer, plus a structured rejection log carrying the FIFO head.
 import { describe, expect, it, vi } from 'vitest';
@@ -15,6 +24,7 @@ import {
 } from '../../../src/runtimes/agent/turn-admission-errors.ts';
 import { sanitizeLogValue } from '../../../src/lib/log-sanitizer.ts';
 import { RuntimeTurnCoordinator, type RuntimeTurnCoordinatorPort } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-double.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 
@@ -59,15 +69,18 @@ function queueStub(): IOutboundQueue {
 }
 
 describe('typed admission errors survive the log sanitizer', () => {
-  it('each class sanitizes to its own discriminating errorClass', () => {
+  it('each class sanitizes to its own discriminating errorClass and message', () => {
     expect(sanitizeLogValue(new ScopeBlockedByDurableRecoveryError())).toEqual({
       errorClass: 'ScopeBlockedByDurableRecoveryError',
+      errorMessage: 'Runtime turn scope is blocked by outstanding durable recovery',
     });
     expect(sanitizeLogValue(new ScopeBlockedByFinalizationRecoveryError())).toEqual({
       errorClass: 'ScopeBlockedByFinalizationRecoveryError',
+      errorMessage: 'Runtime turn scope is blocked by terminal-finalization recovery state',
     });
     expect(sanitizeLogValue(new PerChatTurnFifoOwnerConflictError('key'))).toEqual({
       errorClass: 'PerChatTurnFifoOwnerConflictError',
+      errorMessage: 'Per-chat runtime turn context FIFO already has an active owner for "key"',
     });
   });
 
@@ -85,22 +98,28 @@ describe('typed admission errors survive the log sanitizer', () => {
 
 describe('beginRuntimeTurnEvidence throws typed admission errors', () => {
   it('durable-recovery block throws ScopeBlockedByDurableRecoveryError', () => {
-    const host = {
+    const host = coordinatorPortDouble({
       instanceName: 'admission-test',
-      durability: { hasOutstandingTurnRecoveryForScope: vi.fn(() => true) },
-      runtimeTurnSupervisor: { canAccept: vi.fn(() => true) },
-    } as unknown as RuntimeTurnCoordinatorPort;
+      durability: {
+        hasOutstandingTurnRecoveryForScope: vi.fn(() => true),
+      } as unknown as RuntimeTurnCoordinatorPort['durability'],
+      runtimeTurnSupervisor: {
+        canAccept: vi.fn(() => true),
+      } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+    });
     const coordinator = new RuntimeTurnCoordinator(host);
     expect(() => coordinator.beginRuntimeTurnEvidence(queueStub(), context()))
       .toThrow(ScopeBlockedByDurableRecoveryError);
   });
 
   it('supervisor canAccept refusal throws ScopeBlockedByFinalizationRecoveryError', () => {
-    const host = {
+    const host = coordinatorPortDouble({
       instanceName: 'admission-test',
-      durability: undefined,
-      runtimeTurnSupervisor: { canAccept: vi.fn(() => false) },
-    } as unknown as RuntimeTurnCoordinatorPort;
+      durability: null,
+      runtimeTurnSupervisor: {
+        canAccept: vi.fn(() => false),
+      } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+    });
     const coordinator = new RuntimeTurnCoordinator(host);
     expect(() => coordinator.beginRuntimeTurnEvidence(queueStub(), context()))
       .toThrow(ScopeBlockedByFinalizationRecoveryError);

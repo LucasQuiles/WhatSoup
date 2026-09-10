@@ -503,6 +503,105 @@ describe('service block home-confinement (F3)', () => {
     expect(fs.existsSync(cfgPathFor('svc-dangling-chain'))).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // F6 variant (b), trailing-separator spelling. `lstat(2)` on `<link>/`
+  // reports on the link's TARGET (POSIX reads a trailing separator as a
+  // following `.`), so the existence probe behind the dangling-segment refusal
+  // called the link absent and the climb passed it. One character turned a
+  // refusal into an admission, and the operator's spelling is persisted
+  // verbatim, so the trailing form reached the rendered launchd PATH.
+  // -------------------------------------------------------------------------
+
+  it('rejects a CREATE whose service fields name a DANGLING symlink with a trailing separator', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+    const withSlash = `${path.join(home, 'dangle')}/`;
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: createBody(
+          { claudeConfigDir: withSlash, pathPrepend: [withSlash] },
+          'svc-dangling-trailing-slash',
+        ),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(JSON.parse(res._body).error).toBe(
+      'service.claudeConfigDir must be within the home directory',
+    );
+    expect(fs.existsSync(cfgPathFor('svc-dangling-trailing-slash'))).toBe(false);
+  });
+
+  it('rejects a CREATE whose service.pathPrepend alone carries the trailing separator', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: createBody(
+          { pathPrepend: [`${path.join(home, 'dangle')}/`] },
+          'svc-dangle-slash-prepend',
+        ),
+      }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must be refused: ' + res._body).toBe(400);
+    expect(JSON.parse(res._body).error).toBe(
+      'service.pathPrepend[0] must be within the home directory',
+    );
+    expect(fs.existsSync(cfgPathFor('svc-dangle-slash-prepend'))).toBe(false);
+  });
+
+  it('rejects a PATCH whose service.pathPrepend names a DANGLING symlink with a trailing separator', async () => {
+    const home = homeDir();
+    fs.symlinkSync(path.join(tmpDir, 'attacker-creates-this-later'), path.join(home, 'dangle'));
+    const { deps, configPath } = patchTarget();
+    const before = fs.readFileSync(configPath, 'utf-8');
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({
+        method: 'PATCH',
+        body: JSON.stringify({ service: { pathPrepend: [`${path.join(home, 'dangle')}/`] } }),
+      }),
+      res,
+      deps,
+      { name: 'svc-patch-target' },
+    );
+
+    expect(res._status, 'patch must be refused: ' + res._body).toBe(400);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('still admits a CREATE naming a REAL in-home directory with a trailing separator', async () => {
+    // The compatibility control that rules out refusing the spelling itself:
+    // an instance already carrying `<home>/bin/` must keep rendering.
+    const home = homeDir();
+    const realDir = path.join(home, 'realdir');
+    fs.mkdirSync(realDir, { recursive: true, mode: 0o700 });
+    const service = { pathPrepend: [`${realDir}/`] };
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: createBody(service, 'svc-real-trailing-slash') }),
+      res,
+      makeDeps<any>({}),
+    );
+
+    expect(res._status, 'create must succeed: ' + res._body).toBe(201);
+    const persisted = JSON.parse(fs.readFileSync(cfgPathFor('svc-real-trailing-slash'), 'utf-8'));
+    expect(persisted.service, 'the operator spelling is persisted verbatim').toEqual(service);
+  });
+
   it('still admits an absent LEAF inside an existing in-home parent', async () => {
     // Exactly one level of tolerance. Requiring every segment to exist would
     // break the ordinary case of naming a directory the operator is about to

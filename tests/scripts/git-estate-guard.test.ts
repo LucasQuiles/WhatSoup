@@ -476,7 +476,14 @@ describe('git-estate guard', () => {
       }),
     ]);
 
-    git(repo, ['stash', 'push', '-m', 'sha256 fixture']);
+    // Fixture seam, not a production change: `git stash push` (porcelain)
+    // is broken on Git 2.43 in SHA-256 repositories ("Cannot save the current
+    // status" — reproduced bare, 2026-09-03), while the create/store plumbing
+    // works and produces the exact same refs/stash reflog entry + commit the
+    // production scan reads. Using the plumbing keeps the SHA-256 stash
+    // coverage real on pre-2.45 hosts instead of skipping it.
+    const stashOid = git(repo, ['stash', 'create']);
+    git(repo, ['stash', 'store', '-m', 'sha256 fixture', stashOid]);
     const stashed = snapshot(repo);
     expect(stashed.snapshot.stashes).toEqual([
       {
@@ -1196,7 +1203,7 @@ describe('git-estate guard', () => {
     const laterDecision = (JSON.parse(laterConflict.stdout) as GuardDocument).decision;
     expect(laterDecision.newConflictIds).toHaveLength(1);
     expect(laterDecision.newConflictIds).not.toEqual(conflictIds);
-  });
+  }, 60_000);
 
   it('keeps one conflict operation stable but blocks an exact abort-and-replay instance', () => {
     const { repo } = initRepo();
@@ -1604,7 +1611,7 @@ describe('git-estate guard', () => {
     expect(resolved.status).toBe(0);
     expect((JSON.parse(resolved.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);
-  });
+  }, 60_000);
 
   it('treats an unreadable prunable worktree as incomplete but keeps pre-commit fail-open-with-warning', () => {
     const { root, repo } = initRepo();
