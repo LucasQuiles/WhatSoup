@@ -49,6 +49,14 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly recoveryManagerId: string;
   readonly nextRecoveryGeneration: () => number;
   readonly resolveDispatchTarget: (job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null;
+  /**
+   * PR2 deploy gate for automatic catch-up reconciliation, forwarded
+   * verbatim to the supervisor. Deliberately NOT wired from AgentRuntime
+   * yet: enabling it is a separately-gated cutover decision (see
+   * docs/turn-recovery-continuity-reconciler.md), so the default here is
+   * off until that cutover passes it explicitly.
+   */
+  readonly catchupReconcile?: { readonly groupLimit?: number } | null;
 }): TurnRecoverySupervisor {
   // #2170: all three scopes are dispatchable — per_chat through the per-chat
   // replay pipeline, shared/singleton through the global-turn pipeline
@@ -67,6 +75,7 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
     }),
     supportedScopes: new Set(['per_chat', 'shared', 'singleton']),
     resolveDispatchTarget: deps.resolveDispatchTarget,
+    catchupReconcile: deps.catchupReconcile ?? null,
   });
 }
 
