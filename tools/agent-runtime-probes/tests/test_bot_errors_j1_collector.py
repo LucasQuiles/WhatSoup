@@ -422,22 +422,11 @@ def test_parse_planes_extracts_facts_and_nulls_failed_sections():
 # ------------------------------------------------- alert-host metric sections, executed locally
 
 
-def _section_script(name):
-    """The python block of one alert-host section, extracted verbatim from PLANES_SCRIPT so the
-    test runs the same bytes the remote host runs."""
-    marker = (
-        'echo "=== SECTION ' + name + ' ==="\n'
-        'python3 - "$STATE" "$ST" "$EN" <<' + "'PY'\n"
-    )
-    start = c.PLANES_SCRIPT.index(marker) + len(marker)
-    end = c.PLANES_SCRIPT.index("\nPY\n", start)
-    return c.PLANES_SCRIPT[start:end]
-
-
 def _run_section(name, state_dir, st, en):
+    """Run one alert-host section's python block (the same bytes the remote host runs)."""
     r = subprocess.run(
         [sys.executable, "-", state_dir, str(st), str(en)],
-        input=_section_script(name),
+        input=c.section_script(name),
         capture_output=True,
         text=True,
     )

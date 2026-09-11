@@ -288,6 +288,19 @@ exit $FAIL
 # ----------------------------------------------------------------------------- pure helpers
 
 
+def section_script(name: str) -> str:
+    """The python block of one alert-host metric section, extracted verbatim from
+    PLANES_SCRIPT. The tests and the backfill run these bytes locally so there is exactly one
+    parser for each family: the one the alert host runs."""
+    marker = (
+        'echo "=== SECTION ' + name + ' ==="\n'
+        'python3 - "$STATE" "$ST" "$EN" <<' + "'PY'\n"
+    )
+    start = PLANES_SCRIPT.index(marker) + len(marker)
+    end = PLANES_SCRIPT.index("\nPY\n", start)
+    return PLANES_SCRIPT[start:end]
+
+
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
