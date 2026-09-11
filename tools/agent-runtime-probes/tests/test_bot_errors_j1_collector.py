@@ -11,6 +11,14 @@ import sys
 
 import pytest
 
+try:  # property-based coverage when hypothesis is installed; the corpus stays stdlib-only
+    from hypothesis import given, settings
+    from hypothesis import strategies as st
+
+    HAVE_HYPOTHESIS = True
+except ImportError:  # pragma: no cover - environment without hypothesis
+    HAVE_HYPOTHESIS = False
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bot_errors_j1_collector as c  # noqa: E402
@@ -200,42 +208,86 @@ def test_parse_rows_marks_malformed_records_instead_of_guessing():
     assert (s["rows_scanned"], s["rows_malformed"], s["rows_new"]) == (3, 2, 1)
 
 
-@pytest.mark.parametrize(
-    "body,expected",
-    [
-        ("Codex -> Q / gate nudge", "gate_nudge"),
-        ("[maclab probe 2026] dispatcher DEGRADED", "maclab_probe_post"),
-        ("BOT WARNING - Flap storm: x unstable", "flap_storm_open"),
-        ("BOT INFO - Flap storm closed: x", "flap_storm_close"),
-        ("BOT RECOVERY - x restored", "recovery"),
-        ("✅ *q* resolved · 3m · src", "resolved_lifecycle"),
-        ("\U0001f534 ↻ *Infra* · open 1d", "repeat_renotify"),
-        (
-            "BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k\n> incident_still_open=true",
-            "escalation_bypass_renotify",
-        ),
-        (
-            "BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k\n  > incident_still_open: true",
-            "escalation_bypass_renotify",
-        ),
-        ("BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k", "escalation_new"),
-        (
-            "BOT WARNING - BOT ERRORS heartbeat watchdog still open: k\n  > incident_still_open: true",
-            "repeat_renotify",
-        ),
-        (
-            "BOT WARNING - BOT ERRORS heartbeat watchdog still open: k\nincident_still_open=true",
-            "repeat_renotify",
-        ),
-        ("BOT ERROR - x", "alert"),
-        ("[J1 supervision] Re-armed", "lane_observation_post"),
-        ("something else", "other"),
-    ],
+# Decision table for classify(): one row per lifecycle class, both marker spellings included.
+# Kept as a table so the precedence (escalation before repeat markers, storm close before open)
+# is read in one place; the test walks every row and names the failing row.
+CLASSIFY_TABLE = (
+    ("Codex -> Q / gate nudge", "gate_nudge"),
+    ("[maclab probe 2026] dispatcher DEGRADED", "maclab_probe_post"),
+    ("BOT WARNING - Flap storm: x unstable", "flap_storm_open"),
+    ("BOT INFO - Flap storm closed: x", "flap_storm_close"),
+    ("BOT RECOVERY - x restored", "recovery"),
+    ("✅ *q* resolved · 3m · src", "resolved_lifecycle"),
+    ("\U0001f534 ↻ *Infra* · open 1d", "repeat_renotify"),
+    (
+        "BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k\n> incident_still_open=true",
+        "escalation_bypass_renotify",
+    ),
+    (
+        "BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k\n  > incident_still_open: true",
+        "escalation_bypass_renotify",
+    ),
+    ("BOT ERROR - BOT ERRORS heartbeat watchdog escalated: k", "escalation_new"),
+    (
+        "BOT WARNING - BOT ERRORS heartbeat watchdog still open: k\n  > incident_still_open: true",
+        "repeat_renotify",
+    ),
+    (
+        "BOT WARNING - BOT ERRORS heartbeat watchdog still open: k\nincident_still_open=true",
+        "repeat_renotify",
+    ),
+    ("BOT ERROR - x", "alert"),
+    ("[J1 supervision] Re-armed", "lane_observation_post"),
+    ("something else", "other"),
 )
-def test_classify_covers_every_lifecycle_class_and_both_marker_spellings(
-    body, expected
-):
-    assert c.classify(body) == expected
+
+
+def test_classify_covers_every_lifecycle_class_and_both_marker_spellings():
+    seen = set()
+    for body, expected in CLASSIFY_TABLE:
+        got = c.classify(body)
+        assert got == expected, f"{body!r}: expected {expected}, got {got}"
+        seen.add(got)
+    # Every class the collector can emit is exercised by at least one row.
+    assert seen == c.NOVELTY_EXCLUDED | c.ALERT_LIKE | c.REPEAT_LIKE
+
+
+if HAVE_HYPOTHESIS:
+    _plain = st.text(max_size=40).map(lambda s: s.replace(US, "").replace(RS, ""))
+    _record = st.tuples(
+        st.integers(min_value=0, max_value=10**9),
+        _plain,
+        st.integers(min_value=0, max_value=2**31),
+        _plain,
+        _plain,
+        _plain,
+        _plain,
+        st.sampled_from(["0", "1"]),
+        _plain,
+    )
+
+    @given(records=st.lists(_record, max_size=12), prior_hw=st.integers(0, 10**9))
+    @settings(max_examples=80, deadline=None)
+    def test_parse_rows_roundtrips_any_text_and_summarize_accounts_every_row(
+        records, prior_hw
+    ):
+        text = RS.join(US.join(str(f) for f in rec) for rec in records) + (
+            RS if records else ""
+        )
+        rows = c.parse_rows(text)
+        assert [r.get("malformed", False) for r in rows] == [False] * len(records)
+        assert [(r["pk"], r["message_id"], r["ts"], r["body"]) for r in rows] == [
+            (rec[0], rec[1], rec[2], rec[8]) for rec in records
+        ]
+        s = c.summarize(rows, prior_hw)
+        assert (
+            s["rows_scanned"]
+            == s["rows_new"] + s["dedup_discarded"] + s["rows_malformed"]
+        )
+        assert s["rows_new"] == sum(1 for rec in records if rec[0] > prior_hw)
+        nov = s["novelty"]
+        assert nov["alert_like"] + nov["repeat_like"] + nov["excluded"] == s["rows_new"]
+        assert (nov["ratio"] is None) == (nov["denominator"] == 0)
 
 
 def test_summarize_reports_denominators_and_dedups_by_prior_high_water():
@@ -487,22 +539,24 @@ def test_tampered_cursor_blocks_before_any_write(tmp_path, capsys):
     )
 
 
-@pytest.mark.parametrize(
-    "run_id", ["../../../escape", "/etc/cron.d", "../checkpoint", 7, "a b"]
-)
-def test_hostile_run_id_is_refused_before_any_write(tmp_path, run_id, capsys):
-    root = make_root(tmp_path, run_id=run_id)
-    fx = make_fixtures(tmp_path)
-    before = snapshot(str(tmp_path))
-    assert run(root, fx) == 2
-    assert json.loads(capsys.readouterr().out)["class"] == "cursor-or-io"
-    after = snapshot(str(tmp_path))
-    assert {
-        k: v for k, v in after.items() if k != "loop/monitors/state/.collect.lock"
-    } == before
-    assert not os.path.exists(os.path.join(tmp_path, "escape")) and not os.path.isdir(
-        os.path.join(root, "runs")
-    )
+HOSTILE_RUN_IDS = ("../../../escape", "/etc/cron.d", "../checkpoint", 7, "a b")
+
+
+def test_hostile_run_id_is_refused_before_any_write(tmp_path, capsys):
+    for index, run_id in enumerate(HOSTILE_RUN_IDS):
+        case = tmp_path / f"case{index}"
+        case.mkdir()
+        root = make_root(case, run_id=run_id)
+        fx = make_fixtures(case)
+        before = snapshot(str(case))
+        assert run(root, fx) == 2, f"run_id {run_id!r} was not refused"
+        assert json.loads(capsys.readouterr().out)["class"] == "cursor-or-io"
+        after = snapshot(str(case))
+        assert {
+            k: v for k, v in after.items() if k != "loop/monitors/state/.collect.lock"
+        } == before, f"run_id {run_id!r} wrote outside the lock file"
+        assert not os.path.exists(os.path.join(case, "escape"))
+        assert not os.path.isdir(os.path.join(root, "runs"))
 
 
 def test_generation_path_must_stay_under_root(tmp_path, capsys):
