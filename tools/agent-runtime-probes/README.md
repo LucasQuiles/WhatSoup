@@ -42,6 +42,7 @@ Default behavior is intentionally conservative:
 | `bot_errors_proof_ladder.py` | BOT ERRORS proof-class ladder separating code presence, role-profile expectations, historical observations, and live observations; typed source observations drive report verdicts and optional strict gating | No |
 | `bot_errors_daily_health_artifact_probe.py` | BOT ERRORS daily-health artifact adapter; classifies caller-supplied event JSON or explicit plain text with typed format/schema status, report-only versus strict gating, bounded counts/classes, and no raw evidence, hashes, paths, identifiers, or credential material | No |
 | `bot_errors_health_surface_probe.py` | BOT ERRORS health-check source/static surface inventory: typed source observations for daily-health code, runtime manifest, and managed components; inventories provider/plugin/manifest surfaces without running health checks | No |
+| `bot_errors_j1_collector.py` | BOT ERRORS J1 unattended collector (supervision contract steps 3-8, read-only, no publication): reads the sha-linked supervision cursor, freezes a half-open interval, runs the alert-host planes, two column-scoped store scans and the canary read over ssh (`--live`) or from captured receipts (`--fixture-dir`), classifies rows by event lifecycle with denominators, checks store parity, and writes a `bot-errors-collect` bundle plus its own `COLLECTOR.json` pointer; every remote section carries its own exit status so a failed read is never a zero; bodies go to 0600 receipt files, stdout is metadata only; never takes the checkpoint lease, never moves `CURRENT.json`, never appends the ledger, never sends | No |
 | `runtime_doctor.py` | Version/config/state summary for Claude, Codex, OpenCode, Pi | No |
 | `runtime_budget_rail.py` | Metadata-only cross-harness budget rail: local config ceilings, state-store pressure, instruction-budget estimates, latest Codex session size, and optional aggregate OpenCode stats without raw transcripts or provider payloads | No provider call; runs local `opencode stats` by default unless `--no-opencode-stats` |
 | `compaction_survival_canary.py` | Metadata-only handoff/compaction canary: verifies required evidence/state/safety anchors survive compacted summaries, forbidden payloads stay suppressed, and risky completion claims retain qualifiers without raw source or summary text | No |
@@ -180,6 +181,7 @@ python3 agent-runtime-probes/tests/test_corpus_guard.py
 python3 agent-runtime-probes/tests/test_bot_errors_proof_ladder.py
 python3 agent-runtime-probes/tests/test_bot_errors_daily_health_artifact_probe.py
 python3 agent-runtime-probes/tests/test_bot_errors_health_surface_probe.py
+python3 -m pytest agent-runtime-probes/tests/test_bot_errors_j1_collector.py -q
 python3 agent-runtime-probes/tests/test_codex_config_redactor.py
 python3 agent-runtime-probes/tests/test_codex_prompt_input_shape_probe.py
 python3 agent-runtime-probes/tests/test_codex_rules_inventory_probe.py
