@@ -122,7 +122,7 @@ PLANES_OK = (
     '=== SECTION incident-state ===\n{"openIncidents_len": 79, "flapState_len": 169, "updatedAt": "x"}\nSECTION_RC incident-state 0\n'
     '=== SECTION watchdog-state ===\n{"open": ["local_health:q"], "recentlyRecovered": ["supervision_deadman"], "generation": 7109, "writtenAt": "x"}\nSECTION_RC watchdog-state 0\n'
     '=== SECTION dispatch-outcomes ===\n{"by_type_24h": {"sent": 82, "suppressed": 4282, "cycle_completed": 2694}, "by_type_window": {"sent": 3, "cycle_completed": 112}, "cycle_duration_ms_window": {"n": 112, "p50": 40, "p95": 91, "max": 300}, "first_time": "2026-09-09T09:39:26Z", "last_time": "2026-09-11T01:16:58Z", "lines_24h": 46753, "lines_total": 80894, "lines_undecodable": 0, "lines_window": 1400, "log_bytes": 40593763, "log_mtime_age_s": 16, "window_end_utc": "2026-09-11T01:17:00Z", "window_start_utc": "2026-09-11T00:19:59Z"}\nSECTION_RC dispatch-outcomes 0\n'
-    '=== SECTION incident-inventory ===\n{"age_days_max": 68.7, "age_days_p50": 13.4, "age_days_p90": 51.9, "flap_cumulative_total": 9000, "flap_keys": 163, "flap_keys_window_complete": 150, "flap_top": [{"cumulative": 1151, "key": "h|i|release-currency", "trips_in_window": 11, "window_complete": false}], "flap_trip_unit": "s", "flap_trips_in_window_lower_bound": 40, "open": 80, "renotify_total": 568, "rows_skipped": 0, "status": {"awaiting_physical": 43, "open": 37}, "suppressed_total": 25118, "top_suppressed": [{"age_days": 51.9, "key": "h|i|k", "renotify": 3, "status": "open", "suppressed": 4100}], "updatedAt": "x"}\nSECTION_RC incident-inventory 0\n'
+    '=== SECTION incident-inventory ===\n{"age_days_max": 68.7, "age_days_p50": 13.4, "age_days_p90": 51.9, "flap_cumulative_retained_total": 9000, "flap_keys": 163, "flap_keys_window_complete": 150, "flap_top": [{"cumulative": 1151, "key": "h|i|release-currency", "trips_in_window": 11, "window_complete": false}], "flap_trip_unit": "s", "flap_trips_in_window_lower_bound": 40, "open": 80, "renotify_total": 568, "rows_skipped": 0, "status": {"awaiting_physical": 43, "open": 37}, "suppressed_total": 25118, "top_suppressed": [{"age_days": 51.9, "key": "h|i|k", "renotify": 3, "status": "open", "suppressed": 4100}], "updatedAt": "x"}\nSECTION_RC incident-inventory 0\n'
     "=== SECTION queues ===\noutbox=0\nprocessing=0\nquarantine=42\nsent=10099\nSECTION_RC queues 0\n"
     "=== SECTION supervision-pointer ===\n838d0616700d8ca26b9f1f26cb7ad1f7f47c18469c68327c4923a0d9aed46978  CURRENT.json\n1789086568\nSECTION_RC supervision-pointer 0\n"
     "=== SECTION deployed-checkout ===\nda3c801be5a8995f9033ebebc2b150388ac0a8b9\nfix/some-branch\nSECTION_RC deployed-checkout 0\n"
@@ -425,7 +425,10 @@ def test_parse_planes_extracts_facts_and_nulls_failed_sections():
 def _section_script(name):
     """The python block of one alert-host section, extracted verbatim from PLANES_SCRIPT so the
     test runs the same bytes the remote host runs."""
-    marker = f'echo "=== SECTION {name} ==="\npython3 - "$STATE" "$ST" "$EN" <<\'PY\'\n'
+    marker = (
+        'echo "=== SECTION ' + name + ' ==="\n'
+        'python3 - "$STATE" "$ST" "$EN" <<' + "'PY'\n"
+    )
     start = c.PLANES_SCRIPT.index(marker) + len(marker)
     end = c.PLANES_SCRIPT.index("\nPY\n", start)
     return c.PLANES_SCRIPT[start:end]
@@ -524,7 +527,9 @@ def test_incident_inventory_flags_pruned_flap_history_and_detects_the_trip_unit(
     assert (out["age_days_p50"], out["age_days_max"]) == (2.0, 10.0)
     assert (out["suppressed_total"], out["renotify_total"]) == (5, 2)
     assert out["top_suppressed"][0]["key"] == "h|b|k"
-    assert out["flap_trip_unit"] == "s" and out["flap_cumulative_total"] == 14
+    # A gauge over retained keys (the producer deletes resolved or expired entries), never a
+    # counter to diff between bundles.
+    assert out["flap_trip_unit"] == "s" and out["flap_cumulative_retained_total"] == 14
     by_key = {f["key"]: f for f in out["flap_top"]}
     assert (
         by_key["h|a|flap"]["trips_in_window"],

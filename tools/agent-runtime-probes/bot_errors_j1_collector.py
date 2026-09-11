@@ -221,8 +221,11 @@ scale = {"s": 1, "ms": 1000}.get(unit)
 # The producer prunes tripTimestamps to its own flap window (600 s by default), so a key's
 # retained history usually starts AFTER the collection window does. A per-key window count is
 # complete only when the oldest retained trip is at or before the window start (or the key
-# has no trips at all); otherwise it is a lower bound and is flagged as such. The monotone
-# `cumulativeCount` is the reliable series: consumers diff it between bundles.
+# has no trips at all); otherwise it is a lower bound and is flagged as such. Per key,
+# `cumulativeCount` is monotone while the key exists; the producer deletes keys when a storm
+# resolves or an entry expires, so the sum over retained keys is a GAUGE, never a counter:
+# do not diff it between bundles. New-trip activity is measured from the dispatcher log's
+# flap_storm / flap_entry_pruned / flap_storm_resolved record types (dispatch-outcomes).
 flap = []; cumulative_total = 0; complete_keys = 0
 for k, v in fs.items():
     if not isinstance(v, dict): continue
@@ -239,7 +242,7 @@ for k, v in fs.items():
 flap.sort(key=lambda r: (-r["cumulative"], r["key"]))
 out = {"open": len(oi), "rows_skipped": skipped, "status": status, "age_days_p50": pct(ages, 0.5), "age_days_p90": pct(ages, 0.9), "age_days_max": pct(ages, 1.0),
        "suppressed_total": sup, "renotify_total": ren, "top_suppressed": items[:TOP_N],
-       "flap_keys": len(fs), "flap_trip_unit": unit, "flap_cumulative_total": cumulative_total,
+       "flap_keys": len(fs), "flap_trip_unit": unit, "flap_cumulative_retained_total": cumulative_total,
        "flap_trips_in_window_lower_bound": (sum(f["trips_in_window"] or 0 for f in flap) if scale else None),
        "flap_keys_window_complete": (complete_keys if scale else None), "flap_top": flap[:FLAP_N],
        "updatedAt": d.get("updatedAt")}
