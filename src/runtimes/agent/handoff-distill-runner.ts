@@ -11,6 +11,7 @@ export interface HandoffDistillRunnerDeps {
   distillFor: (conversationKey: string) => Promise<DistillOutcome>;
   persist: (artifact: HandoffArtifact) => void;
   onDegraded: (conversationKey: string, reason: string) => void;
+  onSucceeded?: (conversationKey: string) => void;
   sourceFor: (conversationKey: string) => { provider: string; model: string | null };
 }
 
@@ -60,6 +61,7 @@ export class HandoffDistillRunner {
         onDegraded: (reason) => this.deps.onDegraded(conversationKey, reason),
       });
       this.states.set(conversationKey, result.nextState);
+      if (result.ran) this.deps.onSucceeded?.(conversationKey);
     } finally {
       this.globalInFlight -= 1;
       this.inFlight.delete(conversationKey);
