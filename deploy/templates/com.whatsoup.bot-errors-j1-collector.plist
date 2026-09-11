@@ -13,11 +13,17 @@
     __HOME__  — the account home directory
 
   Install path: ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
-  Script path:  ~/.local/bin/bot-errors-j1-collector  (see bot-errors-j1-collector.sh template)
+  Script path:  ~/.local/bin/bot-errors-j1-collector  (byte-identical copy of the
+                bot-errors-j1-collector.sh template; the drift guard compares them)
   Host config:  ~/.config/whatsoup/bot-errors-j1-collector.env  (untracked; loop root,
-                alert-group jid, collector script path — read by the wrapper)
+                alert-group jid, collector script path — read by the wrapper; mode 600;
+                BOT_ERRORS_J1_SLOT_MINUTE, if set, must equal the Minute below)
 
-  After installing:
+  Install steps (the drift guard checks each prerequisite exists; it never reads the env file):
+    mkdir -p ~/.local/bin ~/.local/state/whatsoup-logs ~/.config/whatsoup
+    cp deploy/templates/bot-errors-j1-collector.sh ~/.local/bin/bot-errors-j1-collector && chmod 755 ~/.local/bin/bot-errors-j1-collector
+    (write ~/.config/whatsoup/bot-errors-j1-collector.env, chmod 600)
+    sed "s|__HOME__|$HOME|g" deploy/templates/com.whatsoup.bot-errors-j1-collector.plist > ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
 -->
 <plist version="1.0">

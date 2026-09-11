@@ -272,21 +272,48 @@ check_ms365_script() {
   fi
 }
 
-check_j1_collector_script() { # same contract as check_ms365_script: optional surface, script must exist and carry no placeholders
+check_j1_collector_script() { # optional surface; when its plist is installed the wrapper must be a readable regular
+                              # executable equal to the tracked template, and its host prerequisites must exist:
+                              # the env file (existence ONLY — never read or printed) and the launchd log directory.
+  local plist="$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
   local script="$BIN_DIR/bot-errors-j1-collector"
-  if [ ! -f "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist" ]; then
+  local template="$REPO_ROOT/deploy/templates/bot-errors-j1-collector.sh"
+  local env_file="$HOME/.config/whatsoup/bot-errors-j1-collector.env"
+  local log_dir="$HOME/.local/state/whatsoup-logs"
+  if [ ! -f "$plist" ]; then
     return 0 # host does not run this surface; plist skip already reported
   fi
-  if [ ! -x "$script" ]; then
-    echo "missing installed bot-errors-j1-collector script: $script" >&2
+  if [ ! -f "$template" ]; then
+    echo "missing repo template: deploy/templates/bot-errors-j1-collector.sh" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -f "$script" ] || [ ! -r "$script" ] || [ ! -x "$script" ]; then
+    echo "missing installed bot-errors-j1-collector script: $script (must be a readable, executable regular file)" >&2
     failures=$((failures + 1)); return 0
   fi
   if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
     echo "drift: bot-errors-j1-collector script has surviving placeholders" >&2
-    failures=$((failures + 1))
+    failures=$((failures + 1)); return 0
   else
-    echo "ok: bot-errors-j1-collector script (no surviving placeholders)"
+    local grep_status=$?
+    if [ "$grep_status" -ne 1 ]; then # 1 = no match; anything else = the inspection itself failed
+      echo "inspection failure: bot-errors-j1-collector script could not be scanned (grep status $grep_status)" >&2
+      failures=$((failures + 1)); return 0
+    fi
   fi
+  if ! cmp -s "$template" "$script"; then
+    echo "drift: bot-errors-j1-collector script differs from deploy/templates/bot-errors-j1-collector.sh" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -f "$env_file" ]; then
+    echo "missing host config for bot-errors-j1-collector: $env_file (existence checked only; contents never read)" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -d "$log_dir" ]; then
+    echo "missing log directory for bot-errors-j1-collector: $log_dir (launchd cannot open StandardOutPath)" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  echo "ok: bot-errors-j1-collector script (matches template; host config and log directory present)"
 }
 
 plist_key() { # PLIST_ABS Label|Prog0  (plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)

@@ -216,13 +216,14 @@
         "script_template": "deploy/templates/bot-errors-j1-collector.sh",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist",
         "script_install_path": "~/.local/bin/bot-errors-j1-collector",
-        "host_config": "~/.config/whatsoup/bot-errors-j1-collector.env (untracked: loop root, alert-group jid, collector script path)",
+        "host_config": "~/.config/whatsoup/bot-errors-j1-collector.env (untracked, mode 600, owned by the running user: loop root, alert-group jid, collector script path; optional slot minute must equal the plist's Minute)",
+        "install_prerequisites": "mkdir -p ~/.local/bin ~/.local/state/whatsoup-logs ~/.config/whatsoup before bootstrapping; the drift guard verifies the wrapper matches its template byte-for-byte and that the env file and log directory exist (it never reads the env file)",
         "schedule": "StartCalendarInterval :17 hourly",
         "run_at_load": false,
         "keep_alive": false,
         "purpose": "Hourly read-only capture of the BOT ERRORS supervision planes (alert host units, dispatcher and watchdog state, alert-group rows, canary) into runs/<run>/collect/ bundles that the J1 investigator session sha-links into its checkpoint generations (contract step 9.5). Keeps collection alive while the investigator session is paused; never publishes a checkpoint, takes a lease, or appends the ledger.",
         "applicable_hosts": "The one supervision host that runs the J1 investigator loop (a macOS workstation with ssh access to the alert host and the canary host).",
-        "probe": "ls -t \"$BOT_ERRORS_J1_ROOT\"/runs/*/collect/collect-*.json | head -3"
+        "probe": "set -o pipefail; ls -t \"${BOT_ERRORS_J1_ROOT:?export it from ~/.config/whatsoup/bot-errors-j1-collector.env}\"/runs/*/collect/collect-*.json | head -3  # newest bundle should be stamped within the last hour"
       }
     ]
   }
