@@ -86,12 +86,24 @@ const MS365_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'ms365-token-backup')
   .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/ms365-token-backup');
 
-const J1_COLLECTOR_TEMPLATE = HARNESS_TEMPLATE
-  .replace('harness-maintenance', 'bot-errors-j1-collector')
-  .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/bot-errors-j1-collector');
+// The collector surface carries a schedule the guard cross-checks against the wrapper's default slot minute.
+const J1_COLLECTOR_TEMPLATE = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<plist version="1.0"><dict>',
+  '  <key>Label</key><string>com.whatsoup.bot-errors-j1-collector</string>',
+  '  <key>ProgramArguments</key><array>',
+  '    <string>__HOME__/.local/bin/bot-errors-j1-collector</string>',
+  '  </array>',
+  '  <key>RunAtLoad</key><false/>',
+  '  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>17</integer></dict>',
+  '  <key>StandardOutPath</key><string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.out</string>',
+  '</dict></plist>',
+  '',
+].join('\n');
 
-// The wrapper template carries no placeholders; the guard compares the installed copy byte-for-byte.
-const J1_WRAPPER_TEMPLATE = '#!/usr/bin/env bash\necho ok\n';
+// The wrapper template carries no placeholders; the guard compares the installed copy byte-for-byte and reads
+// the default slot minute from it.
+const J1_WRAPPER_TEMPLATE = '#!/usr/bin/env bash\nSLOT_MINUTE="${BOT_ERRORS_J1_SLOT_MINUTE:-17}"\necho ok\n';
 
 // Real repo artifacts for the tests that exercise the shipped files rather than fixtures.
 const REAL_J1_PLIST_TEMPLATE = join(process.cwd(), 'deploy/templates/com.whatsoup.bot-errors-j1-collector.plist');
@@ -427,10 +439,34 @@ describe('static template surfaces (substitute-then-compare)', () => {
     const result = run(f);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('ok: bot-errors-j1-collector');
-    expect(result.stdout).toContain('ok: bot-errors-j1-collector script (matches template; host config and log directory present)');
+    expect(result.stdout).toContain('ok: bot-errors-j1-collector script (matches template; host config and log directory present; slot minute 17)');
     expect(result.stdout).not.toContain('warn: unmanaged launchd surface: com.whatsoup.bot-errors-j1-collector.plist');
+    expect(result.stdout).not.toContain('warn: unmanaged collector job');
     // the env file is an existence check only: its bytes must never reach the guard's output
     expect(result.stdout + result.stderr).not.toContain('J1_SECRET_MARKER');
+  });
+
+  it('reports drift when the plist schedule minute and the wrapper default slot minute disagree', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'),
+      subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home).replace('<integer>17</integer>', '<integer>18</integer>'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('slot minute mismatch (plist Minute=18, wrapper default=17)');
+  });
+
+  it('warns (without counting drift) about another LaunchAgent that runs the collector under an unmanaged label', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.launchd, 'com.example.sched.bot-errors-j1-collector.plist'),
+      plistXml('com.example.sched.bot-errors-j1-collector', '/bin/bash').replace('</dict></plist>',
+        '  <key>ProgramArguments2</key><array><string>python3 /somewhere/bot_errors_j1_collector.py --live</string></array>\n</dict></plist>'));
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('warn: unmanaged collector job: com.example.sched.bot-errors-j1-collector');
   });
 
   it('fails when the bot-errors-j1-collector plist is installed but its script is missing', () => {
@@ -555,12 +591,30 @@ describe('static template surfaces (substitute-then-compare)', () => {
     expect(r.stderr).toContain('missing or unreadable host config');
   });
 
-  it('exits 78 when the host config is group- or world-writable', () => {
+  it('exits 78 when the host config is not mode 600 or 400', () => {
     const { home, collector, root } = makeWrapperHome();
-    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`], 0o664);
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`], 0o644);
     const r = runWrapper(home);
     expect(r.status).toBe(78);
-    expect(r.stderr).toContain('group- or world-writable');
+    expect(r.stderr).toContain('must be mode 600 or 400 (got 644)');
+  });
+
+  it('parses the host config instead of executing it: a shell line is a configuration error, not a silent exit 0', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'exit 0', 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`]);
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('unparseable line 2');
+    expect(r.stdout).not.toContain('collector argv');
+  });
+
+  it('exits 78 when the pinned collector sha256 does not match the file', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`,
+      'BOT_ERRORS_J1_COLLECTOR_SHA256=0000000000000000000000000000000000000000000000000000000000000000']);
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('collector sha256 mismatch');
   });
 
   it('exits 78 when a required value is empty, when the collector is missing, and when the slot minute is out of range', () => {

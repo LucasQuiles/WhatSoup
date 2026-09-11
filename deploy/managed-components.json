@@ -216,7 +216,7 @@
         "script_template": "deploy/templates/bot-errors-j1-collector.sh",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist",
         "script_install_path": "~/.local/bin/bot-errors-j1-collector",
-        "host_config": "~/.config/whatsoup/bot-errors-j1-collector.env (untracked, mode 600, owned by the running user: loop root, alert-group jid, collector script path; optional slot minute must equal the plist's Minute)",
+        "host_config": "~/.config/whatsoup/bot-errors-j1-collector.env (untracked; parsed as KEY=value lines, never sourced; mode 600 or 400, owned by the running user: loop root, alert-group jid, collector script path; optional collector sha256 pin; optional slot minute must equal the plist's Minute). Migration: boot out any ad-hoc job for the same collector under another label before bootstrapping this one; the drift guard warns about such jobs.",
         "install_prerequisites": "mkdir -p ~/.local/bin ~/.local/state/whatsoup-logs ~/.config/whatsoup before bootstrapping; the drift guard verifies the wrapper matches its template byte-for-byte and that the env file and log directory exist (it never reads the env file)",
         "schedule": "StartCalendarInterval :17 hourly",
         "run_at_load": false,

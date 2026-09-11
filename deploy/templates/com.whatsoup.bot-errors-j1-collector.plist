@@ -5,9 +5,18 @@
   Template: com.whatsoup.bot-errors-j1-collector.plist
 
   Hourly, read-only BOT ERRORS supervision collector (tools/agent-runtime-probes/
-  bot_errors_j1_collector.py). It captures the alert host's planes and the alert
-  group's rows into runs/<run>/collect/ and never publishes a checkpoint, takes
-  a lease, or appends the ledger — the investigator session does that.
+  bot_errors_j1_collector.py, which lands with PR #3532; until then the host
+  config points at the reviewed copy the host already runs). It captures the
+  alert host's planes and the alert group's rows into runs/<run>/collect/ and
+  never publishes a checkpoint, takes a lease, or appends the ledger — the
+  investigator session does that.
+
+  Migration: if an ad-hoc job for the same collector already exists under another
+  label (for example an mq-schedule label), `launchctl bootout gui/$(id -u)/<label>`
+  it BEFORE bootstrapping this one — two labels would both fire at :17 (the
+  collector's lock turns the loser into an exit-3 "lock-held" run, which is still
+  noise). The drift guard prints `warn: unmanaged collector job: <label>` for any
+  other LaunchAgent whose plist names the collector.
 
   Replace before installing (the drift guard substitutes the same tokens):
     __HOME__  — the account home directory

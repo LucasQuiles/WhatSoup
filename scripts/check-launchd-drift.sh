@@ -313,7 +313,34 @@ check_j1_collector_script() { # optional surface; when its plist is installed th
     echo "missing log directory for bot-errors-j1-collector: $log_dir (launchd cannot open StandardOutPath)" >&2
     failures=$((failures + 1)); return 0
   fi
-  echo "ok: bot-errors-j1-collector script (matches template; host config and log directory present)"
+  # The slot minute exists in the plist (schedule) and in the wrapper (bundle label); they must agree.
+  local plist_minute wrapper_minute
+  plist_minute="$("$PLIST_PYTHON" - "$plist" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    p = plistlib.load(f)
+sci = p.get("StartCalendarInterval")
+print(sci.get("Minute", "") if isinstance(sci, dict) else "")
+PY
+)"
+  wrapper_minute="$(grep -oE 'BOT_ERRORS_J1_SLOT_MINUTE:-[0-9]+' "$script" | head -n 1 | grep -oE '[0-9]+$' || true)"
+  if [ -z "$plist_minute" ] || [ -z "$wrapper_minute" ] || [ "$plist_minute" != "$wrapper_minute" ]; then
+    echo "drift: bot-errors-j1-collector slot minute mismatch (plist Minute=${plist_minute:-unreadable}, wrapper default=${wrapper_minute:-unreadable})" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  echo "ok: bot-errors-j1-collector script (matches template; host config and log directory present; slot minute $plist_minute)"
+}
+
+warn_unmanaged_collector_jobs() { # any OTHER LaunchAgent that runs the J1 collector (e.g. an ad-hoc scheduler label) — reported, not counted
+  local f label
+  for f in "$LAUNCHD_DIR"/*.plist; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in com.whatsoup.bot-errors-j1-collector.plist) continue ;; esac
+    if grep -q 'bot_errors_j1_collector' "$f" 2>/dev/null; then
+      label="$(basename "$f" .plist)"
+      echo "warn: unmanaged collector job: $label (runs bot_errors_j1_collector outside the managed label; boot it out before installing com.whatsoup.bot-errors-j1-collector)"
+    fi
+  done
 }
 
 plist_key() { # PLIST_ABS Label|Prog0  (plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
@@ -418,6 +445,7 @@ check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whats
 check_ms365_script
 check_optional_template_surface "bot-errors-j1-collector" "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist" "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
 check_j1_collector_script
+warn_unmanaged_collector_jobs
 check_fleet_console_structural
 
 discover_instances
