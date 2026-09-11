@@ -563,10 +563,12 @@ export function redactInternalArtifacts(
   // whole email-class pass; the preserve* flags are kept so flipping the email
   // flag back for any single audience restores the exact prior behavior with
   // one edit (e.g. a future client-tier exception).
+  // Exempt recognized prose sentences while keeping ambiguous assignments strict.
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
     preserveWhatsAppMentions: true,
     redactEmailLike: false,
+    keyedSecretValues: 'prose-aware',
   });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-credential' });
