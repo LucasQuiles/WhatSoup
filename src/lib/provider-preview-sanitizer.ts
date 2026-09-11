@@ -108,7 +108,36 @@ function keyedValueStart(text: string, delimiterIndex: number): number | null {
   return valueStart;
 }
 
-function redactKeyedSecretValues(text: string): string {
+// Keyed-secret value policy. 'always' (default, every background caller) masks
+// whatever follows a secret-named key and its `:`/`=` — right for config dumps,
+// env lines, JSON and HTTP previews, where the value IS the secret. Chat egress
+// (redactInternalArtifacts) is PROSE: "About the screen password: Sam gives you
+// that himself" or the Markdown "*…asking for a password:* it wants" carry no
+// credential, yet the pass masked the word after the colon and the WhatsApp
+// formatter then stripped the brackets, so two live client messages read
+// "password:REDACTED it wants" / "password: REDACTED gives you" (2026-09-11).
+// Under 'credential-shaped' an UNQUOTED value is masked only when it looks like
+// a secret rather than a word: after trimming the Markdown/punctuation prose
+// wraps around a word it must be at least MIN_CREDENTIAL_LENGTH chars AND carry
+// a digit, a non-letter, inner capitalisation, or be LONG_CREDENTIAL_LENGTH+
+// (no ordinary word). Quoted values, Bearer tokens and known token prefixes keep
+// masking under both policies — those shapes are never prose. Accepted residual:
+// a plain 6–11 letter lowercase word after "password:" flows in chat.
+export type KeyedSecretValuePolicy = 'always' | 'credential-shaped';
+const MIN_CREDENTIAL_LENGTH = 6;
+const LONG_CREDENTIAL_LENGTH = 12;
+const PROSE_WRAP_LEADING = /^[*_~`"'([{<]+/;
+const PROSE_WRAP_TRAILING = /[*_~`"')\]}>.,;:!?]+$/;
+
+function looksCredentialShaped(value: string): boolean {
+  const core = value.replace(PROSE_WRAP_LEADING, '').replace(PROSE_WRAP_TRAILING, '');
+  if (core.length < MIN_CREDENTIAL_LENGTH) return false;
+  if (core.length >= LONG_CREDENTIAL_LENGTH) return true;
+  if (/[0-9]/.test(core) || /[^A-Za-z]/.test(core)) return true;
+  return /[a-z][A-Z]/.test(core);
+}
+
+function redactKeyedSecretValues(text: string, policy: KeyedSecretValuePolicy): string {
   let cursor = 0;
   let out = '';
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
@@ -140,14 +169,17 @@ function redactKeyedSecretValues(text: string): string {
     let end = valueStart;
     while (end < text.length && !/\s/.test(text[end]!)) end += 1;
     const value = text.slice(valueStart, end);
-    out += value.length > 0 && !isDisplayTruncatedNonSecret(value) ? '[REDACTED]' : value;
+    const mask = value.length > 0
+      && !isDisplayTruncatedNonSecret(value)
+      && (policy === 'always' || looksCredentialShaped(value));
+    out += mask ? '[REDACTED]' : value;
     cursor = end;
   }
   return out + text.slice(cursor);
 }
 
-function sanitizeProviderSecrets(text: string): string {
-  return redactKeyedSecretValues(text)
+function sanitizeProviderSecrets(text: string, policy: KeyedSecretValuePolicy): string {
+  return redactKeyedSecretValues(text, policy)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(KNOWN_TOKEN_RE, '[REDACTED_TOKEN]');
 }
@@ -255,13 +287,20 @@ export interface ProviderPreviewSanitizerOptions {
    * the two preserve* flags are inert (they only parameterize the email pass).
    */
   redactEmailLike?: boolean;
+  /**
+   * How the keyed-secret pass (`password: …`, `token=…`) treats an UNQUOTED
+   * value. Default 'always' — every background caller is unchanged. Chat
+   * egress passes 'credential-shaped' so prose that merely mentions a secret
+   * key is not rewritten (see KeyedSecretValuePolicy above).
+   */
+  keyedSecretValues?: KeyedSecretValuePolicy;
 }
 
 export function sanitizeProviderPreviewText(
   text: string,
   options: ProviderPreviewSanitizerOptions = {},
 ): string {
-  const sanitized = sanitizeProviderSecrets(text);
+  const sanitized = sanitizeProviderSecrets(text, options.keyedSecretValues ?? 'always');
   if (options.redactEmailLike === false) return sanitized;
   return redactEmailLikeTokens(
     sanitized,

@@ -563,10 +563,19 @@ export function redactInternalArtifacts(
   // whole email-class pass; the preserve* flags are kept so flipping the email
   // flag back for any single audience restores the exact prior behavior with
   // one edit (e.g. a future client-tier exception).
+  // `keyedSecretValues: 'credential-shaped'`: chat text is prose, not a config
+  // dump. The default policy masks ANY word after "password:" — on 2026-09-11 two
+  // live client replies ("About the screen password: <name> gives you that
+  // himself", "*…asking for a password:* it wants…") left the runtime as
+  // "password: [REDACTED] gives…" / "password:[REDACTED] it wants", and the
+  // WhatsApp Markdown formatter then stripped the brackets to a bare
+  // "REDACTED". Credential-shaped values (digits, symbols, 12+ chars, quoted,
+  // Bearer, known token prefixes) still mask on every audience.
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
     preserveWhatsAppMentions: true,
     redactEmailLike: false,
+    keyedSecretValues: 'credential-shaped',
   });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-credential' });
