@@ -37,7 +37,7 @@ import tempfile
 from collections import Counter, OrderedDict
 from pathlib import PurePosixPath
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 BUNDLE_KIND = "bot-errors-collect"
 POINTER_KIND = "bot-errors-collector-pointer"
 REDACTION = {
@@ -132,6 +132,105 @@ echo "=== SECTION incident-state ==="
 python3 -c 'import json;d=json.load(open("'"$STATE"'/incident-state.json"));inc=d.get("openIncidents") or {};fs=d.get("flapState") or {};print(json.dumps({"openIncidents_len":len(inc),"flapState_len":len(fs),"updatedAt":d.get("updatedAt")}))'; rc incident-state $?
 echo "=== SECTION watchdog-state ==="
 python3 -c 'import json;d=json.load(open("'"$STATE"'/heartbeat-watchdog-state.json"));o=d.get("open",{});r=d.get("recentlyRecovered",{});c=d.get("_controllerState",{});print(json.dumps({"open":sorted(o),"recentlyRecovered":sorted(r),"generation":c.get("generation"),"writtenAt":c.get("writtenAt")}))'; rc watchdog-state $?
+echo "=== SECTION dispatch-outcomes ==="
+python3 - "$STATE" "$ST" "$EN" <<'PY'
+# Dispatch outcomes (retired meter family, D-METER-1). One pass over the dispatcher's bounded
+# JSONL log: record counts by `type` for the window and for the trailing 24 h (the 24 h count is
+# the denominator that proves the log is alive), cycle durations in the window, and the log's
+# own span. The `type` vocabulary is bounded to MAX_TYPES labels; the rest fold into `other`.
+import collections, json, os, sys, time
+S, ST, EN = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+MAX_TYPES = 64
+def iso(t): return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+start, end, day_cut = iso(ST), iso(EN), iso(EN - 86400)
+p = os.path.join(S, "logs", "dispatch.jsonl")
+st = os.stat(p)
+out = {"window_start_utc": start, "window_end_utc": end, "log_bytes": st.st_size, "log_mtime_age_s": int(time.time() - st.st_mtime),
+       "lines_total": 0, "lines_undecodable": 0, "lines_24h": 0, "lines_window": 0, "first_time": None, "last_time": None}
+bt_w = collections.Counter(); bt_d = collections.Counter(); durs = []
+with open(p, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        out["lines_total"] += 1
+        try: r = json.loads(line)
+        except ValueError: r = None
+        if not isinstance(r, dict):
+            out["lines_undecodable"] += 1; continue
+        t = str(r.get("time") or "")
+        if out["first_time"] is None: out["first_time"] = t
+        out["last_time"] = t
+        if t < day_cut: continue
+        typ = str(r.get("type") or "other")[:48]
+        out["lines_24h"] += 1; bt_d[typ] += 1
+        if start <= t < end:
+            out["lines_window"] += 1; bt_w[typ] += 1
+            if typ == "cycle_completed":
+                d = r.get("details") if isinstance(r.get("details"), dict) else {}
+                v = d.get("durationMs")
+                if isinstance(v, (int, float)) and not isinstance(v, bool): durs.append(int(v))
+def bounded(c):
+    top = c.most_common(MAX_TYPES); rest = sum(n for _, n in c.most_common()[MAX_TYPES:])
+    o = dict(top)
+    if rest: o["other"] = o.get("other", 0) + rest
+    return o
+durs.sort()
+def pct(a, q): return a[min(len(a) - 1, int(q * (len(a) - 1)))] if a else None
+out["by_type_window"] = bounded(bt_w); out["by_type_24h"] = bounded(bt_d)
+out["cycle_duration_ms_window"] = {"n": len(durs), "p50": pct(durs, 0.5), "p95": pct(durs, 0.95), "max": pct(durs, 1.0)}
+print(json.dumps(out, sort_keys=True))
+PY
+rc dispatch-outcomes $?
+echo "=== SECTION incident-inventory ==="
+python3 - "$STATE" "$ST" "$EN" <<'PY'
+# Open-incident inventory and flap counters (retired meter families, D-METER-1), read from the
+# live incident store: status counts, age percentiles, suppression and renotify totals, the
+# TOP_N most-suppressed keys, and the FLAP_N highest cumulative flap keys with their trips inside
+# the window. Keys are bounded in length; the lists are bounded in size.
+import json, os, sys
+S, ST, EN = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+TOP_N, FLAP_N = 10, 8
+def is_int(v): return isinstance(v, int) and not isinstance(v, bool)
+d = json.load(open(os.path.join(S, "incident-state.json")))
+oi = d.get("openIncidents") if isinstance(d.get("openIncidents"), dict) else {}
+fs = d.get("flapState") if isinstance(d.get("flapState"), dict) else {}
+status = {}; ages = []; items = []; sup = 0; ren = 0; skipped = 0
+for k, v in oi.items():
+    if not isinstance(v, dict):
+        skipped += 1; continue
+    s = str(v.get("status") or "open")[:32]; status[s] = status.get(s, 0) + 1
+    opened = v.get("openedAt"); age = (EN - opened) / 86400 if is_int(opened) else None
+    if age is not None: ages.append(age)
+    sc = v.get("suppressedCount"); sc = sc if is_int(sc) else 0
+    rn = v.get("renotifyCount"); rn = rn if is_int(rn) else 0
+    sup += sc; ren += rn
+    items.append({"key": str(k)[:120], "status": s, "age_days": (round(age, 1) if age is not None else None), "suppressed": sc, "renotify": rn})
+ages.sort()
+def pct(a, q): return round(a[min(len(a) - 1, int(q * (len(a) - 1)))], 1) if a else None
+items.sort(key=lambda r: (-r["suppressed"], r["key"]))
+# tripTimestamps unit is detected, never assumed: seconds if every value fits an epoch-seconds
+# range, milliseconds if every value is 1000x that; mixed or absent -> unit null, trips null.
+allts = [t for v in fs.values() if isinstance(v, dict) and isinstance(v.get("tripTimestamps"), list) for t in v["tripTimestamps"] if isinstance(t, (int, float)) and not isinstance(t, bool)]
+unit = None
+if allts:
+    if all(1e9 <= t < 1e11 for t in allts): unit = "s"
+    elif all(1e12 <= t < 1e14 for t in allts): unit = "ms"
+scale = {"s": 1, "ms": 1000}.get(unit)
+flap = []
+for k, v in fs.items():
+    if not isinstance(v, dict): continue
+    trips = v.get("tripTimestamps") if isinstance(v.get("tripTimestamps"), list) else None
+    inwin = None
+    if scale and trips is not None:
+        inwin = sum(1 for t in trips if isinstance(t, (int, float)) and not isinstance(t, bool) and ST * scale <= t < EN * scale)
+    cc = v.get("cumulativeCount"); cc = cc if is_int(cc) else 0
+    flap.append({"key": str(k)[:120], "cumulative": cc, "trips_in_window": inwin})
+flap.sort(key=lambda r: (-r["cumulative"], r["key"]))
+out = {"open": len(oi), "rows_skipped": skipped, "status": status, "age_days_p50": pct(ages, 0.5), "age_days_p90": pct(ages, 0.9), "age_days_max": pct(ages, 1.0),
+       "suppressed_total": sup, "renotify_total": ren, "top_suppressed": items[:TOP_N],
+       "flap_keys": len(fs), "flap_trip_unit": unit, "flap_trips_in_window_total": (sum(f["trips_in_window"] or 0 for f in flap) if scale else None), "flap_top": flap[:FLAP_N],
+       "updatedAt": d.get("updatedAt")}
+print(json.dumps(out, sort_keys=True))
+PY
+rc incident-inventory $?
 echo "=== SECTION queues ==="
 worst=0
 for q in outbox processing quarantine sent; do
@@ -446,6 +545,8 @@ def parse_planes(text: str, units: tuple[str, ...]) -> dict:
         "dispatcher": None,
         "incident_state": None,
         "watchdog": None,
+        "dispatch_outcomes": None,
+        "incident_inventory": None,
         "queues": {},
         "supervision_pointer_sha256": None,
         "supervision_pointer_mtime": None,
@@ -500,6 +601,8 @@ def parse_planes(text: str, units: tuple[str, ...]) -> dict:
         ("dispatcher", "dispatcher-state"),
         ("incident_state", "incident-state"),
         ("watchdog", "watchdog-state"),
+        ("dispatch_outcomes", "dispatch-outcomes"),
+        ("incident_inventory", "incident-inventory"),
     ):
         body = _section(text, blob).strip()
         if body and ok(blob):
@@ -989,6 +1092,17 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
             },
         },
         "parity": par,
+        # The retired meter's families (D-METER-1), measured live from this run's alert-host
+        # receipt. A family whose section failed is None here, never an empty dict.
+        "metrics": {
+            "measurement_mode": "live",
+            "dispatch_outcomes": (
+                planes_facts["dispatch_outcomes"] if planes_facts else None
+            ),
+            "incident_inventory": (
+                planes_facts["incident_inventory"] if planes_facts else None
+            ),
+        },
         "failures": failures,
         "receipt_dir": os.path.relpath(rec_dir, root),
     }
@@ -1004,6 +1118,9 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
         "failed_sections": planes_facts["failed_sections"] if planes_facts else None,
         "sources": {k: v.get("status") for k, v in scans.items()},
         "rows_new": {k: v.get("rows_new") for k, v in scans.items() if "rows_new" in v},
+        "metrics_families": sorted(
+            k for k, v in bundle["metrics"].items() if k != "measurement_mode" and v
+        ),
         "clock_skew_seconds": skew,
         "pointer": None,
         "pointer_write_error": None,

@@ -120,6 +120,8 @@ PLANES_OK = (
     '=== SECTION dispatcher-state ===\n{"cycleCompletedAt": "2026-09-11T00:25:04Z", "lastError": null, "pid": 1}\nSECTION_RC dispatcher-state 0\n'
     '=== SECTION incident-state ===\n{"openIncidents_len": 79, "flapState_len": 169, "updatedAt": "x"}\nSECTION_RC incident-state 0\n'
     '=== SECTION watchdog-state ===\n{"open": ["local_health:q"], "recentlyRecovered": ["supervision_deadman"], "generation": 7109, "writtenAt": "x"}\nSECTION_RC watchdog-state 0\n'
+    '=== SECTION dispatch-outcomes ===\n{"by_type_24h": {"sent": 82, "suppressed": 4282, "cycle_completed": 2694}, "by_type_window": {"sent": 3, "cycle_completed": 112}, "cycle_duration_ms_window": {"n": 112, "p50": 40, "p95": 91, "max": 300}, "first_time": "2026-09-09T09:39:26Z", "last_time": "2026-09-11T01:16:58Z", "lines_24h": 46753, "lines_total": 80894, "lines_undecodable": 0, "lines_window": 1400, "log_bytes": 40593763, "log_mtime_age_s": 16, "window_end_utc": "2026-09-11T01:17:00Z", "window_start_utc": "2026-09-11T00:19:59Z"}\nSECTION_RC dispatch-outcomes 0\n'
+    '=== SECTION incident-inventory ===\n{"age_days_max": 68.7, "age_days_p50": 13.4, "age_days_p90": 51.9, "flap_keys": 163, "flap_top": [{"cumulative": 1151, "key": "h|i|release-currency", "trips_in_window": 11}], "flap_trip_unit": "s", "flap_trips_in_window_total": 40, "open": 80, "renotify_total": 568, "rows_skipped": 0, "status": {"awaiting_physical": 43, "open": 37}, "suppressed_total": 25118, "top_suppressed": [{"age_days": 51.9, "key": "h|i|k", "renotify": 3, "status": "open", "suppressed": 4100}], "updatedAt": "x"}\nSECTION_RC incident-inventory 0\n'
     "=== SECTION queues ===\noutbox=0\nprocessing=0\nquarantine=42\nsent=10099\nSECTION_RC queues 0\n"
     "=== SECTION supervision-pointer ===\n838d0616700d8ca26b9f1f26cb7ad1f7f47c18469c68327c4923a0d9aed46978  CURRENT.json\n1789086568\nSECTION_RC supervision-pointer 0\n"
     "=== SECTION deployed-checkout ===\nda3c801be5a8995f9033ebebc2b150388ac0a8b9\nfix/some-branch\nSECTION_RC deployed-checkout 0\n"
@@ -368,6 +370,13 @@ def test_parse_planes_extracts_facts_and_nulls_failed_sections():
     assert facts["units_failed_listing_rows"] == 0
     assert facts["liveness"]["q"] == [286503, 1789086197]
     assert facts["watchdog"]["recentlyRecovered"] == ["supervision_deadman"]
+    assert facts["dispatch_outcomes"]["by_type_window"]["sent"] == 3
+    assert facts["dispatch_outcomes"]["lines_24h"] == 46753
+    assert facts["incident_inventory"]["status"] == {
+        "awaiting_physical": 43,
+        "open": 37,
+    }
+    assert facts["incident_inventory"]["flap_top"][0]["trips_in_window"] == 11
     assert facts["queues"]["quarantine"] == 42
     assert facts["supervision_pointer_sha256"].startswith("838d0616")
     assert (
@@ -381,9 +390,19 @@ def test_parse_planes_extracts_facts_and_nulls_failed_sections():
     broken = broken.replace("SECTION_RC health 0", "SECTION_RC health 7").replace(
         "http_code=200\n", ""
     )
+    broken = broken.replace(
+        "SECTION_RC dispatch-outcomes 0", "SECTION_RC dispatch-outcomes 1"
+    )
     f2 = c.parse_planes(broken, c.DEFAULT_UNITS)
-    assert f2["failed_sections"] == ["units-failed-listing", "health"]
+    assert f2["failed_sections"] == [
+        "units-failed-listing",
+        "health",
+        "dispatch-outcomes",
+    ]
     assert f2["units_failed_listing_rows"] is None and f2["health_http_code"] is None
+    # A metric family whose section failed is None, never a confident empty inventory.
+    assert f2["dispatch_outcomes"] is None
+    assert f2["incident_inventory"]["open"] == 80
     # A pointer line whose first token is not a sha256 is not a sha.
     swapped = PLANES_OK.replace(
         "838d0616700d8ca26b9f1f26cb7ad1f7f47c18469c68327c4923a0d9aed46978  CURRENT.json\n",
@@ -504,7 +523,10 @@ def test_end_to_end_writes_exactly_the_declared_set_and_prints_no_bodies(
     assert stat.S_IMODE(os.stat(bundle_path).st_mode) == 0o600
     with open(bundle_path, encoding="utf-8") as f:
         bundle = json.load(f)
-    assert bundle["schema_version"] == "1.1" and bundle["kind"] == c.BUNDLE_KIND
+    assert bundle["schema_version"] == "1.2" and bundle["kind"] == c.BUNDLE_KIND
+    assert bundle["metrics"]["measurement_mode"] == "live"
+    assert bundle["metrics"]["dispatch_outcomes"]["lines_window"] == 1400
+    assert bundle["metrics"]["incident_inventory"]["suppressed_total"] == 25118
     assert bundle["complete"] is False and bundle["collection_status"] == "collected"
     assert bundle["collector"]["mode"] == "fixture"
     assert bundle["sources"]["whatsapp_q"]["rows_new"] == 5
@@ -552,6 +574,24 @@ def test_failed_plane_section_yields_partial_with_facts_kept(tmp_path, capsys):
         bundle = json.load(f)
     facts = bundle["planes"]["alert_host"]["facts"]
     assert facts["queues"] == {} and facts["health_http_code"] == 200
+    assert out["metrics_families"] == ["dispatch_outcomes", "incident_inventory"]
+
+
+def test_failed_metric_section_yields_partial_and_a_null_family(tmp_path, capsys):
+    planes = PLANES_OK.replace(
+        "SECTION_RC incident-inventory 0", "SECTION_RC incident-inventory 1"
+    )
+    root = make_root(tmp_path)
+    fx = make_fixtures(tmp_path, planes=planes)
+    assert run(root, fx) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["collection_status"] == "partial"
+    assert out["failed_sections"] == ["incident-inventory"]
+    assert out["metrics_families"] == ["dispatch_outcomes"]
+    with open(os.path.join(root, out["bundle"]), encoding="utf-8") as f:
+        bundle = json.load(f)
+    assert bundle["metrics"]["incident_inventory"] is None
+    assert bundle["metrics"]["dispatch_outcomes"]["lines_24h"] == 46753
 
 
 def test_failed_store_scan_is_failed_not_partial(tmp_path, capsys):
