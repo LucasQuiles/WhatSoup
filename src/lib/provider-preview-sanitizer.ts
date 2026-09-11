@@ -87,7 +87,7 @@ function isSecretKey(key: string): boolean {
     || /(?:^|_)(?:private_?key|signing_?key|secret_?access_?key|cookie|credential|session|pat)$/.test(normalized);
 }
 
-function keyedValueStart(text: string, delimiterIndex: number): number | null {
+function keyedValueStart(text: string, delimiterIndex: number): { start: number; quotedKey: boolean } | null {
   let keyEnd = delimiterIndex;
   while (keyEnd > 0 && /\s/.test(text[keyEnd - 1]!)) keyEnd -= 1;
   let keyStart = keyEnd;
@@ -105,45 +105,109 @@ function keyedValueStart(text: string, delimiterIndex: number): number | null {
   if (keyStart > 0 && /[A-Za-z0-9_]/.test(text[keyStart - 1]!)) return null;
   let valueStart = delimiterIndex + 1;
   while (valueStart < text.length && /\s/.test(text[valueStart]!)) valueStart += 1;
-  return valueStart;
+  return { start: valueStart, quotedKey: closingQuote === '"' || closingQuote === "'" };
 }
 
-// Keyed-secret value policy. 'always' (default, every background caller) masks
-// whatever follows a secret-named key and its `:`/`=` — right for config dumps,
-// env lines, JSON and HTTP previews, where the value IS the secret. Chat egress
-// (redactInternalArtifacts) is PROSE: "About the screen password: Sam gives you
-// that himself" or the Markdown "*…asking for a password:* it wants" carry no
-// credential, yet the pass masked the word after the colon and the WhatsApp
-// formatter then stripped the brackets, so two live client messages read
-// "password:REDACTED it wants" / "password: REDACTED gives you" (2026-09-11).
-// Under 'credential-shaped' an UNQUOTED value is masked only when it looks like
-// a secret rather than a word: after trimming the Markdown/punctuation prose
-// wraps around a word it must be at least MIN_CREDENTIAL_LENGTH chars AND carry
-// a digit, a non-letter, inner capitalisation, or be LONG_CREDENTIAL_LENGTH+
-// (no ordinary word). Quoted values, Bearer tokens and known token prefixes keep
-// masking under both policies — those shapes are never prose. Accepted residual:
-// a plain 6–11 letter lowercase word after "password:" flows in chat.
-export type KeyedSecretValuePolicy = 'always' | 'credential-shaped';
-const MIN_CREDENTIAL_LENGTH = 6;
-const LONG_CREDENTIAL_LENGTH = 12;
-const PROSE_WRAP_LEADING = /^[*_~`"'([{<]+/;
-const PROSE_WRAP_TRAILING = /[*_~`"')\]}>.,;:!?]+$/;
+export type KeyedSecretValuePolicy = 'always' | 'prose-aware';
 
-function looksCredentialShaped(value: string): boolean {
-  const core = value.replace(PROSE_WRAP_LEADING, '').replace(PROSE_WRAP_TRAILING, '');
-  if (core.length < MIN_CREDENTIAL_LENGTH) return false;
-  if (core.length >= LONG_CREDENTIAL_LENGTH) return true;
-  if (/[0-9]/.test(core) || /[^A-Za-z]/.test(core)) return true;
-  return /[a-z][A-Z]/.test(core);
+// These sentence forms exempt prose, not short or low-entropy credentials.
+// Unknown continuations retain strict masking; this is not a language detector.
+const PROSE_CONTINUATION = /^(?:\p{Lu}\p{Ll}+[ \t]+(?:gives[ \t]+you|will[ \t]+send[ \t]+you)|it[ \t]+wants|then[ \t]+press|(?:unfortunately[ \t]+)?you[ \t]+need)(?=[ \t.!?,;:]|$)/u;
+
+function nonProseRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let opening: { start: number; marker: string } | null = null;
+  let lineStart = 0;
+  // Fence detection must not depend on unmatched or escaped inline markers.
+  for (const line of text.split('\n')) {
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      const marker = fence[1]!;
+      if (opening === null) opening = { start: lineStart, marker };
+      else if (marker[0] === opening.marker[0] && marker.length >= opening.marker.length
+        && /^[ \t\r]*$/.test(fence[2]!)) {
+        ranges.push({ start: opening.start, end: lineStart + line.length });
+        opening = null;
+      }
+    } else if (opening === null && /^(?:\[[^\]\r\n]+\]|---)[ \t\r]*$/.test(line)) {
+      // Unfenced configuration stanzas have no reliable chat boundary.
+      ranges.push({ start: lineStart, end: text.length });
+    }
+    lineStart += line.length + 1;
+  }
+  if (opening) ranges.push({ start: opening.start, end: text.length });
+
+  ranges.sort((a, b) => a.start - b.start);
+  const blocks = ranges.slice();
+  let blockIndex = 0;
+  opening = null;
+  for (const match of text.matchAll(/`+/g)) {
+    while (blocks[blockIndex] && blocks[blockIndex]!.end <= match.index) blockIndex += 1;
+    if (blocks[blockIndex] && blocks[blockIndex]!.start <= match.index) continue;
+    if (opening === null) {
+      let escapes = 0;
+      for (let index = match.index - 1; index >= 0 && text[index] === '\\'; index -= 1) escapes += 1;
+      if (escapes % 2 === 0) opening = { start: match.index, marker: match[0] };
+    } else if (match[0].length === opening.marker.length) {
+      ranges.push({ start: opening.start, end: match.index + match[0].length });
+      opening = null;
+    }
+  }
+  if (opening) ranges.push({ start: opening.start, end: text.length });
+  ranges.sort((a, b) => a.start - b.start);
+  const code = ranges.slice();
+  const closingBrackets: string[] = [];
+  let structureStart = 0;
+  let quote: string | null = null;
+  let codeIndex = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    while (code[codeIndex] && code[codeIndex]!.end <= index) codeIndex += 1;
+    if (code[codeIndex] && code[codeIndex]!.start <= index) {
+      index = code[codeIndex]!.end - 1;
+      continue;
+    }
+    const char = text[index]!;
+    if (quote !== null) {
+      if (char === '\\') index += 1;
+      else if (char === quote) quote = null;
+    } else if (closingBrackets.length > 0 && (char === '"' || char === "'")) {
+      quote = char;
+    } else if (char === '{' || char === '[') {
+      if (closingBrackets.length === 0) structureStart = index;
+      closingBrackets.push(char === '{' ? '}' : ']');
+    } else if (char === closingBrackets.at(-1)) {
+      closingBrackets.pop();
+      if (closingBrackets.length === 0) ranges.push({ start: structureStart, end: index + 1 });
+    }
+  }
+  if (closingBrackets.length > 0) ranges.push({ start: structureStart, end: text.length });
+  return ranges.sort((a, b) => a.start - b.start);
 }
 
 function redactKeyedSecretValues(text: string, policy: KeyedSecretValuePolicy): string {
   let cursor = 0;
   let out = '';
+  const ranges = policy === 'prose-aware' ? nonProseRanges(text) : [];
+  let rangeIndex = 0;
   for (const match of text.matchAll(ASSIGNMENT_DELIMITER)) {
     if (match.index < cursor) continue;
-    const valueStart = keyedValueStart(text, match.index);
-    if (valueStart === null) continue;
+    const assignment = keyedValueStart(text, match.index);
+    if (assignment === null) continue;
+    let valueStart = assignment.start;
+    while (ranges[rangeIndex] && ranges[rangeIndex]!.end <= match.index) rangeIndex += 1;
+    const protectedContext = ranges[rangeIndex] !== undefined && ranges[rangeIndex]!.start <= match.index;
+    let prose = false;
+    if (policy === 'prose-aware' && !protectedContext) {
+      const lineStart = text.lastIndexOf('\n', match.index) + 1;
+      const prefix = text.slice(lineStart, match.index);
+      const style = /^(\*{1,2}|_{1,2}|~{1,2})[ \t]+/.exec(text.slice(valueStart));
+      // In "*password:* value", the closing marker is not the credential.
+      if (style && prefix.includes(style[1]!)) valueStart += style[0].length;
+      prose = match[0] === ':' && !assignment.quotedKey
+        && !/^[ \t]/.test(prefix) && !/["']/.test(prefix)
+        && !/[\r\n]/.test(text.slice(match.index, valueStart))
+        && PROSE_CONTINUATION.test(text.slice(valueStart));
+    }
     out += text.slice(cursor, valueStart);
     const quote = text[valueStart];
     if (quote === '"' || quote === "'") {
@@ -171,7 +235,7 @@ function redactKeyedSecretValues(text: string, policy: KeyedSecretValuePolicy): 
     const value = text.slice(valueStart, end);
     const mask = value.length > 0
       && !isDisplayTruncatedNonSecret(value)
-      && (policy === 'always' || looksCredentialShaped(value));
+      && !prose;
     out += mask ? '[REDACTED]' : value;
     cursor = end;
   }
@@ -290,8 +354,8 @@ export interface ProviderPreviewSanitizerOptions {
   /**
    * How the keyed-secret pass (`password: …`, `token=…`) treats an UNQUOTED
    * value. Default 'always' — every background caller is unchanged. Chat
-   * egress passes 'credential-shaped' so prose that merely mentions a secret
-   * key is not rewritten (see KeyedSecretValuePolicy above).
+   * egress passes 'prose-aware' for bounded sentence exceptions outside code
+   * and config. Ambiguous assignments remain strict, regardless of length.
    */
   keyedSecretValues?: KeyedSecretValuePolicy;
 }
