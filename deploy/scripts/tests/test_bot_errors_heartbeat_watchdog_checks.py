@@ -241,3 +241,146 @@ class TestKnownChecksDriftGuard:
                 f"KNOWN_WATCHDOG_CHECKS member '{name}' has no entry in "
                 f"active_reconcile_prefixes(); add reconcile support or remove from registry"
             )
+
+
+# ---------------------------------------------------------------------------
+# turn_failure_rate: terminal per-chat failure rate + session-sharing collision
+# ---------------------------------------------------------------------------
+
+
+def _make_turn_failure_db(db_path: Path, *, failed_rows, checkpoints):
+    """Build a minimal instance DB with just the columns the probe reads.
+
+    failed_rows: list of (conversation_key, failure_class, received_at_utc_str)
+    checkpoints: list of (conversation_key, session_id, session_status)
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE inbound_events ("
+            "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation_key TEXT, "
+            "received_at TEXT, processing_status TEXT, failure_class TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO inbound_events (conversation_key, received_at, "
+            "processing_status, failure_class) VALUES (?, ?, 'failed', ?)",
+            [(ck, ts, fc) for (ck, fc, ts) in failed_rows],
+        )
+        conn.execute(
+            "CREATE TABLE session_checkpoints ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_key TEXT UNIQUE, "
+            "session_id TEXT, session_status TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO session_checkpoints (conversation_key, session_id, "
+            "session_status) VALUES (?, ?, ?)",
+            checkpoints,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestTurnFailureRateProbe:
+    """turn_failure_rate_problems(): terminal-failure-rate alerting and the
+    scheduled/interactive session-sharing collision detector (root cause of the
+    "Exact ... could not be closed" WHATBOT/MOMS RESUME incident)."""
+
+    _NOW = 1_700_000_000
+
+    def _recent(self, seconds_ago: int) -> str:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(
+            self._NOW - seconds_ago, tz=timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _run(self, tmp_path, monkeypatch, *, failed_rows, checkpoints, env=None):
+        mod = _load_module()
+        root = tmp_path / "instances"
+        (root / "alpha").mkdir(parents=True)
+        _make_turn_failure_db(
+            root / "alpha" / "bot.db", failed_rows=failed_rows, checkpoints=checkpoints
+        )
+        base_env = {
+            "BOT_ERRORS_WEDGE_DB_ROOT": str(root),
+            "BOT_ERRORS_DRY_NOW": str(self._NOW),
+            "BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS": "1800",
+            "BOT_ERRORS_TURN_FAILURE_MIN_COUNT": "3",
+        }
+        if env:
+            base_env.update(env)
+        monkeypatch.setattr(mod.os, "environ", base_env)
+        monkeypatch.setattr(
+            mod, "expected_local_services",
+            lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+        )
+        return mod.turn_failure_rate_problems()
+
+    def test_alerts_when_chat_exceeds_failure_threshold(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(60)) for _ in range(3)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" in problems
+        assert "chatA_at_g.us" in problems["turn_failure:alpha"]
+        assert "failed=3" in problems["turn_failure:alpha"]
+        assert "session_collision:alpha" not in problems
+
+    def test_below_threshold_is_silent(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(60)) for _ in range(2)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" not in problems
+
+    def test_stale_failures_outside_window_excluded(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(4000)) for _ in range(5)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" not in problems
+
+    def test_session_collision_alerts_independent_of_failure_rate(
+        self, tmp_path, monkeypatch
+    ):
+        # Zero recent failures, but a scheduled+interactive checkpoint share a
+        # session_id — the structural defect must alert on its own.
+        checkpoints = [
+            ("chatB_at_g.us", "S-shared", "active"),
+            ("chatB@g.us::scheduled-agent-job", "S-shared", "active"),
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
+        )
+        assert "session_collision:alpha" in problems
+        assert "shared_session_id=S-shared" in problems["session_collision:alpha"]
+        assert "chatB_at_g.us" in problems["session_collision:alpha"]
+        assert "turn_failure:alpha" not in problems
+
+    def test_isolated_sessions_do_not_collide(self, tmp_path, monkeypatch):
+        checkpoints = [
+            ("chatB_at_g.us", "S-interactive", "active"),
+            ("chatB@g.us::scheduled-agent-job", "S-scheduled", "active"),
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
+        )
+        assert "session_collision:alpha" not in problems
+
+    def test_missing_database_is_flagged(self, tmp_path, monkeypatch):
+        mod = _load_module()
+        root = tmp_path / "instances"
+        (root / "alpha").mkdir(parents=True)  # no bot.db
+        monkeypatch.setattr(
+            mod.os, "environ", {"BOT_ERRORS_WEDGE_DB_ROOT": str(root)}
+        )
+        monkeypatch.setattr(
+            mod, "expected_local_services",
+            lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+        )
+        problems = mod.turn_failure_rate_problems()
+        assert "turn_failure:alpha" in problems
+        assert "database missing" in problems["turn_failure:alpha"]
