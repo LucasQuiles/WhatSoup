@@ -86,6 +86,10 @@ const MS365_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'ms365-token-backup')
   .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/ms365-token-backup');
 
+const J1_COLLECTOR_TEMPLATE = HARNESS_TEMPLATE
+  .replace('harness-maintenance', 'bot-errors-j1-collector')
+  .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/bot-errors-j1-collector');
+
 const WATCHDOG_TEMPLATE = [
   '<?xml version="1.0" encoding="UTF-8"?>',
   '<plist version="1.0"><dict>',
@@ -118,6 +122,7 @@ function makeFixture(): { repo: string; launchd: string; bin: string; home: stri
   writeFileSync(join(repo, 'deploy/com.whatsoup.harness-maintenance.plist'), HARNESS_TEMPLATE);
   writeFileSync(join(repo, 'deploy/com.whatsoup.reply-guarantee.plist'), REPLY_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.ms365-token-backup.plist'), MS365_TEMPLATE);
+  writeFileSync(join(repo, 'deploy/templates/com.whatsoup.bot-errors-j1-collector.plist'), J1_COLLECTOR_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist'), WATCHDOG_TEMPLATE);
   // fake render-release-drift (deterministic)
   const renderRd = join(repo, 'deploy/scripts/render-release-drift-launchd.sh');
@@ -387,6 +392,60 @@ describe('static template surfaces (substitute-then-compare)', () => {
     expect(result.stdout).toContain('skip: ms365-token-backup');
   });
 
+  it('skips bot-errors-j1-collector when not installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('skip: bot-errors-j1-collector');
+    expect(result.stdout).not.toContain('bot-errors-j1-collector script');
+  });
+
+  it('passes bot-errors-j1-collector when the rendered plist and its script are installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'), subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.bin, 'bot-errors-j1-collector'), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, 'bot-errors-j1-collector'), 0o755);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: bot-errors-j1-collector');
+    expect(result.stdout).toContain('ok: bot-errors-j1-collector script (no surviving placeholders)');
+    expect(result.stdout).not.toContain('warn: unmanaged launchd surface: com.whatsoup.bot-errors-j1-collector.plist');
+  });
+
+  it('fails when the bot-errors-j1-collector plist is installed but its script is missing', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'), subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing installed bot-errors-j1-collector script');
+  });
+
+  it('fails when the installed bot-errors-j1-collector script has surviving placeholders', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'), subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.bin, 'bot-errors-j1-collector'), '#!/usr/bin/env bash\necho __HOME__\n');
+    chmodSync(join(f.bin, 'bot-errors-j1-collector'), 0o755);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: bot-errors-j1-collector script has surviving placeholders');
+  });
+
+  it('reports drift when the installed bot-errors-j1-collector plist differs from its template render', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'),
+      subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home).replace('bot-errors-j1-collector</string>', 'bot-errors-j1-collector-edited</string>'));
+    writeFileSync(join(f.bin, 'bot-errors-j1-collector'), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, 'bot-errors-j1-collector'), 0o755);
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: bot-errors-j1-collector');
+  });
+
   it('exits 2 fail-closed when a placeholder survives substitution', () => {
     const f = makeFixture();
     installAllOk(f);
@@ -601,6 +660,8 @@ describe('manifest parity (deploy/managed-components.json)', () => {
       'release-drift-check': () => count('check_release_drift_surface') >= 2,
       'ms365-token-backup': () => src.includes('check_optional_template_surface "ms365-token-backup"')
         && count('check_ms365_script') >= 2,
+      'bot-errors-j1-collector': () => src.includes('check_optional_template_surface "bot-errors-j1-collector"')
+        && count('check_j1_collector_script') >= 2,
     };
     for (const entry of manifest.protective_services.entries) {
       const probe = WIRED[entry.name];

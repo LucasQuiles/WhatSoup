@@ -29,7 +29,7 @@ ALL_INSTANCES=()
 # Non-instance stems: parity with deploy/managed-components.json
 # protective_services (+ the fleet console). Enforced by
 # tests/scripts/launchd-drift.test.ts (manifest-parity test).
-NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup whatsoup-fleet)
+NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup bot-errors-j1-collector whatsoup-fleet)
 
 usage() {
   cat <<'USAGE'
@@ -272,6 +272,23 @@ check_ms365_script() {
   fi
 }
 
+check_j1_collector_script() { # same contract as check_ms365_script: optional surface, script must exist and carry no placeholders
+  local script="$BIN_DIR/bot-errors-j1-collector"
+  if [ ! -f "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist" ]; then
+    return 0 # host does not run this surface; plist skip already reported
+  fi
+  if [ ! -x "$script" ]; then
+    echo "missing installed bot-errors-j1-collector script: $script" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
+    echo "drift: bot-errors-j1-collector script has surviving placeholders" >&2
+    failures=$((failures + 1))
+  else
+    echo "ok: bot-errors-j1-collector script (no surviving placeholders)"
+  fi
+}
+
 plist_key() { # PLIST_ABS Label|Prog0  (plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
   "$PLIST_PYTHON" - "$1" "$2" <<'PY'
 import plistlib, sys
@@ -372,6 +389,8 @@ check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-mainte
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
 check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
 check_ms365_script
+check_optional_template_surface "bot-errors-j1-collector" "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist" "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
+check_j1_collector_script
 check_fleet_console_structural
 
 discover_instances

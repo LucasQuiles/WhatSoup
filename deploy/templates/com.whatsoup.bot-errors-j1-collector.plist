@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: com.whatsoup.bot-errors-j1-collector.plist
+
+  Hourly, read-only BOT ERRORS supervision collector (tools/agent-runtime-probes/
+  bot_errors_j1_collector.py). It captures the alert host's planes and the alert
+  group's rows into runs/<run>/collect/ and never publishes a checkpoint, takes
+  a lease, or appends the ledger — the investigator session does that.
+
+  Replace before installing (the drift guard substitutes the same tokens):
+    __HOME__  — the account home directory
+
+  Install path: ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
+  Script path:  ~/.local/bin/bot-errors-j1-collector  (see bot-errors-j1-collector.sh template)
+  Host config:  ~/.config/whatsoup/bot-errors-j1-collector.env  (untracked; loop root,
+                alert-group jid, collector script path — read by the wrapper)
+
+  After installing:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.bot-errors-j1-collector</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/bot-errors-j1-collector</string>
+  </array>
+
+  <!-- Never on bootstrap: a load must not produce an off-slot bundle. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Hourly at :17 — after the investigator's own slot, before the next one. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>17</integer>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.err</string>
+</dict>
+</plist>

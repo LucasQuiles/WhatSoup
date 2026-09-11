@@ -208,6 +208,21 @@
         "purpose": "Backs up ~/.ms365-mcp/token-cache.json and selected-account.json daily, retaining 14 copies. Allows token recovery after accidental deletion or plugin upgrade that clears the token store.",
         "applicable_hosts": "Hosts running M365 MCP bots (ml-bot/mini8, ew-bot/mini9 and any future M365-integrated bots).",
         "probe": "ls -lt ~/.ms365-mcp-backups/ | head -5"
+      },
+      {
+        "name": "bot-errors-j1-collector",
+        "label_pattern": "com.whatsoup.bot-errors-j1-collector",
+        "template": "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist",
+        "script_template": "deploy/templates/bot-errors-j1-collector.sh",
+        "install_path": "~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist",
+        "script_install_path": "~/.local/bin/bot-errors-j1-collector",
+        "host_config": "~/.config/whatsoup/bot-errors-j1-collector.env (untracked: loop root, alert-group jid, collector script path)",
+        "schedule": "StartCalendarInterval :17 hourly",
+        "run_at_load": false,
+        "keep_alive": false,
+        "purpose": "Hourly read-only capture of the BOT ERRORS supervision planes (alert host units, dispatcher and watchdog state, alert-group rows, canary) into runs/<run>/collect/ bundles that the J1 investigator session sha-links into its checkpoint generations (contract step 9.5). Keeps collection alive while the investigator session is paused; never publishes a checkpoint, takes a lease, or appends the ledger.",
+        "applicable_hosts": "The one supervision host that runs the J1 investigator loop (a macOS workstation with ssh access to the alert host and the canary host).",
+        "probe": "ls -t \"$BOT_ERRORS_J1_ROOT\"/runs/*/collect/collect-*.json | head -3"
       }
     ]
   }
