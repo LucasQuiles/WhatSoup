@@ -37,7 +37,7 @@ import tempfile
 from collections import Counter, OrderedDict
 from pathlib import PurePosixPath
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 BUNDLE_KIND = "bot-errors-collect"
 POINTER_KIND = "bot-errors-collector-pointer"
 REDACTION = {
@@ -58,8 +58,18 @@ DEFAULT_UNITS = (
     "whatsoup-reply-guarantee.timer",
 )
 FIELD = re.compile(r"^\s*[>›]\s*([a-z_]+):\s*(.*)$", re.M)
-FIELD_SEP = "\x1f"
-RECORD_SEP = "\x1e"
+SCAN_RECEIPT_ENCODING = "json-lines"
+ROW_FIELDS = (
+    "pk",
+    "message_id",
+    "timestamp",
+    "created_at",
+    "sender_jid",
+    "sender_name",
+    "content_type",
+    "is_from_me",
+    "body",
+)
 SAFE_JID = re.compile(r"^[0-9A-Za-z._:@-]{5,64}$")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SAFE_UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$")
@@ -70,12 +80,15 @@ SLOT_FORWARD_TOLERANCE_S = 120
 # Column-scoped scan (contract step 3). Never SELECT *, never immutable=1. The group jid is
 # interpolated into the SQL string by the remote shell; it is admitted only when it matches
 # SAFE_JID (no quotes, spaces or metacharacters), and the timestamps are integers formatted by
-# this process. Field separator US (0x1f) and record separator RS (0x1e) keep a '|' or a
-# newline inside a display name or body from shifting columns.
+# this process. Each row is one JSON object built by json_object() in SQL (JSON Lines; zero
+# rows print nothing). The escaping is done by the SQLite JSON core, which renders every
+# control byte, quote and backslash as a JSON escape, so no byte that can occur inside a
+# display name or a body can shift a column or hide a row. The shell's own `-json` output
+# mode is NOT used: the 3.45 shell prints U+001F as `u001f` without the backslash.
 SCAN_SCRIPT = r"""set -u
 I="$1"; ST="$2"; EN="$3"; JID="$4"
 DB="$HOME/.local/share/whatsoup/instances/$I/bot.db"
-sqlite3 -separator "$(printf '\037')" -newline "$(printf '\036')" "file:$DB?mode=ro" "PRAGMA query_only=ON; SELECT pk,message_id,timestamp,created_at,sender_jid,sender_name,content_type,is_from_me,substr(COALESCE(content_text,content),1,2000) FROM messages WHERE chat_jid='$JID' AND timestamp>=$ST AND timestamp<$EN ORDER BY timestamp,pk;"
+sqlite3 "file:$DB?mode=ro" "PRAGMA query_only=ON; SELECT json_object('pk',pk,'message_id',message_id,'timestamp',timestamp,'created_at',created_at,'sender_jid',sender_jid,'sender_name',sender_name,'content_type',content_type,'is_from_me',is_from_me,'body',substr(COALESCE(content_text,content),1,2000)) FROM messages WHERE chat_jid='$JID' AND timestamp>=$ST AND timestamp<$EN ORDER BY timestamp,pk;"
 """
 
 # Alert-host planes (contract steps 4-6 plus the C1 per-unit read). Read-only. Every section
@@ -210,33 +223,53 @@ def expected_slot(now: dt.datetime, slot_minute: int) -> tuple[str, int]:
     return iso(candidate), int((now - candidate).total_seconds())
 
 
-def parse_rows(text: str) -> list[dict]:
-    """Rows are RS-separated records of exactly nine US-separated fields (see SCAN_SCRIPT).
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
-    A record with the wrong field count, or a non-numeric pk/timestamp, is returned with
-    `malformed: True` and only `raw_sha256` so the caller can count it without guessing.
+
+def _text(value: object) -> str:
+    """A SQL NULL (JSON null) in a text column reads as the empty string."""
+    return value if isinstance(value, str) else ""
+
+
+def parse_rows(text: str) -> list[dict]:
+    """Rows are JSON Lines, one json_object() per line (see SCAN_SCRIPT); zero rows = no text.
+
+    A line that is not a JSON object, lacks a column, has a non-string message_id, or a
+    non-integer pk/timestamp is returned with `malformed: True` and only `raw_sha256`, so it
+    is counted (and downgrades the bundle to partial) but never guessed at. Never raises.
     """
     rows: list[dict] = []
-    for rec in text.split(RECORD_SEP):
-        if rec.strip() == "":
+    # Split on the literal LF the shell prints between rows only. str.splitlines() would also
+    # split on U+0085, U+2028 and other separators, which JSON leaves unescaped inside strings.
+    for line in text.split("\n"):
+        if line.strip() == "":
             continue
-        parts = rec.split(FIELD_SEP)
-        if len(parts) != 9 or not parts[0].isdigit() or not parts[2].isdigit():
-            rows.append(
-                {"malformed": True, "raw_sha256": sha256_bytes(rec.encode("utf-8"))}
-            )
+        raw = line.encode("utf-8")
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            rec = None
+        if (
+            not isinstance(rec, dict)
+            or any(k not in rec for k in ROW_FIELDS)
+            or not _is_int(rec["pk"])
+            or not _is_int(rec["timestamp"])
+            or not isinstance(rec["message_id"], str)
+        ):
+            rows.append({"malformed": True, "raw_sha256": sha256_bytes(raw)})
             continue
         rows.append(
             {
-                "pk": int(parts[0]),
-                "message_id": parts[1],
-                "ts": int(parts[2]),
-                "created_at": parts[3],
-                "sender_jid": parts[4],
-                "sender_name": parts[5],
-                "content_type": parts[6],
-                "is_from_me": parts[7],
-                "body": parts[8],
+                "pk": rec["pk"],
+                "message_id": rec["message_id"],
+                "ts": rec["timestamp"],
+                "created_at": _text(rec["created_at"]),
+                "sender_jid": _text(rec["sender_jid"]),
+                "sender_name": _text(rec["sender_name"]),
+                "content_type": _text(rec["content_type"]),
+                "is_from_me": rec["is_from_me"],
+                "body": _text(rec["body"]),
             }
         )
     return rows
@@ -618,12 +651,23 @@ def read_cursor(root: str) -> dict:
         raise ValueError("generation sources missing")
     for name in ("whatsapp_q", "whatsapp_personal"):
         src = sources.get(name)
-        rows = (src or {}).get("high_water_rows") if isinstance(src, dict) else None
-        pks = [
-            int(r["pk"])
-            for r in (rows or [])
-            if isinstance(r, dict) and isinstance(r.get("pk"), int)
-        ]
+        if not isinstance(src, dict):
+            raise ValueError(f"{name} source missing")
+        rows = src.get("high_water_rows")
+        if not isinstance(rows, list):
+            raise ValueError(f"{name} high_water_rows missing")
+        # Every listed row must carry an integer pk (a digit string is accepted as the same
+        # number). Anything else is refused outright: a silently dropped entry would reset the
+        # high water to 0 and re-count already-seen rows as new.
+        pks = []
+        for r in rows:
+            pk = r.get("pk") if isinstance(r, dict) else None
+            if _is_int(pk):
+                pks.append(pk)
+            elif isinstance(pk, str) and pk.isdigit():
+                pks.append(int(pk))
+            else:
+                raise ValueError(f"{name} high_water pk is not an integer")
         hw[name] = max(pks, default=0)
     return {
         "generation_file": gen_rel,
@@ -670,10 +714,15 @@ def run_ssh(host: str, script: str, args: list[str], timeout: int) -> dict:
 
 
 class Remote:
-    """ssh-backed reads (--live), or fixture-backed reads when --fixture-dir is given."""
+    """ssh-backed reads (--live), or fixture-backed reads when --fixture-dir is given.
+
+    The backend is chosen by one predicate, `live`, which is true only when no fixture
+    directory was given at all; validate_args has already refused an empty or missing one.
+    """
 
     def __init__(self, fixture_dir: str | None, timeout: int):
         self.fixture_dir = fixture_dir
+        self.live = fixture_dir is None
         self.timeout = timeout
 
     def _fixture(self, name: str) -> dict:
@@ -691,7 +740,7 @@ class Remote:
     def planes(
         self, host: str, st: int, en: int, jid: str, port: int, units: tuple[str, ...]
     ) -> dict:
-        if self.fixture_dir:
+        if not self.live:
             return self._fixture("nucles.out")
         return run_ssh(
             host,
@@ -701,14 +750,14 @@ class Remote:
         )
 
     def scan(self, host: str, instance: str, st: int, en: int, jid: str) -> dict:
-        if self.fixture_dir:
+        if not self.live:
             return self._fixture(f"whatsapp_{instance}.out")
         return run_ssh(
             host, SCAN_SCRIPT, [instance, str(int(st)), str(int(en)), jid], self.timeout
         )
 
     def canary(self, host: str, instance: str, from_seq: int) -> dict:
-        if self.fixture_dir:
+        if not self.live:
             return self._fixture("mini3.out")
         return run_ssh(
             host, CANARY_SCRIPT, [instance, str(int(from_seq))], self.timeout
@@ -759,9 +808,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def validate_args(args) -> str | None:
     """Return a blocking class when an argument could reach a shell or SQL unsafely."""
-    if args.fixture_dir is None and not args.live:
+    if args.fixture_dir is not None:
+        # Replay mode. An empty string (a blank shell variable) or a missing directory is
+        # refused here, before any backend is chosen, so it can never fall through to ssh.
+        if args.fixture_dir == "" or not os.path.isdir(args.fixture_dir):
+            return "fixture-dir-invalid"
+    elif not args.live:
         return "live-not-requested"
-    if args.fixture_dir is None:
+    else:
         if not isinstance(args.group_jid, str) or not SAFE_JID.match(args.group_jid):
             return "group-jid-invalid"
         for value in (args.alert_host, args.canary_host, args.canary_instance):
@@ -825,6 +879,7 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
     scans: dict = {}
     rows_by_instance: dict = {}
     scan_failed = False
+    scan_partial = False
     for inst in ("q", "personal"):
         res = remote.scan(
             args.alert_host, inst, iv["start_ts"], iv["end_ts"], args.group_jid
@@ -840,11 +895,16 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
         rows = parse_rows(res["stdout"].decode("utf-8", "replace"))
         rows_by_instance[inst] = rows
         s = summarize(rows, cursor["high_water"][name])
+        # A row the parser could not decode is a row this run did not observe: the source is
+        # partial, and so is the bundle, even though the receipt and the count are on disk.
+        if s["rows_malformed"]:
+            scan_partial = True
         s.update(
             {
-                "status": "collected",
+                "status": "partial" if s["rows_malformed"] else "collected",
                 "prior_high_water_pk": cursor["high_water"][name],
                 "page_exhausted": True,
+                "receipt_encoding": SCAN_RECEIPT_ENCODING,
                 "receipt_sha256": receipts[f"whatsapp_{inst}.out"],
             }
         )
@@ -870,7 +930,7 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
     # the same label as a degraded host plane or an unreachable canary (`partial`).
     if scan_failed:
         status = "failed"
-    elif failures or (planes_facts and planes_facts["failed_sections"]):
+    elif scan_partial or failures or (planes_facts and planes_facts["failed_sections"]):
         status = "partial"
     else:
         status = "collected"
@@ -891,7 +951,7 @@ def collect(args, remote: Remote, now: dt.datetime) -> dict:
             "completed_at_utc": iso(utc_now()),
             "slot_expected_utc": slot,
             "slot_delta_seconds": slot_delta,
-            "mode": "fixture" if remote.fixture_dir else "live",
+            "mode": "live" if remote.live else "fixture",
             "clock_skew_seconds": skew,
             "clock_skew_flag": (skew is not None and abs(skew) > args.overlap_seconds),
         },

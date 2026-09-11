@@ -24,8 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bot_errors_j1_collector as c  # noqa: E402
 
 GEN_ID = "2026-09-11T00:24:59Z"
-US = c.FIELD_SEP
-RS = c.RECORD_SEP
 BODY_MARKER = "UNIQUE-BODY-MARKER-9f3a"
 
 
@@ -37,22 +35,27 @@ def _write(path, data, mode=0o600):
 
 
 def _rec(pk, mid, ts, body, sender="Name", is_from_me=0):
-    return US.join(
-        [
-            str(pk),
-            mid,
-            str(ts),
-            "2026-09-11 00:00:00",
-            "sender@x",
-            sender,
-            "text",
-            str(is_from_me),
-            body,
-        ]
-    )
+    """One scan row as the json_object() the remote script emits (JSON Lines)."""
+    return {
+        "pk": pk,
+        "message_id": mid,
+        "timestamp": ts,
+        "created_at": "2026-09-11 00:00:00",
+        "sender_jid": "sender@x",
+        "sender_name": sender,
+        "content_type": "text",
+        "is_from_me": is_from_me,
+        "body": body,
+    }
 
 
-def make_root(tmp_path, run_id="20260826T035004Z-run"):
+def _lines(recs):
+    # sqlite emits raw UTF-8 for non-ASCII and \uXXXX escapes for control bytes; json.dumps
+    # with ensure_ascii=False produces the same shape.
+    return "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs)
+
+
+def make_root(tmp_path, run_id="20260826T035004Z-run", high_water=None):
     root = str(tmp_path / "loop")
     gen = {
         "schema_version": "bot-errors-checkpoint.v1",
@@ -63,7 +66,8 @@ def make_root(tmp_path, run_id="20260826T035004Z-run"):
             "end_exclusive_utc": GEN_ID,
             "overlap_seconds": 300,
         },
-        "sources": {
+        "sources": high_water
+        or {
             "whatsapp_q": {"high_water_rows": [{"pk": 100}]},
             "whatsapp_personal": {"high_water_rows": [{"pk": 200}]},
         },
@@ -102,7 +106,7 @@ def scan_text(base_pk, sender="Name"):
         _rec(base_pk + i, f"AAAABBBBCCCC{i}", 1789086100 + 60 * i, body, sender=sender)
         for i, body in enumerate(BODIES, start=1)
     ]
-    return RS.join(recs) + RS
+    return _lines(recs)
 
 
 PLANES_OK = (
@@ -181,31 +185,58 @@ def test_expected_slot_snaps_forward_within_tolerance_else_previous_slot():
     )
 
 
-def test_parse_rows_keeps_pipes_and_newlines_inside_names_and_bodies():
-    text = scan_text(0, sender="Ops | on-call")
-    rows = c.parse_rows(text)
-    assert [r["pk"] for r in rows] == [1, 2, 3, 4, 5]
-    assert rows[0]["sender_name"] == "Ops | on-call"
-    assert rows[0]["body"].startswith("BOT ERROR - CRM public path DOWN\n")
-    assert rows[3]["body"] == BODIES[3]
-    assert c.classify(rows[0]["body"]) == "alert"
-
-
-def test_parse_rows_marks_malformed_records_instead_of_guessing():
-    text = (
-        RS.join(
-            [
-                _rec(1, "AAAABBBBCCCC1", 10, "ok"),
-                "broken" + US + "record",
-                _rec("x", "AAAABBBBCCCC2", 11, "bad pk"),
-            ]
-        )
-        + RS
+def test_parse_rows_keeps_every_byte_inside_names_and_bodies_and_reads_null_as_empty():
+    hostile = 'US\x1f RS\x1e pipe | quote " backslash \\ tab\t nl\n literal u001f ↻'
+    text = _lines(
+        [
+            _rec(1, "AAAABBBBCCCC1", 10, hostile, sender="Ops | on\x1f-call"),
+            {**_rec(2, "AAAABBBBCCCC2", 11, "x"), "body": None, "sender_name": None},
+        ]
     )
     rows = c.parse_rows(text)
-    assert [r.get("malformed", False) for r in rows] == [False, True, True]
+    assert [r["pk"] for r in rows] == [1, 2]
+    assert rows[0]["sender_name"] == "Ops | on\x1f-call" and rows[0]["body"] == hostile
+    assert rows[1]["body"] == "" and rows[1]["sender_name"] == ""
+    assert c.parse_rows("") == [] and c.parse_rows("\n\n") == []
+    rows5 = c.parse_rows(scan_text(0))
+    assert [r["pk"] for r in rows5] == [1, 2, 3, 4, 5]
+    assert rows5[3]["body"] == BODIES[3] and c.classify(rows5[0]["body"]) == "alert"
+
+
+# Decision table for parse_rows(): one line per way a row can be undecodable. Each is counted
+# as malformed (with only its raw hash), never guessed at and never silently dropped.
+MALFORMED_LINES = (
+    "not json at all",
+    '"a json string, not an object"',
+    json.dumps({**_rec(3, "AAAABBBBCCCC3", 12, "pk is text"), "pk": "3"}),
+    json.dumps({**_rec(4, "AAAABBBBCCCC4", 13, "ts is text"), "timestamp": "13"}),
+    json.dumps({**_rec(5, "AAAABBBBCCCC5", 14, "pk is bool"), "pk": True}),
+    json.dumps({**_rec(6, "AAAABBBBCCCC6", 15, "null message id"), "message_id": None}),
+    json.dumps(
+        {
+            k: v
+            for k, v in _rec(7, "AAAABBBBCCCC7", 16, "no body").items()
+            if k != "body"
+        }
+    ),
+)
+
+
+def test_parse_rows_counts_every_undecodable_line_as_malformed():
+    text = (
+        _lines([_rec(1, "AAAABBBBCCCC1", 10, "ok")]) + "\n".join(MALFORMED_LINES) + "\n"
+    )
+    rows = c.parse_rows(text)
+    assert [r.get("malformed", False) for r in rows] == [False] + [True] * len(
+        MALFORMED_LINES
+    )
+    assert all(set(r) == {"malformed", "raw_sha256"} for r in rows[1:])
     s = c.summarize(rows, 0)
-    assert (s["rows_scanned"], s["rows_malformed"], s["rows_new"]) == (3, 2, 1)
+    assert (s["rows_scanned"], s["rows_malformed"], s["rows_new"]) == (
+        1 + len(MALFORMED_LINES),
+        len(MALFORMED_LINES),
+        1,
+    )
 
 
 # Decision table for classify(): one row per lifecycle class, both marker spellings included.
@@ -253,17 +284,19 @@ def test_classify_covers_every_lifecycle_class_and_both_marker_spellings():
 
 
 if HAVE_HYPOTHESIS:
-    _plain = st.text(max_size=40).map(lambda s: s.replace(US, "").replace(RS, ""))
-    _record = st.tuples(
-        st.integers(min_value=0, max_value=10**9),
-        _plain,
-        st.integers(min_value=0, max_value=2**31),
-        _plain,
-        _plain,
-        _plain,
-        _plain,
-        st.sampled_from(["0", "1"]),
-        _plain,
+    _plain = st.text(max_size=40)
+    _record = st.fixed_dictionaries(
+        {
+            "pk": st.integers(min_value=0, max_value=10**9),
+            "message_id": _plain,
+            "timestamp": st.integers(min_value=0, max_value=2**31),
+            "created_at": _plain,
+            "sender_jid": _plain,
+            "sender_name": _plain,
+            "content_type": _plain,
+            "is_from_me": st.sampled_from([0, 1]),
+            "body": _plain,
+        }
     )
 
     @given(records=st.lists(_record, max_size=12), prior_hw=st.integers(0, 10**9))
@@ -271,20 +304,18 @@ if HAVE_HYPOTHESIS:
     def test_parse_rows_roundtrips_any_text_and_summarize_accounts_every_row(
         records, prior_hw
     ):
-        text = RS.join(US.join(str(f) for f in rec) for rec in records) + (
-            RS if records else ""
-        )
-        rows = c.parse_rows(text)
+        rows = c.parse_rows(_lines(records))
         assert [r.get("malformed", False) for r in rows] == [False] * len(records)
         assert [(r["pk"], r["message_id"], r["ts"], r["body"]) for r in rows] == [
-            (rec[0], rec[1], rec[2], rec[8]) for rec in records
+            (rec["pk"], rec["message_id"], rec["timestamp"], rec["body"])
+            for rec in records
         ]
         s = c.summarize(rows, prior_hw)
         assert (
             s["rows_scanned"]
             == s["rows_new"] + s["dedup_discarded"] + s["rows_malformed"]
         )
-        assert s["rows_new"] == sum(1 for rec in records if rec[0] > prior_hw)
+        assert s["rows_new"] == sum(1 for rec in records if rec["pk"] > prior_hw)
         nov = s["novelty"]
         assert nov["alert_like"] + nov["repeat_like"] + nov["excluded"] == s["rows_new"]
         assert (nov["ratio"] is None) == (nov["denominator"] == 0)
@@ -400,6 +431,44 @@ def test_iso_roundtrip_and_utc_only():
     assert t.tzinfo == dt.timezone.utc and c.iso(t) == "2026-09-11T01:17:00Z"
 
 
+# Decision table for the cursor's high-water rule: every listed row must carry an integer pk
+# (a digit string is the same number); anything else refuses the cursor instead of silently
+# resetting the high water to 0 and re-counting seen rows as new.
+HIGH_WATER_TABLE = (
+    ([{"pk": 100}], 100),
+    ([{"pk": "100"}], 100),
+    ([{"pk": 7}, {"pk": "9"}], 9),
+    ([], 0),
+    ([{"pk": "bad"}], ValueError),
+    ([{"pk": True}], ValueError),
+    ([{"pk": None}], ValueError),
+    ([{"pk": 1.5}], ValueError),
+    (["not a row"], ValueError),
+    (None, ValueError),
+)
+
+
+def test_cursor_high_water_accepts_integers_and_digit_strings_and_refuses_the_rest(
+    tmp_path,
+):
+    for index, (rows, expected) in enumerate(HIGH_WATER_TABLE):
+        case = tmp_path / f"case{index}"
+        case.mkdir()
+        sources = {
+            "whatsapp_q": {"high_water_rows": rows},
+            "whatsapp_personal": {"high_water_rows": [{"pk": 200}]},
+        }
+        root = make_root(case, high_water=sources)
+        if expected is ValueError:
+            with pytest.raises(ValueError):
+                c.read_cursor(root)
+        else:
+            assert c.read_cursor(root)["high_water"] == {
+                "whatsapp_q": expected,
+                "whatsapp_personal": 200,
+            }, f"case {index}: {rows!r}"
+
+
 # ------------------------------------------------------------------------- end to end (fixture)
 
 
@@ -435,10 +504,15 @@ def test_end_to_end_writes_exactly_the_declared_set_and_prints_no_bodies(
     assert stat.S_IMODE(os.stat(bundle_path).st_mode) == 0o600
     with open(bundle_path, encoding="utf-8") as f:
         bundle = json.load(f)
-    assert bundle["schema_version"] == "1.0" and bundle["kind"] == c.BUNDLE_KIND
+    assert bundle["schema_version"] == "1.1" and bundle["kind"] == c.BUNDLE_KIND
     assert bundle["complete"] is False and bundle["collection_status"] == "collected"
+    assert bundle["collector"]["mode"] == "fixture"
     assert bundle["sources"]["whatsapp_q"]["rows_new"] == 5
+    assert bundle["sources"]["whatsapp_q"]["rows_malformed"] == 0
     assert bundle["sources"]["whatsapp_q"]["prior_high_water_pk"] == 100
+    assert (
+        bundle["sources"]["whatsapp_q"]["receipt_encoding"] == c.SCAN_RECEIPT_ENCODING
+    )
     assert bundle["sources"]["gmail"]["status"] == "not_collected"
     assert bundle["parity"]["body_hash_multiset_equal"] is True
     assert bundle["planes"]["alert_host"]["facts"]["health_http_code"] == 200
@@ -493,6 +567,30 @@ def test_failed_store_scan_is_failed_not_partial(tmp_path, capsys):
     with open(os.path.join(root, out["bundle"]), encoding="utf-8") as f:
         bundle = json.load(f)
     assert bundle["parity"] is None and bundle["complete"] is False
+
+
+def test_undecodable_scan_rows_are_counted_and_downgrade_the_bundle_to_partial(
+    tmp_path, capsys
+):
+    root = make_root(tmp_path)
+    fx = make_fixtures(tmp_path)
+    with open(os.path.join(fx, "whatsapp_q.out"), "a", encoding="utf-8") as f:
+        f.write("garbage line that is not a row\n")
+    assert run(root, fx) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["collection_status"] == "partial"
+    assert out["sources"] == {
+        "whatsapp_q": "partial",
+        "whatsapp_personal": "collected",
+        "gmail": "not_collected",
+    }
+    with open(os.path.join(root, out["bundle"]), encoding="utf-8") as f:
+        bundle = json.load(f)
+    q = bundle["sources"]["whatsapp_q"]
+    assert (q["rows_scanned"], q["rows_malformed"], q["rows_new"]) == (6, 1, 5)
+    # The decodable rows still take part in parity; the malformed one is not guessed into it.
+    assert bundle["parity"]["body_hash_multiset_equal"] is True
+    assert bundle["failures"] == []
 
 
 def test_missing_canary_yields_partial_not_a_crash(tmp_path):
@@ -616,6 +714,14 @@ def test_live_requires_flag_and_safe_arguments(tmp_path, capsys):
         == 2
     )
     assert json.loads(capsys.readouterr().out)["class"] == "root-unusable"
+    # An empty or missing fixture directory (a blank shell variable) is refused before any
+    # backend is chosen: it must never fall through to the ssh backend without --live.
+    for bad_dir in ["", str(tmp_path / "no-such-fixtures")]:
+        assert c.main(["--root", root, "--fixture-dir", bad_dir]) == 2, repr(bad_dir)
+        assert json.loads(capsys.readouterr().out)["class"] == "fixture-dir-invalid"
+        assert not os.path.isdir(os.path.join(root, "runs"))
+    # The backend predicate is "no fixture directory at all", never truthiness.
+    assert c.Remote(None, 1).live is True and c.Remote("", 1).live is False
 
 
 def test_lock_held_by_another_collector_skips_with_exit_3(tmp_path, capsys):
