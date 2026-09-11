@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -121,7 +122,7 @@ PLANES_OK = (
     '=== SECTION incident-state ===\n{"openIncidents_len": 79, "flapState_len": 169, "updatedAt": "x"}\nSECTION_RC incident-state 0\n'
     '=== SECTION watchdog-state ===\n{"open": ["local_health:q"], "recentlyRecovered": ["supervision_deadman"], "generation": 7109, "writtenAt": "x"}\nSECTION_RC watchdog-state 0\n'
     '=== SECTION dispatch-outcomes ===\n{"by_type_24h": {"sent": 82, "suppressed": 4282, "cycle_completed": 2694}, "by_type_window": {"sent": 3, "cycle_completed": 112}, "cycle_duration_ms_window": {"n": 112, "p50": 40, "p95": 91, "max": 300}, "first_time": "2026-09-09T09:39:26Z", "last_time": "2026-09-11T01:16:58Z", "lines_24h": 46753, "lines_total": 80894, "lines_undecodable": 0, "lines_window": 1400, "log_bytes": 40593763, "log_mtime_age_s": 16, "window_end_utc": "2026-09-11T01:17:00Z", "window_start_utc": "2026-09-11T00:19:59Z"}\nSECTION_RC dispatch-outcomes 0\n'
-    '=== SECTION incident-inventory ===\n{"age_days_max": 68.7, "age_days_p50": 13.4, "age_days_p90": 51.9, "flap_keys": 163, "flap_top": [{"cumulative": 1151, "key": "h|i|release-currency", "trips_in_window": 11}], "flap_trip_unit": "s", "flap_trips_in_window_total": 40, "open": 80, "renotify_total": 568, "rows_skipped": 0, "status": {"awaiting_physical": 43, "open": 37}, "suppressed_total": 25118, "top_suppressed": [{"age_days": 51.9, "key": "h|i|k", "renotify": 3, "status": "open", "suppressed": 4100}], "updatedAt": "x"}\nSECTION_RC incident-inventory 0\n'
+    '=== SECTION incident-inventory ===\n{"age_days_max": 68.7, "age_days_p50": 13.4, "age_days_p90": 51.9, "flap_cumulative_total": 9000, "flap_keys": 163, "flap_keys_window_complete": 150, "flap_top": [{"cumulative": 1151, "key": "h|i|release-currency", "trips_in_window": 11, "window_complete": false}], "flap_trip_unit": "s", "flap_trips_in_window_lower_bound": 40, "open": 80, "renotify_total": 568, "rows_skipped": 0, "status": {"awaiting_physical": 43, "open": 37}, "suppressed_total": 25118, "top_suppressed": [{"age_days": 51.9, "key": "h|i|k", "renotify": 3, "status": "open", "suppressed": 4100}], "updatedAt": "x"}\nSECTION_RC incident-inventory 0\n'
     "=== SECTION queues ===\noutbox=0\nprocessing=0\nquarantine=42\nsent=10099\nSECTION_RC queues 0\n"
     "=== SECTION supervision-pointer ===\n838d0616700d8ca26b9f1f26cb7ad1f7f47c18469c68327c4923a0d9aed46978  CURRENT.json\n1789086568\nSECTION_RC supervision-pointer 0\n"
     "=== SECTION deployed-checkout ===\nda3c801be5a8995f9033ebebc2b150388ac0a8b9\nfix/some-branch\nSECTION_RC deployed-checkout 0\n"
@@ -416,6 +417,148 @@ def test_parse_planes_extracts_facts_and_nulls_failed_sections():
         empty["health_http_code"] is None and empty["units_failed_listing_rows"] is None
     )
     assert empty["deployed_head"] is None and empty["failed_sections"] == []
+
+
+# ------------------------------------------------- alert-host metric sections, executed locally
+
+
+def _section_script(name):
+    """The python block of one alert-host section, extracted verbatim from PLANES_SCRIPT so the
+    test runs the same bytes the remote host runs."""
+    marker = f'echo "=== SECTION {name} ==="\npython3 - "$STATE" "$ST" "$EN" <<\'PY\'\n'
+    start = c.PLANES_SCRIPT.index(marker) + len(marker)
+    end = c.PLANES_SCRIPT.index("\nPY\n", start)
+    return c.PLANES_SCRIPT[start:end]
+
+
+def _run_section(name, state_dir, st, en):
+    r = subprocess.run(
+        [sys.executable, "-", state_dir, str(st), str(en)],
+        input=_section_script(name),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def _iso(t):
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_dispatch_outcomes_counts_window_and_24h_independently_and_stops_at_end(
+    tmp_path,
+):
+    en = 1789098550
+    st = (
+        en - 48 * 3600
+    )  # a stalled cursor: the window is longer than the 24 h denominator
+    recs = [
+        {
+            "time": _iso(en - 40 * 3600),
+            "type": "sent",
+        },  # in window, before the 24 h cut
+        {"time": _iso(en - 3600), "type": "sent"},
+        {
+            "time": _iso(en - 3600),
+            "type": "cycle_completed",
+            "details": {"durationMs": 50},
+        },
+        {"time": _iso(en + 5), "type": "sent"},  # appended after the frozen end
+    ]
+    state = tmp_path / "state"
+    _write(
+        str(state / "logs" / "dispatch.jsonl"),
+        "".join(json.dumps(r) + "\n" for r in recs) + "not json\n",
+    )
+    out = _run_section("dispatch-outcomes", str(state), st, en)
+    assert (out["lines_total"], out["lines_undecodable"]) == (5, 1)
+    assert out["lines_window"] == 3 and out["by_type_window"] == {
+        "sent": 2,
+        "cycle_completed": 1,
+    }
+    assert out["lines_24h"] == 2 and out["by_type_24h"] == {
+        "sent": 1,
+        "cycle_completed": 1,
+    }
+    assert out["cycle_duration_ms_window"] == {"n": 1, "p50": 50, "p95": 50, "max": 50}
+    assert out["last_time"] == _iso(en + 5)  # the log's own span still reports it
+
+
+def test_incident_inventory_flags_pruned_flap_history_and_detects_the_trip_unit(
+    tmp_path,
+):
+    en = 1789098550
+    st = en - 3600
+    store = {
+        "updatedAt": "x",
+        "openIncidents": {
+            "h|a|k": {
+                "status": "open",
+                "openedAt": en - 2 * 86400,
+                "suppressedCount": 0,
+            },
+            "h|b|k": {
+                "status": "awaiting_physical",
+                "openedAt": en - 10 * 86400,
+                "suppressedCount": 5,
+                "renotifyCount": 2,
+            },
+            "broken": "not a record",
+        },
+        "flapState": {
+            # oldest retained trip is inside the window: the producer pruned older ones
+            "h|a|flap": {
+                "cumulativeCount": 10,
+                "tripTimestamps": [en - 3000, en - 200],
+            },
+            "h|b|flap": {"cumulativeCount": 4, "tripTimestamps": [st - 100, en - 10]},
+            "h|c|flap": {"cumulativeCount": 0, "tripTimestamps": []},
+        },
+    }
+    state = tmp_path / "state"
+    _write(str(state / "incident-state.json"), json.dumps(store))
+    out = _run_section("incident-inventory", str(state), st, en)
+    assert out["open"] == 3 and out["rows_skipped"] == 1
+    assert out["status"] == {"open": 1, "awaiting_physical": 1}
+    assert (out["age_days_p50"], out["age_days_max"]) == (2.0, 10.0)
+    assert (out["suppressed_total"], out["renotify_total"]) == (5, 2)
+    assert out["top_suppressed"][0]["key"] == "h|b|k"
+    assert out["flap_trip_unit"] == "s" and out["flap_cumulative_total"] == 14
+    by_key = {f["key"]: f for f in out["flap_top"]}
+    assert (
+        by_key["h|a|flap"]["trips_in_window"],
+        by_key["h|a|flap"]["window_complete"],
+    ) == (2, False)
+    assert (
+        by_key["h|b|flap"]["trips_in_window"],
+        by_key["h|b|flap"]["window_complete"],
+    ) == (1, True)
+    assert (
+        by_key["h|c|flap"]["trips_in_window"],
+        by_key["h|c|flap"]["window_complete"],
+    ) == (0, True)
+    assert out["flap_trips_in_window_lower_bound"] == 3
+    assert out["flap_keys_window_complete"] == 2
+    # Millisecond timestamps are detected, not assumed; a mixed store yields no unit.
+    store["flapState"] = {
+        "h|a|flap": {"cumulativeCount": 1, "tripTimestamps": [(en - 200) * 1000]}
+    }
+    _write(str(state / "incident-state.json"), json.dumps(store))
+    out_ms = _run_section("incident-inventory", str(state), st, en)
+    assert (
+        out_ms["flap_trip_unit"] == "ms"
+        and out_ms["flap_top"][0]["trips_in_window"] == 1
+    )
+    store["flapState"]["h|b|flap"] = {
+        "cumulativeCount": 1,
+        "tripTimestamps": [en - 200],
+    }
+    _write(str(state / "incident-state.json"), json.dumps(store))
+    out_mixed = _run_section("incident-inventory", str(state), st, en)
+    assert out_mixed["flap_trip_unit"] is None
+    assert out_mixed["flap_trips_in_window_lower_bound"] is None
+    assert all(f["trips_in_window"] is None for f in out_mixed["flap_top"])
 
 
 def test_clock_skew_is_signed_remote_minus_local_and_none_when_unread():
