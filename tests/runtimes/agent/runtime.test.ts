@@ -13779,13 +13779,7 @@ describe('AgentRuntime', () => {
         chatJid: string;
         reason: string;
       }) => void;
-      registerSendPollAwaiter: (
-        pollId: string,
-        chatJid: string,
-        options: string[],
-        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
-        timeoutMs: number,
-      ) => Promise<string>;
+      registerSendPollAwaiter: AgentRuntime['registerSendPollAwaiter'];
       deletePendingPollQuestions: (mapKey: string) => void;
     };
 
@@ -13999,7 +13993,6 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState & {
-        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
         fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
       };
       await runtime.start();
