@@ -2871,7 +2871,8 @@ def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
 
 
 def daily_health_failure_recovery_cutoff(record: dict[str, Any], instance: str) -> int | None:
-    evidence = record.get("lastEvidence")
+    if alert_text_kind(evidence := record.get("lastEvidence")) != "string":
+        return None
     if not isinstance(evidence, str) or not evidence or len(evidence) >= INCIDENT_EVIDENCE_LIMIT:
         return None
     if re.search(r"\[truncated\b|…|\.{3}", evidence, re.IGNORECASE):

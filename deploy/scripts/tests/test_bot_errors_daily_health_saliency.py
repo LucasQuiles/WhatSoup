@@ -392,6 +392,8 @@ def test_health_probe_cannot_clear_other_failure_domains(recovery_case, other_fa
     "health line-a: FAIL status=unhealthy [truncated 200 chars]",
     "health line-a: FAIL status=unhealthy [TRUNCATED]",
     "health line-a: …", "health line-a: FAIL ...",
+    "health line-a: FAIL {'failureClass': 'TypeError', 'length': 54, 'correlationDigest': '" + "a" * 64 + "'}",
+    "health line-a: FAIL {'failureClass': 'TypeError', 'length': 9007199254740992, 'correlationDigest': '" + "b" * 64 + "'}",
 ])
 def test_ambiguous_failure_evidence_stays_open(recovery_case, evidence):
     dispatcher, state, key, recovery, _ = recovery_case()
