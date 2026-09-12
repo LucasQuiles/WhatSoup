@@ -21,6 +21,26 @@ import {
   providerFailureArmsFallback,
 } from '../../../src/runtimes/agent/failure-taxonomy.ts';
 
+describe('isUsageLimitMessage', () => {
+  it('does not suppress ordinary discussion of usage limits or quotas', () => {
+    expect(isUsageLimitMessage(
+      'Please document how usage limit and quota exceeded errors should be handled.',
+    )).toBe(false);
+  });
+
+  it('matches distinctive provider usage-cap notices', () => {
+    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
+    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
+  });
+
+  it('requires reset-time evidence for generic quota wording', () => {
+    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
+    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
+  });
+});
+
 function statusError(status: number): Error & { status: number } {
   const err = new Error(`http ${status}`) as Error & { status: number };
   err.status = status;

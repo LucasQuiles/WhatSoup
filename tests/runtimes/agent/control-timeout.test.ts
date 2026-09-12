@@ -5,6 +5,7 @@
 // 3. Timeout fires and calls shutdown + clearControlReport after the timeout period.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -266,7 +267,8 @@ function getControlState(runtime: AgentRuntime): {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('control session hard timeout', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.useFakeTimers();
     vi.clearAllMocks();
     mockDequeueNextReport.mockReturnValue(null);

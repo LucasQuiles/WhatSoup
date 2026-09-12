@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { IncomingMessage } from '../../../src/core/types.ts';
@@ -10,6 +11,7 @@ import {
 } from '../../../src/runtimes/agent/session-ownership.ts';
 import { SessionManager, type SessionCrashInfo } from '../../../src/runtimes/agent/session.ts';
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
+import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import {
   FAKE_PROVIDER,
   makeMemoryDb,
@@ -145,7 +147,7 @@ describe('per-chat crash respawn ownership', () => {
     const { messenger, sent } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'crash-respawn-test', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
@@ -277,7 +279,7 @@ describe('per-chat crash respawn ownership', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'stale-crash-test', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
@@ -408,7 +410,7 @@ describe('per-chat crash respawn ownership', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'signal-respawn-test', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     runtime.setDurability(new DurabilityEngine(db));
     const state = runtime as unknown as RuntimeState;
@@ -423,7 +425,7 @@ describe('per-chat crash respawn ownership', () => {
 
     let manager: SessionManager | null = null;
     let signaledPid: number | null = null;
-    let providerGeneration = 0;
+    const initializedChildren: Array<{ sessionId: string; pid: number | null }> = [];
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
     const bodyFailures: unknown[] = [];
     const cleanupFailures: unknown[] = [];
@@ -434,16 +436,27 @@ describe('per-chat crash respawn ownership', () => {
       manager = state.chatSessions.get(mapKey) ?? null;
       if (!manager) throw new Error('spawn-per-turn manager was not mapped');
 
+      const observedManager = manager;
+      const eventSource = manager as unknown as { handleProviderEvent: (event: AgentEvent) => void };
+      const handleProviderEvent = eventSource.handleProviderEvent.bind(manager);
+      eventSource.handleProviderEvent = (event) => {
+        if (event.type === 'init') {
+          initializedChildren.push({ sessionId: event.sessionId, pid: observedManager.getStatus().pid });
+        }
+        handleProviderEvent(event);
+      };
+
       (manager as any).provider = 'opencode-cli';
       (manager as any).model = 'glm/test-model';
       (manager as any).getProviderBinary = () => process.execPath;
       (manager as any).buildSpawnPerTurnArgs = () => {
-        providerGeneration += 1;
+        const owner = ownership.get(mapKey);
+        if (!owner) throw new Error('spawn-per-turn owner record is missing while building arguments');
         return [
           FAKE_PROVIDER,
           JSON.stringify({
             runId,
-            sessionId: `${runId}-generation-${providerGeneration}`,
+            sessionId: `${runId}-generation-${owner.generation}`,
             protocol: 'opencode',
             handleSigterm: false,
           }),
@@ -456,14 +469,21 @@ describe('per-chat crash respawn ownership', () => {
       ownership.transition(mapKey, firstOwner.managerId, 'active');
 
       await manager.sendTurn('signal this spawn-per-turn generation');
-      expect(
-        await waitUntil(
-          () => manager?.getStatus().sessionId === `${runId}-generation-1`,
-          6_000,
-        ),
-      ).toBe(true);
+      const firstInitialized = await waitUntil(
+        () => manager?.getStatus().sessionId === `${runId}-generation-1`,
+        6_000,
+      );
+      expect(firstInitialized, JSON.stringify({
+        initializedChildren,
+        status: manager.getStatus(),
+        owner: ownership.get(mapKey),
+        spawnargs: (manager as any).child?.spawnargs,
+      })).toBe(true);
       signaledPid = manager.getStatus().pid;
       if (signaledPid === null) throw new Error('spawn-per-turn child PID was not captured');
+      expect(initializedChildren).toEqual([
+        { sessionId: `${runId}-generation-1`, pid: signaledPid },
+      ]);
       process.kill(signaledPid, 'SIGTERM');
 
       expect(await waitUntil(() => timers.additions === 1, 6_000)).toBe(true);
@@ -475,7 +495,8 @@ describe('per-chat crash respawn ownership', () => {
           currentOwner.generation === 2 &&
           currentOwner.state === 'active' &&
           manager?.getStatus().active === true &&
-          providerGeneration === 2
+          manager.getStatus().sessionId === `${runId}-generation-2` &&
+          initializedChildren.length === 2
         );
       }, 6_000);
 
@@ -483,7 +504,11 @@ describe('per-chat crash respawn ownership', () => {
       const failure =
         `signal-only respawn wedged: reactivated=${reactivated}, ` +
         `active=${manager.getStatus().active}, pid=${manager.getStatus().pid ?? 'null'}, ` +
-        `state=${currentOwner?.state ?? 'missing'}, generation=${currentOwner?.generation ?? 'missing'}`;
+        `state=${currentOwner?.state ?? 'missing'}, generation=${currentOwner?.generation ?? 'missing'}, ` +
+        `initializedChildren=${JSON.stringify(initializedChildren)}`;
+      const respawnedPid = manager.getStatus().pid;
+      if (respawnedPid === null) throw new Error(`respawned child PID was not captured: ${failure}`);
+      expect(respawnedPid, failure).not.toBe(signaledPid);
       expect(
         {
           reactivated,
@@ -494,7 +519,7 @@ describe('per-chat crash respawn ownership', () => {
           timerAdditions: timers.additions,
           timerDeletions: timers.deletions,
           timerCount: timers.size,
-          providerGeneration,
+          initializedChildren,
         },
         failure,
       ).toEqual({
@@ -506,7 +531,10 @@ describe('per-chat crash respawn ownership', () => {
         timerAdditions: 1,
         timerDeletions: 1,
         timerCount: 0,
-        providerGeneration: 2,
+        initializedChildren: [
+          { sessionId: `${runId}-generation-1`, pid: signaledPid },
+          { sessionId: `${runId}-generation-2`, pid: respawnedPid },
+        ],
       });
     } catch (error) {
       bodyFailures.push(error);

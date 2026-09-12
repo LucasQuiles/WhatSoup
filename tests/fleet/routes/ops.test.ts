@@ -2893,7 +2893,7 @@ describe('ops.ts handleCreateLine uncovered-branch coverage', () => {
       freshDeps(),
     );
     expect(res._status).toBe(400);
-    expect(JSON.parse(res._body).error).toMatch(/pluginDirs entries must be within the home directory/);
+    expect(JSON.parse(res._body).error).toMatch(/each pluginDirs entry must be within the home directory/);
   });
 
   // The shared validateInstanceConfig (create mode) rejects an out-of-range tokenBudget.

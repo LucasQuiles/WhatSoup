@@ -1,3 +1,4 @@
+import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/session.ts
 // SessionManager owns the Claude Code child process lifecycle.
 
@@ -952,6 +953,12 @@ export class SessionManager {
     }
   }
 
+  private admitConfiguredCwd(): string {
+    return this.configuredCwd === undefined
+      ? homedir()
+      : admitHomeConfinedPath(this.configuredCwd, homedir());
+  }
+
   private getProviderBinary(): string {
     const provider = this.assertKnownProvider('getProviderBinary');
     return resolveProviderBinary(provider);
@@ -965,7 +972,7 @@ export class SessionManager {
       cwd,
       resumeSessionId,
       this.model,
-      this.pluginDirs,
+      this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, homedir())),
       this.providerConfig,
       this.providerMcpConfigArgs,
     );
@@ -2273,7 +2280,8 @@ export class SessionManager {
       this.retireUnsupportedResume(resumeSessionId, resolvedRowId!);
       throw new Error(`Provider '${provider}' does not support persisted session resume`);
     }
-    const cwd = this.configuredCwd ?? homedir();
+    let cwd = this.admitConfiguredCwd();
+    const pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, homedir()));
 
     const systemPrompt = this.buildSystemPrompt();
 
@@ -2293,7 +2301,7 @@ export class SessionManager {
       this.messageCount = 0;
       this.lastMessageAt = null;
       this.systemPrompt = systemPrompt;
-      this.configuredCwd = cwd;
+      if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
       this.resumeAttemptId = null;
 
       try {
@@ -2323,7 +2331,7 @@ export class SessionManager {
           systemPrompt,
           model: this.model,
           routePolicy: this.routePolicy,
-          pluginDirs: this.pluginDirs,
+          pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
           onEvent: (event) => {
@@ -2399,7 +2407,7 @@ export class SessionManager {
       this.active = true;
       this.startedAt = new Date().toISOString();
       this.systemPrompt = systemPrompt;
-      this.configuredCwd = cwd;
+      if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
       this.crashStderrPreview = '';
       this.sessionId = resumeSessionId ?? null;
       try {
@@ -2458,7 +2466,9 @@ export class SessionManager {
         throw new Error('provider binary content changed since admission — refusing spawn');
       }
     }
+    cwd = this.admitConfiguredCwd();
     const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
+    if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
 
     const child = spawn(binary, args, {
       cwd,
@@ -2669,7 +2679,7 @@ export class SessionManager {
               }
               // Send a fresh thread/start without threadId
               this.sendCodexRequest(child, 'thread/start', {
-                cwd: this.configuredCwd ?? homedir(),
+                cwd: this.admitConfiguredCwd(),
                 approvalPolicy: 'never' as const,
                 sandbox: 'danger-full-access' as const,
                 persistExtendedHistory: true,
@@ -2678,7 +2688,8 @@ export class SessionManager {
               continue;
             }
           } catch {
-            // Fall through to normal parsing
+            // Intentional: messages that cannot be intercepted continue through
+            // the provider parser, which owns protocol error reporting.
           }
         }
 
@@ -3491,12 +3502,13 @@ export class SessionManager {
         }
       }
 
-      const cwd = this.configuredCwd ?? homedir();
+      let cwd: string;
 
       let args: string[];
       let binary: string;
       let parse: ProviderEventParser;
       try {
+        cwd = this.admitConfiguredCwd();
         args = this.buildSpawnPerTurnArgs(cwd, input);
         const admission = this.providerAdmission;
         if (admission?.required) {
@@ -3567,6 +3579,8 @@ export class SessionManager {
 
       const child = (() => {
         try {
+          cwd = this.admitConfiguredCwd();
+          args = this.buildSpawnPerTurnArgs(cwd, input);
           return spawn(binary, args, {
             cwd,
             detached: true,

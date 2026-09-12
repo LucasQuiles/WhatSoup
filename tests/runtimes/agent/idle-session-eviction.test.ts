@@ -10,6 +10,7 @@
 // Mock scaffolding mirrors zombie-sessions.test.ts.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -235,6 +236,10 @@ function callSweep(runtime: AgentRuntime): void {
   expect(sweep, 'sweepIdleSessions() must be implemented on AgentRuntime').toBeTypeOf('function');
   sweep!.call(runtime);
 }
+
+beforeEach(async () => {
+  await prepareRuntimeHome();
+});
 
 describe('idle session eviction — sweepIdleSessions', () => {
   beforeEach(() => {
