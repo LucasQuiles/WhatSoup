@@ -200,7 +200,9 @@ def test_malformed_attempts_does_not_wedge_later_valid_event(tmp_path):
 
     sent_paths: list[str] = []
 
-    def _fake_send(text: str, socket_path: str = "") -> None:
+    def _fake_send(text: str, socket_path: str = "", *, require_acceptance: bool = False) -> None:
+        if "test-2437-b2-good" in text:
+            assert require_acceptance is True
         sent_paths.append(text)
 
     with (

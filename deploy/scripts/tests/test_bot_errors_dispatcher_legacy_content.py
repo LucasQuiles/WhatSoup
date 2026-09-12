@@ -76,6 +76,14 @@ def _load_module(extra_env: dict[str, str] | None = None):
 _mod = _load_module()
 
 
+def _queued_sender(sent: list[str] | None = None):
+    def send(text: str, socket_path: str = "", *, require_acceptance: bool) -> None:
+        assert require_acceptance is True
+        if sent is not None:
+            sent.append(text)
+    return send
+
+
 def legacy_object() -> dict[str, Any]:
     return {"failureClass": "TypeError", "length": 54, "correlationDigest": DIGEST}
 
@@ -853,7 +861,7 @@ def test_poison_alert_content_does_not_wedge_the_queue(tmp_path, monkeypatch) ->
     mod = _load_module()
 
     sent_texts: list[str] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent_texts.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender(sent_texts))
     monkeypatch.setattr(mod, "append_dispatch_log", lambda *a, **k: None)
 
     paths = mod.setup_dirs()
@@ -1083,7 +1091,7 @@ def test_queued_clear_is_counted_once_not_twice(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
     monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
     mod = _load_module()
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": None)
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender())
     monkeypatch.setattr(mod, "append_dispatch_log", lambda *a, **k: None)
     paths = mod.setup_dirs()
 
@@ -1192,7 +1200,7 @@ def test_a_raising_recorder_does_not_stop_the_event(tmp_path, monkeypatch) -> No
 
     sent: list[str] = []
     logged: list[dict[str, Any]] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender(sent))
     monkeypatch.setattr(mod, "append_dispatch_log", lambda paths, record: logged.append(record))
 
     def raising_recorder(event, incident_state):
@@ -1236,7 +1244,7 @@ def _dispatcher_in(tmp_path: Path, monkeypatch) -> Any:
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
     monkeypatch.setenv("BOT_ERRORS_JID", "12345@g.us")
     mod = _load_module()
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": None)
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender())
     return mod
 
 
@@ -1452,7 +1460,7 @@ def test_a_malformed_event_before_a_healthy_alert_does_not_block_it(tmp_path, mo
     """
     mod = _dispatcher_in(tmp_path, monkeypatch)
     sent: list[str] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender(sent))
     paths = mod.setup_dirs()
 
     _queue_event(paths, "aaa-unrenderable.json", _unrenderable_event())
@@ -1595,7 +1603,7 @@ def test_a_leak_shaped_source_cannot_make_the_page_drop_itself(tmp_path, monkeyp
     """
     mod = _dispatcher_in(tmp_path, monkeypatch)
     sent: list[str] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="": sent.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", _queued_sender(sent))
     paths = mod.setup_dirs()
     event = _unrenderable_event(source=LEAK_SHAPED_SOURCE)
     _queue_event(paths, "aaa-leaky.json", event)
@@ -1901,7 +1909,7 @@ def _dispatcher_bound_to(root: Path):
     os.environ["BOT_ERRORS_OUTBOX_DIR"] = str(root / "outbox")
     os.environ["BOT_ERRORS_JID"] = "12345@g.us"
     mod = _load_module()
-    mod.send_whatsapp = lambda text, socket_path="": None
+    mod.send_whatsapp = _queued_sender()
     return mod
 
 

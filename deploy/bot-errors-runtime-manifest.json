@@ -40,8 +40,10 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b46eaa5210fd1d0c2226a03234b4f795263bee54c17091befe323df6eae94f8b",
+      "sha256": "c12934162dbdf794865a8a2c63fd6ca27930498104faa0a8b216d25f2fd91ac9",
       "mustContain": [
+        "require_acceptance=True",
+        "auditReceipt",
         "append_bounded_jsonl",
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -620,6 +622,15 @@
         "event_file_age_seconds",
         "scan_directory",
         "parse_queue_threshold"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/send_acceptance.py",
+      "sha256": "129445a01a685824339db972d3047aec11284decf62f05b5bef7ac80e798c2db",
+      "mustContain": [
+        "validate_send_acceptance",
+        "SendAcceptanceUnknown",
+        "RecursionError"
       ]
     },
     {
