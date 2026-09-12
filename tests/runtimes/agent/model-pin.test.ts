@@ -501,8 +501,7 @@ import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
 beforeEach(async () => {
-  // Restart journals persist through real descriptor IO despite the partial fs mock.
-  // Keep every describe under the existing owned Vitest temporary-home lifecycle.
+  // Give each test a private state root under the owned Vitest temporary-home lifecycle.
   const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
   mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'ws-model-pin-state-'));
 });
