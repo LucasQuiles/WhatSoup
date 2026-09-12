@@ -298,6 +298,28 @@ quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
 
+### Daily-health recovery scope
+
+Per-instance failures emitted by the health checker use
+`<machine>|bot-errors-health|daily-health-fail:<target>`. Recovery also recognizes
+the legacy `<machine>|<target>|daily-health-fail:<target>` form. Both require an
+exact machine and target match; hostname aliases and other source suffixes are
+not merged.
+
+`daily_health_failure_recovery_cutoff()` owns evidence admission. Only retained
+health lines for that target, plus its optional instance header, can qualify.
+Missing, mixed configuration/socket, context-bearing, or potentially clipped
+evidence remains open. The retained-evidence limit is shared with the incident
+writers; checking below that limit bounds clipping by current writers, not the
+completeness of arbitrary imported historical state.
+
+A verified health observation must follow the latest opening, event, and
+last-seen timestamps. Physical-action incidents also require the existing
+outbound-or-stability proof; an outbound receipt must follow that same latest
+failure bound. A healthy WhatsApp probe cannot clear unrelated daily-health
+failures. Queue delays can conservatively defer recovery until a later
+observation. No age-only recovery or automatic relink follows from this rule.
+
 ### Relay archive census (read-only)
 
 `remote_archive_census()` in `bot-errors-collector.py` reports how much

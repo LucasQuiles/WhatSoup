@@ -7348,6 +7348,7 @@ def unprofiled_config_inventory(root: Path, expected_names: set[str]) -> list[st
 
 
 SUPPORT_WHATSOUP_SERVICE_NAMES = {
+    "bot-errors-j1-collector",
     "dashboard",
     "fleet",
     "ms365-token-backup",
