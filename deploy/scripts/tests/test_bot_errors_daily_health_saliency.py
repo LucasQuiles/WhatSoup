@@ -20,7 +20,10 @@ event and storm-collapsed, so a multi-day outage went unnoticed. Verifies:
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
+from datetime import datetime, timezone
 import importlib.util
+from itertools import combinations, product
 import json
 import os
 from pathlib import Path
@@ -314,6 +317,210 @@ def test_stale_daily_health_fail_key_reconstructs_source_and_alert(dirs):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["producer", "legacy"])
+def recovery_case(request, dirs, monkeypatch):
+    state_dir, outbox_dir = dirs
+    health = _load_health(state_dir, outbox_dir)
+    dispatcher = _load_dispatcher(state_dir, outbox_dir)
+    monkeypatch.setattr(health.socket, "gethostname", lambda: "test-machine")
+    monkeypatch.setattr(health, "safe_observer_provenance", lambda *args: {})
+    monkeypatch.setattr(health, "now_iso", lambda: "2026-05-31T00:00:00Z")
+    monkeypatch.setattr(dispatcher.time, "time", lambda: 1780185600)
+
+    def make(failures=None):
+        with _env(state_dir, outbox_dir):
+            paths = health.emit_per_instance_health_failures(
+                failures if failures is not None else ["health line-a: FAIL status=unhealthy"]
+            )
+        assert len(paths) == 1
+        event = _read_events(paths)[0]
+        if request.param == "legacy":
+            event["instance"] = "line-a"
+        key = dispatcher.incident_key(event)
+        expected_instance = "line-a" if request.param == "legacy" else "bot-errors-health"
+        assert key == f"test-machine|{expected_instance}|daily-health-fail:line-a"
+        state = dispatcher.dispatcher_bootstrap_state()
+        dispatcher.mark_incident_sent(event, state)
+        recovery = {
+            "source": "daily-health",
+            "machine": "test-machine",
+            "instance": "bot-errors-health",
+            "createdAt": "2026-05-31T00:05:00Z",
+            "evidence": (
+                "health line-a: 200 status=healthy wa_connected=true state=connected "
+                "auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=42 "
+                "auth_failure_class=none"
+            ),
+        }
+        return dispatcher, state, key, recovery, event
+
+    return make
+
+
+def test_actual_daily_health_failure_recovers_after_persist_reload(recovery_case, dirs):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    unrelated = "test-machine|bot-errors-health|daily-health-fail:line-b"
+    state["openIncidents"][unrelated] = {"status": "open", "lastEvidence": "FAIL config line-b: absent"}
+    state["lastSentAt"][unrelated] = 1780185600
+    paths = {"incident_state": dirs[0] / "incident-state.json"}
+    assert dispatcher.save_incident_state(paths, state).advance_allowed
+    loaded = dispatcher.load_incident_state(paths)
+    assert key in loaded["openIncidents"]
+    assert dispatcher.close_recovered_daily_health_incidents(recovery, loaded) == [key]
+    assert key not in loaded["openIncidents"] and key not in loaded["lastSentAt"]
+    assert unrelated in loaded["openIncidents"] and loaded["lastSentAt"][unrelated] == 1780185600
+    assert dispatcher.close_recovered_daily_health_incidents(recovery, loaded) == []
+
+
+@pytest.mark.parametrize("other_failure", ["FAIL config line-a: missing fixture", "FAIL socket line-a: absent"])
+def test_health_probe_cannot_clear_other_failure_domains(recovery_case, other_failure):
+    dispatcher, state, key, recovery, _ = recovery_case([other_failure, "health line-a: FAIL status=unhealthy"])
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+    assert key in state["openIncidents"]
+
+
+@pytest.mark.parametrize("evidence", [
+    "", None, {}, "instance: line-a", "health line-a:",
+    "health line-a: FAIL\nFAIL config line-a: missing fixture",
+    "health line-a: FAIL\ninstance: line-b",
+    "health line-b: FAIL", "health line-a: FAIL\nunknown observation",
+    "health line-a: FAIL\nincident_still_open=true",
+    "health line-a: FAIL\nincident_status=awaiting_physical",
+    "…health line-a: FAIL", "health line-a: FAIL\n[truncated]",
+    "health line-a: FAIL status=unhealthy [truncated 200 chars]",
+    "health line-a: FAIL status=unhealthy [TRUNCATED]",
+    "health line-a: …", "health line-a: FAIL ...",
+])
+def test_ambiguous_failure_evidence_stays_open(recovery_case, evidence):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    state["openIncidents"][key]["lastEvidence"] = evidence
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+
+
+def test_recovery_checks_raw_evidence_length_before_strip(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    prefix = " health line-a: FAIL "
+    for size in range(980, 1021):
+        candidate = deepcopy(state)
+        evidence = prefix + "x" * (size - len(prefix) - 1) + " "
+        assert len(evidence) == size
+        candidate["openIncidents"][key]["lastEvidence"] = evidence
+        expected = [key] if size < 1000 else []
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, candidate) == expected, (key, size)
+
+
+def test_clipped_mixed_failure_cannot_become_health_only_after_reload(recovery_case, dirs):
+    suffix = "health line-a: FAIL "
+    health_tail = suffix + "x" * (1000 - len(suffix))
+    dispatcher, state, key, recovery, _ = recovery_case([
+        "FAIL config line-a: " + "x" * 1200, health_tail,
+    ])
+    assert state["openIncidents"][key]["lastEvidence"] == health_tail
+    paths = {"incident_state": dirs[0] / "incident-state.json"}
+    assert dispatcher.save_incident_state(paths, state).advance_allowed
+    loaded = dispatcher.load_incident_state(paths)
+    assert len(loaded["openIncidents"][key]["lastEvidence"]) == 1000
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, loaded) == []
+
+
+@pytest.mark.parametrize("mutation", [
+    {"machine": "other-machine"}, {"source": "daily-health-fail"},
+    {"createdAt": "2026-05-31T00:00:00Z"}, {"createdAt": "invalid"},
+    {"evidence": "health line-b: 200 status=healthy"},
+    {"evidence": "health line-a: 200 status=healthy wa_connected=true"},
+])
+def test_recovery_needs_exact_scope_fresh_time_and_complete_health(recovery_case, mutation):
+    dispatcher, state, _, recovery, _ = recovery_case()
+    recovery.update(mutation)
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+
+
+def test_mismatched_qualified_target_cannot_recover(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    wrong_key = key.rsplit(":", 1)[0] + ":line-b"
+    state["openIncidents"][wrong_key] = state["openIncidents"].pop(key)
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+
+
+def test_invalid_or_newer_incident_metadata_prevents_recovery(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    timestamp_fields = ("openedAt", "eventCreatedAtEpoch", "lastSeenAt")
+    invalid_values = (None, True, False, "unknown", "", "1780185600", [], {}, 0, -1, 1780185600.0, float("nan"))
+    for field, value in product(timestamp_fields, invalid_values):
+        candidate = deepcopy(state)
+        candidate["openIncidents"][key][field] = deepcopy(value)
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, candidate) == [], (key, field, value)
+
+
+def test_recovery_must_follow_every_incident_timestamp(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    timestamp_fields = ("openedAt", "eventCreatedAtEpoch", "lastSeenAt")
+    recovery_epoch = 1780185900
+    timestamp_domain = (1780185600, 1780185899, 1780185900, 1780185901, 1780186000)
+    for timestamps in product(timestamp_domain, repeat=len(timestamp_fields)):
+        candidate = deepcopy(state)
+        candidate["openIncidents"][key].update(zip(timestamp_fields, timestamps))
+        expected = [key] if all(value < recovery_epoch for value in timestamps) else []
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, candidate) == expected, (key, timestamps)
+
+
+def test_recovery_requires_an_eligible_incident_lifecycle(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    lifecycle_states = ("open", "stale", "awaiting_physical", "closed", "resolved", "unknown", None, "", [], {}, True)
+    for status in lifecycle_states:
+        candidate = deepcopy(state)
+        candidate["openIncidents"][key]["status"] = deepcopy(status)
+        expected = [key] if status in ("open", "stale") else []
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, candidate) == expected, (key, status)
+
+
+def test_suppressed_failure_moves_the_recovery_cutoff(recovery_case, monkeypatch):
+    dispatcher, state, key, recovery, event = recovery_case()
+    monkeypatch.setattr(dispatcher.time, "time", lambda: 1780185800)
+    event["id"] = "later-failure"
+    event["createdAt"] = "2026-05-31T00:02:00Z"
+    assert dispatcher.should_suppress_send(event, state) is not None
+    assert state["openIncidents"][key]["lastSeenAt"] == 1780185800
+    recovery["createdAt"] = "2026-05-31T00:03:00Z"
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+
+
+def _physical_recovery_domains():
+    markers = (
+        ("status", "awaiting_physical"),
+        ("failureCode", "WA_AUTH_BOND_SERVER_REVOKED"),
+        ("recoverability", "manual_relink_required"),
+    )
+    timestamp_fields = ("openedAt", "eventCreatedAtEpoch", "lastSeenAt")
+    for width in range(1, len(markers) + 1):
+        for selected, latest_field in product(combinations(markers, width), timestamp_fields):
+            marker_names = "+".join(field for field, _ in selected)
+            yield pytest.param(dict(selected), latest_field, id=f"{marker_names}-{latest_field}")
+
+
+@pytest.mark.parametrize("physical_markers, latest_field", tuple(_physical_recovery_domains()))
+def test_physical_recovery_requires_proof_after_latest_failure(recovery_case, physical_markers, latest_field):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    state["openIncidents"][key].update({**physical_markers, latest_field: 1780185800})
+    for outbound_epoch in (None, *range(1780185700, 1780185900)):
+        candidate = deepcopy(state)
+        observation = deepcopy(recovery)
+        if outbound_epoch is not None:
+            timestamp = datetime.fromtimestamp(outbound_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+            observation["evidence"] += f" outbound_success_evidence=provider_acknowledged_or_better outbound_success_at={timestamp}"
+        expected = [key] if outbound_epoch is not None and outbound_epoch > 1780185800 else []
+        assert dispatcher.daily_health_recovered_incident_keys(observation, candidate) == expected, (
+            key, physical_markers, latest_field, outbound_epoch,
+        )
+
+
+def test_physical_recovery_retains_existing_stability_proof(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    state["openIncidents"][key]["status"] = "awaiting_physical"
+    recovery["evidence"] += f" lifecycle_process_uptime_seconds={dispatcher.SUSTAINED_STABILITY_MIN_UPTIME_SECONDS} reconnect_attempts=0"
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [key]
 
 
 @contextlib.contextmanager

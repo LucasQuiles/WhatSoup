@@ -179,6 +179,7 @@ AUTOCLOSE_PROTECTED_SOURCES = {
 AUTOCLOSE_PROTECTED_FAILURE_CODES = {
     "WA_AUTH_BOND_SERVER_REVOKED",
 }
+INCIDENT_EVIDENCE_LIMIT = 1000
 # Explicit extra sources to force-suppress on stale renotify (CSV), beyond the
 # built-in recovery/no-op pattern set and the SSOT action==none signal.
 STALE_RENOTIFY_SUPPRESS_SOURCES = {
@@ -2869,6 +2870,33 @@ def record_has_verified_health_recovery(record: dict[str, Any]) -> bool:
     return False
 
 
+def daily_health_failure_recovery_cutoff(record: dict[str, Any], instance: str) -> int | None:
+    evidence = record.get("lastEvidence")
+    if not isinstance(evidence, str) or not evidence or len(evidence) >= INCIDENT_EVIDENCE_LIMIT:
+        return None
+    if re.search(r"\[truncated\b|…|\.{3}", evidence, re.IGNORECASE):
+        return None
+    health_seen = False
+    for raw_line in evidence.splitlines():
+        line = raw_line.strip()
+        if not line or line == f"instance: {instance}":
+            continue
+        if not re.fullmatch(rf"(?:FAIL )?health {re.escape(instance)}:\s*\S.*", line):
+            return None
+        health_seen = True
+    if not health_seen:
+        return None
+    epochs: list[int] = []
+    for field in ("openedAt", "eventCreatedAtEpoch", "lastSeenAt"):
+        if field not in record:
+            continue
+        value = record[field]
+        if type(value) is not int or value <= 0:
+            return None
+        epochs.append(value)
+    return max(epochs) if epochs else None
+
+
 def daily_health_recovered_incident_keys(
     event: dict[str, Any],
     incident_state: dict[str, Any],
@@ -2889,17 +2917,28 @@ def daily_health_recovered_incident_keys(
         probe = match.group(2).strip()
         scope = f"{machine}|{instance}"
         if is_verified_whatsapp_health_recovery(probe):
-            daily_health_fail_prefix = f"{scope}|daily-health-fail:"
-            for key, record in open_incidents.items():
-                if not str(key).startswith(daily_health_fail_prefix):
-                    continue
+            for key in (
+                f"{scope}|daily-health-fail:{instance}",
+                f"{machine}|bot-errors-health|daily-health-fail:{instance}",
+            ):
+                record = open_incidents.get(key)
                 if not isinstance(record, dict):
                     continue
-                status = str(record.get("status") or "open")
-                if status in {"closed", "resolved"}:
+                status = record.get("status", "open")
+                if not isinstance(status, str) or status not in {"open", "stale", "awaiting_physical"}:
                     continue
-                opened = int_field(record, "eventCreatedAtEpoch", int_field(record, "openedAt"))
-                if created is None or opened <= 0 or created <= opened:
+                cutoff = daily_health_failure_recovery_cutoff(record, instance)
+                if created is None or cutoff is None or created <= cutoff:
+                    continue
+                requires_physical_proof = (
+                    status == "awaiting_physical"
+                    or str(record.get("failureCode") or "").strip().upper() in AUTOCLOSE_PROTECTED_FAILURE_CODES
+                    or record.get("recoverability") == "manual_relink_required"
+                )
+                if requires_physical_proof and not (
+                    has_post_incident_outbound_proof(probe, record, cutoff)
+                    or has_sustained_connection_stability(probe)
+                ):
                     continue
                 if key not in seen:
                     seen.add(key)
@@ -4508,7 +4547,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             open_record["lastSeenIso"] = now_iso()
             open_record["lastEventId"] = event.get("id")
             open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
-            open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
+            open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), INCIDENT_EVIDENCE_LIMIT, tail=True)
             suppressed = int_field(open_record, "suppressedCount") + 1
             open_record["suppressedCount"] = suppressed
             became_awaiting_physical = update_awaiting_physical_tracking(event, open_record, current)
@@ -4893,7 +4932,7 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             "lastNotifiedAt": current,
             "lastNotifiedIso": now_iso(),
             "lastSummary": redacted_state_text(event_text(event, "summary"), 500),
-            "lastEvidence": redacted_state_text(event_text(event, "evidence"), 1000, tail=True),
+            "lastEvidence": redacted_state_text(event_text(event, "evidence"), INCIDENT_EVIDENCE_LIMIT, tail=True),
             "suppressedCount": suppressed,
             "renotifyCount": renotify_count,
             "forceNotifyLevels": force_levels,

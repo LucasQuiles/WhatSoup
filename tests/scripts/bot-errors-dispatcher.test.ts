@@ -606,11 +606,11 @@ describe('bot-errors-dispatcher', () => {
     expect(duplicate!.eventKind).toBe('incident_recovery');
   });
 
-  it('closes daily-health-fail incidents from a later healthy daily-health summary', () => {
+  it.each(['line-a', 'bot-errors-health'])('closes %s daily-health-fail incidents from a later healthy daily-health summary', (incidentInstance) => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
     const suppressed = join(tmpRoot, 'suppressed');
-    const incidentKey = 'test-machine|line-a|daily-health-fail:line-a';
+    const incidentKey = `test-machine|${incidentInstance}|daily-health-fail:line-a`;
     execFileSync('python3', ['deploy/scripts/patch-incident-state.py', tmpRoot, JSON.stringify({
       version: 1,
       openIncidents: {
