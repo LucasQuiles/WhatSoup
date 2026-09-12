@@ -736,7 +736,8 @@ function resolveHomeConfinedPath(
           return resolved; // Planned path; creation and final consumption revalidate it.
         }
       } catch {
-        // A path that changed during admission receives the same confinement refusal.
+        jsonResponse(res, 400, { error });
+        return null;
       }
     }
     jsonResponse(res, 400, { error });

@@ -2688,7 +2688,8 @@ export class SessionManager {
               continue;
             }
           } catch {
-            // Fall through to normal parsing
+            // Intentional: messages that cannot be intercepted continue through
+            // the provider parser, which owns protocol error reporting.
           }
         }
 
