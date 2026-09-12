@@ -22,7 +22,7 @@
 #   0  healthy / recovered  (status=healthy AND turn_capability.model_usable=true)
 #   1  still degraded after exhausting kickstarts (escalate: GUI keychain unlock)
 #   2  infrastructure: bad args, /health unreachable, or unparseable body
-#   3  unexpected state: /health body present but missing required fields
+#   3  unexpected state: /health body missing required fields or valid freshness
 #
 # Usage:
 #   whatsoup-keychain-heal.sh --label com.whatsoup.x-bot --port 9090 \
@@ -132,7 +132,8 @@ while :; do
       ;;
     fields)
       echo "whatsoup-keychain-heal: FATAL: /health body missing status or" \
-           "turn_capability.model_usable." >&2
+           "turn_capability.model_usable, or missing/invalid" \
+           "turn_capability.model_usable_stale (boolean required)." >&2
       exit 3
       ;;
     *)

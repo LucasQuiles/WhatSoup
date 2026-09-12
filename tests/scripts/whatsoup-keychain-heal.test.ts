@@ -37,9 +37,10 @@ const FAKE_CURL = [
   '# fake curl: report health JSON based on $STATE_FILE',
   'state="$(cat "$STATE_FILE" 2>/dev/null || echo degraded)"',
   'case "$state" in',
-  "  healthy)     echo '{\"status\":\"healthy\",\"turn_capability\":{\"model_usable\":true}}' ;;",
+  "  healthy)     echo '{\"status\":\"healthy\",\"turn_capability\":{\"model_usable\":true,\"model_usable_stale\":false}}' ;;",
   "  stale)       echo '{\"status\":\"healthy\",\"turn_capability\":{\"model_usable\":true,\"model_usable_stale\":true}}' ;;",
-  "  degraded)    echo '{\"status\":\"degraded\",\"turn_capability\":{\"model_usable\":false}}' ;;",
+  "  degraded)    echo '{\"status\":\"degraded\",\"turn_capability\":{\"model_usable\":false,\"model_usable_stale\":false}}' ;;",
+  '  freshness)   printf "%s\\n" "$FRESHNESS_BODY" ;;',
   '  unreachable) exit 7 ;;',
   "  parse)       echo 'not-json{' ;;",
   "  fields)      echo '{\"status\":\"degraded\"}' ;;",
@@ -195,6 +196,32 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
     expect(kickstartCount(h), 'must not kickstart on missing fields').toBe(0);
     expect(stderr).toMatch(/missing status or/i);
   });
+
+  for (const status of ['healthy', 'degraded']) {
+    it.each([
+      { name: 'missing', value: undefined },
+      { name: 'null', value: null },
+      { name: 'string', value: 'false' },
+      { name: 'zero', value: 0 },
+      { name: 'one', value: 1 },
+      { name: 'object', value: {} },
+      { name: 'array', value: [] },
+    ])(
+      `refuses ${status} with $name freshness without kickstart`,
+      ({ value: stale }) => {
+        const h = makeHarness('freshness');
+        const { exitCode, stderr } = runHeal(h, BASE_ARGS, {
+          FRESHNESS_BODY: JSON.stringify({
+            status,
+            turn_capability: { model_usable: true, model_usable_stale: stale },
+          }),
+        });
+        expect(exitCode, 'unobserved freshness must use the fields exit').toBe(3);
+        expect(kickstartCount(h), 'unknown evidence must never authorize kickstart').toBe(0);
+        expect(stderr).not.toMatch(/already healthy|recovered after|kickstart \d/i);
+      },
+    );
+  }
 
   it('fails closed (exit 2) when the kickstart command itself fails', () => {
     const h = makeHarness('degraded');

@@ -23,7 +23,10 @@ def classify(d: object) -> str:
     tc = d.get("turn_capability")
     if status is None or not isinstance(tc, dict) or "model_usable" not in tc:
         return "fields"
-    fresh_usable = tc.get("model_usable") is True and tc.get("model_usable_stale") is not True
+    # Unknown freshness must use the caller's non-mutating "fields" path.
+    if type(tc.get("model_usable_stale")) is not bool:
+        return "fields"
+    fresh_usable = tc.get("model_usable") is True and tc["model_usable_stale"] is False
     return "ok" if (status == "healthy" and fresh_usable) else "degraded"
 
 

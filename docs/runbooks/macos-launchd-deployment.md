@@ -614,6 +614,11 @@ bounded number of times, exiting non-zero to escalate if it cannot recover):
 deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port <port>
 ```
 
+The helper requires an explicit boolean `turn_capability.model_usable_stale`.
+Missing, null or malformed freshness evidence exits 3 without a kickstart; inspect
+the health projection and producer schema before retrying. The helper trusts the
+runtime's stale verdict and does not independently validate provider-proof times.
+
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI
 Terminal on the host (e.g. via RustDesk) and run
