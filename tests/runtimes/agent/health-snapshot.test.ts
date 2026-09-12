@@ -6,6 +6,7 @@
  * lastSessionStartedAt (string | null), and fallback-state fields.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type { AutoCompactController } from '../../../src/runtimes/agent/auto-compact-controller.ts';
@@ -960,6 +961,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
       const mutableConfig = config as unknown as Record<string, unknown>;
       mutableConfig.proactiveResumeOnStartup = true;
       try {
+        await prepareRuntimeHome();
         await runtime.start();
       } finally {
         delete mutableConfig.proactiveResumeOnStartup;

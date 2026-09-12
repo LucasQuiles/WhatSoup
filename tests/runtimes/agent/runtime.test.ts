@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
+import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -520,7 +522,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -686,49 +688,15 @@ function handleEventDownstreamWithoutAdmission(
   );
 }
 
-describe('isUsageLimitMessage', () => {
-  it('does not suppress ordinary discussion of usage limits or quotas', () => {
-    expect(isUsageLimitMessage(
-      'Please document how usage limit and quota exceeded errors should be handled.',
-    )).toBe(false);
-  });
-
-  it('matches distinctive provider usage-cap notices', () => {
-    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
-    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
-  });
-
-  it('requires reset-time evidence for generic quota wording', () => {
-    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
-    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
-  });
-});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 // The runtime keeps its mkdir mock; only harness-owned positive roots exist.
 beforeEach(async () => {
-  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
-  const home = process.env.WHATSOUP_VITEST_HOME;
-  if (!home || home !== process.env.HOME
-    || !fs.lstatSync(join(home, '.whatsoup-vitest-home')).isFile()
-    || fs.realpathSync.native(tmpdir()) !== join(home, 'tmp')) {
-    throw new Error('runtime filesystem fixtures require the marked Vitest HOME');
-  }
-  fs.mkdirSync(join(home, '.claude'), { recursive: true, mode: 0o700 });
-  fs.mkdirSync(join(tmpdir(), '.claude'), { recursive: true, mode: 0o700 });
+  const fs = await prepareRuntimeHome();
   // Keep the real restart guard without sharing boot history between tests.
   mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'runtime-state-'));
 });
-
-async function ownedRuntimeCwd(name: string): Promise<string> {
-  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
-  const cwd = join(tmpdir(), name);
-  fs.mkdirSync(join(cwd, '.claude'), { recursive: true, mode: 0o700 });
-  return cwd;
-}
 
 describe('AgentRuntime', () => {
   beforeEach(async () => {
@@ -847,87 +815,10 @@ describe('AgentRuntime', () => {
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
   });
 
-  it('F6 binds admitted runtime cwd before the first actor socket acquisition', async () => {
-    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
-    const { homedir } = await import('node:os');
-    const { isPathWithinAllowedRoot } = await import('../../../src/lib/path-boundary.ts');
-    const { mkdirSync } = await import('node:fs');
-    const fixture = fs.mkdtempSync(join(homedir(), 'f6-runtime-binding-'));
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-binding-outside-'));
-    const physical = join(fixture, 'physical');
-    const alias = join(fixture, 'alias');
-    const previousMkdir = vi.mocked(mkdirSync).getMockImplementation();
-    let runtime: AgentRuntime | undefined;
-    try {
-      fs.mkdirSync(physical);
-      fs.symlinkSync(physical, alias);
-      const insideFile = join(physical, 'inside.txt');
-      const outsideFile = join(outside, 'outside.txt');
-      fs.writeFileSync(insideFile, 'inside');
-      fs.writeFileSync(outsideFile, 'outside');
-      vi.mocked(mkdirSync).mockImplementation(fs.mkdirSync);
-      runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
-        cwd: alias,
-        sessionScope: 'per_chat',
-        perChatConversationBound: true,
-      });
-      const state = runtime as unknown as {
-        cwd?: string;
-        perChatMcpSocketManager: {
-          consumedAllowedRoots: string[];
-          resources: Map<string, unknown>;
-          acquire(identity: string): { ready: Promise<void> };
-        };
-      };
-      const manager = state.perChatMcpSocketManager;
-      await runtime.start();
-      expect(state.cwd).toBe(fs.realpathSync.native(physical));
-      expect(manager.consumedAllowedRoots).toEqual([]);
-      expect(manager.resources.size).toBe(0);
-
-      // Retarget AFTER runtime admission, BEFORE the first actor acquisition.
-      fs.unlinkSync(alias);
-      fs.symlinkSync(outside, alias);
-      await manager.acquire('later@s.whatsapp.net').ready;
-      expect(manager.consumedAllowedRoots).toHaveLength(1);
-      const consumed = manager.consumedAllowedRoots[0];
-      expect(isPathWithinAllowedRoot(fs.realpathSync.native(outsideFile), consumed)).toBe(false);
-      expect(isPathWithinAllowedRoot(fs.realpathSync.native(insideFile), consumed)).toBe(true);
-      expect(consumed).toBe(fs.realpathSync.native(physical));
-      expect(mockSession.sendTurn).not.toHaveBeenCalled();
-    } finally {
-      try {
-        await runtime?.shutdown();
-      } finally {
-        vi.mocked(mkdirSync).mockImplementation(previousMkdir ?? (() => undefined));
-        fs.rmSync(fixture, { recursive: true, force: true });
-        fs.rmSync(outside, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it('F6 rejects a replaced cwd before creating runtime files outside home', async () => {
-    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
-    const { homedir } = await import('node:os');
-    const home = homedir();
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-outside-'));
-    const cwd = join(home, 'f6-runtime-cwd');
-    fs.symlinkSync(outside, cwd);
-    const { mkdirSync } = await import('node:fs');
-    const previousMkdir = vi.mocked(mkdirSync).getMockImplementation();
-    vi.mocked(mkdirSync).mockImplementation(fs.mkdirSync);
-    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { cwd });
-    try {
-      await expect(runtime.start()).rejects.toThrow(/home/);
-      expect(fs.readdirSync(outside)).toEqual([]);
-      expect(mockSession.spawnSession).not.toHaveBeenCalled();
-    } finally {
-      await runtime.shutdown();
-      vi.mocked(mkdirSync).mockImplementation(previousMkdir ?? (() => undefined));
-      fs.unlinkSync(cwd);
-      fs.rmSync(outside, { recursive: true, force: true });
-    }
-  });
+  registerRuntimeHomeConfinementTests(
+    options => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', options),
+    mockSession,
+  );
 
   it('start() calls ensureAgentSchema', async () => {
     const { ensureAgentSchema } = await import('../../../src/runtimes/agent/session-db.ts');

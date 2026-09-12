@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -181,7 +182,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-owner', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions, queues, trackers } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);
@@ -244,7 +245,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-race', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions, queues, trackers } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);
@@ -300,7 +301,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-rekey', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 100);
@@ -453,7 +454,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-fail', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const replacementPidFile = join(tmpdir(), `${runId}-replacement-pid.json`);
@@ -525,7 +526,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-shutdown-fail', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);

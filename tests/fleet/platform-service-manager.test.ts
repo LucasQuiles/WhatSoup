@@ -180,6 +180,7 @@ describe('platform service managers', () => {
     SERVICE_HOME = realFs.realpathSync.native(
       realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-home-')),
     );
+    realFs.mkdirSync(realPath.join(SERVICE_HOME, 'claude-roots'));
 
     vi.useRealTimers();
     setPlatform(originalPlatform);
