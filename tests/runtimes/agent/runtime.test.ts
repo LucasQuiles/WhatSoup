@@ -282,7 +282,7 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    stateRoot: '/tmp/whatsoup-test-state-runtime',
+    stateRoot: '', // Assigned a private directory by the file-level beforeEach.
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media-runtime/tmp',
     pineconeAllowedIndexes: [] as string[],
@@ -527,6 +527,13 @@ import {
   handlePerChatProviderEvent, currentCrashIdentity,
   type AutoCompactView, type ImageCoalescerView,
 } from './lib/runtime-mock-scaffold.ts';
+
+beforeEach(async () => {
+  // Restart journals persist through real descriptor IO despite the partial fs mock.
+  // Keep every describe under the existing owned Vitest temporary-home lifecycle.
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'ws-runtime-state-'));
+});
 
 // ─── Coupled helpers (hoisting-pinned, cannot leave this file) ────────────────
 
