@@ -31,6 +31,7 @@
 // 1555-prefixed numbers, matching the sibling suites.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import { createServer, request } from 'node:http';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
@@ -434,7 +435,8 @@ function cfgAny(): Record<string, unknown> {
   return mockConfig as unknown as Record<string, unknown>;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await prepareRuntimeHome();
   vi.clearAllMocks();
   capturedOnEventRef.current = null;
   classifyInputOverrideRef.current = null;
