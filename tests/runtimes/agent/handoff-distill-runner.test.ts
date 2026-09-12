@@ -35,6 +35,35 @@ describe('HandoffDistillRunner', () => {
     expect(persisted).toHaveLength(0);
   });
 
+  it('reports success only after persistence, never for a concurrent skipped tick', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const events: string[] = [];
+    const { runner } = harness({
+      distillFor: async () => { await pending; return { summary: 's', tokensUsed: 1 }; },
+      persist: () => { events.push('persisted'); },
+      onSucceeded: (key) => { events.push(`succeeded:${key}`); },
+    });
+    const first = runner.tickConversation('c1');
+    await runner.tickConversation('c1');
+    expect(events).toEqual([]);
+    release();
+    await first;
+    expect(events).toEqual(['persisted', 'succeeded:c1']);
+  });
+
+  it('does not report success when a failed attempt exhausts the call budget', async () => {
+    const onSucceeded = vi.fn();
+    const distillFor = vi.fn().mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValue({ summary: 's', tokensUsed: 1 });
+    const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 }, distillFor, onSucceeded });
+    await runner.tickConversation('c1');
+    await runner.tickConversation('c1');
+    expect(distillFor).toHaveBeenCalledTimes(1);
+    expect(persisted).toEqual([]);
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
   it('prune() forgets gate state so a no-longer-active conversation distills fresh', async () => {
     // Budget of 1 call/window: after one distill the conversation is gated off.
     const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 } });
