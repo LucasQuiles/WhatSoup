@@ -21,6 +21,9 @@
  * this store behind the feature flag.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { Database } from '../../src/core/database.ts';
 import {
@@ -56,8 +59,10 @@ function enqueueInput(inboundSeq: number, overrides: Partial<DeferredTurnEnqueue
 describe('deferred turn obligations (#3295 S1)', () => {
   let db: Database;
   let store: DeferredTurnStore;
+  let databaseDirectory: string | null;
 
   beforeEach(() => {
+    databaseDirectory = null;
     db = new Database(':memory:');
     db.open();
     store = new DeferredTurnStore(db);
@@ -65,10 +70,11 @@ describe('deferred turn obligations (#3295 S1)', () => {
 
   afterEach(() => {
     db.close();
+    if (databaseDirectory !== null) rmSync(databaseDirectory, { recursive: true });
   });
 
   function claim(token = 'claim-token-1', ttlSeconds = 300) {
-    return store.claimNextEligible(SCOPE, { claimToken: token, ttlSeconds });
+    return store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds });
   }
 
   describe('enqueue', () => {
@@ -160,7 +166,7 @@ describe('deferred turn obligations (#3295 S1)', () => {
 
     it('a stale expired claim returns to pending via reclaim, preserving attempts', () => {
       store.enqueueDeferredObligation(enqueueInput(22));
-      const claimed = store.claimNextEligible(SCOPE, { claimToken: 'claim-short', ttlSeconds: -1 });
+      const claimed = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: 'claim-short', ttlSeconds: -1 });
       expect(claimed).not.toBeNull();
 
       const reclaimed = store.expireStaleClaims(SCOPE);
@@ -204,6 +210,155 @@ describe('deferred turn obligations (#3295 S1)', () => {
       const created = store.enqueueDeferredObligation(enqueueInput(33));
       expect(() => store.terminalizeCompleted(created.id, { claimToken: 'claim-x', claimEpoch: 1 }))
         .toThrow(DeferredTurnClaimFenceError);
+    });
+  });
+
+  describe('conversation-scoped claims', () => {
+    const otherConversation = '15550100002';
+
+    function claimOther(token = 'claim-other') {
+      return store.claimNextEligible(SCOPE, {
+        conversationKey: otherConversation,
+        claimToken: token,
+        ttlSeconds: 300,
+      });
+    }
+
+    function useFileDatabase(): string {
+      db.close();
+      databaseDirectory = mkdtempSync(join(tmpdir(), 'deferred-reopen-'));
+      const path = join(databaseDirectory, 'state.sqlite');
+      db = new Database(path);
+      db.open();
+      store = new DeferredTurnStore(db);
+      return path;
+    }
+
+    function reopen(path: string): void {
+      db.close();
+      db = new Database(path);
+      db.open();
+      store = new DeferredTurnStore(db);
+    }
+
+    it.each(['claimed', 'dispatched_commit', 'exhausted'] as const)(
+      'a %s head holds its conversation while another conversation progresses FIFO',
+      (headState) => {
+        const first = store.enqueueDeferredObligation(enqueueInput(5));
+        store.enqueueDeferredObligation(enqueueInput(7, { conversationKey: otherConversation, text: 'other first' }));
+        store.enqueueDeferredObligation(enqueueInput(9));
+        store.enqueueDeferredObligation(enqueueInput(11, { conversationKey: otherConversation, text: 'other second' }));
+
+        const head = claim('head');
+        expect(head?.inboundSeq).toBe(5);
+        const fence = { claimToken: 'head', claimEpoch: head!.claimEpoch };
+        if (headState === 'dispatched_commit') store.markDispatchCommit(first.id, fence);
+        if (headState === 'exhausted') {
+          store.requeueClaim(first.id, fence, 'provider_unavailable');
+          for (let attempt = 1; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+            const token = `exhaust-${attempt}`;
+            const current = claim(token);
+            expect(current?.id).toBe(first.id);
+            store.requeueClaim(first.id, { claimToken: token, claimEpoch: current!.claimEpoch }, 'provider_unavailable');
+          }
+        }
+
+        expect(claim('must-hold')).toBeNull();
+        const other = claimOther();
+        expect(other).toMatchObject({
+          inboundSeq: 7,
+          conversationKey: otherConversation,
+          sourceMessageId: 'wamid-deferred-7',
+          text: 'other first',
+        });
+        expect(claimOther('must-hold-other')).toBeNull();
+        const otherFence = { claimToken: 'claim-other', claimEpoch: other!.claimEpoch };
+        store.markDispatchCommit(other!.id, otherFence);
+        store.terminalizeCompleted(other!.id, otherFence);
+        expect(claimOther('other-second')).toMatchObject({ inboundSeq: 11, text: 'other second' });
+        expect(claim('still-held')).toBeNull();
+        store.terminalizeByOperator(first.id, 'operator_resolved_manually');
+        expect(claim('after-operator')?.inboundSeq).toBe(9);
+      },
+    );
+
+    it.each([
+      { name: 'missing', key: undefined },
+      { name: 'empty', key: '' },
+      { name: 'whitespace', key: '   ' },
+      { name: 'oversized ASCII', key: 'a'.repeat(2049) },
+      { name: 'oversized UTF-8', key: 'é'.repeat(1025) },
+    ])('refuses a $name per-chat key without spending an attempt', ({ key }) => {
+      const created = store.enqueueDeferredObligation(enqueueInput(51));
+      expect(() => store.claimNextEligible(SCOPE, {
+        conversationKey: key,
+        claimToken: 'invalid-key',
+        ttlSeconds: 300,
+      })).toThrow(/conversation key/i);
+      expect(store.listOpenObligations(SCOPE)).toEqual([
+        { id: created.id, inboundSeq: 51, status: 'pending', attemptCount: 0 },
+      ]);
+    });
+
+    it('cannot claim a source using a different conversation key', () => {
+      store.enqueueDeferredObligation(enqueueInput(61));
+      expect(claimOther()).toBeNull();
+      expect(claim()?.attemptCount).toBe(1);
+    });
+
+    it('keeps non-per-chat FIFO scope-wide without requiring a conversation key', () => {
+      const first = store.enqueueDeferredObligation(enqueueInput(71, { scope: 'global' }));
+      store.enqueueDeferredObligation(enqueueInput(72, { scope: 'global', conversationKey: otherConversation }));
+      const head = store.claimNextEligible('global', { claimToken: 'global-first', ttlSeconds: 300 });
+      expect(head?.inboundSeq).toBe(71);
+      expect(store.claimNextEligible('global', { conversationKey: otherConversation, claimToken: 'global-held', ttlSeconds: 300 })).toBeNull();
+      store.terminalizeByOperator(first.id, 'operator_resolved_manually');
+      expect(store.claimNextEligible('global', { claimToken: 'global-second', ttlSeconds: 300 })?.inboundSeq).toBe(72);
+    });
+
+    it('reclaims a pre-commit claim after SQLite reopen and rejects its previous fence', () => {
+      const path = useFileDatabase();
+      store.enqueueDeferredObligation(enqueueInput(81));
+      const original = claim('before-reopen', -1)!;
+      const oldFence = { claimToken: 'before-reopen', claimEpoch: original.claimEpoch };
+
+      reopen(path);
+
+      expect(store.expireStaleClaims(SCOPE)).toBe(1);
+      const reclaimed = claim('after-reopen')!;
+      expect(reclaimed).toMatchObject({ id: original.id, inboundSeq: 81, attemptCount: 2 });
+      expect(reclaimed.claimEpoch).toBeGreaterThan(original.claimEpoch);
+      expect(() => store.markDispatchCommit(original.id, oldFence)).toThrow(DeferredTurnClaimFenceError);
+      expect(() => store.requeueClaim(original.id, oldFence, 'stale_owner')).toThrow(DeferredTurnClaimFenceError);
+      expect(() => store.terminalizeCompleted(original.id, oldFence)).toThrow(DeferredTurnClaimFenceError);
+      const newFence = { claimToken: 'after-reopen', claimEpoch: reclaimed.claimEpoch };
+      store.markDispatchCommit(reclaimed.id, newFence);
+      expect(() => store.markDispatchCommit(reclaimed.id, newFence)).toThrow(DeferredTurnClaimFenceError);
+      expect(() => store.terminalizeCompleted(reclaimed.id, oldFence)).toThrow(DeferredTurnClaimFenceError);
+      store.terminalizeCompleted(reclaimed.id, newFence);
+      expect(store.listOpenObligations(SCOPE)).toEqual([]);
+    });
+
+    it('retains the post-commit replay veto and conversation hold after SQLite reopen', () => {
+      const path = useFileDatabase();
+      store.enqueueDeferredObligation(enqueueInput(91, { text: 'persisted envelope' }));
+      store.enqueueDeferredObligation(enqueueInput(92, { conversationKey: otherConversation }));
+      store.enqueueDeferredObligation(enqueueInput(93));
+      const committed = claim('commit-before-reopen', -1)!;
+      const fence = { claimToken: 'commit-before-reopen', claimEpoch: committed.claimEpoch };
+      store.markDispatchCommit(committed.id, fence);
+
+      reopen(path);
+
+      expect(store.expireStaleClaims(SCOPE)).toBe(0);
+      expect(() => store.requeueClaim(committed.id, fence, 'restart_retry')).toThrow(/dispatch.*commit|committed/i);
+      expect(claim('must-not-replay')).toBeNull();
+      expect(claimOther()).toMatchObject({ inboundSeq: 92, conversationKey: otherConversation });
+      expect(db.raw.prepare('SELECT status, replay_text, source_message_id FROM deferred_turn_obligations WHERE id = ?').get(committed.id)).toMatchObject({
+        status: 'dispatched_commit',
+        replay_text: 'persisted envelope',
+        source_message_id: 'wamid-deferred-91',
+      });
     });
   });
 
