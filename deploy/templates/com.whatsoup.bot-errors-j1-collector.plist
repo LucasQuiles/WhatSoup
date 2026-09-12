@@ -18,6 +18,10 @@
   noise). The drift guard prints `warn: unmanaged collector job: <label>` for any
   other LaunchAgent whose plist names the collector.
 
+  Before bootstrapping this managed label, deploy a health runtime that includes
+  the exact bot-errors-j1-collector support-service exemption and its matching
+  runtime-manifest hash. Otherwise a running collector fails profile coverage.
+
   Replace before installing (the drift guard substitutes the same tokens):
     __HOME__  — the account home directory
 
