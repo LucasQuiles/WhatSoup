@@ -11,6 +11,8 @@
  * file-scoped and cannot be shared across test files.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -278,7 +280,7 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    stateRoot: '/tmp/whatsoup-test-state-runtime',
+    stateRoot: '', // Assigned a private directory by the file-level beforeEach.
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media-model-pin/tmp',
     pineconeAllowedIndexes: [] as string[],
@@ -497,6 +499,13 @@ import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/m
 import { providerConfigEffort, providerHasNativeReasoningControl } from '../../../src/runtimes/agent/reasoning-control.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
+
+beforeEach(async () => {
+  // Restart journals persist through real descriptor IO despite the partial fs mock.
+  // Keep every describe under the existing owned Vitest temporary-home lifecycle.
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'ws-model-pin-state-'));
+});
 
 function makeMessenger(
   // F2a (#2121): production's SubmissionReceipt carries the sent message's
