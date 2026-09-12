@@ -28,6 +28,7 @@ import {
 } from '../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts';
 import { waitForSocket } from '../../helpers/wait-for.ts';
 import { sendJsonRpc } from '../../helpers/socket-rpc.ts';
+import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 
 describe('PerChatMcpSocketManager', () => {
   const roots: string[] = [];
@@ -79,7 +80,7 @@ describe('PerChatMcpSocketManager', () => {
 
   it('F6 carries an admitted runtime root into the first actor socket after alias retarget', async () => {
     const root = mkdtempSync(join(homedir(), 'f6-actor-root-'));
-    const outside = mkdtempSync(join(process.env.TEMP!, 'f6-actor-outside-'));
+    const outside = await outsideRuntimeHome(homedir(), 'f6-actor-outside-');
     roots.push(root, outside);
     const physical = join(root, 'physical');
     const alias = join(root, 'alias');

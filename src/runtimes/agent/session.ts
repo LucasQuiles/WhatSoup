@@ -2468,6 +2468,7 @@ export class SessionManager {
     }
     cwd = this.admitConfiguredCwd();
     const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
+    if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
 
     const child = spawn(binary, args, {
       cwd,
@@ -2678,7 +2679,7 @@ export class SessionManager {
               }
               // Send a fresh thread/start without threadId
               this.sendCodexRequest(child, 'thread/start', {
-                cwd: this.configuredCwd ?? homedir(),
+                cwd: this.admitConfiguredCwd(),
                 approvalPolicy: 'never' as const,
                 sandbox: 'danger-full-access' as const,
                 persistExtendedHistory: true,

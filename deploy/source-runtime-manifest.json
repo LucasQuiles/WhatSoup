@@ -83,7 +83,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "2277de18b2a36393d2f696f27335232da2869c3ed28371da5115b461455d2ad1",
+      "sha256": "df042fc8bd44ec9d58c7961067e8c56c213f605add891aba774e437587280ecb",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",

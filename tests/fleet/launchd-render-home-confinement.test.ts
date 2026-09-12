@@ -134,7 +134,7 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     expect(() => assertHomeConfinedRenderOptions(options, home)).toThrow(LaunchdRenderConfigError);
 
     fs.symlinkSync(path.join(tmpDir, 'nowhere'), path.join(home, 'not-created-yet'));
-    expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home))
+    expect(() => assertHomeConfinedRenderOptions(options, home))
       .toThrow(LaunchdRenderConfigError);
   });
 

@@ -9,6 +9,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -328,7 +329,7 @@ describe('SessionManager', () => {
   it('F6 rechecks cwd after the final provider canary wait before spawn', async () => {
     const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
     const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-transition-'));
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-transition-outside-'));
+    const outside = await outsideRuntimeHome(home, 'f6-transition-outside-');
     const cwd = join(home, 'cwd');
     fs.mkdirSync(cwd);
     const previousHome = homedir();
@@ -382,7 +383,7 @@ describe('SessionManager', () => {
   it('F6 refuses a spawn-per-turn relaunch after its physical cwd is replaced', async () => {
     const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
     const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-relaunch-'));
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-relaunch-outside-'));
+    const outside = await outsideRuntimeHome(home, 'f6-relaunch-outside-');
     const cwd = join(home, 'cwd');
     fs.mkdirSync(cwd);
     const previousHome = homedir();
@@ -4193,6 +4194,56 @@ describe('Codex session resume via thread ID', () => {
         persistExtendedHistory: true,
       },
     });
+  });
+
+  it.each(['alias', 'physical'] as const)('F6 binds the Codex resume retry after its %s cwd is retargeted', async (target) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-codex-retry-'));
+    const outside = await outsideRuntimeHome(home, 'f6-codex-retry-outside-');
+    const physical = join(home, 'physical');
+    const alias = join(home, 'alias');
+    fs.mkdirSync(physical);
+    fs.symlinkSync(physical, alias);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      provider: 'codex-cli', cwd: alias, onEvent: vi.fn(),
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await sm.spawnSession('thread_stale_xyz', 42);
+      expect(spawn).toHaveBeenCalledWith('codex', expect.any(Array), expect.objectContaining({ cwd: physical }));
+      const resumeRequest = mockChild.stdin.write.mock.calls
+        .map(call => JSON.parse(String(call[0])) as { id: string; method?: string })
+        .find(call => call.method === 'thread/start');
+      expect(resumeRequest).toBeDefined();
+      if (target === 'alias') fs.unlinkSync(alias);
+      else fs.rmdirSync(physical);
+      fs.symlinkSync(outside, target === 'alias' ? alias : physical);
+      mockChild.stdin.write.mockClear();
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0', id: resumeRequest!.id, error: { code: -32600, message: 'Thread not found' },
+      }) + '\n'));
+      const retries = mockChild.stdin.write.mock.calls
+        .map(call => JSON.parse(String(call[0])) as { method?: string; params?: { cwd?: string } })
+        .filter(call => call.method === 'thread/start');
+      if (target === 'alias') {
+        expect(retries).toHaveLength(1);
+        expect(retries[0]?.params?.cwd).toBe(physical);
+      } else {
+        expect(retries).toEqual([]);
+      }
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('clears stale thread ID from DB after resume failure', async () => {

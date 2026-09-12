@@ -2,6 +2,20 @@ import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { vi } from 'vitest';
 
+export async function outsideRuntimeHome(home: string, prefix: string): Promise<string> {
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const root = process.env.WHATSOUP_VITEST_TEMP_ROOT;
+  if (!root || !prefix || basename(prefix) !== prefix) {
+    throw new Error('outside-home fixtures require the Vitest temporary root and a child prefix');
+  }
+  const physicalRoot = fs.realpathSync.native(root);
+  const fromHome = relative(fs.realpathSync.native(home), physicalRoot);
+  if (!fromHome || (fromHome !== '..' && !fromHome.startsWith(`..${sep}`) && !isAbsolute(fromHome))) {
+    throw new Error('outside-home fixtures must start outside the admitted home');
+  }
+  return fs.mkdtempSync(join(physicalRoot, prefix));
+}
+
 export async function prepareRuntimeHome(): Promise<typeof import('node:fs')> {
   const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
   const home = process.env.WHATSOUP_VITEST_HOME;

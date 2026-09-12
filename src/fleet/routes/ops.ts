@@ -730,8 +730,14 @@ function resolveHomeConfinedPath(
   try {
     return admitHomeConfinedPath(resolved, homePath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && plannedPrefixIsConfined(rawAbsolute, fs.realpathSync.native(homePath))) {
-      return resolved; // Planned path; creation and final consumption revalidate it.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      try {
+        if (plannedPrefixIsConfined(rawAbsolute, fs.realpathSync.native(homePath))) {
+          return resolved; // Planned path; creation and final consumption revalidate it.
+        }
+      } catch {
+        // A path that changed during admission receives the same confinement refusal.
+      }
     }
     jsonResponse(res, 400, { error });
     return null;

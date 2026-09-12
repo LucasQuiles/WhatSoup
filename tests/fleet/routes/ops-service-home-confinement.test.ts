@@ -17,8 +17,7 @@
  * render admission (assertValidLaunchdPlistRenderOptions -> reconcileLaunchdPlist,
  * src/fleet/platform.ts), so rejecting an out-of-home value there would stop an
  * instance that already persisted one from loading at all. These guards close
- * the ingress; an already-persisted out-of-home entry still passes render
- * admission.
+ * the ingress; final render admission independently revalidates persisted paths.
  *
  * Harness mirrors ops-create-service-passthrough.test.ts (HOME/XDG overridden
  * to a synthetic tmp tree) and ops-branches2.test.ts (handleConfigUpdate driven
@@ -156,6 +155,43 @@ describe('service block home-confinement (F3)', () => {
       'service.claudeConfigDir must be within the home directory',
     );
     expect(fs.existsSync(cfgPathFor('svc-create-cfg-escape'))).toBe(false);
+  });
+
+  it.each([false, true])('keeps a service-path transition to a dangling link within the confinement response (retarget=%s)', async (retarget) => {
+    const home = homeDir();
+    const target = path.join(home, 'target');
+    const alias = path.join(home, 'alias');
+    fs.mkdirSync(target);
+    fs.symlinkSync(target, alias);
+    const entry = path.join(alias, 'bin');
+    fs.mkdirSync(path.join(target, 'bin'));
+    const native = fs.realpathSync.native;
+    let observed = false;
+    const probe = vi.spyOn(fs.realpathSync, 'native').mockImplementation((...args) => {
+      const result = native(...args);
+      if (!observed && String(args[0]) === entry) {
+        observed = true;
+        if (retarget) fs.renameSync(target, path.join(home, 'moved-target'));
+      }
+      return result;
+    });
+    const name = retarget ? 'svc-becomes-dangling' : 'svc-remains-confined';
+    const deps = makeDeps<any>({});
+    const res = mockRes();
+    try {
+      await handleCreateLine(mockReq({ method: 'POST', body: createBody({ pathPrepend: [entry] }, name) }), res, deps);
+      expect(observed).toBe(true);
+      expect(res._status, res._body).toBe(retarget ? 400 : 201);
+      if (retarget) {
+        expect(JSON.parse(res._body).error).toMatch(/service.pathPrepend.*home directory/);
+        expect(fs.existsSync(cfgPathFor(name))).toBe(false);
+        expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+      } else {
+        expect(fs.existsSync(cfgPathFor(name))).toBe(true);
+      }
+    } finally {
+      probe.mockRestore();
+    }
   });
 
   it('admits a CREATE whose service paths are inside the home directory and persists them verbatim', async () => {

@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import type { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 
 type RuntimeFactory = (options: {
   cwd: string;
@@ -18,7 +19,7 @@ export function registerRuntimeHomeConfinementTests(
     const { isPathWithinAllowedRoot } = await import('../../../src/lib/path-boundary.ts');
     const { mkdirSync } = await import('node:fs');
     const fixture = fs.mkdtempSync(join(homedir(), 'f6-runtime-binding-'));
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-binding-outside-'));
+    const outside = await outsideRuntimeHome(homedir(), 'f6-runtime-binding-outside-');
     const physical = join(fixture, 'physical');
     const alias = join(fixture, 'alias');
     const previousMkdir = vi.mocked(mkdirSync).getMockImplementation();
@@ -75,7 +76,7 @@ export function registerRuntimeHomeConfinementTests(
     const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
     const { homedir } = await import('node:os');
     const home = homedir();
-    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-outside-'));
+    const outside = await outsideRuntimeHome(home, 'f6-runtime-outside-');
     const cwd = join(home, 'f6-runtime-cwd');
     fs.symlinkSync(outside, cwd);
     const { mkdirSync } = await import('node:fs');
