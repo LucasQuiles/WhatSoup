@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
+import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -421,7 +423,23 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
 vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
   const { FakePerChatMcpSocketManager } =
     await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
-  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
+  type Options = ConstructorParameters<
+    typeof import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts').PerChatMcpSocketManager
+  >[0];
+  class CapturingPerChatMcpSocketManager extends FakePerChatMcpSocketManager {
+    readonly consumedAllowedRoots: string[] = [];
+
+    constructor(readonly capturedOptions: Options) {
+      super();
+    }
+
+    override acquire(identity: string): { socketPath: string; ready: Promise<void> } {
+      // Observe the same option read the real manager performs at acquisition.
+      this.consumedAllowedRoots.push(this.capturedOptions.allowedRoot);
+      return super.acquire(identity);
+    }
+  }
+  return { PerChatMcpSocketManager: CapturingPerChatMcpSocketManager };
 });
 
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
@@ -504,7 +522,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -670,27 +688,15 @@ function handleEventDownstreamWithoutAdmission(
   );
 }
 
-describe('isUsageLimitMessage', () => {
-  it('does not suppress ordinary discussion of usage limits or quotas', () => {
-    expect(isUsageLimitMessage(
-      'Please document how usage limit and quota exceeded errors should be handled.',
-    )).toBe(false);
-  });
-
-  it('matches distinctive provider usage-cap notices', () => {
-    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
-    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
-  });
-
-  it('requires reset-time evidence for generic quota wording', () => {
-    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
-    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
-  });
-});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+// The runtime keeps its mkdir mock; only harness-owned positive roots exist.
+beforeEach(async () => {
+  const fs = await prepareRuntimeHome();
+  // Keep the real restart guard without sharing boot history between tests.
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'runtime-state-'));
+});
 
 describe('AgentRuntime', () => {
   beforeEach(async () => {
@@ -705,6 +711,7 @@ describe('AgentRuntime', () => {
     // makes the suite order-dependent and obscures the real terminal owner.
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockKillSessionTree.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));
@@ -807,6 +814,11 @@ describe('AgentRuntime', () => {
     }));
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
   });
+
+  registerRuntimeHomeConfinementTests(
+    options => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', options),
+    mockSession,
+  );
 
   it('start() calls ensureAgentSchema', async () => {
     const { ensureAgentSchema } = await import('../../../src/runtimes/agent/session-db.ts');
@@ -991,6 +1003,7 @@ describe('AgentRuntime', () => {
   });
 
   it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
+    const cwd = await ownedRuntimeCwd('whatsoup-non-home-cwd');
     const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
     const { inspectUserClaudeSettings } = await import('../../../src/core/user-claude-settings.ts');
     const { homedir } = await import('node:os');
@@ -999,7 +1012,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
     // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
-    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
+    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: cwd });
     await runtime.start();
 
     expect(inspectUserClaudeSettings).toHaveBeenCalledWith(join(homedir(), '.claude'), expect.stringMatching(/deploy\/hooks\/agent-sandbox\.sh$/));
@@ -2032,16 +2045,17 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
-      whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+      whatsoupMcpSocket: join(cwd, '.claude/whatsoup.sock'),
     });
 
     await emitAgentResultWithoutTokens('done');
@@ -2049,13 +2063,14 @@ describe('AgentRuntime', () => {
   });
 
   it('cleans up partial global MCP socket resources when startup fails', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
     mockSocketServerInstance.start.mockImplementationOnce(() => {
       throw startErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2067,12 +2082,13 @@ describe('AgentRuntime', () => {
     expect(state.globalSocketServer).toBeNull();
     expect(state.globalMcpSocketPath).toBeNull();
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
   });
 
   it('logs cleanup failures after global MCP socket startup errors', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-stop-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
@@ -2083,7 +2099,7 @@ describe('AgentRuntime', () => {
     mockSocketServerInstance.stop.mockImplementationOnce(() => {
       throw stopErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-stop-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2092,11 +2108,11 @@ describe('AgentRuntime', () => {
       globalMcpSocketPath: string | null;
     };
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      { err: stopErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: stopErr, agentCwd: cwd },
       'failed to clean up global socket server after startup error',
     );
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
     expect(state.globalSocketServer).toBeNull();
@@ -2105,10 +2121,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards configured system prompt into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('config-prompt');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/config-prompt',
+      cwd: cwd,
       configSystemPrompt: 'Configured operator prompt.',
     });
 
@@ -2121,10 +2138,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee workspace socket env for sandbox per-chat sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-workspaces');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/rgp-workspaces',
+      cwd: cwd,
       sessionScope: 'per_chat',
       sandboxPerChat: true,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
@@ -2140,9 +2158,10 @@ describe('AgentRuntime', () => {
   });
 
   it('arms and disarms reply guarantee around a non-shared turn', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-turn');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-turn' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
     const durability = {
       getInboundStatus: vi.fn(() => 'processing'),
       completeTurn: vi.fn(),
@@ -3401,12 +3420,13 @@ describe('AgentRuntime', () => {
   });
 
   it('sandbox per_chat notification preserves the crashed workspace owner and state', async () => {
+    const cwd = await ownedRuntimeCwd('cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', {
       sessionScope: 'per_chat',
       sandboxPerChat: true,
-      cwd: '/agent/cwd',
+      cwd: cwd,
     });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
       chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
