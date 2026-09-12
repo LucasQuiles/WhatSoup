@@ -771,14 +771,14 @@ def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Pa
     outbox = tmp_path / "outbox"
     outbox.mkdir()
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
-    original_glob = Path.glob
+    original_scandir = os.scandir
 
-    def glob(path: Path, pattern: str):
+    def scandir(path: Path):
         if path == outbox:
             raise PermissionError("denied")
-        return original_glob(path, pattern)
+        return original_scandir(path)
 
-    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(os, "scandir", scandir)
 
     problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
 
@@ -789,13 +789,7 @@ def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Pa
 
 
 def test_queue_backlog_file_stat_error_handled_gracefully(tmp_path: Path, monkeypatch):
-    """Individual file stat errors are handled gracefully after #2460.
-
-    Previously a stat error on one file crashed the entire directory scan.
-    Now, with the shared scan_directory using event_file_age_seconds (which
-    catches OSError and returns 0.0), the scan completes: the file is counted
-    but its age defaults to 0.  This matches health-check behavior.
-    """
+    """JSON age fallback failure keeps age zero after successful entry metadata."""
     mod = _load_module()
     _private_state(monkeypatch, mod, tmp_path)
     outbox = tmp_path / "outbox"
@@ -811,14 +805,15 @@ def test_queue_backlog_file_stat_error_handled_gracefully(tmp_path: Path, monkey
         nonlocal target_calls
         if path == target:
             target_calls += 1
-            if target_calls > 1:
-                raise PermissionError("denied")
+            raise PermissionError("denied")
         return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", stat)
 
-    # The scan must not crash — it should return problems (possibly empty).
+    assert mod.scan_directory(outbox, "*.json", mod.time.time()) == (1, 0)
+    assert target_calls == 1
     problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
+    assert target_calls > 1
     assert "queue:outbox" not in problems or "scan failed" not in problems.get("queue:outbox", "")
 
 

@@ -298,6 +298,39 @@ quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
 
+### Queue observation and failure evidence
+
+The daily health check and heartbeat watchdog share `lib/queue_age.py`.
+An absent optional directory, an empty directory, and a directory containing
+only `.durable-json.lock` have zero depth and age. A failed directory listing
+or entry metadata read is a failed observation. Daily health reports
+`observation=failed count=unknown oldest_seconds=unknown`, with the path,
+pattern, exception class, and numeric errno when available. The watchdog
+reports a queue scan failure through its existing incident source. Other queue
+checks continue; a failed component prevents a misleading write-fail total.
+
+This boundary covers enumeration and entry classification. JSON payload age
+still falls back from `createdAt` to mtime, then to zero if both reads fail.
+A file lost after enumeration can therefore remain counted with age zero.
+These measurements do not establish an atomic snapshot or payload readability.
+
+`bot-errors-runner.py` retains stdout and stderr from its own child invocation,
+including untagged tracebacks and errno details. It redacts each complete
+stream before retaining bounded head and tail context. The evidence includes
+`capture_scope=owned_invocation`, `capture_limit_chars`,
+`stdout_redacted_chars`, `stderr_redacted_chars`, `stdout_truncated`, and
+`stderr_truncated`, alongside `exit_code` and `duration_ms`. Counts describe
+redacted characters. The limit applies separately to each stream, excludes
+the truncation marker, and must be at least two; it does not bound subprocess
+memory capture or console output. Shared historical tails still require source
+correlation. Existing event redaction and dispatcher content policy also apply;
+retaining evidence in an event does not promise its complete channel rendering.
+
+Observation, incident state, transport acceptance, and channel readback are
+separate evidence. Recovery requires a subsequent successful observation under
+the owning detector's recovery rules. Failed observation, elapsed time, and a
+quiet channel are insufficient recovery proof.
+
 ### Daily-health recovery scope
 
 Per-instance failures emitted by the health checker use
