@@ -11,8 +11,8 @@
  *   (claim token + epoch; stale fence refused);
  * - the requirement-4 veto boundary: once `dispatched_commit` is durably
  *   marked, requeue (automatic input replay) is permanently refused;
- * - exhausted head-of-line BLOCKS the scope (order preservation) until an
- *   operator terminal closes it;
+ * - exhausted head-of-line blocks its conversation in per_chat mode, otherwise
+ *   its scope, until an operator terminal closes it;
  * - bounded envelope (oversize refused, never truncated); error CLASSES only;
  * - content-free diagnostics projection;
  * - retention guard hook: non-terminal obligations are visible to retention.
