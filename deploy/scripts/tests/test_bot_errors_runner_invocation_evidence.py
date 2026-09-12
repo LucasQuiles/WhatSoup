@@ -82,7 +82,12 @@ def test_redacts_complete_owned_stream_before_truncation(tmp_path, stream):
     secret = "BOUNDARYSECRET" * 12
     text = "HEAD_SAFE token=" + secret + " TAIL_SAFE\n"
     redacted = text.replace(secret, "[REDACTED]")
-    proc, events = invoke(tmp_path, f"import sys\nsys.{stream}.write({text!r})\nsys.exit(4)\n")
+    proc, events = invoke(tmp_path, (
+        "import sys\n"
+        "value = 'BOUNDARYSECRET' * 12\n"
+        f"sys.{stream}.write('HEAD_SAFE token=' + value + ' TAIL_SAFE\\n')\n"
+        "sys.exit(4)\n"
+    ))
     assert proc.returncode == 4
     event = events[0]
     assert redacted.strip() in event["evidence"]
