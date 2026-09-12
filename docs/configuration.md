@@ -674,8 +674,7 @@ The rules a persisted value must satisfy, all four:
 - **Inside the instance user's home directory,** after symlinks are resolved.
 - **Physically resolvable.** Every component that exists must resolve. A
   symlink whose target does not exist is refused, because whoever creates that
-  target later decides where the value points. A component that is simply
-  absent is fine.
+  target later decides where the value points. Only the final leaf may be absent; every intermediate directory must resolve.
 
 To find the values, read the block in each instance's `config.json` under the
 instance config directory, and check the two keys. To have the checker find them
@@ -702,17 +701,17 @@ the dry-run until it reports drift instead of refusing, then apply.
 Render admission is a POINT-IN-TIME check, and this is a deliberate boundary
 rather than an oversight. Three properties combine:
 
-- A path whose leaf components do not exist yet is admitted on its longest
-  existing prefix. That is required, not incidental: an agent's default
-  workspace is several not-yet-created segments deep, and refusing it would
-  break instance creation.
-- The value persisted and rendered into `PATH` and `CLAUDE_CONFIG_DIR` is the
-  operator's spelling, not a resolved path.
+- Early API validation may accept a planned path with absent components. Default
+  workspace directories are provisioned only after full configuration validation,
+  one checked component at a time. Final render, runtime, and provider admission
+  require every intermediate to resolve; only the final leaf may be absent.
+- Existing paths are persisted in their accepted physical form. Render and
+  provider launch consume the physical path returned by final admission.
 - Starting or restarting an instance from an already installed plist does not
   re-run render admission. Only reconcile and first install do.
 
 So a principal who can write inside an accepted in-home ancestor can create the
-missing component as a symlink pointing outside the home directory AFTER the
+missing final leaf as a symlink pointing outside the home directory AFTER the
 render, and the executable lookup that happens at the next start follows it.
 Render-time validation cannot close that window; no check made before a write
 can bind a filesystem that stays writable afterwards. What the rule does buy is

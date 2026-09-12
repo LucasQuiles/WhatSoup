@@ -1,3 +1,4 @@
+import { admitHomeConfinedPath, ensureHomeConfinedDirectory } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/runtime.ts
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
@@ -802,7 +803,7 @@ export class AgentRuntime implements Runtime {
   private static readonly ABANDONED_RESPAWN_RETENTION_MS = MS_PER_HOUR;
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
-  private readonly cwd: string | undefined;
+  private cwd: string | undefined;
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly sandbox: SandboxPolicy | undefined;
@@ -823,7 +824,7 @@ export class AgentRuntime implements Runtime {
   /** Task H injectable catalogue seam (AgentRuntimeOptions doc comment) — undefined in production. */
   private readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   private readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
-  private readonly pluginDirs: string[];
+  private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly autoCompactInputTokens: number | undefined;
@@ -2797,10 +2798,11 @@ export class AgentRuntime implements Runtime {
     this.agentFallbackDiscovery = config.agentFallbackDiscovery ?? null;
     this.registry = new ToolRegistry();
     this.registerAllTools();
+    const getAllowedRoot = () => this.cwd ?? homedir();
     this.perChatMcpSocketManager = new PerChatMcpSocketManager({
       stateRoot: config.stateRoot,
       registry: this.registry,
-      allowedRoot: this.cwd ?? homedir(),
+      get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
     });
@@ -3991,6 +3993,12 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    // Refuse configured paths before startup writes or provider setup.
+    const home = homedir();
+    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
+    if (this.cwd) this.cwd = admitHomeConfinedPath(this.cwd, home);
+    this.pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, home));
+
     // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
     // later crash leaves the marker standing. Consumed at the resume gate
     // below; fail-open inside the guard (a broken breaker never wedges a
@@ -3999,7 +4007,6 @@ export class AgentRuntime implements Runtime {
       ? markBootInProgress(restartLoopGuardPath(config.stateRoot))
       : false;
     this.db.assertWritableCompatibility();
-    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
     // Crash-safe latch table for the one-message handoff collapse. Idempotent;
     // created eagerly so an unconsumed notice from a prior process can flush.
@@ -4034,7 +4041,7 @@ export class AgentRuntime implements Runtime {
     if (this.sandbox) {
       const cwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(cwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
         // Resolve allowedPaths to absolute paths before writing
@@ -4096,7 +4103,7 @@ export class AgentRuntime implements Runtime {
     {
       const cwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(cwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
         ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
@@ -4117,7 +4124,7 @@ export class AgentRuntime implements Runtime {
     if (!this.sandboxPerChat) {
       const agentCwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(agentCwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(agentCwd, '.claude'), home);
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
         const socketPath = join(claudeDir, 'whatsoup.sock');
 

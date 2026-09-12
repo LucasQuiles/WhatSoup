@@ -88,21 +88,9 @@ export function rawAbsolutePath(inputPath: string, cwd: string = process.cwd()):
  *    target chose where it pointed. Here raw === resolved, so a
  *    raw-versus-resolved comparison never fires.
  *
- * The distinction that closes (2) without breaking ordinary use is ABSENT
- * versus PRESENT-BUT-UNRESOLVABLE. Walking up past a genuinely absent segment
- * is safe and necessary — callers legitimately name directories that do not
- * exist yet, and an agent's default workspace is several such segments deep.
- * Walking past a segment that EXISTS and fails to resolve is the bypass, so
- * that is refused. `lstat` separates the two without following the link.
- *
- * A tempting stricter rule, "only the final leaf may be absent", was measured
- * and rejected: it refuses the default agent workspace
- * (`~/.local/share/<...>/instances/<name>/workspace`, created after
- * validation), which broke agent cwd defaulting on CREATE and PATCH, the
- * CLAUDE.md and settings.json writes that depend on that cwd, and the in-home
- * service-block positives. It buys nothing either, because an absent segment is
- * not an escape vector until something is created there, and at that point it
- * is no longer absent and is refused.
+ * This absent-tolerant walk is for planning directories before creation.
+ * It is not final consumption admission: that requires every intermediate
+ * component to resolve, through physicalPrefixIsConfined below.
  *
  * `fs.realpathSync.native` (libc realpath(3)) is load-bearing and must not be
  * swapped back to `fs.realpathSync`, which calls `path.resolve()` first and so
@@ -145,7 +133,7 @@ export function realpathLongestAbsentTolerantPrefix(targetPath: string): string 
  * Is this spelling already canonical — absolute, no `.`/`..` component, no
  * redundant separators?
  *
- * Only applied to values that are rendered VERBATIM into a launchd service
+ * Applied before returning accepted physical paths for a launchd service
  * `PATH` or `CLAUDE_CONFIG_DIR`. For those, physical containment is not enough
  * on its own: a `..` component is re-resolved by the kernel at exec time
  * against whatever the filesystem looks like then, so a spelling that resolves
@@ -166,21 +154,65 @@ export function isCanonicalAbsolutePath(value: string): boolean {
 }
 
 /**
- * Is the longest physically-resolvable prefix of this RAW spelling at or inside
- * the resolved home root?
- *
- * Containment is at-or-inside rather than strict on purpose: the absent-tolerant
- * walk can legitimately return the home directory itself, because a caller may
- * name a directory several not-yet-created segments below home. A caller that
- * holds a resolved leaf applies the strict test separately.
- *
- * Both admission sites in src/fleet/routes/ops.ts call this instead of spelling
- * the composition out themselves, so the physical policy cannot drift between
- * them. Throws whatever realpathLongestAbsentTolerantPrefix throws; callers
- * decide how to classify a refusal.
+ * Final-consumption physical policy: every intermediate must resolve.
+ * Only an absent final leaf is tolerated; its parent must already be confined.
+ * This remains a point-in-time check and assumes trusted writable ancestors.
  */
 export function physicalPrefixIsConfined(rawAbsolute: string, homeReal: string): boolean {
+  return pathIsAtOrInsideDirectory(resolveFinalPath(rawAbsolute), homeReal);
+}
+
+function resolveFinalPath(rawAbsolute: string): string {
+  try {
+    return fs.realpathSync.native(rawAbsolute);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || !nothingExistsAt(rawAbsolute)) throw err;
+    // Only the final leaf may be absent. Resolving its parent refuses both
+    // missing intermediates and dangling links instead of walking past them.
+    return path.join(fs.realpathSync.native(path.dirname(rawAbsolute)), path.basename(rawAbsolute));
+  }
+}
+
+export function plannedPrefixIsConfined(rawAbsolute: string, homeReal: string): boolean {
   return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(rawAbsolute), homeReal);
+}
+
+/** Return the physical path that the immediate consumer must use. */
+export function admitHomeConfinedPath(inputPath: string, homeDir: string): string {
+  const homeReal = fs.realpathSync.native(homeDir);
+  if (!isCanonicalAbsolutePath(inputPath)
+    || (!pathIsInsideDirectory(inputPath, path.resolve(homeDir))
+      && !pathIsInsideDirectory(inputPath, homeReal))) {
+    throw new Error('path must resolve inside the home directory');
+  }
+  const accepted = resolveFinalPath(inputPath);
+  if (!pathIsInsideDirectory(accepted, homeReal) || !physicalPrefixIsConfined(accepted, homeReal)) {
+    throw new Error('path must resolve inside the home directory');
+  }
+  return accepted;
+}
+
+/** Provision planned directories one checked component at a time. */
+export function ensureHomeConfinedDirectory(inputPath: string, homeDir: string): string {
+  const homeReal = fs.realpathSync.native(homeDir);
+  const lexicalHome = path.resolve(homeDir);
+  const root = pathIsInsideDirectory(inputPath, lexicalHome) ? lexicalHome : homeReal;
+  if (!isCanonicalAbsolutePath(inputPath) || !pathIsInsideDirectory(inputPath, root)
+    || !plannedPrefixIsConfined(inputPath, homeReal)) {
+    throw new Error('directory must resolve inside the home directory');
+  }
+  let current = homeReal;
+  for (const segment of path.relative(root, inputPath).split(path.sep)) {
+    const accepted = admitHomeConfinedPath(path.join(current, segment), homeReal);
+    try {
+      fs.mkdirSync(accepted, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    current = admitHomeConfinedPath(accepted, homeReal);
+    if (!fs.statSync(current).isDirectory()) throw new Error('home-confined path must be a directory');
+  }
+  return current;
 }
 
 /**
@@ -215,7 +247,6 @@ export function isPhysicallyInsideHome(inputPath: string, homeDir: string): bool
   // absent directory under home" from "home itself", since both resolve to a
   // prefix of home.
   if (!pathIsInsideDirectory(path.resolve(raw), path.resolve(homeDir))) return false;
-  // Physical check, at-or-inside because the resolved prefix legitimately IS
-  // home when every segment below it is still absent.
-  return pathIsAtOrInsideDirectory(realpathLongestAbsentTolerantPrefix(raw), homeReal);
+  // Every intermediate must resolve; only the final leaf may be absent.
+  return physicalPrefixIsConfined(raw, homeReal);
 }

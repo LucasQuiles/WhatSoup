@@ -20,7 +20,7 @@ import {
   LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
-import { isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
+import { admitHomeConfinedPath, isCanonicalAbsolutePath } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
@@ -475,7 +475,7 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
  *
  * SPELLING FIRST, then physical resolution. `isCanonicalAbsolutePath` is the
  * same predicate the API-admission guard applies, imported from the shared
- * module rather than copied, and it runs BEFORE `isPhysicallyInsideHome`.
+ * module rather than copied, and it runs BEFORE `admitHomeConfinedPath`.
  *
  * Two defects it closes, both invisible to physical resolution alone:
  *
@@ -485,7 +485,7 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
  *    into `PATH`. The kernel re-resolves that `..` at every exec, so replacing
  *    `anchor` with a symlink afterwards changes where the same stored string
  *    points. A canonical spelling has no such degree of freedom.
- * 2. A NON-ABSOLUTE spelling. `isPhysicallyInsideHome` makes a relative input
+ * 2. A NON-ABSOLUTE spelling. The former `isPhysicallyInsideHome` check made a relative input
  *    absolute against `process.cwd()`, and on a real host the repository root
  *    sits UNDER the instance user's home, so `~/.local/bin`, `~` and a bare
  *    `pin/bin` would be ADMITTED from there while the same spellings are
@@ -508,34 +508,36 @@ function refuseApplyThatDropsEnv(comparison: GovernedEnvComparison): void {
 export function assertHomeConfinedRenderOptions(
   options: LaunchdPlistRenderOptions,
   homeDir: string = os.homedir(),
-): void {
-  const entries: Array<{ field: string; value: string }> = [];
+): LaunchdPlistRenderOptions {
+  const entries: Array<{ field: string; value: string; index?: number }> = [];
+  const pathPrepend = options.pathPrepend ? [...options.pathPrepend] : undefined;
+  const accepted = { ...options, ...(pathPrepend ? { pathPrepend } : {}) };
   if (options.claudeConfigDir !== undefined) {
     entries.push({ field: 'service.claudeConfigDir', value: options.claudeConfigDir });
   }
   (options.pathPrepend ?? []).forEach((value, index) => {
-    entries.push({ field: `service.pathPrepend[${index}]`, value });
+    entries.push({ field: `service.pathPrepend[${index}]`, value, index });
   });
 
-  for (const { field, value } of entries) {
+  for (const { field, value, index } of entries) {
     // Fail closed WITHOUT consulting the filesystem or the working directory.
     if (!isCanonicalAbsolutePath(value)) {
       throw new LaunchdRenderConfigError(
         `${field} must be a normalized absolute path within the home directory`,
       );
     }
-    let confined: boolean;
+    let physical: string;
     try {
-      confined = isPhysicallyInsideHome(value, homeDir);
+      physical = admitHomeConfinedPath(value, homeDir);
     } catch {
-      confined = false;
-    }
-    if (!confined) {
       throw new LaunchdRenderConfigError(
         `${field} must resolve to a path inside the home directory`,
       );
     }
+    if (index === undefined) accepted.claudeConfigDir = physical;
+    else if (pathPrepend) pathPrepend[index] = physical;
   }
+  return accepted;
 }
 
 /**
@@ -560,9 +562,9 @@ export async function reconcileLaunchdPlist(
   if (previousContents === null) {
     throw new Error(`no existing launchd plist for ${launchdLabel(name)}`);
   }
-  const renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
+  let renderOptions = options.renderOptions ?? resolveLaunchdPlistRenderOptions(name);
   assertValidLaunchdPlistRenderOptions(renderOptions);
-  assertHomeConfinedRenderOptions(renderOptions);
+  renderOptions = assertHomeConfinedRenderOptions(renderOptions);
   // Render once: the drift report always describes exactly the bytes an apply
   // would install.
   const rendered = buildPlist(name, renderOptions);
@@ -610,7 +612,7 @@ async function installLaunchdPlist(name: string): Promise<void> {
   // install-time refusal is pinned by "fails a first install closed when the
   // instance service block is invalid" in
   // tests/fleet/platform-service-manager.test.ts.
-  const renderOptions = resolveLaunchdPlistRenderOptions(name);
+  let renderOptions = resolveLaunchdPlistRenderOptions(name);
   // This is the second render call site, and until now the only unasserted one:
   // reconcileLaunchdPlist has always asserted render-option shape, so
   // assertValidLaunchdPlistRenderOptions had exactly one caller in src/.
@@ -627,7 +629,7 @@ async function installLaunchdPlist(name: string): Promise<void> {
   // tests/fleet/platform-install-shape-assertion.test.ts pins that by mocking
   // the resolver to return options it never checked.
   assertValidLaunchdPlistRenderOptions(renderOptions);
-  assertHomeConfinedRenderOptions(renderOptions);
+  renderOptions = assertHomeConfinedRenderOptions(renderOptions);
   const dest = plistPath(name);
   const previousContents = readExpectedGeneratedLaunchdPlist(name, dest);
   fs.mkdirSync(path.dirname(dest), { recursive: true });

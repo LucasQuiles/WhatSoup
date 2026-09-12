@@ -267,8 +267,9 @@ the reconciler because only the render path knows the expected values.
 ### Preflight: service paths that are already persisted
 
 Plist render refuses a `service` path that is not a canonical absolute path
-inside the instance user's home directory, or whose existing components do not
-resolve. The refusal happens before any bytes are written, so an instance
+inside the instance user's home directory, or whose intermediate components do not
+resolve. Only the final leaf may be absent; accepted paths are rendered in their
+physical form. The refusal happens before any bytes are written, so an instance
 carrying such a value keeps running its installed plist but cannot be installed
 or reconciled until the value is corrected. Sweep the hosts before upgrading.
 
@@ -282,8 +283,7 @@ A normal governed-env report means the block is fine. A `LaunchdRenderConfigErro
 names the offending key, `service.claudeConfigDir` or `service.pathPrepend[N]`,
 and the rule it broke, without echoing the value. Then edit that key in the
 instance's `config.json`: make it an absolute path with no `.` or `..`
-component, inside the home directory, and create the target directory if a
-symlink on the path does not resolve. Dropping the entry is also a fix. Re-run
+component, inside the home directory, and create missing intermediate directories or repair unresolved symlinks. Dropping the entry is also a fix. Re-run
 the dry-run until it reports drift instead of refusing, then apply as usual.
 
 See [`service` (launchd render options)](../configuration.md#service-launchd-render-options)
@@ -321,7 +321,7 @@ renders it instead of destroying it:
 
    The dry run is refused outright when the persisted `service` block names a
    path outside the instance user's home directory, or one whose intermediate
-   segment is a symlink that does not resolve. Render-admission confinement runs
+   segment is absent or does not resolve. Render-admission confinement runs
    before the dry-run early return, so the command exits with a
    `LaunchdRenderConfigError` naming the offending field instead of printing a
    report. Correct that entry in `config.json` — or drop it from the block — and

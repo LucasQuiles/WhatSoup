@@ -599,7 +599,7 @@ describe('service block home-confinement (F3)', () => {
 
     expect(res._status, 'create must succeed: ' + res._body).toBe(201);
     const persisted = JSON.parse(fs.readFileSync(cfgPathFor('svc-real-trailing-slash'), 'utf-8'));
-    expect(persisted.service, 'the operator spelling is persisted verbatim').toEqual(service);
+    expect(persisted.service, 'the accepted physical path is persisted').toEqual({ pathPrepend: [realDir] });
   });
 
   it('still admits an absent LEAF inside an existing in-home parent', async () => {

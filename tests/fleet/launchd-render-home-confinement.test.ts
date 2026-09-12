@@ -16,7 +16,7 @@
  *
  *   npx vitest run tests/fleet/launchd-render-home-confinement.test.ts
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -127,17 +127,49 @@ describe('assertHomeConfinedRenderOptions — physical render admission', () => 
     )).not.toThrow();
   });
 
-  it('admits a wholly absent in-home path, and refuses it once a dangling link appears in it', () => {
-    // Absent is not an escape vector; PRESENT-BUT-UNRESOLVABLE is. Both halves
-    // are asserted here so the tolerance cannot silently widen to cover the
-    // dangling case.
+  it.each(['pathPrepend', 'claudeConfigDir'] as const)('refuses a missing intermediate at final %s render admission', (field) => {
     const raw = path.join(home, 'not-created-yet', 'bin');
     expect(fs.existsSync(raw)).toBe(false);
-    expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home)).not.toThrow();
+    const options = field === 'pathPrepend' ? { pathPrepend: [raw] } : { claudeConfigDir: raw };
+    expect(() => assertHomeConfinedRenderOptions(options, home)).toThrow(LaunchdRenderConfigError);
 
     fs.symlinkSync(path.join(tmpDir, 'nowhere'), path.join(home, 'not-created-yet'));
     expect(() => assertHomeConfinedRenderOptions({ pathPrepend: [raw] }, home))
       .toThrow(LaunchdRenderConfigError);
+  });
+
+  it('returns physically accepted paths for the renderer to consume', () => {
+    const real = path.join(home, 'real');
+    fs.mkdirSync(real);
+    const link = path.join(home, 'alias');
+    fs.symlinkSync(real, link);
+    expect(assertHomeConfinedRenderOptions({ pathPrepend: [link], claudeConfigDir: link }, home))
+      .toEqual({ pathPrepend: [real], claudeConfigDir: real });
+  });
+
+  it('returns the checked physical path when an input symlink changes during admission', () => {
+    const real = path.join(home, 'checked');
+    fs.mkdirSync(real);
+    const link = path.join(home, 'changing');
+    fs.symlinkSync(real, link);
+    const native = fs.realpathSync.native;
+    let replaced = false;
+    const probe = vi.spyOn(fs.realpathSync, 'native').mockImplementation(((input: fs.PathLike) => {
+      const accepted = native(input);
+      if (input === link && !replaced) {
+        fs.unlinkSync(link);
+        fs.symlinkSync(outside, link);
+        replaced = true;
+      }
+      return accepted;
+    }) as typeof fs.realpathSync.native);
+    try {
+      expect(assertHomeConfinedRenderOptions({ pathPrepend: [link] }, home))
+        .toEqual({ pathPrepend: [real] });
+      expect(replaced).toBe(true);
+    } finally {
+      probe.mockRestore();
+    }
   });
 
   it('refuses a dangling claudeConfigDir on the same rule', () => {

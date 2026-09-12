@@ -158,6 +158,40 @@ describe('handleCreateLine — service block passthrough (issue #3401 item 2)', 
     expect(persisted.service).toEqual(service);
   });
 
+  it('persists the accepted physical service and plugin paths', async () => {
+    const real = path.join(os.homedir(), 'physical');
+    fs.mkdirSync(real);
+    const alias = path.join(os.homedir(), 'alias');
+    fs.symlinkSync(real, alias);
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name: 'svc-physical-paths', type: 'agent', adminPhones: ['15551234567'],
+      agentOptions: { cwd: real, pluginDirs: [alias] },
+      service: { claudeConfigDir: alias, pathPrepend: [alias] },
+    }) }), res, successDeps());
+    expect(res._status, res._body).toBe(201);
+    const config = JSON.parse(fs.readFileSync(cfgPathFor('svc-physical-paths'), 'utf8'));
+    expect(config.agentOptions.pluginDirs).toEqual([real]);
+    expect(config.service).toEqual({ claudeConfigDir: real, pathPrepend: [real] });
+  });
+
+  it('rejects malformed expectedAccountDigest CREATE without creating config or enabling a service', async () => {
+    const name = 'svc-bad-digest';
+    const cwd = path.join(os.homedir(), 'existing-workspace');
+    fs.mkdirSync(cwd);
+    const deps = successDeps();
+    const res = mockRes();
+    await handleCreateLine(mockReq({ method: 'POST', body: JSON.stringify({
+      name, type: 'agent', adminPhones: ['15551234567'],
+      agentOptions: { cwd }, service: { expectedAccountDigest: 'not-a-sha256-digest' },
+    }) }), res, deps);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/expectedAccountDigest.*sha256/);
+    expect(fs.existsSync(path.dirname(cfgPathFor(name)))).toBe(false);
+    expect(fs.readdirSync(cwd)).toEqual([]);
+    expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+  });
+
   it('persists service.expectedAccountDigest through CREATE on an agent instance (#3443)', async () => {
     // #3443 put 'service' in PASSTHROUGH_FIELDS so the block survives CREATE,
     // but no test pinned the identity field itself: the two cases above only

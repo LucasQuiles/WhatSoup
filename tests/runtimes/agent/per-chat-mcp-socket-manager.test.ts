@@ -2,7 +2,9 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -11,13 +13,15 @@ import {
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
 import { noExecutingSession } from '../../../src/mcp/types.ts';
+import { isPathWithinAllowedRoot } from '../../../src/lib/path-boundary.ts';
+import { admitHomeConfinedPath } from '../../../src/lib/home-confinement.ts';
 import {
   assertSafeOwnedSocket,
   PerChatMcpSocketManager,
@@ -72,6 +76,44 @@ describe('PerChatMcpSocketManager', () => {
     expect(response.id).toBe(1);
     expect(response.result?.tools).toEqual(expect.any(Array));
   }
+
+  it('F6 carries an admitted runtime root into the first actor socket after alias retarget', async () => {
+    const root = mkdtempSync(join(homedir(), 'f6-actor-root-'));
+    const outside = mkdtempSync(join(process.env.TEMP!, 'f6-actor-outside-'));
+    roots.push(root, outside);
+    const physical = join(root, 'physical');
+    const alias = join(root, 'alias');
+    mkdirSync(physical);
+    symlinkSync(physical, alias);
+    const insideFile = join(physical, 'inside.txt');
+    const outsideFile = join(outside, 'outside.txt');
+    writeFileSync(insideFile, 'inside');
+    writeFileSync(outsideFile, 'outside');
+    const admittedRoot = admitHomeConfinedPath(alias, homedir());
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry: new ToolRegistry(),
+      allowedRoot: admittedRoot,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+    });
+    const later = 'later@s.whatsapp.net';
+    try {
+      const resources = (manager as unknown as {
+        resources: Map<string, { server: { baseSession: { allowedRoot?: string } } }>;
+      }).resources;
+      expect(resources.size).toBe(0);
+      unlinkSync(alias);
+      symlinkSync(outside, alias);
+      await manager.acquire(later, later).ready;
+      const context = resources.get(later)!.server.baseSession;
+      expect(isPathWithinAllowedRoot(realpathSync.native(outsideFile), context.allowedRoot)).toBe(false);
+      expect(isPathWithinAllowedRoot(realpathSync.native(insideFile), context.allowedRoot)).toBe(true);
+      expect(context.allowedRoot).toBe(admittedRoot);
+    } finally {
+      manager.release(later);
+    }
+  });
 
   it('binds an awaitable mode-0600 socket below a mode-0700 state-root directory using only a digest', async () => {
     const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));

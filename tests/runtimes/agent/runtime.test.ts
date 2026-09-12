@@ -421,7 +421,23 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
 vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
   const { FakePerChatMcpSocketManager } =
     await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
-  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
+  type Options = ConstructorParameters<
+    typeof import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts').PerChatMcpSocketManager
+  >[0];
+  class CapturingPerChatMcpSocketManager extends FakePerChatMcpSocketManager {
+    readonly consumedAllowedRoots: string[] = [];
+
+    constructor(readonly capturedOptions: Options) {
+      super();
+    }
+
+    override acquire(identity: string): { socketPath: string; ready: Promise<void> } {
+      // Observe the same option read the real manager performs at acquisition.
+      this.consumedAllowedRoots.push(this.capturedOptions.allowedRoot);
+      return super.acquire(identity);
+    }
+  }
+  return { PerChatMcpSocketManager: CapturingPerChatMcpSocketManager };
 });
 
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
@@ -692,6 +708,28 @@ describe('isUsageLimitMessage', () => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+// The runtime keeps its mkdir mock; only harness-owned positive roots exist.
+beforeEach(async () => {
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const home = process.env.WHATSOUP_VITEST_HOME;
+  if (!home || home !== process.env.HOME
+    || !fs.lstatSync(join(home, '.whatsoup-vitest-home')).isFile()
+    || fs.realpathSync.native(tmpdir()) !== join(home, 'tmp')) {
+    throw new Error('runtime filesystem fixtures require the marked Vitest HOME');
+  }
+  fs.mkdirSync(join(home, '.claude'), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(join(tmpdir(), '.claude'), { recursive: true, mode: 0o700 });
+  // Keep the real restart guard without sharing boot history between tests.
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'runtime-state-'));
+});
+
+async function ownedRuntimeCwd(name: string): Promise<string> {
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const cwd = join(tmpdir(), name);
+  fs.mkdirSync(join(cwd, '.claude'), { recursive: true, mode: 0o700 });
+  return cwd;
+}
+
 describe('AgentRuntime', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -705,6 +743,7 @@ describe('AgentRuntime', () => {
     // makes the suite order-dependent and obscures the real terminal owner.
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockKillSessionTree.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));
@@ -806,6 +845,88 @@ describe('AgentRuntime', () => {
       statusOpIds: [],
     }));
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
+  });
+
+  it('F6 binds admitted runtime cwd before the first actor socket acquisition', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const { homedir } = await import('node:os');
+    const { isPathWithinAllowedRoot } = await import('../../../src/lib/path-boundary.ts');
+    const { mkdirSync } = await import('node:fs');
+    const fixture = fs.mkdtempSync(join(homedir(), 'f6-runtime-binding-'));
+    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-binding-outside-'));
+    const physical = join(fixture, 'physical');
+    const alias = join(fixture, 'alias');
+    const previousMkdir = vi.mocked(mkdirSync).getMockImplementation();
+    let runtime: AgentRuntime | undefined;
+    try {
+      fs.mkdirSync(physical);
+      fs.symlinkSync(physical, alias);
+      const insideFile = join(physical, 'inside.txt');
+      const outsideFile = join(outside, 'outside.txt');
+      fs.writeFileSync(insideFile, 'inside');
+      fs.writeFileSync(outsideFile, 'outside');
+      vi.mocked(mkdirSync).mockImplementation(fs.mkdirSync);
+      runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+        cwd: alias,
+        sessionScope: 'per_chat',
+        perChatConversationBound: true,
+      });
+      const state = runtime as unknown as {
+        cwd?: string;
+        perChatMcpSocketManager: {
+          consumedAllowedRoots: string[];
+          resources: Map<string, unknown>;
+          acquire(identity: string): { ready: Promise<void> };
+        };
+      };
+      const manager = state.perChatMcpSocketManager;
+      await runtime.start();
+      expect(state.cwd).toBe(fs.realpathSync.native(physical));
+      expect(manager.consumedAllowedRoots).toEqual([]);
+      expect(manager.resources.size).toBe(0);
+
+      // Retarget AFTER runtime admission, BEFORE the first actor acquisition.
+      fs.unlinkSync(alias);
+      fs.symlinkSync(outside, alias);
+      await manager.acquire('later@s.whatsapp.net').ready;
+      expect(manager.consumedAllowedRoots).toHaveLength(1);
+      const consumed = manager.consumedAllowedRoots[0];
+      expect(isPathWithinAllowedRoot(fs.realpathSync.native(outsideFile), consumed)).toBe(false);
+      expect(isPathWithinAllowedRoot(fs.realpathSync.native(insideFile), consumed)).toBe(true);
+      expect(consumed).toBe(fs.realpathSync.native(physical));
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      try {
+        await runtime?.shutdown();
+      } finally {
+        vi.mocked(mkdirSync).mockImplementation(previousMkdir ?? (() => undefined));
+        fs.rmSync(fixture, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('F6 rejects a replaced cwd before creating runtime files outside home', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const { homedir } = await import('node:os');
+    const home = homedir();
+    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-runtime-outside-'));
+    const cwd = join(home, 'f6-runtime-cwd');
+    fs.symlinkSync(outside, cwd);
+    const { mkdirSync } = await import('node:fs');
+    const previousMkdir = vi.mocked(mkdirSync).getMockImplementation();
+    vi.mocked(mkdirSync).mockImplementation(fs.mkdirSync);
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { cwd });
+    try {
+      await expect(runtime.start()).rejects.toThrow(/home/);
+      expect(fs.readdirSync(outside)).toEqual([]);
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    } finally {
+      await runtime.shutdown();
+      vi.mocked(mkdirSync).mockImplementation(previousMkdir ?? (() => undefined));
+      fs.unlinkSync(cwd);
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('start() calls ensureAgentSchema', async () => {
@@ -991,6 +1112,7 @@ describe('AgentRuntime', () => {
   });
 
   it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
+    const cwd = await ownedRuntimeCwd('whatsoup-non-home-cwd');
     const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
     const { inspectUserClaudeSettings } = await import('../../../src/core/user-claude-settings.ts');
     const { homedir } = await import('node:os');
@@ -999,7 +1121,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
     // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
-    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
+    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: cwd });
     await runtime.start();
 
     expect(inspectUserClaudeSettings).toHaveBeenCalledWith(join(homedir(), '.claude'), expect.stringMatching(/deploy\/hooks\/agent-sandbox\.sh$/));
@@ -2032,16 +2154,17 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
-      whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+      whatsoupMcpSocket: join(cwd, '.claude/whatsoup.sock'),
     });
 
     await emitAgentResultWithoutTokens('done');
@@ -2049,13 +2172,14 @@ describe('AgentRuntime', () => {
   });
 
   it('cleans up partial global MCP socket resources when startup fails', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
     mockSocketServerInstance.start.mockImplementationOnce(() => {
       throw startErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2067,12 +2191,13 @@ describe('AgentRuntime', () => {
     expect(state.globalSocketServer).toBeNull();
     expect(state.globalMcpSocketPath).toBeNull();
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
   });
 
   it('logs cleanup failures after global MCP socket startup errors', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-stop-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
@@ -2083,7 +2208,7 @@ describe('AgentRuntime', () => {
     mockSocketServerInstance.stop.mockImplementationOnce(() => {
       throw stopErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-stop-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2092,11 +2217,11 @@ describe('AgentRuntime', () => {
       globalMcpSocketPath: string | null;
     };
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      { err: stopErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: stopErr, agentCwd: cwd },
       'failed to clean up global socket server after startup error',
     );
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
     expect(state.globalSocketServer).toBeNull();
@@ -2105,10 +2230,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards configured system prompt into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('config-prompt');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/config-prompt',
+      cwd: cwd,
       configSystemPrompt: 'Configured operator prompt.',
     });
 
@@ -2121,10 +2247,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee workspace socket env for sandbox per-chat sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-workspaces');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/rgp-workspaces',
+      cwd: cwd,
       sessionScope: 'per_chat',
       sandboxPerChat: true,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
@@ -2140,9 +2267,10 @@ describe('AgentRuntime', () => {
   });
 
   it('arms and disarms reply guarantee around a non-shared turn', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-turn');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-turn' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
     const durability = {
       getInboundStatus: vi.fn(() => 'processing'),
       completeTurn: vi.fn(),
@@ -3401,12 +3529,13 @@ describe('AgentRuntime', () => {
   });
 
   it('sandbox per_chat notification preserves the crashed workspace owner and state', async () => {
+    const cwd = await ownedRuntimeCwd('cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', {
       sessionScope: 'per_chat',
       sandboxPerChat: true,
-      cwd: '/agent/cwd',
+      cwd: cwd,
     });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
       chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;

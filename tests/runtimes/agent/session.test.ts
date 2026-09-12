@@ -107,7 +107,8 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   }),
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
   readFileSync: vi.fn(),
 }));
 
@@ -255,6 +256,32 @@ function lastSpawnEnv(): NodeJS.ProcessEnv {
   return options?.env ?? {};
 }
 
+async function withOwnedSessionPaths(
+  run: (paths: { home: string; directory(relative: string): string }) => Promise<void>,
+): Promise<void> {
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const harnessHome = process.env.WHATSOUP_VITEST_HOME;
+  if (!harnessHome || !fs.lstatSync(join(harnessHome, '.whatsoup-vitest-home')).isFile()) {
+    throw new Error('session filesystem fixtures require the marked Vitest HOME');
+  }
+  const home = fs.mkdtempSync(join(harnessHome, 'session-paths-'));
+  const previousHome = homedir();
+  vi.mocked(homedir).mockReturnValue(home);
+  try {
+    await run({
+      home,
+      directory(relative) {
+        const cwd = join(home, relative);
+        fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
+        return cwd;
+      },
+    });
+  } finally {
+    vi.mocked(homedir).mockReturnValue(previousHome);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('SessionManager', () => {
@@ -269,6 +296,159 @@ describe('SessionManager', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each(['cwd', 'pluginDirs'] as const)('F6 refuses a missing intermediate before consuming %s', async (field) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-session-'));
+    fs.mkdirSync(join(home, 'cwd'));
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const bad = join(home, 'missing', 'leaf');
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      cwd: field === 'cwd' ? bad : join(home, 'cwd'),
+      pluginDirs: field === 'pluginDirs' ? [bad] : [],
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await expect(sm.spawnSession()).rejects.toThrow(/home|ENOENT/);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(fs.existsSync(join(home, 'missing'))).toBe(false);
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('F6 rechecks cwd after the final provider canary wait before spawn', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-transition-'));
+    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-transition-outside-'));
+    const cwd = join(home, 'cwd');
+    fs.mkdirSync(cwd);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    let release!: () => void;
+    let reachedFinal!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const finalWait = new Promise<void>(resolve => { reachedFinal = resolve; });
+    let admissions = 0;
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), cwd, providerCanaryAdmission: async () => {
+        if (++admissions === 2) {
+          reachedFinal();
+          await ready;
+        }
+        return { allowed: true, required: false, resolvedPath: 'claude', binarySha256: '', proxyScriptSha256: '' };
+      },
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    let starting: Promise<void> | undefined;
+    try {
+      starting = sm.spawnSession();
+      await Promise.race([finalWait, starting]);
+      expect(admissions, 'startup must reach its final canary admission').toBe(2);
+      expect(spawn).not.toHaveBeenCalled();
+      fs.rmdirSync(cwd);
+      fs.symlinkSync(outside, cwd);
+      release();
+      await expect(starting).rejects.toThrow(/home/);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      release();
+      try {
+        // The body observes the startup result; cleanup also waits for it to
+        // settle after releasing the canary, before retiring its child.
+        if (starting) await Promise.allSettled([starting]);
+        await sm.shutdown();
+      } finally {
+        vi.mocked(homedir).mockReturnValue(previousHome);
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('F6 refuses a spawn-per-turn relaunch after its physical cwd is replaced', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-relaunch-'));
+    const outside = fs.mkdtempSync(join(process.env.TEMP!, 'f6-relaunch-outside-'));
+    const cwd = join(home, 'cwd');
+    fs.mkdirSync(cwd);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const child = makeMockChild(12151);
+    vi.mocked(spawn).mockReturnValueOnce(child as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), cwd, provider: 'opencode-cli', model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    try {
+      await session.spawnSession();
+      await session.sendTurn('first');
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(spawn).toHaveBeenCalledWith('opencode', expect.any(Array), expect.objectContaining({ cwd }));
+      session.completeProviderTurn();
+      fs.rmdirSync(cwd);
+      fs.symlinkSync(outside, cwd);
+      await expect(session.sendTurn('must not launch outside home')).rejects.toThrow(/home/);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(fs.readdirSync(outside)).toEqual([]);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      child._closeCb?.(0, null);
+      try {
+        await session.shutdown();
+      } finally {
+        vi.mocked(homedir).mockReturnValue(previousHome);
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it.each(['claude-cli', 'openai-api'] as const)('F6 consumes accepted cwd and plugin paths for %s', async (provider) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-accepted-'));
+    const real = join(home, 'physical');
+    const alias = join(home, 'alias');
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, alias);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), provider, cwd: alias, pluginDirs: [alias],
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await sm.spawnSession();
+      if (provider === 'openai-api') {
+        expect(initialize).toHaveBeenCalledWith(expect.objectContaining({ cwd: real, pluginDirs: [real] }));
+      } else {
+        expect(spawn).toHaveBeenCalledWith('claude', expect.arrayContaining(['--plugin-dir', real]), expect.objectContaining({ cwd: real }));
+      }
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('invalidates opaque evidence bindings on lifecycle or ownership generation changes', () => {
@@ -587,7 +767,8 @@ describe('SessionManager', () => {
     });
   });
 
-  it('spawnSession can isolate child HOME/XDG config roots when explicitly enabled', async () => {
+  it('spawnSession can isolate child HOME/XDG config roots when explicitly enabled', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('workspace/chat-a');
     await withConnectorMutationEnv({
       HOME: '/host/home',
       XDG_CONFIG_HOME: '/host/config',
@@ -601,19 +782,19 @@ describe('SessionManager', () => {
         messenger,
         chatJid: CHAT_JID,
         onEvent: vi.fn(),
-        cwd: '/workspace/chat-a',
-        configRoot: '/workspace/chat-a/.agent-home',
+        cwd: cwd,
+        configRoot: join(cwd, '.agent-home'),
       });
 
       await sm.spawnSession();
 
       expect(lastSpawnEnv()).toMatchObject({
-        HOME: '/workspace/chat-a/.agent-home',
-        XDG_CONFIG_HOME: '/workspace/chat-a/.agent-home/.config',
-        XDG_DATA_HOME: '/workspace/chat-a/.agent-home/.local/share',
+        HOME: join(cwd, '.agent-home'),
+        XDG_CONFIG_HOME: join(cwd, '.agent-home/.config'),
+        XDG_DATA_HOME: join(cwd, '.agent-home/.local/share'),
       });
     });
-  });
+  }));
 
   it('sendTurn writes JSONL to stdin', async () => {
     const db = makeDb();
@@ -973,13 +1154,14 @@ describe('SessionManager', () => {
     expect(updateTranscriptPath).toHaveBeenCalledWith(db, 42, expectedPath);
   });
 
-  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => {
+  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('srv/whatsoup/daemon');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/srv/whatsoup/daemon',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -988,17 +1170,18 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-srv-whatsoup-daemon', 'ses_lnx.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-srv-whatsoup-daemon`, 'ses_lnx.jsonl'),
     );
-  });
+  }));
 
-  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => {
+  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('Applications/WhatSoup');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/Applications/WhatSoup',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -1007,17 +1190,18 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup', 'ses_macos.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-Applications-WhatSoup`, 'ses_macos.jsonl'),
     );
-  });
+  }));
 
-  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => {
+  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('Applications/WhatSoup/.worktrees/patch');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/Applications/WhatSoup/.worktrees/patch',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -1026,9 +1210,9 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup--worktrees-patch', 'ses_dot.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-Applications-WhatSoup--worktrees-patch`, 'ses_dot.jsonl'),
     );
-  });
+  }));
 
   it('init event writes transcript path under CLAUDE_CONFIG_DIR override', async () => {
     const prev = process.env['CLAUDE_CONFIG_DIR'];
@@ -1225,7 +1409,8 @@ describe('SessionManager', () => {
     });
   });
 
-  it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => {
+  it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -1235,19 +1420,19 @@ describe('SessionManager', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
-      cwd: '/agent/dir',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
     expect(createSession).toHaveBeenCalledWith(
       db,
       0,
-      '/agent/dir',
+      cwd,
       CHAT_JID,
       toConversationKey(CHAT_JID),
       'opencode-cli',
     );
-  });
+  }));
 
   it.each([
     {
@@ -2615,23 +2800,24 @@ describe('SessionManager', () => {
 
   // ─── Configurable cwd + instructionsPath ─────────────────────────────────
 
-  it('spawnSession uses configurable cwd when provided', async () => {
+  it('spawnSession uses configurable cwd when provided', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('custom/cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       instanceName: 'personal',
-      cwd: '/custom/cwd',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
     expect(spawn).toHaveBeenCalledWith(
       'claude',
       expect.any(Array),
-      expect.objectContaining({ cwd: '/custom/cwd' }),
+      expect.objectContaining({ cwd: cwd }),
     );
-  });
+  }));
 
   it('spawnSession uses homedir() when cwd is not provided', async () => {
     const db = makeDb();
@@ -2647,7 +2833,8 @@ describe('SessionManager', () => {
     );
   });
 
-  it('spawnSession reads instructionsPath and prepends identity line', async () => {
+  it('spawnSession reads instructionsPath and prepends identity line', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions here.');
@@ -2655,7 +2842,7 @@ describe('SessionManager', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       instanceName: 'mybot',
-      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+      cwd: cwd, instructionsPath: 'CLAUDE.md',
     });
     await sm.spawnSession();
 
@@ -2666,8 +2853,8 @@ describe('SessionManager', () => {
     const systemPrompt = args[systemPromptIdx + 1];
     expect(systemPrompt).toContain('mybot');
     expect(systemPrompt).toContain('Custom instructions here.');
-    expect(readFileSync).toHaveBeenCalledWith('/agent/dir/CLAUDE.md', 'utf8');
-  });
+    expect(readFileSync).toHaveBeenCalledWith(join(cwd, 'CLAUDE.md'), 'utf8');
+  }));
 
   // ─── Provider-aware system prompt identity ────────────────────────────────
 
@@ -2740,7 +2927,8 @@ describe('SessionManager', () => {
     })).toThrow(/unknown provider/i);
   });
 
-  it('system prompt with instructionsPath uses provider display name', async () => {
+  it('system prompt with instructionsPath uses provider display name', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions.');
@@ -2748,14 +2936,14 @@ describe('SessionManager', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       provider: 'opencode-cli',
-      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+      cwd: cwd, instructionsPath: 'CLAUDE.md',
     });
     await sm.spawnSession();
 
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal OpenCode agent');
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).not.toContain('Claude Code');
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('Custom instructions.');
-  });
+  }));
 
   // ─── P3-C: Pending tool tracking ─────────────────────────────────────────
 
@@ -5824,21 +6012,23 @@ describe('providerConfig-driven claude-cli args', () => {
     expect(args).not.toContain('--fallback-model');
   });
 
-  it('--plugin-dir args are added for each pluginDir', async () => {
+  it('--plugin-dir args are added for each pluginDir', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const firstPlugin = directory('plugins/a');
+    const secondPlugin = directory('plugins/b');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
-      pluginDirs: ['/plugins/a', '/plugins/b'],
+      pluginDirs: [firstPlugin, secondPlugin],
     });
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
     const pluginDirIndices = args.reduce<number[]>((acc, v, i) => { if (v === '--plugin-dir') acc.push(i); return acc; }, []);
     expect(pluginDirIndices).toHaveLength(2);
-    expect(args[pluginDirIndices[0] + 1]).toBe('/plugins/a');
-    expect(args[pluginDirIndices[1] + 1]).toBe('/plugins/b');
-  });
+    expect(args[pluginDirIndices[0] + 1]).toBe(firstPlugin);
+    expect(args[pluginDirIndices[1] + 1]).toBe(secondPlugin);
+  }));
 });
 
 // ─── opencode-cli session resume via sessionId ────────────────────────────────
