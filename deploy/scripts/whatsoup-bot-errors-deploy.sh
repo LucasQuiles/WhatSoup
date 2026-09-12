@@ -79,6 +79,7 @@ FILES=(
   "deploy/scripts/lib/health_reader.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"
   "deploy/scripts/lib/queue_age.py"
+  "deploy/scripts/lib/send_acceptance.py"
   "deploy/scripts/lib/sentinel_pin.py"
   "deploy/scripts/lib/state_files.py"
   "deploy/scripts/lib/state_root.py"

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template: com.whatsoup.bot-errors-j1-collector.plist
+
+  Hourly, read-only BOT ERRORS supervision collector (tools/agent-runtime-probes/
+  bot_errors_j1_collector.py, which lands with PR #3532; until then the host
+  config points at the reviewed copy the host already runs). It captures the
+  alert host's planes and the alert group's rows into runs/<run>/collect/ and
+  never publishes a checkpoint, takes a lease, or appends the ledger — the
+  investigator session does that.
+
+  Migration: if an ad-hoc job for the same collector already exists under another
+  label (for example an mq-schedule label), `launchctl bootout gui/$(id -u)/<label>`
+  it BEFORE bootstrapping this one — two labels would both fire at :17 (the
+  collector's lock turns the loser into an exit-3 "lock-held" run, which is still
+  noise). The drift guard prints `warn: unmanaged collector job: <label>` for any
+  other LaunchAgent whose plist names the collector.
+
+  Before bootstrapping this managed label, deploy a health runtime that includes
+  the exact bot-errors-j1-collector support-service exemption and its matching
+  runtime-manifest hash. Otherwise a running collector fails profile coverage.
+
+  Replace before installing (the drift guard substitutes the same tokens):
+    __HOME__  — the account home directory
+
+  Install path: ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
+  Script path:  ~/.local/bin/bot-errors-j1-collector  (byte-identical copy of the
+                bot-errors-j1-collector.sh template; the drift guard compares them)
+  Host config:  ~/.config/whatsoup/bot-errors-j1-collector.env  (untracked; loop root,
+                alert-group jid, collector script path — read by the wrapper; mode 600;
+                BOT_ERRORS_J1_SLOT_MINUTE, if set, must equal the Minute below)
+
+  Install steps (the drift guard checks each prerequisite exists; it never reads the env file):
+    mkdir -p ~/.local/bin ~/.local/state/whatsoup-logs ~/.config/whatsoup
+    cp deploy/templates/bot-errors-j1-collector.sh ~/.local/bin/bot-errors-j1-collector && chmod 755 ~/.local/bin/bot-errors-j1-collector
+    (write ~/.config/whatsoup/bot-errors-j1-collector.env, chmod 600)
+    sed "s|__HOME__|$HOME|g" deploy/templates/com.whatsoup.bot-errors-j1-collector.plist > ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.bot-errors-j1-collector.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsoup.bot-errors-j1-collector</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/bot-errors-j1-collector</string>
+  </array>
+
+  <!-- Never on bootstrap: a load must not produce an off-slot bundle. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Hourly at :17 — after the investigator's own slot, before the next one. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>17</integer>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.err</string>
+</dict>
+</plist>
