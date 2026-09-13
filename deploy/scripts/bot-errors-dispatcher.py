@@ -31,7 +31,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.bot_errors_daily_health import daily_health_host_from_payload
+from lib.bot_errors_daily_health import (
+    daily_health_host_from_payload,
+    daily_health_line_is_failure,
+    daily_health_line_is_warning,
+)
 from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
@@ -3869,6 +3873,65 @@ def stamp_delivery_freshness(event: dict[str, Any], current: int) -> None:
         return
 
 
+def format_daily_health_event(core: list[str], evidence: str, details: list[str]) -> str:
+    """Keep whole findings and explicit omissions ahead of optional diagnostics."""
+    fallback = (
+        "BOT ERRORS - INCOMPLETE ALERT: message limit cannot hold identity, action and evidence. "
+        "Review the retained event."
+    )
+    if MAX_MESSAGE_CHARS < len(fallback):
+        raise ValueError("BOT_ERRORS_MAX_MESSAGE_CHARS is too small for an incomplete-alert notice")
+
+    core_text = "\n".join(core)
+    detail_notice = f"  > diagnostics_omitted: {len(details)}" if details else ""
+    detail_reserve = len(detail_notice) + 1 if detail_notice else 0
+    evidence_prefix = "\n  > evidence: "
+    budget = min(1800, MAX_MESSAGE_CHARS - len(core_text) - len(evidence_prefix) - detail_reserve)
+
+    # Redact the complete text first: multiline credentials must not be split
+    # before the shared backend redactor has confined them.
+    groups: list[list[str]] = [[], [], []]
+    for line in redact(evidence).replace("@", " at ").splitlines():
+        rank = 0 if daily_health_line_is_failure(line) else 1 if daily_health_line_is_warning(line) else 2
+        groups[rank].append(line)
+    rendered = "\n".join(line for group in groups for line in group)
+
+    def omission_notice(counts: list[int]) -> str:
+        coverage = "; incomplete finding coverage (selected asset may be omitted)" if counts[0] or counts[1] else ""
+        return (
+            f"evidence_omitted: failure_lines={counts[0]}; warning_only_lines={counts[1]}; "
+            f"context_lines={counts[2]}{coverage}; see retained event"
+        )
+
+    if len(core_text) + detail_reserve > MAX_MESSAGE_CHARS:
+        return fallback
+    if len(rendered) > budget:
+        omitted = [len(group) for group in groups]
+        reserved = len(omission_notice(omitted))
+        if reserved > budget:
+            return fallback
+        selected: list[str] = []
+        remaining = budget - reserved
+        for rank, group in enumerate(groups):
+            for line in group:
+                if len(line) + 1 <= remaining:
+                    selected.append(line)
+                    remaining -= len(line) + 1
+                    omitted[rank] -= 1
+        rendered = "\n".join([*selected, omission_notice(omitted)])
+
+    text = core_text + (evidence_prefix + rendered if rendered else "")
+    omitted_details = 0
+    for detail in details:
+        if len(text) + 1 + len(detail) + detail_reserve <= MAX_MESSAGE_CHARS:
+            text += "\n" + detail
+        else:
+            omitted_details += 1
+    if omitted_details:
+        text += f"\n  > diagnostics_omitted: {omitted_details}"
+    return text
+
+
 def format_event(event: dict[str, Any]) -> str:
     classification = classify_event(event)
     severity = classification.severity
@@ -3899,7 +3962,7 @@ def format_event(event: dict[str, Any]) -> str:
         else None
     )
 
-    lines = [
+    identity_lines = [
         f"{title} - {summary}",
         event_line("severity", event.get("severity")),
         event_line("machine", event.get("machine")),
@@ -3922,6 +3985,8 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("confidence", failure.get("confidence")),
         event_line("event", event.get("id")),
         event_line("created", event.get("createdAt")),
+    ]
+    recovery_lines = [
         event_line(
             "writefail_recovered",
             (
@@ -3935,6 +4000,8 @@ def format_event(event: dict[str, Any]) -> str:
             else None,
             900,
         ),
+    ]
+    freshness_lines = [
         event_line("dispatcher_attempts", delivery.get("attempts")),
         event_line("delivery_age_seconds", delivery.get("ageAtDeliverySeconds")),
         event_line(
@@ -3943,6 +4010,8 @@ def format_event(event: dict[str, Any]) -> str:
              if delivery.get("revalidated") is False else None),
             120,
         ),
+    ]
+    lines = [
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
         event_line("cwd", process_info.get("cwd")),
@@ -3963,11 +4032,21 @@ def format_event(event: dict[str, Any]) -> str:
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
     clear_requirement = critical_clear_requirement(event)
+    clear_requirement_line = event_line("clear_requirement", clear_requirement, 900)
     requested_action = f"  > requested_action: {requested_action_text(event)}"
     lines.extend([
         event_line("queue", diagnostics.get("queue")),
         event_line("dispatch_log", diagnostics.get("dispatchLog")),
-        event_line("clear_requirement", clear_requirement, 900),
+    ])
+    if event.get("source") == "daily-health":
+        return format_daily_health_event(
+            [line for line in [*identity_lines, *freshness_lines, clear_requirement_line, requested_action] if line],
+            event_text(event, "evidence"),
+            [line for line in [*recovery_lines, *lines] if line],
+        )
+    lines = identity_lines + recovery_lines + freshness_lines + lines
+    lines.extend([
+        clear_requirement_line,
         event_line("evidence", event_text(event, "evidence"), 1800),
         requested_action,
     ])

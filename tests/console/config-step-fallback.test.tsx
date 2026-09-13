@@ -9,9 +9,27 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ReactElement, useState } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+const LIVE_PROVIDERS = vi.hoisted(() => ([
+  { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+  { id: 'opencode-cli', displayName: 'OpenCode', type: 'cli', needsApiKey: true, credentialService: null, providerConfig: ['model'] },
+  { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+] as const))
+
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    getProviders: vi.fn().mockResolvedValue(LIVE_PROVIDERS),
+    getProviderModels: vi.fn().mockResolvedValue({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'test' },
+      asOfLabel: 'just now',
+    }),
+  },
+}))
+
 import ConfigStep from '../../console/src/components/wizard/ConfigStep'
-import { PROVIDERS } from '../../console/src/lib/providers'
 
 afterEach(() => cleanup())
 
@@ -40,7 +58,12 @@ function renderConfigStep(opts: RenderOpts = {}) {
     return <ConfigStep data={data} onChange={handleChange} errors={{}} />
   }
 
-  const utils = render(<Harness />)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const utils = render(
+    <QueryClientProvider client={client}>
+      <Harness />
+    </QueryClientProvider>,
+  )
   return { onChange, getData: () => latestData, ...utils }
 }
 
@@ -77,7 +100,7 @@ describe('ConfigStep — fallback provider section', () => {
     expect(fallbackSelect.options[0]?.textContent).toMatch(/select fallback provider/i)
   })
 
-  it('renders provider <select> + model field when a fallbackProvider is set, and the select lists every catalog provider', () => {
+  it('renders provider <select> + model field when a fallbackProvider is set, and the select lists every server provider', async () => {
     renderConfigStep({
       initialData: {
         agentOptions: { provider: 'claude-cli', fallbackProvider: 'openai-api', fallbackModel: 'gpt-4o' },
@@ -89,10 +112,10 @@ describe('ConfigStep — fallback provider section', () => {
     expect(screen.getByText('Fallback Model')).toBeDefined()
 
     // The fallback select shows the configured provider's display name (OpenAI)
-    // and offers every provider id from the single console catalog.
-    const fallbackSelect = screen.getByDisplayValue('OpenAI') as HTMLSelectElement
+    // and offers every provider id from the server catalogue.
+    const fallbackSelect = await waitFor(() => screen.getByDisplayValue('OpenAI') as HTMLSelectElement)
     const optionValues = Array.from(fallbackSelect.options).map((o) => o.value)
-    expect(optionValues).toEqual(['', ...PROVIDERS.map((p) => p.id)])
+    expect(optionValues).toEqual(['', ...LIVE_PROVIDERS.map((p) => p.id)])
 
     // Model text field reflects the configured fallback model.
     expect((screen.getByDisplayValue('gpt-4o') as HTMLInputElement).tagName).toBe('INPUT')
@@ -107,14 +130,14 @@ describe('ConfigStep — fallback provider section', () => {
     openPermissionsTab()
     onChange.mockClear()
 
-    const modelInput = screen.getByPlaceholderText('claude-sonnet-4-6')
+    const modelInput = screen.getByPlaceholderText('Runtime default, or type a model ID')
     fireEvent.change(modelInput, { target: { value: 'gpt-4o-mini' } })
 
     const patch = onChange.mock.calls[0][0] as { agentOptions: { fallbackModel?: string } }
     expect(patch.agentOptions.fallbackModel).toBe('gpt-4o-mini')
   })
 
-  it('keeps the fallback model disabled until a fallback provider is selected', () => {
+  it('keeps the fallback model disabled until a fallback provider is selected', async () => {
     renderConfigStep({
       initialData: { agentOptions: { provider: 'claude-cli' } },
     })
@@ -125,9 +148,12 @@ describe('ConfigStep — fallback provider section', () => {
     const modelInput = screen.getByPlaceholderText('Select a fallback provider first') as HTMLInputElement
     expect(modelInput.disabled).toBe(true)
 
-    fireEvent.change(screen.getByLabelText('Fallback Provider'), { target: { value: 'openai-api' } })
+    const fallbackProvider = screen.getByLabelText('Fallback Provider') as HTMLSelectElement
+    await waitFor(() => expect(Array.from(fallbackProvider.options).map((option) => option.value))
+      .toContain('openai-api'))
+    fireEvent.change(fallbackProvider, { target: { value: 'openai-api' } })
 
-    const enabledModelInput = screen.getByPlaceholderText('claude-sonnet-4-6') as HTMLInputElement
+    const enabledModelInput = await waitFor(() => screen.getByPlaceholderText('Runtime default, or type a model ID') as HTMLInputElement)
     expect(enabledModelInput.disabled).toBe(false)
   })
 

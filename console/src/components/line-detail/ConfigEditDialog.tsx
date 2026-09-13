@@ -25,6 +25,7 @@ import { normalizePhoneInput, validatePhone } from '../../lib/validation'
 import { isNonEmptyString } from '../../lib/type-guards'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
+import { DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import {
   CheckboxField,
   Modal,
@@ -37,13 +38,13 @@ import {
   TextInput,
 } from '../primitives'
 import { Button } from '../primitives/Button'
+import ProviderModelInput from '../ProviderModelInput'
+import ProviderSelect from '../ProviderSelect'
 import {
   CONFIG_EXCLUDE_KEYS,
   AGENT_OPTION_FIELDS,
   CHAT_OPTION_FIELDS,
   ENUM_OPTIONS,
-  CUSTOM_ENUM_OPTION,
-  CUSTOMIZABLE_ENUM_KEYS,
   FIELD_VALIDATORS,
   isRecord,
   getValueAtPath,
@@ -94,16 +95,14 @@ export function ConfigEditDialog({
   const queryClient = useQueryClient()
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
-  const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
   const fieldIdPrefix = useId()
 
-  // Reset patch and custom-enum state on each open (C-B3W2-1 — mirrors
+  // Reset patch state on each open (C-B3W2-1 — mirrors
   // CreateGroupModal precedent; provides fresh-state-per-open semantics that
   // mount-gating previously provided).
   useEffect(() => {
     if (open) {
       setPatch({})
-      setCustomEnumFields({})
     }
   }, [open])
 
@@ -176,12 +175,6 @@ export function ConfigEditDialog({
 
   const getFieldError = useCallback((key: string): string | null => {
     const value = currentValue(key)
-    const enumOptions = ENUM_OPTIONS[key]
-    const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
-      && (key in customEnumFields || (typeof value === 'string' && !!enumOptions && !enumOptions.includes(value)))
-    if (customEnumActive && typeof value === 'string' && value.trim() === '') {
-      return 'Enter a custom model ID or choose a preset'
-    }
     const fieldError = FIELD_VALIDATORS[key]?.(value) ?? null
     if (fieldError) return fieldError
     if (key === CHAT_OPENAI_BASE_URL_KEY) {
@@ -199,7 +192,16 @@ export function ConfigEditDialog({
       }
     }
     return null
-  }, [currentValue, customEnumFields])
+  }, [currentValue])
+
+  const providerForModelField = useCallback((key: string): string => {
+    if (key === 'agentOptions.fallbackModel') {
+      const fallbackProvider = currentValue('agentOptions.fallbackProvider')
+      return typeof fallbackProvider === 'string' ? fallbackProvider : ''
+    }
+    const provider = getValueAtPath(config, 'agentOptions.provider')
+    return typeof provider === 'string' && provider ? provider : DEFAULT_PROVIDER_ID
+  }, [config, currentValue])
 
   const handleSave = async () => {
     if (Object.keys(patch).length === 0) {
@@ -316,64 +318,54 @@ export function ConfigEditDialog({
       )
     }
 
+    if (typeof originalValue === 'string' && (key === 'model' || key === 'agentOptions.fallbackModel')) {
+      return (
+        <ProviderModelInput
+          id={fieldId}
+          provider={providerForModelField(key)}
+          value={typeof val === 'string' ? val : ''}
+          onChange={(value) => setField(key, value)}
+          className="text-m-pas"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
+        />
+      )
+    }
+
+    if (typeof originalValue === 'string' && key === 'agentOptions.fallbackProvider') {
+      return (
+        <ProviderSelect
+          id={fieldId}
+          value={typeof val === 'string' ? val : ''}
+          onChange={(value) => setField(key, value)}
+          className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
+        />
+      )
+    }
+
     // String with known enum -> select
     const enumOpts = key in ENUM_OPTIONS ? ENUM_OPTIONS[key]
       : key in AGENT_OPTION_FIELDS && AGENT_OPTION_FIELDS[key].type === 'enum' ? AGENT_OPTION_FIELDS[key].enum
       : null
     if (typeof originalValue === 'string' && enumOpts) {
-      const customEnumActive = CUSTOMIZABLE_ENUM_KEYS.has(key)
-        && (key in customEnumFields || !enumOpts.includes(val as string))
-      const clearCustomEnum = () => {
-        setCustomEnumFields(prev => {
-          if (!(key in prev)) return prev
-          const next = { ...prev }
-          delete next[key]
-          return next
-        })
-      }
-
       return (
-        <div className="flex flex-col gap-[var(--sp-2)]">
-          <SelectInput
-            id={fieldId}
-            value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
-            onChange={e => {
-              const nextValue = e.target.value
-              if (nextValue === CUSTOM_ENUM_OPTION) {
-                setCustomEnumFields(prev => ({ ...prev, [key]: true }))
-                setField(key, typeof val === 'string' && !enumOpts.includes(val) ? val : '')
-                return
-              }
-              clearCustomEnum()
-              setField(key, nextValue)
-            }}
-            className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
-            aria-describedby={describedBy}
-            aria-invalid={invalid ? true : undefined}
-            error={invalid && !customEnumActive}
-          >
-            {enumOpts.map(opt => (
-              <option key={opt} value={opt}>{enumOptionLabel(key, opt)}</option>
-            ))}
-            {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
-              <option value={CUSTOM_ENUM_OPTION}>Custom…</option>
-            )}
-          </SelectInput>
-          {customEnumActive && (
-            <TextInput
-              id={`${fieldId}-custom`}
-              type="text"
-              value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
-              onChange={e => setField(key, e.target.value)}
-              aria-label="Custom model ID"
-              placeholder="Enter custom model ID"
-              className="text-m-pas"
-              aria-describedby={describedBy}
-              aria-invalid={invalid ? true : undefined}
-              error={invalid}
-            />
-          )}
-        </div>
+        <SelectInput
+          id={fieldId}
+          value={val as string}
+          onChange={e => setField(key, e.target.value)}
+          className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
+        >
+          {enumOpts.map(opt => (
+            <option key={opt} value={opt}>{enumOptionLabel(key, opt)}</option>
+          ))}
+        </SelectInput>
       )
     }
 
@@ -411,8 +403,7 @@ export function ConfigEditDialog({
 
   const hasChanges = Object.keys(patch).length > 0
   const hasErrors = editableEntries.some(([key]) => {
-    const isActive = key in patch || key in customEnumFields
-    return isActive && getFieldError(key) !== null
+    return key in patch && getFieldError(key) !== null
   })
 
   return (
@@ -435,7 +426,7 @@ export function ConfigEditDialog({
 
       <ModalBody>
         {editableEntries.map(([key, originalValue]) => {
-          const isActive = key in patch || key in customEnumFields
+          const isActive = key in patch
           const fieldError = isActive ? getFieldError(key) : null
           const fieldId = `${fieldIdPrefix}-${fieldIdSegment(key)}`
           const errorId = fieldError ? `${fieldId}-error` : undefined
