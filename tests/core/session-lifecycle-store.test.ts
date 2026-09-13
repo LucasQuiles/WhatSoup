@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { errorLikeSerializers } from '../../src/logger.ts';
+import { sanitizingLogHook } from '../../src/lib/log-sanitizer.ts';
 
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
@@ -825,5 +828,93 @@ describe('SessionLifecycleStore through DurabilityEngine', () => {
     expect(durability.getSessionCheckpoint('foreign-failure')).toEqual(failureCheckpointBefore);
     expect(agentRow(db, gracefulRow)).toEqual(gracefulBefore);
     expect(durability.getSessionCheckpoint('foreign-graceful')).toEqual(gracefulCheckpointBefore);
+  });
+});
+
+
+describe('close conflict diagnostic evidence', () => {
+  let db: Database;
+  let durability: DurabilityEngine;
+  beforeEach(() => { db = new Database(':memory:'); db.open(); durability = new DurabilityEngine(db); });
+  afterEach(() => { vi.restoreAllMocks(); db.close(); });
+
+  function reject(params: Parameters<DurabilityEngine['closeSessionLifecycle']>[0]): Error {
+    let caught: unknown;
+    try { durability.closeSessionLifecycle(params); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe('Exact active agent session row could not be closed');
+    return caught as Error;
+  }
+
+  it.each(['session', 'provider', 'status', 'preinit', 'missing'] as const)('retains exact expected and observed identity for %s rejection', (kind) => {
+    const rowId = insertAgentRow(db, 'stored-sid', kind === 'status' ? 'suspended' : 'active', 'diagnostic-key');
+    durability.upsertSessionCheckpoint('diagnostic-key', { sessionId: 'stored-sid', sessionStatus: 'active' });
+    const expected = { agentSessionRowId: kind === 'missing' ? rowId + 100 : rowId,
+      providerSessionId: kind === 'preinit' ? null : kind === 'session' ? 'expected-sid' : 'stored-sid',
+      provider: kind === 'provider' ? 'opencode-cli' : 'claude-cli', conversationKey: 'diagnostic-key', status: 'ended' as const };
+    const beforeRow = db.raw.prepare('SELECT * FROM agent_sessions WHERE id = ?').get(rowId);
+    const beforeCheckpoint = durability.getSessionCheckpoint('diagnostic-key');
+    const error = reject(expected);
+    expect(error.cause).toEqual({ lifecycleCloseConflict: { expected, observed: kind === 'missing'
+      ? { state: 'ROW_NOT_FOUND', row: null }
+      : { state: 'ROW_FOUND', row: { agentSessionRowId: rowId, providerSessionId: 'stored-sid', provider: 'claude-cli', status: kind === 'status' ? 'suspended' : 'active' } } } });
+    expect(db.raw.prepare('SELECT * FROM agent_sessions WHERE id = ?').get(rowId)).toEqual(beforeRow);
+    expect(durability.getSessionCheckpoint('diagnostic-key')).toEqual(beforeCheckpoint);
+  });
+
+  it.each(['', '::scheduled-agent-job'])('reads the diagnostic tuple in-transaction and logs realistic identities (%s)', (suffix) => {
+    const expectedSid = 'ses_testAbCdE12345fGhIjKlMn6789';
+    const observedSid = 'a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6';
+    const conversationKey = '111111100000000001@g.us' + suffix;
+    const rowId = insertAgentRow(db, observedSid, 'active', conversationKey, 'opencode');
+    const original = db.raw.prepare.bind(db.raw);
+    const transactionObservations: boolean[] = [];
+    vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+      if (sql.includes('AS agentSessionRowId')) transactionObservations.push(db.raw.isTransaction);
+      return original(sql);
+    });
+    const expected = { agentSessionRowId: rowId, providerSessionId: expectedSid, provider: 'opencode', conversationKey, status: 'ended' as const };
+    const error = reject(expected);
+    expect(transactionObservations).toEqual([true]);
+    const lines: string[] = [];
+    const logger = pino({ serializers: errorLikeSerializers, hooks: { logMethod: sanitizingLogHook } }, { write: (line: string) => { lines.push(line); } });
+    logger.error({ err: error }, 'fixture close rejected');
+    expect(lines).toHaveLength(1);
+    const serialized = JSON.parse(lines[0]);
+    expect(serialized.err.cause).toEqual({ lifecycleCloseConflict: {
+      expected: { ...expected, conversationKey: '***' + suffix },
+      observed: { state: 'ROW_FOUND', row: { agentSessionRowId: rowId, providerSessionId: observedSid, provider: 'opencode', status: 'active' } },
+    } });
+    expect(serialized.err.errorMessage).toBe(error.message);
+    expect(serialized.err.cause.lifecycleCloseConflict.expected.providerSessionId).toBe(expectedSid);
+    expect(serialized.err.cause.lifecycleCloseConflict.observed.row.providerSessionId).toBe(observedSid);
+    expect((error.cause as { lifecycleCloseConflict: { expected: { conversationKey: string } } }).lifecycleCloseConflict.expected.conversationKey).toBe(conversationKey);
+    expect(serialized.err.stack).toBeUndefined();
+  });
+
+  it('keeps the original invariant error and reports UNKNOWN if the diagnostic lookup fails', () => {
+    const rowId = insertAgentRow(db, 'stored-sid', 'active', 'diagnostic-key');
+    const original = db.raw.prepare.bind(db.raw);
+    vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+      if (sql.includes('AS agentSessionRowId')) throw new Error('private diagnostic lookup detail');
+      return original(sql);
+    });
+    const expected = { agentSessionRowId: rowId, providerSessionId: 'expected-sid', provider: 'claude-cli', conversationKey: 'diagnostic-key', status: 'ended' as const };
+    expect(reject(expected).cause).toEqual({ lifecycleCloseConflict: { expected, observed: { state: 'UNKNOWN', row: null } } });
+    expect(agentRow(db, rowId).status).toBe('active');
+  });
+
+  it.each([null, 'stored-sid'])('keeps valid and idempotent closes free of diagnostic lookups (%s)', (sid) => {
+    const rowId = insertAgentRow(db, sid, 'active', 'diagnostic-key');
+    durability.upsertSessionCheckpoint('diagnostic-key', { sessionId: sid ?? undefined, sessionStatus: 'active' });
+    const original = db.raw.prepare.bind(db.raw);
+    const diagnostic = vi.fn();
+    vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => { if (sql.includes('AS agentSessionRowId')) diagnostic(); return original(sql); });
+    const params = { agentSessionRowId: rowId, providerSessionId: sid, provider: 'claude-cli', conversationKey: 'diagnostic-key', status: 'suspended' as const };
+    expect(() => durability.closeSessionLifecycle(params)).not.toThrow();
+    const before = agentRow(db, rowId);
+    expect(() => durability.closeSessionLifecycle(params)).not.toThrow();
+    expect(agentRow(db, rowId)).toEqual(before);
+    expect(diagnostic).not.toHaveBeenCalled();
   });
 });

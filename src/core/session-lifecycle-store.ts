@@ -144,10 +144,12 @@ function requireChanges(result: { changes: number | bigint }, message: string): 
  * row/session or row/conversation identity.
  */
 export class SessionLifecycleStore {
+  private readonly db: Database;
   private readonly statements: LifecycleStatements;
   private readonly transact: TransactionRunner;
 
   constructor(db: Database) {
+    this.db = db;
     this.transact = getTransactionRunner(db);
     const prepare = db.raw.prepare.bind(db.raw);
     this.statements = {
@@ -796,7 +798,38 @@ export class SessionLifecycleStore {
           );
           return;
         }
-        throw new Error('Exact active agent session row could not be closed');
+        let observed: { state: 'ROW_FOUND' | 'ROW_NOT_FOUND' | 'UNKNOWN'; row: {
+          agentSessionRowId: number;
+          providerSessionId: string | null;
+          provider: string;
+          status: string;
+        } | null };
+        try {
+          const row = this.db.raw.prepare(`
+            SELECT id AS agentSessionRowId, session_id AS providerSessionId, provider, status
+            FROM agent_sessions WHERE id = ?
+          `).get(params.agentSessionRowId) as NonNullable<typeof observed.row> | undefined;
+          observed = row === undefined
+            ? { state: 'ROW_NOT_FOUND', row: null }
+            : { state: 'ROW_FOUND', row };
+        } catch {
+          // Diagnostic failure must not replace the original lifecycle rejection.
+          observed = { state: 'UNKNOWN', row: null };
+        }
+        throw new Error('Exact active agent session row could not be closed', {
+          cause: {
+            lifecycleCloseConflict: {
+              expected: {
+                agentSessionRowId: params.agentSessionRowId,
+                providerSessionId: params.providerSessionId,
+                provider: params.provider,
+                conversationKey: params.conversationKey,
+                status: params.status,
+              },
+              observed,
+            },
+          },
+        });
       }
 
       const checkpointResult = params.providerSessionId === null

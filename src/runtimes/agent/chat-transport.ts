@@ -197,7 +197,21 @@ export interface SendDirectOutcome {
   readonly messageId: string | null;
 }
 
-export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+export interface PreAdmissionNoticeAttribution {
+  readonly sourceInboundSeq: number | undefined;
+  readonly mapKey?: string;
+}
+
+export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false, notice?: PreAdmissionNoticeAttribution): Promise<SendDirectOutcome> {
+  if (notice !== undefined) {
+    if (bypassEchoGuard) return { accepted: false, messageId: null };
+    const queue = port.getQueueForChat(chatJid, notice.mapKey);
+    if (!queue || queue.isPoisoned()) return { accepted: false, messageId: null };
+    return {
+      accepted: queue.enqueuePreAdmissionNotice?.(text, notice.sourceInboundSeq) ?? false,
+      messageId: null,
+    };
+  }
   if (bypassEchoGuard) {
     // Bypass queue entirely — direct send for admin responses
     try {
@@ -231,6 +245,6 @@ export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: st
   }
 }
 
-export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<boolean> {
-  return (await sendDirectWithReceipt(port, chatJid, text, bypassEchoGuard)).accepted;
+export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false, notice?: PreAdmissionNoticeAttribution): Promise<boolean> {
+  return (await sendDirectWithReceipt(port, chatJid, text, bypassEchoGuard, notice)).accepted;
 }
