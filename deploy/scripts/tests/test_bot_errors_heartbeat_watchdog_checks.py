@@ -343,6 +343,104 @@ class TestTurnFailureRateProbe:
         )
         assert "turn_failure:alpha" not in problems
 
+    @pytest.mark.parametrize("window,seconds_ago,alerts", [
+        (1800, -1, False),
+        (1800, 0, True),
+        (1800, 1800, True),
+        (1800, 1801, False),
+        (60, 60, True),
+        (60, 61, False),
+    ])
+    def test_rate_window_is_closed_past_interval(
+        self, tmp_path, monkeypatch, window, seconds_ago, alerts
+    ):
+        rows = [("chatA_at_g.us", "unknown", self._recent(seconds_ago))] * 3
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[],
+            env={"BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS": str(window)},
+        )
+        expected = {}
+        if alerts:
+            expected["turn_failure:alpha"] = (
+                f"turn-failure rate: instance=alpha window_seconds={window} "
+                "min_count=3 affected_chats=1 "
+                "ck=chatA_at_g.us failed=3 classes=unknown:3"
+            )
+        assert problems == expected
+
+    @pytest.mark.parametrize("received_at", [None, "not-a-timestamp"])
+    def test_rate_window_excludes_unusable_timestamps(
+        self, tmp_path, monkeypatch, received_at
+    ):
+        problems = self._run(
+            tmp_path, monkeypatch,
+            failed_rows=[("chatA_at_g.us", "unknown", received_at)] * 3,
+            checkpoints=[],
+        )
+        assert problems == {}
+
+    def test_rate_window_aggregates_only_qualifying_failures(
+        self, turn_failure_reconciliation, monkeypatch
+    ):
+        import sqlite3
+
+        mod, instances, _ = turn_failure_reconciliation
+        (instances / "alpha").mkdir()
+        db_path = instances / "alpha" / "bot.db"
+        rows = [
+            ("chatA_at_g.us", None, self._recent(0)),
+            ("chatA_at_g.us", "unknown", self._recent(60)),
+            ("chatA_at_g.us", "timeout", self._recent(1800)),
+            ("chatA_at_g.us", "future", self._recent(-1)),
+            ("chatA_at_g.us", "old", self._recent(1801)),
+            ("chatA_at_g.us", "missing", None),
+            ("chatA_at_g.us", "invalid", "not-a-timestamp"),
+        ]
+        rows += [("chatB_at_g.us", "unknown", self._recent(60))] * 2
+        rows += [("futureChat_at_g.us", "unknown", self._recent(-1))] * 4
+        _make_turn_failure_db(db_path, failed_rows=rows, checkpoints=[])
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executemany(
+                "INSERT INTO inbound_events "
+                "(conversation_key, received_at, processing_status, failure_class) "
+                "VALUES ('chatB_at_g.us', ?, ?, 'unknown')",
+                [(self._recent(60), status) for status in ("pending", "completed")],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(mod, "expected_local_services", lambda: [{"name": "alpha"}])
+        problems = mod.turn_failure_rate_problems()
+        assert problems == {
+            "turn_failure:alpha": (
+                "turn-failure rate: instance=alpha window_seconds=1800 "
+                "min_count=3 affected_chats=1 "
+                "ck=chatA_at_g.us failed=3 classes=unknown:2,timeout:1"
+            ),
+        }
+
+    def test_rate_report_limit_preserves_affected_chat_count(
+        self, tmp_path, monkeypatch
+    ):
+        rows = [
+            (chat, "unknown", self._recent(60))
+            for chat, count in (("chatA", 3), ("chatB", 5), ("chatC", 4), ("chatD", 2))
+            for _ in range(count)
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[],
+            env={"BOT_ERRORS_TURN_FAILURE_MAX_CHATS": "2"},
+        )
+        assert problems == {
+            "turn_failure:alpha": (
+                "turn-failure rate: instance=alpha window_seconds=1800 "
+                "min_count=3 affected_chats=3 "
+                "ck=chatB failed=5 classes=unknown:5; "
+                "ck=chatC failed=4 classes=unknown:4"
+            ),
+        }
+
     def test_session_collision_alerts_independent_of_failure_rate(
         self, tmp_path, monkeypatch
     ):

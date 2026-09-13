@@ -1537,7 +1537,7 @@ def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[s
                     "WHERE processing_status = 'failed' "
                     "AND received_at IS NOT NULL "
                     "AND strftime('%s', received_at) IS NOT NULL "
-                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) <= ? "
+                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) BETWEEN 0 AND ? "
                     "GROUP BY conversation_key, fc",
                     (now, window),
                 ).fetchall()
