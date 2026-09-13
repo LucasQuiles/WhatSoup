@@ -423,7 +423,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   }
 }
 
-describe('whatsoup_run_bounded fallback lifecycle', () => {
+describe('whatsoup_run_bounded process-group lifecycle', () => {
   it.each(['fast', 'nested', 'nonzero', 'zero'] as const)('reaps every owned descendant before returning from %s', (mode) => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
@@ -505,9 +505,8 @@ describe('whatsoup_run_bounded fallback lifecycle', () => {
 
 /**
  * Runs a snippet against the real library. When `withoutTimeout` is set, PATH is
- * reduced to a shim directory holding only the utilities the fallback needs — so
- * `timeout`/`gtimeout` are genuinely absent and the Darwin-shaped branch is the
- * only reachable one. This is what makes the macOS path verifiable on Linux CI.
+ * reduced to a shim directory holding only stock utilities. The supervisor must
+ * work with timeout/gtimeout installed and with both genuinely absent.
  */
 function runSnippet(snippet: string, opts: { withoutTimeout?: boolean } = {}) {
   const repoRoot = process.cwd();
@@ -570,7 +569,7 @@ describe.each([
     expect(res.stdout).toContain('rc=2');
   });
 
-  it.each(['timeout', 'gtimeout'])('rejects zero before dispatching to %s', (tool) => {
+  it.each(['timeout', 'gtimeout'])('does not invoke %s for a zero budget', (tool) => {
     const res = runSnippet([
       `${tool}() { echo delegated; return 91; }`,
       'whatsoup_run_bounded 0 cat /dev/null; echo "rc=$?"',
@@ -578,27 +577,6 @@ describe.each([
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toContain('rc=124');
     expect(res.stdout).not.toContain('delegated');
-  });
-
-  it('confirms which branch is under test', () => {
-    const res = runSnippet(
-      'command -v timeout >/dev/null 2>&1 && echo present || echo absent',
-      opts,
-    );
-    const branch = res.stdout.trim();
-    if (withoutTimeout) {
-      // PATH was stripped, so the pure-shell watchdog is the only reachable path.
-      expect(branch).toBe('absent');
-    } else if (process.platform === 'linux') {
-      // Linux ships timeout(1); if that ever stops being true the delegation
-      // branch would silently stop being covered anywhere.
-      expect(branch).toBe('present');
-    } else {
-      // macOS may legitimately have neither timeout nor gtimeout — that is the
-      // condition this whole change exists for. Either branch is acceptable
-      // here; the behavioural assertions below must hold regardless.
-      expect(['present', 'absent']).toContain(branch);
-    }
   });
 
   it('returns the command status for a fast command', () => {
@@ -616,6 +594,30 @@ describe.each([
   it('propagates a non-timeout failure status unchanged', () => {
     const res = runSnippet('whatsoup_run_bounded 3 false; echo "rc=$?"', opts);
     expect(res.stdout).toContain('rc=1');
+  });
+
+  it('preserves a natural exit 137 before the deadline', () => {
+    const started = Date.now();
+    const res = runSnippet('whatsoup_run_bounded 5 /bin/sh -c "exit 137"; echo "rc=$?"', opts);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain('rc=137');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('does not overflow a valid large budget when adding kill grace', () => {
+    const res = runSnippet('whatsoup_run_bounded 9223372036854775807 /usr/bin/true; echo "rc=$?"', opts);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain('rc=0');
+  });
+
+  it('allows a command to finish its TERM handler before the kill grace expires', () => {
+    const res = runSnippet([
+      'whatsoup_run_bounded 1 /bin/sh -c \'trap "sleep 0.2; echo term-finished; exit 0" TERM; while :; do sleep 1; done\'',
+      'echo "rc=$?"',
+    ].join('\n'), opts);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain('term-finished');
+    expect(res.stdout).toContain('rc=124');
   });
 
   it('passes stdin through to the wrapped command', () => {
@@ -652,20 +654,8 @@ describe.each([
   });
 });
 
-describe('whatsoup_run_bounded hard-kills a child that ignores SIGTERM', () => {
-  const hasTimeoutOrGtimeout = (() => {
-    const res = spawnSync(
-      'bash',
-      ['-c', 'command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1'],
-      { encoding: 'utf8' },
-    );
-    return res.status === 0;
-  })();
-
-  // The defect lives in the timeout/gtimeout delegation branches; the pure-shell
-  // watchdog already hard-kills at the budget. On a host with neither binary that
-  // branch is unreachable, so there is nothing for this test to exercise.
-  it.skipIf(!hasTimeoutOrGtimeout)(
+describe.each([false, true])('whatsoup_run_bounded hard kill with timeout absent=%s', (withoutTimeout) => {
+  it(
     'bounds the wall clock, not just the return code',
     () => {
       // Bare `timeout Ns` sends SIGTERM at the budget and then WAITS for the child
@@ -676,7 +666,8 @@ describe('whatsoup_run_bounded hard-kills a child that ignores SIGTERM', () => {
       // assertion to mean anything.
       const started = Date.now();
       const res = runSnippet(
-        'whatsoup_run_bounded 1 bash -c \'trap "" TERM; sleep 30\'; echo "rc=$?"',
+        'whatsoup_run_bounded 1 /bin/bash -c \'trap "" TERM; sleep 30\'; echo "rc=$?"',
+        { withoutTimeout },
       );
       const wall = Date.now() - started;
 

@@ -8,11 +8,8 @@
 # lookup wedges the caller forever — that is how ph-bot on mini11 stayed down for
 # ~45h while its watchdog reported `ok`.
 #
-# Why it is not just `timeout 3s`: stock macOS ships no `timeout(1)`. GNU
-# coreutils installs it as `gtimeout`, and Homebrew's `coreutils` is not a
-# deployment prerequisite. A `timeout 3s security ...` line is therefore a
-# no-op-that-fails-closed on Linux and a `command not found` on Darwin. The
-# pure-shell fallback below is the only branch guaranteed to exist on both.
+# Stock macOS ships no timeout(1). Use the same shell supervisor everywhere so
+# command statuses and descendant cleanup do not depend on installed utilities.
 #
 # Exit status: 124 when the budget was exhausted (matching GNU timeout), the
 # command's own status otherwise.
@@ -35,39 +32,12 @@ whatsoup_run_bounded() {
   # GNU timeout interprets zero as unlimited; this helper has no such mode.
   [ "$budget" -ne 0 ] || return 124
 
-  # SIGKILL grace (seconds) after SIGTERM, for the timeout/gtimeout branches only.
-  # Bare GNU `timeout` sends SIGTERM at the budget and then WAITS for the child to
-  # exit, so a child that ignores or survives SIGTERM lets the wrapper wait with it
-  # forever: `timeout 2s bash -c 'trap "" TERM; sleep 20'` returns 124 only after
-  # the child has already run the full 20s (measured). `-k` follows SIGTERM with
-  # SIGKILL after this grace, so the wall clock is actually bounded, not merely
-  # reported as timed-out.
-  #
-  # The grace scales with the budget: a short credential probe (3-5s) must fail
-  # fast, while a long package install (300-600s) needs a real window after SIGTERM
-  # to release a dpkg lock or flush a mirror transfer before SIGKILL — SIGKILLing a
-  # package manager mid-`dpkg` can leave a broken install worse than the hang this
-  # helper exists to stop. Floor 2s, ceiling 30s.
+  # Allow package managers to release locks after TERM, then enforce KILL even
+  # when the command ignores TERM. Keep short credential probes responsive.
   local rc grace
   grace=$(( budget / 10 ))
   [ "$grace" -lt 2 ] && grace=2
   [ "$grace" -gt 30 ] && grace=30
-
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k "${grace}s" "${budget}s" "$@"
-    rc=$?
-    # `timeout` exits 137 (128+SIGKILL) when it had to escalate past SIGTERM to
-    # SIGKILL; fold that back into the documented 124 budget-exhausted exit so
-    # callers distinguish "timed out" from "failed", never which signal ended it.
-    [ "$rc" -eq 137 ] && rc=124
-    return "$rc"
-  fi
-  if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k "${grace}s" "${budget}s" "$@"
-    rc=$?
-    [ "$rc" -eq 137 ] && rc=124
-    return "$rc"
-  fi
 
   # Job control is local to this subshell. Command and watchdog groups are
   # verified before release. Either supervisor can enforce the deadline.
@@ -76,7 +46,7 @@ whatsoup_run_bounded() {
     set -m
     local directory cmd_pid="" cmd_group="" command_release_pid=""
     local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
-    local candidate observed caller_group remaining completed_rc cleanup_rc=0
+    local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
     directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
 
     _whatsoup_bounded_cleanup() {
@@ -123,6 +93,8 @@ whatsoup_run_bounded() {
       set +m
       IFS= read -r start < "$directory/command" || exit 2
       [ "$start" = run ] || exit 2
+      # Keep the result writer alive while the command handles its own TERM.
+      trap ':' TERM
       "$@"
       rc=$?
       builtin printf '%s\n' "$rc" > "$directory/result"
@@ -144,6 +116,8 @@ whatsoup_run_bounded() {
       [ "$start" = run ] || exit 2
       sleep "$budget" || exit 2
       : > "$directory/timed-out"
+      kill -TERM -- "-$cmd_group" 2>/dev/null
+      sleep "$grace" || exit 2
       kill -9 -- "-$cmd_group" 2>/dev/null
     ) </dev/null >/dev/null 2>&1 &
     watchdog_pid=$!
@@ -164,8 +138,9 @@ whatsoup_run_bounded() {
     builtin printf 'run\n' > "$directory/command" &
     command_release_pid=$!
     remaining="$budget"
+    remaining_grace="$grace"
     rc=124
-    while [ "$remaining" -gt 0 ]; do
+    while [ "$remaining" -gt 0 ] || [ "$remaining_grace" -gt 0 ]; do
       completed_rc=""
       # Read/write open cannot wait for a missing writer on the supported hosts.
       # The redirection is scoped to read; the command retains its original stdin.
@@ -184,7 +159,11 @@ whatsoup_run_bounded() {
         wait "$cmd_pid" 2>/dev/null || rc=$?
         break
       fi
-      remaining=$((remaining - 1))
+      if [ "$remaining" -gt 0 ]; then
+        remaining=$((remaining - 1))
+      else
+        remaining_grace=$((remaining_grace - 1))
+      fi
     done
     [ ! -f "$directory/timed-out" ] || rc=124
     _whatsoup_bounded_cleanup
