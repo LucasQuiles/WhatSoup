@@ -207,6 +207,47 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
     expect(existsSync(h.curlLog)).toBe(false);
   });
 
+  it.each(['degraded', 'unhealthy'])('refuses non-model %s health without a kickstart', (status) => {
+    const h = makeHarness('raw');
+    const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1'], {
+      HTTP_STATUS: '503',
+      HEALTH_BODY: JSON.stringify({
+        status, whatsapp: {}, instance: { name: 'x-bot' },
+        turn_capability: { model_usable: true, model_usable_stale: false },
+      }),
+    });
+    expect(JSON.parse(readFileSync(h.curlLog, 'utf8')).authorized).toBe(true);
+    expect(kickstartCount(h)).toBe(0);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain('not a keychain-heal case');
+  });
+
+  it('bounds a stalled kickstart and stops further remediation', () => {
+    const h = makeHarness('degraded');
+    const pidPath = join(h.root, 'kickstart-pid');
+    writeFileSync(join(h.binDir, 'launchctl'), [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$KICK_LOG"',
+      'echo 1 > "$KICK_COUNT"',
+      'echo "$$" > "$KICK_PID"',
+      'exec sleep 10',
+      '',
+    ].join('\n'), { mode: 0o700 });
+    const started = performance.now();
+    const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1', '--health-timeout', '1'], {
+      KICK_PID: pidPath,
+    });
+    expect(kickstartCount(h)).toBe(1);
+    expect(existsSync(pidPath)).toBe(true);
+    expect(result.exitCode).toBe(2);
+    expect(performance.now() - started).toBeLessThan(8_000);
+    const pid = Number(readFileSync(pidPath, 'utf8').trim());
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+    let processError: NodeJS.ErrnoException | undefined;
+    try { process.kill(pid, 0); } catch (error) { processError = error as NodeJS.ErrnoException; }
+    expect(processError?.code).toBe('ESRCH');
+  });
+
   it.each(['other.x-bot', 'com.whatsoup../x-bot', 'com.whatsoup.X-bot', `com.whatsoup.${'a'.repeat(31)}`])(
     'refuses noncanonical instance label %s before token or HTTP access', (label) => {
       const h = makeHarness('healthy');

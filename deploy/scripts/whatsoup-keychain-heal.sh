@@ -21,7 +21,8 @@
 # Exit codes:
 #   0  healthy / recovered  (status=healthy AND turn_capability.model_usable=true)
 #   1  still degraded after exhausting kickstarts (escalate: GUI keychain unlock)
-#   2  bad args/runtime/token, transport/HTTP auth failure, or unobserved health
+#   2  bad args/runtime/token, failed/timed-out kickstart, unobserved health,
+#      transport/HTTP auth failure, or non-model degradation
 #   3  authenticated health missing identity, required fields or valid freshness
 #
 # Usage:
@@ -98,7 +99,7 @@ fi
 TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/$INSTANCE/tokens.env"
 
 # Classify the current /health. Prints exactly one verdict token:
-#   ok | degraded | unreachable | parse | fields | token | unobserved | identity
+#   ok | degraded | non_model | unreachable | parse | fields | token | unobserved | identity
 classify_health() {
   local health_token response http_status body
   # A local can inherit an ambient variable's export attribute in Bash.
@@ -167,11 +168,16 @@ while :; do
       fi
       attempt=$((attempt + 1))
       echo "whatsoup-keychain-heal: $LABEL degraded; kickstart $attempt/$MAX_KICKSTARTS gui/${UID_}/${LABEL}" >&2
-      if ! launchctl kickstart -k "gui/${UID_}/${LABEL}" >&2; then
-        echo "whatsoup-keychain-heal: FATAL: launchctl kickstart failed for gui/${UID_}/${LABEL}." >&2
+      if ! whatsoup_run_bounded "$HEALTH_TIMEOUT" launchctl kickstart -k "gui/${UID_}/${LABEL}" >&2; then
+        echo "whatsoup-keychain-heal: FATAL: launchctl kickstart failed or timed out for gui/${UID_}/${LABEL}." >&2
         exit 2
       fi
       sleep "$SETTLE"
+      ;;
+    non_model)
+      echo "whatsoup-keychain-heal: authenticated health reports a fresh usable model;" \
+           "non-model degradation is not a keychain-heal case; no action." >&2
+      exit 2
       ;;
     unreachable)
       echo "whatsoup-keychain-heal: FATAL: /health unreachable on 127.0.0.1:${PORT}" \

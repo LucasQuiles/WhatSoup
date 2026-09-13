@@ -45,8 +45,9 @@ def test_healthy_model_usable_null_is_degraded():
     assert classify(body) == "degraded"
 
 
-def test_degraded_status_is_degraded():
-    assert classify({"status": "degraded", "turn_capability": _tc()}) == "degraded"
+@pytest.mark.parametrize("status", ["degraded", "unhealthy"])
+def test_non_model_degradation_is_not_a_keychain_heal_case(status):
+    assert classify({"status": status, "turn_capability": _tc()}) == "non_model"
 
 
 def test_missing_turn_capability_is_fields():

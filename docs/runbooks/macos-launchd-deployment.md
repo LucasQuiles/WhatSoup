@@ -645,7 +645,11 @@ or dependencies. A partial bot-errors scripts deployment does not supply this
 complete dependency closure. The shared token reader and timeout helper support
 Linux and macOS; kickstart remediation here is specifically for macOS launchd.
 `--health-timeout` is a positive integer budget applied separately to Node
-resolution, each token read and each HTTP request, not an overall run deadline.
+resolution, each token read, each HTTP request and each launchctl kickstart.
+An external timeout backend may add its bounded termination grace. A failed or
+timed-out kickstart exits 2 without another remediation attempt. The configured
+`--settle` pause and `--max-kickstarts` attempt count still apply; this is not an
+overall run deadline.
 
 For authenticated model degradation, run the bounded remediation helper. It
 re-probes `/health` and issues at most the configured number of kickstarts:
@@ -655,6 +659,9 @@ deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port 
 ```
 
 The helper requires an explicit boolean `turn_capability.model_usable_stale`.
+An authenticated degraded or unhealthy response with a fresh usable model exits
+2 without a kickstart: queue, transport or other non-model failures do not
+establish a keychain remediation case. Inspect those health signals separately.
 Missing, null or malformed freshness evidence exits 3 without a kickstart; inspect
 the health projection and producer schema before retrying. The helper trusts the
 runtime's stale verdict and does not independently validate provider-proof times.
