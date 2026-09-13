@@ -1554,8 +1554,8 @@ def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[s
         # Alert on a shared session ID independently of the failure-rate threshold.
         if collisions:
             collision_details = "; ".join(
-                f"ck=[REDACTED CONVERSATION] shared_session_id={session_id}"
-                for conv_key, session_id in sorted(collisions.items())[:max_chats]
+                "ck=[REDACTED CONVERSATION] shared_session_id=[REDACTED SESSION]"
+                for _ in sorted(collisions)[:max_chats]
             )
             problems[collision_key] = (
                 f"session-sharing collision: instance={name} "
@@ -1582,7 +1582,7 @@ def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[s
             )
             detail = f"ck=[REDACTED CONVERSATION] failed={total} classes={classes}"
             if conv_key in collisions:
-                detail += f" session_collision session_id={collisions[conv_key]}"
+                detail += " session_collision session_id=[REDACTED SESSION]"
             details.append(detail)
         problems[key] = (
             f"turn-failure rate: instance={name} window_seconds={window} "

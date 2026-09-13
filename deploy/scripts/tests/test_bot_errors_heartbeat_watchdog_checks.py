@@ -410,20 +410,23 @@ class TestTurnFailureRateProbe:
         assert "session_collision:alpha" not in problems
 
     @given(local=st.integers(min_value=1000000000, max_value=9999999999999999),
-           suffix=st.sampled_from(["", "_at_g.us", "_at_lid"]))
-    @example(local=15555550123, suffix="")
-    @example(local=120363123456789, suffix="_at_g.us")
+           suffix=st.sampled_from(["", "_at_g.us", "_at_lid"]),
+           session_shape=st.sampled_from(["opaque", "embedded", "identity"]))
+    @example(local=15555550123, suffix="", session_shape="embedded")
+    @example(local=120363123456789, suffix="_at_g.us", session_shape="identity")
+    @example(local=15555550123, suffix="", session_shape="opaque")
     @settings(max_examples=30, deadline=None, database=None)
-    def test_turn_alert_packets_do_not_expose_conversation_identifiers(self, local, suffix):
+    def test_turn_alert_packets_do_not_expose_conversation_identifiers(self, local, suffix, session_shape):
         conversation = f"{local}{suffix}"
+        session = {"opaque": "S-shared", "embedded": f"sess-{local}-a1", "identity": conversation}[session_shape]
         with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
             root = Path(directory)
             problems = self._run(
                 root, patch,
                 failed_rows=[(conversation, "timeout", self._recent(60))] * 3,
                 checkpoints=[
-                    (conversation, "S-shared", "active"),
-                    (f"{conversation}::scheduled-agent-job", "S-shared", "active"),
+                    (conversation, session, "active"),
+                    (f"{conversation}::scheduled-agent-job", session, "active"),
                 ],
                 env={"BOT_ERRORS_STATE_DIR": str(root / "state"),
                      "BOT_ERRORS_OUTBOX_DIR": str(root / "outbox")},
@@ -437,6 +440,7 @@ class TestTurnFailureRateProbe:
                 raw = packet.read_text()
                 assert conversation not in raw
                 assert str(local) not in raw
+                assert session not in raw
                 event = json.loads(raw)
                 assert "affected_chats=1" in event["evidence"]
 
@@ -567,7 +571,7 @@ class TestTurnFailureRateProbe:
             tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
         )
         assert "session_collision:alpha" in problems
-        assert "shared_session_id=S-shared" in problems["session_collision:alpha"]
+        assert "shared_session_id=[REDACTED SESSION]" in problems["session_collision:alpha"]
         assert "ck=[REDACTED CONVERSATION]" in problems["session_collision:alpha"]
         assert "turn_failure:alpha" not in problems
 
