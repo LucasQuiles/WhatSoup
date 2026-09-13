@@ -1464,12 +1464,9 @@ TURN_FAILURE_PREFIXES = ("turn_failure:", "session_collision:", "turn_failure_pr
 
 
 def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
-    """conversation_key -> shared session_id for the scheduled/interactive
-    session-sharing collision that yields "Exact ... could not be closed"
-    terminal failures. An interactive per_chat checkpoint and its
-    ``::scheduled-agent-job`` sibling MUST NOT share one claude session; when
-    they do, whichever scope finalizes first closes the shared agent_sessions
-    row and the other scope's exact-identity close matches zero rows and throws.
+    """Map interactive conversation keys to session IDs also used by active
+    scheduled checkpoints. Interactive and scheduled work use separate
+    persistence namespaces; a shared session ID contradicts that isolation.
     Read-only; unavailable schema propagates as an observation failure."""
     rows = conn.execute(
         "SELECT i.conversation_key, i.session_id "
@@ -1553,12 +1550,8 @@ def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[s
         # Instance evaluation by another check is not evidence for these keys.
         if evaluated_keys is not None:
             evaluated_keys.update((key, collision_key, probe_key))
-        # Session-sharing collision is a zero-false-positive structural defect:
-        # an interactive per_chat checkpoint and its ``::scheduled-agent-job``
-        # sibling must never share a claude session. When they do, the exact
-        # lifecycle-close guards throw ("Exact ... could not be closed") on every
-        # interactive turn. Alert on it directly — independent of failure rate,
-        # since real user turns arrive too sparsely to reliably cross a rate gate.
+        # Active interactive and scheduled checkpoints use separate namespaces.
+        # Alert on a shared session ID independently of the failure-rate threshold.
         if collisions:
             collision_details = "; ".join(
                 f"ck={conv_key} shared_session_id={session_id}"
@@ -3093,6 +3086,10 @@ def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
         checks = configured_checks()
+        if "turn_failure_rate" in checks:
+            turn_failure_window_seconds()
+            turn_failure_min_count()
+            turn_failure_max_chats_reported()
     except ValueError as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded

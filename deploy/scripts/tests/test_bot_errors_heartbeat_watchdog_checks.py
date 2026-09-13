@@ -13,11 +13,15 @@ import importlib.util
 import json
 import os
 import sys
+from contextlib import closing, redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +140,83 @@ class TestConfiguredChecksValidation:
 
 class TestRunOnceConfigurationError:
     """Verify run_once exits nonzero on bad config and does not reconcile (#2465)."""
+
+    @given(
+        knob=st.sampled_from([
+            "BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS",
+            "BOT_ERRORS_TURN_FAILURE_MIN_COUNT",
+            "BOT_ERRORS_TURN_FAILURE_MAX_CHATS",
+        ]),
+        value=st.one_of(
+            st.integers(min_value=-1_000_000, max_value=0).map(str),
+            st.sampled_from(["", "1.5", "nan", "invalid"]),
+        ),
+    )
+    @example(knob="BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", value="0")
+    @example(knob="BOT_ERRORS_TURN_FAILURE_MIN_COUNT", value="invalid")
+    @example(knob="BOT_ERRORS_TURN_FAILURE_MAX_CHATS", value="-1")
+    @settings(max_examples=30, deadline=None, database=None)
+    def test_enabled_turn_failure_thresholds_fail_before_state(self, knob, value):
+        with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+            mod = _load_module()
+            patch.setattr(mod.os, "environ", {
+                "HOME": directory,
+                "BOT_ERRORS_WATCHDOG_CHECKS": "turn_failure_rate",
+                "BOT_ERRORS_DRY_NOW": "1700000000",
+                knob: value,
+            })
+            effects = {}
+            for name in (
+                "open_watchdog_state_session", "collect_problems",
+                "turn_failure_rate_problems", "reconcile",
+            ):
+                effects[name] = mock.Mock(side_effect=AssertionError(f"unexpected {name}"))
+                patch.setattr(mod, name, effects[name])
+            stdout, stderr = StringIO(), StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = mod.run_once(SimpleNamespace())
+            assert exit_code == 2
+            assert json.loads(stdout.getvalue()) == {
+                "time": "2023-11-14T22:13:20Z",
+                "verdict": "configuration_error",
+                "error": f"{knob} must be a positive integer",
+            }
+            assert stderr.getvalue().strip() == (
+                f"configuration_error: {knob} must be a positive integer"
+            )
+            for effect in effects.values():
+                effect.assert_not_called()
+            assert list(Path(directory).iterdir()) == []
+
+    def test_disabled_turn_failure_ignores_unused_thresholds(
+        self, turn_failure_reconciliation, monkeypatch
+    ):
+        mod, _, _ = turn_failure_reconciliation
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_WATCHDOG_CHECKS", "q_loop")
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", "invalid")
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_MIN_COUNT", "0")
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_MAX_CHATS", "-1")
+        collect = mock.Mock(return_value={})
+        reconcile = mock.Mock(return_value=[])
+        monkeypatch.setattr(mod, "collect_problems", collect)
+        monkeypatch.setattr(mod, "reconcile", reconcile)
+        assert mod.run_once(SimpleNamespace()) == 0
+        collect.assert_called_once()
+        assert collect.call_args.args[1] == {"q_loop"}
+        reconcile.assert_called_once()
+
+    def test_enabled_turn_failure_accepts_positive_thresholds(
+        self, turn_failure_reconciliation, monkeypatch
+    ):
+        mod, instances, _ = turn_failure_reconciliation
+        (instances / "alpha").mkdir()
+        _make_turn_failure_db(instances / "alpha" / "bot.db", failed_rows=[], checkpoints=[])
+        monkeypatch.setattr(mod, "expected_local_services", lambda: [{"name": "alpha"}])
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", "1")
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_MIN_COUNT", "1")
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_TURN_FAILURE_MAX_CHATS", "1")
+        assert mod.run_once(SimpleNamespace()) == 0
+        assert mod.load_state()["open"] == {}
 
     def test_run_once_unknown_selector_returns_nonzero(self, monkeypatch, capsys):
         mod = _load_module()
@@ -284,9 +365,8 @@ def _make_turn_failure_db(db_path: Path, *, failed_rows, checkpoints):
 
 
 class TestTurnFailureRateProbe:
-    """turn_failure_rate_problems(): terminal-failure-rate alerting and the
-    scheduled/interactive session-sharing collision detector (root cause of the
-    "Exact ... could not be closed" WHATBOT/MOMS RESUME incident)."""
+    """Terminal per-chat failure-rate alerts and active checkpoint
+    session-sharing observations."""
 
     _NOW = 1_700_000_000
 
@@ -343,30 +423,32 @@ class TestTurnFailureRateProbe:
         )
         assert "turn_failure:alpha" not in problems
 
-    @pytest.mark.parametrize("window,seconds_ago,alerts", [
-        (1800, -1, False),
-        (1800, 0, True),
-        (1800, 1800, True),
-        (1800, 1801, False),
-        (60, 60, True),
-        (60, 61, False),
-    ])
-    def test_rate_window_is_closed_past_interval(
-        self, tmp_path, monkeypatch, window, seconds_ago, alerts
-    ):
-        rows = [("chatA_at_g.us", "unknown", self._recent(seconds_ago))] * 3
-        problems = self._run(
-            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[],
-            env={"BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS": str(window)},
-        )
-        expected = {}
-        if alerts:
-            expected["turn_failure:alpha"] = (
-                f"turn-failure rate: instance=alpha window_seconds={window} "
-                "min_count=3 affected_chats=1 "
-                "ck=chatA_at_g.us failed=3 classes=unknown:3"
+    @given(
+        window=st.integers(min_value=1, max_value=86400),
+        seconds_ago=st.integers(min_value=-172800, max_value=172800),
+    )
+    @example(window=1800, seconds_ago=-1)
+    @example(window=1800, seconds_ago=0)
+    @example(window=1800, seconds_ago=1800)
+    @example(window=1800, seconds_ago=1801)
+    @example(window=60, seconds_ago=60)
+    @example(window=60, seconds_ago=61)
+    @settings(max_examples=50, deadline=None, database=None)
+    def test_rate_window_is_closed_past_interval(self, window, seconds_ago):
+        with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+            rows = [("chatA_at_g.us", "unknown", self._recent(seconds_ago))] * 3
+            problems = self._run(
+                Path(directory), patch, failed_rows=rows, checkpoints=[],
+                env={"BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS": str(window)},
             )
-        assert problems == expected
+            expected = {}
+            if 0 <= seconds_ago <= window:
+                expected["turn_failure:alpha"] = (
+                    f"turn-failure rate: instance=alpha window_seconds={window} "
+                    "min_count=3 affected_chats=1 "
+                    "ck=chatA_at_g.us failed=3 classes=unknown:3"
+                )
+            assert problems == expected
 
     @pytest.mark.parametrize("received_at", [None, "not-a-timestamp"])
     def test_rate_window_excludes_unusable_timestamps(
@@ -405,7 +487,7 @@ class TestTurnFailureRateProbe:
                 "INSERT INTO inbound_events "
                 "(conversation_key, received_at, processing_status, failure_class) "
                 "VALUES ('chatB_at_g.us', ?, ?, 'unknown')",
-                [(self._recent(60), status) for status in ("pending", "completed")],
+                [(self._recent(60), status) for status in ("pending", "complete")],
             )
             conn.commit()
         finally:
@@ -487,7 +569,11 @@ class TestTurnFailureRateProbe:
 @pytest.fixture
 def turn_failure_reconciliation(tmp_path, monkeypatch):
     """Use the real probe, controller-state envelope and private local outbox."""
-    root = tmp_path.resolve()
+    return _make_turn_failure_reconciliation(tmp_path, monkeypatch)
+
+
+def _make_turn_failure_reconciliation(root, monkeypatch):
+    root = root.resolve()
     state = root / "state"
     state.mkdir(mode=0o700)
     instances = root / "instances"
@@ -506,17 +592,42 @@ def turn_failure_reconciliation(tmp_path, monkeypatch):
     return mod, instances, mod.active_reconcile_prefixes({"turn_failure_rate"})
 
 
-@pytest.mark.parametrize("unavailable,prefix", [
-    ("database_missing", "session_collision:"),
-    ("database_missing", "turn_failure:"),
-    ("checkpoint_table_missing", "session_collision:"),
-    ("inbound_table_missing", "turn_failure:"),
-    ("inbound_table_missing", "session_collision:"),
-    ("database_corrupt", "turn_failure:"),
-    ("database_corrupt", "session_collision:"),
-])
+@given(
+    unavailable=st.sampled_from([
+        "database_missing", "checkpoint_table_missing",
+        "inbound_table_missing", "database_corrupt",
+    ]),
+    prefix=st.sampled_from(["turn_failure:", "session_collision:"]),
+    observations=st.integers(min_value=2, max_value=5),
+)
+@example(unavailable="database_missing", prefix="session_collision:", observations=2)
+@example(unavailable="database_missing", prefix="turn_failure:", observations=2)
+@example(unavailable="checkpoint_table_missing", prefix="session_collision:", observations=2)
+@example(unavailable="inbound_table_missing", prefix="turn_failure:", observations=2)
+@example(unavailable="inbound_table_missing", prefix="session_collision:", observations=2)
+@example(unavailable="database_corrupt", prefix="turn_failure:", observations=2)
+@example(unavailable="database_corrupt", prefix="session_collision:", observations=2)
+@settings(max_examples=25, deadline=None, database=None)
 def test_unavailable_collision_observation_preserves_prior_incident(
-    turn_failure_reconciliation, monkeypatch, unavailable, prefix,
+    unavailable, prefix, observations,
+):
+    with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        fixture = _make_turn_failure_reconciliation(Path(directory), patch)
+        key, before, persisted, events = _observe_unavailable_collision(
+            fixture, patch, unavailable, prefix, observations,
+        )
+        assert key in persisted
+        assert persisted[key]["lastEvidence"] == before["lastEvidence"]
+        assert persisted[key].get("recoveryObservations", 0) == 0
+        assert not any(
+            json.loads(path.read_text()).get("eventType") == "clear"
+            and json.loads(path.read_text()).get("alertSource") == key
+            for path in events
+        )
+
+
+def _observe_unavailable_collision(
+    turn_failure_reconciliation, monkeypatch, unavailable, prefix, observations,
 ):
     import sqlite3
 
@@ -526,15 +637,17 @@ def test_unavailable_collision_observation_preserves_prior_incident(
     if unavailable == "database_corrupt":
         (instance / "bot.db").write_bytes(b"not a SQLite database")
     if unavailable == "inbound_table_missing":
-        with sqlite3.connect(instance / "bot.db") as conn:
+        with closing(sqlite3.connect(instance / "bot.db")) as conn:
             conn.execute("CREATE TABLE unrelated (value TEXT)")
+            conn.commit()
     if unavailable == "checkpoint_table_missing":
         db = instance / "bot.db"
         _make_turn_failure_db(db, failed_rows=[], checkpoints=[])
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute(
                 "ALTER TABLE session_checkpoints RENAME TO unavailable_session_checkpoints"
             )
+            conn.commit()
     monkeypatch.setattr(
         mod, "expected_local_services",
         lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
@@ -552,7 +665,7 @@ def test_unavailable_collision_observation_preserves_prior_incident(
     mod.reconcile({key: "previously confirmed shared session"}, prefixes)
     before = mod.load_state()["open"][key].copy()
     events = []
-    for tick in (1700000001, 1700000002):
+    for tick in range(1700000001, 1700000001 + observations):
         monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", str(tick))
         evaluated_keys = set()
         evaluated_instances = set()
@@ -569,14 +682,7 @@ def test_unavailable_collision_observation_preserves_prior_incident(
         ))
     http.assert_not_called()
     persisted = mod.load_state()["open"]
-    assert key in persisted
-    assert persisted[key]["lastEvidence"] == before["lastEvidence"]
-    assert persisted[key].get("recoveryObservations", 0) == 0
-    assert not any(
-        json.loads(path.read_text()).get("eventType") == "clear"
-        and json.loads(path.read_text()).get("alertSource") == key
-        for path in events
-    )
+    return key, before, persisted, events
 
 
 @pytest.mark.parametrize("prefix", ["turn_failure:", "session_collision:"])
