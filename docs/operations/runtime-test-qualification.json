@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "id": "model-pin-isolation",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/runtimes/agent/model-pin.test.ts",
+        "--pool=forks",
+        "--retry=0"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "BOTERRORS-RUNTIME-TEST-ISOLATION"
+      ]
+    },
+    {
+      "id": "callback-assertions",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/runtimes/agent/capability-obligation-execution-tool.test.ts",
+        "--pool=forks",
+        "--retry=0"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+      ]
+    },
+    {
+      "id": "poll-runtime",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/runtimes/agent/runtime.test.ts",
+        "--pool=forks",
+        "--retry=0"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "BOTERRORS-RUNTIME-TEST-ISOLATION"
+      ]
+    },
+    {
+      "id": "source-types",
+      "argv": [
+        "node",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "BOTERRORS-RUNTIME-TEST-ISOLATION",
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+      ]
+    },
+    {
+      "id": "test-types",
+      "argv": [
+        "node",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "tsconfig.test.json"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "BOTERRORS-RUNTIME-TEST-ISOLATION",
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+      ]
+    },
+    {
+      "id": "documentation-drift",
+      "argv": [
+        "node",
+        "--disable-warning=ExperimentalWarning",
+        "--experimental-strip-types",
+        "scripts/doc-drift-check.ts"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "DOCS"
+      ]
+    }
+  ],
+  "toolchain_probes": [
+    {
+      "id": "qualification-environment",
+      "argv": [
+        "node",
+        "-e",
+        "const fs=require('node:fs');const assert=require('node:assert/strict');assert.notEqual(process.env.WHATSOUP_SKIP_DOC_DRIFT,'1','documentation skip is not accepted for qualification');const pin=fs.readFileSync('.nvmrc','utf8').trim().replace(/^v/,'');assert.equal(process.versions.node,pin);console.log('Node pin verified:',process.versions.node);"
+      ],
+      "timeout": 10
+    }
+  ],
+  "test_definitions": [
+    "tests/runtimes/agent/model-pin.test.ts",
+    "tests/runtimes/agent/capability-obligation-execution-tool.test.ts",
+    "tests/runtimes/agent/runtime.test.ts"
+  ],
+  "config_paths": [
+    "package.json",
+    ".nvmrc",
+    "vitest.config.ts",
+    "tsconfig.json",
+    "tsconfig.test.json"
+  ],
+  "lock_paths": [
+    "package-lock.json"
+  ],
+  "documentation_paths": [
+    "CLAUDE.md",
+    "README.md",
+    "docs/tools.md",
+    "docs/configuration.md",
+    "docs/design-system/04-enforcement/lint-plan.md",
+    "docs/design-system/05-cutover/push-gate-readiness.md",
+    "docs/design-system/06-implementation/qa-hardening.md",
+    "docs/design-system/06-implementation/conformance-manifest.md"
+  ],
+  "environment": [
+    "PATH",
+    "CI",
+    "LOG_LEVEL",
+    "NODE_OPTIONS",
+    "WHATSOUP_SKIP_DOC_DRIFT"
+  ]
+}
