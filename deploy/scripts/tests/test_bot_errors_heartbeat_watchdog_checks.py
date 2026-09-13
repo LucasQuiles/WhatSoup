@@ -415,6 +415,7 @@ class TestTurnFailureRateProbe:
     @example(local=15555550123, suffix="", session_shape="embedded")
     @example(local=120363123456789, suffix="_at_g.us", session_shape="identity")
     @example(local=15555550123, suffix="", session_shape="opaque")
+    @example(local=1700000000, suffix="", session_shape="embedded")
     @settings(max_examples=30, deadline=None, database=None)
     def test_turn_alert_packets_do_not_expose_conversation_identifiers(self, local, suffix, session_shape):
         conversation = f"{local}{suffix}"
@@ -437,11 +438,14 @@ class TestTurnFailureRateProbe:
             mod = _load_module()
             for key, detail in problems.items():
                 packet = mod.outbox_event(detail, detail, "critical", key)
-                raw = packet.read_text()
+                event = json.loads(packet.read_text())
+                assert event.pop("id") == (
+                    f"heartbeat-watchdog-{key.replace(':', '-')}-alert-{self._NOW}"
+                )
+                raw = json.dumps(event)
                 assert conversation not in raw
                 assert str(local) not in raw
                 assert session not in raw
-                event = json.loads(raw)
                 assert "affected_chats=1" in event["evidence"]
 
     def test_below_threshold_is_silent(self, tmp_path, monkeypatch):
@@ -584,6 +588,19 @@ class TestTurnFailureRateProbe:
             tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
         )
         assert "session_collision:alpha" not in problems
+
+    @pytest.mark.parametrize("session_id", [None, ""])
+    def test_missing_session_ids_do_not_collide(
+        self, tmp_path, monkeypatch, session_id
+    ):
+        checkpoints = [
+            ("chat", session_id, "active"),
+            ("chat::scheduled-agent-job", session_id, "active"),
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
+        )
+        assert problems == {}
 
     def test_missing_database_is_flagged(self, tmp_path, monkeypatch):
         mod = _load_module()

@@ -1475,7 +1475,7 @@ def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
         "WHERE i.session_status = 'active' AND s.session_status = 'active' "
         "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
         "AND s.conversation_key LIKE '%::scheduled-agent-job' "
-        "AND i.session_id IS NOT NULL"
+        "AND i.session_id IS NOT NULL AND i.session_id <> ''"
     ).fetchall()
     return {str(r[0]): str(r[1]) for r in rows}
 
