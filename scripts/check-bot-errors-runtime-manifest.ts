@@ -77,12 +77,13 @@ export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'src/lib/bot-errors-outbox.ts',
   // Imported for value by bot-errors-outbox.ts at module scope, and TypeScript
   // runs from source here, so these load in production exactly like the outbox
-  // itself. The bot-errors deployer ships all four; an entry it ships without a
+  // itself. The bot-errors deployer ships all five; an entry it ships without a
   // manifest hash is a hard exit-3 in resolve_managed_files, so requiring them
   // keeps the two lists from drifting apart in either direction.
   'src/lib/alert-evidence.ts',
   'src/lib/private-fs.ts',
   'src/lib/redaction-patterns.ts',
+  'src/lib/redaction-text.ts',
   'src/lib/type-guards.ts',
   'src/lib/fault-taxonomy-registry.json',
   'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',

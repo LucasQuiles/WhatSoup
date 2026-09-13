@@ -48,6 +48,10 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       .toContain('src/lib/fault-taxonomy-registry.json');
   });
 
+  it('requires the shared redaction implementation as an integrity-pinned dependency', () => {
+    expect(EXPLICIT_REQUIRED_RUNTIME_PATHS).toContain('src/lib/redaction-text.ts');
+  });
+
   it('pins the fenced bounded JSONL runtime module and capability markers', () => {
     expect(computeRequiredRuntimePaths(repoRoot))
       .toContain('deploy/scripts/lib/bounded_jsonl.py');
