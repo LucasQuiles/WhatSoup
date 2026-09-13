@@ -61,37 +61,93 @@ whatsoup_run_bounded() {
     return "$rc"
   fi
 
-  # Portable fallback. The watchdog's stdout/stderr are detached so a caller
-  # using command substitution is not held open for the full budget waiting on
-  # the watchdog's copy of the pipe.
-  local marker
-  marker="$(mktemp "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
-
-  # `<&0` is required: bash assigns /dev/null to an asynchronous command's stdin
-  # unless an explicit redirection overrides it, which would silently break
-  # callers that pipe a secret in (e.g. `printf ... | whatsoup_run_bounded 5
-  # secret-tool store ...`).
-  "$@" <&0 &
-  local cmd_pid=$!
-
+  # Job control is local to this subshell. Each gated job gets an owned group;
+  # disabling monitor mode inside it keeps ordinary descendants in that group.
   (
-    sleep "$budget"
-    if kill -0 "$cmd_pid" 2>/dev/null; then
-      printf 'timeout' > "$marker"
-      kill -9 "$cmd_pid" 2>/dev/null
+    set +e
+    set -m
+    local directory cmd_pid="" cmd_group="" watchdog_pid="" watchdog_group=""
+    local candidate observed caller_group cleanup_rc=0
+    directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
+
+    _whatsoup_bounded_cleanup() {
+      local group count
+      # Unverified jobs are still blocked opening their launch FIFO and have
+      # not executed the requested command or created timer descendants.
+      if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
+      if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
+      for group in "$watchdog_group" "$cmd_group"; do
+        [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
+      done
+      [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null
+      [ -n "$watchdog_pid" ] && wait "$watchdog_pid" 2>/dev/null
+      # Grandchildren are reaped by their parent or the OS. Do not report
+      # completion while a signalled member still exists in an owned group.
+      for group in "$watchdog_group" "$cmd_group"; do
+        [ -n "$group" ] || continue
+        count=0
+        while kill -0 -- "-$group" 2>/dev/null; do
+          count=$((count + 1))
+          if [ "$count" -ge 200 ]; then cleanup_rc=2; break; fi
+          sleep 0.01
+        done
+      done
+      rm -f "$directory/command" "$directory/watchdog" "$directory/timeout"
+      rmdir "$directory"
+    }
+    trap '_whatsoup_bounded_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+
+    if ! mkfifo "$directory/command" "$directory/watchdog"; then return 2; fi
+    caller_group="$(ps -o pgid= -p "$$")" || return 2
+    caller_group="${caller_group//[[:space:]]/}"
+    [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
+
+    # The read redirects only its own stdin; the wrapped command retains fd0.
+    (
+      set +m
+      IFS= read -r start < "$directory/command" || exit 2
+      [ "$start" = run ] || exit 2
+      "$@"
+    ) <&0 &
+    cmd_pid=$!
+    candidate="$(jobs -p %+)"
+    observed="$(ps -o pgid= -p "$cmd_pid")" || return 2
+    observed="${observed//[[:space:]]/}"
+    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
+        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ]; then
+      return 2
     fi
-  ) >/dev/null 2>&1 &
-  local watchdog_pid=$!
+    cmd_group="$candidate"
 
-  rc=0
-  wait "$cmd_pid" 2>/dev/null || rc=$?
+    (
+      set +m
+      IFS= read -r start < "$directory/watchdog" || exit 2
+      [ "$start" = run ] || exit 2
+      sleep "$budget"
+      printf timeout > "$directory/timeout"
+      kill -9 -- "-$cmd_group" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+    candidate="$(jobs -p %+)"
+    observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
+    observed="${observed//[[:space:]]/}"
+    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
+        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ] \
+        || [ "$candidate" = "$cmd_group" ]; then
+      return 2
+    fi
+    watchdog_group="$candidate"
 
-  kill -9 "$watchdog_pid" 2>/dev/null
-  wait "$watchdog_pid" 2>/dev/null
-
-  if [ -s "$marker" ]; then
-    rc=124
-  fi
-  rm -f "$marker"
-  return "$rc"
+    printf 'run\n' > "$directory/command"
+    printf 'run\n' > "$directory/watchdog"
+    rc=0
+    wait "$cmd_pid" 2>/dev/null || rc=$?
+    [ -s "$directory/timeout" ] && rc=124
+    _whatsoup_bounded_cleanup
+    trap - EXIT
+    [ "$cleanup_rc" -eq 0 ] || rc=2
+    return "$rc"
+  )
 }

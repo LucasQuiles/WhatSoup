@@ -250,6 +250,149 @@ function resolveBinary(name: string): string | undefined {
   return undefined;
 }
 
+// A fresh session identifies every owned group, including Bash job-control
+// groups. Capture survivors before finally cleans them; cleanup cannot make a
+// lifecycle assertion pass. Processes that create a new session are outside
+// this boundary and are not claimed as covered by these probes.
+const LIFECYCLE_DRIVER = String.raw`
+import json, os, pathlib, signal, subprocess, sys, time
+root, helper, bash, mode = sys.argv[1:]
+root = pathlib.Path(root)
+def interrupted(signum, frame):
+    raise TimeoutError('outer lifecycle watchdog interrupted the fixture')
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+def members(session):
+    result = subprocess.run(['/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps', '-axo', 'pid=,ppid=,pgid=,lstart=,comm='], capture_output=True, text=True, timeout=3)
+    if result.returncode: raise RuntimeError('process identity unavailable')
+    found = []
+    for row in result.stdout.splitlines():
+        fields = row.split()
+        if len(fields) < 3: continue
+        pid = int(fields[0])
+        try:
+            if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'identity': row})
+        except ProcessLookupError: pass
+    return found
+record = {}
+sentinel = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
+with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
+    child = subprocess.Popen([bash, str(root / 'probe.sh'), helper, bash, str(root / 'child.sh'), mode], stdin=subprocess.PIPE, stdout=out, stderr=err, text=True, start_new_session=True)
+    session = os.getsid(child.pid)
+    try:
+        if session != child.pid: raise RuntimeError('test session ownership unavailable')
+        record['root_pid'] = child.pid
+        record['session_id'] = session
+        record['initial'] = members(session)
+        record['sentinel'] = members(os.getsid(sentinel.pid))
+        child.stdin.write('go\n'); child.stdin.close()
+        child.wait(timeout=8)
+        record['exit'] = child.returncode
+        record['survivors_before_cleanup'] = members(session)
+        record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
+    except Exception as error:
+        record['error'] = repr(error)
+    finally:
+        # Finish bounded cleanup if the Node-side watchdog requested shutdown.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        owned = members(session) if session == child.pid else []
+        if session != child.pid: child.kill()
+        record['cleanup_groups'] = sorted({item['pgid'] for item in owned})
+        for group in record['cleanup_groups']:
+            try: os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError: pass
+        child.wait(timeout=3)
+        deadline = time.monotonic() + 2
+        while members(session) and time.monotonic() < deadline: time.sleep(0.01)
+        record['survivors_after_cleanup'] = members(session)
+        if sentinel.poll() is None: sentinel.kill()
+        sentinel.wait(timeout=3)
+record['stdout'] = (root / 'stdout').read_text()
+record['stderr'] = (root / 'stderr').read_text()
+record['command_started'] = (root / 'command-started').exists()
+print(json.dumps(record))
+`;
+
+function runLifecycleProbe(mode: 'fast' | 'nested' | 'nonzero' | 'ownership-command' | 'ownership-watchdog' | 'zero') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
+  const shim = path.join(root, 'bin');
+  fs.mkdirSync(shim);
+  for (const name of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
+    const binary = resolveBinary(name);
+    if (binary) fs.symlinkSync(binary, path.join(shim, name));
+  }
+  if (mode.startsWith('ownership-')) {
+    fs.unlinkSync(path.join(shim, 'ps'));
+    fs.writeFileSync(path.join(shim, 'ps'), [
+      '#!/bin/bash',
+      'count=0; [ ! -f "$PS_COUNTER" ] || read -r count < "$PS_COUNTER"',
+      'count=$((count + 1)); printf "%s\\n" "$count" > "$PS_COUNTER"',
+      '[ "$count" -ne "$PS_FAIL_AT" ] || exit 1',
+      'exec "$REAL_PS" "$@"',
+      '',
+    ].join('\n'), { mode: 0o700 });
+  }
+  fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
+  fs.writeFileSync(path.join(root, 'probe.sh'), [
+    'IFS= read -r go',
+    '. "$1"',
+    'before_options="$-"',
+    'budget=6; [ "$4" != nested ] || budget=1; [ "$4" != zero ] || budget=0',
+    'if out="$(printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
+    'printf "rc=%s output=%s options=%s/%s\\n" "$rc" "$out" "$before_options" "$-"',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'child.sh'), [
+    'printf started > "$COMMAND_STARTED"',
+    'if [ "$1" != nested ] && [ "$1" != zero ]; then',
+    '  IFS= read -r payload',
+    '  sleep 0.05',
+    '  printf "%s" "$payload"',
+    '  [ "$1" != nonzero ] || exit 7',
+    'else',
+    '  value="$(sleep 30)"',
+    '  printf "%s" "$value"',
+    'fi',
+    '',
+  ].join('\n'));
+  try {
+    const result = spawnSync(resolveBinary('python3')!, [
+      path.join(root, 'lifecycle.py'), root, path.resolve(BOUNDED_LIB), resolveBinary('bash')!, mode,
+    ], { encoding: 'utf8', timeout: 15_000, env: {
+      ...process.env, PATH: shim, TMPDIR: root,
+      COMMAND_STARTED: path.join(root, 'command-started'),
+      REAL_PS: resolveBinary('ps')!, PS_COUNTER: path.join(root, 'ps-counter'),
+      PS_FAIL_AT: mode === 'ownership-watchdog' ? '3' : '2',
+    } });
+    if (result.error) throw result.error;
+    expect(result.status, result.stderr).toBe(0);
+    return JSON.parse(result.stdout);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe('whatsoup_run_bounded fallback lifecycle', () => {
+  it.each(['fast', 'nested', 'nonzero', 'zero'] as const)('reaps every owned descendant before returning from %s', (mode) => {
+    const result = runLifecycleProbe(mode);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    const expected = mode === 'fast' ? 'rc=0 output=payload' : mode === 'nonzero' ? 'rc=7 output=payload' : 'rc=124 output=';
+    expect(result.stdout).toContain(expected);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each(['ownership-command', 'ownership-watchdog'] as const)('refuses %s failure before releasing the command', (mode) => {
+    const result = runLifecycleProbe(mode);
+    expect(result.stdout).toContain('rc=2 output=');
+    expect(result.command_started).toBe(false);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+});
+
 /**
  * Runs a snippet against the real library. When `withoutTimeout` is set, PATH is
  * reduced to a shim directory holding only the utilities the fallback needs — so
@@ -263,7 +406,7 @@ function runSnippet(snippet: string, opts: { withoutTimeout?: boolean } = {}) {
 
   if (opts.withoutTimeout) {
     shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded-shim-'));
-    for (const bin of ['sleep', 'mktemp', 'rm', 'cat', 'false']) {
+    for (const bin of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
       const resolved = resolveBinary(bin);
       if (resolved) fs.symlinkSync(resolved, path.join(shimDir, bin));
     }
@@ -356,6 +499,24 @@ describe.each([
     const res = runSnippet('out="$(whatsoup_run_bounded 30 cat </dev/null)"; echo done', opts);
     expect(res.stdout).toContain('done');
     expect(Date.now() - started).toBeLessThan(15_000);
+  });
+
+  it.each(['set +m', 'set -m'])('preserves caller options, traps and environment with %s', (monitor) => {
+    const res = runSnippet([
+      monitor,
+      'set -u',
+      'export BOUNDED_CALLER_FIXTURE=unchanged',
+      'trap ":" USR1',
+      'before_options="$-"; before_traps="$(trap -p)"; before_umask="$(umask)"',
+      'if whatsoup_run_bounded 3 false; then rc=0; else rc=$?; fi',
+      '[ "$before_options" = "$-" ] || exit 91',
+      '[ "$before_traps" = "$(trap -p)" ] || exit 92',
+      '[ "$before_umask" = "$(umask)" ] || exit 93',
+      '[ "$BOUNDED_CALLER_FIXTURE" = unchanged ] || exit 94',
+      'printf "rc=%s caller-preserved\\n" "$rc"',
+    ].join('\n'), opts);
+    expect(res.status, res.stderr).toBe(0);
+    expect(res.stdout).toContain('rc=1 caller-preserved');
   });
 });
 

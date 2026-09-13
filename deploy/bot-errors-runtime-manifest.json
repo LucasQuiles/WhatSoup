@@ -533,7 +533,7 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "sha256": "1899377cb14c039ffc468cbe401c6a175d728eccc0bad2425efd3cc6b27aee3c",
       "mustContain": [
         "def classify(d: object) -> str:"
       ]
