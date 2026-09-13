@@ -405,9 +405,40 @@ class TestTurnFailureRateProbe:
             tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
         )
         assert "turn_failure:alpha" in problems
-        assert "chatA_at_g.us" in problems["turn_failure:alpha"]
+        assert "ck=[REDACTED CONVERSATION]" in problems["turn_failure:alpha"]
         assert "failed=3" in problems["turn_failure:alpha"]
         assert "session_collision:alpha" not in problems
+
+    @given(local=st.integers(min_value=1000000000, max_value=9999999999999999),
+           suffix=st.sampled_from(["", "_at_g.us", "_at_lid"]))
+    @example(local=15555550123, suffix="")
+    @example(local=120363123456789, suffix="_at_g.us")
+    @settings(max_examples=30, deadline=None, database=None)
+    def test_turn_alert_packets_do_not_expose_conversation_identifiers(self, local, suffix):
+        conversation = f"{local}{suffix}"
+        with TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+            root = Path(directory)
+            problems = self._run(
+                root, patch,
+                failed_rows=[(conversation, "timeout", self._recent(60))] * 3,
+                checkpoints=[
+                    (conversation, "S-shared", "active"),
+                    (f"{conversation}::scheduled-agent-job", "S-shared", "active"),
+                ],
+                env={"BOT_ERRORS_STATE_DIR": str(root / "state"),
+                     "BOT_ERRORS_OUTBOX_DIR": str(root / "outbox")},
+            )
+            assert set(problems) == {"turn_failure:alpha", "session_collision:alpha"}
+            assert "failed=3" in problems["turn_failure:alpha"]
+            assert "classes=timeout:3" in problems["turn_failure:alpha"]
+            mod = _load_module()
+            for key, detail in problems.items():
+                packet = mod.outbox_event(detail, detail, "critical", key)
+                raw = packet.read_text()
+                assert conversation not in raw
+                assert str(local) not in raw
+                event = json.loads(raw)
+                assert "affected_chats=1" in event["evidence"]
 
     def test_below_threshold_is_silent(self, tmp_path, monkeypatch):
         rows = [("chatA_at_g.us", "unknown", self._recent(60)) for _ in range(2)]
@@ -446,7 +477,7 @@ class TestTurnFailureRateProbe:
                 expected["turn_failure:alpha"] = (
                     f"turn-failure rate: instance=alpha window_seconds={window} "
                     "min_count=3 affected_chats=1 "
-                    "ck=chatA_at_g.us failed=3 classes=unknown:3"
+                    "ck=[REDACTED CONVERSATION] failed=3 classes=unknown:3"
                 )
             assert problems == expected
 
@@ -498,7 +529,7 @@ class TestTurnFailureRateProbe:
             "turn_failure:alpha": (
                 "turn-failure rate: instance=alpha window_seconds=1800 "
                 "min_count=3 affected_chats=1 "
-                "ck=chatA_at_g.us failed=3 classes=unknown:2,timeout:1"
+                "ck=[REDACTED CONVERSATION] failed=3 classes=unknown:2,timeout:1"
             ),
         }
 
@@ -518,8 +549,8 @@ class TestTurnFailureRateProbe:
             "turn_failure:alpha": (
                 "turn-failure rate: instance=alpha window_seconds=1800 "
                 "min_count=3 affected_chats=3 "
-                "ck=chatB failed=5 classes=unknown:5; "
-                "ck=chatC failed=4 classes=unknown:4"
+                "ck=[REDACTED CONVERSATION] failed=5 classes=unknown:5; "
+                "ck=[REDACTED CONVERSATION] failed=4 classes=unknown:4"
             ),
         }
 
@@ -537,7 +568,7 @@ class TestTurnFailureRateProbe:
         )
         assert "session_collision:alpha" in problems
         assert "shared_session_id=S-shared" in problems["session_collision:alpha"]
-        assert "chatB_at_g.us" in problems["session_collision:alpha"]
+        assert "ck=[REDACTED CONVERSATION]" in problems["session_collision:alpha"]
         assert "turn_failure:alpha" not in problems
 
     def test_isolated_sessions_do_not_collide(self, tmp_path, monkeypatch):
