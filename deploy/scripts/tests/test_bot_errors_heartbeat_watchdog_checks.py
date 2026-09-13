@@ -241,3 +241,358 @@ class TestKnownChecksDriftGuard:
                 f"KNOWN_WATCHDOG_CHECKS member '{name}' has no entry in "
                 f"active_reconcile_prefixes(); add reconcile support or remove from registry"
             )
+
+
+# ---------------------------------------------------------------------------
+# turn_failure_rate: terminal per-chat failure rate + session-sharing collision
+# ---------------------------------------------------------------------------
+
+
+def _make_turn_failure_db(db_path: Path, *, failed_rows, checkpoints):
+    """Build a minimal instance DB with just the columns the probe reads.
+
+    failed_rows: list of (conversation_key, failure_class, received_at_utc_str)
+    checkpoints: list of (conversation_key, session_id, session_status)
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE inbound_events ("
+            "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation_key TEXT, "
+            "received_at TEXT, processing_status TEXT, failure_class TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO inbound_events (conversation_key, received_at, "
+            "processing_status, failure_class) VALUES (?, ?, 'failed', ?)",
+            [(ck, ts, fc) for (ck, fc, ts) in failed_rows],
+        )
+        conn.execute(
+            "CREATE TABLE session_checkpoints ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_key TEXT UNIQUE, "
+            "session_id TEXT, session_status TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO session_checkpoints (conversation_key, session_id, "
+            "session_status) VALUES (?, ?, ?)",
+            checkpoints,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestTurnFailureRateProbe:
+    """turn_failure_rate_problems(): terminal-failure-rate alerting and the
+    scheduled/interactive session-sharing collision detector (root cause of the
+    "Exact ... could not be closed" WHATBOT/MOMS RESUME incident)."""
+
+    _NOW = 1_700_000_000
+
+    def _recent(self, seconds_ago: int) -> str:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(
+            self._NOW - seconds_ago, tz=timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _run(self, tmp_path, monkeypatch, *, failed_rows, checkpoints, env=None):
+        mod = _load_module()
+        root = tmp_path / "instances"
+        (root / "alpha").mkdir(parents=True)
+        _make_turn_failure_db(
+            root / "alpha" / "bot.db", failed_rows=failed_rows, checkpoints=checkpoints
+        )
+        base_env = {
+            "BOT_ERRORS_WEDGE_DB_ROOT": str(root),
+            "BOT_ERRORS_DRY_NOW": str(self._NOW),
+            "BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS": "1800",
+            "BOT_ERRORS_TURN_FAILURE_MIN_COUNT": "3",
+        }
+        if env:
+            base_env.update(env)
+        monkeypatch.setattr(mod.os, "environ", base_env)
+        monkeypatch.setattr(
+            mod, "expected_local_services",
+            lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+        )
+        return mod.turn_failure_rate_problems()
+
+    def test_alerts_when_chat_exceeds_failure_threshold(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(60)) for _ in range(3)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" in problems
+        assert "chatA_at_g.us" in problems["turn_failure:alpha"]
+        assert "failed=3" in problems["turn_failure:alpha"]
+        assert "session_collision:alpha" not in problems
+
+    def test_below_threshold_is_silent(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(60)) for _ in range(2)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" not in problems
+
+    def test_stale_failures_outside_window_excluded(self, tmp_path, monkeypatch):
+        rows = [("chatA_at_g.us", "unknown", self._recent(4000)) for _ in range(5)]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=rows, checkpoints=[]
+        )
+        assert "turn_failure:alpha" not in problems
+
+    def test_session_collision_alerts_independent_of_failure_rate(
+        self, tmp_path, monkeypatch
+    ):
+        # Zero recent failures, but a scheduled+interactive checkpoint share a
+        # session_id — the structural defect must alert on its own.
+        checkpoints = [
+            ("chatB_at_g.us", "S-shared", "active"),
+            ("chatB@g.us::scheduled-agent-job", "S-shared", "active"),
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
+        )
+        assert "session_collision:alpha" in problems
+        assert "shared_session_id=S-shared" in problems["session_collision:alpha"]
+        assert "chatB_at_g.us" in problems["session_collision:alpha"]
+        assert "turn_failure:alpha" not in problems
+
+    def test_isolated_sessions_do_not_collide(self, tmp_path, monkeypatch):
+        checkpoints = [
+            ("chatB_at_g.us", "S-interactive", "active"),
+            ("chatB@g.us::scheduled-agent-job", "S-scheduled", "active"),
+        ]
+        problems = self._run(
+            tmp_path, monkeypatch, failed_rows=[], checkpoints=checkpoints
+        )
+        assert "session_collision:alpha" not in problems
+
+    def test_missing_database_is_flagged(self, tmp_path, monkeypatch):
+        mod = _load_module()
+        root = tmp_path / "instances"
+        (root / "alpha").mkdir(parents=True)  # no bot.db
+        monkeypatch.setattr(
+            mod.os, "environ", {"BOT_ERRORS_WEDGE_DB_ROOT": str(root)}
+        )
+        monkeypatch.setattr(
+            mod, "expected_local_services",
+            lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+        )
+        problems = mod.turn_failure_rate_problems()
+        assert set(problems) == {"turn_failure_probe:alpha"}
+        assert "database missing" in problems["turn_failure_probe:alpha"]
+
+
+@pytest.fixture
+def turn_failure_reconciliation(tmp_path, monkeypatch):
+    """Use the real probe, controller-state envelope and private local outbox."""
+    root = tmp_path.resolve()
+    state = root / "state"
+    state.mkdir(mode=0o700)
+    instances = root / "instances"
+    instances.mkdir()
+    monkeypatch.setattr(os, "environ", {
+        "HOME": str(root),
+        "WHATSOUP_INSTANCE_CONFIG_ROOT": str(root / "config"),
+        "BOT_ERRORS_STATE_DIR": str(state),
+        "BOT_ERRORS_OUTBOX_DIR": str(state / "outbox"),
+        "BOT_ERRORS_WEDGE_DB_ROOT": str(instances),
+        "BOT_ERRORS_WATCHDOG_CHECKS": "turn_failure_rate",
+        "BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS": "2",
+        "BOT_ERRORS_DRY_NOW": "1700000000",
+    })
+    mod = _load_module()
+    return mod, instances, mod.active_reconcile_prefixes({"turn_failure_rate"})
+
+
+@pytest.mark.parametrize("unavailable,prefix", [
+    ("database_missing", "session_collision:"),
+    ("database_missing", "turn_failure:"),
+    ("checkpoint_table_missing", "session_collision:"),
+    ("inbound_table_missing", "turn_failure:"),
+    ("inbound_table_missing", "session_collision:"),
+    ("database_corrupt", "turn_failure:"),
+    ("database_corrupt", "session_collision:"),
+])
+def test_unavailable_collision_observation_preserves_prior_incident(
+    turn_failure_reconciliation, monkeypatch, unavailable, prefix,
+):
+    import sqlite3
+
+    mod, instances, prefixes = turn_failure_reconciliation
+    instance = instances / "alpha"
+    instance.mkdir()
+    if unavailable == "database_corrupt":
+        (instance / "bot.db").write_bytes(b"not a SQLite database")
+    if unavailable == "inbound_table_missing":
+        with sqlite3.connect(instance / "bot.db") as conn:
+            conn.execute("CREATE TABLE unrelated (value TEXT)")
+    if unavailable == "checkpoint_table_missing":
+        db = instance / "bot.db"
+        _make_turn_failure_db(db, failed_rows=[], checkpoints=[])
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "ALTER TABLE session_checkpoints RENAME TO unavailable_session_checkpoints"
+            )
+    monkeypatch.setattr(
+        mod, "expected_local_services",
+        lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+    )
+    monkeypatch.setattr(
+        mod, "expected_local_instances", lambda: [{"name": "alpha", "healthPort": 3200}],
+    )
+    monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES", json.dumps({
+        "alpha": {"body": {"status": "healthy", "instance": {"name": "alpha"},
+                            "whatsapp": {"connected": True}}},
+    }))
+    http = mock.Mock(side_effect=AssertionError("unexpected HTTP request"))
+    monkeypatch.setattr(mod, "urlopen", http)
+    key = prefix + "alpha"
+    mod.reconcile({key: "previously confirmed shared session"}, prefixes)
+    before = mod.load_state()["open"][key].copy()
+    events = []
+    for tick in (1700000001, 1700000002):
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", str(tick))
+        evaluated_keys = set()
+        evaluated_instances = set()
+        problems = mod.collect_problems(
+            SimpleNamespace(), checks={"turn_failure_rate", "local_instance_health"},
+            evaluated_instances=evaluated_instances, evaluated_keys=evaluated_keys,
+        )
+        assert set(problems) == {"turn_failure_probe:alpha"}
+        assert evaluated_instances == {"alpha"}
+        assert evaluated_keys == set()
+        events.extend(mod.reconcile(
+            problems, prefixes, evaluated_instances=evaluated_instances,
+            evaluated_keys=evaluated_keys,
+        ))
+    http.assert_not_called()
+    persisted = mod.load_state()["open"]
+    assert key in persisted
+    assert persisted[key]["lastEvidence"] == before["lastEvidence"]
+    assert persisted[key].get("recoveryObservations", 0) == 0
+    assert not any(
+        json.loads(path.read_text()).get("eventType") == "clear"
+        and json.loads(path.read_text()).get("alertSource") == key
+        for path in events
+    )
+
+
+@pytest.mark.parametrize("prefix", ["turn_failure:", "session_collision:"])
+def test_unevaluated_instance_retained_while_evaluated_instance_recovers(
+    turn_failure_reconciliation, monkeypatch, prefix,
+):
+    mod, instances, prefixes = turn_failure_reconciliation
+    beta = instances / "beta"
+    beta.mkdir()
+    _make_turn_failure_db(beta / "bot.db", failed_rows=[], checkpoints=[])
+    monkeypatch.setattr(
+        mod, "expected_local_services",
+        lambda: [{"name": "beta", "service": "whatsoup-beta.service"}],
+    )
+    retained, recovered = prefix + "alpha", prefix + "beta"
+    mod.reconcile({retained: "prior failure", recovered: "prior failure"}, prefixes)
+    assert {retained, recovered} <= set(mod.load_state()["open"])
+    before = mod.load_state()["open"][retained].copy()
+    events = []
+    for tick in (1700000001, 1700000002):
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", str(tick))
+        evaluated_keys = set()
+        problems = mod.collect_problems(
+            SimpleNamespace(), checks={"turn_failure_rate"}, evaluated_keys=evaluated_keys,
+        )
+        assert problems == {}
+        events.extend(mod.reconcile(problems, prefixes, evaluated_keys=evaluated_keys))
+    persisted = mod.load_state()["open"]
+    assert retained in persisted
+    assert persisted[retained]["lastEvidence"] == before["lastEvidence"]
+    assert persisted[retained].get("recoveryObservations", 0) == 0
+    assert recovered not in persisted
+    clears = [
+        json.loads(path.read_text())["alertSource"] for path in events
+        if json.loads(path.read_text()).get("eventType") == "clear"
+    ]
+    assert clears == [recovered]
+
+
+def test_probe_and_workload_recover_only_after_successful_observation_resumes(
+    turn_failure_reconciliation, monkeypatch,
+):
+    mod, instances, prefixes = turn_failure_reconciliation
+    alpha = instances / "alpha"
+    alpha.mkdir()
+    monkeypatch.setattr(
+        mod, "expected_local_services",
+        lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+    )
+    key = "session_collision:alpha"
+    probe_key = "turn_failure_probe:alpha"
+    mod.reconcile({key: "previously confirmed shared session"}, prefixes)
+    assert mod.run_once(SimpleNamespace()) == 0
+    assert {key, probe_key} <= set(mod.load_state()["open"])
+    _make_turn_failure_db(alpha / "bot.db", failed_rows=[], checkpoints=[])
+    monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", "1700000001")
+    assert mod.run_once(SimpleNamespace()) == 0
+    before = mod.load_state()["open"]
+    assert before[key]["recoveryObservations"] == 1
+    assert before[probe_key]["recoveryObservations"] == 1
+    (alpha / "bot.db").rename(alpha / "unavailable.db")
+    monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", "1700000002")
+    assert mod.run_once(SimpleNamespace()) == 0
+    held = mod.load_state()["open"][key]
+    assert held["recoveryObservations"] == 1
+    assert held["lastEvidence"] == before[key]["lastEvidence"]
+    (alpha / "unavailable.db").rename(alpha / "bot.db")
+    for tick in (1700000003, 1700000004):
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", str(tick))
+        assert mod.run_once(SimpleNamespace()) == 0
+    assert mod.load_state()["open"] == {}
+    events = [json.loads(path.read_text()) for path in (mod.state_root() / "outbox").glob("*.json")]
+    assert {event["alertSource"] for event in events if event["eventType"] == "clear"} == {
+        key, probe_key,
+    }
+
+
+def test_unavailable_observation_holds_deferred_workload_recovery_notice(
+    turn_failure_reconciliation, monkeypatch,
+):
+    mod, instances, prefixes = turn_failure_reconciliation
+    alpha = instances / "alpha"
+    alpha.mkdir()
+    _make_turn_failure_db(alpha / "bot.db", failed_rows=[], checkpoints=[])
+    monkeypatch.setattr(
+        mod, "expected_local_services",
+        lambda: [{"name": "alpha", "service": "whatsoup-alpha.service"}],
+    )
+    monkeypatch.setitem(os.environ, "BOT_ERRORS_WATCHDOG_FLAP_REARM_SECONDS", "30")
+
+    def observe(tick):
+        monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", str(tick))
+        evaluated_keys = set()
+        problems = mod.collect_problems(
+            SimpleNamespace(), checks={"turn_failure_rate"}, evaluated_keys=evaluated_keys,
+        )
+        return mod.reconcile(problems, prefixes, evaluated_keys=evaluated_keys)
+
+    key = "session_collision:alpha"
+    mod.reconcile({key: "confirmed collision"}, prefixes)
+    observe(1700000001)
+    observe(1700000002)
+    monkeypatch.setitem(os.environ, "BOT_ERRORS_DRY_NOW", "1700000003")
+    mod.reconcile({key: "confirmed collision again"}, prefixes)
+    observe(1700000004)
+    observe(1700000005)
+    before = mod.load_state()["recentlyRecovered"][key].copy()
+    assert before["holdNotice"] is True
+    (alpha / "bot.db").rename(alpha / "unavailable.db")
+    events = observe(1700000040)
+    assert mod.load_state()["recentlyRecovered"][key] == before
+    assert not any(json.loads(path.read_text())["eventType"] == "clear" for path in events)
+    (alpha / "unavailable.db").rename(alpha / "bot.db")
+    events = observe(1700000041)
+    clears = [json.loads(path.read_text()) for path in events
+              if json.loads(path.read_text())["eventType"] == "clear"]
+    assert [event["alertSource"] for event in clears] == [key]
