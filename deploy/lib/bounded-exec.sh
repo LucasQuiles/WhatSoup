@@ -12,7 +12,7 @@
 # coreutils installs it as `gtimeout`, and Homebrew's `coreutils` is not a
 # deployment prerequisite. A `timeout 3s security ...` line is therefore a
 # no-op-that-fails-closed on Linux and a `command not found` on Darwin. The
-# pure-shell watchdog below is the only branch guaranteed to exist on both.
+# pure-shell fallback below is the only branch guaranteed to exist on both.
 #
 # Exit status: 124 when the budget was exhausted (matching GNU timeout), the
 # command's own status otherwise.
@@ -26,6 +26,14 @@ whatsoup_run_bounded() {
 
   local budget="$1"
   shift
+
+  # Accept whole decimal seconds without evaluating caller text as arithmetic.
+  case "$budget" in ''|*[!0-9]*) return 2 ;; esac
+  while [ "${budget#0}" != "$budget" ]; do budget="${budget#0}"; done
+  budget="${budget:-0}"
+  [ "$budget" -ge 0 ] 2>/dev/null || return 2
+  # GNU timeout interprets zero as unlimited; this helper has no such mode.
+  [ "$budget" -ne 0 ] || return 124
 
   # SIGKILL grace (seconds) after SIGTERM, for the timeout/gtimeout branches only.
   # Bare GNU `timeout` sends SIGTERM at the budget and then WAITS for the child to
@@ -61,29 +69,35 @@ whatsoup_run_bounded() {
     return "$rc"
   fi
 
-  # Job control is local to this subshell. Each gated job gets an owned group;
-  # disabling monitor mode inside it keeps ordinary descendants in that group.
+  # Job control is local to this subshell. Command and watchdog groups are
+  # verified before release. Either supervisor can enforce the deadline.
   (
     set +e
     set -m
-    local directory cmd_pid="" cmd_group="" watchdog_pid="" watchdog_group=""
-    local candidate observed caller_group cleanup_rc=0
+    local directory cmd_pid="" cmd_group="" command_release_pid=""
+    local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
+    local candidate observed caller_group remaining completed_rc cleanup_rc=0
     directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
 
     _whatsoup_bounded_cleanup() {
       local group count
-      # Unverified jobs are still blocked opening their launch FIFO and have
-      # not executed the requested command or created timer descendants.
+      # An unverified job is still blocked opening its launch FIFO and has
+      # not executed the requested command or created descendants.
       if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
       if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
-      for group in "$watchdog_group" "$cmd_group"; do
+      # The release writer runs only a builtin and cannot create descendants.
+      [ -n "$command_release_pid" ] && kill -9 "$command_release_pid" 2>/dev/null
+      [ -n "$watchdog_release_pid" ] && kill -9 "$watchdog_release_pid" 2>/dev/null
+      for group in "$cmd_group" "$watchdog_group"; do
         [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
       done
       [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null
+      [ -n "$command_release_pid" ] && wait "$command_release_pid" 2>/dev/null
       [ -n "$watchdog_pid" ] && wait "$watchdog_pid" 2>/dev/null
+      [ -n "$watchdog_release_pid" ] && wait "$watchdog_release_pid" 2>/dev/null
       # Grandchildren are reaped by their parent or the OS. Do not report
       # completion while a signalled member still exists in an owned group.
-      for group in "$watchdog_group" "$cmd_group"; do
+      for group in "$cmd_group" "$watchdog_group"; do
         [ -n "$group" ] || continue
         count=0
         while kill -0 -- "-$group" 2>/dev/null; do
@@ -92,14 +106,14 @@ whatsoup_run_bounded() {
           sleep 0.01
         done
       done
-      rm -f "$directory/command" "$directory/watchdog" "$directory/timeout"
+      rm -f "$directory/command" "$directory/result" "$directory/watchdog" "$directory/timed-out"
       rmdir "$directory"
     }
     trap '_whatsoup_bounded_cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
 
-    if ! mkfifo "$directory/command" "$directory/watchdog"; then return 2; fi
+    if ! mkfifo "$directory/command" "$directory/result" "$directory/watchdog"; then return 2; fi
     caller_group="$(ps -o pgid= -p "$$")" || return 2
     caller_group="${caller_group//[[:space:]]/}"
     [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
@@ -110,6 +124,9 @@ whatsoup_run_bounded() {
       IFS= read -r start < "$directory/command" || exit 2
       [ "$start" = run ] || exit 2
       "$@"
+      rc=$?
+      builtin printf '%s\n' "$rc" > "$directory/result"
+      exit "$rc"
     ) <&0 &
     cmd_pid=$!
     candidate="$(jobs -p %+)"
@@ -125,10 +142,10 @@ whatsoup_run_bounded() {
       set +m
       IFS= read -r start < "$directory/watchdog" || exit 2
       [ "$start" = run ] || exit 2
-      sleep "$budget"
-      printf timeout > "$directory/timeout"
+      sleep "$budget" || exit 2
+      : > "$directory/timed-out"
       kill -9 -- "-$cmd_group" 2>/dev/null
-    ) >/dev/null 2>&1 &
+    ) </dev/null >/dev/null 2>&1 &
     watchdog_pid=$!
     candidate="$(jobs -p %+)"
     observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
@@ -140,11 +157,36 @@ whatsoup_run_bounded() {
     fi
     watchdog_group="$candidate"
 
-    printf 'run\n' > "$directory/command"
-    printf 'run\n' > "$directory/watchdog"
-    rc=0
-    wait "$cmd_pid" 2>/dev/null || rc=$?
-    [ -s "$directory/timeout" ] && rc=124
+    # A verified reader can die before release. Keep a blocked FIFO writer
+    # out of the parent so the parent can still enforce the deadline and reap it.
+    builtin printf 'run\n' > "$directory/watchdog" &
+    watchdog_release_pid=$!
+    builtin printf 'run\n' > "$directory/command" &
+    command_release_pid=$!
+    remaining="$budget"
+    rc=124
+    while [ "$remaining" -gt 0 ]; do
+      completed_rc=""
+      # Read/write open cannot wait for a missing writer on the supported hosts.
+      # The redirection is scoped to read; the command retains its original stdin.
+      if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
+        if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then
+          rc="$completed_rc"
+        else
+          rc=2
+        fi
+        break
+      fi
+      if ! kill -0 "$cmd_pid" 2>/dev/null; then
+        # Stop any remaining descendants before harvesting the leader's status.
+        kill -9 -- "-$cmd_group" 2>/dev/null
+        rc=0
+        wait "$cmd_pid" 2>/dev/null || rc=$?
+        break
+      fi
+      remaining=$((remaining - 1))
+    done
+    [ ! -f "$directory/timed-out" ] || rc=124
     _whatsoup_bounded_cleanup
     trap - EXIT
     [ "$cleanup_rc" -eq 0 ] || rc=2
