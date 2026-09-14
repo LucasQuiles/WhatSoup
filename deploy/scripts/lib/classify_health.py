@@ -4,7 +4,7 @@
 Extracted from whatsoup-keychain-heal.sh so the classification logic is unit
 testable. Reads the /health JSON on stdin, prints exactly one token:
 
-    ok | degraded | parse | fields
+    ok | degraded | non_model | parse | fields
 
 The acceptance signal for a healthy agent is a FRESH usable model: status
 "healthy" AND turn_capability.model_usable is True AND not stale. The freshness
@@ -23,8 +23,13 @@ def classify(d: object) -> str:
     tc = d.get("turn_capability")
     if status is None or not isinstance(tc, dict) or "model_usable" not in tc:
         return "fields"
-    fresh_usable = tc.get("model_usable") is True and tc.get("model_usable_stale") is not True
-    return "ok" if (status == "healthy" and fresh_usable) else "degraded"
+    # Unknown freshness must use the caller's non-mutating "fields" path.
+    if type(tc.get("model_usable_stale")) is not bool:
+        return "fields"
+    fresh_usable = tc.get("model_usable") is True and tc["model_usable_stale"] is False
+    if fresh_usable:
+        return "ok" if status == "healthy" else "non_model"
+    return "degraded"
 
 
 def main() -> None:

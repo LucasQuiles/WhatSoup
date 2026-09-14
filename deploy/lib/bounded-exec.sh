@@ -8,11 +8,8 @@
 # lookup wedges the caller forever — that is how ph-bot on mini11 stayed down for
 # ~45h while its watchdog reported `ok`.
 #
-# Why it is not just `timeout 3s`: stock macOS ships no `timeout(1)`. GNU
-# coreutils installs it as `gtimeout`, and Homebrew's `coreutils` is not a
-# deployment prerequisite. A `timeout 3s security ...` line is therefore a
-# no-op-that-fails-closed on Linux and a `command not found` on Darwin. The
-# pure-shell watchdog below is the only branch guaranteed to exist on both.
+# Stock macOS ships no timeout(1). Use the same shell supervisor everywhere so
+# command statuses and descendant cleanup do not depend on installed utilities.
 #
 # Exit status: 124 when the budget was exhausted (matching GNU timeout), the
 # command's own status otherwise.
@@ -27,71 +24,151 @@ whatsoup_run_bounded() {
   local budget="$1"
   shift
 
-  # SIGKILL grace (seconds) after SIGTERM, for the timeout/gtimeout branches only.
-  # Bare GNU `timeout` sends SIGTERM at the budget and then WAITS for the child to
-  # exit, so a child that ignores or survives SIGTERM lets the wrapper wait with it
-  # forever: `timeout 2s bash -c 'trap "" TERM; sleep 20'` returns 124 only after
-  # the child has already run the full 20s (measured). `-k` follows SIGTERM with
-  # SIGKILL after this grace, so the wall clock is actually bounded, not merely
-  # reported as timed-out.
-  #
-  # The grace scales with the budget: a short credential probe (3-5s) must fail
-  # fast, while a long package install (300-600s) needs a real window after SIGTERM
-  # to release a dpkg lock or flush a mirror transfer before SIGKILL — SIGKILLing a
-  # package manager mid-`dpkg` can leave a broken install worse than the hang this
-  # helper exists to stop. Floor 2s, ceiling 30s.
+  # Accept whole decimal seconds without evaluating caller text as arithmetic.
+  case "$budget" in ''|*[!0-9]*) return 2 ;; esac
+  while [ "${budget#0}" != "$budget" ]; do budget="${budget#0}"; done
+  budget="${budget:-0}"
+  [ "$budget" -ge 0 ] 2>/dev/null || return 2
+  # GNU timeout interprets zero as unlimited; this helper has no such mode.
+  [ "$budget" -ne 0 ] || return 124
+
+  # Allow package managers to release locks after TERM, then enforce KILL even
+  # when the command ignores TERM. Keep short credential probes responsive.
   local rc grace
   grace=$(( budget / 10 ))
   [ "$grace" -lt 2 ] && grace=2
   [ "$grace" -gt 30 ] && grace=30
 
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k "${grace}s" "${budget}s" "$@"
-    rc=$?
-    # `timeout` exits 137 (128+SIGKILL) when it had to escalate past SIGTERM to
-    # SIGKILL; fold that back into the documented 124 budget-exhausted exit so
-    # callers distinguish "timed out" from "failed", never which signal ended it.
-    [ "$rc" -eq 137 ] && rc=124
-    return "$rc"
-  fi
-  if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k "${grace}s" "${budget}s" "$@"
-    rc=$?
-    [ "$rc" -eq 137 ] && rc=124
-    return "$rc"
-  fi
-
-  # Portable fallback. The watchdog's stdout/stderr are detached so a caller
-  # using command substitution is not held open for the full budget waiting on
-  # the watchdog's copy of the pipe.
-  local marker
-  marker="$(mktemp "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
-
-  # `<&0` is required: bash assigns /dev/null to an asynchronous command's stdin
-  # unless an explicit redirection overrides it, which would silently break
-  # callers that pipe a secret in (e.g. `printf ... | whatsoup_run_bounded 5
-  # secret-tool store ...`).
-  "$@" <&0 &
-  local cmd_pid=$!
-
+  # Job control is local to this subshell. Command and watchdog groups are
+  # verified before release. Either supervisor can enforce the deadline.
   (
-    sleep "$budget"
-    if kill -0 "$cmd_pid" 2>/dev/null; then
-      printf 'timeout' > "$marker"
-      kill -9 "$cmd_pid" 2>/dev/null
+    set +e
+    set -m
+    local directory cmd_pid="" cmd_group="" command_release_pid=""
+    local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
+    local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
+    directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
+
+    _whatsoup_bounded_cleanup() {
+      local group count
+      # An unverified job is still blocked opening its launch FIFO and has
+      # not executed the requested command or created descendants.
+      if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
+      if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
+      # The release writer runs only a builtin and cannot create descendants.
+      [ -n "$command_release_pid" ] && kill -9 "$command_release_pid" 2>/dev/null
+      [ -n "$watchdog_release_pid" ] && kill -9 "$watchdog_release_pid" 2>/dev/null
+      for group in "$cmd_group" "$watchdog_group"; do
+        [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
+      done
+      [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null
+      [ -n "$command_release_pid" ] && wait "$command_release_pid" 2>/dev/null
+      [ -n "$watchdog_pid" ] && wait "$watchdog_pid" 2>/dev/null
+      [ -n "$watchdog_release_pid" ] && wait "$watchdog_release_pid" 2>/dev/null
+      # Grandchildren are reaped by their parent or the OS. Do not report
+      # completion while a signalled member still exists in an owned group.
+      for group in "$cmd_group" "$watchdog_group"; do
+        [ -n "$group" ] || continue
+        count=0
+        while kill -0 -- "-$group" 2>/dev/null; do
+          count=$((count + 1))
+          if [ "$count" -ge 200 ]; then cleanup_rc=2; break; fi
+          sleep 0.01
+        done
+      done
+      rm -f "$directory/command" "$directory/result" "$directory/watchdog" "$directory/timed-out"
+      rmdir "$directory"
+    }
+    trap '_whatsoup_bounded_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+
+    if ! mkfifo "$directory/command" "$directory/result" "$directory/watchdog"; then return 2; fi
+    caller_group="$(ps -o pgid= -p "$$")" || return 2
+    caller_group="${caller_group//[[:space:]]/}"
+    [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
+
+    # The read redirects only its own stdin; the wrapped command retains fd0.
+    (
+      set +m
+      IFS= read -r start < "$directory/command" || exit 2
+      [ "$start" = run ] || exit 2
+      # Keep the result writer alive while the command handles its own TERM.
+      trap ':' TERM
+      "$@"
+      rc=$?
+      builtin printf '%s\n' "$rc" > "$directory/result"
+      exit "$rc"
+    ) <&0 &
+    cmd_pid=$!
+    candidate="$(jobs -p %+)"
+    observed="$(ps -o pgid= -p "$cmd_pid")" || return 2
+    observed="${observed//[[:space:]]/}"
+    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
+        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ]; then
+      return 2
     fi
-  ) >/dev/null 2>&1 &
-  local watchdog_pid=$!
+    cmd_group="$candidate"
 
-  rc=0
-  wait "$cmd_pid" 2>/dev/null || rc=$?
+    (
+      set +m
+      IFS= read -r start < "$directory/watchdog" || exit 2
+      [ "$start" = run ] || exit 2
+      sleep "$budget" || exit 2
+      : > "$directory/timed-out"
+      kill -TERM -- "-$cmd_group" 2>/dev/null
+      sleep "$grace" || exit 2
+      kill -9 -- "-$cmd_group" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    watchdog_pid=$!
+    candidate="$(jobs -p %+)"
+    observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
+    observed="${observed//[[:space:]]/}"
+    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
+        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ] \
+        || [ "$candidate" = "$cmd_group" ]; then
+      return 2
+    fi
+    watchdog_group="$candidate"
 
-  kill -9 "$watchdog_pid" 2>/dev/null
-  wait "$watchdog_pid" 2>/dev/null
-
-  if [ -s "$marker" ]; then
+    # A verified reader can die before release. Keep a blocked FIFO writer
+    # out of the parent so the parent can still enforce the deadline and reap it.
+    builtin printf 'run\n' > "$directory/watchdog" &
+    watchdog_release_pid=$!
+    builtin printf 'run\n' > "$directory/command" &
+    command_release_pid=$!
+    remaining="$budget"
+    remaining_grace="$grace"
     rc=124
-  fi
-  rm -f "$marker"
-  return "$rc"
+    while [ "$remaining" -gt 0 ] || [ "$remaining_grace" -gt 0 ]; do
+      completed_rc=""
+      # Read/write open cannot wait for a missing writer on the supported hosts.
+      # The redirection is scoped to read; the command retains its original stdin.
+      if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
+        if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then
+          rc="$completed_rc"
+        else
+          rc=2
+        fi
+        break
+      fi
+      if ! kill -0 "$cmd_pid" 2>/dev/null; then
+        # Stop any remaining descendants before harvesting the leader's status.
+        kill -9 -- "-$cmd_group" 2>/dev/null
+        rc=0
+        wait "$cmd_pid" 2>/dev/null || rc=$?
+        break
+      fi
+      if [ "$remaining" -gt 0 ]; then
+        remaining=$((remaining - 1))
+      else
+        remaining_grace=$((remaining_grace - 1))
+      fi
+    done
+    [ ! -f "$directory/timed-out" ] || rc=124
+    _whatsoup_bounded_cleanup
+    trap - EXIT
+    [ "$cleanup_rc" -eq 0 ] || rc=2
+    return "$rc"
+  )
 }
