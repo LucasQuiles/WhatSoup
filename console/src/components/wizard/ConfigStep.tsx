@@ -273,6 +273,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       } else {
         next[key] = normalized
       }
+      if (key === 'fallbackProvider') delete next.fallbackModel
       onChange({ agentOptions: next })
     },
     [agentOptions, onChange],

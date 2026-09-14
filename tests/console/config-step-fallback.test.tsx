@@ -137,6 +137,39 @@ describe('ConfigStep — fallback provider section', () => {
     expect(patch.agentOptions.fallbackModel).toBe('gpt-4o-mini')
   })
 
+  it.each([
+    ['openai-api', 'gpt-4.1', 'opencode-cli'],
+    ['opencode-cli', 'openai/gpt-4.1', 'openai-api'],
+  ])('changing fallback provider from %s clears its model %s', async (previousProvider, previousModel, nextProvider) => {
+    const primaryOptions = { provider: 'claude-cli', providerConfig: { model: 'sonnet' }, cwd: '/workspace/synthetic' }
+    const { getData } = renderConfigStep({
+      initialData: {
+        agentOptions: { ...primaryOptions, fallbackProvider: previousProvider, fallbackModel: previousModel },
+      },
+    })
+    openPermissionsTab()
+    const select = screen.getByLabelText('Fallback Provider') as HTMLSelectElement
+    await waitFor(() => expect(Array.from(select.options).map((option) => option.value)).toContain(nextProvider))
+
+    fireEvent.change(select, { target: { value: nextProvider } })
+
+    expect(getAgentOptions(getData())).toEqual({ ...primaryOptions, fallbackProvider: nextProvider })
+    expect(screen.queryByDisplayValue(previousModel)).toBeNull()
+  })
+
+  it('keeps the fallback model when the selected provider is unchanged', async () => {
+    const initialOptions = { provider: 'claude-cli', fallbackProvider: 'openai-api', fallbackModel: 'gpt-4.1' }
+    const { getData } = renderConfigStep({ initialData: { agentOptions: initialOptions } })
+    openPermissionsTab()
+    const select = screen.getByLabelText('Fallback Provider') as HTMLSelectElement
+    await waitFor(() => expect(Array.from(select.options).map((option) => option.value)).toContain('openai-api'))
+
+    fireEvent.change(select, { target: { value: 'openai-api' } })
+
+    expect(getAgentOptions(getData())).toEqual(initialOptions)
+    expect(screen.getByDisplayValue('gpt-4.1')).toBeDefined()
+  })
+
   it('keeps the fallback model disabled until a fallback provider is selected', async () => {
     renderConfigStep({
       initialData: { agentOptions: { provider: 'claude-cli' } },

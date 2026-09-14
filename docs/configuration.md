@@ -1567,6 +1567,11 @@ restart the instance after editing. Verification paths are peers: the
 live turn, while `POST /api/credentials/:service/verify` runs a single
 list-models probe without touching a session.
 
+In the Add Line wizard, changing **Fallback Provider** clears **Fallback
+Model**, because model IDs belong to a provider. Choose a model for the new
+provider when it requires one. Keeping the same provider preserves its model
+and changing the fallback leaves the primary provider settings unchanged.
+
 #### Provider fallback behavior
 
 When the primary provider returns a usage-limit, rate-limit, auth-required, or model-unavailable terminal `result` (`src/runtimes/agent/runtime-turn-result-handler.ts`), the runtime:
