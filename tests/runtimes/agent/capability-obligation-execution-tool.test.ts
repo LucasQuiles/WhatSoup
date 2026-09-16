@@ -146,8 +146,10 @@ const SOURCE_DIGEST = createHash('sha256').update(SOURCE_URL).digest('hex');
 
 let db: Database;
 let store: CapabilityObligationStore;
+const dispatchErrors: unknown[] = [];
 
 beforeEach(() => {
+  dispatchErrors.length = 0;
   db = new Database(':memory:');
   db.open();
   store = new CapabilityObligationStore(db);
@@ -156,6 +158,9 @@ beforeEach(() => {
 afterEach(() => {
   spawnOverride = null;
   db.close();
+  if (dispatchErrors.length > 0) {
+    throw new AggregateError(dispatchErrors, 'Dispatch callback failed');
+  }
 });
 
 function freshAttestation(execution: CapabilityObligationsOptions['execution'] = OPTIONS.execution): number {
@@ -252,7 +257,13 @@ function makeRuntime(
       facts: LIVE_FACTS,
       dispatch: async (minted, seq) => {
         dispatched.push({ id: obligation.id, minted, seq });
-        await script.onDispatch?.(registeredTool!);
+        try {
+          await script.onDispatch?.(registeredTool!);
+        } catch (error) {
+          // Production quarantines dispatch errors; also surface them to Vitest.
+          dispatchErrors.push(error);
+          throw error;
+        }
         return 'dispatched' as ObligationDispatchOutcome;
       },
     }),
@@ -524,7 +535,8 @@ describe('spawn seam', () => {
         const r = (await tool.handler({ source: SOURCE_URL }, TOOL_SESSION)) as Record<string, unknown>;
         spawnOverride = null;
         expect(r['error']).toBe('capability_execution_failed');
-        expect(String(r['message'])).toContain('exit=signal');
+        expect(String(r['message'])).toContain('exit=none');
+        expect(String(r['message'])).toContain('signal=SIGKILL');
         expect(String(r['message'])).toContain('timedOut=true');
       },
     });

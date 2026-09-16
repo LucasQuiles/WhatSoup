@@ -17,6 +17,7 @@
 // constructor args so tests can drive the captured resolver directly.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
@@ -399,7 +400,8 @@ describe('global-socket actor scoping (#2976 direction ii)', () => {
     return seq;
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.clearAllMocks();
     resetDoubles();
     db = new Database(':memory:');
