@@ -9,6 +9,10 @@
 
 ## Behavioral changes
 
+- Concurrent catalogue requests share one CLI probe per provider and binary.
+  Failed probes retain their classified reason for one second before retrying.
+  A failed refresh still serves the last successful capture with its original
+  age; it does not make that capture fresh again.
 - Console model fields now use runtime catalogue results as editable
   suggestions. Empty fields retain the runtime default, manual provider-native
   IDs remain valid, and request or provider failures are shown rather than

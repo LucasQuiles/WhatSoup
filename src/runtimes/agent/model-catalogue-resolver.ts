@@ -45,6 +45,8 @@ const OPENCODE_CACHE_TTL_MS = 60_000;
 /** The native Codex command has its own opaque cache; this cache only avoids
  * repeatedly spawning the command while preserving a capture timestamp. */
 const CODEX_CACHE_TTL_MS = 60_000;
+/** Coalesce repeated failed renders while allowing a repaired CLI to retry promptly. */
+const CLI_FAILURE_RETRY_MS = 1_000;
 /** Same TTL discipline for the openai adapter (Task B) — one constant per
  *  source so a tune to one harness never silently retunes another. */
 const OPENAI_CACHE_TTL_MS = 60_000;
@@ -54,8 +56,14 @@ interface CacheEntry {
   capturedAtMs: number;
 }
 
-const opencodeCache = new Map<string, CacheEntry>();
-const codexCache = new Map<string, CacheEntry>();
+interface CliCacheEntry {
+  capture?: CacheEntry;
+  failure?: { reason: UnavailableReason; capturedAtMs: number };
+  pending?: Promise<void>;
+}
+
+const opencodeCache = new Map<string, CliCacheEntry>();
+const codexCache = new Map<string, CliCacheEntry>();
 // openai is keyed (HTTP, no per-binary variance) — a single entry, not a Map.
 let openaiCache: CacheEntry | null = null;
 
@@ -171,33 +179,55 @@ async function resolveCachedCliCatalogue(
   binary: string,
   deps: CatalogueResolveDeps,
   listFn: typeof listModelCatalog,
-  cache: Map<string, CacheEntry>,
+  cache: Map<string, CliCacheEntry>,
   ttlMs: number,
   sourceLabel: string,
 ): Promise<AvailableModelsListing> {
-  const cached = cache.get(binary);
+  let entry = cache.get(binary);
+  if (!entry) {
+    entry = {};
+    cache.set(binary, entry);
+  }
+  const state = entry;
+  const cached = state.capture;
 
   // Fresh cache → serve without spawning (capture-stamped as-of).
   if (cached && deps.nowMs - cached.capturedAtMs < ttlMs) {
     return { status: 'ok', ids: cached.ids, sourceLabel, asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
   }
 
-  const result = await listFn(binary);
-  if (result.status === 'ok' && looksLikeModelIds(result.ids)) {
-    cache.set(binary, { ids: [...result.ids], capturedAtMs: deps.nowMs });
-    return { status: 'ok', ids: result.ids, sourceLabel, asOfLabel: 'just now' };
+  const backingOff = state.failure && deps.nowMs - state.failure.capturedAtMs < CLI_FAILURE_RETRY_MS;
+  if (!backingOff && !state.pending) {
+    state.pending = Promise.resolve().then(() => listFn(binary)).then((result) => {
+      if (result.status === 'ok' && looksLikeModelIds(result.ids)) {
+        state.capture = { ids: [...result.ids], capturedAtMs: deps.nowMs };
+        state.failure = undefined;
+      } else {
+        state.failure = {
+          reason: result.status === 'unavailable' ? probeReasonToReason(result.reason) : { kind: 'unparseable' },
+          capturedAtMs: deps.nowMs,
+        };
+      }
+    }, () => {
+      state.failure = { reason: { kind: 'probe-failed' }, capturedAtMs: deps.nowMs };
+    }).finally(() => {
+      state.pending = undefined;
+    });
   }
+  await state.pending;
 
   // Re-probe failed (or output looked unparseable). If we have any prior capture,
   // serve it STALE with a disclosed age rather than blank the catalogue on a
   // transient failure (Q 2b#1: staleness said out loud, not silent).
-  if (cached) {
-    return { status: 'ok', ids: cached.ids, sourceLabel, asOfLabel: formatCaptureAsOf(cached.capturedAtMs, deps.nowMs) };
+  if (state.capture) {
+    return { status: 'ok', ids: state.capture.ids, sourceLabel, asOfLabel: formatCaptureAsOf(state.capture.capturedAtMs, deps.nowMs) };
   }
 
-  const reason: UnavailableReason =
-    result.status === 'unavailable' ? probeReasonToReason(result.reason) : { kind: 'unparseable' };
-  return { status: 'unavailable', reason, asOfLabel: 'just now' };
+  return {
+    status: 'unavailable',
+    reason: state.failure!.reason,
+    asOfLabel: formatCaptureAsOf(state.failure!.capturedAtMs, deps.nowMs),
+  };
 }
 
 async function resolveClaude(deps: CatalogueResolveDeps): Promise<AvailableModelsListing> {

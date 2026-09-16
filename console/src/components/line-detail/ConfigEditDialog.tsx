@@ -164,12 +164,22 @@ export function ConfigEditDialog({
   const setField = useCallback((key: string, value: unknown) => {
     setPatch(prev => {
       const originalValue = key in editableEntryValues ? editableEntryValues[key] : configValue(key)
+      const next = { ...prev, [key]: value }
       if (isEqualValue(value, originalValue)) {
-        const next = { ...prev }
         delete next[key]
-        return next
       }
-      return { ...prev, [key]: value }
+      if (key === 'agentOptions.fallbackProvider') {
+        const previousProvider = key in prev ? prev[key] : originalValue
+        if (!isEqualValue(value, previousProvider)) {
+          const modelKey = 'agentOptions.fallbackModel'
+          if (isEqualValue('', configValue(modelKey))) {
+            delete next[modelKey]
+          } else {
+            next[modelKey] = ''
+          }
+        }
+      }
+      return next
     })
   }, [editableEntryValues, configValue])
 
