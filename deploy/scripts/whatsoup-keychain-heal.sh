@@ -33,7 +33,7 @@
 set +x
 set -euo pipefail
 # Remove an inherited export before introducing the private local below.
-unset health_token
+unset health_token WHATSOUP_HEALTH_TOKEN
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLASSIFY_PY="${SCRIPT_DIR}/lib/classify_health.py"

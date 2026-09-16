@@ -155,7 +155,10 @@ const BASE_ARGS = ['--label', 'com.whatsoup.x-bot', '--port', '9090', '--uid', C
 describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
   it('authenticates over stdin without exposing the token in argv, environment or trace output', () => {
     const h = makeHarness('healthy');
-    const result = runHeal(h, BASE_ARGS, { health_token: 'ambient-placeholder' }, true);
+    const ambientToken = 'b'.repeat(64);
+    const result = runHeal(h, BASE_ARGS, {
+      health_token: 'ambient-placeholder', WHATSOUP_HEALTH_TOKEN: ambientToken,
+    }, true);
     expect(result.exitCode).toBe(0);
     const request = JSON.parse(readFileSync(h.curlLog, 'utf8'));
     expect(request.authorized).toBe(true);
@@ -164,9 +167,52 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
     expect(request.argv[0]).toBe('-q');
     expect(request.argv).toContain('--noproxy');
     expect(request.env.health_token).toBeUndefined();
+    expect(request.env.WHATSOUP_HEALTH_TOKEN).toBeUndefined();
     expect(JSON.stringify(request)).not.toContain(TOKEN);
+    expect(JSON.stringify(request)).not.toContain(ambientToken);
     expect(result.stdout + result.stderr).not.toContain(TOKEN);
+    expect(result.stdout + result.stderr).not.toContain(ambientToken);
   });
+
+  it('omits inherited health tokens from kickstart while recovering with the file token', () => {
+    const h = makeHarness('degraded');
+    const envLog = join(h.root, 'kickstart-env.json');
+    writeFileSync(join(h.binDir, 'launchctl'), [
+      '#!/usr/bin/env python3',
+      'import json, os, pathlib, sys',
+      'pathlib.Path(os.environ["KICK_ENV_LOG"]).write_text(json.dumps(dict(os.environ)))',
+      'pathlib.Path(os.environ["KICK_LOG"]).write_text(" ".join(sys.argv[1:]))',
+      'pathlib.Path(os.environ["KICK_COUNT"]).write_text("1")',
+      'pathlib.Path(os.environ["STATE_FILE"]).write_text("healthy")',
+      '',
+    ].join('\n'));
+    const result = runHeal(h, BASE_ARGS, {
+      KICK_ENV_LOG: envLog, health_token: 'ambient-placeholder', WHATSOUP_HEALTH_TOKEN: 'b'.repeat(64),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(kickstartCount(h)).toBe(1);
+    expect(readFileSync(h.kickLog, 'utf8')).toContain(`gui/${CURRENT_UID}/com.whatsoup.x-bot`);
+    const childEnv = JSON.parse(readFileSync(envLog, 'utf8'));
+    expect(childEnv.health_token).toBeUndefined();
+    expect(childEnv.WHATSOUP_HEALTH_TOKEN).toBeUndefined();
+    expect(JSON.parse(readFileSync(h.curlLog, 'utf8')).authorized).toBe(true);
+  });
+
+  it.each(['', 'maintenance', null, 42, false, {}, []].map((status) => ({ status })))(
+    'rejects unknown health status $status without a kickstart',
+    ({ status }) => {
+      const h = makeHarness('raw');
+      const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1'], {
+        HEALTH_BODY: JSON.stringify({
+          status, whatsapp: {}, instance: { name: 'x-bot' },
+          turn_capability: { model_usable: false, model_usable_stale: false },
+        }),
+      });
+      expect(JSON.parse(readFileSync(h.curlLog, 'utf8')).authorized).toBe(true);
+      expect(result.exitCode).toBe(3);
+      expect(kickstartCount(h)).toBe(0);
+    },
+  );
 
   it.each(['missing', 'incompatible'])('refuses %s Node before HTTP access', (scenario) => {
     const h = makeHarness('degraded');

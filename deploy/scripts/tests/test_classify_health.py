@@ -62,6 +62,15 @@ def test_non_dict_is_parse():
     assert classify(["not", "a", "dict"]) == "parse"
 
 
+@pytest.mark.parametrize("status", ["", "maintenance", None, 42, False, {}, []])
+@pytest.mark.parametrize("usable", [True, False])
+def test_unknown_status_is_fields_not_recovery(status, usable):
+    assert classify({
+        "status": status,
+        "turn_capability": _tc(model_usable=usable),
+    }) == "fields"
+
+
 @pytest.mark.parametrize("status", ["healthy", "degraded"])
 @pytest.mark.parametrize("usable", [True, False])
 @pytest.mark.parametrize("stale", [None, "false", 0, 1, {}, []])
