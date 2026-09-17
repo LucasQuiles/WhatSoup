@@ -60,7 +60,10 @@ whatsoup_run_bounded() {
       [ "$pid" -gt 1 ] && [ "$group" -gt 1 ] && [ "$pid" = "$group" ] || return 2
       [ "$group" != "$worker_group" ] && [ "$group" != "$guard_group" ] || return 2
       kill -0 "$pid" 2>/dev/null || return 1
-      observed="$(/bin/ps -o ppid= -o pgid= -p "$pid" 2>/dev/null)" || return 1
+      if ! observed="$(/bin/ps -o ppid= -o pgid= -p "$pid" 2>/dev/null)"; then
+        kill -0 "$pid" 2>/dev/null || return 1
+        return 2
+      fi
       read -r parent observed_group <<< "$observed"
       [[ "$parent" =~ ^[0-9]+$ ]] && [ "$parent" = "$worker_pid" ] && [ "$observed_group" = "$group" ] && return 0
       return 2
@@ -89,7 +92,8 @@ whatsoup_run_bounded() {
       [ "$control_release" = 1 ] || return 2
       case "$control_directory" in "${TMPDIR:-/tmp}"/whatsoup-bounded.*) ;; *) return 2 ;; esac
       [ "$control_command_group" != "$control_watchdog_group" ] || return 2
-      _bounded_group_is_owned "$control_command_pid" "$control_command_group" || return 2
+      _bounded_group_is_owned "$control_command_pid" "$control_command_group"
+      case "$?" in 0) ;; 1) return 1 ;; *) return 2 ;; esac
       _bounded_group_is_owned "$control_watchdog_pid" "$control_watchdog_group"
       case "$?" in 0) ;; 1) control_watchdog_group="" ;; *) return 2 ;; esac
     }
@@ -260,18 +264,43 @@ whatsoup_run_bounded() {
         [ -z "$timer_pid" ] || kill -9 "$timer_pid" 2>/dev/null
         exit "$guard_status"
       }
-      trap '_bounded_guard_exit' INT TERM HUP
-      _bounded_wait_for_budget &
-      timer_pid=$!
-      kill -CONT "$worker_pid" 2>/dev/null
-      wait "$timer_pid" 2>/dev/null
-      if [ "$?" -ne 0 ]; then
+      _bounded_guard_protocol_failure() {
         guard_status=2
         kill -TERM -- "-$worker_group" 2>/dev/null
         kill -USR1 "$worker_pid" 2>/dev/null
         if ! sleep "$grace"; then kill -9 -- "-$worker_group" 2>/dev/null; exit 2; fi
         kill -9 -- "-$worker_group" 2>/dev/null
         exit 2
+      }
+      trap '_bounded_guard_exit' INT TERM HUP
+      trap '_bounded_guard_protocol_failure' USR2
+      _bounded_wait_for_budget &
+      timer_pid=$!
+      (
+        local observed state observed_group
+        while :; do
+          if ! observed="$(/bin/ps -o stat= -o pgid= -p "$worker_pid" 2>/dev/null)"; then
+            kill -0 "$worker_pid" 2>/dev/null || exit 0
+            kill -USR2 0 2>/dev/null
+            exit 2
+          fi
+          read -r state observed_group <<< "$observed"
+          if [[ ! "$observed_group" =~ ^[0-9]+$ ]] || [ "$observed_group" != "$worker_group" ]; then
+            kill -USR2 0 2>/dev/null
+            exit 2
+          fi
+          case "$state" in
+            *T*)
+              kill -CONT "$worker_pid" 2>/dev/null || kill -USR2 0 2>/dev/null
+              exit
+              ;;
+          esac
+          sleep 0.01 || { kill -USR2 0 2>/dev/null; exit 2; }
+        done
+      ) &
+      wait "$timer_pid" 2>/dev/null
+      if [ "$?" -ne 0 ]; then
+        _bounded_guard_protocol_failure
       fi
       local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0
       guard_status=124

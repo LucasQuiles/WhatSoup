@@ -370,6 +370,51 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 record['forged_completion'] = str(completion)
             os.kill(worker, signal.SIGSTOP)
             record['stopped_worker'] = worker
+        if mode == 'dead-leader-before-authorization':
+            deadline = time.monotonic() + 3
+            authorization = None
+            while time.monotonic() < deadline:
+                matches = list(root.glob('whatsoup-bounded-authorize.*'))
+                if matches and 'release=1' in matches[0].read_text():
+                    authorization = matches[0]
+                    break
+                time.sleep(0.01)
+            if authorization is None: raise RuntimeError('outer authorization unavailable')
+            fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
+            command_pid = int(fields['command_pid'])
+            worker = next((item['ppid'] for item in members(session) if item['pid'] == command_pid), None)
+            worker_record = next((item for item in members(session) if item['pid'] == worker), None)
+            if worker is None or worker_record is None: raise RuntimeError('worker identity unavailable')
+            outer = worker_record['ppid']
+            guard_candidates = [
+                item for item in members(session)
+                if item['ppid'] == outer and item['pid'] != worker and item['pgid'] != worker_record['pgid']
+            ]
+            if len(guard_candidates) != 1: raise RuntimeError('guard identity unavailable')
+            guard = guard_candidates[0]['pid']
+            os.kill(guard, signal.SIGSTOP)
+            record['stopped_guard'] = guard
+            while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
+                time.sleep(0.01)
+            if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')
+            try:
+                os.kill(command_pid, 0)
+            except ProcessLookupError:
+                record['command_pid_reaped_before_authorization'] = True
+            else:
+                raise RuntimeError('command leader remained present before outer authorization')
+            os.kill(guard, signal.SIGCONT)
+            record['continued_guard'] = guard
+        if mode == 'handshake-early-cont':
+            deadline = time.monotonic() + 3
+            while not (root / 'handshake-stop-entered').exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not (root / 'handshake-stop-entered').exists(): raise RuntimeError('worker stop entry unavailable')
+            early_deadline = time.monotonic() + 0.2
+            while not (root / 'handshake-early-cont').exists() and time.monotonic() < early_deadline:
+                time.sleep(0.01)
+            record['early_cont_before_stop'] = (root / 'handshake-early-cont').exists()
+            (root / 'handshake-allow-stop').write_text('continue')
         if mode in ('parent-stopped', 'parent-terminated'):
             deadline = time.monotonic() + 3
             while not (root / 'command-started').exists() and time.monotonic() < deadline: time.sleep(0.01)
@@ -418,16 +463,21 @@ record['duration_ms'] = int((time.monotonic() - started) * 1000)
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
+record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
 if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(record['timeout_victim']).read_text()
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-2' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-2' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
+  const authorizationRmRelease = path.join(root, 'authorization-rm-release');
+  if (mode === 'dead-leader-before-authorization') {
+    execFileSync(resolveBinary('mkfifo')!, [authorizationRmRelease]);
+  }
   for (const name of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
     const binary = resolveBinary(name);
     if (binary) fs.symlinkSync(binary, path.join(shim, name));
@@ -511,15 +561,39 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
+    'case "$4" in dead-leader-before-authorization)',
+    '  rm() {',
+    '    local argument marker_rc',
+    '    for argument in "$@"; do',
+    '      case "$argument" in',
+    '        "$TMPDIR"/whatsoup-bounded-authorize.*)',
+    '          set -C; : > "$AUTHORIZATION_RM_USED" 2>/dev/null; marker_rc=$?; set +C',
+    '          if [ "$marker_rc" -eq 0 ]; then',
+    '            builtin printf ready > "$AUTHORIZATION_RM_READY"',
+    '            IFS= read -r _ < "$AUTHORIZATION_RM_RELEASE"',
+    '          fi',
+    '          ;;',
+    '      esac',
+    '    done',
+    '    "$REAL_RM" "$@"',
+    '  }',
+    '  ;; esac',
     'case "$4" in handshake-early-cont)',
-    '  jobs() {',
-    '    if [ "$1" = -s ]; then builtin kill -CONT "$worker_pid" 2>/dev/null; builtin printf "1\\n"; else builtin jobs "$@"; fi',
+    '  kill() {',
+    '    if [ "$1" = -STOP ] && [ "$2" = 0 ]; then',
+    '      builtin printf entered > "$HANDSHAKE_STOP_ENTERED"',
+    '      while [ ! -f "$HANDSHAKE_EARLY_CONT" ] && [ ! -f "$HANDSHAKE_ALLOW_STOP" ]; do /bin/sleep 0.01; done',
+    '      builtin printf stopped > "$HANDSHAKE_STOPPED"',
+    '    elif [ "$1" = -CONT ]; then',
+    '      if [ -f "$HANDSHAKE_STOPPED" ]; then builtin printf continued > "$HANDSHAKE_CONT_AFTER_STOP"; else builtin printf early > "$HANDSHAKE_EARLY_CONT"; fi',
+    '    fi',
+    '    builtin kill "$@"',
     '  }',
     '  ;; esac',
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
     'if out="$(builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
     'builtin printf "rc=%s output=%s options=%s/%s\\n" "$rc" "$out" "$before_options" "$-"',
     '',
@@ -527,7 +601,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
-    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
@@ -558,6 +632,15 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       SETUP_CHILD_PID: path.join(root, 'setup-child-pid'),
       KILL_INTERCEPT_GROUPS: path.join(root, 'dangerous-groups'),
       KILL_INTERCEPT_LOG: path.join(root, 'dangerous-kill-attempts'),
+      REAL_RM: resolveBinary('rm')!,
+      AUTHORIZATION_RM_READY: path.join(root, 'authorization-rm-ready'),
+      AUTHORIZATION_RM_USED: path.join(root, 'authorization-rm-used'),
+      AUTHORIZATION_RM_RELEASE: authorizationRmRelease,
+      HANDSHAKE_STOP_ENTERED: path.join(root, 'handshake-stop-entered'),
+      HANDSHAKE_STOPPED: path.join(root, 'handshake-stopped'),
+      HANDSHAKE_EARLY_CONT: path.join(root, 'handshake-early-cont'),
+      HANDSHAKE_ALLOW_STOP: path.join(root, 'handshake-allow-stop'),
+      HANDSHAKE_CONT_AFTER_STOP: path.join(root, 'handshake-cont-after-stop'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -656,6 +739,17 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
+  it('reports a deadline when the command leader is reaped before outer authorization', () => {
+    const result = runLifecycleProbe('dead-leader-before-authorization');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.stopped_guard, JSON.stringify(result)).toBeTruthy();
+    expect(result.continued_guard, JSON.stringify(result)).toBe(result.stopped_guard);
+    expect(result.command_pid_reaped_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
   it('preserves an ordinary wrapped command exit 2', () => {
     const result = runLifecycleProbe('ordinary-exit-2');
     expect(result.exit, JSON.stringify(result)).toBe(0);
@@ -684,12 +778,14 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
-  it('does not depend on stopped-job status before starting its deadline', () => {
+  it('does not lose a release sent before the worker stops', () => {
     const result = runLifecycleProbe('handshake-early-cont');
     expect(result.exit, JSON.stringify(result)).toBe(0);
-    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
-    expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=payload');
+    expect(result.early_cont_before_stop, JSON.stringify(result)).toBe(false);
+    expect(result.continued_after_stop, JSON.stringify(result)).toBe(true);
     expect(result.command_started, JSON.stringify(result)).toBe(true);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=payload');
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
