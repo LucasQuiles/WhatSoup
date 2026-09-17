@@ -466,6 +466,7 @@ record['command_started'] = (root / 'command-started').exists()
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
+if (root / 'cleanup-residual-polls').exists(): record['cleanup_residual_polls'] = int((root / 'cleanup-residual-polls').read_text())
 if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(record['timeout_victim']).read_text()
 print(json.dumps(record))
 `;
@@ -544,6 +545,15 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       '',
     ].join('\n'), { mode: 0o700 });
   }
+  if (mode === 'cleanup-residual') {
+    fs.unlinkSync(path.join(shim, 'sleep'));
+    fs.writeFileSync(path.join(shim, 'sleep'), [
+      '#!/bin/bash',
+      'if [ "$1" = 0.01 ] && [ -e "$CLEANUP_RESIDUAL_ACTIVE" ]; then exec /bin/sleep 0.05; fi',
+      'exec /bin/sleep "$@"',
+      '',
+    ].join('\n'), { mode: 0o700 });
+  }
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
     'IFS= read -r go',
@@ -553,7 +563,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    groups=""; [ ! -r "$KILL_INTERCEPT_GROUPS" ] || IFS= read -r groups < "$KILL_INTERCEPT_GROUPS"',
     '    if [ "$cleanup_mode" = cleanup-residual ] && [ "$1" = -0 ] && [ "$2" = -- ]; then',
     '      [ -n "$cleanup_group" ] || cleanup_group="$3"',
-    '      if [ "$3" = "$cleanup_group" ]; then cleanup_group_checks=$((cleanup_group_checks + 1)); [ "$cleanup_group_checks" -le 200 ] && return 0; fi',
+    '      if [ "$3" = "$cleanup_group" ]; then cleanup_group_checks=$((cleanup_group_checks + 1)); builtin printf active > "$CLEANUP_RESIDUAL_ACTIVE"; builtin printf "%s" "$cleanup_group_checks" > "$CLEANUP_RESIDUAL_POLLS"; [ "$cleanup_group_checks" -le 200 ] && return 0; fi',
     '    fi',
     '    for argument in "$@"; do',
     '      case "$argument" in -[0-9]*) case ",$groups," in *,"${argument#-}",*) builtin printf "%s\\n" "$argument" >> "$KILL_INTERCEPT_LOG"; return 0;; esac;; esac',
@@ -641,6 +651,8 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       HANDSHAKE_EARLY_CONT: path.join(root, 'handshake-early-cont'),
       HANDSHAKE_ALLOW_STOP: path.join(root, 'handshake-allow-stop'),
       HANDSHAKE_CONT_AFTER_STOP: path.join(root, 'handshake-cont-after-stop'),
+      CLEANUP_RESIDUAL_ACTIVE: path.join(root, 'cleanup-residual-active'),
+      CLEANUP_RESIDUAL_POLLS: path.join(root, 'cleanup-residual-polls'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -735,6 +747,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(7_500);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(true);
+    expect(result.cleanup_residual_polls, JSON.stringify(result)).toBeGreaterThan(0);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);

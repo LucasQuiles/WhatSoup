@@ -110,6 +110,18 @@ whatsoup_run_bounded() {
       return "$marker_rc"
     }
 
+    _bounded_reserve_cleanup_marker() {
+      local saved_umask marker_rc
+      saved_umask="$(umask)"
+      umask 077
+      set -C
+      builtin printf 'token=%s\ncleanup=running\n' "$control_token" > "$cleanup_file"
+      marker_rc=$?
+      set +C
+      umask "$saved_umask"
+      return "$marker_rc"
+    }
+
     _bounded_outer_cleanup() {
       local group
       for group in "$guard_group" "$worker_group"; do
@@ -140,6 +152,7 @@ whatsoup_run_bounded() {
 
       _bounded_worker_cleanup() {
         local group count
+        _bounded_reserve_cleanup_marker || cleanup_rc=2
         if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
         if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
         [ -n "$command_release_pid" ] && kill -9 "$command_release_pid" 2>/dev/null
@@ -162,6 +175,7 @@ whatsoup_run_bounded() {
         done
         [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog"; rmdir "$directory" 2>/dev/null; }
         rm -f "$authorization_file" "$control_file" "$timeout_file"
+        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"
       }
 
       trap '_bounded_worker_cleanup' EXIT
@@ -240,7 +254,6 @@ whatsoup_run_bounded() {
       _bounded_worker_cleanup
       trap - EXIT
       if [ "$cleanup_rc" -ne 0 ]; then
-        ( umask 077; set -C; builtin printf 'token=%s\ncleanup=failed\n' "$control_token" > "$cleanup_file" ) || :
         rc=2
       fi
       return "$rc"
