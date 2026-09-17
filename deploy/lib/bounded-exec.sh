@@ -2,173 +2,330 @@
 
 # Bounded command execution for credential-store probes.
 #
-# Why this exists: `security` (macOS Keychain) and `secret-tool` (libsecret) both
-# block indefinitely when the credential daemon needs interactive authorization.
-# On a headless or auto-login host nobody can answer that prompt, so an unbounded
-# lookup wedges the caller forever — that is how ph-bot on mini11 stayed down for
-# ~45h while its watchdog reported `ok`.
-#
 # Stock macOS ships no timeout(1). Use the same shell supervisor everywhere so
 # command statuses and descendant cleanup do not depend on installed utilities.
 #
 # Exit status: 124 when the budget was exhausted (matching GNU timeout), the
 # command's own status otherwise.
 
-# whatsoup_run_bounded <seconds> <command> [args...]
 whatsoup_run_bounded() {
   if [ "$#" -lt 2 ]; then
     echo "FATAL: whatsoup_run_bounded requires a budget and a command" >&2
     return 2
   fi
-
   local budget="$1"
   shift
-
-  # Accept whole decimal seconds without evaluating caller text as arithmetic.
   case "$budget" in ''|*[!0-9]*) return 2 ;; esac
   while [ "${budget#0}" != "$budget" ]; do budget="${budget#0}"; done
   budget="${budget:-0}"
   [ "$budget" -ge 0 ] 2>/dev/null || return 2
-  # GNU timeout interprets zero as unlimited; this helper has no such mode.
   [ "$budget" -ne 0 ] || return 124
 
-  # Allow package managers to release locks after TERM, then enforce KILL even
-  # when the command ignores TERM. Keep short credential probes responsive.
-  local rc grace
-  grace=$(( budget / 10 ))
+  local grace
+  grace=$((budget / 10))
   [ "$grace" -lt 2 ] && grace=2
   [ "$grace" -gt 30 ] && grace=30
 
-  # Job control is local to this subshell. Command and watchdog groups are
-  # verified before release. Either supervisor can enforce the deadline.
   (
     set +e
     set -m
-    local directory cmd_pid="" cmd_group="" command_release_pid=""
-    local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
-    local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
-    directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
+    local worker_pid="" worker_group="" guard_pid="" guard_group=""
+    local worker_rc=0 guard_rc=0 rc=0
+    local control_token="${RANDOM}${RANDOM}${RANDOM}"
+    local control_file="${TMPDIR:-/tmp}/whatsoup-bounded-control.$$.$control_token"
+    local authorization_file="${TMPDIR:-/tmp}/whatsoup-bounded-authorize.$$.$control_token"
+    local timeout_file="${TMPDIR:-/tmp}/whatsoup-bounded-timeout.$$.$control_token"
+    local cleanup_file="${TMPDIR:-/tmp}/whatsoup-bounded-cleanup.$$.$control_token"
+    local control_directory="" control_command_pid="" control_command_group=""
+    local control_watchdog_pid="" control_watchdog_group="" control_release=""
 
-    _whatsoup_bounded_cleanup() {
-      local group count
-      # An unverified job is still blocked opening its launch FIFO and has
-      # not executed the requested command or created descendants.
-      if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
-      if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
-      # The release writer runs only a builtin and cannot create descendants.
-      [ -n "$command_release_pid" ] && kill -9 "$command_release_pid" 2>/dev/null
-      [ -n "$watchdog_release_pid" ] && kill -9 "$watchdog_release_pid" 2>/dev/null
-      for group in "$cmd_group" "$watchdog_group"; do
+    _bounded_read_beacon() {
+      local key value token_seen=0 directory_seen=0
+      control_directory=""
+      [ -r "$control_file" ] || return 1
+      while IFS='=' read -r key value; do
+        case "$key" in
+          token) [ "$token_seen" -eq 0 ] && [ "$value" = "$control_token" ] || return 2; token_seen=1 ;;
+          directory) [ "$directory_seen" -eq 0 ] || return 2; control_directory="$value"; directory_seen=1 ;;
+          *) return 2 ;;
+        esac
+      done < "$control_file"
+      [ "$token_seen" -eq 1 ] && [ "$directory_seen" -eq 1 ] || return 2
+      case "$control_directory" in "${TMPDIR:-/tmp}"/whatsoup-bounded.*) return 0 ;; *) return 2 ;; esac
+    }
+
+    _bounded_group_is_owned() {
+      local pid="$1" group="$2" observed parent observed_group
+      [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$group" =~ ^[0-9]+$ ]] || return 2
+      [ "$pid" -gt 1 ] && [ "$group" -gt 1 ] && [ "$pid" = "$group" ] || return 2
+      [ "$group" != "$worker_group" ] && [ "$group" != "$guard_group" ] || return 2
+      kill -0 "$pid" 2>/dev/null || return 1
+      observed="$(/bin/ps -o ppid= -o pgid= -p "$pid" 2>/dev/null)" || return 1
+      read -r parent observed_group <<< "$observed"
+      [[ "$parent" =~ ^[0-9]+$ ]] && [ "$parent" = "$worker_pid" ] && [ "$observed_group" = "$group" ] && return 0
+      return 2
+    }
+
+    _bounded_read_authorization() {
+      local key value token_seen=0 directory_seen=0 command_pid_seen=0 command_group_seen=0
+      local watchdog_pid_seen=0 watchdog_group_seen=0 release_seen=0
+      control_directory="" control_command_pid="" control_command_group=""
+      control_watchdog_pid="" control_watchdog_group="" control_release=""
+      [ -r "$authorization_file" ] || return 1
+      while IFS='=' read -r key value; do
+        case "$key" in
+          token) [ "$token_seen" -eq 0 ] && [ "$value" = "$control_token" ] || return 2; token_seen=1 ;;
+          directory) [ "$directory_seen" -eq 0 ] || return 2; control_directory="$value"; directory_seen=1 ;;
+          command_pid) [ "$command_pid_seen" -eq 0 ] || return 2; control_command_pid="$value"; command_pid_seen=1 ;;
+          command_group) [ "$command_group_seen" -eq 0 ] || return 2; control_command_group="$value"; command_group_seen=1 ;;
+          watchdog_pid) [ "$watchdog_pid_seen" -eq 0 ] || return 2; control_watchdog_pid="$value"; watchdog_pid_seen=1 ;;
+          watchdog_group) [ "$watchdog_group_seen" -eq 0 ] || return 2; control_watchdog_group="$value"; watchdog_group_seen=1 ;;
+          release) [ "$release_seen" -eq 0 ] || return 2; control_release="$value"; release_seen=1 ;;
+          *) return 2 ;;
+        esac
+      done < "$authorization_file"
+      [ "$token_seen" -eq 1 ] && [ "$directory_seen" -eq 1 ] && [ "$command_pid_seen" -eq 1 ] || return 2
+      [ "$command_group_seen" -eq 1 ] && [ "$watchdog_pid_seen" -eq 1 ] && [ "$watchdog_group_seen" -eq 1 ] && [ "$release_seen" -eq 1 ] || return 2
+      [ "$control_release" = 1 ] || return 2
+      case "$control_directory" in "${TMPDIR:-/tmp}"/whatsoup-bounded.*) ;; *) return 2 ;; esac
+      [ "$control_command_group" != "$control_watchdog_group" ] || return 2
+      _bounded_group_is_owned "$control_command_pid" "$control_command_group" || return 2
+      _bounded_group_is_owned "$control_watchdog_pid" "$control_watchdog_group"
+      case "$?" in 0) ;; 1) control_watchdog_group="" ;; *) return 2 ;; esac
+    }
+
+    _bounded_reserve_timeout_marker() {
+      local saved_umask marker_rc
+      saved_umask="$(umask)"
+      umask 077
+      set -C
+      : > "$timeout_file"
+      marker_rc=$?
+      set +C
+      umask "$saved_umask"
+      return "$marker_rc"
+    }
+
+    _bounded_outer_cleanup() {
+      local group
+      for group in "$guard_group" "$worker_group"; do
         [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
       done
-      [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null
-      [ -n "$command_release_pid" ] && wait "$command_release_pid" 2>/dev/null
-      [ -n "$watchdog_pid" ] && wait "$watchdog_pid" 2>/dev/null
-      [ -n "$watchdog_release_pid" ] && wait "$watchdog_release_pid" 2>/dev/null
-      # Grandchildren are reaped by their parent or the OS. Do not report
-      # completion while a signalled member still exists in an owned group.
-      for group in "$cmd_group" "$watchdog_group"; do
-        [ -n "$group" ] || continue
-        count=0
-        while kill -0 -- "-$group" 2>/dev/null; do
-          count=$((count + 1))
-          if [ "$count" -ge 200 ]; then cleanup_rc=2; break; fi
-          sleep 0.01
-        done
-      done
-      rm -f "$directory/command" "$directory/result" "$directory/watchdog" "$directory/timed-out"
-      rmdir "$directory"
+      [ -n "$worker_pid" ] && wait "$worker_pid" 2>/dev/null
+      [ -n "$guard_pid" ] && wait "$guard_pid" 2>/dev/null
+      if _bounded_read_beacon; then
+        rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
+        rmdir "$control_directory" 2>/dev/null
+      fi
+      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file"
     }
-    trap '_whatsoup_bounded_cleanup' EXIT
+
+    trap '_bounded_outer_cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
 
-    if ! mkfifo "$directory/command" "$directory/result" "$directory/watchdog"; then return 2; fi
-    caller_group="$(ps -o pgid= -p "$$")" || return 2
-    caller_group="${caller_group//[[:space:]]/}"
-    [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
-
-    # The read redirects only its own stdin; the wrapped command retains fd0.
     (
+      set +e
       set +m
-      IFS= read -r start < "$directory/command" || exit 2
-      [ "$start" = run ] || exit 2
-      # Keep the result writer alive while the command handles its own TERM.
-      trap ':' TERM
-      "$@"
-      rc=$?
-      builtin printf '%s\n' "$rc" > "$directory/result"
-      exit "$rc"
-    ) <&0 &
-    cmd_pid=$!
-    candidate="$(jobs -p %+)"
-    observed="$(ps -o pgid= -p "$cmd_pid")" || return 2
-    observed="${observed//[[:space:]]/}"
-    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
-        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ]; then
-      return 2
-    fi
-    cmd_group="$candidate"
+      kill -STOP 0
 
-    (
-      set +m
-      IFS= read -r start < "$directory/watchdog" || exit 2
-      [ "$start" = run ] || exit 2
-      sleep "$budget" || exit 2
-      : > "$directory/timed-out"
-      kill -TERM -- "-$cmd_group" 2>/dev/null
-      sleep "$grace" || exit 2
-      kill -9 -- "-$cmd_group" 2>/dev/null
-    ) </dev/null >/dev/null 2>&1 &
-    watchdog_pid=$!
-    candidate="$(jobs -p %+)"
-    observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
-    observed="${observed//[[:space:]]/}"
-    if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] \
-        || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ] \
-        || [ "$candidate" = "$cmd_group" ]; then
-      return 2
-    fi
-    watchdog_group="$candidate"
+      local directory="" cmd_pid="" cmd_group="" command_release_pid=""
+      local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
+      local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
+      local entry_timeout=0 entry_timeout_handled=0
 
-    # A verified reader can die before release. Keep a blocked FIFO writer
-    # out of the parent so the parent can still enforce the deadline and reap it.
-    builtin printf 'run\n' > "$directory/watchdog" &
-    watchdog_release_pid=$!
-    builtin printf 'run\n' > "$directory/command" &
-    command_release_pid=$!
-    remaining="$budget"
-    remaining_grace="$grace"
-    rc=124
-    while [ "$remaining" -gt 0 ] || [ "$remaining_grace" -gt 0 ]; do
-      completed_rc=""
-      # Read/write open cannot wait for a missing writer on the supported hosts.
-      # The redirection is scoped to read; the command retains its original stdin.
-      if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
-        if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then
-          rc="$completed_rc"
-        else
-          rc=2
-        fi
-        break
-      fi
-      if ! kill -0 "$cmd_pid" 2>/dev/null; then
-        # Stop any remaining descendants before harvesting the leader's status.
+      _bounded_worker_cleanup() {
+        local group count
+        if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
+        if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
+        [ -n "$command_release_pid" ] && kill -9 "$command_release_pid" 2>/dev/null
+        [ -n "$watchdog_release_pid" ] && kill -9 "$watchdog_release_pid" 2>/dev/null
+        for group in "$cmd_group" "$watchdog_group"; do
+          [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
+        done
+        [ -n "$cmd_pid" ] && wait "$cmd_pid" 2>/dev/null
+        [ -n "$command_release_pid" ] && wait "$command_release_pid" 2>/dev/null
+        [ -n "$watchdog_pid" ] && wait "$watchdog_pid" 2>/dev/null
+        [ -n "$watchdog_release_pid" ] && wait "$watchdog_release_pid" 2>/dev/null
+        for group in "$cmd_group" "$watchdog_group"; do
+          [ -n "$group" ] || continue
+          count=0
+          while kill -0 -- "-$group" 2>/dev/null; do
+            count=$((count + 1))
+            [ "$count" -lt 200 ] || { cleanup_rc=2; break; }
+            sleep 0.01
+          done
+        done
+        [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog"; rmdir "$directory" 2>/dev/null; }
+        rm -f "$authorization_file" "$control_file" "$timeout_file"
+      }
+
+      trap '_bounded_worker_cleanup' EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM HUP
+      trap 'entry_timeout=1
+        [ -z "$cmd_group" ] || kill -TERM -- "-$cmd_group" 2>/dev/null' USR1
+
+      caller_group="$(ps -o pgid= -p "$$")" || return 2
+      caller_group="${caller_group//[[:space:]]/}"
+      [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
+      directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
+      ( umask 077; set -C; builtin printf 'token=%s\ndirectory=%s\n' "$control_token" "$directory" > "$control_file" ) || return 2
+      mkfifo "$directory/command" "$directory/result" "$directory/watchdog" || return 2
+
+      set -m
+      (
+        set +m
+        IFS= read -r start < "$directory/command" || exit 2
+        [ "$start" = run ] || exit 2
+        trap ':' TERM
+        "$@"
+        rc=$?
+        builtin printf '%s\n' "$rc" > "$directory/result"
+        exit "$rc"
+      ) <&0 &
+      cmd_pid=$!
+      candidate="$(jobs -p %+)"
+      observed="$(ps -o pgid= -p "$cmd_pid")" || return 2
+      observed="${observed//[[:space:]]/}"
+      if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ]; then return 2; fi
+      cmd_group="$candidate"
+
+      (
+        set +m
+        IFS= read -r start < "$directory/watchdog" || exit 2
+        [ "$start" = run ] || exit 2
+        sleep "$budget" || exit 2
+        kill -TERM -- "-$cmd_group" 2>/dev/null
+        sleep "$grace" || exit 2
         kill -9 -- "-$cmd_group" 2>/dev/null
-        rc=0
-        wait "$cmd_pid" 2>/dev/null || rc=$?
-        break
+      ) </dev/null >/dev/null 2>&1 &
+      watchdog_pid=$!
+      candidate="$(jobs -p %+)"
+      observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
+      observed="${observed//[[:space:]]/}"
+      if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ] || [ "$candidate" = "$cmd_group" ]; then return 2; fi
+      watchdog_group="$candidate"
+
+      _bounded_reserve_timeout_marker || return 2
+      ( umask 077; set -C; builtin printf 'token=%s\ndirectory=%s\ncommand_pid=%s\ncommand_group=%s\nwatchdog_pid=%s\nwatchdog_group=%s\nrelease=1\n' "$control_token" "$directory" "$cmd_pid" "$cmd_group" "$watchdog_pid" "$watchdog_group" > "$authorization_file" ) || return 2
+      builtin printf 'run\n' > "$directory/watchdog" &
+      watchdog_release_pid=$!
+      builtin printf 'run\n' > "$directory/command" &
+      command_release_pid=$!
+      remaining="$budget" remaining_grace="$grace" rc=124
+      while [ "$remaining" -gt 0 ] || [ "$remaining_grace" -gt 0 ]; do
+        if [ "$entry_timeout" -ne 0 ] && [ "$entry_timeout_handled" -eq 0 ]; then
+          remaining=0
+          remaining_grace="$grace"
+          entry_timeout_handled=1
+        fi
+        completed_rc=""
+        if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
+          if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then rc="$completed_rc"; else rc=2; fi
+          break
+        fi
+        if ! kill -0 "$cmd_pid" 2>/dev/null; then
+          kill -9 -- "-$cmd_group" 2>/dev/null
+          rc=0
+          wait "$cmd_pid" 2>/dev/null || rc=$?
+          break
+        fi
+        if [ "$remaining" -gt 0 ]; then remaining=$((remaining - 1)); else remaining_grace=$((remaining_grace - 1)); fi
+      done
+      _bounded_worker_cleanup
+      trap - EXIT
+      if [ "$cleanup_rc" -ne 0 ]; then
+        ( umask 077; set -C; builtin printf 'token=%s\ncleanup=failed\n' "$control_token" > "$cleanup_file" ) || :
+        rc=2
       fi
-      if [ "$remaining" -gt 0 ]; then
-        remaining=$((remaining - 1))
+      return "$rc"
+    ) <&0 &
+    worker_pid=$!
+    worker_group="$(jobs -p %+)"
+    if [[ ! "$worker_group" =~ ^[0-9]+$ ]] || [ "$worker_group" -le 1 ]; then return 2; fi
+
+    (
+      set +m
+      local timer_pid="" guard_status=0
+      _bounded_wait_for_budget() {
+        local remaining="$budget" chunk
+        while [ "$remaining" -gt 0 ]; do
+          if [ "$remaining" -gt 60 ]; then chunk=60; else chunk="$remaining"; fi
+          sleep "$chunk" || return 2
+          remaining=$((remaining - chunk))
+        done
+      }
+      _bounded_guard_exit() {
+        [ -z "$timer_pid" ] || kill -9 "$timer_pid" 2>/dev/null
+        exit "$guard_status"
+      }
+      trap '_bounded_guard_exit' INT TERM HUP
+      _bounded_wait_for_budget &
+      timer_pid=$!
+      kill -CONT "$worker_pid" 2>/dev/null
+      wait "$timer_pid" 2>/dev/null
+      if [ "$?" -ne 0 ]; then
+        guard_status=2
+        kill -TERM -- "-$worker_group" 2>/dev/null
+        kill -USR1 "$worker_pid" 2>/dev/null
+        if ! sleep "$grace"; then kill -9 -- "-$worker_group" 2>/dev/null; exit 2; fi
+        kill -9 -- "-$worker_group" 2>/dev/null
+        exit 2
+      fi
+      local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0
+      guard_status=124
+      _bounded_read_authorization
+      authorization_state=$?
+      if [ "$authorization_state" -eq 0 ]; then
+        command_authorized=1
+        [ -z "$control_watchdog_group" ] || watchdog_authorized=1
+        kill -TERM -- "-$control_command_group" 2>/dev/null
+      elif [ "$authorization_state" -eq 2 ]; then
+        protocol_failure=1
+        guard_status=2
+        kill -TERM -- "-$worker_group" 2>/dev/null
       else
-        remaining_grace=$((remaining_grace - 1))
+        kill -TERM -- "-$worker_group" 2>/dev/null
       fi
-    done
-    [ ! -f "$directory/timed-out" ] || rc=124
-    _whatsoup_bounded_cleanup
+      kill -USR1 "$worker_pid" 2>/dev/null
+      if ! sleep "$grace"; then
+        if [ "$command_authorized" -eq 1 ] && kill -0 "$control_command_pid" 2>/dev/null; then kill -9 -- "-$control_command_group" 2>/dev/null; fi
+        if [ "$watchdog_authorized" -eq 1 ] && kill -0 "$control_watchdog_pid" 2>/dev/null; then kill -9 -- "-$control_watchdog_group" 2>/dev/null; fi
+        kill -9 -- "-$worker_group" 2>/dev/null
+        guard_status=2
+        exit 2
+      fi
+      if [ "$command_authorized" -eq 1 ] && kill -0 "$control_command_pid" 2>/dev/null; then kill -9 -- "-$control_command_group" 2>/dev/null; fi
+      if [ "$watchdog_authorized" -eq 1 ] && kill -0 "$control_watchdog_pid" 2>/dev/null; then kill -9 -- "-$control_watchdog_group" 2>/dev/null; fi
+      if [ "$authorization_state" -eq 0 ]; then
+        sleep "$grace" &
+        timer_pid=$!
+        wait "$timer_pid" 2>/dev/null
+        [ "$?" -eq 0 ] || { kill -9 "$worker_pid" 2>/dev/null; kill -9 -- "-$worker_group" 2>/dev/null; exit 2; }
+        kill -9 "$worker_pid" 2>/dev/null
+        kill -9 -- "-$worker_group" 2>/dev/null
+        exit 2
+      else
+        kill -9 -- "-$worker_group" 2>/dev/null
+      fi
+      [ "$protocol_failure" -eq 0 ] || guard_status=2
+      exit "$guard_status"
+    ) </dev/null >/dev/null 2>&1 &
+    guard_pid=$!
+    guard_group="$(jobs -p %+)"
+    if [[ ! "$guard_group" =~ ^[0-9]+$ ]] || [ "$guard_group" -le 1 ] || [ "$guard_group" = "$worker_group" ]; then return 2; fi
+
+    wait "$worker_pid" 2>/dev/null || worker_rc=$?
+    if kill -0 "$guard_pid" 2>/dev/null; then kill -TERM "$guard_pid" 2>/dev/null; fi
+    wait "$guard_pid" 2>/dev/null || guard_rc=$?
+    if [ -e "$cleanup_file" ] || [ -L "$cleanup_file" ]; then
+      rc=2
+    else
+      case "$guard_rc" in 124|2) rc="$guard_rc" ;; *) rc="$worker_rc" ;; esac
+    fi
+    _bounded_outer_cleanup
     trap - EXIT
-    [ "$cleanup_rc" -eq 0 ] || rc=2
     return "$rc"
   )
 }

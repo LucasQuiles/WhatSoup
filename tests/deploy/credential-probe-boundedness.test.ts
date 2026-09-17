@@ -287,6 +287,8 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         record['session_id'] = session
         record['initial'] = members(session)
         record['sentinel'] = members(os.getsid(sentinel.pid))
+        record['sentinel_group'] = os.getpgid(sentinel.pid)
+        record['caller_group'] = os.getpgid(child.pid)
         if master is not None:
             record['terminal_foreground_group'] = os.tcgetpgrp(master)
             os.write(master, b'go\n')
@@ -294,6 +296,80 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             # command has already exited. The fixture owns the master reader.
             if select.select([master], [], [], 2)[0]: record['terminal_echo'] = os.read(master, 4096).decode()
         else: child.stdin.write('go\n'); child.stdin.close()
+        if mode in ('timeout-symlink', 'timeout-existing'):
+            deadline = time.monotonic() + 3
+            control = None
+            while time.monotonic() < deadline:
+                matches = list(root.glob('whatsoup-bounded-control.*'))
+                if matches:
+                    control = matches[0]
+                    break
+                time.sleep(0.01)
+            if control is None: raise RuntimeError('timeout control record unavailable')
+            timeout_path = root / ('whatsoup-bounded-timeout.%s.%s' % (child.pid, control.name.rsplit('.', 1)[1]))
+            victim = root / 'timeout-victim'
+            victim.write_text('unchanged')
+            if mode == 'timeout-symlink': timeout_path.symlink_to(victim)
+            else: timeout_path.write_text('preexisting')
+            (root / 'timeout-fixture-ready').write_text('ready')
+            record['timeout_victim'] = str(victim)
+        if mode.startswith('control-'):
+            deadline = time.monotonic() + 3
+            control = None
+            while time.monotonic() < deadline:
+                matches = list(root.glob('whatsoup-bounded-authorize.*')) or list(root.glob('whatsoup-bounded-control.*'))
+                if matches and 'release=1' in matches[0].read_text():
+                    control = matches[0]
+                    break
+                time.sleep(0.01)
+            if control is None: raise RuntimeError('complete control record unavailable')
+            fields = dict(line.split('=', 1) for line in control.read_text().splitlines() if '=' in line)
+            target_group = {
+                'control-low-group': '1',
+                'control-caller-group': str(record['caller_group']),
+                'control-external-group': str(record['sentinel_group']),
+            }.get(mode, fields['command_group'])
+            target_pid = {
+                'control-low-group': '1',
+                'control-caller-group': str(record['caller_group']),
+                'control-external-group': str(sentinel.pid),
+            }.get(mode, fields.get('command_pid', target_group))
+            (root / 'dangerous-groups').write_text(','.join(('1', str(record['caller_group']), str(record['sentinel_group']))))
+            replacement = [
+                'directory=' + fields['directory'],
+                'command_pid=' + target_pid,
+                'command_group=' + target_group,
+                'watchdog_pid=' + fields.get('watchdog_pid', target_pid),
+                'watchdog_group=' + fields['watchdog_group'],
+                'release=1',
+            ]
+            if mode != 'control-tokenless': replacement.insert(0, 'token=' + fields['token'])
+            if mode == 'control-duplicate-token': replacement.insert(1, 'token=' + fields['token'])
+            staged = root / 'replacement-control'
+            staged.write_text('\n'.join(replacement) + '\n')
+            staged.replace(control)
+            record['control_corrupted'] = mode
+        if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped'):
+            deadline = time.monotonic() + 3
+            authorization = None
+            while time.monotonic() < deadline:
+                matches = list(root.glob('whatsoup-bounded-authorize.*'))
+                if matches and 'release=1' in matches[0].read_text():
+                    authorization = matches[0]
+                    break
+                time.sleep(0.01)
+            if authorization is None: raise RuntimeError('worker authorization unavailable')
+            fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
+            command_pid = int(fields['command_pid'])
+            worker = next((item['ppid'] for item in members(session) if item['pid'] == command_pid), None)
+            if worker is None or worker == child.pid: raise RuntimeError('worker identity unavailable')
+            if mode == 'forged-completion-worker-stopped':
+                token = authorization.name.rsplit('.', 1)[1]
+                completion = root / ('whatsoup-bounded-cleanup-complete.%s.%s' % (child.pid, token))
+                completion.write_text('token=' + token + '\ncomplete=1\n')
+                record['forged_completion'] = str(completion)
+            os.kill(worker, signal.SIGSTOP)
+            record['stopped_worker'] = worker
         if mode in ('parent-stopped', 'parent-terminated'):
             deadline = time.monotonic() + 3
             while not (root / 'command-started').exists() and time.monotonic() < deadline: time.sleep(0.01)
@@ -311,7 +387,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     record['command_alive_while_parent_stopped'] = any(item['pid'] == command_pid for item in members(session))
                 finally: os.kill(supervisor, signal.SIGCONT)
             else: os.kill(supervisor, signal.SIGTERM)
-        child.wait(timeout=8)
+        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
         record['exit'] = child.returncode
         record['survivors_before_cleanup'] = members(session)
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
@@ -343,10 +419,12 @@ record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
+record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
+if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(record['timeout_victim']).read_text()
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-2' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
@@ -376,13 +454,72 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       '',
     ].join('\n'), { mode: 0o700 });
   }
+  if (mode.startsWith('timeout-')) {
+    fs.unlinkSync(path.join(shim, 'ps'));
+    fs.writeFileSync(path.join(shim, 'ps'), [
+      '#!/bin/bash',
+      'count=0; [ ! -f "$PS_COUNTER" ] || read -r count < "$PS_COUNTER"',
+      'count=$((count + 1)); printf "%s\\n" "$count" > "$PS_COUNTER"',
+      'if [ "$count" -eq 2 ]; then while [ ! -f "$TIMEOUT_FIXTURE_READY" ]; do /bin/sleep 0.01; done; fi',
+      'exec "$REAL_PS" "$@"',
+      '',
+    ].join('\n'), { mode: 0o700 });
+  }
+  const stalledSetupBinary = mode === 'setup-mktemp-term-ignoring' || mode === 'setup-timer-sleep-failure'
+    ? 'mktemp'
+    : mode === 'setup-mkfifo-term-ignoring'
+      ? 'mkfifo'
+      : mode === 'setup-ps-term-ignoring'
+        ? 'ps'
+        : undefined;
+  if (stalledSetupBinary) {
+    fs.unlinkSync(path.join(shim, stalledSetupBinary));
+    fs.writeFileSync(path.join(shim, stalledSetupBinary), [
+      '#!/bin/bash',
+      'printf "%s\\n" "$$" > "$SETUP_PID"',
+      'trap "" TERM HUP USR1',
+      mode === 'setup-timer-sleep-failure' ? '/bin/sleep 30 &' : 'sleep 30 &',
+      'child=$!',
+      'printf "%s\\n" "$child" > "$SETUP_CHILD_PID"',
+      'wait "$child"',
+      '',
+    ].join('\n'), { mode: 0o700 });
+  }
+  if (mode === 'setup-timer-sleep-failure') {
+    fs.unlinkSync(path.join(shim, 'sleep'));
+    fs.writeFileSync(path.join(shim, 'sleep'), [
+      '#!/bin/bash',
+      '[ "$1" != 1 ] || exit 1',
+      'exec /bin/sleep "$@"',
+      '',
+    ].join('\n'), { mode: 0o700 });
+  }
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
     'IFS= read -r go',
+    'cleanup_mode="$4"',
+    'case "$4" in control-*|cleanup-residual)',
+    '  kill() {',
+    '    groups=""; [ ! -r "$KILL_INTERCEPT_GROUPS" ] || IFS= read -r groups < "$KILL_INTERCEPT_GROUPS"',
+    '    if [ "$cleanup_mode" = cleanup-residual ] && [ "$1" = -0 ] && [ "$2" = -- ]; then',
+    '      [ -n "$cleanup_group" ] || cleanup_group="$3"',
+    '      if [ "$3" = "$cleanup_group" ]; then cleanup_group_checks=$((cleanup_group_checks + 1)); [ "$cleanup_group_checks" -le 200 ] && return 0; fi',
+    '    fi',
+    '    for argument in "$@"; do',
+    '      case "$argument" in -[0-9]*) case ",$groups," in *,"${argument#-}",*) builtin printf "%s\\n" "$argument" >> "$KILL_INTERCEPT_LOG"; return 0;; esac;; esac',
+    '    done',
+    '    builtin kill "$@"',
+    '  }',
+    '  ;; esac',
+    'case "$4" in handshake-early-cont)',
+    '  jobs() {',
+    '    if [ "$1" = -s ]; then builtin kill -CONT "$worker_pid" 2>/dev/null; builtin printf "1\\n"; else builtin jobs "$@"; fi',
+    '  }',
+    '  ;; esac',
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|watchdog-reader-killed-after-verification|parent-stopped) budget=1;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
     'if out="$(builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
     'builtin printf "rc=%s output=%s options=%s/%s\\n" "$rc" "$out" "$before_options" "$-"',
     '',
@@ -390,11 +527,13 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
+    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
     '  printf "%s" "$payload"',
     '  [ "$1" != nonzero ] || exit 7',
+    '  [ "$1" != ordinary-exit-2 ] || exit 2',
     '  [ "$1" != status-255 ] || exit 255',
     'else',
     '  value="$(sleep 30)"',
@@ -414,6 +553,11 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       PS_BORROW_GROUP: mode === 'ownership-caller-group' ? '1' : '0',
       PS_CALLER_GROUP: path.join(root, 'caller-group'),
       PS_KILL_RECEIPT: path.join(root, 'reader-killed'),
+      TIMEOUT_FIXTURE_READY: path.join(root, 'timeout-fixture-ready'),
+      SETUP_PID: path.join(root, 'setup-pid'),
+      SETUP_CHILD_PID: path.join(root, 'setup-child-pid'),
+      KILL_INTERCEPT_GROUPS: path.join(root, 'dangerous-groups'),
+      KILL_INTERCEPT_LOG: path.join(root, 'dangerous-kill-attempts'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -478,6 +622,94 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe('parent-terminated');
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout).toContain('rc=143 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring'] as const)('bounds a TERM-ignoring setup child from helper entry: %s', (mode) => {
+    const result = runLifecycleProbe(mode);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.command_started, JSON.stringify(result)).toBe(false);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('fails closed and reaps setup when the outer timer sleep fails', () => {
+    const result = runLifecycleProbe('setup-timer-sleep-failure');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.command_started, JSON.stringify(result)).toBe(false);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('reports a worker cleanup residual instead of a deadline', () => {
+    const result = runLifecycleProbe('cleanup-residual');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(7_500);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.command_started, JSON.stringify(result)).toBe(true);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('preserves an ordinary wrapped command exit 2', () => {
+    const result = runLifecycleProbe('ordinary-exit-2');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=payload');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('bounds an authorized worker that is stopped before timeout cleanup', () => {
+    const result = runLifecycleProbe('worker-stopped-after-authorization');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stopped_worker, JSON.stringify(result)).toBeTruthy();
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('does not trust a forged completion marker for a stopped worker', () => {
+    const result = runLifecycleProbe('forged-completion-worker-stopped');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.forged_completion, JSON.stringify(result)).toBeTruthy();
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('does not depend on stopped-job status before starting its deadline', () => {
+    const result = runLifecycleProbe('handshake-early-cont');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=payload');
+    expect(result.command_started, JSON.stringify(result)).toBe(true);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each(['control-tokenless', 'control-duplicate-token', 'control-low-group', 'control-caller-group', 'control-external-group'] as const)('fails closed without signalling an injected group: %s', (mode) => {
+    const result = runLifecycleProbe(mode);
+    expect(result.control_corrupted, JSON.stringify(result)).toBe(mode);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each(['timeout-symlink', 'timeout-existing'] as const)('does not follow or trust a pre-existing timeout marker: %s', (mode) => {
+    const result = runLifecycleProbe(mode);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.timeout_victim_contents, JSON.stringify(result)).toBe('unchanged');
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
