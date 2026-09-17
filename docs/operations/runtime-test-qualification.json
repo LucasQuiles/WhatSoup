@@ -50,6 +50,22 @@
       ]
     },
     {
+      "id": "shared-turn-reclamation",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/runtimes/agent/scheduled-turn-lifecycle.test.ts",
+        "--pool=forks",
+        "--fileParallelism=false",
+        "--retry=0"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "WS-3374-SHARED-SUCCESSOR"
+      ]
+    },
+    {
       "id": "source-types",
       "argv": [
         "node",
@@ -108,7 +124,8 @@
   "test_definitions": [
     "tests/runtimes/agent/model-pin.test.ts",
     "tests/runtimes/agent/capability-obligation-execution-tool.test.ts",
-    "tests/runtimes/agent/runtime.test.ts"
+    "tests/runtimes/agent/runtime.test.ts",
+    "tests/runtimes/agent/scheduled-turn-lifecycle.test.ts"
   ],
   "config_paths": [
     "package.json",
