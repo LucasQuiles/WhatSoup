@@ -126,7 +126,10 @@ whatsoup_run_bounded() {
       wait "$helper_pid" 2>/dev/null
       # A child fork may finish after the first group signal catches its leader.
       while kill -0 -- "-$helper_pid" 2>/dev/null; do
-        kill -9 -- "-$helper_pid" 2>/dev/null || return 2
+        if ! kill -9 -- "-$helper_pid" 2>/dev/null; then
+          kill -0 -- "-$helper_pid" 2>/dev/null && return 2
+          break
+        fi
         count=$((count + 1))
         [ "$count" -lt 200 ] || return 2
         sleep 0.01 </dev/null >/dev/null 2>&1 || return 2
