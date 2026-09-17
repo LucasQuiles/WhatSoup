@@ -30,6 +30,11 @@ import type {
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
+
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
   type CapturedCrashInfo = {
     exitCode: number | null;
@@ -1260,6 +1265,46 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain("Couldn't pin");
       // Plain-language hold: no line/tier/weight in the new copy either.
       expect(reply).not.toMatch(/\b(line|tier|weight)\b/i);
+    });
+
+    it('DEFER retry: re-selecting the same pending model retries after backoff, keeps an honest continued defer, then promotes the existing pin after recovery', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const base = 1_800_000_000_000;
+      vi.setSystemTime(base);
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const listFn = vi.fn()
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      expect(listFn).toHaveBeenCalledTimes(1);
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 1_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-3' }));
+
+      expect(listFn).toHaveBeenCalledTimes(2);
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      let reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('pending a catalogue check');
+      expect(reply).not.toContain('Already set');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 2_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-4' }));
+
+      expect(listFn).toHaveBeenCalledTimes(3);
+      expect(prefRows()[0].model_pin_verified).toBe(1);
+      reply = allReplies(sentMessages).join('\n');
+      expect(reply).not.toContain('Already set');
+      expect(reply).not.toContain('pending a catalogue check');
+      expect(reply).toContain('kimi/kimi-k3');
     });
 
     it('PROVIDER-CHANGED FAIL-OPEN: a verified pin against a DIFFERENT provider than the one resolving now never bleeds its model into the route (Task H)', async () => {
@@ -3015,9 +3060,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // credential): `/model <provider>` already rejects it at SET time (F07,
       // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
       // the direct selector could pin a route that hard-fails or silently falls
-      // back. `absentService` mirrors the provider-id F07 test — no keychain
-      // dependency (the service is absent from every store → credential null).
-      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      // back. The shared process mock supplies an empty keyring result; the
+      // isolated file stores and unknown service keep other sources absent.
+      const absentService = 'wa-test-absent-model-pin';
       cfgAny().agentProviderConfig = { apiKeyService: absentService };
       cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
@@ -3079,6 +3124,47 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).toContain('kimi/kimi-k3');
       expect(reply).toContain('glm/glm-5.2');
       expect(listFn).toHaveBeenCalled();
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('routes the shared CLI catalogue test seam through the codex-cli drill without spawning a real binary', async () => {
+      const listFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueListFn: listFn,
+      });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => [
+        'claude-cli',
+        'codex-cli',
+      ];
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model',
+      }));
+      const brandMenu = allReplies(sentMessages).join('\n');
+      const codexRow = brandMenu.match(/^(\d+)\. Codex$/m);
+      expect(codexRow).not.toBeNull();
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: `/model ${codexRow![1]}`,
+        messageId: 'codex-drill',
+      }));
+
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Codex — pick a model:*');
+      expect(reply).toContain('gpt-5.6-sol');
+      expect(reply).toContain('gpt-5.5');
+      // This suite's session mock deliberately returns no resolved binary, so
+      // fetchProviderCatalogue falls back to the provider id. Production uses
+      // getProviderBinary('codex-cli') -> 'codex'.
+      expect(listFn).toHaveBeenCalledWith('codex-cli');
       expect(prefRows()).toHaveLength(0);
     });
 
@@ -3271,7 +3357,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(allReplies(sentMessages).join('\n')).toContain("isn't configured on this instance");
     });
 
-    it('L2 render is capped (review M-2): a chatty provider catalogue is bounded, with an honest "showing 1–N of M" disclosure', async () => {
+    it('L2 pagination: a chatty provider catalogue shows eleven models plus More, then resolves the next-page snapshot without widening the visible cap', async () => {
       const many = Array.from({ length: 20 }, (_, i) => `opencode/model-${i}`);
       const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: many });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
@@ -3280,10 +3366,25 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' })); // → OpenCode L2
       const reply = allReplies(sentMessages).join('\n');
-      // Capped at MODEL_CATALOGUE_CAP (12) — the 13th id is not numbered.
-      expect(reply).toContain('12. opencode/model-11');
+      expect(reply).toContain('11. opencode/model-10');
+      expect(reply).toContain('12. More models');
       expect(reply).not.toContain('13. opencode/model-12');
-      expect(reply).toContain('showing 1–12 of 20');
+      expect(reply).toContain('showing 1–11 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 12', messageId: 'm3' }));
+      const nextPage = allReplies(sentMessages).join('\n');
+      expect(nextPage).toContain('1. opencode/model-11');
+      expect(nextPage).toContain('9. opencode/model-19');
+      expect(nextPage).not.toContain('10. ');
+      expect(nextPage).toContain('showing 12–20 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' }));
+      expect(prefRows()[0].requested_model).toBe('opencode/model-11');
+      expect(prefRows()[0].model_pin_verified).toBe(1);
     });
   });
 });
