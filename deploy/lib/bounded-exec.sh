@@ -95,7 +95,7 @@ whatsoup_run_bounded() {
       case "$control_directory" in "${TMPDIR:-/tmp}"/whatsoup-bounded.*) ;; *) return 2 ;; esac
       [ "$control_command_group" != "$control_watchdog_group" ] || return 2
       _bounded_group_is_owned "$control_command_pid" "$control_command_group"
-      case "$?" in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+      case "$?" in 0) ;; 1) return 3 ;; *) return 2 ;; esac
       _bounded_group_is_owned "$control_watchdog_pid" "$control_watchdog_group"
       case "$?" in 0) ;; 1) control_watchdog_group="" ;; *) return 2 ;; esac
     }
@@ -115,7 +115,7 @@ whatsoup_run_bounded() {
       fi
       _bounded_read_authorization
       authorization_state=$?
-      case "$authorization_state" in 0|1) return 124 ;; *) return 2 ;; esac
+      case "$authorization_state" in 0|3) return 124 ;; *) return 2 ;; esac
     }
 
     _bounded_read_deadline_bounded() {
@@ -392,10 +392,11 @@ whatsoup_run_bounded() {
         protocol_failure=1
         guard_status=2
         kill -TERM -- "-$worker_group" 2>/dev/null
-      else
+      elif [ "$authorization_state" -ne 3 ]; then
         kill -TERM -- "-$worker_group" 2>/dev/null
       fi
-      kill -USR1 "$worker_pid" 2>/dev/null
+      # A reaped command may have a worker still finishing bounded cleanup.
+      [ "$authorization_state" -eq 3 ] || kill -USR1 "$worker_pid" 2>/dev/null
       if ! sleep "$grace"; then
         if [ "$command_authorized" -eq 1 ] && kill -0 "$control_command_pid" 2>/dev/null; then kill -9 -- "-$control_command_group" 2>/dev/null; fi
         if [ "$watchdog_authorized" -eq 1 ] && kill -0 "$control_watchdog_pid" 2>/dev/null; then kill -9 -- "-$control_watchdog_group" 2>/dev/null; fi

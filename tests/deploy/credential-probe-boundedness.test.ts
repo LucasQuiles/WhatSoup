@@ -370,7 +370,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 record['forged_completion'] = str(completion)
             os.kill(worker, signal.SIGSTOP)
             record['stopped_worker'] = worker
-        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
+        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
             while time.monotonic() < deadline:
@@ -392,6 +392,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             ]
             if len(guard_candidates) != 1: raise RuntimeError('guard identity unavailable')
             guard = guard_candidates[0]['pid']
+            (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
@@ -403,6 +404,21 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 record['command_pid_reaped_before_authorization'] = True
             else:
                 raise RuntimeError('command leader remained present before outer authorization')
+            if mode == 'dead-leader-finishing-cleanup':
+                os.kill(guard, signal.SIGCONT)
+                record['continued_guard'] = guard
+                authority_deadline = time.monotonic() + 2
+                while not (root / 'outer-authority-finished').exists() and time.monotonic() < authority_deadline:
+                    time.sleep(0.01)
+                record['outer_authority_finished'] = (root / 'outer-authority-finished').exists()
+                if not record['outer_authority_finished']: raise RuntimeError('outer authority check did not complete')
+                try:
+                    release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
+                    try: os.write(release, b'release\n')
+                    finally: os.close(release)
+                    record['cleanup_released_after_authority'] = True
+                except OSError as error:
+                    record['cleanup_release_error'] = repr(error)
             if mode == 'deadline-fifo-after-cleanup':
                 deadlines = list(root.glob('whatsoup-bounded-deadline.*'))
                 if len(deadlines) != 1: raise RuntimeError('deadline handoff unavailable')
@@ -433,7 +449,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode == 'dead-leader-before-authorization':
                 os.kill(guard, signal.SIGCONT)
                 record['continued_guard'] = guard
-            else:
+            elif mode != 'dead-leader-finishing-cleanup':
                 record['guard_left_stopped_for_deadline_reader'] = guard
         if mode == 'handshake-early-cont':
             deadline = time.monotonic() + 3
@@ -496,22 +512,36 @@ record['command_started'] = (root / 'command-started').exists()
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
-if (root / 'cleanup-residual-polls').exists(): record['cleanup_residual_polls'] = int((root / 'cleanup-residual-polls').read_text())
+if (root / 'cleanup-residual-polls').exists():
+    polls = (root / 'cleanup-residual-polls').read_text().splitlines()
+    record['cleanup_residual_polls_raw'] = polls
+    record['cleanup_residual_capture_valid'] = all(value.isdecimal() for value in polls)
+    record['cleanup_residual_polls'] = len(polls)
 if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(record['timeout_victim']).read_text()
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
   const authorizationRmRelease = path.join(root, 'authorization-rm-release');
-  if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
+  if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
     execFileSync(resolveBinary('mkfifo')!, [authorizationRmRelease]);
   }
   for (const name of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
     const binary = resolveBinary(name);
     if (binary) fs.symlinkSync(binary, path.join(shim, name));
+  }
+  if (mode === 'dead-leader-finishing-cleanup') {
+    fs.unlinkSync(path.join(shim, 'sleep'));
+    fs.writeFileSync(path.join(shim, 'sleep'), [
+      '#!/bin/bash',
+      'guard=""; [ ! -r "$TMPDIR/expected-guard-pid" ] || IFS= read -r guard < "$TMPDIR/expected-guard-pid"',
+      'if [ "$1" = 2 ] && [ "$PPID" = "$guard" ]; then builtin printf ready > "$TMPDIR/outer-authority-finished"; fi',
+      'exec /bin/sleep "$@"',
+      '',
+    ].join('\n'), { mode: 0o700 });
   }
   if (mode.startsWith('ownership-') || mode.endsWith('reader-killed-after-verification')) {
     fs.unlinkSync(path.join(shim, 'ps'));
@@ -593,7 +623,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    groups=""; [ ! -r "$KILL_INTERCEPT_GROUPS" ] || IFS= read -r groups < "$KILL_INTERCEPT_GROUPS"',
     '    if [ "$cleanup_mode" = cleanup-residual ] && [ "$1" = -0 ] && [ "$2" = -- ]; then',
     '      [ -n "$cleanup_group" ] || cleanup_group="$3"',
-    '      if [ "$3" = "$cleanup_group" ]; then cleanup_group_checks=$((cleanup_group_checks + 1)); builtin printf active > "$CLEANUP_RESIDUAL_ACTIVE"; builtin printf "%s" "$cleanup_group_checks" > "$CLEANUP_RESIDUAL_POLLS"; [ "$cleanup_group_checks" -le 200 ] && return 0; fi',
+    '      if [ "$3" = "$cleanup_group" ]; then cleanup_group_checks=$((cleanup_group_checks + 1)); builtin printf active > "$CLEANUP_RESIDUAL_ACTIVE"; builtin printf "%s\\n" "$cleanup_group_checks" >> "$CLEANUP_RESIDUAL_POLLS"; [ "$cleanup_group_checks" -le 200 ] && return 0; fi',
     '    fi',
     '    for argument in "$@"; do',
     '      case "$argument" in -[0-9]*) case ",$groups," in *,"${argument#-}",*) builtin printf "%s\\n" "$argument" >> "$KILL_INTERCEPT_LOG"; return 0;; esac;; esac',
@@ -601,7 +631,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
-    'case "$4" in dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup)',
+    'case "$4" in dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup)',
     '  rm() {',
     '    local argument marker_rc',
     '    for argument in "$@"; do',
@@ -650,7 +680,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
     'if out="$(builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
     'builtin printf "rc=%s output=%s options=%s/%s\\n" "$rc" "$out" "$before_options" "$-"',
     '',
@@ -658,7 +688,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
-    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
@@ -797,6 +827,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(true);
     expect(result.cleanup_residual_polls, JSON.stringify(result)).toBeGreaterThan(0);
+    expect(result.cleanup_residual_capture_valid, JSON.stringify(result)).toBe(true);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
@@ -820,6 +851,19 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.guard_left_stopped_for_deadline_reader, JSON.stringify(result)).toBe(result.stopped_guard);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('allows bounded worker cleanup to finish after the command leader is reaped', () => {
+    const result = runLifecycleProbe('dead-leader-finishing-cleanup');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.command_pid_reaped_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.outer_authority_finished, JSON.stringify(result)).toBe(true);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.cleanup_released_after_authority, JSON.stringify(result)).toBe(true);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
