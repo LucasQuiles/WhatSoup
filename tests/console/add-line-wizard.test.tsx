@@ -34,8 +34,9 @@ import {
 } from 'vitest'
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
-import type { FC, ReactElement } from 'react'
+import type { FC, ReactElement, ReactNode } from 'react'
 import { ToastProvider } from '../../console/src/hooks/use-toast'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 // ---------------------------------------------------------------------------
 // Mocks — hoisted before component import
@@ -46,6 +47,7 @@ const mockUpdateConfig = vi.fn()
 const mockDeleteLine = vi.fn()
 const mockCheckExists = vi.fn()
 const mockSetCredential = vi.fn()
+const mockGetProviderModels = vi.fn()
 
 vi.mock('../../console/src/lib/api', () => ({
   api: {
@@ -54,6 +56,7 @@ vi.mock('../../console/src/lib/api', () => ({
     deleteLine: (...args: unknown[]) => mockDeleteLine(...args),
     checkExists: (...args: unknown[]) => mockCheckExists(...args),
     setCredential: (...args: unknown[]) => mockSetCredential(...args),
+    getProviderModels: (...args: unknown[]) => mockGetProviderModels(...args),
   },
   // isProductionConsole is exported from the real module; other test workers
   // that share this mock factory expect it to exist on the named export.
@@ -71,8 +74,17 @@ import AddLineWizard from '../../console/src/components/AddLineWizard'
 // "must be used within a ToastProvider" before the first paint. All renders
 // in this file are of AddLineWizard/WizardWrapper, so shadowing `render` here
 // covers every call site (including `rerender`, which reuses the same wrapper).
+const TestProviders: FC<{ children: ReactNode }> = ({ children }) => {
+  const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
+  return (
+    <QueryClientProvider client={client}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
+  )
+}
+
 function render(ui: ReactElement) {
-  return rtlRender(ui, { wrapper: ToastProvider })
+  return rtlRender(ui, { wrapper: TestProviders })
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +140,7 @@ afterEach(() => {
   mockDeleteLine.mockReset()
   mockCheckExists.mockReset()
   mockSetCredential.mockReset()
+  mockGetProviderModels.mockReset()
 })
 
 beforeEach(() => {
@@ -137,6 +150,12 @@ beforeEach(() => {
   mockDeleteLine.mockResolvedValue({ deleted: 'test-line' })
   mockCheckExists.mockResolvedValue({ exists: false })
   mockSetCredential.mockResolvedValue({ ok: true, service: 's' })
+  mockGetProviderModels.mockResolvedValue({
+    status: 'ok',
+    ids: ['future/default-model'],
+    sourceLabel: 'live test catalogue',
+    asOfLabel: 'just now',
+  })
   wizardEventSources = []
   // jsdom has no EventSource; LinkStep (mounted when tests advance past
   // Identity) opens one in an effect, which otherwise raises unhandled
@@ -445,6 +464,7 @@ describe('AddLineWizard — step-0→1 creation side-effect', () => {
     const nextBtn = screen.getByRole('button', { name: /next/i })
     await act(async () => { fireEvent.click(nextBtn) })
     await waitFor(() => expect(mockCreateLine).toHaveBeenCalledTimes(1))
+    expect(mockCreateLine.mock.calls[0]?.[0]).not.toHaveProperty('models')
   })
 
   it('createLine failure shows error message and stays on step 0', async () => {
