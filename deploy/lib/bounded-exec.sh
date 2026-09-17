@@ -30,11 +30,13 @@ whatsoup_run_bounded() {
     set +e
     set -m
     local worker_pid="" worker_group="" guard_pid="" guard_group=""
-    local worker_rc=0 guard_rc=0 rc=0
+    local worker_rc=0 guard_rc=0 rc=0 deadline_rc=0
+    local status_reader_pid="" status_timer_pid=""
     local control_token="${RANDOM}${RANDOM}${RANDOM}"
     local control_file="${TMPDIR:-/tmp}/whatsoup-bounded-control.$$.$control_token"
     local authorization_file="${TMPDIR:-/tmp}/whatsoup-bounded-authorize.$$.$control_token"
     local timeout_file="${TMPDIR:-/tmp}/whatsoup-bounded-timeout.$$.$control_token"
+    local deadline_file="${TMPDIR:-/tmp}/whatsoup-bounded-deadline.$$.$control_token"
     local cleanup_file="${TMPDIR:-/tmp}/whatsoup-bounded-cleanup.$$.$control_token"
     local control_directory="" control_command_pid="" control_command_group=""
     local control_watchdog_pid="" control_watchdog_group="" control_release=""
@@ -98,6 +100,54 @@ whatsoup_run_bounded() {
       case "$?" in 0) ;; 1) control_watchdog_group="" ;; *) return 2 ;; esac
     }
 
+    _bounded_read_deadline() {
+      local deadline_token="" deadline_seen=0 deadline_valid=1 authorization_state
+      if [ -L "$deadline_file" ] || [ ! -f "$deadline_file" ] || [ ! -r "$deadline_file" ]; then
+        return 2
+      fi
+      while IFS= read -r deadline_token; do
+        [ "$deadline_seen" -eq 0 ] && [ "$deadline_token" = "$control_token" ] || deadline_valid=0
+        deadline_seen=$((deadline_seen + 1))
+      done < "$deadline_file"
+      [ "$deadline_valid" -eq 1 ] && [ "$deadline_seen" -eq 1 ] || return 2
+      if [ -L "$authorization_file" ] || [ ! -f "$authorization_file" ] || [ ! -r "$authorization_file" ]; then
+        return 2
+      fi
+      _bounded_read_authorization
+      authorization_state=$?
+      case "$authorization_state" in 0|1) return 124 ;; *) return 2 ;; esac
+    }
+
+    _bounded_read_deadline_bounded() {
+      local reader_rc=0
+      (
+        set +m
+        _bounded_read_deadline
+      ) &
+      status_reader_pid=$!
+      (
+        set +m
+        local timer_sleep_pid="" timer_rc=0
+        _bounded_status_timer_cleanup() {
+          [ -z "$timer_sleep_pid" ] || kill -9 "$timer_sleep_pid" 2>/dev/null
+          [ -z "$timer_sleep_pid" ] || wait "$timer_sleep_pid" 2>/dev/null
+        }
+        trap '_bounded_status_timer_cleanup' EXIT
+        trap 'exit 2' INT TERM HUP
+        sleep "$grace" &
+        timer_sleep_pid=$!
+        wait "$timer_sleep_pid" 2>/dev/null || timer_rc=$?
+        [ "$timer_rc" -ne 0 ] || kill -9 -- "-$status_reader_pid" 2>/dev/null
+        exit "$timer_rc"
+      ) &
+      status_timer_pid=$!
+      wait "$status_reader_pid" 2>/dev/null || reader_rc=$?
+      kill -9 -- "-$status_timer_pid" 2>/dev/null
+      wait "$status_timer_pid" 2>/dev/null
+      status_reader_pid="" status_timer_pid=""
+      case "$reader_rc" in 124) return 124 ;; *) return 2 ;; esac
+    }
+
     _bounded_reserve_timeout_marker() {
       local saved_umask marker_rc
       saved_umask="$(umask)"
@@ -124,6 +174,10 @@ whatsoup_run_bounded() {
 
     _bounded_outer_cleanup() {
       local group
+      [ -n "$status_timer_pid" ] && kill -9 -- "-$status_timer_pid" 2>/dev/null
+      [ -n "$status_reader_pid" ] && kill -9 -- "-$status_reader_pid" 2>/dev/null
+      [ -n "$status_timer_pid" ] && wait "$status_timer_pid" 2>/dev/null
+      [ -n "$status_reader_pid" ] && wait "$status_reader_pid" 2>/dev/null
       for group in "$guard_group" "$worker_group"; do
         [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
       done
@@ -133,7 +187,7 @@ whatsoup_run_bounded() {
         rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
         rmdir "$control_directory" 2>/dev/null
       fi
-      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file"
+      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file"
     }
 
     trap '_bounded_outer_cleanup' EXIT
@@ -174,7 +228,7 @@ whatsoup_run_bounded() {
           done
         done
         [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog"; rmdir "$directory" 2>/dev/null; }
-        rm -f "$authorization_file" "$control_file" "$timeout_file"
+        rm -f "$timeout_file"
         [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"
       }
 
@@ -214,6 +268,7 @@ whatsoup_run_bounded() {
         IFS= read -r start < "$directory/watchdog" || exit 2
         [ "$start" = run ] || exit 2
         sleep "$budget" || exit 2
+        ( umask 077; set -C; builtin printf '%s\n' "$control_token" > "$deadline_file" ) || exit 2
         kill -TERM -- "-$cmd_group" 2>/dev/null
         sleep "$grace" || exit 2
         kill -9 -- "-$cmd_group" 2>/dev/null
@@ -251,6 +306,8 @@ whatsoup_run_bounded() {
         fi
         if [ "$remaining" -gt 0 ]; then remaining=$((remaining - 1)); else remaining_grace=$((remaining_grace - 1)); fi
       done
+      [ -z "$watchdog_group" ] || kill -9 -- "-$watchdog_group" 2>/dev/null
+      [ -z "$watchdog_pid" ] || wait "$watchdog_pid" 2>/dev/null
       _bounded_worker_cleanup
       trap - EXIT
       if [ "$cleanup_rc" -ne 0 ]; then
@@ -264,7 +321,7 @@ whatsoup_run_bounded() {
 
     (
       set +m
-      local timer_pid="" guard_status=0
+      local timer_pid="" monitor_pid="" guard_status=0
       _bounded_wait_for_budget() {
         local remaining="$budget" chunk
         while [ "$remaining" -gt 0 ]; do
@@ -273,17 +330,24 @@ whatsoup_run_bounded() {
           remaining=$((remaining - chunk))
         done
       }
-      _bounded_guard_exit() {
+      _bounded_guard_cleanup() {
         [ -z "$timer_pid" ] || kill -9 "$timer_pid" 2>/dev/null
+        [ -z "$monitor_pid" ] || kill -9 "$monitor_pid" 2>/dev/null
+        [ -z "$timer_pid" ] || wait "$timer_pid" 2>/dev/null
+        [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
+      }
+      _bounded_guard_exit() {
+        _bounded_guard_cleanup
+        trap - EXIT
         exit "$guard_status"
       }
       _bounded_guard_protocol_failure() {
         guard_status=2
         kill -TERM -- "-$worker_group" 2>/dev/null
         kill -USR1 "$worker_pid" 2>/dev/null
-        if ! sleep "$grace"; then kill -9 -- "-$worker_group" 2>/dev/null; exit 2; fi
+        if ! sleep "$grace"; then kill -9 -- "-$worker_group" 2>/dev/null; _bounded_guard_exit; fi
         kill -9 -- "-$worker_group" 2>/dev/null
-        exit 2
+        _bounded_guard_exit
       }
       trap '_bounded_guard_exit' INT TERM HUP
       trap '_bounded_guard_protocol_failure' USR2
@@ -311,6 +375,7 @@ whatsoup_run_bounded() {
           sleep 0.01 || { kill -USR2 0 2>/dev/null; exit 2; }
         done
       ) &
+      monitor_pid=$!
       wait "$timer_pid" 2>/dev/null
       if [ "$?" -ne 0 ]; then
         _bounded_guard_protocol_failure
@@ -336,7 +401,7 @@ whatsoup_run_bounded() {
         if [ "$watchdog_authorized" -eq 1 ] && kill -0 "$control_watchdog_pid" 2>/dev/null; then kill -9 -- "-$control_watchdog_group" 2>/dev/null; fi
         kill -9 -- "-$worker_group" 2>/dev/null
         guard_status=2
-        exit 2
+        _bounded_guard_exit
       fi
       if [ "$command_authorized" -eq 1 ] && kill -0 "$control_command_pid" 2>/dev/null; then kill -9 -- "-$control_command_group" 2>/dev/null; fi
       if [ "$watchdog_authorized" -eq 1 ] && kill -0 "$control_watchdog_pid" 2>/dev/null; then kill -9 -- "-$control_watchdog_group" 2>/dev/null; fi
@@ -344,27 +409,36 @@ whatsoup_run_bounded() {
         sleep "$grace" &
         timer_pid=$!
         wait "$timer_pid" 2>/dev/null
-        [ "$?" -eq 0 ] || { kill -9 "$worker_pid" 2>/dev/null; kill -9 -- "-$worker_group" 2>/dev/null; exit 2; }
+        [ "$?" -eq 0 ] || { kill -9 "$worker_pid" 2>/dev/null; kill -9 -- "-$worker_group" 2>/dev/null; guard_status=2; _bounded_guard_exit; }
         kill -9 "$worker_pid" 2>/dev/null
         kill -9 -- "-$worker_group" 2>/dev/null
-        exit 2
+        guard_status=2
+        _bounded_guard_exit
       else
+        if kill -0 "$worker_pid" 2>/dev/null; then guard_status=2; fi
         kill -9 -- "-$worker_group" 2>/dev/null
       fi
       [ "$protocol_failure" -eq 0 ] || guard_status=2
-      exit "$guard_status"
+      _bounded_guard_exit
     ) </dev/null >/dev/null 2>&1 &
     guard_pid=$!
     guard_group="$(jobs -p %+)"
     if [[ ! "$guard_group" =~ ^[0-9]+$ ]] || [ "$guard_group" -le 1 ] || [ "$guard_group" = "$worker_group" ]; then return 2; fi
 
     wait "$worker_pid" 2>/dev/null || worker_rc=$?
-    if kill -0 "$guard_pid" 2>/dev/null; then kill -TERM "$guard_pid" 2>/dev/null; fi
+    if [ -e "$deadline_file" ] || [ -L "$deadline_file" ]; then
+      _bounded_read_deadline_bounded
+      deadline_rc=$?
+    fi
+    if kill -0 "$guard_pid" 2>/dev/null; then
+      kill -CONT "$guard_pid" 2>/dev/null
+      kill -TERM "$guard_pid" 2>/dev/null
+    fi
     wait "$guard_pid" 2>/dev/null || guard_rc=$?
-    if [ -e "$cleanup_file" ] || [ -L "$cleanup_file" ]; then
+    if [ "$deadline_rc" -eq 2 ] || [ -e "$cleanup_file" ] || [ -L "$cleanup_file" ]; then
       rc=2
     else
-      case "$guard_rc" in 124|2) rc="$guard_rc" ;; *) rc="$worker_rc" ;; esac
+      case "$guard_rc" in 124|2) rc="$guard_rc" ;; *) if [ "$deadline_rc" -eq 124 ]; then rc=124; else rc="$worker_rc"; fi ;; esac
     fi
     _bounded_outer_cleanup
     trap - EXIT

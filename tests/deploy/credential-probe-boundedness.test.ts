@@ -370,7 +370,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 record['forged_completion'] = str(completion)
             os.kill(worker, signal.SIGSTOP)
             record['stopped_worker'] = worker
-        if mode == 'dead-leader-before-authorization':
+        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
             while time.monotonic() < deadline:
@@ -403,8 +403,38 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 record['command_pid_reaped_before_authorization'] = True
             else:
                 raise RuntimeError('command leader remained present before outer authorization')
-            os.kill(guard, signal.SIGCONT)
-            record['continued_guard'] = guard
+            if mode == 'deadline-fifo-after-cleanup':
+                deadlines = list(root.glob('whatsoup-bounded-deadline.*'))
+                if len(deadlines) != 1: raise RuntimeError('deadline handoff unavailable')
+                release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
+                try: os.write(release, b'release\n')
+                finally: os.close(release)
+                cleanup_deadline = time.monotonic() + 3
+                while any(item['pid'] == worker for item in members(session)) and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.01)
+                record['worker_cleanup_completed_before_authorization'] = not any(item['pid'] == worker for item in members(session))
+                if not record['worker_cleanup_completed_before_authorization']: raise RuntimeError('worker did not finish before deadline substitution')
+                while not (root / 'deadline-race-substituted').exists() and time.monotonic() < cleanup_deadline + 3:
+                    time.sleep(0.01)
+                record['deadline_replaced_with_fifo'] = (root / 'deadline-race-substituted').exists()
+                if not record['deadline_replaced_with_fifo']: raise RuntimeError('deadline stat/open substitution was not reached')
+            if mode in ('dead-leader-clean-cleanup', 'authorization-unreadable-after-cleanup'):
+                if mode == 'authorization-unreadable-after-cleanup':
+                    authorization.chmod(0)
+                    record['authorization_unreadable'] = not os.access(authorization, os.R_OK)
+                release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
+                try: os.write(release, b'release\n')
+                finally: os.close(release)
+                cleanup_deadline = time.monotonic() + 3
+                while any(item['pid'] == worker for item in members(session)) and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.01)
+                record['worker_cleanup_completed_before_authorization'] = not any(item['pid'] == worker for item in members(session))
+                if not record['worker_cleanup_completed_before_authorization']: raise RuntimeError('worker did not finish clean cleanup')
+            if mode == 'dead-leader-before-authorization':
+                os.kill(guard, signal.SIGCONT)
+                record['continued_guard'] = guard
+            else:
+                record['guard_left_stopped_for_deadline_reader'] = guard
         if mode == 'handshake-early-cont':
             deadline = time.monotonic() + 3
             while not (root / 'handshake-stop-entered').exists() and time.monotonic() < deadline:
@@ -471,12 +501,12 @@ if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-2' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
   const authorizationRmRelease = path.join(root, 'authorization-rm-release');
-  if (mode === 'dead-leader-before-authorization') {
+  if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
     execFileSync(resolveBinary('mkfifo')!, [authorizationRmRelease]);
   }
   for (const name of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
@@ -571,14 +601,19 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
-    'case "$4" in dead-leader-before-authorization)',
+    'case "$4" in dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup)',
     '  rm() {',
     '    local argument marker_rc',
     '    for argument in "$@"; do',
     '      case "$argument" in',
-    '        "$TMPDIR"/whatsoup-bounded-authorize.*)',
+    '        "$TMPDIR"/whatsoup-bounded-timeout.*)',
     '          set -C; : > "$AUTHORIZATION_RM_USED" 2>/dev/null; marker_rc=$?; set +C',
-    '          if [ "$marker_rc" -eq 0 ]; then',
+    '          if [ "$marker_rc" -eq 0 ] && [ "$cleanup_mode" = deadline-fifo-after-cleanup ]; then',
+    '            "$REAL_RM" "$@"',
+    '            builtin printf ready > "$AUTHORIZATION_RM_READY"',
+    '            IFS= read -r _ < "$AUTHORIZATION_RM_RELEASE"',
+    '            return 0',
+    '          elif [ "$marker_rc" -eq 0 ]; then',
     '            builtin printf ready > "$AUTHORIZATION_RM_READY"',
     '            IFS= read -r _ < "$AUTHORIZATION_RM_RELEASE"',
     '          fi',
@@ -600,10 +635,22 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
+    'case "$4" in deadline-fifo-after-cleanup)',
+    '  function [ {',
+    '    target=""; builtin [ "$1" = -f ] && target="$2"; builtin [ "$1" = ! ] && builtin [ "$2" = -f ] && target="$3"',
+    '    builtin [ "$@"; bracket_rc=$?',
+    '    case "$target" in "$TMPDIR"/whatsoup-bounded-deadline.*)',
+    '      if builtin [ ! -e "$DEADLINE_RACE_SUBSTITUTED" ] && builtin [ -f "$target" ]; then',
+    '        "$REAL_RM" -f "$target"; mkfifo "$target"; builtin printf substituted > "$DEADLINE_RACE_SUBSTITUTED"',
+    '      fi',
+    '      ;; esac',
+    '    return "$bracket_rc"',
+    '  }',
+    '  ;; esac',
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
     'if out="$(builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
     'builtin printf "rc=%s output=%s options=%s/%s\\n" "$rc" "$out" "$before_options" "$-"',
     '',
@@ -611,13 +658,14 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
-    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    'case "$1" in control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
     '  printf "%s" "$payload"',
     '  [ "$1" != nonzero ] || exit 7',
     '  [ "$1" != ordinary-exit-2 ] || exit 2',
+    '  [ "$1" != ordinary-exit-143 ] || exit 143',
     '  [ "$1" != status-255 ] || exit 255',
     'else',
     '  value="$(sleep 30)"',
@@ -646,6 +694,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       AUTHORIZATION_RM_READY: path.join(root, 'authorization-rm-ready'),
       AUTHORIZATION_RM_USED: path.join(root, 'authorization-rm-used'),
       AUTHORIZATION_RM_RELEASE: authorizationRmRelease,
+      DEADLINE_RACE_SUBSTITUTED: path.join(root, 'deadline-race-substituted'),
       HANDSHAKE_STOP_ENTERED: path.join(root, 'handshake-stop-entered'),
       HANDSHAKE_STOPPED: path.join(root, 'handshake-stopped'),
       HANDSHAKE_EARLY_CONT: path.join(root, 'handshake-early-cont'),
@@ -725,7 +774,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
-    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(false);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
@@ -752,21 +801,56 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
-  it('reports a deadline when the command leader is reaped before outer authorization', () => {
+  it('refuses interrupted cleanup after the command leader is reaped before outer authorization', () => {
     const result = runLifecycleProbe('dead-leader-before-authorization');
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stopped_guard, JSON.stringify(result)).toBeTruthy();
     expect(result.continued_guard, JSON.stringify(result)).toBe(result.stopped_guard);
     expect(result.command_pid_reaped_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('keeps the deadline result when clean worker completion precedes outer authorization', () => {
+    const result = runLifecycleProbe('dead-leader-clean-cleanup');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.command_pid_reaped_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.guard_left_stopped_for_deadline_reader, JSON.stringify(result)).toBe(result.stopped_guard);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
-  it('preserves an ordinary wrapped command exit 2', () => {
-    const result = runLifecycleProbe('ordinary-exit-2');
+  it('refuses an unreadable authorization record after clean worker completion', () => {
+    const result = runLifecycleProbe('authorization-unreadable-after-cleanup');
+    expect(result.authorization_unreadable, JSON.stringify(result)).toBe(true);
+    expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
     expect(result.exit, JSON.stringify(result)).toBe(0);
-    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=payload');
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('fails closed after a worker-cleanup deadline handoff is replaced with a FIFO', () => {
+    const result = runLifecycleProbe('deadline-fifo-after-cleanup');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.deadline_replaced_with_fifo, JSON.stringify(result)).toBe(true);
+    expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each([0, 2, 143] as const)('preserves a natural result ready before the watchdog event: %s', (status) => {
+    const result = runLifecycleProbe(status === 0 ? 'ordinary-exit-0' : status === 2 ? 'ordinary-exit-2' : 'ordinary-exit-143');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.stdout, JSON.stringify(result)).toContain(`rc=${status} output=payload`);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
