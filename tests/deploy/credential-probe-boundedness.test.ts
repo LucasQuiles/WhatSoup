@@ -520,6 +520,7 @@ record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
+record['command_partial_signal'] = (root / 'command-partial-signal').read_text() if (root / 'command-partial-signal').exists() else None
 record['umask_groups'] = [int(value) for value in (root / 'umask-groups').read_text().split()] if (root / 'umask-groups').exists() else []
 record['timer_partial_signal'] = (root / 'timer-partial-signal').read_text() if (root / 'timer-partial-signal').exists() else None
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
@@ -532,7 +533,7 @@ if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
@@ -705,6 +706,15 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '    return "$bracket_rc"',
     '  }',
     '  ;; esac',
+    'case "$4" in command-group-descendant)',
+    '  kill() {',
+    '    if [ "$1" = -9 ] && [ -n "$cmd_group" ] && [ "$3" = "-$cmd_group" ] && [ ! -f "$TMPDIR/command-partial-signal" ]; then',
+    '      builtin printf "%s\\n" "$cmd_group" > "$TMPDIR/command-partial-signal"',
+    '      builtin kill -9 "$cmd_pid" 2>/dev/null; return 0',
+    '    fi',
+    '    builtin kill "$@"',
+    '  }',
+    '  ;; esac',
     'case "$4" in cleanup-child-group)',
     '  umask() { if [ "$#" -eq 0 ]; then /bin/bash "$TMPDIR/umask-capture.sh"; else builtin umask "$@"; fi; }',
     '  ;; esac',
@@ -735,6 +745,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
+    'if [ "$1" = command-group-descendant ]; then sleep 30 & exit 0; fi',
     'case "$1" in cleanup-child-group|deadline-timer-descendant|control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
@@ -1003,6 +1014,15 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const expected = mode === 'leader-exits' ? 'rc=137 output=' : mode === 'status-255' ? 'rc=255 output=payload' : 'rc=0 output=payload';
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain(expected);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('reaps a command child that survives the first group signal', () => {
+    const result = runLifecycleProbe('command-group-descendant');
+    expect(result.command_partial_signal, JSON.stringify(result)).toBeTruthy();
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=');
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);

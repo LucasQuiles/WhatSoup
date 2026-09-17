@@ -236,6 +236,7 @@ whatsoup_run_bounded() {
           [ -n "$group" ] || continue
           count=0
           while kill -0 -- "-$group" 2>/dev/null; do
+            kill -9 -- "-$group" 2>/dev/null
             count=$((count + 1))
             [ "$count" -lt 200 ] || { cleanup_rc=2; break; }
             sleep 0.01
