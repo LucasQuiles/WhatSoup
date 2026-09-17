@@ -32,6 +32,7 @@ whatsoup_run_bounded() {
     local worker_pid="" worker_group="" guard_pid="" guard_group=""
     local worker_rc=0 guard_rc=0 rc=0 deadline_rc=0
     local status_reader_pid="" status_timer_pid=""
+    local status_cleanup_failed=0
     local control_token="${RANDOM}${RANDOM}${RANDOM}"
     local control_file="${TMPDIR:-/tmp}/whatsoup-bounded-control.$$.$control_token"
     local authorization_file="${TMPDIR:-/tmp}/whatsoup-bounded-authorize.$$.$control_token"
@@ -118,6 +119,20 @@ whatsoup_run_bounded() {
       case "$authorization_state" in 0|3) return 124 ;; *) return 2 ;; esac
     }
 
+    _bounded_reap_status_helper() {
+      local helper_pid="$1" count=0
+      [ -n "$helper_pid" ] || return 0
+      kill -9 -- "-$helper_pid" 2>/dev/null
+      wait "$helper_pid" 2>/dev/null
+      # A child fork may finish after the first group signal catches its leader.
+      while kill -0 -- "-$helper_pid" 2>/dev/null; do
+        kill -9 -- "-$helper_pid" 2>/dev/null || return 2
+        count=$((count + 1))
+        [ "$count" -lt 200 ] || return 2
+        sleep 0.01 </dev/null >/dev/null 2>&1 || return 2
+      done
+    }
+
     _bounded_read_deadline_bounded() {
       local reader_rc=0
       (
@@ -142,9 +157,9 @@ whatsoup_run_bounded() {
       ) &
       status_timer_pid=$!
       wait "$status_reader_pid" 2>/dev/null || reader_rc=$?
-      kill -9 -- "-$status_timer_pid" 2>/dev/null
-      wait "$status_timer_pid" 2>/dev/null
-      status_reader_pid="" status_timer_pid=""
+      if _bounded_reap_status_helper "$status_timer_pid"; then status_timer_pid=""; else status_cleanup_failed=1; fi
+      if _bounded_reap_status_helper "$status_reader_pid"; then status_reader_pid=""; else status_cleanup_failed=1; fi
+      [ "$status_cleanup_failed" -eq 0 ] || return 2
       case "$reader_rc" in 124) return 124 ;; *) return 2 ;; esac
     }
 
@@ -174,10 +189,8 @@ whatsoup_run_bounded() {
 
     _bounded_outer_cleanup() {
       local group
-      [ -n "$status_timer_pid" ] && kill -9 -- "-$status_timer_pid" 2>/dev/null
-      [ -n "$status_reader_pid" ] && kill -9 -- "-$status_reader_pid" 2>/dev/null
-      [ -n "$status_timer_pid" ] && wait "$status_timer_pid" 2>/dev/null
-      [ -n "$status_reader_pid" ] && wait "$status_reader_pid" 2>/dev/null
+      if _bounded_reap_status_helper "$status_timer_pid"; then status_timer_pid=""; else status_cleanup_failed=1; fi
+      if _bounded_reap_status_helper "$status_reader_pid"; then status_reader_pid=""; else status_cleanup_failed=1; fi
       for group in "$guard_group" "$worker_group"; do
         [ -n "$group" ] && kill -9 -- "-$group" 2>/dev/null
       done
@@ -206,6 +219,7 @@ whatsoup_run_bounded() {
 
       _bounded_worker_cleanup() {
         local group count
+        set +m
         _bounded_reserve_cleanup_marker || cleanup_rc=2
         if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
         if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
@@ -257,12 +271,14 @@ whatsoup_run_bounded() {
         exit "$rc"
       ) <&0 &
       cmd_pid=$!
+      set +m
       candidate="$(jobs -p %+)"
       observed="$(ps -o pgid= -p "$cmd_pid")" || return 2
       observed="${observed//[[:space:]]/}"
       if [[ ! "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -le 1 ] || [ "$candidate" != "$observed" ] || [ "$candidate" = "$caller_group" ]; then return 2; fi
       cmd_group="$candidate"
 
+      set -m
       (
         set +m
         IFS= read -r start < "$directory/watchdog" || exit 2
@@ -274,6 +290,7 @@ whatsoup_run_bounded() {
         kill -9 -- "-$cmd_group" 2>/dev/null
       ) </dev/null >/dev/null 2>&1 &
       watchdog_pid=$!
+      set +m
       candidate="$(jobs -p %+)"
       observed="$(ps -o pgid= -p "$watchdog_pid")" || return 2
       observed="${observed//[[:space:]]/}"
@@ -443,6 +460,7 @@ whatsoup_run_bounded() {
     fi
     _bounded_outer_cleanup
     trap - EXIT
+    [ "$status_cleanup_failed" -eq 0 ] || rc=2
     return "$rc"
   )
 }
