@@ -187,28 +187,23 @@ The final three-file routing/catalogue run passes all 148 tests. Source/test
 types and required Test Integrity also pass; the same 81 baseline findings and
 three location drifts remain. These results are not full-release validation.
 
-The exploration also identified two unresolved selection gaps:
+### Selection continuity follow-up
 
-- Deferred-pin retry: after an initial catalogue outage, repeating the same
-  numbered selection returns "Already set" without another catalogue lookup.
-  Two local diagnostic cases reproduced this with both recovery and continued
-  outage: the row remained unverified. The repeat-confirm path returns before
-  verification; history confirms this predates the recent helper extraction.
-  Owner: this lane; priority: required for truthful selection continuity.
-  Repair design remains pending. Acceptance must include recovered verification,
-  honest continued deferral and unchanged behavior for already-verified pins,
-  sticky preferences and competing senders. The diagnostic patch and failure
-  receipts are retained in the existing private lane ledger; no failing test
-  or temporary production mutation remains in this candidate.
-- Discovery access: a served menu check on September 5 returned four configured
-  choices through `/model list`, while the provider drill discovered 76 models
-  and displayed its first 12. Source inspection confirms that the drill slices
-  its snapshot to the displayed rows and the existing text filter searches only
-  configured models. The bounded menu is intentional, but discovery alone does
-  not make the undisplayed models accessible through that picker. Owner: this
-  lane; priority: catalogue usability. A bounded search or navigation design must
-  preserve visible-row identity and sender isolation; changing the cap alone is
-  not an adequate solution. No model leaf was selected during the live check.
+- Deferred model pins now re-run their existing catalogue verification after
+  the resolver's one-second failure backoff when the same pending model is
+  selected again. A further outage remains an explicit pending result; recovery
+  verifies the existing row before its normal receipt. Already-verified
+  re-confirms retain their existing behavior.
+- A provider drill with more than twelve models renders eleven model rows and a
+  numbered **More models** row. Selecting it opens the next page, which remains
+  sender-bound to the exact visible snapshot. Final pages may contain up to
+  twelve model rows; no page exceeds twelve rows. This adds bounded navigation
+  without changing the configured-only `/model list` filter.
+
+Focused checks cover deferred outage/retry/recovery, the existing verified
+same-sender re-confirm control, typed More rendering, sender-bound More
+snapshots, and next-page model selection. Full release validation remains
+separate.
 
 ## Canonical recovery review
 

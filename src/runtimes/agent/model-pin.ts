@@ -476,7 +476,7 @@ export function recordRouteModelPin(
   providerId: string,
   model: string,
   effort: string | null = null,
-): 'set' | 'refreshed' | 'sticky_kept' {
+): 'set' | 'refreshed' | 'sticky_kept' | 'reverify_pending' {
   const now = Date.now();
   const existing = getPreference(port.db, chatKey, senderKey, now);
   if (
@@ -489,6 +489,20 @@ export function recordRouteModelPin(
     // a fresh 'set' + re-verify + recycle), never a no-op 'refreshed'.
     (existing.requestedEffort ?? null) === effort
   ) {
+    // A matching pin that never passed its catalogue check is not a completed
+    // re-confirm. Keep the row pending and let the caller run the normal
+    // verification seam again; the resolver's failure backoff bounds retries.
+    if (existing.modelPinVerified === false) {
+      if (existing.expiresAt !== null) {
+        setPreference(port.db, {
+          ...existing,
+          updatedAt: now,
+          expiresAt: now + PREFERENCE_TTL_MS,
+          keepReceiptMessageId: null,
+        });
+      }
+      return 'reverify_pending';
+    }
     if (existing.expiresAt !== null) {
       // A3 (#2121 follow-up): `{ ...existing }` carries the captured
       // `keepReceiptMessageId`, so this refresh used to PRESERVE the id and
@@ -1055,7 +1069,7 @@ async function pinConfiguredModelEntry(
 ): Promise<void> {
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
   const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
-  if (await echoPinReconfirm(port, ctx, outcome, modelId)) return;
+  if (outcome !== 'reverify_pending' && await echoPinReconfirm(port, ctx, outcome, modelId)) return;
   // Task H: verify the fresh pin against the catalogue BEFORE the echo
   // (awaited — no fire-and-forget) so a subsequent read (this same reply,
   // /model status, a next-session spawn) never observes an unverified pin
@@ -1158,6 +1172,7 @@ async function sendModelDrillModelLevel(
   senderJid: string,
   brand: string,
   provider: string,
+  offset = 0,
 ): Promise<void> {
   const listing = await fetchProviderCatalogue(port, provider);
   if (listing.status !== 'ok') {
@@ -1166,15 +1181,18 @@ async function sendModelDrillModelLevel(
   }
   const route = port.resolveRouteForTurn(chatJid, senderJid);
   const currentModel = route.provider === provider ? route.model : null;
-  // Bound the render the same way the flat menu does (MODEL_CATALOGUE_CAP): a
-  // chatty provider's live catalogue is unbounded, and an uncapped numbered
-  // list makes an unusable WhatsApp message. The snapshot stores exactly what
-  // was SHOWN, so a number always resolves to a visible row.
-  const shown = listing.ids.slice(0, MODEL_CATALOGUE_CAP);
-  const rendered = renderModelLevel(brand, provider, shown, currentModel);
+  // A non-final page reserves its twelfth visible row for an explicit next
+  // page. The snapshot stores precisely those visible model and More rows.
+  const safeOffset = Number.isSafeInteger(offset) && offset >= 0 && offset < listing.ids.length ? offset : 0;
+  const pageSize = listing.ids.length - safeOffset > MODEL_CATALOGUE_CAP
+    ? MODEL_CATALOGUE_CAP - 1
+    : MODEL_CATALOGUE_CAP;
+  const shown = listing.ids.slice(safeOffset, safeOffset + pageSize);
+  const nextOffset = safeOffset + shown.length < listing.ids.length ? safeOffset + shown.length : null;
+  const rendered = renderModelLevel(brand, provider, shown, currentModel, nextOffset);
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'model', rendered.entries);
-  const text = shown.length < listing.ids.length
-    ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
+  const text = nextOffset !== null || safeOffset > 0
+    ? `${rendered.text}\n_showing ${safeOffset + 1}–${safeOffset + shown.length} of ${listing.ids.length}_`
     : rendered.text;
   port.sendDirect(chatJid, text);
 }
@@ -1334,6 +1352,17 @@ export async function handleModelCommand(
       // Level-1 pick → open Level-2 for that brand's provider. (The union
       // narrows on `kind` — brand/provider are non-optional on this arm.)
       await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
+      return;
+    }
+    if (pick.entry.kind === 'more') {
+      await sendModelDrillModelLevel(
+        port,
+        chatJid,
+        senderJid,
+        pick.entry.brand,
+        pick.entry.provider,
+        pick.entry.offset,
+      );
       return;
     }
     if (pick.entry.kind === 'model') {

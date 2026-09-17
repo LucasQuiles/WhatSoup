@@ -1267,6 +1267,46 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toMatch(/\b(line|tier|weight)\b/i);
     });
 
+    it('DEFER retry: re-selecting the same pending model retries after backoff, keeps an honest continued defer, then promotes the existing pin after recovery', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const base = 1_800_000_000_000;
+      vi.setSystemTime(base);
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const listFn = vi.fn()
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      expect(listFn).toHaveBeenCalledTimes(1);
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 1_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-3' }));
+
+      expect(listFn).toHaveBeenCalledTimes(2);
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      let reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('pending a catalogue check');
+      expect(reply).not.toContain('Already set');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 2_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-4' }));
+
+      expect(listFn).toHaveBeenCalledTimes(3);
+      expect(prefRows()[0].model_pin_verified).toBe(1);
+      reply = allReplies(sentMessages).join('\n');
+      expect(reply).not.toContain('Already set');
+      expect(reply).not.toContain('pending a catalogue check');
+      expect(reply).toContain('kimi/kimi-k3');
+    });
+
     it('PROVIDER-CHANGED FAIL-OPEN: a verified pin against a DIFFERENT provider than the one resolving now never bleeds its model into the route (Task H)', async () => {
       // Direct DB seed via the runtime's own canonical-key derivation
       // (preferenceKeys) rather than the /model N flow — this constructs
@@ -3317,7 +3357,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(allReplies(sentMessages).join('\n')).toContain("isn't configured on this instance");
     });
 
-    it('L2 render is capped (review M-2): a chatty provider catalogue is bounded, with an honest "showing 1–N of M" disclosure', async () => {
+    it('L2 pagination: a chatty provider catalogue shows eleven models plus More, then resolves the next-page snapshot without widening the visible cap', async () => {
       const many = Array.from({ length: 20 }, (_, i) => `opencode/model-${i}`);
       const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: many });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
@@ -3326,10 +3366,25 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' })); // → OpenCode L2
       const reply = allReplies(sentMessages).join('\n');
-      // Capped at MODEL_CATALOGUE_CAP (12) — the 13th id is not numbered.
-      expect(reply).toContain('12. opencode/model-11');
+      expect(reply).toContain('11. opencode/model-10');
+      expect(reply).toContain('12. More models');
       expect(reply).not.toContain('13. opencode/model-12');
-      expect(reply).toContain('showing 1–12 of 20');
+      expect(reply).toContain('showing 1–11 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 12', messageId: 'm3' }));
+      const nextPage = allReplies(sentMessages).join('\n');
+      expect(nextPage).toContain('1. opencode/model-11');
+      expect(nextPage).toContain('9. opencode/model-19');
+      expect(nextPage).not.toContain('10. ');
+      expect(nextPage).toContain('showing 12–20 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' }));
+      expect(prefRows()[0].requested_model).toBe('opencode/model-11');
+      expect(prefRows()[0].model_pin_verified).toBe(1);
     });
   });
 });
