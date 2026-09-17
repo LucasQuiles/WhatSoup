@@ -758,7 +758,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'else',
