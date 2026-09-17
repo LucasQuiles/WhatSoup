@@ -13,7 +13,8 @@
       ],
       "timeout": 90,
       "criteria": [
-        "BOTERRORS-RUNTIME-TEST-ISOLATION"
+        "BOTERRORS-RUNTIME-TEST-ISOLATION",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     },
     {
@@ -28,7 +29,8 @@
       ],
       "timeout": 90,
       "criteria": [
-        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     },
     {
@@ -43,7 +45,8 @@
       ],
       "timeout": 90,
       "criteria": [
-        "BOTERRORS-RUNTIME-TEST-ISOLATION"
+        "BOTERRORS-RUNTIME-TEST-ISOLATION",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     },
     {
@@ -56,7 +59,8 @@
       "timeout": 90,
       "criteria": [
         "BOTERRORS-RUNTIME-TEST-ISOLATION",
-        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     },
     {
@@ -71,7 +75,8 @@
       "timeout": 90,
       "criteria": [
         "BOTERRORS-RUNTIME-TEST-ISOLATION",
-        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY"
+        "RUNTIME-DISPATCH-ASSERTION-INTEGRITY",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     },
     {
@@ -84,7 +89,8 @@
       ],
       "timeout": 90,
       "criteria": [
-        "DOCS"
+        "DOCS",
+        "WS-RUNTIME-QUALIFICATION-PROFILE-PUBLICATION"
       ]
     }
   ],
