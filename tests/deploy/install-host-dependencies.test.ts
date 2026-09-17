@@ -64,7 +64,10 @@ function resolveHostTool(name: string): string {
 }
 
 function installShellToolbox(bin: string): void {
-  for (const name of ['bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'sed', 'tr']) {
+  for (const name of [
+    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp',
+    'ps', 'rm', 'rmdir', 'sed', 'sleep', 'tr',
+  ]) {
     symlinkSync(resolveHostTool(name), join(bin, name));
   }
 }
@@ -99,12 +102,8 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   versionTool(bin, 'rg', 'ripgrep 14.1.1');
   versionTool(bin, 'zsh', 'zsh 5.9');
   versionTool(bin, 'shellcheck', 'ShellCheck 0.11.0');
-  // GNU timeout in miniature, shared with the health-token-wrapper tests via
-  // fakeTimeoutBody(): `--version` answers the capability probe; any other argv is
-  // `timeout [-k <grace>] <duration> <command...>`, which the fake collapses to just
-  // the command (it does not bound — whatsoup_run_bounded's own bounding is covered
-  // by credential-probe-boundedness.test.ts; here the fake only needs to let the
-  // installer's wrapped commands reach their ledger-writing targets).
+  // The dependency doctor still probes timeout capability. Wrapped commands use
+  // the real shell supervisor and the restricted toolbox above.
   executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
@@ -346,12 +345,7 @@ describe('explicit host dependency installer', () => {
 
   it('kills a stalled install command fast and reports a distinguishable timeout', () => {
     const fx = fixture('Linux');
-    // Swap the delegating fake timeout for the real GNU timeout so a stalled
-    // child is actually killed after the budget, and shrink the update budget so
-    // the test proves the fail-fast path without sleeping for the 300s default.
-    unlinkSync(join(fx.bin, 'timeout'));
-    symlinkSync(resolveHostTool('timeout'), join(fx.bin, 'timeout'));
-    symlinkSync(resolveHostTool('sleep'), join(fx.bin, 'sleep'));
+    // Exercise the real supervisor with a short install budget.
     executable(join(fx.bin, 'apt-get'), 'sleep 300');
     fx.env.WHATSOUP_APT_UPDATE_TIMEOUT = '1';
 
@@ -366,8 +360,7 @@ describe('explicit host dependency installer', () => {
     ]);
     const wall = Date.now() - started;
 
-    // 124 (GNU timeout), not 1 — the next person debugging can tell a hang from a
-    // genuine install failure. And it must fail fast, not ride to the job cap.
+    // Expiry has a distinct status from an install failure and remains bounded.
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(124);
     expect(result.stderr).toContain('TIMEOUT');
     expect(result.stderr).toContain('apt-get update');
