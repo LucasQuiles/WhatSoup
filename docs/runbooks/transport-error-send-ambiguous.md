@@ -85,6 +85,17 @@ The runtime contains the risk on every axis:
 
 ## Operator diagnosis steps
 
+The Python BOT ERRORS dispatcher has a separate queued-notification path:
+`process_one` records send-issued state before requesting delivery and requires
+literal `sent: true` with the expected `resolved_chatJid` in the MCP result.
+Malformed, contradictory, deeply nested or wrong-target replies enter its existing
+post-request `AmbiguousSendOutcome` hold. Reclaim must not resend that record.
+A valid optional receipt is retained privately as `delivery.auditReceipt`.
+The Q-loop and the dispatcher's direct flap, digest and quarantine send routes
+still need equivalent acceptance and reconciliation ownership; issue #2424 tracks
+that remaining work. This queued-path check does not establish remote idempotency
+or resolve a crash between acceptance and receipt publication.
+
 1. Read `payload.phase` first — it determines how much risk exists:
    `provider_call_started` / `ack_received` mean the message may have landed;
    `not_started` means it provably did not.

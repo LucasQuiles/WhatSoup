@@ -226,10 +226,12 @@ def test_deeply_nested_event_is_delivered_not_crashed(state_root: Path):
     paths = mod.setup_dirs()
     event_path = _write_event(paths, _event("evt-deep", payload=_nest(_DEEP)), "20260828233919")
 
-    with patch.object(mod, "send_whatsapp", return_value=None):
+    with patch.object(mod, "send_whatsapp", return_value=None) as send:
         ok, detail = mod.process_one(event_path, paths)
 
     assert (ok, detail) == (True, "sent")
+    send.assert_called_once()
+    assert send.call_args.kwargs == {"require_acceptance": True}
     assert not list(paths["quarantine"].glob("*.poison"))
 
 
@@ -266,8 +268,14 @@ def test_unsnapshottable_event_is_quarantined_and_the_next_alert_still_delivers(
         return real_snapshot(payload)
 
     sent: list[str] = []
+
+    def send(text: str, *, require_acceptance: bool = False) -> None:
+        if "daily health failing" in text:
+            assert require_acceptance is True
+        sent.append(text)
+
     with patch.object(mod, "json_snapshot", side_effect=failing_snapshot), \
-         patch.object(mod, "send_whatsapp", side_effect=lambda text: sent.append(text)), \
+         patch.object(mod, "send_whatsapp", side_effect=send), \
          patch.object(mod, "email_fallback", return_value=True):
         summary = mod.run_once(max_events=10)
 
