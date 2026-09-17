@@ -37,9 +37,9 @@ const getProvidersMock = api.getProviders as unknown as ReturnType<typeof vi.fn>
 const getProviderStatusMock = api.getProviderStatus as unknown as ReturnType<typeof vi.fn>
 
 const CATALOG: ProviderCatalogEntry[] = [
-  { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, providerConfig: [] },
-  { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
-  { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+  { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+  { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+  { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, credentialService: 'anthropic', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
 ]
 
 function fallbackStatus(
@@ -69,7 +69,7 @@ function withProviders(node: ReactElement) {
 
 function withSeededProviderStatus(lineName: string, status: ProviderStatus) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } } })
-  client.setQueryData(['providers'], CATALOG)
+  client.setQueryData(['providers'], { status: 'ok', providers: CATALOG })
   client.setQueryData(['provider-status', lineName], status)
   return (
     <QueryClientProvider client={client}>
@@ -315,7 +315,7 @@ describe('ProvidersKeysCard — fallback states', () => {
     vi.setSystemTime(now)
 
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } } })
-    client.setQueryData(['providers'], CATALOG)
+    client.setQueryData(['providers'], { status: 'ok', providers: CATALOG })
     client.setQueryData(['provider-status', 'line-k'], {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
       fallback: fallbackStatus({

@@ -8,7 +8,7 @@
 //  Backend descriptor shape:
 //    src/runtimes/agent/providers/types.ts → ProviderDescriptor
 //
-//  Display metadata (names, colors, placeholders) stays console-local in
+//  Non-picker display metadata (names and colors) stays console-local in
 //  PROVIDER_META below. A backend ID without metadata still renders (the ID
 //  doubles as its display name) so the console can never *omit* a provider
 //  the backend accepts — the drift guard
@@ -65,40 +65,53 @@ export const PROVIDERS: ProviderDef[] = PROVIDER_IDS.map(
     },
 );
 
-// Precomputed maps for O(1) lookups and stable references
+// Precomputed map for O(1) lookups and stable references
 const _providerMap = new Map<string, ProviderDef>(PROVIDERS.map(p => [p.id, p]));
-const _configFieldsCache = new Map<string, ConfigFieldDef[]>();
+
+const CONFIG_FIELD_META: Readonly<Record<string, ConfigFieldDef>> = {
+  model: { key: 'model', label: 'Model', placeholder: 'Runtime default, or type a model ID', inputType: 'text' },
+  baseUrl: { key: 'baseUrl', label: 'Base URL', placeholder: 'https://api.openai.com/v1', inputType: 'text' },
+  apiKeyService: { key: 'apiKeyService', label: 'Keyring Service', placeholder: 'openai', inputType: 'text' },
+  maxTokens: { key: 'maxTokens', label: 'Max Tokens', placeholder: '16384', inputType: 'number' },
+};
 
 export function getProvider(id: string): ProviderDef | undefined {
   return _providerMap.get(id);
 }
 
-/** Config fields for the UI per provider. Default provider returns [] (handled by existing agentOptions UI). */
-export function getProviderConfigFields(providerId: string): ConfigFieldDef[] {
-  const cached = _configFieldsCache.get(providerId);
-  if (cached) return cached;
-
+/**
+ * Config controls for a provider. A server-advertised key list wins so a new
+ * adapter does not require another console option table. The local derivation
+ * remains a render fallback while the provider catalogue is loading.
+ */
+export function getProviderConfigFields(
+  providerId: string,
+  advertisedFields?: readonly string[],
+): ConfigFieldDef[] {
+  if (advertisedFields) {
+    return advertisedFields.map((key) => CONFIG_FIELD_META[key] ?? {
+      key,
+      label: key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[-_]/g, ' '),
+      placeholder: key,
+      inputType: 'text',
+    });
+  }
   const provider = getProvider(providerId);
   if (!provider || providerId === DEFAULT_PROVIDER_ID) {
-    const empty: ConfigFieldDef[] = [];
-    _configFieldsCache.set(providerId, empty);
-    return empty;
+    return [];
   }
 
-  const fields: ConfigFieldDef[] = [];
-  fields.push({ key: 'model', label: 'Model', placeholder: modelPlaceholder(providerId), inputType: 'text' });
+  const keys = ['model'];
 
   if (provider.type === 'api') {
-    fields.push({ key: 'baseUrl', label: 'Base URL', placeholder: 'https://api.openai.com/v1', inputType: 'text' });
-    fields.push({ key: 'apiKeyService', label: 'Keyring Service', placeholder: 'openai', inputType: 'text' });
+    keys.push('baseUrl', 'apiKeyService');
   }
 
   if (providerId === 'anthropic-api') {
-    fields.push({ key: 'maxTokens', label: 'Max Tokens', placeholder: '16384', inputType: 'number' });
+    keys.push('maxTokens');
   }
 
-  _configFieldsCache.set(providerId, fields);
-  return fields;
+  return keys.map((key) => CONFIG_FIELD_META[key]);
 }
 
 export type ProviderColor = Readonly<{ stroke: string; fill: string }>;
@@ -123,15 +136,4 @@ function isKnownProviderId(id: string): id is ProviderId {
 
 export function getProviderColor(id: string): ProviderColor {
   return isKnownProviderId(id) ? PROVIDER_COLORS[id] : UNKNOWN_PROVIDER_COLOR;
-}
-
-function modelPlaceholder(providerId: string): string {
-  switch (providerId) {
-    case 'codex-cli':     return 'gpt-5.4';
-    case 'gemini-cli':    return 'gemini-2.5-pro';
-    case 'opencode-cli':  return 'claude-sonnet-4-6';
-    case 'openai-api':    return 'gpt-4o';
-    case 'anthropic-api': return 'claude-sonnet-4-6';
-    default:              return '';
-  }
 }

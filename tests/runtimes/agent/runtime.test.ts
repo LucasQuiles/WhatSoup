@@ -13779,13 +13779,7 @@ describe('AgentRuntime', () => {
         chatJid: string;
         reason: string;
       }) => void;
-      registerSendPollAwaiter: (
-        pollId: string,
-        chatJid: string,
-        options: string[],
-        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
-        timeoutMs: number,
-      ) => Promise<string>;
+      registerSendPollAwaiter: AgentRuntime['registerSendPollAwaiter'];
       deletePendingPollQuestions: (mapKey: string) => void;
     };
 
@@ -13999,7 +13993,6 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState & {
-        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
         fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
       };
       await runtime.start();
@@ -14009,24 +14002,36 @@ describe('AgentRuntime', () => {
 
       const pollId = 'POLL_QR036';
       const mapKey = `send_poll:${pollId}`;
-      // Fire-and-forget the awaiter (its promise resolves only on a qualifying vote / timeout).
-      void state.registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000);
+      let settled: string | null = null;
+      const awaiter = state
+        .registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000)
+        .then((answer) => { settled = answer; })
+        .catch((err: Error) => { settled = `rejected:${err.message}`; });
 
-      await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
-      await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
+      try {
+        await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
+        await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
 
-      const pending = state.pendingPolls.questions.get(mapKey);
-      expect(pending).toBeDefined();
-      // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
-      // this was downgraded to 'first-vote-wins', letting any member resolve).
-      expect(pending!.resolution).toBe('admin-only');
-      expect(pending!.adminJids ?? null).toBeNull();
+        const pending = state.pendingPolls.questions.get(mapKey);
+        expect(pending).toBeDefined();
+        // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
+        // this was downgraded to 'first-vote-wins', letting any member resolve).
+        expect(pending!.resolution).toBe('admin-only');
+        expect(pending!.adminJids ?? null).toBeNull();
 
-      // A non-admin vote must NOT resolve the gated decision.
-      state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
-      expect(pending!.answersCollected[0]).toBeUndefined();
-      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
-      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        // A non-admin vote must NOT resolve the gated decision.
+        state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
+        await Promise.resolve();
+        expect(settled).toBeNull();
+        expect(pending!.answersCollected[0]).toBeUndefined();
+        expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      } finally {
+        state.deletePendingPollQuestions(mapKey);
+        await awaiter;
+      }
+      expect(settled).toMatch(/^rejected:Poll abandoned/);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
     });
 
     it('QR-051 — send_poll admin-only stays fail-closed when group admin metadata is unavailable', async () => {

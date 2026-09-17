@@ -113,6 +113,11 @@ const useAccessMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useCheckpointsMock = vi.hoisted(() => vi.fn(() => ({ data: undefined, isLoading: false, freshness: undefined })));
 const useProvidersMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useProviderModelsMock = vi.hoisted(() => vi.fn(() => ({
+  data: undefined,
+  isPending: false,
+  isError: false,
+})));
 const useProviderStatusMock = vi.hoisted(() => vi.fn(() => ({ data: null })));
 // RateLimitsCard (SummaryTab, chat-mode) calls useRateLimits internally —
 // the explicit-shape factory must provide it or the import errors at load.
@@ -144,6 +149,7 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useTyping: useTypingMock,
   useCheckpoints: useCheckpointsMock,
   useProviders: useProvidersMock,
+  useProviderModels: useProviderModelsMock,
   useProviderStatus: useProviderStatusMock,
   useRateLimits: useRateLimitsMock,
   useLiveSessions: useLiveSessionsMock,

@@ -2,6 +2,7 @@ name: Quality
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
   # only advances once every required check reports on the merge_group ref, so without
   # this trigger an enabled queue would stall every PR indefinitely waiting for a run
