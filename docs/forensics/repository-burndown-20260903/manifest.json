@@ -1,0 +1,40 @@
+{
+  "schema_version": "forensic.package-manifest.v1",
+  "files": [
+    {
+      "path": "analysis.json",
+      "bytes": 7122,
+      "sha256": "7d562278e5ef08fd0093e3006140bf80a3407fcdba8406dc74c98f41a2df9fda"
+    },
+    {
+      "path": "evidence.json",
+      "bytes": 7642,
+      "sha256": "ec199cf8d2093c7070778f855c7d7ff8bb5e4827534ab9a147742ac0bca7cda7"
+    },
+    {
+      "path": "narrative.json",
+      "bytes": 2204,
+      "sha256": "73122e5c1caadb6143c5f22da8f5f23718a34146da9d1b7bdf2d8ba10ae1489a"
+    },
+    {
+      "path": "query-journal.json",
+      "bytes": 29987,
+      "sha256": "9356088aec45514f91fd7d7023e0f80efafa173adfd18065c6fcc0b795cad4d1"
+    },
+    {
+      "path": "report.md",
+      "bytes": 4234,
+      "sha256": "8731b636502f9420732249dc08a77613234c33d80d45516f3c7ee5c39f4194f8"
+    },
+    {
+      "path": "source-inventory.json",
+      "bytes": 10249,
+      "sha256": "245eef61cf7dcd27fe7c9c7039502fd62f58bc876cc1cbe674a25fb42bcf73b6"
+    },
+    {
+      "path": "state.json",
+      "bytes": 4664,
+      "sha256": "7391ce10be6d3b53af30c45e8eeedc389d3c02a6bc6e424986c3bb43be541fa9"
+    }
+  ]
+}

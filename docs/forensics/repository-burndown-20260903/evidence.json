@@ -1,0 +1,287 @@
+{
+  "schema_version": "forensic.evidence.v1",
+  "selection": {
+    "retained": 9,
+    "observed_candidates": 15277,
+    "rule": "referenced-by-adjudication"
+  },
+  "evidence": [
+    {
+      "evidence_id": "evidence-305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624",
+      "record_sha256": "305a0e89c560aa1068b0c36b94c409a3a478fdb3ad7bfee026539eb492396624",
+      "occurrences": [
+        {
+          "family": "claude",
+          "pass": 1,
+          "source_alias": "claude-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 45,
+            "byte_start": 180628,
+            "byte_end": 221801
+          },
+          "matched_query_ids": [
+            "G06"
+          ],
+          "envelope": {
+            "type": "user",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125",
+      "record_sha256": "3b04aedcc773192fef3e96d0c10c289dfc1e4aff2b33bfa031d22fdab33bc125",
+      "occurrences": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 14305,
+            "byte_start": 37566368,
+            "byte_end": 37609030
+          },
+          "matched_query_ids": [
+            "G08"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0",
+      "record_sha256": "5e82b64053520118f8540c89fe4c3ef8adc84daf592cc0e875e2251c4f9914a0",
+      "occurrences": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 15689,
+            "byte_start": 45934668,
+            "byte_end": 45958050
+          },
+          "matched_query_ids": [
+            "G03",
+            "G06",
+            "G07"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 15689,
+            "byte_start": 45934668,
+            "byte_end": 45958050
+          },
+          "matched_query_ids": [
+            "P04",
+            "P07"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-6c5c60f3bd432eae97d7c2d656fc6ecfaa2c315befd72fb856b0fb3e2957cb14",
+      "record_sha256": "6c5c60f3bd432eae97d7c2d656fc6ecfaa2c315befd72fb856b0fb3e2957cb14",
+      "occurrences": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 14986,
+            "byte_start": 41734974,
+            "byte_end": 41747637
+          },
+          "matched_query_ids": [
+            "G06"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        },
+        {
+          "family": "codex",
+          "pass": 2,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 14986,
+            "byte_start": 41734974,
+            "byte_end": 41747637
+          },
+          "matched_query_ids": [
+            "P05"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-7d8c2618994fadf80131329d3413c25e8d7e7d9209e2c3d6de81eb0e1ea64330",
+      "record_sha256": "7d8c2618994fadf80131329d3413c25e8d7e7d9209e2c3d6de81eb0e1ea64330",
+      "occurrences": [
+        {
+          "family": "claude",
+          "pass": 1,
+          "source_alias": "claude-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 28931,
+            "byte_start": 42168633,
+            "byte_end": 42175279
+          },
+          "matched_query_ids": [
+            "G01"
+          ],
+          "envelope": {
+            "type": "user",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-8f55fc7d4f490993c35a71bfce82d8451d37425374a6c74b43a5724c9c713cc6",
+      "record_sha256": "8f55fc7d4f490993c35a71bfce82d8451d37425374a6c74b43a5724c9c713cc6",
+      "occurrences": [
+        {
+          "family": "codex",
+          "pass": 2,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 14945,
+            "byte_start": 41584570,
+            "byte_end": 41586192
+          },
+          "matched_query_ids": [
+            "P07"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+      "record_sha256": "bae32ca32bee0d85e81d322a2c27159c87737bece85811a06dfe63f18664eaa7",
+      "occurrences": [
+        {
+          "family": "claude",
+          "pass": 2,
+          "source_alias": "claude-session-02",
+          "locator": {
+            "kind": "jsonl",
+            "line": 48744,
+            "byte_start": 72633111,
+            "byte_end": 72636488
+          },
+          "matched_query_ids": [
+            "P01",
+            "P03"
+          ],
+          "envelope": {
+            "type": "user",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a",
+      "record_sha256": "bcaa283e41dab9067a6470769dd7517a49645b6accce740c9bab2862aeaf7f5a",
+      "occurrences": [
+        {
+          "family": "codex",
+          "pass": 1,
+          "source_alias": "codex-session-01",
+          "locator": {
+            "kind": "jsonl",
+            "line": 15540,
+            "byte_start": 44751724,
+            "byte_end": 44790412
+          },
+          "matched_query_ids": [
+            "G01",
+            "G02",
+            "G06"
+          ],
+          "envelope": {
+            "type": "response_item",
+            "role": null
+          }
+        }
+      ]
+    },
+    {
+      "evidence_id": "evidence-df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b",
+      "record_sha256": "df47add5201935d7141539a0bffe9bd3f39cf624540d99f204150f33eba0fd5b",
+      "occurrences": [
+        {
+          "family": "claude",
+          "pass": 1,
+          "source_alias": "claude-session-02",
+          "locator": {
+            "kind": "jsonl",
+            "line": 48052,
+            "byte_start": 71608350,
+            "byte_end": 71631853
+          },
+          "matched_query_ids": [
+            "G06",
+            "G07"
+          ],
+          "envelope": {
+            "type": "user",
+            "role": null
+          }
+        },
+        {
+          "family": "claude",
+          "pass": 2,
+          "source_alias": "claude-session-02",
+          "locator": {
+            "kind": "jsonl",
+            "line": 48052,
+            "byte_start": 71608350,
+            "byte_end": 71631853
+          },
+          "matched_query_ids": [
+            "P03"
+          ],
+          "envelope": {
+            "type": "user",
+            "role": null
+          }
+        }
+      ]
+    }
+  ]
+}
