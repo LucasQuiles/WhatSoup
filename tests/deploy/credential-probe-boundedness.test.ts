@@ -263,7 +263,7 @@ def interrupted(signum, frame):
 signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 def members(session):
-    result = subprocess.run(['/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps', '-axo', 'pid=,ppid=,pgid=,stat=,wchan=,lstart=,comm='], capture_output=True, text=True, timeout=3)
+    result = subprocess.run(['/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps', '-axo', 'pid=,ppid=,pgid='], capture_output=True, text=True, timeout=3)
     if result.returncode: raise RuntimeError('process identity unavailable')
     found = []
     for row in result.stdout.splitlines():
@@ -489,8 +489,8 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
         record['exit'] = child.returncode
-        record['survivors_before_cleanup'] = members(session)
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
+        record['survivors_before_cleanup'] = members(session)
     except Exception as error:
         record['error'] = repr(error)
         record['at_error'] = members(session)
@@ -559,7 +559,9 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     fs.unlinkSync(path.join(shim, 'sleep'));
     fs.writeFileSync(path.join(shim, 'sleep'), [
       '#!/bin/bash',
-      'builtin printf "%s\\n" "$$" > "$TMPDIR/sleep-child.$PPID"',
+      'group="$("$REAL_PS" -o pgid= -p "$$")" || exit 2',
+      'group="${group//[[:space:]]/}"; [[ "$group" =~ ^[0-9]+$ ]] || exit 2',
+      'builtin printf "%s\\n" "$$" > "$TMPDIR/sleep-child.$group"',
       'exec /bin/sleep "$@"',
       '',
     ].join('\n'), { mode: 0o700 });
