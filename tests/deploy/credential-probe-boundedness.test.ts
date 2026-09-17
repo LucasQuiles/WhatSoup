@@ -522,6 +522,8 @@ record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['command_partial_signal'] = (root / 'command-partial-signal').read_text() if (root / 'command-partial-signal').exists() else None
 record['umask_groups'] = [int(value) for value in (root / 'umask-groups').read_text().split()] if (root / 'umask-groups').exists() else []
+record['helper_vanished_after_probe'] = (root / 'helper-vanished-after-probe').exists()
+record['helper_signal_refused'] = (root / 'helper-signal-refused').exists()
 record['timer_partial_signal'] = (root / 'timer-partial-signal').read_text() if (root / 'timer-partial-signal').exists() else None
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
 if (root / 'cleanup-residual-polls').exists():
@@ -533,7 +535,7 @@ if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'zero', terminal = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
@@ -553,7 +555,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
       '',
     ].join('\n'), { mode: 0o700 });
   }
-  if (mode === 'deadline-timer-descendant') {
+  if (mode === 'deadline-timer-descendant' || mode === 'deadline-helper-vanished' || mode === 'deadline-helper-signal-refused') {
     fs.unlinkSync(path.join(shim, 'sleep'));
     fs.writeFileSync(path.join(shim, 'sleep'), [
       '#!/bin/bash',
@@ -718,7 +720,16 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     'case "$4" in cleanup-child-group)',
     '  umask() { if [ "$#" -eq 0 ]; then /bin/bash "$TMPDIR/umask-capture.sh"; else builtin umask "$@"; fi; }',
     '  ;; esac',
-    'case "$4" in deadline-timer-descendant)',
+    'case "$4" in deadline-timer-descendant|deadline-helper-vanished|deadline-helper-signal-refused)',
+    '  case "$4" in deadline-helper-*)',
+    '    sleep() {',
+    '      if [ "${FUNCNAME[1]}" = _bounded_wait_for_budget ]; then',
+    '        local polls=0',
+    '        while [ ! -f "$TMPDIR/timer-partial-signal" ]; do polls=$((polls + 1)); [ "$polls" -lt 300 ] || return 2; /bin/sleep 0.01; done',
+    '      fi',
+    '      command sleep "$@"',
+    '    }',
+    '    ;; esac',
     '  kill() {',
     '    if [ "$1" = -9 ] && [ -n "$status_timer_pid" ] && [ "$3" = "-$status_timer_pid" ] && [ ! -f "$TMPDIR/timer-partial-signal" ]; then',
     '      count=0; while [ ! -s "$TMPDIR/sleep-child.$status_timer_pid" ] && [ "$count" -lt 100 ]; do /bin/sleep 0.01; count=$((count + 1)); done',
@@ -727,13 +738,25 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     // Model the observed fork race: the first signal catches the leader while its child survives.
     '      builtin kill -9 "$status_timer_pid"; return "$?"',
     '    fi',
+    '    if [ "$cleanup_mode" = deadline-helper-vanished ] && [ "$1" = -0 ] && [ "$2" = -- ] && [ "$3" = "-$status_timer_pid" ] && [ -f "$TMPDIR/timer-partial-signal" ] && [ ! -f "$TMPDIR/helper-vanished-after-probe" ]; then',
+    '      builtin kill "$@" || return "$?"',
+    '      builtin kill -9 -- "-$status_timer_pid" || return 2',
+    '      count=0; while builtin kill -0 -- "-$status_timer_pid" 2>/dev/null; do count=$((count + 1)); [ "$count" -lt 200 ] || return 2; /bin/sleep 0.01; done',
+    '      builtin printf vanished > "$TMPDIR/helper-vanished-after-probe"',
+    '      return 0',
+    '    fi',
+    '    if [ "$cleanup_mode" = deadline-helper-signal-refused ] && [ "$1" = -9 ] && [ "$3" = "-$status_timer_pid" ] && [ -f "$TMPDIR/timer-partial-signal" ]; then',
+    '      builtin kill -0 -- "-$status_timer_pid" || return "$?"',
+    '      builtin printf refused > "$TMPDIR/helper-signal-refused"',
+    '      return 1',
+    '    fi',
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
     '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; deadline-timer-descendant|cleanup-child-group) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
+    'budget=6; case "$4" in nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=2;; zero) budget=0;; esac',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'else',
@@ -746,7 +769,7 @@ function runLifecycleProbe(mode: 'fast' | 'near-deadline' | 'printf-override' | 
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
     'if [ "$1" = command-group-descendant ]; then sleep 30 & exit 0; fi',
-    'case "$1" in cleanup-child-group|deadline-timer-descendant|control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
@@ -1050,12 +1073,29 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
+  it.each([
+    ['deadline-helper-vanished', 124, true, false],
+    ['deadline-helper-signal-refused', 2, false, true],
+  ] as const)('handles %s without masking a surviving helper', (mode, status, vanished, refused) => {
+    const result = runLifecycleProbe(mode, true);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.timer_partial_signal, JSON.stringify(result)).toBeTruthy();
+    expect(result.helper_vanished_after_probe, JSON.stringify(result)).toBe(vanished);
+    expect(result.helper_signal_refused, JSON.stringify(result)).toBe(refused);
+    expect(result.stdout, JSON.stringify(result)).toContain(`rc=${status} output=`);
+    expect(result.terminal_foreground_group, JSON.stringify(result)).toBe(result.root_pid);
+    expect(result.terminal_echo, JSON.stringify(result)).toContain('go');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    if (vanished) expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+
   it('preserves job-control isolation under a controlling PTY', () => {
     const result = runLifecycleProbe('nested', true);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.terminal_foreground_group, JSON.stringify(result)).toBe(result.root_pid);
     expect(result.terminal_echo, JSON.stringify(result)).toContain('go');
-    expect(result.stdout).toContain('rc=124 output=');
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
