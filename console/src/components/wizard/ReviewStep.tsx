@@ -149,11 +149,11 @@ const ReviewStep: FC<ReviewStepProps> = ({
           <>
             <KV
               label="Conversation"
-              value={models?.conversation ?? 'claude-sonnet-4-6'}
+              value={models?.conversation || 'Runtime default'}
             />
             <KV
               label="Extraction"
-              value={models?.extraction ?? 'claude-haiku-4-5-20251001'}
+              value={models?.extraction || 'Runtime default'}
             />
             <KV
               label="Auth"
@@ -181,7 +181,10 @@ const ReviewStep: FC<ReviewStepProps> = ({
             <KV label="Session scope" value={agentOptions.sessionScope ?? 'single'} />
             <KV label="Provider" value={agentOptions.provider ?? DEFAULT_PROVIDER_ID} />
             {agentOptions.provider && agentOptions.provider !== DEFAULT_PROVIDER_ID &&
-              getProviderConfigFields(agentOptions.provider).map(field => {
+              getProviderConfigFields(
+                agentOptions.provider,
+                Object.keys(agentOptions.providerConfig ?? {}),
+              ).map(field => {
                 const v = agentOptions.providerConfig?.[field.key]
                 return v != null && v !== ''
                   ? <KV key={field.key} label={field.label} value={String(v)} />
