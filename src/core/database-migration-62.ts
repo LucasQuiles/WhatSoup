@@ -19,7 +19,8 @@ import type { DatabaseSync } from 'node:sqlite';
  * dispatch is durably marked, automatic input replay is permanently vetoed.
  *
  * One obligation per (scope, inbound_seq) — enforced by a unique index; the
- * drain supervisor (slice S3) claims strictly by lowest inbound_seq per scope.
+ * drain supervisor (slice S3) claims strictly by lowest inbound_seq per
+ * conversation in per_chat mode, otherwise per scope.
  *
  * Fail-closed properties: idempotent via IF NOT EXISTS on a brand-new table
  * (no rebuild, no data movement); SAVEPOINT-wrapped so a partial DDL error
