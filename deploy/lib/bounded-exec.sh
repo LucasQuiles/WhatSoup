@@ -39,8 +39,10 @@ whatsoup_run_bounded() {
     local timeout_file="${TMPDIR:-/tmp}/whatsoup-bounded-timeout.$$.$control_token"
     local deadline_file="${TMPDIR:-/tmp}/whatsoup-bounded-deadline.$$.$control_token"
     local cleanup_file="${TMPDIR:-/tmp}/whatsoup-bounded-cleanup.$$.$control_token"
+    local outcome_file="${TMPDIR:-/tmp}/whatsoup-bounded-outcome.$$.$control_token"
     local control_directory="" control_command_pid="" control_command_group=""
     local control_watchdog_pid="" control_watchdog_group="" control_release=""
+    local outcome_event=""
 
     _bounded_read_beacon() {
       local key value token_seen=0 directory_seen=0
@@ -99,6 +101,45 @@ whatsoup_run_bounded() {
       case "$?" in 0) ;; 1) return 3 ;; *) return 2 ;; esac
       _bounded_group_is_owned "$control_watchdog_pid" "$control_watchdog_group"
       case "$?" in 0) ;; 1) control_watchdog_group="" ;; *) return 2 ;; esac
+    }
+
+    _bounded_claim_outcome() {
+      local event="$1" status="${2:-}" candidate=""
+      case "$event" in
+        result) [[ "$status" =~ ^[0-9]+$ ]] && [ "$status" -le 255 ] || return 2 ;;
+        deadline-outer) [ -z "$status" ] || return 2 ;;
+        *) return 2 ;;
+      esac
+      candidate="${outcome_file}.${event}"
+      # An exclusive FIFO supplies an inode without opening an existing path.
+      command -p mkfifo -m 600 "$candidate" 2>/dev/null || return 2
+      # link treats the destination as one path, including when it is a directory.
+      if command -p link "$candidate" "$outcome_file" 2>/dev/null; then
+        [ ! -L "$outcome_file" ] && [ -p "$outcome_file" ] && [ "$candidate" -ef "$outcome_file" ] && return 0
+        return 2
+      fi
+      if [ -e "$outcome_file" ] || [ -L "$outcome_file" ]; then return 1; fi
+      return 2
+    }
+
+    _bounded_read_outcome() {
+      local event candidate
+      outcome_event=""
+      if [ -L "$outcome_file" ] || [ ! -p "$outcome_file" ]; then
+        return 2
+      fi
+      # Compare the exclusive claim's inode without opening a replaceable path.
+      for event in result deadline-outer; do
+        candidate="${outcome_file}.${event}"
+        if [ ! -L "$candidate" ] && [ -p "$candidate" ] && [ "$candidate" -ef "$outcome_file" ]; then
+          case "$event" in
+            result) outcome_event=result ;;
+            deadline-outer) outcome_event=deadline ;;
+          esac
+          return 0
+        fi
+      done
+      return 2
     }
 
     _bounded_read_deadline() {
@@ -203,7 +244,8 @@ whatsoup_run_bounded() {
         rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
         rmdir "$control_directory" 2>/dev/null
       fi
-      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file"
+      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$outcome_file"
+      rm -f "$outcome_file.result" "$outcome_file.deadline-outer"
     }
 
     trap '_bounded_outer_cleanup' EXIT
@@ -218,7 +260,7 @@ whatsoup_run_bounded() {
       local directory="" cmd_pid="" cmd_group="" command_release_pid=""
       local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
       local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
-      local entry_timeout=0 entry_timeout_handled=0
+      local entry_timeout=0 entry_timeout_handled=0 outcome_claim_rc=0
 
       _bounded_worker_cleanup() {
         local group count
@@ -248,6 +290,21 @@ whatsoup_run_bounded() {
         [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog"; rmdir "$directory" 2>/dev/null; }
         rm -f "$timeout_file"
         [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"
+      }
+
+      _bounded_accept_result() {
+        _bounded_claim_outcome result "$rc"
+        outcome_claim_rc=$?
+        case "$outcome_claim_rc" in
+          0) return 0 ;;
+          1)
+            _bounded_read_outcome || { rc=2; return 0; }
+            [ "$outcome_event" = deadline ] || { rc=2; return 0; }
+            rc=124
+            return 0
+            ;;
+          *) rc=2; return 0 ;;
+        esac
       }
 
       trap '_bounded_worker_cleanup' EXIT
@@ -317,12 +374,14 @@ whatsoup_run_bounded() {
         completed_rc=""
         if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
           if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then rc="$completed_rc"; else rc=2; fi
+          _bounded_accept_result
           break
         fi
         if ! kill -0 "$cmd_pid" 2>/dev/null; then
           kill -9 -- "-$cmd_group" 2>/dev/null
           rc=0
           wait "$cmd_pid" 2>/dev/null || rc=$?
+          _bounded_accept_result
           break
         fi
         if [ "$remaining" -gt 0 ]; then remaining=$((remaining - 1)); else remaining_grace=$((remaining_grace - 1)); fi
@@ -401,8 +460,22 @@ whatsoup_run_bounded() {
       if [ "$?" -ne 0 ]; then
         _bounded_guard_protocol_failure
       fi
-      local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0
+      local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0 outcome_claim_rc=0
       guard_status=124
+      _bounded_claim_outcome deadline-outer
+      outcome_claim_rc=$?
+      case "$outcome_claim_rc" in
+        0) ;;
+        1)
+          _bounded_read_outcome || _bounded_guard_protocol_failure
+          case "$outcome_event" in
+            result) guard_status=0 ;;
+            deadline) ;;
+            *) _bounded_guard_protocol_failure ;;
+          esac
+          ;;
+        *) _bounded_guard_protocol_failure ;;
+      esac
       _bounded_read_authorization
       authorization_state=$?
       if [ "$authorization_state" -eq 0 ]; then
