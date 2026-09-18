@@ -13,7 +13,12 @@ const tmp = trackTmpDirs('');
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 
 function git(repo: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', [
+    '-c', 'user.email=guard-test@users.noreply.github.com',
+    '-c', 'user.name=Guard Test',
+    '-c', 'commit.gpgsign=false',
+    ...args,
+  ], {
     cwd: repo,
     encoding: 'utf8',
     env: cleanGitEnv(),
@@ -25,9 +30,6 @@ function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid:
   const repo = tmp.make('pr-metadata-guard');
 
   git(repo, ['init']);
-  git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
-  git(repo, ['config', 'user.name', 'Guard Test']);
-  git(repo, ['config', 'commit.gpgsign', 'false']);
   writeFileSync(path.join(repo, 'note.txt'), 'base\n');
   git(repo, ['add', 'note.txt']);
   git(repo, ['commit', '-m', 'base']);
