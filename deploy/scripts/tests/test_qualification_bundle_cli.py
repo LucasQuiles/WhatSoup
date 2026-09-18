@@ -103,18 +103,34 @@ def test_bundle_cli_qualifies_actual_bound_health_and_records_inputs(tmp_path, h
     assert str(fixture.root) not in result.stdout
 
 
-@pytest.mark.parametrize("change", ["profile_bytes", "foreign_profile", "missing_binding"])
-def test_bundle_cli_refuses_invalid_inputs_before_health(tmp_path, health_server, change):
+def test_bundle_cli_refuses_changed_profile_before_health(tmp_path, health_server):
+    _fixture_value, _root, runtime, argv = _case(tmp_path, health_server.server_port)
+    (runtime / "health-deployment-qualification-profile.json").write_text("{}")
+    result = _run(argv)
+    assert result.returncode == 3, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["outcome"] == "inconclusive"
+    assert "bundle_binding" not in receipt
+    assert health_server.requests == []
+
+
+def test_bundle_cli_refuses_foreign_profile_before_health(tmp_path, health_server):
     _fixture_value, root, runtime, argv = _case(tmp_path, health_server.server_port)
-    if change == "profile_bytes":
-        (runtime / "health-deployment-qualification-profile.json").write_text("{}")
-    elif change == "foreign_profile":
-        foreign = root / "foreign-profile.json"
-        shutil.copyfile(runtime / "health-deployment-qualification-profile.json", foreign)
-        argv.extend(["--profile", str(foreign)])
-    else:
-        position = argv.index("--effective-record-sha256")
-        del argv[position:position + 2]
+    foreign = root / "foreign-profile.json"
+    shutil.copyfile(runtime / "health-deployment-qualification-profile.json", foreign)
+    argv.extend(["--profile", str(foreign)])
+    result = _run(argv)
+    assert result.returncode == 3, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["outcome"] == "inconclusive"
+    assert "bundle_binding" not in receipt
+    assert health_server.requests == []
+
+
+def test_bundle_cli_refuses_missing_effective_binding_before_health(tmp_path, health_server):
+    _fixture_value, _root, _runtime, argv = _case(tmp_path, health_server.server_port)
+    position = argv.index("--effective-record-sha256")
+    del argv[position:position + 2]
     result = _run(argv)
     assert result.returncode == 3, result.stderr
     receipt = json.loads(result.stdout)
