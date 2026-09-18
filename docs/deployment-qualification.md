@@ -83,12 +83,14 @@ turn an unhealthy authenticated response into healthy service evidence. Its boun
 mode accepts `--effective-record-root`, `--effective-record`, and the record digest,
 plus every target and run-context field. It uses the existing effective-record reader
 before making an HTTP request, so a stale, mismatched, or unsafe record produces an
-inconclusive result without a probe. The record supplies the instance and health port;
+inconclusive result without a probe. It reads the record and its source inputs again
+after the observation; a changed record cannot produce an accepted health receipt.
+The record supplies the instance and health port;
 the CLI does not accept a port or timeout override in bound mode.
 
 `npm run test:deployment-qualification` uses the shared bounded pytest resolver for
 the health reader, health qualifier, effective-record reader, resolver integration,
-and private record writer. Both declarative local gates and Quality's named
+private record writer, bundle verifier, and real bundled CLI boundary. Both declarative local gates and Quality's named
 `Deployment qualification source suite` run this exact target. The later BOT ERRORS
 full behavioral suite is a separate broader regression layer.
 
@@ -99,8 +101,71 @@ and rechecks file and parent identity before using a token. A missing capability
 unsafe file, or observed path replacement leaves the valid credential leg unobserved
 without sending an Authorization request.
 
-Complete qualifier/helper/profile bundle pinning, operator-suppression coupling, and
-the final receipt evaluator remain integration work. Until those gates are complete,
-neither the configuration command nor standalone health qualification can produce
-deployment acceptance. Installation, activation, permission changes, and live
-configuration changes are separate actions.
+## Bound qualification bundle
+
+The health CLI also accepts `--bundle-root`, `--bundle-manifest`, and
+`--bundle-sha256` together with all effective-record binding arguments. The
+`whatsoup.qualification-bundle.v1` manifest binds the source commit, compatible
+ARC/qFleet commits, deployment policy version, execution directory, qualifier,
+and the exact file closure with SHA-256 and executable flags. The manifest stays
+outside the execution directory. Paths are relative and cannot escape the export.
+
+The execution directory must contain the qualifier, both deployment profiles,
+`runtime-test-qualification.json`, and the loaded health-reader, durable-JSON,
+effective-config, and bundle-verifier helpers under `lib/`. The source-test profile
+is copied from `docs/operations/runtime-test-qualification.json` in the same source
+export. File presence alone does not establish that its commands ran. The qualifier
+checks the loaded helper paths and the selected health profile against this closure.
+Symlinks, hard links, unexpected files, bytecode, changed file identities, and hash
+drift are refused. Inclusive traversal limits are 64 entries, 32 files, 16 directories
+including the root, depth 4, 1 MiB per file, and 2 MiB total regular-file bytes.
+The CLI refuses an external Python bytecode-cache prefix before importing project
+helpers; `-B` alone prevents cache writes but does not prevent cache reads.
+Malformed or excessively nested bundle JSON produces a content-free refusal.
+
+Bundle validation precedes the health requests and runs again after them. Successful
+bound health observations include only the bundle/effective-record digests, source
+context, and opaque target references in `bundle_binding`; a failed recheck emits
+`bundle_unavailable` and no binding. These are bounded observations, not a filesystem
+lock or a guarantee against subsequent changes. The qualifier and helpers retain
+their runtime-manifest pins; no operator exemption is introduced.
+
+### Export from a committed source
+
+The maintained `release:export` command can include the bundle in its staged,
+exact-commit release. Supply the compatible revisions and complete source selection
+explicitly; the command does not infer compatibility from a sibling checkout:
+
+```sh
+npm run release:export -- --commit "$SOURCE_COMMIT" --release-root "$RELEASE_ROOT" \
+  --qualification-bundle --qualification-source-commit "$SOURCE_COMMIT" \
+  --qualification-arc-commit "$ARC_COMMIT" \
+  --qualification-qfleet-commit "$QFLEET_COMMIT" \
+  --qualification-policy-version whatsoup.deployment-qualification-profile.v1 \
+  --qualification-qualifier deploy/scripts/qualify-health-deployment.py \
+  --qualification-source-test-profile docs/operations/runtime-test-qualification.json \
+  --qualification-deployment-profile deploy/scripts/health-deployment-qualification-profile.json \
+  --qualification-deployment-profile deploy/scripts/deployment-qualification-profile.json \
+  --qualification-health-helper deploy/scripts/lib/health_reader.py \
+  --qualification-health-helper deploy/scripts/lib/durable_json.py \
+  --qualification-health-helper deploy/scripts/lib/deployment_effective_config.py \
+  --qualification-health-helper deploy/scripts/lib/deployment_qualification_bundle.py \
+  --json
+```
+
+The export contains `qualification-bundle.json` and the execution closure under
+`deployment-qualification/`. Its JSON result includes the manifest path and SHA-256
+under `qualificationBundle`. The ordinary release manifest also covers these files.
+Uncommitted changes are excluded; missing required commit inputs prevent publication.
+An exported bundle is an artifact, not evidence that source tests or deployment
+qualification passed. Required source acceptance and compatibility evidence must
+still bind the same immutable revisions before use. Exporting onto a live host,
+installing, activating, and changing service selectors remain separate operations.
+
+The final deployment evaluator remains integration work.
+The currently declared `arc.observation.v1` input still needs a validated producer
+contract carrying target, source, run context, bundle, effective configuration,
+freshness, and required-area evidence. Generic verification records or unbound
+collector observations cannot stand in for that contract. Neither source tests nor
+standalone health qualification establish deployment acceptance. Installation,
+activation, permission changes, and live configuration changes are separate actions.

@@ -273,7 +273,8 @@ def test_bound_effective_record_controls_the_health_target_and_refusal_probes_no
     )
 
     assert receipt["outcome"] == "qualified"
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
     assert calls[0][1] == {
         "expected_sha256": "e" * 64,
         "expected_context": expected_context,
@@ -328,6 +329,42 @@ def test_cli_refuses_a_port_override_when_an_effective_record_is_selected(
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["unresolved"] == ["effective_record_unavailable"]
     assert health_server.requests == []
+
+
+def test_bound_effective_record_change_during_health_observation_refuses_receipt(
+    health_server, monkeypatch, tmp_path,
+):
+    root = tmp_path / "private-root"
+    root.mkdir(mode=0o700)
+    record = root / "effective.json"
+    record.write_text("{}")
+    record.chmod(0o600)
+    calls = []
+
+    def load_record(target, **kwargs):
+        calls.append((target, kwargs))
+        if health_server.requests:
+            raise qualifier.deployment_effective_config.EffectiveConfigRefusal()
+        return _bound_record(health_server.server_port)
+
+    monkeypatch.setattr(qualifier.deployment_effective_config, "load_effective_config", load_record)
+    monkeypatch.setenv("WHATSOUP_HEALTH_TOKEN", VALID_TOKEN)
+
+    with pytest.raises(qualifier.deployment_effective_config.EffectiveConfigRefusal):
+        qualifier.qualify_health_deployment_from_effective_record(
+            profile=json.loads(_HEALTH_PROFILE.read_text()),
+            effective_record_root=root,
+            effective_record_path=record,
+            expected_sha256="e" * 64,
+            expected_context=_bound_context(),
+            expected_target=_bound_target(),
+        )
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert health_server.requests == [
+        None, f"Bearer {qualifier.SYNTHETIC_INVALID_TOKEN}", f"Bearer {VALID_TOKEN}",
+    ]
 
 
 def test_refuses_launch_agent_token_fallback_through_a_nonprivate_parent(tmp_path, monkeypatch):

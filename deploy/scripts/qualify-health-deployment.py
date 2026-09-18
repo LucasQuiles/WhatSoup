@@ -39,12 +39,15 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from lib import deployment_effective_config, durable_json, health_reader  # noqa: E402
+sys.dont_write_bytecode = True
+if sys.pycache_prefix is None:
+    from lib import deployment_effective_config, deployment_qualification_bundle, durable_json, health_reader  # noqa: E402
 
 
 PROFILE_SCHEMA_VERSION = "health.deployment-qualification-profile.v1"
 RECEIPT_SCHEMA_VERSION = "health.deployment-qualification.v1"
 SYNTHETIC_INVALID_TOKEN = "health-qualification-invalid-token"
+DEPLOYMENT_POLICY_VERSION = "whatsoup.deployment-qualification-profile.v1"
 MAX_BODY_BYTES = 64 * 1024
 PUBLIC_SCHEMA_VERSION = "health.public.v1"
 PUBLIC_KEYS = frozenset({"schema_version", "status", "generated_at", "startupNotification"})
@@ -357,11 +360,20 @@ def qualify_health_deployment_from_effective_record(
         raise
     except (OSError, ValueError, TypeError, durable_json.DurableWriteError):
         raise deployment_effective_config.EffectiveConfigRefusal() from None
-    return qualify_health_deployment(
+    receipt = qualify_health_deployment(
         instance,
         selected_profile,
         launch_agent_plist=launch_agent_plist,
     )
+    final_record = deployment_effective_config.load_effective_config(
+        target,
+        expected_sha256=expected_sha256,
+        expected_context=expected_context,
+        expected_target=expected_target,
+    )
+    if final_record != record:
+        raise deployment_effective_config.EffectiveConfigRefusal()
+    return receipt
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -749,7 +761,36 @@ def _inconclusive_receipt(reason: str) -> dict[str, Any]:
     }
 
 
+def _require_loaded_bundle_paths(bundle: deployment_qualification_bundle.QualificationBundle, profile_path: Path) -> None:
+    root = bundle.execution_root
+    if (
+        Path(__file__).absolute() != bundle.qualifier_path
+        or _SCRIPT_DIR != root
+        or profile_path != root / "health-deployment-qualification-profile.json"
+    ):
+        raise deployment_qualification_bundle.QualificationBundleRefusal()
+    required = {
+        bundle.qualifier_path,
+        profile_path,
+        root / "deployment-qualification-profile.json",
+        root / "runtime-test-qualification.json",
+    }
+    for module in (deployment_effective_config, deployment_qualification_bundle, durable_json, health_reader):
+        loaded = Path(module.__file__).absolute()
+        expected = root / "lib" / (module.__name__.rsplit(".", 1)[-1] + ".py")
+        if loaded != expected:
+            raise deployment_qualification_bundle.QualificationBundleRefusal()
+        required.add(loaded)
+    if not required.issubset(bundle.declared_file_paths) or any(
+        path.suffix in {".pyc", ".pyo"} for path in bundle.declared_file_paths
+    ):
+        raise deployment_qualification_bundle.QualificationBundleRefusal()
+
+
 def main() -> int:
+    if sys.pycache_prefix is not None:
+        print(json.dumps(_inconclusive_receipt("bundle_unavailable"), separators=(",", ":")))
+        return 3
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--instance", required=True, help="local instance name; never emitted")
     parser.add_argument("--port", type=int, help="local loopback health port for an unbound observation")
@@ -767,14 +808,31 @@ def main() -> int:
     parser.add_argument("--user-ref")
     parser.add_argument("--instance-ref")
     parser.add_argument("--inventory-host")
+    parser.add_argument("--bundle-root", type=Path)
+    parser.add_argument("--bundle-manifest", type=Path)
+    parser.add_argument("--bundle-sha256")
     args = parser.parse_args()
     try:
-        profile = dict(_load_json(args.profile))
         effective_inputs = (
             args.effective_record_root, args.effective_record, args.effective_record_sha256,
             args.arc_commit, args.qfleet_commit, args.whatsoup_commit, args.run_context_digest,
             args.host_ref, args.user_ref, args.instance_ref, args.inventory_host,
         )
+        bundle = None
+        bundle_inputs = (args.bundle_root, args.bundle_manifest, args.bundle_sha256)
+        if any(value is not None for value in bundle_inputs):
+            if any(value is None for value in (*bundle_inputs, *effective_inputs)):
+                raise deployment_qualification_bundle.QualificationBundleRefusal()
+            bundle = deployment_qualification_bundle.load_qualification_bundle(
+                args.bundle_root, args.bundle_manifest,
+                expected_sha256=args.bundle_sha256,
+                expected_source_commit=args.whatsoup_commit,
+                expected_arc_commit=args.arc_commit,
+                expected_qfleet_commit=args.qfleet_commit,
+                expected_policy_version=DEPLOYMENT_POLICY_VERSION,
+            )
+            _require_loaded_bundle_paths(bundle, args.profile)
+        profile = dict(_load_json(args.profile))
         if any(value is not None for value in effective_inputs):
             if any(value is None for value in effective_inputs) or args.port is not None or args.timeout_seconds is not None:
                 raise deployment_effective_config.EffectiveConfigRefusal()
@@ -809,6 +867,26 @@ def main() -> int:
                 profile,
                 launch_agent_plist=args.launch_agent_plist,
             )
+        if bundle is not None:
+            deployment_qualification_bundle.recheck_qualification_bundle(bundle)
+            receipt["bundle_binding"] = {
+                "manifest_sha256": bundle.bundle_sha256,
+                "effective_record_sha256": args.effective_record_sha256,
+                "context": {
+                    "arc_commit": args.arc_commit,
+                    "qfleet_commit": args.qfleet_commit,
+                    "whatsoup_commit": args.whatsoup_commit,
+                    "run_context_digest": args.run_context_digest,
+                },
+                "target": {
+                    "host_ref": args.host_ref,
+                    "user_ref": args.user_ref,
+                    "instance_ref": args.instance_ref,
+                },
+            }
+    except deployment_qualification_bundle.QualificationBundleRefusal:
+        print(json.dumps(_inconclusive_receipt("bundle_unavailable"), separators=(",", ":")))
+        return 3
     except deployment_effective_config.EffectiveConfigRefusal:
         print(json.dumps(_inconclusive_receipt("effective_record_unavailable"), separators=(",", ":")))
         return 3

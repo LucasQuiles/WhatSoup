@@ -599,6 +599,16 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/deployment_qualification_bundle.py",
+      "sha256": "2ffe5f3bffde2c38d2a380a0b95c10f47c3335043aaf997f2b1761faec639666",
+      "mustContain": [
+        "class QualificationBundleRefusal",
+        "def load_qualification_bundle(",
+        "def recheck_qualification_bundle(",
+        "_MAX_CLOSURE_ENTRIES"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/durable_json_remote.py",
       "sha256": "42f20f670d53b1acaef5a457b088d38a4e85629f6045ac13cb78e71df3832571",
       "mustContain": [
@@ -711,7 +721,7 @@
     },
     {
       "path": "deploy/scripts/qualify-health-deployment.py",
-      "sha256": "a67b93f3ddd04f5211e5f09cded60af1a38703c07ef7d020882c7ed0d649a633",
+      "sha256": "13162afa5090b433726093c42d2b96e5688bf5fe4421ec6c12ab66391235af73",
       "mustContain": [
         "def qualify_health_deployment_from_effective_record(",
         "effective_record_unavailable",
