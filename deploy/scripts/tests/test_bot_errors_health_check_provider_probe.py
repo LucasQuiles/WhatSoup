@@ -2540,6 +2540,13 @@ def _governed_probe_fixture(monkeypatch, tmp_path, configured_command):
         {"PATH": environment["PATH"], "WHATSOUP_PATH_PREPEND": environment["WHATSOUP_PATH_PREPEND"]},
     )
     monkeypatch.setattr(_mod, "loaded_instance_environment", lambda name: dict(environment))
+    # Command-resolution tests must not inspect host credentials or sessions
+    # when the synthetic executable fails. Those diagnostics have separate tests.
+    monkeypatch.setattr(_mod, "provider_credential_fragments", lambda *args: [])
+    monkeypatch.setattr(
+        _mod, "provider_live_session_evidence",
+        lambda *args: {"fresh": False, "active": 0, "alive": 0, "fragments": []},
+    )
     lines = _mod.provider_probe_target_inventory(
         {}, {"providerProbeCommand": configured_command}, "agent-alpha",
         {"type": "agent", "agentOptions": {"provider": "claude-cli"}},
@@ -2583,25 +2590,85 @@ def test_probe_command_resolves_against_the_governed_path_and_runs(monkeypatch, 
 
     Without this, the row above could be satisfied by never resolving anything.
     """
-    seen: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
     real_output = _mod.provider_command_output
 
     def _spy(command, *args, **kwargs):
-        seen["argv"] = list(command)
-        return real_output(command, *args, **kwargs)
+        call: dict[str, object] = {"argv": list(command)}
+        calls.append(call)
+        try:
+            result = real_output(command, *args, **kwargs)
+        except Exception as exc:
+            call["error"] = repr(exc)
+            raise
+        call["result"] = result
+        return result
 
     monkeypatch.setattr(_mod, "provider_command_output", _spy)
     environment, governed_bin, _ambient, lines = _governed_probe_fixture(
         monkeypatch, tmp_path, "claude",
     )
 
-    argv = seen.get("argv")
+    assert len(calls) == 1, (calls, lines)
+    argv = calls[0]["argv"]
     assert argv, "the probe never reached the spawn"
     assert os.path.isabs(argv[0]), f"argv[0] must be absolute, got {argv[0]}"
     assert argv[0].startswith(str(governed_bin)), (
         f"argv[0] must resolve under the governed directory, got {argv[0]}"
     )
+    assert calls[0].get("result") == ("GOVERNED-CLAUDE-RAN\n", "", 0, False), (calls, lines)
+    assert "status=ok rc=0" in lines[0], lines
     assert "GOVERNED-CLAUDE-RAN" in "\n".join(lines), lines
+
+
+@pytest.mark.parametrize(
+    ("outcome", "failure_class", "rc"),
+    [("timeout", "provider_timeout", 124), ("nonzero", "provider_probe_failed", 7)],
+)
+def test_governed_probe_fixture_keeps_failures_without_host_diagnostics(
+    monkeypatch, tmp_path, outcome, failure_class, rc
+):
+    primary_calls: list[list[str]] = []
+    host_calls: list[str] = []
+    diagnostic_reads: list[str] = []
+    expected_binary = tmp_path / "pin" / "bin" / "claude"
+
+    def observed_output(command, *args, **kwargs):
+        if command[0] == str(expected_binary):
+            primary_calls.append(list(command))
+            if outcome == "timeout":
+                raise _mod.subprocess.TimeoutExpired(command, 15)
+            return "", "fixture command failed", rc, False
+        host_calls.append(Path(command[0]).name)
+        return "", "", 1, False
+
+    def observed_fragments(*args):
+        diagnostic_reads.append("credential-context")
+        return []
+
+    def observed_session(*args):
+        diagnostic_reads.append("live-session")
+        return {"fresh": False, "active": 0, "alive": 0, "fragments": []}
+
+    monkeypatch.setattr(_mod, "provider_command_output", observed_output)
+    monkeypatch.setattr(_mod, "provider_settings_fragments", observed_fragments)
+    monkeypatch.setattr(_mod, "provider_claude_state_fragments", observed_fragments)
+    monkeypatch.setattr(_mod, "provider_macos_session_fragments", observed_fragments)
+    monkeypatch.setattr(_mod, "provider_live_session_from_db", observed_session)
+    monkeypatch.setenv("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", "0")
+    monkeypatch.delenv("BOT_ERRORS_DRY_PROVIDER_LIVE_SESSION_JSON", raising=False)
+
+    _environment, _governed_bin, _ambient, lines = _governed_probe_fixture(
+        monkeypatch, tmp_path, "claude",
+    )
+
+    assert primary_calls == [[str(expected_binary), "--print", "Return exactly OK."]]
+    assert len(lines) == 1
+    assert lines[0].startswith("FAIL provider_probe agent-alpha:")
+    assert f"failure_class={failure_class} rc={rc}" in lines[0], lines
+    assert "status=ok" not in lines[0]
+    assert host_calls == [], "the synthetic fixture requested host diagnostic commands"
+    assert diagnostic_reads == [], "the synthetic fixture requested host diagnostic state"
 
 
 def test_probe_directory_predicate_rejects_a_descendant_of_the_workspace(tmp_path):
