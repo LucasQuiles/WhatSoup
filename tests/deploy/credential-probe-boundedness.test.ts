@@ -254,7 +254,7 @@ function resolveBinary(name: string): string | undefined {
 // groups. Capture survivors before finally cleans them; cleanup cannot make a
 // lifecycle assertion pass. Processes that create a new session are outside
 // this boundary and are not claimed as covered by these probes.
-type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | `event-order-natural-${0 | 2 | 143}`;
+type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}`;
 
 // Instrument a fixture-owned string, never the production helper. Each anchor
 // must remain unique so a source change cannot silently remove an observation.
@@ -294,8 +294,11 @@ function observeLifecycleEventOrder(source: string): string {
   ].join('\n'));
   insert('        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"', `        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"\n        ${event('C_COMPLETE cleanup=$cleanup_rc')}`);
   insert('      guard_status=124\n      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
-    `      ${event('D_OUTER_ENTER worker=$worker_pid')}`,
     '      guard_status=124',
+    '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
+    '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
+    '        ;; esac',
+    `      ${event('D_OUTER_ENTER worker=$worker_pid')}`,
     '      _bounded_claim_outcome deadline-outer',
     '      outcome_claim_rc=$?',
     `      ${event('O_OUTER_CLAIM rc=$outcome_claim_rc worker=$worker_pid')}`,
@@ -310,6 +313,9 @@ function observeLifecycleEventOrder(source: string): string {
     `      ${event('AUTHORITY state=$authorization_state')}`,
     '      if [ "$authorization_state" -eq 0 ]; then',
   ].join('\n'));
+  insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);
+  insert('      _bounded_read_deadline_bounded\n      deadline_rc=$?', `      _bounded_read_deadline_bounded\n      deadline_rc=$?\n      ${event('P_DEADLINE_READ deadline_rc=$deadline_rc cleanup_failed=$status_cleanup_failed')}`);
+  insert('    wait "$guard_pid" 2>/dev/null || guard_rc=$?', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    wait "$guard_pid" 2>/dev/null || guard_rc=$?\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
   insert('    _bounded_outer_cleanup\n    trap - EXIT', `    ${event('A worker=$worker_pid worker_rc=$worker_rc guard=$guard_pid guard_rc=$guard_rc deadline_rc=$deadline_rc rc=$rc')}\n    _bounded_outer_cleanup\n    trap - EXIT`);
   return source;
 }
@@ -369,6 +375,16 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 for line in lines[observed_count:]:
                     record['event_observations'].append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
                 observed_count = len(lines)
+                if mode == 'event-order-outcome-candidate-directory' and not authority_released and 'D_INNER_COMMIT' in lines and any(line.startswith('O_RESULT_CLAIM rc=2 ') for line in lines) and any(line.startswith('G_WAIT ') for line in lines):
+                    try:
+                        release = os.open(root / 'event-order-authority-release', os.O_WRONLY | os.O_NONBLOCK)
+                        try: os.write(release, b'release\n')
+                        finally: os.close(release)
+                    except OSError as error:
+                        record['outer_release_error'] = repr(error)
+                    else:
+                        authority_released = True
+                        record['outer_released_after_parent_wait'] = True
                 if mode == 'event-order-expired-reaped':
                     def release_fifo(name):
                         descriptor = os.open(root / name, os.O_WRONLY | os.O_NONBLOCK)
@@ -584,10 +600,13 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if not (root / 'timer-library-return').exists(): raise RuntimeError('library return checkpoint unavailable')
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
+        record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
         child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
+        record['pre_cleanup_inventory_ms'] = int((time.monotonic() - started) * 1000)
     except Exception as error:
         record['error'] = repr(error)
         record['at_error'] = members(session)
@@ -648,11 +667,13 @@ print(json.dumps(record))
 
 function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
-  const eventTrace = mode.startsWith('event-order-') || nearDeadlineTrace;
+  const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
+  const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
+  const eventTrace = mode.startsWith('event-order-') || nearDeadlineTrace || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
-  if (mode.startsWith('outcome-')) {
-    const source = fs.readFileSync(BOUNDED_LIB, 'utf8');
+  if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
+    const source = eventOrderSource ?? fs.readFileSync(BOUNDED_LIB, 'utf8');
     const anchor = '    local outcome_file="${TMPDIR:-/tmp}/whatsoup-bounded-outcome.$$.$control_token"\n';
     const claimAnchor = '    _bounded_claim_outcome() {\n';
     expect(source.split(anchor)).toHaveLength(2);
@@ -660,7 +681,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     outcomeSource = source.replace(anchor, () => anchor + [
       '    local fixture_target',
       '    local fixture_targets=("$outcome_file")',
-      '    case "$EVENT_ORDER_MODE" in outcome-candidate-*) fixture_targets=("$outcome_file.result" "$outcome_file.deadline-outer") ;; esac',
+      '    case "$EVENT_ORDER_MODE" in outcome-candidate-*|event-order-outcome-candidate-*) fixture_targets=("$outcome_file.result" "$outcome_file.deadline-outer") ;; esac',
       '    for fixture_target in "${fixture_targets[@]}"; do',
       '      case "$EVENT_ORDER_MODE" in',
       '        *-symlink) command -p ln -s "$TMPDIR/outcome-victim" "$fixture_target" ;;',
@@ -902,7 +923,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
-    eventOrderSource ?? outcomeSource ?? '. "$1"',
+    outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
     'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
@@ -925,6 +946,11 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  IFS= read -r payload',
     '  builtin printf "%s" "$payload"',
     '  builtin printf "%s\\n" "P_PAYLOAD" >> "$EVENT_ORDER_LOG"',
+    '  case "$1" in event-order-inner-deadline-command-2|event-order-outcome-candidate-directory)',
+    '    trap "exit 2" TERM',
+    '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
+    '    exit 2',
+    '    ;; esac',
     '  if [ "$1" = event-order-deadline-first ] || [ "$1" = event-order-expired-reaped ]; then',
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
     '    exit 0',
@@ -988,6 +1014,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
     const record = JSON.parse(result.stdout);
+    if (outcomeTrace) process.stderr.write('OUTCOME_EVENT_TRACE ' + JSON.stringify(record) + '\n');
+    if (stoppedWorkerTrace) process.stderr.write('STOPPED_WORKER_EVENT_TRACE ' + JSON.stringify(record) + '\n');
     if (nearDeadlineTrace) {
       const events = Array.isArray(record.events)
         ? record.events.filter((event: unknown) => typeof event === 'string' && /^(R_FIFO |O_RESULT_CLAIM |D_OUTER_ENTER|O_OUTER_CLAIM |A )/.test(event))
@@ -1224,6 +1252,65 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
       expect(events[index('C_COMPLETE')], evidence).toBe('C_COMPLETE cleanup=0');
       expect(result.stdout, evidence).toContain(`rc=${status} output=payload`);
     }
+  });
+  it('keeps an authenticated command exit 2 under a real inner deadline', ({ task }) => {
+    const result = runLifecycleProbe('event-order-inner-deadline-command-2');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedInnerDeadlineCommand2: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.transport, evidence).toBe('pipe');
+    expect(result.exit, evidence).toBe(0);
+    expect(result.command_started, evidence).toBe(true);
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('P_PAYLOAD'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('D_INNER_ENTER'), evidence).toBeGreaterThan(index('P_PAYLOAD'));
+    expect(index('D_INNER_COMMIT'), evidence).toBeGreaterThan(index('D_INNER_ENTER'));
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=2');
+    expect(index('O_RESULT_CLAIM'), evidence).toBeGreaterThan(index('D_INNER_COMMIT'));
+    expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=2 guard=\d+ guard_rc=\d+ deadline_rc=124 rc=124$/);
+    expect(index('A'), evidence).toBeGreaterThan(index('O_RESULT_CLAIM'));
+    expect(result.stdout, evidence).toContain('rc=124 output=payload');
+  });
+  it('keeps a malformed candidate as worker failure after a real inner deadline', ({ task }) => {
+    const result = runLifecycleProbe('event-order-outcome-candidate-directory');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedInnerDeadlineMalformedCandidate: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.transport, evidence).toBe('pipe');
+    expect(result.exit, evidence).toBe(0);
+    expect(result.command_started, evidence).toBe(true);
+    expect(result.outcome_substitution, evidence).toBe('event-order-outcome-candidate-directory');
+    expect(result.outcome_paths, evidence).toHaveLength(2);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.outcome_claims, evidence).toEqual(['result', 'deadline-outer']);
+    expect(result.outcome_victim_contents, evidence).toBe('unchanged');
+    expect(result.outcome_directory_children, evidence).toEqual([]);
+    expect(result.outer_release_error, evidence).toBeUndefined();
+    expect(result.outer_released_after_parent_wait, evidence).toBe(true);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('P_PAYLOAD'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('D_INNER_ENTER'), evidence).toBeGreaterThan(index('P_PAYLOAD'));
+    expect(index('D_INNER_COMMIT'), evidence).toBeGreaterThan(index('D_INNER_ENTER'));
+    expect(events[index('O_RESULT_CLAIM')], evidence).toMatch(/^O_RESULT_CLAIM rc=2 result=\d+$/);
+    expect(index('O_RESULT_CLAIM'), evidence).toBeGreaterThan(index('D_INNER_COMMIT'));
+    expect(index('G_WAIT'), evidence).toBeGreaterThan(index('O_RESULT_CLAIM'));
+    expect(index('D_OUTER_ENTER'), evidence).toBeGreaterThan(index('G_WAIT'));
+    expect(events[index('O_OUTER_CLAIM')], evidence).toMatch(/^O_OUTER_CLAIM rc=2 worker=\d+$/);
+    expect(index('O_OUTER_CLAIM'), evidence).toBeGreaterThan(index('D_OUTER_ENTER'));
+    expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=2 guard=\d+ guard_rc=2 deadline_rc=124 rc=2$/);
+    expect(index('A'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
   });
   it('bounds an authorized worker that is stopped before timeout cleanup', () => {
     const result = runLifecycleProbe('worker-stopped-after-authorization');

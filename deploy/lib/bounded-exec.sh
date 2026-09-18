@@ -527,7 +527,11 @@ whatsoup_run_bounded() {
     fi
     if kill -0 "$guard_pid" 2>/dev/null; then
       kill -CONT "$guard_pid" 2>/dev/null
-      kill -TERM "$guard_pid" 2>/dev/null
+      # A failed claim and a real exit 2 share worker status. If the inner
+      # deadline fired without an authenticated outcome, let the guard decide.
+      if [ "$worker_rc" -ne 2 ] || [ "$deadline_rc" -ne 124 ] || _bounded_read_outcome; then
+        kill -TERM "$guard_pid" 2>/dev/null
+      fi
     fi
     wait "$guard_pid" 2>/dev/null || guard_rc=$?
     if [ "$deadline_rc" -eq 2 ] || [ -e "$cleanup_file" ] || [ -L "$cleanup_file" ]; then
