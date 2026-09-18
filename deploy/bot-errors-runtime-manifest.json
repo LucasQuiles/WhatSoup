@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T13:00:00Z",
+  "generatedAt": "2026-09-16T00:00:00Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -10,6 +10,23 @@
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
+      ]
+    },
+    {
+      "path": "deploy/scripts/deployment-qualification-profile.json",
+      "sha256": "16cd78cbd35b0f24fa9df65d686361884747bae2f4fb5ad18eb63328adc224a6",
+      "mustContain": [
+        "arc.observation.v1",
+        "\"required_areas\"",
+        "\"source_test_pass_qualifies_deployment\": false"
+      ]
+    },
+    {
+      "path": "deploy/scripts/health-deployment-qualification-profile.json",
+      "sha256": "3e8746a085b72559b5b5ec38e2cd2114c829bcdb065213ffde6ae4d297cdc42a",
+      "mustContain": [
+        "health.deployment-qualification-profile.v1",
+        "\"timeout_seconds\": 5"
       ]
     },
     {
@@ -562,12 +579,33 @@
     },
     {
       "path": "deploy/scripts/lib/durable_json.py",
-      "sha256": "fbc6320f29aeec6a3e4ef3d2d7625e1dc30e27809bfa103a1ec2a36b019c5fd0",
+      "sha256": "898a216383f40f0e93107eeddd1c3112fed2650250af4c37390b04d9809cb32f",
       "mustContain": [
         "publish_event_json",
         "publish_state_json",
         "require_all_advance",
         "O_NOFOLLOW"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/deployment_effective_config.py",
+      "sha256": "c3d4424e9cd45ef829108d56d4a602059fb3a7f77a7bdd72db9796f6ee4ad00a",
+      "mustContain": [
+        "class EffectiveConfigRefusal",
+        "def load_effective_config(",
+        "expected_sha256",
+        "expected_context",
+        "expected_target"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/deployment_qualification_bundle.py",
+      "sha256": "2ffe5f3bffde2c38d2a380a0b95c10f47c3335043aaf997f2b1761faec639666",
+      "mustContain": [
+        "class QualificationBundleRefusal",
+        "def load_qualification_bundle(",
+        "def recheck_qualification_bundle(",
+        "_MAX_CLOSURE_ENTRIES"
       ]
     },
     {
@@ -682,6 +720,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/qualify-health-deployment.py",
+      "sha256": "13162afa5090b433726093c42d2b96e5688bf5fe4421ec6c12ab66391235af73",
+      "mustContain": [
+        "def qualify_health_deployment_from_effective_record(",
+        "effective_record_unavailable",
+        "def _validate_launch_agent_path(",
+        "durable_json._open_target_parent(",
+        "O_NOFOLLOW",
+        "SYNTHETIC_INVALID_TOKEN"
+      ]
+    },
+    {
       "path": "deploy/scripts/render-watchdog.py",
       "sha256": "b7c684bd207e166b0459d61a400b301602fbff8f0d8704ad879a4f2d4c8601ed",
       "mustContain": [
@@ -714,6 +764,15 @@
       ]
     },
     {
+      "path": "deploy/scripts/write_effective_config_record.py",
+      "sha256": "08f02e4dfd592e4b54b6497d2fa9861ff4bc787e45220e2f7010e86bfd4ef6dd",
+      "mustContain": [
+        "def write_effective_config_record(",
+        "durable_json_target",
+        "EffectiveConfigWriteError"
+      ]
+    },
+    {
       "path": "src/lib/bot-errors-outbox.ts",
       "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
       "mustContain": [
@@ -739,7 +798,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "405975415cbbb023b19d8497afb6c3be09e411611b4dc79623f95b2c17faf60c",
+      "sha256": "d0028239196d640cbde7cc79ffc358f44d5bf2b1deff56391f9b661040db00e6",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
