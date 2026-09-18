@@ -261,7 +261,7 @@ type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped
 function observeLifecycleEventOrder(source: string): string {
   const insert = (anchor: string, replacement: string) => {
     expect(source.split(anchor).length, anchor).toBe(2);
-    source = source.replace(anchor, replacement);
+    source = source.replace(anchor, () => replacement);
   };
   const event = (text: string) => `builtin printf '%s\\n' "${text}" >> "$EVENT_ORDER_LOG"`;
   insert('          sleep "$chunk" || return 2', `${event('S_OUTER budget=$budget worker=$worker_pid')}\n          sleep "$chunk" || return 2`);
@@ -623,8 +623,9 @@ record['helper_vanished_after_probe'] = (root / 'helper-vanished-after-probe').e
 record['helper_signal_refused'] = (root / 'helper-signal-refused').exists()
 record['timer_partial_signal'] = (root / 'timer-partial-signal').read_text() if (root / 'timer-partial-signal').exists() else None
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
-if mode.startswith('event-order-'):
+if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
+    record.setdefault('event_observations', [])
     for line in record['events'][len(record['event_observations']):]:
         record['event_observations'].append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
     record['transport'] = terminal
@@ -638,42 +639,53 @@ if (root / 'cleanup-residual-polls').exists():
 if 'timeout_victim' in record: record['timeout_victim_contents'] = pathlib.Path(record['timeout_victim']).read_text()
 if (root / 'outcome-fixture-ready').exists():
     record['outcome_substitution'] = (root / 'outcome-fixture-ready').read_text()
+    record['outcome_paths'] = (root / 'outcome-fixture-paths').read_text().splitlines()
+    record['outcome_claims'] = (root / 'outcome-claims').read_text().splitlines() if (root / 'outcome-claims').exists() else []
     record['outcome_victim_contents'] = (root / 'outcome-victim').read_text()
     record['outcome_directory_children'] = [str(child.relative_to(root)) for directory in root.glob('whatsoup-bounded-outcome.*') if directory.is_dir() for child in directory.iterdir()]
 print(json.dumps(record))
 `;
 
 function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'zero', terminal = false) {
-  const eventOrderSource = mode.startsWith('event-order-') ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
+  const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
+  const eventTrace = mode.startsWith('event-order-') || nearDeadlineTrace;
+  const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-')) {
     const source = fs.readFileSync(BOUNDED_LIB, 'utf8');
-    const anchor = '    _bounded_claim_outcome() {\n';
+    const anchor = '    local outcome_file="${TMPDIR:-/tmp}/whatsoup-bounded-outcome.$$.$control_token"\n';
+    const claimAnchor = '    _bounded_claim_outcome() {\n';
     expect(source.split(anchor)).toHaveLength(2);
-    outcomeSource = source.replace(anchor, anchor + [
-      '      if [ "$1" = deadline-outer ]; then',
-      '        local fixture_target="$outcome_file"',
-      '        case "$EVENT_ORDER_MODE" in outcome-candidate-*) fixture_target="$outcome_file.deadline-outer" ;; esac',
-      '        case "$EVENT_ORDER_MODE" in',
-      '          *-symlink) command -p ln -s "$TMPDIR/outcome-victim" "$fixture_target" ;;',
-      '          *-fifo) command -p mkfifo "$fixture_target" ;;',
-      '          *-directory) command -p mkdir "$fixture_target" ;;',
-      '          *-existing) builtin printf preexisting > "$fixture_target" ;;',
-      '        esac',
-      '        [ "$?" -eq 0 ] || exit 99',
-      '        builtin printf "%s" "$EVENT_ORDER_MODE" > "$TMPDIR/outcome-fixture-ready"',
-      '      fi',
+    expect(source.split(claimAnchor)).toHaveLength(2);
+    outcomeSource = source.replace(anchor, () => anchor + [
+      '    local fixture_target',
+      '    local fixture_targets=("$outcome_file")',
+      '    case "$EVENT_ORDER_MODE" in outcome-candidate-*) fixture_targets=("$outcome_file.result" "$outcome_file.deadline-outer") ;; esac',
+      '    for fixture_target in "${fixture_targets[@]}"; do',
+      '      case "$EVENT_ORDER_MODE" in',
+      '        *-symlink) command -p ln -s "$TMPDIR/outcome-victim" "$fixture_target" ;;',
+      '        *-fifo) command -p mkfifo "$fixture_target" ;;',
+      '        *-directory) command -p mkdir "$fixture_target" ;;',
+      '        *-existing) builtin printf preexisting > "$fixture_target" ;;',
+      '      esac',
+      '      [ "$?" -eq 0 ] || exit 99',
+      '      builtin printf "%s\\n" "$fixture_target" >> "$TMPDIR/outcome-fixture-paths"',
+      '    done',
+      '    builtin printf "%s" "$EVENT_ORDER_MODE" > "$TMPDIR/outcome-fixture-ready"',
       '',
-    ].join('\n'));
+    ].join('\n')).replace(claimAnchor, () => claimAnchor + '      builtin printf "%s\\n" "$1" >> "$TMPDIR/outcome-claims"\n');
+    expect(outcomeSource.split(anchor)).toHaveLength(2);
   }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded lifecycle '));
   const shim = path.join(root, 'bin');
   fs.mkdirSync(shim);
   if (outcomeSource) fs.writeFileSync(path.join(root, 'outcome-victim'), 'unchanged');
   const authorizationRmRelease = path.join(root, 'authorization-rm-release');
-  if (eventOrderSource) {
+  if (eventTrace) {
     fs.writeFileSync(path.join(root, 'event-order.log'), '', { mode: 0o600 });
-    execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release'].map((name) => path.join(root, name)));
+    if (mode.startsWith('event-order-')) {
+      execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release'].map((name) => path.join(root, name)));
+    }
   }
   if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
     execFileSync(resolveBinary('mkfifo')!, [authorizationRmRelease]);
@@ -942,6 +954,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     ], { encoding: 'utf8', timeout: 15_000, env: {
       ...process.env, PATH: shim, TMPDIR: root,
       EVENT_ORDER_MODE: mode,
+      EVENT_ORDER_TRACE: eventTrace ? '1' : '0',
       EVENT_ORDER_LOG: path.join(root, 'event-order.log'),
       EVENT_ORDER_CLEANUP_RELEASE: path.join(root, 'event-order-cleanup-release'),
       EVENT_ORDER_CHILD_RELEASE: path.join(root, 'event-order-child-release'),
@@ -974,7 +987,18 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
-    return JSON.parse(result.stdout);
+    const record = JSON.parse(result.stdout);
+    if (nearDeadlineTrace) {
+      const events = Array.isArray(record.events)
+        ? record.events.filter((event: unknown) => typeof event === 'string' && /^(R_FIFO |O_RESULT_CLAIM |D_OUTER_ENTER|O_OUTER_CLAIM |A )/.test(event))
+        : [];
+      process.stderr.write('NEAR_DEADLINE_EVENT_TRACE ' + JSON.stringify({
+        stdout: record.stdout,
+        stderr: record.stderr,
+        events,
+      }) + '\n');
+    }
+    return record;
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1247,6 +1271,9 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   it.each(['outcome-symlink', 'outcome-existing', 'outcome-fifo', 'outcome-directory', 'outcome-candidate-symlink', 'outcome-candidate-existing', 'outcome-candidate-fifo', 'outcome-candidate-directory'] as const)('refuses an unauthenticated outcome without reading it: %s', (mode) => {
     const result = runLifecycleProbe(mode);
     expect(result.outcome_substitution, JSON.stringify(result)).toBe(mode);
+    expect(result.outcome_paths, JSON.stringify(result)).toHaveLength(mode.startsWith('outcome-candidate-') ? 2 : 1);
+    expect(result.outcome_claims.length, JSON.stringify(result)).toBeGreaterThan(0);
+    expect(result.outcome_claims.every((event: string) => event === 'result' || event === 'deadline-outer'), JSON.stringify(result)).toBe(true);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
