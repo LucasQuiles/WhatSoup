@@ -40,8 +40,10 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c0ed4ead5b8688d66779bc43333f80a4d9070142fa64981f730c82f396126275",
+      "sha256": "bd53669aeb7652b35807c2021047803d28689f3f09621c07dfcb29796f3b5fc9",
       "mustContain": [
+        "require_acceptance=True",
+        "auditReceipt",
         "append_bounded_jsonl",
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -144,7 +146,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "000ae75c796d672d292f01a987404f2144fc10b1438a03ac9039190fa3a64721",
+      "sha256": "db8fa0093f2b741c2250f4cc310f691cab9bb00c766cd0ca3642185f1864a310",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -309,7 +311,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "223e1964611637e5da6c481f10eeb74f184c6bd94cef05251d95d995d71c1f9e",
+      "sha256": "3485c2866d32dae6c433dd3ee160e400a8c26ed9a701d7dc3b30c1eb8348f1c4",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -615,7 +617,7 @@
     },
     {
       "path": "deploy/scripts/lib/queue_age.py",
-      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
+      "sha256": "b05e5b20dca140867f7f12355b7c894f73c5768eb1b4923d63df9a124ae42cb0",
       "mustContain": [
         "event_file_age_seconds",
         "scan_directory",
@@ -706,7 +708,7 @@
     },
     {
       "path": "deploy/scripts/whatsoup-db-snapshot.py",
-      "sha256": "e7d0cf49032deddc3fb29314f207b592eca6263bb0eb7ec6ea1cfe137940b657",
+      "sha256": "d73f87f3db5a4ac1f9eb7829ac89b46f76bd5d93e2a9f53a7d404a16da79d924",
       "mustContain": [
         "integrity_check",
         "mode=ro",
@@ -768,6 +770,15 @@
         "runtimeAgentHealthSignals",
         "turnRecoveryBlockedUnsafe",
         "autoCompactActiveBackoffScopes"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/send_acceptance.py",
+      "sha256": "129445a01a685824339db972d3047aec11284decf62f05b5bef7ac80e798c2db",
+      "mustContain": [
+        "validate_send_acceptance",
+        "SendAcceptanceUnknown",
+        "RecursionError"
       ]
     }
   ]
