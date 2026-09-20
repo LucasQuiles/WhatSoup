@@ -35,6 +35,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
+import type { RuntimeTurnCompletion } from '../../../src/runtimes/agent/runtime-turn-completion.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 
 // ─── Hoisted per-construction provider-boundary doubles ─────────────────────
@@ -845,14 +847,53 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     // shutdown still succeeds.
     it('cell 7 reclamation gap probe: durable reclamation also releases the wedged SHARED queue (#3374 ask-2 coupling)', async () => {
       const seq = dispatchScheduled();
-      await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      const lane = runtime as unknown as {
+        currentRuntimeTurnContext: RuntimeTurnContext | null;
+        currentRuntimeTurnCompletion: RuntimeTurnCompletion | null;
+        currentInboundSeq: number | undefined;
+      };
+      expect(lane.currentRuntimeTurnContext?.identity.inboundSeq).toBe(seq);
+      const scheduledTurnId = lane.currentRuntimeTurnContext!.identity.logicalTurnId;
+      expect(lane.currentRuntimeTurnCompletion?.context.identity.logicalTurnId).toBe(scheduledTurnId);
+      expect(session.turnInFlight).toBe(true);
+      expect(status(seq)).toBe('processing');
+
+      function expectRetiredGlobalTurn(): void {
+        expect(globalQueue().activeTurn).toBeNull();
+        expect(globalQueue().pending).toBe(0);
+        expect(lane.currentRuntimeTurnContext).toBeNull();
+        expect(lane.currentRuntimeTurnCompletion).toBeNull();
+        expect(lane.currentInboundSeq).toBeUndefined();
+      }
 
       backdate(seq, '-25 hours');
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 1 });
 
+      await vi.waitFor(expectRetiredGlobalTurn, { timeout: GAP_PROBE_BOUND_MS });
+      expect(status(seq)).toBe('failed');
+      expect(failureClass(seq)).toBe('stale_reclaim');
+      expect(session.turnInFlight).toBe(false);
+
+      const messageId = 'msg-interactive-after-shared-reclamation';
+      const iSeq = engine.journalInbound(messageId, toConversationKey(groupJid), groupJid, 'agent');
+      void runtime.handleMessage(makeMsg({ messageId, inboundSeq: iSeq }));
+      const interactiveSession = await waitForInFlightTurn((t) => t.includes('interactive question'));
       await vi.waitFor(() => {
-        expect(globalQueue().activeTurn ?? null).toBeNull();
-      }, { timeout: GAP_PROBE_BOUND_MS });
+        expect(globalQueue().activeTurn?.sourceMessageId).toBe(messageId);
+        expect(lane.currentRuntimeTurnContext?.identity.inboundSeq).toBe(iSeq);
+        expect(lane.currentRuntimeTurnContext?.identity.logicalTurnId).not.toBe(scheduledTurnId);
+        expect(lane.currentRuntimeTurnCompletion?.context.identity.inboundSeq).toBe(iSeq);
+        expect(lane.currentInboundSeq).toBe(iSeq);
+      }, { timeout: 4_000 });
+      expect(status(iSeq)).toBe('processing');
+
+      emitTerminal(interactiveSession, 'On it.');
+      await vi.waitFor(() => expect(status(iSeq)).toBe('complete'), { timeout: 4_000 });
+      await vi.waitFor(expectRetiredGlobalTurn, { timeout: 4_000 });
+      expect(interactiveSession.turnInFlight).toBe(false);
+      expect(status(seq)).toBe('failed');
+      expect(failureClass(seq)).toBe('stale_reclaim');
     });
 
     // #3374 C7 — the managed-provider wedge. `reapWedgedProviderChild` returns

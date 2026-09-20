@@ -574,9 +574,11 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('renews the lease while a long-running replay dispatch is pending (PRESTAGE-T4 point 7)', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId, conversationKey, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease' });
+      // Freeze after SQLite seeds next_attempt_at with its real clock so the
+      // supervisor's fake clock cannot classify this ready job as future work.
+      vi.useFakeTimers();
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim');
       const renewAtMs: number[] = [];
@@ -644,9 +646,9 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('retries a transient renewal failure and resumes successful renewal while dispatch remains pending', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease-transient' });
+      vi.useFakeTimers();
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
       const renewAtMs: number[] = [];
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim')
@@ -703,9 +705,9 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('aborts on confirmed claim-fence loss and never completes or requeues through the stale fence', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-fence-lost' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
@@ -759,9 +761,9 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('aborts before expiry after repeated transient renewal failures and requeues only through the live fence', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-retry-exhausted' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new Error('store remains unavailable');
       });
@@ -829,9 +831,9 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('records an unproven abort distinctly and makes no completion or requeue claim', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-abort-failed' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
@@ -1068,13 +1070,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     }
 
     it('a post-crash backlog of a full scan page, each replay taking ~1s, does not false-alarm during the startup grace window', async () => {
-      vi.useFakeTimers();
       try {
         const inboundSeqByJobId = new Map<number, number>();
         for (let i = 0; i < SCAN_PAGE_SIZE; i += 1) {
           const seeded = crashOneSourceTurn({ suffix: `backlog-${i}` });
           inboundSeqByJobId.set(seeded.jobId, seeded.sourceInboundSeq);
         }
+        vi.useFakeTimers();
 
         // Jobs in a scan page are awaited strictly sequentially (the
         // fair-scheduling loop in runScan()), so at most one dispatchReplay
@@ -1162,7 +1164,6 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     });
 
     it('a single legitimately slow replay spanning well past the old 45s budget does not false-alarm stale_success once the supervisor has an established healthy history', async () => {
-      vi.useFakeTimers();
       try {
         // Mutable, assigned only once the slow job is actually seeded below —
         // dispatchReplay is never invoked before then (the first scanOnce()
@@ -1198,6 +1199,7 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
 
         const seeded = crashOneSourceTurn({ suffix: 'slow-replay' });
         sourceInboundSeq = seeded.sourceInboundSeq;
+        vi.useFakeTimers();
 
         const emitAlertFixed = vi.fn(() => true);
         const deadmanFixed = new TurnRecoveryDeadman({

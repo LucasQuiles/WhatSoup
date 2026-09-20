@@ -420,8 +420,7 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux');
 
     expect(stdout).toBe('canonical-secret');
-    expect(log).toContain('timeout -k 2s 3s secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('secret-tool lookup service whatsoup-health-token user test-instance');
+    expect(log.trim()).toBe('secret-tool lookup service whatsoup-health-token user test-instance');
     expect(stdout).not.toBe('shared-env-token');
   });
 
@@ -429,10 +428,10 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux', 'canonical-miss-legacy-hit');
 
     expect(stdout).toBe('legacy-keyring-token');
-    expect(log).toContain('timeout -k 2s 3s secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('timeout -k 2s 3s secret-tool lookup service whatsoup_health');
-    expect(log).toContain('secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('secret-tool lookup service whatsoup_health');
+    expect(log.trim().split('\n')).toEqual([
+      'secret-tool lookup service whatsoup-health-token user test-instance',
+      'secret-tool lookup service whatsoup_health',
+    ]);
     expect(stdout).not.toBe('shared-env-token');
   });
 

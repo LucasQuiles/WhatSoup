@@ -210,6 +210,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:guard-test-coverage',
       'npm run guard:lint:src',
       'npm run test:tokenomics',
+      'npm run test:deployment-qualification',
       'npm run test:drills',
       'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci',
       'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck',

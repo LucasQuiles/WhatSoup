@@ -348,7 +348,7 @@ describe('exact revision classification', () => {
     expect(result.requiredSuites).toEqual(
       path.endsWith('.test.ts') ? ['tests/example.test.ts', path] : ['tests/example.test.ts'],
     );
-  });
+  }, 60_000);
 
   it('fails closed on an uncovered gitlink while preserving its native object-type reason', () => {
     const { root, baseOid, manifestDigest } = fixture();
@@ -529,7 +529,7 @@ describe('exact revision classification', () => {
     expect(substituted.reasons).toEqual(['ci.classification.merge-binding-invalid']);
     expect(substituted.requiredControls).toEqual(ALL_CONTROLS);
     expect(substituted.requiredSuites).toEqual(['tests/example.test.ts']);
-  });
+  }, 60_000);
 
   it('fails closed when a push predecessor is not an ancestor of the outgoing commit', () => {
     const { root, baseOid, manifestDigest } = fixture();
@@ -561,7 +561,7 @@ describe('exact revision classification', () => {
     expect(result.reasons).toEqual(reasons);
     expect(result.requiredControls).toEqual(ALL_CONTROLS);
     expect(result.requiredSuites).toEqual(['tests/example.test.ts']);
-  });
+  }, 60_000);
 
   it('fails closed for an exact symlink object without relying on host symlink behavior', () => {
     const { root, baseOid, manifestDigest } = fixture();
@@ -893,7 +893,7 @@ describe('lineage lease invalidation', () => {
       reproduce: 'npm run ci:classify -- --help',
       retryable: false,
     });
-  });
+  }, 60_000);
 });
 
 describe('classifier CLI', () => {

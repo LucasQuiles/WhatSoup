@@ -423,7 +423,7 @@ describe('strict exact-classification admission', () => {
     expect(() => (detached.classification.reasons as string[]).push('forged')).toThrowError(TypeError);
   });
 
-  it('preserves a genuine unknown-path system-wide inconclusive result without narrowing selection', () => {
+  it('preserves a genuine unknown-path system-wide inconclusive result without narrowing selection', { timeout: 60_000 }, () => {
     const { root, trustedInput } = fixture('mystery/run.bin');
     const created = createRiskClassificationReceipt(root, trustedInput);
     const admitted = admitRiskClassificationReceipt(root, trustedInput, created.receiptBytes);

@@ -67,6 +67,55 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: injected`), { code });
 }
 
+/**
+ * Inject a CONTENT-read failure for creds.json.
+ *
+ * creds.json is opened once with O_NOFOLLOW and read from that descriptor, so
+ * validation and read cannot race across a symlink swap. The behaviour these
+ * tests pin is unchanged — stat succeeded, content did not — but the READ CALL
+ * has moved twice, and the injection has to follow it or it stops firing:
+ * `readFileSync(path)`, then `readFileSync(fd)`, and now a bounded `readSync`
+ * loop on that descriptor. This injection targets the current seam.
+ *
+ * `onFire` exists because a mock that silently stops matching turns every test
+ * using it green for the wrong reason. That is exactly what happened here: the
+ * previous version keyed on `readFileSync(<descriptor>)`, a call the reader no
+ * longer makes, so the injected fault never fired and the credential read
+ * cleanly. Each case asserts this counter, so the fault is proven reached.
+ */
+function credsReadFails(
+  actual: FsModule,
+  credsPath: string,
+  code: string,
+  onFire: () => void,
+): Partial<FsModule> {
+  let credsFd: number | null = null;
+  return {
+    openSync: vi.fn(((path: Parameters<FsModule['openSync']>[0], ...rest: unknown[]) => {
+      const fd = (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+      if (String(path) === credsPath) credsFd = fd;
+      return fd;
+    })) as unknown as FsModule['openSync'],
+    readSync: vi.fn(((fd: number, ...rest: unknown[]) => {
+      if (credsFd !== null && fd === credsFd) {
+        onFire();
+        throw errno(code);
+      }
+      return (actual.readSync as (...a: unknown[]) => number)(fd, ...rest);
+    })) as unknown as FsModule['readSync'],
+  };
+}
+
+/** Inject a failure at the stat-equivalent: the O_NOFOLLOW open itself. */
+function credsOpenFails(actual: FsModule, credsPath: string, code: string): Partial<FsModule> {
+  return {
+    openSync: vi.fn(((path: Parameters<FsModule['openSync']>[0], ...rest: unknown[]) => {
+      if (String(path) === credsPath) throw errno(code);
+      return (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+    })) as unknown as FsModule['openSync'],
+  };
+}
+
 describe('auth bond: unreadable is not missing (#2292 L3)', () => {
   it('keeps exists TRUE when lstat succeeded but the content read failed', async () => {
     const root = makeRoot();
@@ -74,15 +123,16 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    let fired = 0;
+    const mod = await importGuardWithFsMock(
+      (actual) => credsReadFails(actual, credsPath, 'EACCES', () => { fired += 1; }),
+    );
 
     const snap = guardFor(root, authDir, mod).inspect();
 
+    // Coverage assertion FIRST: the injected read fault was actually reached.
+    // Without it every assertion below passes on a clean read.
+    expect(fired).toBeGreaterThanOrEqual(1);
     // The hash is the one field that genuinely could not be computed.
     expect(snap.creds.sha256).toBeNull();
     // ...but the metadata that DID succeed is kept, not discarded.
@@ -99,16 +149,19 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    let fired = 0;
+    const mod = await importGuardWithFsMock(
+      (actual) => credsReadFails(actual, credsPath, 'EACCES', () => { fired += 1; }),
+    );
 
     const snap = guardFor(root, authDir, mod).inspect();
 
+    expect(fired).toBeGreaterThanOrEqual(1);
     expect(snap.status).toBe('invalid');
+    // EACCES is a HARD read fault, so it keeps the definite `unreadable` class.
+    // Only EAGAIN/EWOULDBLOCK are reclassified as transient by the bounded
+    // reader; a permissions fault says something about the file, and must not
+    // be softened into "not right now".
     expect(snap.issues).toContain('creds_json_unreadable:EACCES');
     // The defect: "missing" sends an operator to re-pair over a permissions fault.
     expect(snap.issues).not.toContain('creds_json_missing');
@@ -122,35 +175,33 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      readFileSync: vi.fn(((path: Parameters<FsModule['readFileSync']>[0], ...rest: unknown[]) => {
-        if (String(path) === credsPath) throw errno('EIO');
-        return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest);
-      })) as unknown as FsModule['readFileSync'],
-    }));
+    let fired = 0;
+    const mod = await importGuardWithFsMock(
+      (actual) => credsReadFails(actual, credsPath, 'EIO', () => { fired += 1; }),
+    );
 
     const snap = guardFor(root, authDir, mod).inspect();
 
+    expect(fired).toBeGreaterThanOrEqual(1);
+    // EIO likewise stays definite. The bounded reader rethrows anything that is
+    // neither EINTR nor EAGAIN/EWOULDBLOCK, so it reaches the outer handler and
+    // is reported through `creds.error` as an unreadable credential.
     expect(snap.issues).toContain('creds_json_unreadable:EIO');
     expect(snap.issues).not.toContain('creds_json_invalid_json');
     expect(snap.issues).not.toContain('creds_json_empty');
   });
 
-  // The OTHER failure point. Above, lstat succeeded and the read failed; here
-  // lstat itself fails, so existence was never established — `exists` stays
-  // false, but with an errno, which is what separates it from plain absence.
-  it('marks a non-ENOENT lstat failure unreadable rather than missing', async () => {
+  // The OTHER failure point. Above, the stat succeeded and the read failed;
+  // here the O_NOFOLLOW open itself fails, so existence was never established —
+  // `exists` stays false, but with an errno, which is what separates it from
+  // plain absence.
+  it('marks a non-ENOENT open failure unreadable rather than missing', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     writeAuth(authDir);
     const credsPath = join(authDir, 'creds.json');
 
-    const mod = await importGuardWithFsMock((actual) => ({
-      lstatSync: vi.fn(((path: Parameters<FsModule['lstatSync']>[0]) => {
-        if (String(path) === credsPath) throw errno('EACCES');
-        return (actual.lstatSync as (...a: unknown[]) => unknown)(path);
-      })) as unknown as FsModule['lstatSync'],
-    }));
+    const mod = await importGuardWithFsMock((actual) => credsOpenFails(actual, credsPath, 'EACCES'));
 
     const snap = guardFor(root, authDir, mod).inspect();
 

@@ -7,8 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isNonEmptyString } from '../src/lib/type-guards.ts';
 import {
   createReleaseSnapshotDriftReport,
+  parseReleaseSnapshotManifest,
   type ReleaseSnapshotDriftIssue,
   type ReleaseSnapshotDriftReport,
+  type ReleaseSnapshotManifest,
 } from './release-snapshot-plan.ts';
 import { emitReleaseAlert, type ReleaseAlertEmitResult } from './lib/live-release-alert.ts';
 import {
@@ -246,11 +248,144 @@ function assess(report: ReleaseSnapshotDriftReport, selection?: LaunchdReleaseSe
   return { report, issues, ok: report.ok && issues.length === 0 };
 }
 
-function alertSummary(assessment: DriftAssessment): string {
-  const name = path.basename(assessment.report.releasePath);
-  if (assessment.ok) return `release drift recovered: ${name}`;
+/**
+ * The identity token carried in the alert text: the leading hex of the ratified
+ * release identity, or the sentinel unchanged.
+ *
+ * Truncated rather than whole because the summary is human-facing incident text
+ * and 64 hex characters would dominate it. Eight trades collision resistance
+ * for that readability: it puts 32 bits of release identity into the three
+ * dispatcher fingerprints that read this text (`storm_fingerprint`,
+ * `recovery_episode_fingerprint` and `recovery_duplicate_fingerprint`).
+ *
+ * There is an on-point precedent against a short identity prefix in a grouping
+ * key, and it is cited here rather than left for a reader to find.
+ * `deploy/scripts/lib/bot_errors_redaction.py` names both widths as constants
+ * (`LEGACY_DISPLAY_DIGEST_CHARS = 8`, `LEGACY_FULL_DIGEST_CHARS = 64`), and
+ * `alert_text_for_fingerprint` renders with the 64 one because the display
+ * rendering had put identity on an eight-character prefix and two incidents
+ * sharing that prefix merged into one. A test pins that renderer
+ * (`deploy/scripts/tests/test_bot_errors_legacy_alert_content.py:784-785`).
+ * Read its scope exactly: it pins the fingerprint renderer's OWN digest field,
+ * not the summary field this token travels in, and no test asserts a width
+ * floor on the summary. The precedent is an argued analogy about entropy in a
+ * grouping key, not a constraint this change breaks.
+ *
+ * Eight is accepted anyway, for reasons specific to what this token identifies.
+ * It identifies a RELEASE, and the fleet is expected to run only a handful
+ * of distinct releases at once, so a 32-bit prefix collision between two
+ * concurrently alerting releases is negligible under that expectation
+ * rather than merely improbable per pair. The full 64-hex identity
+ * still rides the event's typed diagnostics (`desired_release_identity`, built
+ * in `typedDriftDiagnostics` below), so the truncation is not the only copy.
+ * The residual cost is disclosed rather than hidden: two distinct releases
+ * sharing a token would group as one incident, and no test constructs that
+ * collision.
+ *
+ * Widening is a judgement about the same trade-off rather than something the
+ * redactor forbids, and it is a THREE-site change rather than a two-site one:
+ * the slice below, the `RELEASE_IDENTITY_TOKEN_LENGTH` constant in the focused
+ * test file, and the hardcoded width in that file's anchored token-shape regex,
+ * which is a second deliberate oracle and does not read the constant.
+ *
+ * No redaction rule bounds the width, and that is worth stating because the
+ * obvious reading is the wrong one. `PHONE_LIKE_RE`
+ * (`deploy/scripts/lib/bot_errors_redaction.py`) does match a long bare digit
+ * run, but `redact_phone_like_match` then declines it: the candidate has to
+ * start with `+` or contain one of `[\s().-]` before the ten-to-fifteen digit
+ * test is ever reached (`bot_errors_redaction.py:97-98`). A bare hex or digit
+ * token has neither, so it passes through at any length. No other rule reaches
+ * it either: every digest-shaped pattern there is anchored to a prefix (`AKIA`,
+ * `gh?_`, `eyJ`) that a bare hex slice does not have.
+ *
+ * What is load-bearing is where the token goes, not how long it is. It is
+ * appended last so it cannot merge with the parenthesised issue count: the
+ * parentheses and the space are separator characters `PHONE_LIKE_RE` accepts,
+ * so a token placed before the count contributes its own digits to a single
+ * candidate, and an all-digit token that reaches the ten-digit floor that way
+ * IS redacted. It is appended after a space rather than a comma so the
+ * dispatcher's `normalize_token_lists`
+ * (`deploy/scripts/bot-errors-dispatcher.py:6009-6014`) never reorders it; see
+ * `alertSummary` below for why that matters to grouping.
+ *
+ * The sentinel is passed through as the literal word, never digested. Hashing it
+ * would produce a token indistinguishable in shape from a real identity, so an
+ * operator reading the incident could not tell an attested release from one that
+ * had no readable manifest.
+ *
+ * The early return for the sentinel is a deliberate explicit contract rather
+ * than a branch the current behaviour needs. `UNKNOWN_RELEASE_IDENTITY` is
+ * seven characters, so the slice below already returns it unchanged, and
+ * deleting the guard leaves this suite green. It is kept so the intent survives
+ * a sentinel longer than the token width; no test in this file asserts it,
+ * because none can distinguish its presence.
+ */
+function releaseIdentityToken(identity: string): string {
+  if (identity === UNKNOWN_RELEASE_IDENTITY) return UNKNOWN_RELEASE_IDENTITY;
+  return identity.slice(0, 8);
+}
+
+/**
+ * The alert text, carrying the release identity but no release directory name
+ * (#2385 L1b).
+ *
+ * The summary is the only free-text input to the dispatcher's
+ * `storm_fingerprint` (source, severity, normalised summary). While it named the
+ * release directory, two hosts running the SAME bytes under different directory
+ * names produced two fingerprints and two incidents, which is exactly the
+ * correlation the path-free identity above exists to establish. The name is an
+ * accident of a rollout, so it is gone from the text.
+ *
+ * What replaces it is the identity token, and it deliberately DOES key the
+ * storm. Dropping the basename without it left the text varying only by issue
+ * count, so two unrelated releases drifting by the same amount would have
+ * grouped into one incident. The token restores that discrimination on the
+ * property that actually identifies a release. It is appended after a space, not
+ * a comma: the dispatcher's `normalize_token_lists` sorts comma-joined runs, so
+ * a comma would let the token reorder against its neighbours and make the
+ * emitted text differ from the grouped text for no gain.
+ *
+ * Coverage limit, stated rather than implied, and it is ONE drift kind rather
+ * than two. For `manifest-missing` there is no readable manifest:
+ * `createReleaseSnapshotDriftReport` returns that kind early, before parsing
+ * anything, so `readManifestFacts` below fails its own read, the identity is the
+ * sentinel, and the token is that same constant on every host. Those events
+ * still group across unrelated releases.
+ *
+ * `release-missing` is NOT such a kind, despite the adjacent name. It is pushed
+ * inside `collectReleaseSnapshotDrift`, which is reached only after the manifest
+ * has been read and parsed, so the manifest exists and is well formed,
+ * `readManifestFacts` returns a real 64-hex identity, and the token is a
+ * per-release digest that discriminates exactly as every other kind's does.
+ * With the default manifest path the two kinds never compete: the manifest lives
+ * inside the release directory, so a missing release directory makes the
+ * manifest missing too and the kind reported is `manifest-missing`.
+ * `release-missing` is reachable through the documented `--manifest` override,
+ * and a test pins its token there as a real digest rather than the sentinel.
+ *
+ * Discrimination is restored for every drift kind except `manifest-missing`,
+ * and except any event whose identity computation degrades to the sentinel:
+ * `readManifestFacts` re-reads the manifest the drift report already read, so a
+ * manifest that stops being readable or parseable in between either fails that
+ * read or leaves `releaseIdentityFromManifestText` with unparseable JSON or a
+ * rejected schema, and `containedReleaseIdentity` below degrades any unexpected
+ * error to the sentinel rather than let it suppress the alert.
+ *
+ * The issue count stays, and it is a property of the drift rather than of the
+ * release. Two hosts running the same release that drift to different extents
+ * report different counts, and those alerts do land in different groups: what
+ * groups is hosts that drifted the same way on the same release, not every host
+ * running it.
+ *
+ * Cost, accepted by the owner ruling rather than overlooked: alerts emitted
+ * before this change and alerts emitted after fingerprint differently, so one
+ * 120-second storm window at cutover groups the two texts separately.
+ */
+function alertSummary(assessment: DriftAssessment, facts: ReleaseManifestFacts): string {
+  const token = releaseIdentityToken(facts.identity);
+  if (assessment.ok) return `release drift recovered release ${token}`;
   const count = assessment.issues.length;
-  return `release drift detected: ${name} (${count} issue${count === 1 ? '' : 's'})`;
+  return `release drift detected (${count} issue${count === 1 ? '' : 's'}) release ${token}`;
 }
 
 function alertEvidence(assessment: DriftAssessment): string {
@@ -265,15 +400,207 @@ function alertEvidence(assessment: DriftAssessment): string {
   }, null, 2);
 }
 
+const RELEASE_IDENTITY_DOMAIN = 'whatsoup-release-identity-v1';
+/** Unchanged #2458 domain: the digest over the manifest FILE bytes. */
+const MANIFEST_DIGEST_DOMAIN = 'whatsoup-release-drift-manifest-v1';
+/** Explicit sentinel for an identity that cannot be attested, never an empty string. */
+const UNKNOWN_RELEASE_IDENTITY = 'unknown';
+
+/** One member of the closed drift-kind union carried on the event. */
+export type DriftKindMember = LiveReleaseDriftIssue['kind'];
+
+/**
+ * The `drift_kind` field: `none`, one kind, or a comma-joined ascending join of
+ * kinds.
+ *
+ * What this type guarantees: the value is `none`, or it BEGINS with a member of
+ * the closed kind union. What it does NOT guarantee: the tail after the first
+ * comma. TypeScript rejects a recursive template literal (TS2456) and the
+ * non-recursive expansion of nine kinds exceeds the union size limit, so the
+ * tail is `${string}` and the type cannot reject `file-sha256-drift,anything`.
+ * Boundedness of the tail is a RUNTIME property, asserted on the emitted value
+ * in the two-kind test rather than claimed here.
+ */
+export type DriftKindField = 'none' | DriftKindMember | `${DriftKindMember},${string}`;
+
+/**
+ * The manifest-derived facts this invocation needs, taken from ONE read of the
+ * manifest. Deriving them from two reads would let the manifest change between
+ * them and let the log record and the event disagree about the same release.
+ *
+ * The drift report performs its own read of the same file. That second read is
+ * kept separate BY CHOICE, not by contract necessity: reusing the report's
+ * parse would mean rebuilding the report here, and one duplicated read is a
+ * smaller cost than a duplicated report builder.
+ */
+interface ReleaseManifestFacts {
+  /** sha256 over the manifest FILE bytes — the pre-existing #2458 semantics. */
+  desiredDigest: string;
+  /** Path-free identity over the PARSED manifest, or the unknown sentinel. */
+  identity: string;
+  /**
+   * Class name of an unexpected error raised while computing the identity, or
+   * null. The class name only — a message could carry a path or file content
+   * into the event.
+   */
+  identityErrorClass: string | null;
+}
+
+/**
+ * Path-free release identity (#2385 C1): a digest over the identity-bearing
+ * fields of the VALIDATED manifest — schema version, source ref and commit, the
+ * ascending repo-relative file list with hashes and sizes, and the required
+ * outputs. `release.path`, `release.createdAt` and `rollback.path` are excluded
+ * on purpose: the release directory name is an accident of a rollout, so two
+ * assets deployed from the same bytes under different directory names are the
+ * same release and must correlate.
+ *
+ * The input is the manifest the schema parser returns, not raw JSON, so the
+ * parser's normalisations (repo-relative paths, lowercased hashes) are part of
+ * the identity and a manifest that fails validation yields the sentinel rather
+ * than a digest over whatever fields happened to be present.
+ *
+ * This is deliberately NOT `desiredReleaseDigest`, which hashes the manifest
+ * FILE. That digest answers a different question (did this invocation see the
+ * same manifest bytes?) and moves with the directory name, so it can never
+ * correlate two differently-named assets.
+ */
+export function releaseIdentityFromManifestText(manifestText: string): string {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(manifestText);
+  } catch (error) {
+    if (error instanceof SyntaxError) return UNKNOWN_RELEASE_IDENTITY;
+    throw error;
+  }
+  let manifest: ReleaseSnapshotManifest;
+  try {
+    manifest = parseReleaseSnapshotManifest(payload);
+  } catch (error) {
+    // The parser rejects every schema violation with a plain Error. A TypeError
+    // or RangeError from here is a defect in this script, not a bad manifest,
+    // and must surface instead of being laundered into the sentinel.
+    if (error instanceof TypeError || error instanceof RangeError) throw error;
+    return UNKNOWN_RELEASE_IDENTITY;
+  }
+  // Encoded as an array of objects rather than a delimiter join: a joined
+  // string admits crafted path/hash/size combinations that collide with a
+  // different release, and JSON keeps every field boundary explicit.
+  const canonical = JSON.stringify({
+    schemaVersion: manifest.schemaVersion,
+    sourceRef: manifest.source.ref,
+    sourceCommit: manifest.source.commit,
+    files: [...manifest.files]
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+      .map((file) => ({ path: file.path, sha256: file.sha256, sizeBytes: file.sizeBytes })),
+    requiredOutputs: [...manifest.requiredOutputs].sort(),
+  });
+  return domainDigest(RELEASE_IDENTITY_DOMAIN, canonical);
+}
+
+/**
+ * Read the manifest once and derive both facts from the same bytes. An
+ * unreadable manifest is not an error here: the drift report has already
+ * classified that as `manifest-missing`, and both facts fail closed to the
+ * sentinel.
+ */
+function readManifestFacts(manifestPath: string): ReleaseManifestFacts {
+  let manifestText: string;
+  try {
+    manifestText = readFileSync(manifestPath, 'utf8');
+  } catch {
+    return { desiredDigest: UNKNOWN_RELEASE_IDENTITY, identity: UNKNOWN_RELEASE_IDENTITY, identityErrorClass: null };
+  }
+  const identity = containedReleaseIdentity(() => releaseIdentityFromManifestText(manifestText));
+  return {
+    desiredDigest: domainDigest(MANIFEST_DIGEST_DOMAIN, manifestText),
+    identity: identity.identity,
+    identityErrorClass: identity.errorClass,
+  };
+}
+
+/**
+ * Containment boundary for the identity computation. The identity is a side
+ * fact; the drift alert is the product. `releaseIdentityFromManifestText`
+ * deliberately re-throws anything that is not a parse or schema failure, so
+ * without this boundary an unexpected error there would propagate out of
+ * `checkLiveReleaseDrift` and suppress the alert the check exists to raise.
+ *
+ * Any unexpected error therefore degrades to the sentinel identity plus the
+ * error's class name, and the alert still goes out.
+ */
+export function containedReleaseIdentity(compute: () => string): { identity: string; errorClass: string | null } {
+  try {
+    return { identity: compute(), errorClass: null };
+  } catch (error) {
+    const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    return { identity: UNKNOWN_RELEASE_IDENTITY, errorClass };
+  }
+}
+
+/**
+ * The bounded drift kind for the event: the ascending set of issue kinds
+ * present, or `none` when the release verifies. Every member comes from the
+ * closed `LiveReleaseDriftIssue` union, so the result is a closed-enum join and
+ * carries no content. Deliberately the same set `conditionFingerprint` is built
+ * from, rather than a new precedence ordering no test pins.
+ */
+function driftKind(issues: readonly LiveReleaseDriftIssue[]): DriftKindField {
+  const kinds: DriftKindMember[] = [...new Set(issues.map((issue) => issue.kind))].sort();
+  const [first, ...rest] = kinds;
+  if (first === undefined) return 'none';
+  return rest.length === 0 ? first : `${first},${rest.join(',')}`;
+}
+
+/**
+ * Typed drift facts as structured event data (#2385 L1a). They ride the emit
+ * helper's existing repeatable `--diagnostic key=value` channel, which lands
+ * them verbatim in the event's `diagnostics` object. This channel leaves the
+ * human-readable summary untouched: `storm_fingerprint` keys on source,
+ * severity and the normalized summary only, so adding diagnostics cannot re-key
+ * an in-flight incident.
+ *
+ * Scoped to the diagnostics channel, and only to it. L1b since put the release
+ * identity token into the summary itself, where it deliberately DOES key the
+ * storm — see `releaseIdentityToken` and `alertSummary` above. Nothing here
+ * says identity stays out of the grouping key; it says this channel is not how
+ * identity gets there.
+ */
+function typedDriftDiagnostics(assessment: DriftAssessment, facts: ReleaseManifestFacts): string[] {
+  // The observed tree identity is only attestable when verification passed —
+  // the same rule the structured log record already applies. Reconstructing a
+  // drifted tree's real identity needs a re-walk this leaf does not do, so it
+  // stays the explicit sentinel rather than a guess.
+  const observed = assessment.ok && facts.identity !== UNKNOWN_RELEASE_IDENTITY
+    ? facts.identity
+    : UNKNOWN_RELEASE_IDENTITY;
+  // Annotated, not inferred: if driftKind is ever retyped to return a bare
+  // `string`, this assignment stops compiling. It is the only type-level guard
+  // on the field, so it is deliberately a declaration and not an inline call.
+  const kindField: DriftKindField = driftKind(assessment.issues);
+  const diagnostics = [
+    `drift_kind=${kindField}`,
+    `desired_release_identity=${facts.identity}`,
+    `observed_release_identity=${observed}`,
+  ];
+  if (facts.identityErrorClass !== null) diagnostics.push(`release_identity_error=${facts.identityErrorClass}`);
+  return diagnostics;
+}
+
 function runEmit(
   options: LiveReleaseDriftAlertOptions,
   assessment: DriftAssessment,
   eventType: 'alert' | 'clear',
+  facts: ReleaseManifestFacts,
 ): ReleaseAlertEmitResult {
   return emitReleaseAlert({ ...options, eventId: randomUUID() }, {
-    summary: alertSummary(assessment),
+    summary: alertSummary(assessment, facts),
     evidence: alertEvidence(assessment),
-    diagnostics: [`release=${assessment.report.releasePath}`, `manifest=${assessment.report.manifestPath}`],
+    diagnostics: [
+      `release=${assessment.report.releasePath}`,
+      `manifest=${assessment.report.manifestPath}`,
+      ...typedDriftDiagnostics(assessment, facts),
+    ],
     severity: 'critical',
   }, eventType);
 }
@@ -285,15 +612,7 @@ function domainDigest(domain: string, value: string): string {
   return createHash('sha256').update(`${domain}|${value}`).digest('hex');
 }
 
-function desiredReleaseDigest(manifestPath: string): string {
-  try {
-    return domainDigest('whatsoup-release-drift-manifest-v1', readFileSync(manifestPath, 'utf8'));
-  } catch {
-    return 'unknown';
-  }
-}
-
-function countIssueKinds(issues: readonly { kind: string }[]): Record<string, number> {
+function countIssueKinds(issues: readonly LiveReleaseDriftIssue[]): Record<string, number> {
   const issueKinds: Record<string, number> = {};
   for (const issue of issues) issueKinds[issue.kind] = (issueKinds[issue.kind] ?? 0) + 1;
   return issueKinds;
@@ -304,10 +623,11 @@ function buildLogRecord(input: {
   alertKind: 'alert' | 'clear' | null;
   emitResult: ReleaseAlertEmitResult | null;
   emitFailedOutcome: boolean;
+  manifestFacts: ReleaseManifestFacts;
   now: () => Date;
 }): LiveReleaseDriftLogRecord {
   const issueKinds = countIssueKinds(input.assessment.issues);
-  const desired = desiredReleaseDigest(input.assessment.report.manifestPath);
+  const desired = input.manifestFacts.desiredDigest;
   // The observed tree identity is only attestable when verification passed.
   const observed = input.assessment.ok && desired !== 'unknown' ? desired : 'unknown';
   const kindSet = Object.keys(issueKinds).sort().join(',');
@@ -344,13 +664,16 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
   // the false pass this check exists to catch; treating it as ok would emit a
   // clear event under --clear-on-ok, which is worse than staying silent.
   const assessment = assess(report, options.launchdSelection);
+  // Read the manifest once, before emitting, so the event and the log record
+  // describe the same bytes even if the release changes underneath us.
+  const manifestFacts = readManifestFacts(assessment.report.manifestPath);
   const alertKind: 'alert' | 'clear' | null = assessment.ok ? (options.clearOnOk ? 'clear' : null) : 'alert';
   let emitResult: ReleaseAlertEmitResult | null = null;
   if (alertKind && options.emit) {
-    emitResult = runEmit(options, assessment, alertKind);
+    emitResult = runEmit(options, assessment, alertKind, manifestFacts);
   }
   const emitFailedOutcome = Boolean(emitResult && emitResult.status !== 0);
-  const record = buildLogRecord({ assessment, alertKind, emitResult, emitFailedOutcome, now: options.now ?? (() => new Date()) });
+  const record = buildLogRecord({ assessment, alertKind, emitResult, emitFailedOutcome, manifestFacts, now: options.now ?? (() => new Date()) });
   const selection = options.launchdSelection;
   return {
     check: 'live-release-drift-alert',
