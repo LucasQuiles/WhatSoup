@@ -293,6 +293,9 @@ jobs:
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
         run: bash deploy/scripts/run-sentinel-tests.sh
 
+      - name: Deployment qualification source suite
+        run: npm run test:deployment-qualification
+
       - name: BOT ERRORS full behavioral suite gate
         run: bash deploy/scripts/run-bot-errors-full-suite.sh
 
