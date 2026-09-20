@@ -7573,6 +7573,76 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it('reports OpenCode progress for its live child and ignores stale-child output after handoff', async () => {
+    let now = 20_000;
+    const firstChild = makeMockChild(12011);
+    const secondChild = makeMockChild(12012);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    try {
+      const gate = new ProviderExecutionGate({ now: () => now });
+      const first = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'first-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      const second = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'second-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      await first.spawnSession();
+      await second.spawnSession();
+
+      await first.sendTurn('first');
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('first-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_010;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'first live progress' },
+      })}\n`));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      const secondTurn = second.sendTurn('second');
+      await Promise.resolve();
+      now = 20_020;
+      firstChild._closeCb?.(0, null);
+      await secondTurn;
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('second-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_030;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'stale progress' },
+      })}\n`));
+      expect(gate.snapshot()).toMatchObject({
+        activePhase: 'executing',
+        progressAgeMs: 10,
+      });
+
+      secondChild._closeCb?.(0, null);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.mocked(spawn).mockReset();
+    }
+  });
+
   it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
     const firstChild = makeMockChild(12005);
     const secondChild = makeMockChild(12006);

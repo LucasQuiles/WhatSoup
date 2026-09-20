@@ -2910,7 +2910,28 @@ export class SessionManager {
     const lease = this.childExecutionLeases.get(child);
     if (!lease) return;
     this.childExecutionLeases.delete(child);
+    lease.setPhase('terminalizing');
+    lease.markProgress();
+    lease.setPhase('cleanup');
+    lease.markProgress();
     lease.release();
+  }
+
+  /**
+   * Progress is accepted only from the exact child that still owns this
+   * session generation. The lease's own generation fence then prevents a
+   * released holder from changing its FIFO successor.
+   */
+  private markProviderExecutionProgress(
+    child: ReturnType<typeof spawn>,
+    generation: SessionGenerationIdentity | null,
+    phase?: 'executing',
+  ): void {
+    if (!this.isCurrentPersistentChild(child, generation)) return;
+    const lease = this.childExecutionLeases.get(child);
+    if (!lease) return;
+    if (phase) lease.setPhase(phase);
+    lease.markProgress();
   }
 
   /**
@@ -3544,39 +3565,6 @@ export class SessionManager {
         throw err;
       }
 
-      const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
-        if (this.activeProviderTurnToken !== providerTurnToken) return;
-        if (this.provider === 'opencode-cli') {
-          if (pendingOpenCodeResult !== null && event.type !== 'result') {
-            if (openCodeStopCandidateCount === 1) {
-              log.warn({
-                provider: this.provider,
-                chatJid: this.chatJid,
-                sessionId: this.sessionId,
-              }, 'OpenCode stop candidate superseded by continued provider output');
-            }
-            pendingOpenCodeResult = null;
-            pendingOpenCodeText = [];
-            sawResult = false;
-          }
-          if (event.type === 'assistant_text') {
-            pendingOpenCodeText.push(event);
-            this.tickWatchdog();
-            return;
-          }
-          if (event.type === 'result') {
-            openCodeStopCandidateCount += 1;
-            pendingOpenCodeResult = event;
-            sawResult = true;
-            this.tickWatchdog();
-            return;
-          }
-        } else if (event.type === 'result') {
-          sawResult = true;
-        }
-        this.handleProviderEvent(event);
-      };
-
       const child = (() => {
         try {
           cwd = this.admitConfiguredCwd();
@@ -3619,6 +3607,41 @@ export class SessionManager {
           : `${childGeneration.managerId}:${childGeneration.generation}:${randomUUID()}`,
       );
       this.child = child;
+      this.markProviderExecutionProgress(child, childGeneration, 'executing');
+
+      const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
+        if (this.activeProviderTurnToken !== providerTurnToken) return;
+        this.markProviderExecutionProgress(child, childGeneration);
+        if (this.provider === 'opencode-cli') {
+          if (pendingOpenCodeResult !== null && event.type !== 'result') {
+            if (openCodeStopCandidateCount === 1) {
+              log.warn({
+                provider: this.provider,
+                chatJid: this.chatJid,
+                sessionId: this.sessionId,
+              }, 'OpenCode stop candidate superseded by continued provider output');
+            }
+            pendingOpenCodeResult = null;
+            pendingOpenCodeText = [];
+            sawResult = false;
+          }
+          if (event.type === 'assistant_text') {
+            pendingOpenCodeText.push(event);
+            this.tickWatchdog();
+            return;
+          }
+          if (event.type === 'result') {
+            openCodeStopCandidateCount += 1;
+            pendingOpenCodeResult = event;
+            sawResult = true;
+            this.tickWatchdog();
+            return;
+          }
+        } else if (event.type === 'result') {
+          sawResult = true;
+        }
+        this.handleProviderEvent(event);
+      };
 
       // OpenCode reads a non-TTY stdin stream as its run message. Keep the
       // system prompt, continuity context, and user text out of process argv,
