@@ -338,6 +338,18 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
+/**
+ * Structured timing exemption (test-integrity `js-sleep-in-test`): the held
+ * documents test is an ABSENCE proof — while the scope awaits the previous
+ * answer's delivery echo, the queued head must neither dispatch nor be
+ * rejected. The coordinator re-polls every 25 ms and a correct wait changes no
+ * durable or session state, so the only observable to poll is the very
+ * dispatch whose absence is asserted. Real time must cover several polls.
+ */
+function TIMING(waitMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
 describe('deferred-turn admission (#3295 S2)', () => {
   let db: Database;
   let engine: DurabilityEngine;
@@ -572,7 +584,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     for (const [i, content] of contents.entries()) {
       seqs.push(await arriveFollower(`wamid-document-${i}`, { contentType: 'document', content }));
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await TIMING(100);
     expect(seqs.map(status)).toEqual(contents.map(() => 'processing'));
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
     expect(admissionRejectedAlerts()).toBe(0);
@@ -635,7 +647,8 @@ describe('deferred-turn admission (#3295 S2)', () => {
     makeRuntime({ sessionScope: 'per_chat' });
     const jobId = seedOutstandingRecoveryJob(true);
     const seq = await arriveFollower('waiting-then-claimed', { contentType: 'document' });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The live queue calls the echo wait synchronously, so an active head has already polled once.
+    await waitForLiveQueue(seq);
     expect(status(seq)).toBe('processing');
     engine.claimTurnRecoveryJob(jobId, {
       logicalTurnId: 'turn-crashed-source-recovery', managerId: 'manager-recovery-owner', generation: 1,
@@ -652,7 +665,6 @@ describe('deferred-turn admission (#3295 S2)', () => {
     clock.mockReturnValue(1_780_000_000_000);
     const seq = await arriveFollower('waiting-timeout', { contentType: 'document' });
     const { queue } = await waitForLiveQueue(seq);
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(status(seq)).toBe('processing');
     clock.mockReturnValue(1_780_000_010_000);
     await vi.waitFor(() => expect(status(seq)).toBe('failed'));
