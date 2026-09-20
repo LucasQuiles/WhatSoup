@@ -40,7 +40,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "bd53669aeb7652b35807c2021047803d28689f3f09621c07dfcb29796f3b5fc9",
+      "sha256": "478a3144cee77a7da60e59c595cb54a9619d1f80185bcda6371c08850e2fba13",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",
@@ -146,7 +146,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "db8fa0093f2b741c2250f4cc310f691cab9bb00c766cd0ca3642185f1864a310",
+      "sha256": "3cc4962211703fbba0a301c0388b90620eafe8b380b4e882ac92435fff8b1849",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -266,7 +266,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "343be559cfa88407bc7a1cee8161c8da3a6c37ee24bf551774ff6664bff58e8e",
+      "sha256": "fa46d8b0649b579e0f20c0a1fc9aeec38f0553d94bf2752349b9e7e800cdaad8",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -468,7 +468,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
+      "sha256": "eb750aab0f6ddb1589236027fa508dfd48a8f2d432035401015369a474e0efe0",
       "mustContain": [
         "daily_health_host_from_payload",
         "normalize_hub_host",
@@ -535,7 +535,7 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "sha256": "0070609866af404964e2693fe6553ea3e5d1afccd048422704fd2893b80b8dcd",
       "mustContain": [
         "def classify(d: object) -> str:"
       ]
@@ -779,6 +779,15 @@
         "validate_send_acceptance",
         "SendAcceptanceUnknown",
         "RecursionError"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/dm_roundtrip.py",
+      "sha256": "5d0c822cc06046c26d9c772a5e9c5cdc71a247ee31b991f63e1b2bc67e48fe33",
+      "mustContain": [
+        "RoundtripConfigError",
+        "parse_roster",
+        "evaluate_target"
       ]
     }
   ]

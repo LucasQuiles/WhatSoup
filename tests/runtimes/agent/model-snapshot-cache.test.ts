@@ -291,6 +291,20 @@ describe('CatalogueSnapshotCache', () => {
       expect(c.latestSnapshotKind(CHAT, SENDER_A)).toBe('drill');
     });
 
+    it('keeps a numbered More control in the sender-bound drill snapshot', () => {
+      const c = createCatalogueSnapshotCache();
+      const more = {
+        kind: 'more' as const,
+        label: 'More models',
+        brand: 'OpenCode',
+        provider: 'opencode-cli',
+        offset: 11,
+      };
+      c.putDrillSnapshot(CHAT, SENDER_A, 'model', [more]);
+      expect(c.resolveLatestPick(CHAT, SENDER_A, 1)).toEqual({ kind: 'drill', entry: more });
+      expect(c.resolveLatestPick(CHAT, SENDER_B, 1)).toBeNull();
+    });
+
     it('an EXPIRED drill slot reads as no-snapshot on every path (consistent TTL boundary)', () => {
       vi.useFakeTimers();
       const c = createCatalogueSnapshotCache();

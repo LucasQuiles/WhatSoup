@@ -5,6 +5,7 @@
 // process and its watchdog timers.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -230,7 +231,8 @@ async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promis
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('zombie session fix — sendTurnToSession', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.clearAllMocks();
     callOrder.length = 0;
     // Default: inactive session (triggers the spawn path)

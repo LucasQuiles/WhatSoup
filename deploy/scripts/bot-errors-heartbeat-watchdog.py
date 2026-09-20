@@ -1466,30 +1466,27 @@ def turn_failure_max_chats_reported() -> int:
     return positive_env_int("BOT_ERRORS_TURN_FAILURE_MAX_CHATS", 5)
 
 
+TURN_FAILURE_PREFIXES = ("turn_failure:", "session_collision:", "turn_failure_probe:")
+
+
 def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
-    """conversation_key -> shared session_id for the scheduled/interactive
-    session-sharing collision that yields "Exact ... could not be closed"
-    terminal failures. An interactive per_chat checkpoint and its
-    ``::scheduled-agent-job`` sibling MUST NOT share one claude session; when
-    they do, whichever scope finalizes first closes the shared agent_sessions
-    row and the other scope's exact-identity close matches zero rows and throws.
-    Read-only; returns {} when session_checkpoints is absent."""
-    try:
-        rows = conn.execute(
-            "SELECT i.conversation_key, i.session_id "
-            "FROM session_checkpoints i "
-            "JOIN session_checkpoints s ON s.session_id = i.session_id "
-            "WHERE i.session_status = 'active' AND s.session_status = 'active' "
-            "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
-            "AND s.conversation_key LIKE '%::scheduled-agent-job' "
-            "AND i.session_id IS NOT NULL"
-        ).fetchall()
-    except sqlite3.Error:
-        return {}
+    """Map interactive conversation keys to session IDs also used by active
+    scheduled checkpoints. Interactive and scheduled work use separate
+    persistence namespaces; a shared session ID contradicts that isolation.
+    Read-only; unavailable schema propagates as an observation failure."""
+    rows = conn.execute(
+        "SELECT i.conversation_key, i.session_id "
+        "FROM session_checkpoints i "
+        "JOIN session_checkpoints s ON s.session_id = i.session_id "
+        "WHERE i.session_status = 'active' AND s.session_status = 'active' "
+        "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
+        "AND s.conversation_key LIKE '%::scheduled-agent-job' "
+        "AND i.session_id IS NOT NULL AND i.session_id <> ''"
+    ).fetchall()
     return {str(r[0]): str(r[1]) for r in rows}
 
 
-def turn_failure_rate_problems() -> dict[str, str]:
+def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[str, str]:
     """Per-instance terminal turn-failure-rate probe.
 
     Sibling of :func:`wedge_signature_problems`, which by contract only fires on
@@ -1515,9 +1512,10 @@ def turn_failure_rate_problems() -> dict[str, str]:
         name = item["name"]
         key = f"turn_failure:{name}"
         collision_key = f"session_collision:{name}"
+        probe_key = f"turn_failure_probe:{name}"
         db_path = wedge_db_root() / name / "bot.db"
         if not db_path.exists():
-            problems[key] = (
+            problems[probe_key] = (
                 f"turn-failure probe misconfigured: instance={name} database missing: {db_path}"
             )
             continue
@@ -1530,7 +1528,7 @@ def turn_failure_rate_problems() -> dict[str, str]:
                     "AND name='inbound_events'"
                 ).fetchone()
                 if not has_inbound:
-                    problems[key] = (
+                    problems[probe_key] = (
                         f"turn-failure probe found no inbound_events table: "
                         f"instance={name} db={db_path}"
                     )
@@ -1542,7 +1540,7 @@ def turn_failure_rate_problems() -> dict[str, str]:
                     "WHERE processing_status = 'failed' "
                     "AND received_at IS NOT NULL "
                     "AND strftime('%s', received_at) IS NOT NULL "
-                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) <= ? "
+                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) BETWEEN 0 AND ? "
                     "GROUP BY conversation_key, fc",
                     (now, window),
                 ).fetchall()
@@ -1550,20 +1548,20 @@ def turn_failure_rate_problems() -> dict[str, str]:
             finally:
                 conn.close()
         except sqlite3.Error as exc:
-            problems[key] = (
+            problems[probe_key] = (
                 f"turn-failure probe failed: instance={name} error={str(exc)[:160]}"
             )
             continue
-        # Session-sharing collision is a zero-false-positive structural defect:
-        # an interactive per_chat checkpoint and its ``::scheduled-agent-job``
-        # sibling must never share a claude session. When they do, the exact
-        # lifecycle-close guards throw ("Exact ... could not be closed") on every
-        # interactive turn. Alert on it directly — independent of failure rate,
-        # since real user turns arrive too sparsely to reliably cross a rate gate.
+        # Both queries must succeed before this probe can authorize recovery.
+        # Instance evaluation by another check is not evidence for these keys.
+        if evaluated_keys is not None:
+            evaluated_keys.update((key, collision_key, probe_key))
+        # Active interactive and scheduled checkpoints use separate namespaces.
+        # Alert on a shared session ID independently of the failure-rate threshold.
         if collisions:
             collision_details = "; ".join(
-                f"ck={conv_key} shared_session_id={session_id}"
-                for conv_key, session_id in sorted(collisions.items())[:max_chats]
+                "ck=[REDACTED CONVERSATION] shared_session_id=[REDACTED SESSION]"
+                for _ in sorted(collisions)[:max_chats]
             )
             problems[collision_key] = (
                 f"session-sharing collision: instance={name} "
@@ -1588,9 +1586,9 @@ def turn_failure_rate_problems() -> dict[str, str]:
                 f"{cls}:{count}"
                 for cls, count in sorted(split.items(), key=lambda kv: kv[1], reverse=True)
             )
-            detail = f"ck={conv_key} failed={total} classes={classes}"
+            detail = f"ck=[REDACTED CONVERSATION] failed={total} classes={classes}"
             if conv_key in collisions:
-                detail += f" session_collision session_id={collisions[conv_key]}"
+                detail += " session_collision session_id=[REDACTED SESSION]"
             details.append(detail)
         problems[key] = (
             f"turn-failure rate: instance={name} window_seconds={window} "
@@ -2527,8 +2525,7 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
     if "wedge_signature" in checks:
         prefixes.append("wedge:")
     if "turn_failure_rate" in checks:
-        prefixes.append("turn_failure:")
-        prefixes.append("session_collision:")
+        prefixes.extend(TURN_FAILURE_PREFIXES)
     if "supervision_deadman" in checks:
         prefixes.append("supervision_deadman")
     if "clock_skew" in checks:
@@ -2594,7 +2591,18 @@ def dm_roundtrip_problems() -> dict[str, str]:
     return problems
 
 
-def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, evaluated_instances: set[str] | None = None) -> dict[str, str]:
+def key_recovery_is_observed(key: str, evaluated_keys: set[str] | None) -> bool:
+    return not key.startswith(TURN_FAILURE_PREFIXES) or (
+        evaluated_keys is not None and key in evaluated_keys
+    )
+
+
+def collect_problems(
+    args: argparse.Namespace,
+    checks: set[str] | None = None,
+    evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
+) -> dict[str, str]:
     checks = checks if checks is not None else configured_checks()
     problems: dict[str, str] = {}
     if "q_loop" in checks:
@@ -2706,7 +2714,7 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
     if "wedge_signature" in checks:
         problems.update(wedge_signature_problems())
     if "turn_failure_rate" in checks:
-        problems.update(turn_failure_rate_problems())
+        problems.update(turn_failure_rate_problems(evaluated_keys))
     if "supervision_deadman" in checks:
         problems.update(supervision_deadman_problems())
     if "clock_skew" in checks:
@@ -2779,6 +2787,7 @@ def reconcile(
     session: Any = None,
     capability: Any = None,
     evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
 ) -> list[Path]:
     """Reconcile problems against open incidents and write outbox events.
 
@@ -2802,6 +2811,7 @@ def reconcile(
                 _compat_session,
                 _load.capability,
                 evaluated_instances,
+                evaluated_keys,
             )
     assert state is not None and capability is not None
     open_incidents: dict[str, Any] = state.setdefault("open", {})
@@ -2979,6 +2989,8 @@ def reconcile(
     for key in sorted(set(open_incidents) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
             continue
+        if not key_recovery_is_observed(key, evaluated_keys):
+            continue
         # #2431: constrain incident-clear to the evaluated instance set only.
         # An incident for a non-evaluated instance must survive the sweep so
         # that a removed/renamed instance does not silently lose its incident.
@@ -3047,11 +3059,13 @@ def reconcile(
             event_type="clear",
         ))
     for key in sorted(set(state["pendingStale"]) - set(problems)):
-        if key_in_active_scope(key, active_prefixes):
+        if key_in_active_scope(key, active_prefixes) and key_recovery_is_observed(key, evaluated_keys):
             state["pendingStale"].pop(key, None)
     rearm_seconds = watchdog_flap_rearm_seconds()
     for key in sorted(set(state["recentlyRecovered"]) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
+            continue
+        if not key_recovery_is_observed(key, evaluated_keys):
             continue
         record = state["recentlyRecovered"][key]
         if not isinstance(record, dict):
@@ -3134,6 +3148,10 @@ def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
         checks = configured_checks()
+        if "turn_failure_rate" in checks:
+            turn_failure_window_seconds()
+            turn_failure_min_count()
+            turn_failure_max_chats_reported()
     except ValueError as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded
@@ -3170,7 +3188,8 @@ def run_once(args: argparse.Namespace) -> int:
             _state = _load_result.payload
             _capability = _load_result.capability
             evaluated_instances: set[str] = set()
-            problems = collect_problems(args, checks, evaluated_instances)
+            evaluated_keys: set[str] = set()
+            problems = collect_problems(args, checks, evaluated_instances, evaluated_keys)
             written = reconcile(
                 problems,
                 active_reconcile_prefixes(checks),
@@ -3178,6 +3197,7 @@ def run_once(args: argparse.Namespace) -> int:
                 session,
                 _capability,
                 evaluated_instances,
+                evaluated_keys,
             )
             print(json.dumps({
                 "time": now_iso(),
