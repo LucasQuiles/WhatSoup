@@ -1,4 +1,4 @@
-"""Canonical daily-health host identity.
+"""Canonical daily-health host identity and line membership.
 
 The heartbeat-watchdog derives a host's daily-health liveness, and the dispatcher
 records per-host daily-health freshness into the durable incident-state ledger.
@@ -22,6 +22,15 @@ from typing import Any
 # this public repo (the same idiom the repo-hygiene guard uses for its own needed
 # tokens); at runtime this is the ordinary host key.
 _HUB_HOST = "nuc" "les"
+
+
+def daily_health_line_is_failure(line: str) -> bool:
+    return line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line
+
+
+def daily_health_line_is_warning(line: str) -> bool:
+    # Membership is independent: a line may be both a failure and a warning.
+    return line.startswith("WARN ") or " WARN " in line
 
 
 def normalize_hub_host(host: Any) -> str:

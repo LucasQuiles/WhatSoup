@@ -1,8 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
@@ -12,7 +13,12 @@ const tmp = trackTmpDirs('');
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 
 function git(repo: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', [
+    '-c', 'user.email=guard-test@users.noreply.github.com',
+    '-c', 'user.name=Guard Test',
+    '-c', 'commit.gpgsign=false',
+    ...args,
+  ], {
     cwd: repo,
     encoding: 'utf8',
     env: cleanGitEnv(),
@@ -24,9 +30,6 @@ function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid:
   const repo = tmp.make('pr-metadata-guard');
 
   git(repo, ['init']);
-  git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
-  git(repo, ['config', 'user.name', 'Guard Test']);
-  git(repo, ['config', 'commit.gpgsign', 'false']);
   writeFileSync(path.join(repo, 'note.txt'), 'base\n');
   git(repo, ['add', 'note.txt']);
   git(repo, ['commit', '-m', 'base']);
@@ -61,6 +64,21 @@ function makeUnrelatedRootOid(repo: string): string {
 }
 
 describe('PR metadata guard', () => {
+  it('receives fresh PR metadata after edits while preserving normal PR qualification events', () => {
+    const workflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/quality.yml'), 'utf8'));
+    const activities = workflow.on.pull_request?.types ?? ['opened', 'synchronize', 'reopened'];
+
+    for (const activity of ['opened', 'synchronize', 'reopened', 'edited']) {
+      expect(activities, `Quality must receive ${activity} PR events`).toContain(activity);
+    }
+    const guard = workflow.jobs.quality.steps.find((step: { name: string }) => step.name === 'PR metadata guard');
+    expect(guard).toMatchObject({
+      if: "github.event_name == 'pull_request'",
+      env: { PR_METADATA_EVENT: '${{ github.event_path }}' },
+    });
+    expect(guard.run).toContain('guard:pr-metadata -- --github-event "$PR_METADATA_EVENT"');
+  });
+
   it('rejects the #2391 historical negated closing phrase outside the declared directive section', () => {
     const { repo, baseOid, headOid } = makeRangeRepo();
 
@@ -302,12 +320,14 @@ describe('PR metadata guard', () => {
     });
   });
 
-  it('reads a complete pull-request event payload without querying GitHub', () => {
+  it.each(['opened', 'edited'])('reads the current body from a complete %s PR event without querying GitHub', (action) => {
     const { repo, baseOid, headOid } = makeRangeRepo();
     const eventPath = path.join(repo, 'event.json');
     writeFileSync(
       eventPath,
       JSON.stringify({
+        action,
+        changes: { body: { from: 'Closes owner/repo#132' } },
         number: 77,
         repository: { default_branch: 'main' },
         pull_request: {

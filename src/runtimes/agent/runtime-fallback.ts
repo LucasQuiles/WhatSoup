@@ -57,7 +57,13 @@ import {
   calculatePeriodicProbeDelay,
   formatPrimaryModelUsabilityEvidence,
 } from './primary-readiness-probe.ts';
-import { listModelCatalog, probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import {
+  listModelCatalog,
+  probeFallbackBinary,
+  probeModelCatalog,
+  type ModelCatalogCaptureMode,
+  type ModelCatalogUnavailableReason,
+} from './providers/binary-preflight.ts';
 import {
   deriveFallbackChainFromCatalog,
   type CandidateEvidence,
@@ -798,7 +804,18 @@ export class RuntimeFallbackCoordinator {
       mode: 'auto';
       lastDerivedAt: number | null;
       catalogueSize: number | null;
-      candidates: Array<{ model: string; evidence: CandidateEvidence; freeTier: boolean; selected: boolean }>;
+      captureMode: ModelCatalogCaptureMode | null;
+      refreshFailure: ModelCatalogUnavailableReason | null;
+      candidates: Array<{
+        model: string;
+        evidence: CandidateEvidence;
+        catalogStatus: string | null;
+        releaseDate: string | null;
+        zeroCost: boolean | null;
+        eligibilityBasis: DiscoveredCandidate['eligibilityBasis'];
+        freeTier: boolean;
+        selected: boolean;
+      }>;
     } | null;
   } {
     const active = this.host.isFallbackWindowActive;
@@ -852,9 +869,15 @@ export class RuntimeFallbackCoordinator {
             mode: 'auto' as const,
             lastDerivedAt: this.lastDiscovery?.at ?? null,
             catalogueSize: this.lastDiscovery?.catalogueSize ?? null,
+            captureMode: this.lastDiscovery?.captureMode ?? null,
+            refreshFailure: this.lastDiscovery?.refreshFailure ?? null,
             candidates: (this.lastDiscovery?.basis ?? []).map((c) => ({
               model: c.model,
               evidence: c.evidence,
+              catalogStatus: c.catalogStatus,
+              releaseDate: c.releaseDate,
+              zeroCost: c.zeroCost,
+              eligibilityBasis: c.eligibilityBasis,
               freeTier: c.freeTier,
               selected: c.selected,
             })),
@@ -1308,7 +1331,13 @@ export class RuntimeFallbackCoordinator {
   // in-place mutation of host.agentFallbacks that every downstream consumer
   // (selection, canary, exhaustion, restore membership, /health) reads live.
 
-  private lastDiscovery: { at: number; catalogueSize: number; basis: DiscoveredCandidate[] } | null = null;
+  private lastDiscovery: {
+    at: number;
+    catalogueSize: number;
+    captureMode: ModelCatalogCaptureMode;
+    refreshFailure: ModelCatalogUnavailableReason | null;
+    basis: DiscoveredCandidate[];
+  } | null = null;
   private discoveryRefreshInFlight = false;
 
   /**
@@ -1343,6 +1372,7 @@ export class RuntimeFallbackCoordinator {
       }
       const derived = deriveFallbackChainFromCatalog({
         catalogIds: listing.ids,
+        ...(listing.metadata ? { catalogMetadata: listing.metadata } : {}),
         gatewayProvider: DISCOVERY_GATEWAY_PROVIDER,
         primary: { provider: this.host.agentProvider, model: this.host.model ?? null },
         policy: {
@@ -1354,12 +1384,31 @@ export class RuntimeFallbackCoordinator {
         evidenceFor: (modelId) => this.discoveredCandidateEvidence(modelId),
       });
       this.applyDiscoveredChain(derived.entries);
-      this.lastDiscovery = { at: systemClock.now(), catalogueSize: listing.ids.length, basis: derived.basis };
+      const captureMode = listing.captureMode ?? 'legacy';
+      const refreshFailure = listing.refreshFailure ?? null;
+      this.lastDiscovery = {
+        at: systemClock.now(),
+        catalogueSize: listing.ids.length,
+        captureMode,
+        refreshFailure,
+        basis: derived.basis,
+      };
       log.info({
         trigger,
         catalogueSize: listing.ids.length,
+        captureMode,
+        refreshFailure,
         chain: this.host.agentFallbacks.map((entry) => `${entry.provider}:${entry.model ?? 'default'}`),
-        basis: derived.basis.map((c) => ({ model: c.model, evidence: c.evidence, freeTier: c.freeTier, selected: c.selected })),
+        basis: derived.basis.map((c) => ({
+          model: c.model,
+          evidence: c.evidence,
+          catalogStatus: c.catalogStatus,
+          releaseDate: c.releaseDate,
+          zeroCost: c.zeroCost,
+          eligibilityBasis: c.eligibilityBasis,
+          freeTier: c.freeTier,
+          selected: c.selected,
+        })),
       }, 'fallback chain discovered');
       if (this.host.agentFallbacks.length === 0) {
         emitAlertChecked(
@@ -1424,10 +1473,11 @@ export class RuntimeFallbackCoordinator {
 
   /**
    * The entry set a canary sweep probes. Static chains sweep the configured
-   * entries. Discovery mode sweeps the last derivation's full CANDIDATE basis
-   * (capped) — not just the selected chain — so a dead-excluded candidate can
-   * prove recovery and re-enter the ladder at the next derivation instead of
-   * waiting for its failure evidence to lapse.
+   * entries. Discovery mode sweeps the last derivation's provider-candidate
+   * basis (capped), not just the selected chain. This preserves one recovery
+   * probe for a provider whose representative is dead. A dead model replaced
+   * by a live sibling is deliberately absent until its failure evidence lapses;
+   * sweeping every sibling would violate the bounded-probe contract.
    */
   private chainCanarySweepEntries(): AgentFallbackEntry[] {
     if (!this.host.agentFallbackDiscovery || this.lastDiscovery === null) {
