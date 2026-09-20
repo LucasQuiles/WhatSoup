@@ -17,6 +17,7 @@ describe('inbound-failure-class — vocabulary', () => {
         'provider_failure',
         'recovery_owner_reclaimed',
         'session_crash',
+        'operator_cancelled',
         'session_spawn_failed',
         'stale_reclaim',
         'timeout',
