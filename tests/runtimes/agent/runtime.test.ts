@@ -542,7 +542,7 @@ import {
   type PerChatCleanupRuntimeState, type PerChatSendTurnRuntimeState,
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
-  handlePerChatProviderEvent, currentCrashIdentity,
+  handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
   type AutoCompactView, type ImageCoalescerView,
 } from './lib/runtime-mock-scaffold.ts';
 
@@ -3938,7 +3938,7 @@ describe('AgentRuntime', () => {
       }),
       'media processing failed — using fallback label',
     );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    await awaitDispatchedTurn(mockSession.sendTurn, '[audio message — processing failed]');
     expect(durability.markInboundSkipped).not.toHaveBeenCalled();
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
@@ -4600,7 +4600,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
-    mockSession.sendTurn.mockClear();
+    await retireDispatchedTurn(mockSession.sendTurn, 'hello');
     (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set(groupJid, [42]);
 
     await expect(runtime.handleAgentCommand({
