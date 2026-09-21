@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
 
+import { shellQuote } from '../../helpers/git-estate-guard-fixtures.ts';
+
 import {
   BOUNDARY_PINNED_GENERATED_INDEX_PARENT,
   EXPECTED_CHILD_CONTRACT_ROWS,
@@ -74,6 +76,43 @@ import {
   writeSyntheticRunInitAnchor,
 } from './support.ts';
 
+async function withHostGitSentinel<T>(callback: (markerPath: string) => Promise<T>): Promise<T> {
+  const root = mkdtempSync(path.join(tmpdir(), 'boundary-run-host-git-'));
+  fixtureRoots.push(root);
+  const fixtureHome = path.join(root, 'home');
+  const xdgConfigHome = path.join(root, 'xdg');
+  const hookDirectory = path.join(root, 'hooks');
+  const markerPath = path.join(root, 'sentinel-ran');
+  const globalConfig = [
+    '[core]',
+    `\thooksPath = ${JSON.stringify(hookDirectory)}`,
+    '[init]',
+    '\tdefaultBranch = sentinel',
+    '',
+  ].join('\n');
+  mkdirSync(fixtureHome, { recursive: true });
+  mkdirSync(path.join(xdgConfigHome, 'git'), { recursive: true });
+  mkdirSync(hookDirectory, { recursive: true });
+  writeFileSync(path.join(fixtureHome, '.gitconfig'), globalConfig);
+  writeFileSync(path.join(xdgConfigHome, 'git', 'config'), globalConfig);
+  const hook = path.join(hookDirectory, 'pre-commit');
+  writeFileSync(hook, `#!/bin/sh\nprintf '%s\\n' sentinel > ${shellQuote(markerPath)}\nexit 1\n`);
+  chmodSync(hook, 0o700);
+
+  const originalHome = process.env['HOME'];
+  const originalXdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  try {
+    process.env['HOME'] = fixtureHome;
+    process.env['XDG_CONFIG_HOME'] = xdgConfigHome;
+    return await callback(markerPath);
+  } finally {
+    if (originalHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = originalHome;
+    if (originalXdgConfigHome === undefined) delete process.env['XDG_CONFIG_HOME'];
+    else process.env['XDG_CONFIG_HOME'] = originalXdgConfigHome;
+  }
+}
+
 export function registerTransitionCases(): void {
   it('initializes one canonical active observation manifest and verifies it read-only', async () => {
     const api = boundaryCli as unknown as {
@@ -121,85 +160,90 @@ export function registerTransitionCases(): void {
   });
 
 
-  it('records one exact commit transition and rejects subject substitution or reuse', async () => {
+  it('isolates an exact commit transition from inherited Git hooks/default branch and rejects subject substitution or reuse', async () => {
     const api = boundaryCli as unknown as {
       runBoundaryRunCli?: (argv: readonly string[], cwd?: string) => Promise<ReturnType<typeof validateBoundaryRun>>;
     };
     expect(typeof api.runBoundaryRunCli).toBe('function');
     if (!api.runBoundaryRunCli) return;
-    const fixture = makeCliRepo();
-    expect(await api.runBoundaryRunCli([
-      'init', '--run-dir', fixture.runDir, '--task', 'BCF-00', '--profile', 'bcf00-observation',
-      '--preserve-owner-path', 'owner.tsv',
-    ], fixture.repo)).toMatchObject({ ok: true, exitCode: 0 });
+    await withHostGitSentinel(async (markerPath) => {
+      const fixture = makeCliRepo();
+      expect(git(fixture.repo, ['branch', '--show-current'])).toBe('main');
+      expect(existsSync(markerPath)).toBe(false);
+      expect(await api.runBoundaryRunCli([
+        'init', '--run-dir', fixture.runDir, '--task', 'BCF-00', '--profile', 'bcf00-observation',
+        '--preserve-owner-path', 'owner.tsv',
+      ], fixture.repo)).toMatchObject({ ok: true, exitCode: 0 });
 
-    const manifestPath = path.join(fixture.runDir, 'run_manifest.json');
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
-    const run = manifest['run'] as Record<string, unknown>;
-    const profile = boundaryRun.RUN_CONTRACT_PROFILES['bcf01-parser'];
-    run['taskId'] = profile.taskId;
-    run['profileId'] = profile.profileId;
-    run['phase'] = profile.phase;
-    run['allowedPaths'] = [...profile.allowedPaths];
-    run['requiredAttemptIds'] = [...profile.requiredAttemptIds];
-    run['mayComplete'] = profile.mayComplete;
-    run['chainAppend'] = profile.chainAppend;
-    writeFileSync(path.join(fixture.repo, 'scripts/semantic-quality-check.ts'), 'export const fixture = false;\n');
-    writeFileSync(path.join(fixture.repo, 'tests/scripts/semantic-quality-check.test.ts'), 'test changed fixture\n');
-    git(fixture.repo, ['add', ...profile.allowedPaths]);
-    const stagedSnapshot = boundaryRun.captureBoundaryWorktreeSnapshot(fixture.repo, {
-      allowedUntrackedPaths: [],
-      preservedOwnerPaths: ['owner.tsv'],
+      const manifestPath = path.join(fixture.runDir, 'run_manifest.json');
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+      const run = manifest['run'] as Record<string, unknown>;
+      const profile = boundaryRun.RUN_CONTRACT_PROFILES['bcf01-parser'];
+      run['taskId'] = profile.taskId;
+      run['profileId'] = profile.profileId;
+      run['phase'] = profile.phase;
+      run['allowedPaths'] = [...profile.allowedPaths];
+      run['requiredAttemptIds'] = [...profile.requiredAttemptIds];
+      run['mayComplete'] = profile.mayComplete;
+      run['chainAppend'] = profile.chainAppend;
+      writeFileSync(path.join(fixture.repo, 'scripts/semantic-quality-check.ts'), 'export const fixture = false;\n');
+      writeFileSync(path.join(fixture.repo, 'tests/scripts/semantic-quality-check.test.ts'), 'test changed fixture\n');
+      git(fixture.repo, ['add', ...profile.allowedPaths]);
+      const stagedSnapshot = boundaryRun.captureBoundaryWorktreeSnapshot(fixture.repo, {
+        allowedUntrackedPaths: [],
+        preservedOwnerPaths: ['owner.tsv'],
+      });
+      expect(stagedSnapshot).toMatchObject({ ok: true });
+      expect(stagedSnapshot.snapshot).not.toBeNull();
+      manifest['currentSnapshot'] = structuredClone(stagedSnapshot.snapshot);
+      writeFileSync(manifestPath, boundaryRun.canonicalizeBoundaryRun(manifest));
+      writeSyntheticRunInitAnchor(fixture.runDir, manifest);
+
+      const beforeHead = git(fixture.repo, ['rev-parse', 'HEAD']);
+      const wrongSubject = await api.runBoundaryRunCli([
+        'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
+        '--kind', 'commit', '--expect-before', beforeHead, '--message-subject', 'fix(quality): substitute subject',
+      ], fixture.repo);
+      expect(wrongSubject).toMatchObject({ ok: false, exitCode: 2, verdict: 'Inconclusive' });
+      expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(beforeHead);
+      expect(existsSync(path.join(fixture.runDir, 'attempts/parser-commit-transition'))).toBe(false);
+
+      const recorded = await api.runBoundaryRunCli([
+        'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
+        '--kind', 'commit', '--expect-before', beforeHead,
+        '--message-subject', 'fix(quality): fail closed on invalid semantic options',
+      ], fixture.repo);
+      expect(recorded, JSON.stringify(recorded)).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
+      const afterHead = git(fixture.repo, ['rev-parse', 'HEAD']);
+      expect(afterHead).not.toBe(beforeHead);
+      expect(git(fixture.repo, ['show', '-s', '--format=%s', 'HEAD']))
+        .toBe('fix(quality): fail closed on invalid semantic options');
+      const advanced = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        run: { terminalHead: string; transitionCount: number };
+        attempts: Array<Record<string, unknown>>;
+      };
+      expect(advanced.run).toMatchObject({ terminalHead: afterHead, transitionCount: 1 });
+      expect(advanced.attempts).toHaveLength(1);
+      expect(advanced.attempts[0]).toMatchObject({
+        id: 'parser-commit-transition', operation: 'git-transition', rawExit: 0,
+        rawSignal: null, expectationMet: true, verdict: 'Pass',
+      });
+      const structured = advanced.attempts[0]!['structuredResult'] as { path: string };
+      expect(JSON.parse(readFileSync(path.join(fixture.runDir, structured.path), 'utf8'))).toMatchObject({
+        kind: 'commit', beforeHead, afterHead, parents: [beforeHead],
+        changedPaths: [...profile.allowedPaths],
+      });
+      expect(git(fixture.repo, ['diff', '--name-only', 'HEAD', '--', ...profile.allowedPaths])).toBe('');
+
+      const reused = await api.runBoundaryRunCli([
+        'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
+        '--kind', 'commit', '--expect-before', beforeHead,
+        '--message-subject', 'fix(quality): fail closed on invalid semantic options',
+      ], fixture.repo);
+      expect(reused).toMatchObject({ ok: false, exitCode: 2, verdict: 'Inconclusive' });
+      expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(afterHead);
+      expect(existsSync(markerPath)).toBe(false);
     });
-    expect(stagedSnapshot).toMatchObject({ ok: true });
-    expect(stagedSnapshot.snapshot).not.toBeNull();
-    manifest['currentSnapshot'] = structuredClone(stagedSnapshot.snapshot);
-    writeFileSync(manifestPath, boundaryRun.canonicalizeBoundaryRun(manifest));
-    writeSyntheticRunInitAnchor(fixture.runDir, manifest);
-
-    const beforeHead = git(fixture.repo, ['rev-parse', 'HEAD']);
-    const wrongSubject = await api.runBoundaryRunCli([
-      'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
-      '--kind', 'commit', '--expect-before', beforeHead, '--message-subject', 'fix(quality): substitute subject',
-    ], fixture.repo);
-    expect(wrongSubject).toMatchObject({ ok: false, exitCode: 2, verdict: 'Inconclusive' });
-    expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(beforeHead);
-    expect(existsSync(path.join(fixture.runDir, 'attempts/parser-commit-transition'))).toBe(false);
-
-    const recorded = await api.runBoundaryRunCli([
-      'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
-      '--kind', 'commit', '--expect-before', beforeHead,
-      '--message-subject', 'fix(quality): fail closed on invalid semantic options',
-    ], fixture.repo);
-    expect(recorded, JSON.stringify(recorded)).toMatchObject({ ok: true, exitCode: 0, verdict: 'Pass' });
-    const afterHead = git(fixture.repo, ['rev-parse', 'HEAD']);
-    expect(afterHead).not.toBe(beforeHead);
-    expect(git(fixture.repo, ['show', '-s', '--format=%s', 'HEAD']))
-      .toBe('fix(quality): fail closed on invalid semantic options');
-    const advanced = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-      run: { terminalHead: string; transitionCount: number };
-      attempts: Array<Record<string, unknown>>;
-    };
-    expect(advanced.run).toMatchObject({ terminalHead: afterHead, transitionCount: 1 });
-    expect(advanced.attempts).toHaveLength(1);
-    expect(advanced.attempts[0]).toMatchObject({
-      id: 'parser-commit-transition', operation: 'git-transition', rawExit: 0,
-      rawSignal: null, expectationMet: true, verdict: 'Pass',
-    });
-    const structured = advanced.attempts[0]!['structuredResult'] as { path: string };
-    expect(JSON.parse(readFileSync(path.join(fixture.runDir, structured.path), 'utf8'))).toMatchObject({
-      kind: 'commit', beforeHead, afterHead, parents: [beforeHead],
-      changedPaths: [...profile.allowedPaths],
-    });
-    expect(git(fixture.repo, ['diff', '--name-only', 'HEAD', '--', ...profile.allowedPaths])).toBe('');
-
-    const reused = await api.runBoundaryRunCli([
-      'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
-      '--kind', 'commit', '--expect-before', beforeHead,
-      '--message-subject', 'fix(quality): fail closed on invalid semantic options',
-    ], fixture.repo);
-    expect(reused).toMatchObject({ ok: false, exitCode: 2, verdict: 'Inconclusive' });
-    expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(afterHead);
   });
 
   it('records one exact merge transition from its pinned observation evidence', async () => {
@@ -320,7 +364,10 @@ export function registerTransitionCases(): void {
     if (!api.runBoundaryRunCli) return;
     const clone = realpathSync(mkdtempSync(path.join(tmpdir(), 'boundary-run-pinned-merge-')));
     fixtureRoots.push(clone);
-    execFileSync('git', ['clone', '--shared', process.cwd(), clone], { stdio: 'ignore' });
+    const cloneHooksPath = mkdtempSync(path.join(tmpdir(), 'boundary-run-clone-hooks-'));
+    fixtureRoots.push(cloneHooksPath);
+    execFileSync('git', ['-c', `core.hooksPath=${cloneHooksPath}`, 'clone', '--shared', process.cwd(), clone], { stdio: 'ignore' });
+    git(clone, ['config', '--local', 'core.hooksPath', cloneHooksPath]);
     git(clone, ['config', 'user.name', 'WhatSoup Test']);
     git(clone, ['config', 'user.email', FIXTURE_EMAIL]);
     const branchHead = git(clone, ['rev-parse', 'HEAD']);

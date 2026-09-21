@@ -212,10 +212,17 @@ export function git(repo: string, args: string[]): string {
   }).trim();
 }
 
+function initializeFixtureGitRepository(repo: string): void {
+  git(repo, ['init', '--initial-branch=main']);
+  const hooksPath = path.join(repo, '.git', 'boundary-run-fixture-hooks');
+  mkdirSync(hooksPath, { mode: 0o700 });
+  git(repo, ['config', '--local', 'core.hooksPath', hooksPath]);
+}
+
 export function makeSnapshotRepo(): string {
   const repo = mkdtempSync(path.join(tmpdir(), 'boundary-run-snapshot-'));
   fixtureRoots.push(repo);
-  git(repo, ['init']);
+  initializeFixtureGitRepository(repo);
   git(repo, ['config', 'core.fileMode', 'true']);
   writeFileSync(path.join(repo, 'tracked.txt'), 'tracked\n');
   git(repo, ['add', 'tracked.txt']);
@@ -236,7 +243,7 @@ export function makeEvidenceRoot(): string {
 export function makeCliRepo(): { repo: string; runDir: string } {
   const repo = realpathSync(mkdtempSync(path.join(tmpdir(), 'boundary-run-cli-')));
   fixtureRoots.push(repo);
-  git(repo, ['init']);
+  initializeFixtureGitRepository(repo);
   git(repo, ['config', 'user.name', 'WhatSoup Test']);
   git(repo, ['config', 'user.email', FIXTURE_EMAIL]);
   for (const directory of [
