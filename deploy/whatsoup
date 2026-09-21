@@ -142,6 +142,7 @@ DATABASE_BOOTSTRAP_TRUST_CHECKER="scripts/source-runtime-drift-check.ts"
 DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "$DATABASE_BOOTSTRAP_TRUST_CHECKER"
   "scripts/lib/guard-core.ts"
+  "scripts/lib/cli-args.ts"
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
 )
