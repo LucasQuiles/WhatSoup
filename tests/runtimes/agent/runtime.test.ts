@@ -3938,7 +3938,11 @@ describe('AgentRuntime', () => {
       }),
       'media processing failed — using fallback label',
     );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    // The per-chat FIFO now awaits the delivery-echo gate before dispatch, so the
+    // turn lands after `turnChain` settles — sendAndDrain never covered dispatch.
+    await vi.waitFor(() => {
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    });
     expect(durability.markInboundSkipped).not.toHaveBeenCalled();
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
@@ -4600,6 +4604,12 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
+    // The per-chat FIFO now awaits the delivery-echo gate before dispatch, so the
+    // seeding turn lands after `turnChain` settles. Retire it before clearing, so
+    // the assertion below covers the entire rejection window rather than racing it.
+    await vi.waitFor(() => {
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('hello');
+    });
     mockSession.sendTurn.mockClear();
     (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set(groupJid, [42]);
 
