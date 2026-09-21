@@ -106,6 +106,25 @@ describe('push-gate manifest registry (#2224)', () => {
     );
   });
 
+  it('keeps deployment qualification in both local lanes and the Quality workflow', () => {
+    const expectedCommand = 'npm run test:deployment-qualification';
+    for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
+      expect(steps).toContainEqual(
+        expect.objectContaining({ name: 'test:deployment-qualification', cmd: expectedCommand }),
+      );
+    }
+
+    const qualityWorkflow = readFileSync('.github/workflows/quality.yml', 'utf8');
+    expect(qualityWorkflow).toContain(
+      '      - name: Deployment qualification source suite\n        run: npm run test:deployment-qualification',
+    );
+
+    const command = pkg.scripts['test:deployment-qualification'];
+    expect(command).toContain('bash -euc');
+    expect(command).not.toContain('bash -lc');
+    expect(command).toContain('deploy/scripts/lib/pytest-runner.sh');
+  });
+
   it('every curated test path exists on disk', () => {
     const missing = CURATED_TEST_PATHS.filter((path) => !existsSync(path));
     expect(missing, `curated test path(s) drifted from disk: ${missing.join(', ')}`).toEqual([]);

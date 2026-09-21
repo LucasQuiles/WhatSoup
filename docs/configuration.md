@@ -165,6 +165,7 @@ rows with any checkpoint mismatch are never reactivated.
 |----------|------|---------|-------------|
 | `WHATSOUP_ZOMBIE_SWEEP_MS` | integer (ms) | `1800000` (30m) | How often the zombie-session classifier re-runs after startup. |
 | `WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS` | integer (ms) | `86400000` (24h) | Age (with zero processed messages) past which an 'ambiguous' row is independently re-verified for PID liveness/ownership and, if still not alive+owned, marked terminal (`orphaned`). A session with any processed messages, or a PID confirmed alive and owned by this service, is left alone regardless of age. |
+| `WHATSOUP_RESIDENT_TURN_PROGRESS_DEADLINE_MS` | integer (ms) | `WHATSOUP_SESSION_IDLE_MS` (`3600000`, 1h) | How long a current-process resident manager may make no turn progress before it loses its exemption from zombie disposition (#3523). Progress is a turn in flight, or a turn completed within this window. Deliberately tracks `WHATSOUP_SESSION_IDLE_MS` so timing alone never disposes of a resident the runtime's own residency policy still considers live; lowering it makes an idle resident reapable sooner, and the zombie sweep only observes it every `WHATSOUP_ZOMBIE_SWEEP_MS`. Independent of this deadline, a scope with positive livelock evidence (auto-compact non-convergence or rapid re-arms at the convergence limit) is treated as making no progress immediately. A non-progressing resident whose row is `authoritative_live` is hard-reset through the owned per-chat reset; other classifications take their normal disposition. |
 
 Persisted resume is supported only by `claude-cli`, `codex-cli`, and `opencode-cli`.
 If a persisted resume is attempted with `gemini-cli`, `openai-api`, or
@@ -612,8 +613,8 @@ fails closed on a hand-set `WHATSOUP_PATH_PREPEND` containing one, printing a
 
 | Field | Type | Rules | Effect |
 |-------|------|-------|--------|
-| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory when written through the API (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
-| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory when written through the API (see below) | Rendered onto **two** surfaces of the same plist: prepended in order ahead of the generating shell's ambient `PATH` in the service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd), **and** joined with `:` into a second governed key `WHATSOUP_PATH_PREPEND`. Omitted or empty → neither surface changes and the plist is byte-identical to the historical render. |
+| `claudeConfigDir` | string | absolute path; no surrounding whitespace or control characters; within the home directory, checked at API admission and again at plist render (see below) | Rendered as `CLAUDE_CONFIG_DIR` so the launchd service context resolves the same dedicated claude-cli config root as interactive use of that root (e.g. an isolated per-bot root such as `$HOME/.claude-<instance>`). Omitted → the key is not rendered. The block governs only which config root the service resolves; it does not create or copy credentials (the CLI keeps those keychain-resident). |
+| `pathPrepend` | string[] | at most 16 entries; each an absolute path without `:` or control characters; each within the home directory, checked at API admission and again at plist render (see below) | Rendered onto **two** surfaces of the same plist: prepended in order ahead of the generating shell's ambient `PATH` in the service `PATH` (e.g. `$HOME/.local/bin` so a fallback provider binary resolves under launchd), **and** joined with `:` into a second governed key `WHATSOUP_PATH_PREPEND`. Omitted or empty → neither surface changes and the plist is byte-identical to the historical render. |
 | `expectedAccountDigest` | string | `sha256:<64 lowercase hex>` exactly, produced by `npm run --silent claude-account-digest` (the `--silent` matters — see the capture procedure); agent instances with `agentOptions.provider` `claude-cli` (the default) only — rejected elsewhere | Not a render key (never reaches the plist; applies on every platform). The ratified account identity the runtime verifies against; see [Ratified account identity](#ratified-account-identity-serviceexpectedaccountdigest). A raw email or organization id is rejected at admission on every path (create / PATCH / load / discovery). Omitted → verification disabled (one info log line at the first probe). |
 
 One source of truth: the shape rules live in `src/lib/launchd-service-config.ts`
@@ -624,17 +625,104 @@ unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
 
-Home-confinement of the two filesystem fields is enforced one layer up, at the
-API write paths only (`POST /api/lines` and `PATCH /api/lines/:name/config` in
-`src/fleet/routes/ops.ts`), which refuse a `claudeConfigDir` or a `pathPrepend`
-entry resolving outside the instance user's home directory with a `400`. It is
-not a shape rule, because `src/lib/launchd-service-config.ts` also runs on load
-and on render admission: rejecting there would stop an instance that already
-persisted an out-of-home value from loading at all. So a value written before
-this rule existed, or edited into `config.json` by hand, still loads and still
-renders — the guard closes the ingress, it does not retire existing values. The
-`PATCH` guard runs on the merged config, so an instance carrying an out-of-home
-entry is refused on every field until the entry is corrected.
+Home-confinement of the two filesystem fields is enforced at two call sites. At
+API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
+`src/fleet/routes/ops.ts`) a `claudeConfigDir` or a `pathPrepend` entry
+resolving outside the instance user's home directory is refused with a `400`. At
+plist RENDER admission (`assertHomeConfinedRenderOptions` in
+`src/fleet/platform.ts`, on both the reconcile and the first-install paths) the
+same rule is applied again to the resolved render options, immediately before
+the plist is built.
+
+It is still not a shape rule, because `src/lib/launchd-service-config.ts` also
+runs on config load: rejecting there would stop an instance that already
+persisted an out-of-home value from loading at all. So such a value — written
+before this rule existed, or edited into `config.json` by hand — still loads,
+but it no longer renders. The render refuses it with a
+`LaunchdRenderConfigError` naming the field, which covers reconciliation
+(`--dry-run` included, because the check precedes the dry-run early return) and
+the first install after authentication.
+
+Re-checking at render is not redundant with admission, because admission cannot
+bind a value whose meaning can still change. A path admitted while an
+intermediate segment was absent resolves to wherever a symlink later created at
+that segment points, and admission has already happened by then. Render
+admission is the last point before the value is baked into a plist, so that is
+where the physical resolution has to be repeated. This section records the
+render-time revalidation decision the PATH-governance follow-ups require.
+
+The `PATCH` guard runs on the merged config, so an instance carrying an
+out-of-home entry is refused on every field until the entry is corrected.
+
+#### Preflight for an instance that already carries a service path
+
+Render admission also applies to values that were persisted before it existed.
+An instance whose `service.claudeConfigDir`, or any `service.pathPrepend` entry,
+breaks one of the rules below cannot install or reconcile its plist: the render
+throws before any bytes are written, so the job keeps running from its already
+installed plist and no update reaches it until the value is corrected. Check
+every instance before upgrading.
+
+The rules a persisted value must satisfy, all four:
+
+- **Absolute.** It starts with `/`. Neither `~` nor a relative path is expanded
+  here.
+- **Canonically spelled.** No `.` or `..` component and no doubled separator.
+  A `..` is re-resolved by the kernel at every exec, so a spelling that lands
+  in the home directory today can land elsewhere after a component becomes a
+  symlink.
+- **Inside the instance user's home directory,** after symlinks are resolved.
+- **Physically resolvable.** Every component that exists must resolve. A
+  symlink whose target does not exist is refused, because whoever creates that
+  target later decides where the value points. Only the final leaf may be absent; every intermediate directory must resolve.
+
+To find the values, read the block in each instance's `config.json` under the
+instance config directory, and check the two keys. To have the checker find them
+for you, dry-run the reconciler per instance:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A `LaunchdRenderConfigError` naming a field is the answer: the message says
+which key and which rule, and never echoes the value. `must be a normalized
+absolute path within the home directory` means the spelling; `must resolve to a
+path inside the home directory` means where it points, or that something on the
+path does not resolve.
+
+To fix one, replace the value with a canonical absolute path inside the home
+directory and create the directory if it is missing, or drop the entry. Editing
+`config.json` directly is enough; the same rules are enforced on the API write
+paths, so `PATCH` refuses a bad replacement rather than persisting it. Re-run
+the dry-run until it reports drift instead of refusing, then apply.
+
+#### Design boundary: trusted ancestry under the home directory
+
+Render admission is a POINT-IN-TIME check, and this is a deliberate boundary
+rather than an oversight. Three properties combine:
+
+- Early API validation may accept a planned path with absent components. Default
+  workspace directories are provisioned only after full configuration validation,
+  one checked component at a time. Final render, runtime, and provider admission
+  require every intermediate to resolve; only the final leaf may be absent.
+- Existing paths are persisted in their accepted physical form. Render and
+  provider launch consume the physical path returned by final admission.
+- Starting or restarting an instance from an already installed plist does not
+  re-run render admission. Only reconcile and first install do.
+
+So a principal who can write inside an accepted in-home ancestor can create the
+missing final leaf as a symlink pointing outside the home directory AFTER the
+render, and the executable lookup that happens at the next start follows it.
+Render-time validation cannot close that window; no check made before a write
+can bind a filesystem that stays writable afterwards. What the rule does buy is
+that the ancestor must already be inside the home directory, so the trust
+boundary is "whoever can write under this home directory", not "anyone".
+
+Whether that principal is inside the threat model is an owner decision, not a
+property of this code. The stricter alternatives, if it is, are to require the
+complete target to exist at validation time, or to create the leaf directories
+privately before validating them. Both trade instance-creation ergonomics for
+the guarantee, and neither is implemented here.
 
 Unknown keys inside `service` are ignored (the instance-config convention for
 extraneous keys), so a misspelled field is silently inert — read the dry-run
@@ -1161,7 +1249,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. Omission is allowed only for `claude-cli`, `codex-cli`, and `gemini-cli`, which may use their own defaults; **required when `fallbackProvider` is `opencode-cli`, `openai-api`, or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
 | `fallbackDataPolicy` | string | no | — | Legacy single-fallback classification paired with `fallbackProvider`: `trusted` or `restricted`. It is required when `providerBoundaryMode` is `enforce`, and `restricted` has the same API-provider-only limitation as `providerDataPolicy`. |
 | `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>", "dataPolicy": "trusted" | "restricted" }`; `model` may be omitted only for `claude-cli`, `codex-cli`, and `gemini-cli`, and `dataPolicy` may be omitted only in `shadow` mode. OpenCode and managed API entries require a model. Do not combine with `fallbackProvider` / `fallbackModel` / `fallbackDataPolicy`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Auth-required failures skip same-provider entries because they share the failed auth surface and require an independent provider. Maximum 8 entries. Duplicate provider/model routes with conflicting policies are rejected. |
-| `fallbackDiscovery` | object | no | — | Discovery-mode fallback (R6): `{ "mode": "auto", "maxEntries": 3, "preferModels": { "glm": "glm/glm-5.2" }, "excludeProviders": [], "includeFreeTier": true }`. Instead of a hardcoded list, the runtime DERIVES the chain per host/user/deployment from the OpenCode gateway's credential-aware model catalogue (`opencode models`): one model per catalogue provider (provider diversity — adjacent same-provider entries die together on quota/suspension), operator pin via `preferModels` else the last (newest) catalogue entry per provider, canary-`ok` candidates ranked before `unknown`, canary-`dead` excluded, and one keyless free-tier `opencode/*` model reserved as the tail entry when `includeFreeTier` (default true; a chain of `maxEntries` 1 keeps its slot for the strongest keyed candidate). `maxEntries` clamps to [1, 4] (default 3). Derivation runs at boot (awaited, honest-degrading — an unavailable catalogue keeps the previous chain and raises `fallback_discovery_empty` only when the instance is actually left without a ladder), fire-and-forget at window arm when the snapshot is older than 1 hour, and after every chain-canary sweep (evidence changed → re-rank); mid-window a re-derivation never swaps the ACTIVE entry and never drops entries already tried that window — only the not-yet-tried remainder is re-ranked. The canary sweeps the full discovered candidate basis (≤5 probes) so an excluded-dead candidate can prove recovery. Mutually exclusive with a non-empty `fallbacks` list and with the legacy `fallbackProvider`/`fallbackModel`/`fallbackDataPolicy` fields — rejected at admission, no silent merge. `/health` reports the derivation under `fallbackDiscovery` (last-derived time, catalogue size, per-candidate evidence/selection). |
+| `fallbackDiscovery` | object | no | — | Discovery-mode fallback (R6): `{ "mode": "auto", "maxEntries": 3, "preferModels": { "glm": "glm/glm-5.2" }, "excludeProviders": [], "includeFreeTier": true }`. The runtime derives a bounded, provider-diverse chain per host/user/deployment from the OpenCode gateway's configured-provider catalogue. Capture first runs `opencode models --pure --refresh --verbose`; a failed refresh may use explicitly labeled cached verbose data, and older gateways degrade to labeled legacy ID-only output. Automatic candidates must not be explicitly inactive, non-text-output, or non-tool-capable when metadata supplies those facts. Within each provider, a live operator pin wins; otherwise recent successful completion evidence outranks unknown evidence, stable lifecycle outranks preview lifecycle, a validated month- or day-precision release date breaks the remaining tie, and metadata-free gateways retain the established later-entry tie break. A dead exact model falls through to another eligible model from the same provider. One `opencode/*` model whose input, output, and nested numeric prices are all metadata-confirmed zero is reserved as the tail when `includeFreeTier` (legacy catalogues retain the prior provider-prefix assumption); a one-entry chain keeps its slot for the strongest keyed candidate. `maxEntries` clamps to [1, 4] (default 3). Derivation runs at boot, at stale window arm, and after chain-canary sweeps; unavailable catalogues retain the prior chain, and mid-window derivation preserves the active and already-tried entries. The canary sweep remains bounded to the provider-candidate basis: an all-dead provider retains one recovery probe, while a replaced dead sibling waits for its failure evidence to expire. Discovery is mutually exclusive with static and legacy fallback fields. `/health` reports capture mode, refresh failure, catalogue size, and each candidate's evidence, lifecycle, release date, cost classification, eligibility basis, and selection. Requested route labels remain configuration—not independently observed provider identity. See the [selection architecture record](architecture/capability-aware-fallback-discovery.md). |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
@@ -1565,6 +1653,11 @@ restart the instance after editing. Verification paths are peers: the
 [`FALLBACK ON` canary](#enabling-provider-fallback-on-a-new-host) exercises a
 live turn, while `POST /api/credentials/:service/verify` runs a single
 list-models probe without touching a session.
+
+In the Add Line wizard, changing **Fallback Provider** clears **Fallback
+Model**, because model IDs belong to a provider. Choose a model for the new
+provider when it requires one. Keeping the same provider preserves its model
+and changing the fallback leaves the primary provider settings unchanged.
 
 #### Provider fallback behavior
 

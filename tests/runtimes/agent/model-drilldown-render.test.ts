@@ -56,6 +56,21 @@ describe('model-drilldown-render (Slice 2 pure level renderers)', () => {
       expect(text).not.toContain('1. kimi/kimi-k3 (current)');
     });
 
+    it('renders a typed More row after eleven models, keeping the menu at twelve visible rows', () => {
+      const models = Array.from({ length: 11 }, (_, i) => `opencode/model-${i}`);
+      const { text, entries } = renderModelLevel('OpenCode', 'opencode-cli', models, null, 11);
+      expect(entries).toHaveLength(12);
+      expect(text).toContain('11. opencode/model-10');
+      expect(text).toContain('12. More models');
+      expect(entries[11]).toEqual({
+        kind: 'more',
+        label: 'More models',
+        brand: 'OpenCode',
+        provider: 'opencode-cli',
+        offset: 11,
+      });
+    });
+
     it('retired up-nav: the footer never advertises /model back', () => {
       const { text } = renderModelLevel('Claude', 'claude-cli', ['claude-opus-4-8']);
       expect(text).not.toContain('/model back');

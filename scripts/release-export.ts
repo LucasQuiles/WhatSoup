@@ -18,6 +18,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isHelpFlag, takeValue } from './lib/cli-args.ts';
+import {
+  stageDeploymentQualificationBundle,
+  type DeploymentQualificationBundleReport,
+  type DeploymentQualificationExportBinding,
+} from './lib/deployment-qualification-export.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
 import {
   RELEASE_MANIFEST_FILE,
@@ -48,6 +53,8 @@ export interface ReleaseExportOptions {
   /** Replace an existing release, preserving it at the rollback path. */
   replace?: boolean;
   mutablePathExcludes?: readonly string[];
+  /** Optional, fully explicit immutable bundle for the deployment qualifier. */
+  qualificationBundle?: DeploymentQualificationExportBinding;
 }
 
 export interface ReleaseExportReport {
@@ -61,6 +68,7 @@ export interface ReleaseExportReport {
   /** Digest over the sorted (path, sha256) manifest rows — the release identity. */
   treeSha256: string;
   selfCheck: ReleaseSnapshotDriftReport;
+  qualificationBundle?: DeploymentQualificationBundleReport;
   approvalPending: string;
 }
 
@@ -156,6 +164,18 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       mkdirSync(path.dirname(destination), { recursive: true });
       cpSync(path.join(stagingSource, file.path), destination);
     }
+    const stagedQualificationBundle = options.qualificationBundle
+      ? stageDeploymentQualificationBundle({
+        sourceRoot: stagingSource,
+        stagingReleaseRoot: stagingRelease,
+        sourceCommit: commit,
+        binding: options.qualificationBundle,
+      })
+      : undefined;
+    if (stagedQualificationBundle) {
+      manifest.files = [...manifest.files, ...stagedQualificationBundle.releaseFiles]
+        .sort((left, right) => left.path.localeCompare(right.path));
+    }
     const manifestBody = `${JSON.stringify(manifest, null, 2)}\n`;
     writeFileSync(path.join(stagingRelease, RELEASE_MANIFEST_FILE), manifestBody, 'utf8');
 
@@ -213,6 +233,13 @@ export function exportRelease(options: ReleaseExportOptions): ReleaseExportRepor
       fileCount: manifest.files.length,
       treeSha256: manifestTreeSha256(manifest),
       selfCheck,
+      qualificationBundle: stagedQualificationBundle
+        ? {
+          ...stagedQualificationBundle.report,
+          executionRoot: path.join(releasePath, stagedQualificationBundle.report.executionRootRelativePath),
+          manifestPath: path.join(releasePath, stagedQualificationBundle.report.manifestRelativePath),
+        }
+        : undefined,
       approvalPending:
         'repoint-launchd-and-restart: release bytes exported only; service repoint/restart remain separately-approved host mutations',
     };
@@ -231,6 +258,16 @@ interface ParsedArgs {
   buildTime: string;
   requiredOutputs: string[];
   replace: boolean;
+  qualificationBundle?: DeploymentQualificationExportBinding;
+  qualificationBundleEnabled: boolean;
+  qualificationSourceCommit?: string;
+  qualificationArcCommit?: string;
+  qualificationQfleetCommit?: string;
+  qualificationPolicyVersion?: string;
+  qualificationQualifier?: string;
+  qualificationSourceTestProfile?: string;
+  qualificationDeploymentProfiles: string[];
+  qualificationHealthHelpers: string[];
   json: boolean;
 }
 
@@ -240,6 +277,9 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
     buildTime: new Date().toISOString(),
     requiredOutputs: [],
     replace: false,
+    qualificationBundleEnabled: false,
+    qualificationDeploymentProfiles: [],
+    qualificationHealthHelpers: [],
     json: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -258,10 +298,19 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
     else if (arg === '--build-time') options.buildTime = next();
     else if (arg === '--required-output') options.requiredOutputs.push(next());
     else if (arg === '--replace') options.replace = true;
+    else if (arg === '--qualification-bundle') options.qualificationBundleEnabled = true;
+    else if (arg === '--qualification-source-commit') options.qualificationSourceCommit = next();
+    else if (arg === '--qualification-arc-commit') options.qualificationArcCommit = next();
+    else if (arg === '--qualification-qfleet-commit') options.qualificationQfleetCommit = next();
+    else if (arg === '--qualification-policy-version') options.qualificationPolicyVersion = next();
+    else if (arg === '--qualification-qualifier') options.qualificationQualifier = next();
+    else if (arg === '--qualification-source-test-profile') options.qualificationSourceTestProfile = next();
+    else if (arg === '--qualification-deployment-profile') options.qualificationDeploymentProfiles.push(next());
+    else if (arg === '--qualification-health-helper') options.qualificationHealthHelpers.push(next());
     else if (arg === '--json') options.json = true;
     else if (isHelpFlag(arg)) {
       throw new Error(
-        'Usage: scripts/release-export.ts --commit <full-sha> --release-root /absolute/path [--repo-root /absolute/path] [--release-name name] [--rollback-root /absolute/path] [--source-ref label] [--build-time iso] [--required-output rel/path ...] [--replace] [--json]',
+        'Usage: scripts/release-export.ts --commit <full-sha> --release-root /absolute/path [--repo-root /absolute/path] [--release-name name] [--rollback-root /absolute/path] [--source-ref label] [--build-time iso] [--required-output rel/path ...] [--replace] [--qualification-bundle --qualification-source-commit sha --qualification-arc-commit sha --qualification-qfleet-commit sha --qualification-policy-version version --qualification-qualifier path --qualification-source-test-profile path --qualification-deployment-profile path --qualification-deployment-profile path --qualification-health-helper path ...] [--json]',
       );
     } else {
       throw new Error(`unknown argument: ${arg}`);
@@ -269,6 +318,40 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
   }
   if (!options.commit) throw new Error('--commit is required');
   if (!options.releaseRoot) throw new Error('--release-root is required');
+  const qualificationArgumentsPresent = options.qualificationSourceCommit !== undefined
+    || options.qualificationArcCommit !== undefined
+    || options.qualificationQfleetCommit !== undefined
+    || options.qualificationPolicyVersion !== undefined
+    || options.qualificationQualifier !== undefined
+    || options.qualificationSourceTestProfile !== undefined
+    || options.qualificationDeploymentProfiles.length > 0
+    || options.qualificationHealthHelpers.length > 0;
+  if (!options.qualificationBundleEnabled && qualificationArgumentsPresent) {
+    throw new Error('qualification bundle arguments require --qualification-bundle');
+  }
+  if (options.qualificationBundleEnabled) {
+    const required = [
+      ['--qualification-source-commit', options.qualificationSourceCommit],
+      ['--qualification-arc-commit', options.qualificationArcCommit],
+      ['--qualification-qfleet-commit', options.qualificationQfleetCommit],
+      ['--qualification-policy-version', options.qualificationPolicyVersion],
+      ['--qualification-qualifier', options.qualificationQualifier],
+      ['--qualification-source-test-profile', options.qualificationSourceTestProfile],
+    ].filter(([, value]) => value === undefined).map(([name]) => name);
+    if (required.length > 0 || options.qualificationDeploymentProfiles.length === 0 || options.qualificationHealthHelpers.length === 0) {
+      throw new Error(`qualification bundle binding is incomplete: ${[...required, '--qualification-deployment-profile', '--qualification-health-helper'].join(', ')}`);
+    }
+    options.qualificationBundle = {
+      sourceCommit: options.qualificationSourceCommit as string,
+      arcCommit: options.qualificationArcCommit as string,
+      qfleetCommit: options.qualificationQfleetCommit as string,
+      policyVersion: options.qualificationPolicyVersion as string,
+      qualifier: options.qualificationQualifier as string,
+      sourceTestProfile: options.qualificationSourceTestProfile as string,
+      deploymentProfiles: options.qualificationDeploymentProfiles,
+      healthHelpers: options.qualificationHealthHelpers,
+    };
+  }
   return options;
 }
 
@@ -284,12 +367,16 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
     buildTime: options.buildTime,
     requiredOutputs: options.requiredOutputs,
     replace: options.replace,
+    qualificationBundle: options.qualificationBundle,
   });
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else {
     console.log(`exported ${report.commit} -> ${report.releasePath}`);
     console.log(`files=${report.fileCount} tree=${report.treeSha256}`);
     console.log(`self-check ok=${report.selfCheck.ok}`);
+    if (report.qualificationBundle) {
+      console.log(`qualification bundle=${report.qualificationBundle.manifestPath} sha256=${report.qualificationBundle.manifestSha256}`);
+    }
     console.log(`pending approval: ${report.approvalPending}`);
   }
   return report;

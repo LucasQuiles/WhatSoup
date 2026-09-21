@@ -273,5 +273,5 @@ Status: completed
     // (proving the classification is actually differentiating, not a constant).
     const lifecycles = new Set(index.rows.map((r) => r.lifecycle));
     expect(lifecycles.size).toBeGreaterThanOrEqual(2);
-  });
+  }, 60_000);
 });

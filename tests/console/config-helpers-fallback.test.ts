@@ -11,21 +11,15 @@ import {
   AGENT_OPTION_FIELDS,
   buildConfigEntries,
 } from '../../console/src/components/line-detail/config-helpers.ts';
-import { PROVIDERS } from '../../console/src/lib/providers.ts';
 
 describe('AGENT_OPTION_FIELDS — fallback fields', () => {
   it('classifies agentOptions.fallbackModel as a typed string field', () => {
     expect(AGENT_OPTION_FIELDS['agentOptions.fallbackModel']).toEqual({ type: 'string' });
   });
 
-  it('classifies agentOptions.fallbackProvider as an enum sourced from the provider catalog', () => {
+  it('classifies agentOptions.fallbackProvider as a typed string rendered by ProviderSelect', () => {
     const def = AGENT_OPTION_FIELDS['agentOptions.fallbackProvider'];
-    expect(def.type).toBe('enum');
-    // Enum options are derived from the single console PROVIDERS catalog — never
-    // a second hardcoded provider-id list.
-    expect(def.enum).toEqual(PROVIDERS.map((p) => p.id));
-    expect(def.enum).toContain('openai-api');
-    expect(def.enum).toContain('claude-cli');
+    expect(def).toEqual({ type: 'string' });
   });
 });
 
