@@ -164,13 +164,14 @@ export function registerTransitionCases(): void {
     const api = boundaryCli as unknown as {
       runBoundaryRunCli?: (argv: readonly string[], cwd?: string) => Promise<ReturnType<typeof validateBoundaryRun>>;
     };
-    expect(typeof api.runBoundaryRunCli).toBe('function');
-    if (!api.runBoundaryRunCli) return;
+    const runBoundaryRunCli = api.runBoundaryRunCli;
+    expect(typeof runBoundaryRunCli).toBe('function');
+    if (!runBoundaryRunCli) return;
     await withHostGitSentinel(async (markerPath) => {
       const fixture = makeCliRepo();
       expect(git(fixture.repo, ['branch', '--show-current'])).toBe('main');
       expect(existsSync(markerPath)).toBe(false);
-      expect(await api.runBoundaryRunCli([
+      expect(await runBoundaryRunCli([
         'init', '--run-dir', fixture.runDir, '--task', 'BCF-00', '--profile', 'bcf00-observation',
         '--preserve-owner-path', 'owner.tsv',
       ], fixture.repo)).toMatchObject({ ok: true, exitCode: 0 });
@@ -200,7 +201,7 @@ export function registerTransitionCases(): void {
       writeSyntheticRunInitAnchor(fixture.runDir, manifest);
 
       const beforeHead = git(fixture.repo, ['rev-parse', 'HEAD']);
-      const wrongSubject = await api.runBoundaryRunCli([
+      const wrongSubject = await runBoundaryRunCli([
         'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
         '--kind', 'commit', '--expect-before', beforeHead, '--message-subject', 'fix(quality): substitute subject',
       ], fixture.repo);
@@ -208,7 +209,7 @@ export function registerTransitionCases(): void {
       expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(beforeHead);
       expect(existsSync(path.join(fixture.runDir, 'attempts/parser-commit-transition'))).toBe(false);
 
-      const recorded = await api.runBoundaryRunCli([
+      const recorded = await runBoundaryRunCli([
         'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
         '--kind', 'commit', '--expect-before', beforeHead,
         '--message-subject', 'fix(quality): fail closed on invalid semantic options',
@@ -235,7 +236,7 @@ export function registerTransitionCases(): void {
       });
       expect(git(fixture.repo, ['diff', '--name-only', 'HEAD', '--', ...profile.allowedPaths])).toBe('');
 
-      const reused = await api.runBoundaryRunCli([
+      const reused = await runBoundaryRunCli([
         'record-git-transition', '--run-dir', fixture.runDir, '--attempt', 'parser-commit-transition',
         '--kind', 'commit', '--expect-before', beforeHead,
         '--message-subject', 'fix(quality): fail closed on invalid semantic options',
