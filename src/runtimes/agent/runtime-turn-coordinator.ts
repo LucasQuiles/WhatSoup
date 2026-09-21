@@ -37,7 +37,10 @@ import {
   rebindRuntimeTurnOwner,
   type RuntimeTurnContext,
 } from './runtime-turn-context.ts';
-import type { AttemptOutcome } from './turn-terminal.ts';
+import {
+  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+  type AttemptOutcome,
+} from './turn-terminal.ts';
 import {
   finalizeRuntimeTurn,
   type FinalizeRuntimeTurnResult,
@@ -1326,7 +1329,9 @@ async finalizeActiveRuntimeTurnsForShutdown(
  * report processing after its legacy flags clear, so immutable contexts are
  * the authority here.
  */
-async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
+async terminalizeGlobalTurnForReset(
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+): Promise<RuntimeTurnQueueTeardown> {
   const existing = this.globalTeardown;
   if (existing) {
     if (
@@ -1377,7 +1382,7 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     finalizations.push(this.finalizeUndispatchedRuntimeTurn(
       turn.runtimeContext,
       undefined,
-      { kind: 'admission_rejected' },
+      operatorCancellation ?? { kind: 'admission_rejected' },
       () => { detached.ownershipProven = true; },
     ));
   }
@@ -1386,7 +1391,11 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     pendingSingleton
     && current?.identity.logicalTurnId !== pendingSingleton.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(pendingSingleton));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      pendingSingleton,
+      undefined,
+      operatorCancellation,
+    ));
   }
   const activeTurn = runtimeQueue.activeTurn;
   if (
@@ -1394,7 +1403,11 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     && current?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
     && pendingSingleton?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(activeTurn.runtimeContext));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      activeTurn.runtimeContext,
+      undefined,
+      operatorCancellation,
+    ));
   }
   if (current) {
     const queue = this.host.getQueueForChat(current.identity.deliveryJid);
@@ -1407,7 +1420,7 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
       const finalization = this.finalizeRuntimeTurnContext({
         context: current,
         queue,
-        attemptOutcome: { kind: 'failed', class: 'crash' },
+        attemptOutcome: operatorCancellation ?? { kind: 'failed', class: 'crash' },
         session: this.host.session,
         clearReplayOnSuccess: false,
       });
@@ -1515,7 +1528,10 @@ async retireGlobalTurnQueueAfterReset(transaction: RuntimeTurnQueueTeardown): Pr
  *
  * Scoped mirror of the per-chat arm of finalizeActiveRuntimeTurnsForShutdown().
  */
-async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQueueTeardown> {
+async terminalizePerChatTurnQueueForKill(
+  mapKey: string,
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+): Promise<RuntimeTurnQueueTeardown> {
   const existing = this.perChatTeardowns.get(mapKey);
   if (existing) {
     if (
@@ -1572,7 +1588,7 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
       finalizations.push(this.finalizeUndispatchedRuntimeTurn(
         turn.runtimeContext,
         scopeRef,
-        { kind: 'admission_rejected' },
+        operatorCancellation ?? { kind: 'admission_rejected' },
         () => { detached.ownershipProven = true; },
       ));
     }
@@ -1586,7 +1602,11 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
     activeTurn?.runtimeContext
     && published?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(activeTurn.runtimeContext, scopeRef));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      activeTurn.runtimeContext,
+      scopeRef,
+      operatorCancellation,
+    ));
   }
   if (published) {
     const queue = this.host.chatQueues.get(mapKey);
@@ -1599,7 +1619,7 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
       const finalization = this.finalizeRuntimeTurnContext({
         context: published,
         queue,
-        attemptOutcome: { kind: 'failed', class: 'crash' },
+        attemptOutcome: operatorCancellation ?? { kind: 'failed', class: 'crash' },
         session: this.host.chatSessions.get(mapKey) ?? null,
         mapKey,
         clearReplayOnSuccess: false,
@@ -2181,13 +2201,15 @@ async finalizeUndispatchedRuntimeTurnAndWait(
 terminalizeUndispatchedRuntimeCrash(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
 ): Promise<FinalizeRuntimeTurnResult> {
   const turnId = context.identity.logicalTurnId;
+  const interruption = operatorCancellation ? 'operator cancellation' : 'crash';
   this.cancelledUndispatchedTurnIds.add(turnId);
   const initialFinalization = this.finalizeUndispatchedRuntimeTurn(
     context,
     scopeRef,
-    { kind: 'failed', class: 'crash' },
+    operatorCancellation ?? { kind: 'failed', class: 'crash' },
   );
   const finalization = initialFinalization.then(async (result) => {
     if (result.kind !== 'terminal' && !result.mayAdvance) {
@@ -2197,12 +2219,12 @@ terminalizeUndispatchedRuntimeCrash(
     this.host.runtimeTurnSupervisor.markDegraded(context);
     log.error(
       { err, mapKey: scopeRef?.value, scopeKey: this.runtimeTurnScopeKey(context) },
-      'undispatched runtime crash finalization failed',
+      `undispatched runtime ${interruption} finalization failed`,
     );
     throw err;
   });
   this.undispatchedCrashFinalizations.set(turnId, finalization);
-  void finalization.catch((err) => log.debug({ err }, 'runtime-turn-coordinator: undispatched crash finalization rejected (consumed at its await site; barrier only)'));
+  void finalization.catch((err) => log.debug({ err }, `runtime-turn-coordinator: undispatched ${interruption} finalization rejected (consumed at its await site; barrier only)`));
   return initialFinalization;
 }
 

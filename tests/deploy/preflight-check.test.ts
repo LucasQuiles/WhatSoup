@@ -54,6 +54,7 @@ const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-privat
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
+const CLI_ARGS = join(REPO_ROOT, 'scripts/lib/cli-args.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
@@ -161,6 +162,7 @@ function makeFixtureTree(
   const integrityFiles: Record<string, string> = {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
   };
@@ -219,6 +221,7 @@ function makeIntegrityReleaseTree(): string {
   const root = makeFixtureTree('export const mainOk = true;\n', {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
     'deploy/source-runtime-manifest.json': JSON.stringify({
@@ -298,6 +301,7 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
+  copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');

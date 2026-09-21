@@ -7573,7 +7573,7 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
-  it('reports OpenCode progress for its live child and ignores stale-child output after handoff', async () => {
+  it.each(['stdout', 'stderr'] as const)('reports OpenCode %s diagnostic progress and ignores stale-child output after handoff', async (stream) => {
     let now = 20_000;
     const firstChild = makeMockChild(12011);
     const secondChild = makeMockChild(12012);
@@ -7615,6 +7615,10 @@ describe('session.ts uncovered-branch coverage', () => {
       })}\n`));
       expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
 
+      now = 20_015;
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=tool-running\n'));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
       const secondTurn = second.sendTurn('second');
       await Promise.resolve();
       now = 20_020;
@@ -7631,6 +7635,7 @@ describe('session.ts uncovered-branch coverage', () => {
       firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
         type: 'text', part: { text: 'stale progress' },
       })}\n`));
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=stale-tool\n'));
       expect(gate.snapshot()).toMatchObject({
         activePhase: 'executing',
         progressAgeMs: 10,

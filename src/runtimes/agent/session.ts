@@ -3704,6 +3704,7 @@ export class SessionManager {
             || this.activeProviderTurnToken !== providerTurnToken
           ) return;
           if (this.provider === 'opencode-cli' && isOpenCodeDiagnosticLogLine(line)) {
+            this.markProviderExecutionProgress(child, childGeneration);
             this.tickWatchdog();
             continue;
           }
@@ -3737,6 +3738,7 @@ export class SessionManager {
           openCodeStderrBufferStr = lines.pop() ?? '';
           for (const line of lines) {
             if (isOpenCodeDiagnosticLogLine(line)) {
+              this.markProviderExecutionProgress(child, childGeneration);
               this.tickWatchdog();
               continue;
             }
