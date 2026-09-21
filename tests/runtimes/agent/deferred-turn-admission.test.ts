@@ -668,7 +668,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     expect(status(seq)).toBe('processing');
     clock.mockReturnValue(1_780_000_010_000);
     await vi.waitFor(() => expect(status(seq)).toBe('failed'));
-    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'scope_blocked_recovery' }]);
+    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
     engine.matchEcho('wamid-original-answer');
     await queue.idle();
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
@@ -873,7 +873,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
       release();
     }
     await queue.idle();
-    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'scope_blocked_recovery' }]);
+    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
   });
 
@@ -888,7 +888,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     monotonic.mockReturnValue(10_100);
     try {
       await vi.waitFor(() => expect(status(seq)).toBe('failed'));
-      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'scope_blocked_recovery' }]);
+      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
       expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
     } finally {
       wall.mockRestore();
@@ -909,7 +909,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     clock.mockRestore();
     await runtime.shutdown();
     await queue.idle();
-    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'scope_blocked_recovery' }]);
+    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
   });
 });

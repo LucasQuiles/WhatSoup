@@ -2533,8 +2533,12 @@ private async waitForQueuedDeliveryEcho(
           'queued turn waiting for completed answer delivery echo');
       }
       if (performance.now() - startedAt >= QUEUED_DELIVERY_ECHO_WAIT_MS) {
+        // Same terminal class the thrown ScopeBlockedByDurableRecoveryError already maps to in
+        // finalizePerChatProcessorError, so a follower blocked by recovery lands in one class
+        // whether it was rejected before dispatch or after the echo wait timed out.
+        // scope_blocked_recovery stays reserved for outbound-queue-poison containment (#3321).
         await this.finalizeUndispatchedRuntimeTurnAndWait(context, scopeRef,
-          { kind: 'admission_rejected', class: 'scope_blocked_recovery' },
+          { kind: 'admission_rejected', class: 'pre_dispatch_error' },
           { error: new ScopeBlockedByDurableRecoveryError() });
         return false;
       }
