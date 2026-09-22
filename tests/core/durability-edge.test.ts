@@ -441,7 +441,7 @@ describe('DurabilityEngine edge coverage', () => {
         status: 'incomplete',
         failedPhases: ['emit_outbound_quarantine_alert'],
         openRecoveries: 0,
-      });
+        });
     },
   );
 

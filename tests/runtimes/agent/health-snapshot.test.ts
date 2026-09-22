@@ -341,6 +341,9 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
     turnRecoveryEchoConflicts: 0,
+    turnRecoveryBlockedUnsafeSynthetic: 0,
+    turnRecoveryBlockedUnsafeSuperseded: 0,
+    turnRecoveryBlockedUnsafeStranded: 0,
   };
 }
 
