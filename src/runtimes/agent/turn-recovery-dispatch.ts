@@ -372,6 +372,10 @@ export interface TurnRecoveryHealthDetails {
   readonly turnRecoveryCorruptLinks: number;
   readonly turnRecoveryOrphanTransfers: number;
   readonly turnRecoveryEchoConflicts: number;
+  /** blockedUnsafe split — see TurnRecoverySupervisorCounts.blockedUnsafeSynthetic. */
+  readonly turnRecoveryBlockedUnsafeSynthetic: number;
+  readonly turnRecoveryBlockedUnsafeSuperseded: number;
+  readonly turnRecoveryBlockedUnsafeStranded: number;
 }
 
 /** Pure projection of durability's supervisor counts (arch.file-size extraction). */
@@ -384,6 +388,7 @@ export function getTurnRecoveryHealthDetails(
       outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
       blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
       orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+      blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     };
   return {
     turnRecoveryOutstanding: counts.outstanding,
@@ -397,5 +402,8 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryCorruptLinks: counts.corruptLinks,
     turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
     turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
+    turnRecoveryBlockedUnsafeSynthetic: counts.blockedUnsafeSynthetic ?? 0,
+    turnRecoveryBlockedUnsafeSuperseded: counts.blockedUnsafeSuperseded ?? 0,
+    turnRecoveryBlockedUnsafeStranded: counts.blockedUnsafeStranded ?? 0,
   };
 }
