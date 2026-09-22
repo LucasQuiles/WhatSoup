@@ -193,7 +193,7 @@
     "@types/ws": "^8.18.1",
     "@typescript-eslint/rule-tester": "8.58.0",
     "@vitest/browser-playwright": "^4.1.11",
-    "@vitest/coverage-v8": "4.1.10",
+    "@vitest/coverage-v8": "4.1.11",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "eslint": "9.39.4",
