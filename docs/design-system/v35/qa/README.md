@@ -29,8 +29,10 @@ Scripts are sanitized: machine-specific paths/hosts are environment variables.
   which is no longer present in the mockups they were rendered from. They are not
   replaced in place because the shrink-only tracked-PNG ratchet from issue #2219
   Option A, enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit`,
-  caps any new or changed PNG at 100 KiB while a fresh render of these surfaces
-  is several times that. Regenerate on demand instead, with the pipeline this
+  caps any new PNG, and any changed PNG outside `docs/screenshots/`, at 100 KiB
+  (a tracked screenshot under `docs/screenshots/` may be replaced only by one
+  that is no larger than its committed version and at most 640 KiB), while a
+  fresh render of these surfaces is several times that. Regenerate on demand instead, with the pipeline this
   directory documents:
 
       python3 -m venv .venv
