@@ -14,8 +14,8 @@ import { createChildLogger } from '../logger.ts';
 import {
   deletePrivateFileSync,
   readPrivateFileSync,
-  writeAtomicPrivateFileIsolatedSync,
 } from './private-fs.ts';
+import { privatePublicationStateOf, writeAtomicPrivateFileIsolatedSync } from './private-fs-isolated.ts';
 import { isNonEmptyString } from './type-guards.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
@@ -515,8 +515,12 @@ export function writeCredential(
     if (options.user === undefined) {
       try {
         fileStoreWrite(service, value);
-      } catch {
-        fileStoreDelete(service);
+      } catch (err) {
+        // Remove the mirror only when the new value provably never reached it
+        // (the old value would otherwise disagree with the keychain). When the
+        // new value was, or may have been, published, deleting it could remove
+        // the just-written credential; the thrown error still reports failure.
+        if (privatePublicationStateOf(err) === 'not-published') fileStoreDelete(service);
         throw new KeyringWriteError('KEYRING_WRITE_FAILED', `credential mirror failed for service ${service}`);
       }
     }
@@ -660,7 +664,8 @@ export function readOpenCodeAuthKey(provider: string): string | null {
 
 function fileStoreWrite(service: string, value: string): void {
   if (Buffer.byteLength(value) > FILE_STORE_MAX_BYTES) {
-    throw new Error('credential exceeds file-store maximum size');
+    // Refused before any write, so the caller may treat the mirror as untouched.
+    throw Object.assign(new Error('credential exceeds file-store maximum size'), { publication: 'not-published' });
   }
   writeAtomicPrivateFileIsolatedSync(fileStorePath(service), value, 'credential');
 }

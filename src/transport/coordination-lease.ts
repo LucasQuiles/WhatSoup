@@ -31,14 +31,21 @@
 //
 // Fencing monotonicity: release writes a tombstone carrying the released
 // token BEFORE removing the lease; acquisition takes
-// max(tombstone, existing lease) + 1. The O_EXCL lease create is the
-// single-winner arbiter between racing acquirers.
+// max(tombstone, existing lease) + 1. The exclusive lease create (an isolated
+// child hard-links a fully written, fsynced temp onto the lease path, which
+// fails EEXIST atomically) is the single-winner arbiter between racing
+// acquirers.
 
 import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { appendPrivateJsonLineSync, ensurePrivateDirectorySync, writeAtomicPrivateFileIsolatedSync } from '../lib/private-fs.ts';
+import { appendPrivateJsonLineSync, ensurePrivateDirectorySync } from '../lib/private-fs.ts';
+import {
+  createPrivateFileIsolatedSync,
+  privatePublicationStateOf,
+  writeAtomicPrivateFileIsolatedSync,
+} from '../lib/private-fs-isolated.ts';
 import { getCurrentBootId } from '../lib/process-lock.ts';
 import { systemClock } from '../lib/clock.ts';
 import {
@@ -224,16 +231,23 @@ function buildLease(args: AcquireLeaseArgs, fencingToken: number): CoordinationL
   return parseCoordinationLease(candidate);
 }
 
-function writeLeaseExclusive(leasePath: string, lease: CoordinationLeaseV1): boolean {
-  let fd: number | null = null;
+type ExclusiveLeaseWrite = 'written' | 'exists' | 'io_error' | 'maybe_written';
+
+/**
+ * Exclusively create the lease (never replaces an existing one): the isolated
+ * writer hard-links a fully written, fsynced temp onto the lease path, which
+ * fails EEXIST atomically when another acquirer got there first.
+ * 'maybe_written' means the lease may be on disk; the caller's
+ * verify-after-write read decides.
+ */
+function writeLeaseExclusive(leasePath: string, lease: CoordinationLeaseV1): ExclusiveLeaseWrite {
   try {
-    fd = openSync(leasePath, 'wx', 0o600);
-    writeSync(fd, JSON.stringify(lease));
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (fd !== null) closeSync(fd);
+    createPrivateFileIsolatedSync(leasePath, JSON.stringify(lease), 'coordination lease');
+    return 'written';
+  } catch (err) {
+    const publication = privatePublicationStateOf(err);
+    if (publication !== 'not-published') return 'maybe_written';
+    return (err as NodeJS.ErrnoException).code === 'EEXIST' ? 'exists' : 'io_error';
   }
 }
 
@@ -350,15 +364,16 @@ export function acquireCoordinationLease(args: AcquireLeaseArgs): AcquireLeaseRe
     const fencingToken = Math.max(readTombstoneToken(args.stateRoot, args.scopeId), priorToken) + 1;
     const lease = buildLease(args, fencingToken);
     if (lease === null) return { ok: false, refusal: 'owner_unknown' };
-    if (!writeLeaseExclusive(leasePath, lease)) {
-      // Another acquirer won the O_EXCL race between our unlink/read and write.
-      return { ok: false, refusal: 'lease_race_lost' };
-    }
+    const written = writeLeaseExclusive(leasePath, lease);
+    // Another acquirer won the exclusive-create race between our unlink/read and write.
+    if (written === 'exists') return { ok: false, refusal: 'lease_race_lost' };
+    if (written === 'io_error') return { ok: false, refusal: 'io_error' };
     // Verify-after-write: our write must still be the lease on disk. Belt and
-    // braces under the guard; load-bearing if a guard-less writer slips in.
+    // braces under the guard; load-bearing if a guard-less writer slips in, and
+    // decisive when the writer could not prove whether it published.
     const onDisk = readCoordinationLease(args.stateRoot, args.scopeId);
     if (onDisk === null || onDisk.operationId !== lease.operationId || onDisk.fencingToken !== lease.fencingToken) {
-      return { ok: false, refusal: 'lease_race_lost' };
+      return { ok: false, refusal: written === 'maybe_written' ? 'io_error' : 'lease_race_lost' };
     }
     if (takeover !== null) appendTakeoverReceipt(args.stateRoot, args.scopeId, takeover);
     return { ok: true, lease, takeover };
@@ -375,7 +390,7 @@ export function acquireCoordinationLease(args: AcquireLeaseArgs): AcquireLeaseRe
 
 export type RenewLeaseResult =
   | { ok: true; lease: CoordinationLeaseV1 }
-  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' };
+  | { ok: false; refusal: 'lease_missing' | 'lease_corrupt' | 'fencing_token_mismatch' | 'io_error' };
 
 export function renewCoordinationLease(args: {
   stateRoot: string;
@@ -404,7 +419,15 @@ export function renewCoordinationLease(args: {
   };
   const renewed = parseCoordinationLease(renewedCandidate);
   if (renewed === null) return { ok: false, refusal: 'lease_corrupt' };
-  writeAtomicPrivateFileIsolatedSync(leasePath, JSON.stringify(renewed), 'coordination lease');
+  try {
+    writeAtomicPrivateFileIsolatedSync(leasePath, JSON.stringify(renewed), 'coordination lease');
+  } catch {
+    // Renewal runs on a timer: a write failure (including a bounded-child
+    // timeout) is reported as a refusal so the caller keeps running and keeps
+    // reporting, instead of crashing the process from inside setInterval. The
+    // previous lease stays in force until its own expiry.
+    return { ok: false, refusal: 'io_error' };
+  }
   return { ok: true, lease: renewed };
 }
 
@@ -477,6 +500,14 @@ export function forceTakeoverCoordinationLease(args: AcquireLeaseArgs & {
   const fencingToken = Math.max(readTombstoneToken(args.stateRoot, args.scopeId), priorToken) + 1;
   const lease = buildLease(args, fencingToken);
   if (lease === null) return { ok: false, refusal: 'io_error' };
-  if (!writeLeaseExclusive(leasePath, lease)) return { ok: false, refusal: 'io_error' };
+  const written = writeLeaseExclusive(leasePath, lease);
+  if (written === 'maybe_written') {
+    const onDisk = readCoordinationLease(args.stateRoot, args.scopeId);
+    if (onDisk !== null && onDisk.operationId === lease.operationId && onDisk.fencingToken === lease.fencingToken) {
+      return { ok: true, lease };
+    }
+    return { ok: false, refusal: 'io_error' };
+  }
+  if (written !== 'written') return { ok: false, refusal: 'io_error' };
   return { ok: true, lease };
 }
