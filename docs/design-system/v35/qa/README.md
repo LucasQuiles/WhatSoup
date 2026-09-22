@@ -27,13 +27,14 @@ Scripts are sanitized: machine-specific paths/hosts are environment variables.
   removed: they were shot before the identifier-replacement pass and still
   rendered an operator identifier at a length that reconstructs it completely,
   which is no longer present in the mockups they were rendered from. They are not
-  replaced in place because the shrink-only tracked-PNG ratchet from issue #2219
-  Option A, enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit`,
-  caps any new PNG, and any changed PNG outside `docs/screenshots/`, at 100 KiB
-  (a tracked screenshot under `docs/screenshots/` may be replaced only by one
-  that is no larger than its committed version and at most 640 KiB), while a
-  fresh render of these surfaces is several times that. Regenerate on demand instead, with the pipeline this
-  directory documents:
+  replaced in place because the shrink-only tracked-PNG ratchet from issue #2219,
+  enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit` and the
+  push gate, caps any new PNG, and any changed PNG outside `docs/screenshots/`,
+  at 100 KiB, and pins every tracked PNG to its committed size (a tracked
+  screenshot under `docs/screenshots/` may be replaced only by one that is no
+  larger), while a fresh render of these surfaces is several times the 100 KiB
+  cap. Regenerate on demand instead, with the pipeline this directory
+  documents:
 
       python3 -m venv .venv
       .venv/bin/pip install playwright        # verified with 1.62.0
