@@ -32,6 +32,11 @@ from lib.bounded_jsonl import (
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.dm_roundtrip import (  # noqa: E402
+    RoundtripConfigError,
+    evaluate_target as dm_roundtrip_evaluate_target,
+    parse_roster as dm_roundtrip_parse_roster,
+)
 from lib.health_reader import (  # noqa: E402,F401 — PUBLIC_HEALTH_SCHEMA_PREFIX re-exported for consumers/tests
     PUBLIC_HEALTH_SCHEMA_PREFIX,
     health_body_is_disclosed,
@@ -107,6 +112,7 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "turn_failure_rate",
     "supervision_deadman",
     "clock_skew",
+    "dm_roundtrip",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2524,11 +2530,65 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("supervision_deadman")
     if "clock_skew" in checks:
         prefixes.append("clock_skew")
+    if "dm_roundtrip" in checks:
+        prefixes.append("dm_roundtrip:")
     return prefixes
 
 
 def key_in_active_scope(key: str, prefixes: list[str]) -> bool:
     return any(key == prefix or key.startswith(prefix) for prefix in prefixes)
+
+
+def dm_roundtrip_env_float(name: str, default: float) -> float:
+    """Positive finite float from env, else default (fail-safe on bad input)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def dm_roundtrip_problems() -> dict[str, str]:
+    """Active direct-DM round-trip liveness probe (layer 3, bead active-liveness-checks-fleet).
+
+    Per roster entry: send a sentinel to the instance's OWN jid over its MCP
+    socket, prove the send was accepted, then confirm the sentinel lands in that
+    instance's ``messages`` table as a ``fromMe`` echo -- end-to-end liveness that
+    a ``/health`` 200 cannot give. Does NOT prove the turn pipeline (Finding B).
+
+    Dark by default: runs only when ``dm_roundtrip`` is explicitly listed in
+    ``BOT_ERRORS_WATCHDOG_CHECKS`` (NOT in DEFAULT_CHECKS). Because the endpoints
+    (socket + own jid) are not auto-discoverable, the roster is explicit via
+    ``BOT_ERRORS_DM_ROUNDTRIP_ROSTER`` (JSON array of ``{name,socket,own_jid[,db]}``;
+    ``db`` defaults to ``wedge_db_root()/<name>/bot.db``). Enabled-but-unconfigured
+    fails loud as a config problem rather than silently probing nothing.
+    """
+    problems: dict[str, str] = {}
+    raw = os.environ.get("BOT_ERRORS_DM_ROUNDTRIP_ROSTER", "")
+    try:
+        targets = dm_roundtrip_parse_roster(
+            raw, default_db_for=lambda name: str(wedge_db_root() / name / "bot.db")
+        )
+    except RoundtripConfigError as exc:
+        problems["dm_roundtrip:config"] = (
+            f"dm_roundtrip enabled but roster invalid: {exc}. Set "
+            "BOT_ERRORS_DM_ROUNDTRIP_ROSTER to a JSON array of "
+            "{name,socket,own_jid[,db]}."
+        )
+        return problems
+    timeout = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_TIMEOUT_SECONDS", 15.0)
+    deadline = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_DEADLINE_SECONDS", 10.0)
+    poll = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_POLL_SECONDS", 0.5)
+    for target in targets:
+        problem = dm_roundtrip_evaluate_target(
+            target, timeout=timeout, deadline_s=deadline, poll_interval_s=poll
+        )
+        if problem:
+            problems[f"dm_roundtrip:{target.name}"] = problem
+    return problems
 
 
 def key_recovery_is_observed(key: str, evaluated_keys: set[str] | None) -> bool:
@@ -2659,6 +2719,8 @@ def collect_problems(
         problems.update(supervision_deadman_problems())
     if "clock_skew" in checks:
         problems.update(clock_skew_problems())
+    if "dm_roundtrip" in checks:
+        problems.update(dm_roundtrip_problems())
     return problems
 
 

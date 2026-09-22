@@ -75,10 +75,12 @@ FILES=(
   # crash on load while do_verify still prints VERIFY_OK. Kept managed by
   # tests/scripts/deployer-import-closure.test.ts, which derives the required
   # set from the parsed import graph -- never from this array.
+  "deploy/scripts/lib/dm_roundtrip.py"
   "deploy/scripts/lib/durable_json.py"
   "deploy/scripts/lib/health_reader.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"
   "deploy/scripts/lib/queue_age.py"
+  "deploy/scripts/lib/send_acceptance.py"
   "deploy/scripts/lib/sentinel_pin.py"
   "deploy/scripts/lib/state_files.py"
   "deploy/scripts/lib/state_root.py"

@@ -80,6 +80,7 @@ from lib.state_files import (
     MAINTENANCE,
 )
 from lib.state_root import state_root
+from lib.send_acceptance import SendAcceptanceUnknown, SendNotAccepted, validate_send_acceptance
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -3748,7 +3749,9 @@ def validate_bot_errors_target() -> None:
         raise RuntimeError("BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live dispatch")
 
 
-def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
+def send_whatsapp(
+    text: str, socket_path: str = DEFAULT_SOCKET, *, require_acceptance: bool = False,
+) -> dict[str, str] | None:
     # Test seam: force a delivery failure with a caller-supplied error string so
     # subprocess tests can drive the transient-vs-permanent failure routing
     # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
@@ -3781,8 +3784,16 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
         "tools/call",
         {"name": "send_message", "arguments": {"chatJid": BOT_ERRORS_JID, "text": text}},
     )
-    if result.get("isError") is True:
-        raise RuntimeError(f"send_message returned error: {result}")
+    if not require_acceptance:
+        if result.get("isError") is True:
+            raise RuntimeError(f"send_message returned error: {result}")
+        return None
+    try:
+        return validate_send_acceptance(result, BOT_ERRORS_JID)
+    except SendNotAccepted as exc:
+        raise ProvenRemoteRejection(str(exc)) from exc
+    except SendAcceptanceUnknown as exc:
+        raise AmbiguousSendOutcome(str(exc), phase=JSON_RPC_POST_REQUEST_PHASE) from exc
 
 
 def email_fallback(subject: str, body: str) -> bool:
@@ -9569,7 +9580,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # never left. Routing the refusal through mark_failure below requeues it
         # with the marker cleared, so the next pass retries the send instead.
         require_all_advance([issued_publication])
-        send_whatsapp(text)
+        send_receipt = send_whatsapp(text, require_acceptance=True)
     except Exception as exc:
         # #2424: an outcome with no proof must never be re-sent. This runs
         # BEFORE mark_failure and before the transient carve-out below, which
@@ -9781,6 +9792,8 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
     mark_incident_sent(event, incident_state)
     event = mark_sent(event)
+    if send_receipt:
+        event["delivery"]["auditReceipt"] = send_receipt["audit_receipt"]
     sent_target = _durable_target(claimed)
     sent_observation = observe_json(sent_target)
     sent_generation = (sent_observation.version.generation or 0) + 1
