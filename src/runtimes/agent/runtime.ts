@@ -268,7 +268,7 @@ import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
+import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
   checkAndRecordInterruptedBoot,
   markBootInProgress,
@@ -2193,6 +2193,11 @@ export class AgentRuntime implements Runtime {
 
   // Startup events are deferred until main's strict-readiness controller runs.
   private pendingStartupEvent: StartupNotificationEvent | null = null;
+  // #3570: expired-session notices raised before the transport connects, at
+  // most one per chat. Kept apart from the single slot above so that several
+  // failing chats, or a restart-loop alert, can never displace each other.
+  private readonly pendingStartupChatNotices = new Map<string, StartupChatNotice>();
+  private startupChatNoticesDrained = false;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -4313,6 +4318,14 @@ export class AgentRuntime implements Runtime {
             notifyUser: (msg) => {
               this.handleCrashNotify(msg, chatJid);
             },
+            // #3570: the provider can refuse the resumed session after spawn
+            // (exit 1, no init). Tell this chat and rebuild its context.
+            onResumeFailed: () => {
+              this.handleResumeFailed(chatJid, {
+                mapKey: resolveSessionMapKey() ?? initialMapKey,
+                session,
+              });
+            },
             eventToolScopeKey: toolScopeKey,
           });
         } catch (err) {
@@ -4395,6 +4408,15 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
+        }, (err: unknown) => {
+          // #3570: the resume itself was refused (for example, the checkpoint
+          // names a session this chat does not own). The chat's prior context
+          // is gone, so tell it and rebuild context in a fresh session.
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume refused — notifying chat and starting fresh');
+          this.handleResumeFailed(chatJid, {
+            mapKey: resolveSessionMapKey() ?? initialMapKey,
+            session,
+          });
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
         });
@@ -7413,6 +7435,17 @@ export class AgentRuntime implements Runtime {
     const event = this.pendingStartupEvent;
     this.pendingStartupEvent = null;
     return event;
+  }
+
+  /**
+   * Drain the per-chat startup notices (#3570). Main calls this once the
+   * transport is connected; later notices go straight to the chat's queue.
+   */
+  popStartupChatNotifications(): StartupChatNotice[] {
+    this.startupChatNoticesDrained = true;
+    const notices = [...this.pendingStartupChatNotices.values()];
+    this.pendingStartupChatNotices.clear();
+    return notices;
   }
 
   getHealthSnapshot(): RuntimeHealth {
@@ -11531,21 +11564,71 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Called by SessionManager when a --resume attempt is rejected by Claude
-   * (exit code 1, no init event). Sends a clear status message and spawns a
-   * fresh session so the user can continue without manual intervention.
+   * Tell a chat that its prior session could not be restored (#3570).
+   * - A pending startup `resume` event for the same chat is replaced, because
+   *   that chat would otherwise be told its session resumed.
+   * - Until main drains startup notices, the notice waits in a per-chat list,
+   *   because the transport may not be connected yet. Any other occupant of
+   *   the single startup slot, such as a restart-loop alert, stays in place.
+   * - After that, the notice goes to the chat's queue immediately.
    */
-  private handleResumeFailed(chatJid: string): void {
+  private noticeExpiredSession(chatJid: string, opts: { deferDuringStartup: boolean }): void {
+    const text = '_Previous session expired_ — starting fresh. Send a message to begin.';
+    const pending = this.pendingStartupEvent;
+    if (pending?.kind === 'resume' && pending.chatJid === chatJid) {
+      this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text };
+      return;
+    }
+    if (!this.startupChatNoticesDrained && (opts.deferDuringStartup || pending !== null)) {
+      this.pendingStartupChatNotices.set(chatJid, { kind: 'expired_session_notice', chatJid, text });
+      return;
+    }
+    this.sendDirect(chatJid, text);
+  }
+
+  /**
+   * Called by SessionManager when a --resume attempt is rejected by Claude
+   * (exit code 1, no init event), and by the non-sandbox per_chat startup
+   * resume when the resume itself is refused. Sends a clear status message
+   * and spawns a fresh session so the user can continue without manual
+   * intervention.
+   */
+  private handleResumeFailed(
+    chatJid: string,
+    perChatTarget?: { mapKey: string; session: SessionManager },
+  ): void {
     log.warn({ chatJid }, 'resume failed — spawning fresh session');
 
     // Resolve the correct session and mapKey — sandboxPerChat uses the per-chat map,
-    // single/shared mode uses the shared this.session field.
+    // non-sandbox per_chat names its exact manager (#3570), and single/shared
+    // mode uses the shared this.session field.
     let session: SessionManager | undefined;
     let mapKey: string | undefined;
     if (this.sandboxPerChat) {
       const ws = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
       mapKey = ws.workspaceKey;
       session = this.chatSessions.get(mapKey);
+    } else if (perChatTarget) {
+      mapKey = perChatTarget.mapKey;
+      if (isScheduledAgentJobMapKey(mapKey)) {
+        // A scheduled job has no conversation of its own to restore or notify.
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: scheduled agent job scope — skipping');
+        return;
+      }
+      if (this.shutdownRequested) {
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: runtime shutting down — skipping recovery');
+        return;
+      }
+      session = this.chatSessions.get(mapKey) === perChatTarget.session
+        ? perChatTarget.session
+        : undefined;
+      if (!session) {
+        // Another manager now owns the chat, so it must not be respawned from
+        // here. The user still learns the prior context was not restored.
+        this.noticeExpiredSession(chatJid, { deferDuringStartup: true });
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: chat ownership moved — notice only');
+        return;
+      }
     } else {
       session = this.session ?? undefined;
     }
@@ -11566,12 +11649,7 @@ export class AgentRuntime implements Runtime {
 
     if (!pendingText) {
       // No pending message — notify user to resend
-      const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
-      if (this.pendingStartupEvent !== null) {
-        this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text: msg };
-      } else {
-        this.sendDirect(chatJid, msg);
-      }
+      this.noticeExpiredSession(chatJid, { deferDuringStartup: perChatTarget !== undefined });
     }
 
     // Mark this mapKey as owned by handleResumeFailed before spawning

@@ -60,6 +60,7 @@ import {
   type RuntimeTurnCompletion,
 } from './runtime-turn-completion.ts';
 import { discardCancelledPreBoundaryPerChatTurn } from './runtime-turn-pre-boundary-cancellation.ts';
+import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
 import {
   replayTurnOnFallback as replayTurnOnFallbackForHost,
   type ProviderFallbackReplayArgs,
@@ -904,7 +905,19 @@ turnFinalizationBookkeeping(
   session: SessionManager | null,
   event?: Extract<AgentEvent, { type: 'result' }>,
   attemptOutcome?: AttemptOutcome,
+  perChatScopeKey?: string,
 ): TurnFinalizationBookkeepingParams {
+  // #3570: a non-sandbox per_chat scheduled job runs on its own manager, which
+  // persists its checkpoint under '<mapKey>::scheduled-agent-job'. The turn
+  // still carries the chat's conversation key, so writing the checkpoint here
+  // would put the scheduled session's id/pid/status and completed identity
+  // into the chat's row. The next restart would then try to resume the
+  // scheduled session for the chat. The scheduled manager records its own
+  // lifecycle under its own key (session.ts), so the chat's row is skipped.
+  const turnScopeKey = this.host.perChatRuntimeTurnScopeRefs.get(context.identity.logicalTurnId)?.value
+    ?? perChatScopeKey;
+  const checkpointOwnedByOtherManager = turnScopeKey !== undefined
+    && isScheduledAgentJobMapKey(turnScopeKey);
   const rowId = session?.getDbRowId() ?? null;
   const status = session?.getStatus();
   const hasUsage = event !== undefined
@@ -974,7 +987,7 @@ turnFinalizationBookkeeping(
           }
         : {}
     ),
-    checkpoint: {
+    ...(checkpointOwnedByOtherManager ? {} : { checkpoint: {
       // The completing turn owns checkpoint attribution. activeChatJid may
       // still name the first chat that spawned a shared session.
       conversationKey: context.identity.conversationKey,
@@ -993,7 +1006,7 @@ turnFinalizationBookkeeping(
           ? {}
           : { lastInboundSeq: context.identity.inboundSeq }),
       },
-    },
+    } }),
   };
 }
 
@@ -1046,7 +1059,13 @@ private async performRuntimeTurnFinalization(args: {
   if (!this.host.durability) {
     throw new Error('Runtime turn finalization requires durability');
   }
-  const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event, args.attemptOutcome);
+  const bookkeeping = this.turnFinalizationBookkeeping(
+    args.context,
+    args.session,
+    args.event,
+    args.attemptOutcome,
+    args.mapKey,
+  );
   const scopeRef = args.mapKey === undefined
     ? undefined
     : this.host.perChatRuntimeTurnScopeRefs.get(args.context.identity.logicalTurnId)
@@ -2120,7 +2139,7 @@ private async runUndispatchedRuntimeTurnFinalization(
   // rowId is always null and the usage-loss alert in turnFinalizationBookkeeping
   // never fires for this call site regardless of attemptOutcome — passed through
   // for signature consistency, not because it changes behavior here.
-  const bookkeeping = this.turnFinalizationBookkeeping(context, null, undefined, attemptOutcome);
+  const bookkeeping = this.turnFinalizationBookkeeping(context, null, undefined, attemptOutcome, scopeRef?.value);
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: null,
     admissionRejected: true,
