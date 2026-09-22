@@ -121,10 +121,10 @@ describe('emitCgroupDivergence (best-effort isolation)', () => {
   });
 });
 
-describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
+describe('#1869 killSessionTree cgroup isolation (mock ps)', () => {
   const ROOT_PID = 51_001;
   const CHILD_PID = 51_002;
-  const DAEMON_PID = 99_999;
+  const SIBLING_SESSION_PID = 99_999;
   const START = 'Fri Jul 10 08:00:00 2026';
 
   let killSpy: ReturnType<typeof vi.spyOn>;
@@ -147,45 +147,166 @@ describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
     killSpy.mockRestore();
   });
 
-  it('adds a reparented (PPID=1) daemon to the owned set and fires divergence', async () => {
-    const withDaemon = census([
+  it('observes but never signals a cgroup-only sibling session', async () => {
+    const withSibling = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
       { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
       { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
-      // A process that reparented to PID 1 — NOT reachable via PPID descent from root
-      { pid: DAEMON_PID, ppid: 1, pgid: DAEMON_PID, command: 'reparented-daemon' },
+      // A different resident provider in the same service cgroup is not owned by ROOT_PID.
+      {
+        pid: SIBLING_SESSION_PID,
+        ppid: process.pid,
+        pgid: SIBLING_SESSION_PID,
+        command: 'sibling-provider',
+      },
+    ]);
+    const serviceMainAndSibling = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      {
+        pid: SIBLING_SESSION_PID,
+        ppid: process.pid,
+        pgid: SIBLING_SESSION_PID,
+        command: 'sibling-provider',
+      },
+    ]);
+
+    execFileSyncMock
+      .mockReturnValueOnce(withSibling) // entry: build PPID-owned tree
+      .mockReturnValueOnce(withSibling) // pre-signal resolution
+      .mockReturnValueOnce(serviceMainAndSibling); // final: sibling survives owned-tree exit
+
+    const divergenceSink = vi.fn();
+
+    await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
+      generationMarker: 'test-preserve-sibling',
+      killGraceMs: 0,
+      onCgroupDivergence: divergenceSink,
+      readCgroupMemberPids: () => [
+        process.pid,
+        ROOT_PID,
+        CHILD_PID,
+        SIBLING_SESSION_PID,
+      ],
+    })).resolves.toBeUndefined();
+
+    // The divergence sink reports the off-tree PID that the PPID walk missed
+    expect(divergenceSink).toHaveBeenCalledTimes(1);
+    expect(divergenceSink).toHaveBeenCalledWith<[CgroupDivergenceInfo]>({
+      cgroupMemberCount: 4,
+      ownedCount: 2,
+      offTreeCount: 2, // service main plus sibling session
+    });
+
+    // Cgroup membership alone proves co-location, not ownership. Signaling the
+    // sibling reproduces the observed cross-session crash during idle TTL.
+    expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(killSpy).toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
+  });
+
+  it('falls back to owned PIDs when an off-tree process shares the root process group', async () => {
+    const withSharedGroupSibling = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+      {
+        pid: SIBLING_SESSION_PID,
+        ppid: process.pid,
+        pgid: ROOT_PID,
+        command: 'off-tree-shared-group-process',
+      },
+    ]);
+    const serviceMainAndSibling = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      {
+        pid: SIBLING_SESSION_PID,
+        ppid: process.pid,
+        pgid: ROOT_PID,
+        command: 'off-tree-shared-group-process',
+      },
+    ]);
+
+    execFileSyncMock
+      .mockReturnValueOnce(withSharedGroupSibling)
+      .mockReturnValueOnce(withSharedGroupSibling)
+      .mockReturnValueOnce(serviceMainAndSibling);
+
+    await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
+      generationMarker: 'test-preserve-shared-group-sibling',
+      killGraceMs: 0,
+      readCgroupMemberPids: () => [
+        process.pid,
+        ROOT_PID,
+        CHILD_PID,
+        SIBLING_SESSION_PID,
+      ],
+    })).resolves.toBeUndefined();
+
+    expect(killSpy).not.toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
+    expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
+    expect(killSpy.mock.calls).toEqual([
+      [CHILD_PID, 'SIGKILL'],
+      [ROOT_PID, 'SIGKILL'],
+    ]);
+  });
+
+  it('refuses an absent target instead of adopting cgroup peers as owned', async () => {
+    const withoutRoot = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      {
+        pid: SIBLING_SESSION_PID,
+        ppid: process.pid,
+        pgid: SIBLING_SESSION_PID,
+        command: 'sibling-provider',
+      },
     ]);
     const selfOnly = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
     ]);
 
     execFileSyncMock
-      .mockReturnValueOnce(withDaemon) // entry: build owned + cgroup extension
-      .mockReturnValueOnce(withDaemon) // pre-signal resolution
-      .mockReturnValueOnce(selfOnly);  // final: all owned processes exited
-
-    const divergenceSink = vi.fn();
+      .mockReturnValueOnce(withoutRoot) // entry: the requested provider root is already gone
+      .mockReturnValueOnce(withoutRoot) // broken cgroup-union path: pre-signal resolution
+      .mockReturnValueOnce(selfOnly);   // broken cgroup-union path: peer appears to exit
 
     await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
-      generationMarker: 'test-catch-daemon',
+      generationMarker: 'test-missing-root',
       killGraceMs: 0,
-      onCgroupDivergence: divergenceSink,
-      readCgroupMemberPids: () => [ROOT_PID, CHILD_PID, DAEMON_PID],
-    })).resolves.toBeUndefined();
+      readCgroupMemberPids: () => [process.pid, SIBLING_SESSION_PID],
+    })).rejects.toThrow('pre-signal root row missing or ambiguous');
 
-    // The divergence sink reports the off-tree PID that the PPID walk missed
-    expect(divergenceSink).toHaveBeenCalledTimes(1);
-    expect(divergenceSink).toHaveBeenCalledWith<[CgroupDivergenceInfo]>({
-      cgroupMemberCount: 3,
-      ownedCount: 2,
-      offTreeCount: 1,
-    });
-
-    // The reparented daemon was added to the owned set and signaled
-    expect(killSpy).toHaveBeenCalledWith(DAEMON_PID, 'SIGKILL');
+    expect(killSpy).not.toHaveBeenCalledWith(SIBLING_SESSION_PID, 'SIGKILL');
   });
 
-  it('does NOT fire divergence when every cgroup member is already in the PPID tree', async () => {
+  it('keeps PPID-owned termination isolated from a throwing cgroup reader', async () => {
+    const normal = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+      { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
+      { pid: CHILD_PID, ppid: ROOT_PID, pgid: ROOT_PID, command: 'provider-child' },
+    ]);
+    const selfOnly = census([
+      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
+    ]);
+
+    execFileSyncMock
+      .mockReturnValueOnce(normal)
+      .mockReturnValueOnce(normal)
+      .mockReturnValueOnce(selfOnly);
+
+    await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
+      generationMarker: 'test-reader-isolation',
+      killGraceMs: 0,
+      onCgroupDivergence: vi.fn(),
+      readCgroupMemberPids: () => {
+        throw new Error('reader blew up');
+      },
+    })).resolves.toBeUndefined();
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(killSpy).toHaveBeenCalledWith(-ROOT_PID, 'SIGKILL');
+  });
+
+  it('emits a zero divergence gauge when every cgroup member is already in the PPID tree', async () => {
     const normal = census([
       { pid: process.pid, ppid: 1, pgid: process.pid, command: 'test-runner' },
       { pid: ROOT_PID, ppid: process.pid, pgid: ROOT_PID, command: 'provider-root' },
@@ -209,7 +330,11 @@ describe('#1869 killSessionTree cgroup extension (mock ps)', () => {
       readCgroupMemberPids: () => [ROOT_PID, CHILD_PID],
     })).resolves.toBeUndefined();
 
-    // All cgroup members are already in the PPID-owned set — silence is correct
-    expect(divergenceSink).not.toHaveBeenCalled();
+    expect(divergenceSink).toHaveBeenCalledTimes(1);
+    expect(divergenceSink).toHaveBeenCalledWith<[CgroupDivergenceInfo]>({
+      cgroupMemberCount: 2,
+      ownedCount: 2,
+      offTreeCount: 0,
+    });
   });
 });

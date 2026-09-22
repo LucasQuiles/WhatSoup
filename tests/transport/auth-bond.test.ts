@@ -103,7 +103,12 @@ describe('AuthBondGuard', () => {
     }).toStrictEqual({
       status: 'invalid',
       treeHash: null,
-      issues: ['auth_tree_symlink:.'],
+      // Two independent detectors now report the same condition, and both are
+      // load-bearing. `auth_tree_symlink:.` comes from the tree walk, which the
+      // /health projection serves from cache and can therefore be stale.
+      // `auth_dir_symlink` is a live lstat on every snapshot, so a root
+      // symlinked after a clean walk is still caught.
+      issues: ['auth_tree_symlink:.', 'auth_dir_symlink'],
     });
   });
 

@@ -582,7 +582,7 @@ function captureHookLineage(git: TrustedGitExecutable, cwd: string): HookLineage
   }
 }
 
-function withStableHeadLineageUsing<T>(
+export function withStableHeadLineageUsing<T>(
   git: TrustedGitExecutable,
   cwd: string,
   evaluate: (expectedOid: string) => T,

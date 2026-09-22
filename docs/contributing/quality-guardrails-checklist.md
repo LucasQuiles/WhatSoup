@@ -141,6 +141,28 @@ tampering; a same-user attacker who can rewrite both payload and digest is outsi
 this local guard's threat boundary. Baseline acceptance is therefore an explicit
 owner action, not an automatic way to bless a newly observed conflict.
 
+To acknowledge one retained stash without accepting other new findings, use its
+full object ID and a non-sensitive reason:
+
+```bash
+npm run guard:git-estate -- baseline accept-stash --oid <full-object-id> --reason 'preserved work awaiting integration' --json
+```
+
+This requires a valid existing baseline, two complete matching estate snapshots,
+and matching stash parents with all reachable objects present and of supported
+types. It adds only the selected stash finding; other finding IDs, counts and
+container identities retain their prior values. A different stash, conflict or
+worktree lock still blocks. The JSON receipt includes the reason; the baseline
+does not. This acknowledgment does not prove restored content, integration or
+retirement eligibility, and does not apply or drop the stash.
+
+Both baseline writers use one process lock under the common Git directory. An
+active, corrupt or unrecoverable stale lock refuses the operation. Same-boot
+stale locks are not automatically reclaimed. Success is reported only after
+verified lock release. A lost lock or release error reports an unknown outcome;
+inspect the baseline and current owner before retrying because the write may
+already have occurred.
+
 Linked worktrees must use a worktree-relative hook path:
 
 ```bash

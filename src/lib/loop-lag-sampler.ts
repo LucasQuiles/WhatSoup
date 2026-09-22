@@ -62,6 +62,22 @@ export interface LoopLagSnapshot {
   intervalSampleCount: number;
   snapshotSampleCount: number;
   locallyStarved: boolean;
+  /**
+   * Observer time already subtracted from the lag samples in this window.
+   *
+   * Do NOT subtract it again: `p95LagMs`, `minLagMs`, `medianLagMs` and
+   * `maxLagMs` are all net of it.
+   *
+   * It does NOT reconstruct a raw per-sample delay, and must not be documented
+   * as if it did. This is a SUM across the retained window while the lag
+   * figures beside it are single-sample statistics, so adding the two is
+   * dimensionally wrong. It is also not bounded by the nominal window: each
+   * sample's contribution is bounded by that sample's own elapsed time, which
+   * heavy observer cost stretches, so twenty samples carrying 400 ms each
+   * publish 8000 against a nominally 10-second window. Read it as "this is how
+   * much of the window was the observer's own doing", nothing finer.
+   */
+  observerCostMs: number;
   discontinuityCount: number;
   lastEluUtilization: number | null;
   lastCpuDeltaMs: number | null;
@@ -80,7 +96,30 @@ interface CpuReading {
 interface WindowSample {
   readonly lagMs: number;
   readonly source: LoopLagObservationSource;
+  /** Observer time excluded from this sample's lagMs. */
+  readonly observerCostMs: number;
 }
+
+/**
+ * A stretch of time spent inside an observer, on the sampler's own clock.
+ *
+ * `endMs: null` means the observer is STILL RUNNING. An open span is registered
+ * the moment it begins, not when it closes, because an interval can fire while
+ * a health handler is mid-flight; a span that only appeared on close could not
+ * explain the very sample it caused.
+ */
+interface ObserverSpan {
+  readonly startMs: number;
+  endMs: number | null;
+}
+
+/**
+ * Ceiling on retained observer spans.
+ *
+ * Closed spans are pruned once the consume cursor passes them, so this only
+ * bounds a pathological burst of concurrent requests between two ticks.
+ */
+const MAX_OBSERVER_SPANS = 64;
 
 export interface LoopLagSamplerOptions {
   now?: () => number;
@@ -105,6 +144,15 @@ function defaultCpuReader(): CpuReading | null {
 export class LoopLagSampler {
   private timer: NodeJS.Timeout | null = null;
   private window: WindowSample[] = [];
+  private observerSpans: ObserverSpan[] = [];
+  /**
+   * Monotonically advancing high-water mark of observer time already accounted
+   * for. Every observation counts only the region after this cursor, so no span
+   * can be subtracted twice however the baseline is rebased afterwards. This
+   * replaces trimming spans against the baseline, which a recorded snapshot
+   * rewinds and which therefore re-exposed already-counted time.
+   */
+  private observerConsumedUpToMs = 0;
   private rawRing: RawLoopLagSample[] = [];
   private lastIntervalAtMs: number | null = null;
   private discontinuityCount = 0;
@@ -128,6 +176,8 @@ export class LoopLagSampler {
   start(): void {
     if (this.timer !== null) return;
     this.resetWindow();
+    this.observerSpans = [];
+    this.observerConsumedUpToMs = this.now();
     this.lastIntervalAtMs = this.now();
     this.prevElu = this.eluReader();
     this.prevCpu = this.cpuReader();
@@ -141,6 +191,8 @@ export class LoopLagSampler {
       this.timer = null;
     }
     this.resetWindow();
+    this.observerSpans = [];
+    this.observerConsumedUpToMs = 0;
     this.lastIntervalAtMs = null;
     this.prevElu = null;
     this.prevCpu = null;
@@ -159,6 +211,7 @@ export class LoopLagSampler {
       maxLagMs: lags.length > 0 ? Math.max(...lags) : null,
       intervalSampleCount: this.window.filter((sample) => sample.source === 'interval').length,
       snapshotSampleCount: this.window.filter((sample) => sample.source === 'snapshot').length,
+      observerCostMs: this.window.reduce((total, sample) => total + sample.observerCostMs, 0),
       locallyStarved:
         this.window.length === LOOP_LAG_WINDOW_SAMPLES
         && p95LagMs !== null
@@ -215,6 +268,84 @@ export class LoopLagSampler {
     });
   }
 
+  /**
+   * Mark the start of a stretch of observer work; the returned function ends it.
+   *
+   * #1753 rem-1 already excluded the CURRENT request's cost from the CURRENT
+   * reading by snapshotting before the handler's own work. That left the
+   * cross-request case: the window is 10 seconds wide, so at any poll cadence
+   * faster than one request per 5 seconds the PREVIOUS request's block is still
+   * inside it and requests contaminate each other. Recording the span itself,
+   * rather than ordering one read against one write, is what makes the
+   * exclusion cover the whole window.
+   */
+  beginObserverSpan(): () => void {
+    const startMs = this.now();
+    // Registered OPEN, immediately. Synchronous work between here and the close
+    // is exactly what an interval firing mid-handler would otherwise read as
+    // starvation, and a span that appeared only on close could not cover it.
+    const span: ObserverSpan = { startMs, endMs: null };
+    this.pushObserverSpan(span);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      span.endMs = this.now();
+    };
+  }
+
+  /** Record an already-closed observer span. Times must be on this sampler's clock. */
+  recordObserverSpan(startMs: number, endMs: number): void {
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+    this.pushObserverSpan({ startMs, endMs });
+  }
+
+  private pushObserverSpan(span: ObserverSpan): void {
+    this.observerSpans.push(span);
+    // Dropping the oldest under-subtracts, which over-reports lag. Fail-safe.
+    if (this.observerSpans.length > MAX_OBSERVER_SPANS) this.observerSpans.shift();
+  }
+
+  /**
+   * Total time covered by at least one observer span inside [fromMs, toMs].
+   *
+   * The UNION, not the sum: two overlapping handlers occupy the loop once
+   * between them, and summing would subtract the same wall time twice and hide
+   * real lag behind it. An open span is treated as running through `toMs`.
+   */
+  private observerUnionMs(fromMs: number, toMs: number): number {
+    if (!(toMs > fromMs)) return 0;
+    const clipped: Array<{ lo: number; hi: number }> = [];
+    for (const span of this.observerSpans) {
+      const lo = Math.max(span.startMs, fromMs);
+      const hi = Math.min(span.endMs ?? toMs, toMs);
+      if (hi > lo) clipped.push({ lo, hi });
+    }
+    if (clipped.length === 0) return 0;
+    clipped.sort((left, right) => left.lo - right.lo);
+    let total = 0;
+    let cursor = clipped[0]!.lo;
+    let end = clipped[0]!.hi;
+    for (let index = 1; index < clipped.length; index += 1) {
+      const next = clipped[index]!;
+      if (next.lo > end) {
+        total += end - cursor;
+        cursor = next.lo;
+        end = next.hi;
+      } else if (next.hi > end) {
+        end = next.hi;
+      }
+    }
+    return total + (end - cursor);
+  }
+
+  /** Drop spans that closed at or before the consume cursor; keep open ones. */
+  private pruneObserverSpans(): void {
+    this.observerSpans = this.observerSpans.filter(
+      (span) => span.endMs === null || span.endMs > this.observerConsumedUpToMs,
+    );
+  }
+
   private sample(): void {
     this.observe('interval');
   }
@@ -237,7 +368,17 @@ export class LoopLagSampler {
     // recording lag-0 samples on every health request would dilute the window
     // with zeros under frequent polling and mask real starvation. Interval
     // fires always record — discarding "early" fires is the phantom mechanism.
-    const overdueMs = actualAtMs - baselineAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
+    // Only observer time inside the OVERDUE region counts. Work that ran before
+    // the timer was even due delayed nothing, and subtracting it erased real
+    // stalls: with baseline 0, due 500, an observer at [100,500] and unrelated
+    // blocking at [500,900], subtracting the whole [0,900] overlap reported
+    // zero lag against 400 ms of genuine starvation.
+    const dueAtMs = baselineAtMs + LOOP_LAG_SAMPLE_INTERVAL_MS;
+    const accountFromMs = Math.max(dueAtMs, this.observerConsumedUpToMs);
+    const observerCostMs = this.observerUnionMs(accountFromMs, actualAtMs);
+    const overdueMs = actualAtMs - dueAtMs - observerCostMs;
+    // Returning here leaves the spans untouched on purpose: no observation was
+    // recorded, so the baseline does not move and nothing has been consumed.
     if (source === 'snapshot' && overdueMs <= 0) return;
 
     const lagMs = Math.max(0, overdueMs);
@@ -263,7 +404,7 @@ export class LoopLagSampler {
         this.discontinuityCount + 1,
       );
     } else {
-      this.window.push({ lagMs, source });
+      this.window.push({ lagMs, source, observerCostMs });
     }
     if (this.window.length > LOOP_LAG_WINDOW_SAMPLES) this.window.shift();
     this.lastIntervalAtMs = source === 'interval'
@@ -271,6 +412,10 @@ export class LoopLagSampler {
       // A recorded snapshot consumed the overdue span; measure only residual
       // delay from here so the next interval fire cannot double-count it.
       : actualAtMs - LOOP_LAG_SAMPLE_INTERVAL_MS;
+    // The cursor only ever moves forward, so rebasing the baseline behind it
+    // cannot re-expose time this sample already accounted for.
+    this.observerConsumedUpToMs = Math.max(this.observerConsumedUpToMs, actualAtMs);
+    this.pruneObserverSpans();
   }
 
   private pushRaw(sample: RawLoopLagSample): void {

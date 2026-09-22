@@ -434,9 +434,30 @@ describe('D. cross-conversation guard', () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('does not match session conversation');
+    // Contrast partner to the unbound case below, asserted on the SAME observable:
+    // the guard denies before the handler runs, so the underlying chat-modify
+    // operation is never reached with the foreign target.
+    const chatModifyCalls = captured.filter((c) => c.method === 'chatModify');
+    expect(chatModifyCalls).toHaveLength(0);
   });
 
-  it('global session without bound conversationKey accepts any valid chatJid', async () => {
+  // Pins the CURRENT behaviour of the cross-conversation guard
+  // (src/mcp/registry.ts:741), which keys on `session.conversationKey` alone: an
+  // undefined key skips the comparison entirely, so a caller-supplied target
+  // reaches the handler unchecked. This is the FAIL-OPEN half of the #3435 gate
+  // (criterion C4), and this test is what the deferral of C4 is cited against.
+  // The assertions are therefore unconditional and positive: they measure what a
+  // fail-closed guard would take away, rather than merely excluding one error
+  // string, which would hold whether the call succeeded or failed.
+  //
+  // #3435 leaf 3 is expected to FLIP this expectation deliberately. When it does,
+  // rewrite this case to assert the denial — do not delete it.
+  //
+  // The registry comes from tests/helpers/resolved-tool-registry.ts, which asserts
+  // `resolved: true`. That is load-bearing, not incidental: an UNRESOLVED session
+  // is denied `clear_chat` at the forbidden-tool gate (src/mcp/registry.ts:104)
+  // and would never reach the guard under test here.
+  it('unbound global session reaches the caller-supplied chatJid — pins the fail-open cross-conversation guard at base', async () => {
     const unboundGlobal: SessionContext = { tier: 'global' };
 
     const result = await registry.call(
@@ -448,10 +469,16 @@ describe('D. cross-conversation guard', () => {
       unboundGlobal,
     );
 
-    // No cross-conversation error — only possible error is WhatsApp not connected
-    if (result.isError) {
-      expect(result.content[0].text).not.toContain('does not match session conversation');
-    }
+    // Load-bearing: the underlying operation ran against the EXACT caller-supplied
+    // target. A guard that fail-closed on the undefined key would stop this.
+    const chatModifyCalls = captured.filter((c) => c.method === 'chatModify');
+    expect(chatModifyCalls).toHaveLength(1);
+    expect(chatModifyCalls[0].jid).toBe(BOB_JID);
+
+    // And the call was admitted: registry.call omits `isError` on the success path,
+    // and the success payload echoes the target it acted on.
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain(BOB_JID);
   });
 });
 

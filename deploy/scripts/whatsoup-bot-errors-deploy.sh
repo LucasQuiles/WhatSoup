@@ -43,8 +43,8 @@ ROOT="${2:?missing <root>}"
 # blank and "#" lines, so comments between the entries are safe and the array
 # below carries them. Each remaining line must be a single quoted bare path.
 #
-# On the src/lib entries: bot-errors-outbox.ts imports alert-evidence.ts,
-# private-fs.ts, redaction-patterns.ts and type-guards.ts at module scope.
+# On the src/lib entries: bot-errors-outbox.ts transitively imports alert-evidence.ts,
+# private-fs.ts, redaction-patterns.ts, redaction-text.ts and type-guards.ts at module scope.
 # Node links them on import, so shipping the importer without them yields an
 # unstartable runtime rather than a degraded one. The omission predates the
 # conversation-scope work and became fatal when the outbox began importing a
@@ -77,6 +77,7 @@ FILES=(
   # set from the parsed import graph -- never from this array.
   "deploy/scripts/lib/durable_json.py"
   "deploy/scripts/lib/health_reader.py"
+  "deploy/scripts/lib/producer_cadence_receipt.py"
   "deploy/scripts/lib/queue_age.py"
   "deploy/scripts/lib/sentinel_pin.py"
   "deploy/scripts/lib/state_files.py"
@@ -94,6 +95,7 @@ FILES=(
   "src/lib/alert-evidence.ts"
   "src/lib/private-fs.ts"
   "src/lib/redaction-patterns.ts"
+  "src/lib/redaction-text.ts"
   "src/lib/type-guards.ts"
 )
 

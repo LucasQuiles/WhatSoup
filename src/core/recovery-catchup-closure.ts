@@ -373,11 +373,22 @@ export function closeOperatorCatchupRecovery(
 
 export const RECONCILE_DEFAULT_GROUP_LIMIT = 50;
 export const RECONCILE_DEFAULT_ACTOR = 'auto_reconciler';
+/**
+ * Groups a pass may examine for each group it is allowed to attempt a closure
+ * on. A group with no catch-up candidate costs an examination but not an
+ * attempt, so the pass reaches closable groups sitting behind unattemptable
+ * ones while the per-group work stays bounded.
+ */
+export const RECONCILE_EXAMINATION_MULTIPLIER = 20;
 
 export interface ReconcileOperatorCatchupParams {
   /** Ledger actor recorded on auto-closed links. Defaults to 'auto_reconciler'. */
   actor?: string;
-  /** Max distinct (plan, conversation) groups processed per invocation. */
+  /**
+   * Max closure attempts per invocation. A group with no catch-up candidate
+   * does not charge it; up to `groupLimit * RECONCILE_EXAMINATION_MULTIPLIER`
+   * groups are examined per pass.
+   */
   groupLimit?: number;
 }
 
@@ -409,6 +420,7 @@ export interface ReconcileOperatorCatchupReport {
 interface PendingGroupRow {
   plan_id: string;
   conversation_key: string;
+  chat_jid: string;
   inbound_seq: number;
 }
 
@@ -469,6 +481,7 @@ export function reconcileOperatorCatchupRecoveries(
   const rows = allFromStatement<PendingGroupRow>(raw.prepare(`
     SELECT links.recovery_plan_id AS plan_id,
            source.conversation_key AS conversation_key,
+           source.chat_jid AS chat_jid,
            links.inbound_seq AS inbound_seq
     FROM inbound_disposition_links links
     JOIN inbound_events source ON source.seq = links.inbound_seq
@@ -484,35 +497,67 @@ export function reconcileOperatorCatchupRecoveries(
     ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
   `));
 
-  const groups = new Map<string, { planId: string; conversationKey: string; seqs: number[] }>();
+  const groups = new Map<string, {
+    planId: string;
+    conversationKey: string;
+    chatJid: string;
+    seqs: number[];
+  }>();
   for (const row of rows) {
-    const key = `${row.plan_id} ${row.conversation_key}`;
+    // The separator is U+0000, written as an escape so line tools do not
+    // treat this file as binary.
+    const key = `${row.plan_id}\x00${row.conversation_key}`;
     let bucket = groups.get(key);
     if (!bucket) {
-      bucket = { planId: row.plan_id, conversationKey: row.conversation_key, seqs: [] };
+      // Rows are ordered by inbound_seq, so this is the earliest source's chat.
+      bucket = {
+        planId: row.plan_id,
+        conversationKey: row.conversation_key,
+        chatJid: row.chat_jid,
+        seqs: [],
+      };
       groups.set(key, bucket);
     }
     bucket.seqs.push(row.inbound_seq);
   }
 
-  // Earliest unambiguous delivery proof strictly later than every source seq.
+  // Earliest unambiguous delivery proof strictly later than every source seq,
+  // on the sources' own chat. A closure inserts one link per source and the
+  // trigger inbound_disposition_closure_validate_insert requires
+  // target.chat_jid = source.chat_jid on every one of them, so a proof from
+  // another chat under the same conversation_key can never close the group.
+  // Without the chat filter such a proof, whenever it sorts earliest, is
+  // re-picked on every pass and the group never closes even though its own
+  // catch-up is provable. A group whose sources span several chats cannot close
+  // under any target; it is still attempted and the trigger rejects it closed.
   const candidate = raw.prepare(`
     SELECT MIN(target_seq) AS catchup_seq
     FROM operator_catchup_delivery_proofs
-    WHERE conversation_key = ? AND target_seq > ?
+    WHERE conversation_key = ? AND chat_jid = ? AND target_seq > ?
   `);
 
   const report: ReconcileOperatorCatchupReport = {
     attempted: 0, closed: 0, linksClosed: 0, skipped: 0, skips: [],
   };
 
-  let processed = 0;
+  // Two budgets. groupLimit caps closure attempts. examinationLimit caps how
+  // many groups the pass may look at, because a group with no candidate no
+  // longer charges groupLimit: without a second cap a large backlog of
+  // candidate-less groups would be probed in full. Enumeration order is a
+  // stable recovery_plan_id, so this raises the point at which a fixed prefix
+  // of unattemptable groups starves the ones behind it from groupLimit to
+  // examinationLimit rather than removing it. It bounds the per-group candidate
+  // probes and closure attempts only; the enumeration query above still reads
+  // every open pending link.
+  const examinationLimit = groupLimit * RECONCILE_EXAMINATION_MULTIPLIER;
+  let examined = 0;
   for (const bucket of groups.values()) {
-    if (processed >= groupLimit) break;
-    processed += 1;
+    if (report.attempted >= groupLimit) break;
+    if (examined >= examinationLimit) break;
+    examined += 1;
     // seqs are ORDER BY inbound_seq ASC, so the last is the max.
     const maxSourceSeq = bucket.seqs[bucket.seqs.length - 1];
-    const candidateRow = candidate.get(bucket.conversationKey, maxSourceSeq) as
+    const candidateRow = candidate.get(bucket.conversationKey, bucket.chatJid, maxSourceSeq) as
       | { catchup_seq: number | null }
       | undefined;
     const catchupSeq = candidateRow?.catchup_seq ?? null;

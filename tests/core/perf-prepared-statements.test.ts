@@ -84,7 +84,16 @@ describe('prepared statement caching', () => {
     // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
     // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
     // for reconcileContinuityCandidates() reuse.)
-    expect(prepareSpy).toHaveBeenCalledTimes(152);
+    // (+1 vs 152, #3523 layer 3: resumableCheckpointForConversation — the
+    // same-namespace RESUMABLE checkpoint existence probe that distinguishes a
+    // real row/checkpoint divergence from a clean cross-namespace no-op on close —
+    // prepared once in the constructor and reused per close.)
+    // (+1 vs 153, document admission: getTurnRecoveryAdmissionStateForScope — the
+    // three-state scope probe that separates a scope merely awaiting a completed
+    // answer's delivery echo from one truly blocked by outstanding recovery. It
+    // shares its FROM/WHERE text with hasOutstandingTurnRecoveryForScope, which
+    // stays a distinct statement, so the store prepares one more, not two.)
+    expect(prepareSpy).toHaveBeenCalledTimes(154);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

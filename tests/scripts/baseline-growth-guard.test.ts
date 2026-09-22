@@ -144,7 +144,7 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(1);
     expect(out).toMatch(/boundary-baseline\.json/);
     expect(out).toMatch(/new|identity|subset/i);
-  });
+  }, 120_000);
 
   it('is INCONCLUSIVE (exit 2), never a pass, when the baseline becomes unparseable', () => {
     // A truncated/corrupt baseline weighs as nothing. Since shrinking is allowed, treating

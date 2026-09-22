@@ -88,6 +88,16 @@ vi.mock('../../src/transport/auth-bond.ts', () => ({
         path: null,
         error: null,
       }),
+      // The tree-cache half of the guard surface. ConnectionManager reaches all
+      // three on paths these tests drive: warmTreeCache on socket open,
+      // invalidateTreeCache from the credential saver, inspectCached from the
+      // health projection. Omitting them did not fail a test — the calls are
+      // unawaited, so they rejected into the void and only surfaced as vitest
+      // "unhandled errors" with a passing test count and exit 1. The surface
+      // assertion at the end of this file is what stops that recurring.
+      warmTreeCache: vi.fn(async () => {}),
+      invalidateTreeCache: vi.fn(),
+      inspectCached: vi.fn(() => mockAuth.snapshot),
     };
   }),
 }));
@@ -103,8 +113,11 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(()
   }),
 }));
 
-import { makeWASocket } from '@whiskeysockets/baileys';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { AuthBondGuard } from '../../src/transport/auth-bond.ts';
 
 function makeSnapshot(overrides: AuthBondSnapshotOverrides = {}): AuthBondSnapshot {
   const snapshot: AuthBondSnapshot = {
@@ -270,6 +283,325 @@ describe('ConnectionManager auth-bond edge coverage', () => {
       { source: '/tmp/auth-backup/latest' },
       'auth bond restored from protected local snapshot',
     );
+  });
+
+  /**
+   * A review finding on the withheld restore. The guard refuses to run the
+   * destructive repair on a transient read, which is right, but the connect
+   * path ignored `attempted: false` and carried on: it loaded the auth state,
+   * and that reader initialises FRESH credentials when the existing ones
+   * cannot be read or parsed. So a credential that was merely unreadable for
+   * one open could be replaced by an empty one and taken to QR — and the QR
+   * handler returns without scheduling anything, so nothing retried. A
+   * `/health` read cannot rescue it either: /health re-reads the credential
+   * but never calls the restore.
+   *
+   * The activation must therefore abort BEFORE the auth state is loaded and
+   * schedule the retry itself.
+   */
+  function deferredRestore(transientReadPersistent: boolean): AuthBondRestoreResult {
+    const snapshot = makeSnapshot({
+      status: 'invalid',
+      creds: { exists: false, mode: null, size: null, mtime: null, sha256: null },
+      issues: ['creds_json_read_transient:EAGAIN'],
+      transientReadPersistent,
+    });
+    return {
+      attempted: false,
+      restored: false,
+      source: null,
+      snapshot,
+      deferred: true,
+      error: 'auth bond read was transient; restore withheld pending a definite read',
+    };
+  }
+
+  it('aborts the activation and schedules a reconnect when the restore is withheld', async () => {
+    vi.useFakeTimers();
+    try {
+      mockAuth.snapshot = makeSnapshot();
+      mockAuth.restore = deferredRestore(false);
+
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      // The load-bearing half: the auth state is never loaded, so the reader
+      // that would initialise fresh credentials never runs, and no socket is
+      // created off them.
+      expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+
+      // The retry is arranged rather than hoped for.
+      expect(manager.getConnectionState()).toMatchObject({
+        state: 'reconnecting',
+        reconnectAttempts: 1,
+      });
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps activation deferred when the transient read outlives the reporting bound', async () => {
+    vi.useFakeTimers();
+    try {
+      // Same withheld restore, one field different: the streak has outlived
+      // treeStaleRiskMs. That flag changes the health classification, but it
+      // still does not establish that the credential is absent or invalid.
+      // Loading the auth state here would let Baileys replace an unreadable
+      // credential with freshly initialised credentials.
+      const restore = deferredRestore(true);
+      mockAuth.snapshot = restore.snapshot;
+      mockAuth.restore = restore;
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+      expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(0);
+      expect(lifecycleEventCount(manager, 'qr_required')).toBe(0);
+      expect(alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      )).toHaveLength(0);
+      expect(manager.getConnectionState()).toMatchObject({
+        state: 'reconnecting',
+        reconnectAttempts: 1,
+      });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not defer a restore that was declined for any other reason', async () => {
+    vi.useFakeTimers();
+    try {
+      mockAuth.snapshot = makeSnapshot();
+      // Coverage assertion for the two tests above: `deferred` is what gates
+      // the abort, not merely `attempted: false`. Auto-restore being off
+      // produces the same attempted/restored pair and must still proceed.
+      mockAuth.restore = {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: makeSnapshot(),
+        error: 'auto-restore disabled',
+      };
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      expect(vi.mocked(useMultiFileAuthState)).toHaveBeenCalled();
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The paging consequence of aborting early, asserted rather than assumed.
+   *
+   * The abort returns before the `connect-preflight` inspection, so the
+   * local-auth-bond alert no longer fires for a deferred attempt. That is the
+   * intended severity: a credential that could not be READ must not page as
+   * `WA_AUTH_BOND_LOCAL_*`, which asserts something about the credential's
+   * integrity that a transient read never established. The condition is not
+   * lost — it surfaces on the health endpoint through the persistent-read class
+   * and reaches the fleet through the poller's non-healthy set.
+   *
+   * The snapshot here is deliberately INVALID and carries the transient issue,
+   * so the alert path is one the preflight WOULD take. Without that, a zero
+   * alert count would pass because nothing could ever have emitted.
+   */
+  it('does not page a local-auth-bond failure for a deferred attempt', async () => {
+    vi.useFakeTimers();
+    try {
+      const transientSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_read_transient:EAGAIN'],
+      });
+      mockAuth.snapshot = transientSnapshot;
+      mockAuth.restore = deferredRestore(false);
+
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      const localBondAlerts = alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      );
+      expect(localBondAlerts).toHaveLength(0);
+      // The disclosure that replaces it, so the attempt is not silent.
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+      expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(0);
+
+      // Control: an invalid snapshot on the same path, declined for a
+      // non-deferred reason, does reach the preflight and does page. This is
+      // what makes the zero above a property of the abort rather than of the
+      // fixture.
+      //
+      // The control fixture is invalid WITHOUT a transient issue, and that is
+      // load-bearing. The preflight has its own transient gate (see the test
+      // below), so a transient control would defer as well and could no longer
+      // demonstrate that anything ever pages. `creds_json_invalid_json` is a
+      // DEFINITE read of a broken credential, which is precisely the condition
+      // that may page.
+      alertCalls.length = 0;
+      const definiteInvalidSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_invalid_json'],
+      });
+      mockAuth.snapshot = definiteInvalidSnapshot;
+      mockAuth.restore = {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: definiteInvalidSnapshot,
+        error: 'auto-restore disabled',
+      };
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const control = new ConnectionManager();
+      await control.connect();
+
+      const controlAlerts = alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      );
+      expect(controlAlerts.length).toBeGreaterThanOrEqual(1);
+      expect(
+        String((controlAlerts[0]?.[5] as { failure?: { code?: unknown } })?.failure?.code ?? ''),
+      ).toMatch(/^WA_AUTH_BOND_LOCAL_/);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same defect one read later — the preflight, which was unguarded.
+   *
+   * The restore answers one read. The connect path then takes a SECOND,
+   * independent live read and acts on it: it pages `WA_AUTH_BOND_LOCAL_*` on an
+   * invalid status and loads the auth state. A transient open on that read
+   * produces the same non-'present' status that says nothing about the
+   * credential, so both conclusions were drawn from an unfinished read — the
+   * paging one asserts an integrity verdict nothing established, and the load
+   * hands an unreadable credential to a reader that initialises fresh ones.
+   *
+   * Reachability does not need a race. The restore's success return carries no
+   * `deferred` field and the connect path does not return on `restored`, so
+   * execution falls through to this read immediately after the restore renamed
+   * a tree into place — a first look at fresh state.
+   *
+   * The fixture therefore puts the transient issue on the PREFLIGHT path behind
+   * a restore that succeeded — the shape the gate above cannot cover, and one
+   * `restoreLatestIfNeeded` actually returns.
+   */
+  it('does not page or load the auth state when the preflight read is transient', async () => {
+    vi.useFakeTimers();
+    try {
+      const transientSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_read_transient:EAGAIN'],
+      });
+      mockAuth.snapshot = transientSnapshot;
+      // The restore SUCCEEDED, which is both the producible shape and the
+      // reachable one. Its success return carries no `deferred` field and the
+      // connect path records the success without returning, so the run falls
+      // through to this second read — a first look at a tree the restore has
+      // just renamed into place, which is where a transient open is most
+      // likely rather than least.
+      //
+      // Pairing a transient snapshot with 'auto-restore disabled' would be a
+      // combination restoreLatestIfNeeded cannot return, because its transient
+      // branch precedes its auto-restore branch. A fixture the guard cannot
+      // produce would leave this test pinning a code shape rather than a
+      // reachable path.
+      mockAuth.restore = {
+        attempted: true,
+        restored: true,
+        source: '/tmp/auth-backup/latest',
+        snapshot: transientSnapshot,
+        error: null,
+      };
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      // The paging half: an unfinished read must not assert integrity.
+      expect(alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      )).toHaveLength(0);
+      // The destructive half: the reader that initialises fresh credentials
+      // never runs, and no socket is created off them.
+      expect(vi.mocked(useMultiFileAuthState)).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket)).not.toHaveBeenCalled();
+      // The sequence, not just the gate: the restore reported success and the
+      // very next read was still unfinished, which is the window this covers.
+      expect(lifecycleEventCount(manager, 'auth_restore_succeeded')).toBe(1);
+      // The disclosure and the arranged retry, so the attempt is not silent
+      // and a later definite read gets to decide.
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(1);
+      expect(manager.getConnectionState()).toMatchObject({
+        state: 'reconnecting',
+        reconnectAttempts: 1,
+      });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Coverage assertion for the test above: the deferral is a property of the
+   * TRANSIENT issue, not of every invalid preflight. A definite invalid read on
+   * the identical path still pages and still loads, so a gate that swallowed
+   * every non-'present' preflight would fail here.
+   */
+  it('still pages and loads on a preflight that read the credential definitely', async () => {
+    vi.useFakeTimers();
+    try {
+      const definiteInvalidSnapshot = makeSnapshot({
+        status: 'invalid',
+        issues: ['creds_json_invalid_json'],
+      });
+      mockAuth.snapshot = definiteInvalidSnapshot;
+      mockAuth.restore = {
+        attempted: false,
+        restored: false,
+        source: null,
+        snapshot: definiteInvalidSnapshot,
+        error: 'auto-restore disabled',
+      };
+
+      const { mockSock } = makeMockSocket();
+      vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+      const manager = new ConnectionManager();
+      await manager.connect();
+
+      const localBondAlerts = alertCalls.filter(
+        (call) => call[1] === 'whatsapp_auth_bond_local_failure',
+      );
+      expect(localBondAlerts.length).toBeGreaterThanOrEqual(1);
+      expect(
+        String((localBondAlerts[0]?.[5] as { failure?: { code?: unknown } })?.failure?.code ?? ''),
+      ).toMatch(/^WA_AUTH_BOND_LOCAL_/);
+      expect(vi.mocked(useMultiFileAuthState)).toHaveBeenCalled();
+      expect(lifecycleEventCount(manager, 'auth_preflight_invalid')).toBe(1);
+      expect(lifecycleEventCount(manager, 'auth_restore_deferred')).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('classifies a missing local auth bond with a backup as restorable', async () => {
@@ -737,5 +1069,48 @@ describe('#2394 auth-bond restart recovery authority', () => {
       expect(clearCalls).toHaveLength(0);
       expect((manager as any).localAuthAlertEmitted).toBe(true);
     });
+  });
+});
+
+/**
+ * Surface guard for the auth-bond double.
+ *
+ * A test double that has fallen behind the class it stands in for does not
+ * fail like a wrong answer; it fails like nothing at all. The three tree-cache
+ * methods were missing here for two rounds, and because ConnectionManager calls
+ * them unawaited the misses surfaced only as vitest "unhandled errors" beside a
+ * passing test count and a nonzero exit — a shape that reads green at a glance.
+ *
+ * The member list is DERIVED from the production source rather than written out
+ * here, so a newly added `this.authBond.<member>` call fails this test on the
+ * commit that adds it instead of rejecting into the void. Each member is
+ * checked twice: it must exist on the REAL prototype, which catches a stale
+ * list after a rename, and on the double, which catches the drift itself.
+ */
+describe('auth-bond double surface', () => {
+  it('exposes every guard member ConnectionManager calls', async () => {
+    const source = readFileSync(
+      join(import.meta.dirname, '..', '..', 'src', 'transport', 'connection.ts'),
+      'utf8',
+    );
+    const reached = [...new Set(
+      Array.from(source.matchAll(/this\.authBond\.([A-Za-z_]+)/g), (m) => m[1]),
+    )].sort();
+
+    // Coverage assertion: the scan found the call sites at all. Without it a
+    // regex that stopped matching would make every check below vacuous.
+    expect(reached).toContain('warmTreeCache');
+    expect(reached.length).toBeGreaterThanOrEqual(5);
+
+    const real = await vi.importActual<typeof import('../../src/transport/auth-bond.ts')>(
+      '../../src/transport/auth-bond.ts',
+    );
+    const realPrototype = real.AuthBondGuard.prototype as unknown as Record<string, unknown>;
+    const double = new (AuthBondGuard as unknown as new () => Record<string, unknown>)();
+
+    for (const member of reached) {
+      expect(typeof realPrototype[member]).toBe('function');
+      expect(typeof double[member]).toBe('function');
+    }
   });
 });

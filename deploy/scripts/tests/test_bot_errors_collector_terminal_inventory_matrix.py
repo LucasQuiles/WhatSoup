@@ -57,6 +57,10 @@ EXPECTED_DISPOSITIONS = {
     "sent": SCANNED,
     "storm_collapsed": SCANNED,
     "storm_manifests": EXEMPT_NON_RECORD,  # storm manifest indexes, no event id
+    # #2387 per-window digest receipts: bounded counts, the severity bucket, the
+    # window identity and an opaque fingerprint. No event record and no event id,
+    # so the collector's per-event dedupe scan has nothing to match on.
+    "storm_receipts": EXEMPT_NON_RECORD,
     # owed-page breadcrumbs written before a quarantine move: {"signal", "breadcrumb"}
     # only (a digest id, the canonical signal), never an event record or an event id
     "unrenderable_signals": EXEMPT_NON_RECORD,

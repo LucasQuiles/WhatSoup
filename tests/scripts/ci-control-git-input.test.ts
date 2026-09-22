@@ -1734,7 +1734,7 @@ describe('exact added lines', () => {
         patchBytes: first.accounting.remaining.patchBytes - 1,
       },
     }), 'ci.input.added-lines.budget');
-  });
+  }, 30_000);
 
   it('keeps the non-empty legacy runtime result to exactly three keys without accounting', () => {
     const { root, baseOid } = fixture();

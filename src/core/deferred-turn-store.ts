@@ -17,9 +17,9 @@
  *
  * Invariants:
  * - one obligation per (scope, inbound_seq); enqueue is idempotent;
- * - strict head-of-line FIFO: only the LOWEST open inbound_seq per scope is
- *   claimable — an exhausted or held head blocks the scope rather than
- *   permitting out-of-order replay;
+ * - strict head-of-line FIFO: only the LOWEST open inbound_seq per conversation
+ *   in per_chat mode (otherwise per scope) is claimable — an exhausted or held
+ *   head blocks its queue rather than permitting out-of-order replay;
  * - `dispatched_commit` is the requirement-4 point of no return: automatic
  *   input replay (requeue) is permanently refused after it;
  * - bounded envelope: oversize replay text and replay-unsafe sources are
@@ -28,8 +28,32 @@
  */
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
+import { TURN_RECOVERY_MAX_ID_BYTES, validateBoundedRequired } from './turn-recovery-store.ts';
 
 export const DEFERRED_TURN_MAX_ATTEMPTS = 5;
+
+/**
+ * The absorbing states of the lifecycle above — the CHECK-backed statuses after
+ * which no further transition is possible and nothing is owed.
+ */
+export const DEFERRED_TURN_TERMINAL_STATUSES = [
+  'terminal_completed',
+  'terminal_quarantined',
+  'terminal_operator',
+] as const;
+
+/**
+ * SQL predicate that is TRUE while an obligation row is non-terminal, rendered
+ * once from the list above.
+ *
+ * Exported because the retention sweep must hold the source inbound and its
+ * replay envelope while ANY obligation for that inbound is still non-terminal
+ * (#3295 required behaviour 8). A second copy of the status list over there
+ * would silently resume deleting held evidence the day a terminal state is
+ * added here, so both sites read the same definition.
+ */
+export const DEFERRED_TURN_NON_TERMINAL_STATUS_SQL =
+  `status NOT IN (${DEFERRED_TURN_TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 
 const ERROR_CLASS_RE = /^[a-z0-9_.:-]{1,64}$/;
 const CLAIM_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -182,7 +206,7 @@ export class DeferredTurnStore {
         WHERE scope = ? AND inbound_seq = ?
       `),
       // Strict head-of-line: claim ONLY the row that is the minimum open
-      // inbound_seq for the scope AND is pending with attempts left. If the
+      // inbound_seq for the selected queue AND is pending with attempts left. If the
       // head is claimed/committed/exhausted, no row matches — never skip.
       claimHead: prepare(`
         UPDATE deferred_turn_obligations
@@ -196,7 +220,8 @@ export class DeferredTurnStore {
         WHERE id = (
           SELECT id FROM deferred_turn_obligations
           WHERE scope = ?
-            AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+            AND (scope <> 'per_chat' OR conversation_key = ?)
+            AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
           ORDER BY inbound_seq ASC
           LIMIT 1
         )
@@ -224,7 +249,7 @@ export class DeferredTurnStore {
             terminal_reason = ?,
             updated_at = datetime('now')
         WHERE id = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
         RETURNING id
       `),
       expireStale: prepare(`
@@ -242,7 +267,7 @@ export class DeferredTurnStore {
         SELECT id, inbound_seq, status, attempt_count
         FROM deferred_turn_obligations
         WHERE scope = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
         ORDER BY inbound_seq ASC
       `),
       countByStatus: prepare(`
@@ -254,7 +279,7 @@ export class DeferredTurnStore {
       hasNonTerminal: prepare(`
         SELECT 1 AS present FROM deferred_turn_obligations
         WHERE scope = ? AND inbound_seq = ?
-          AND status NOT IN ('terminal_completed', 'terminal_quarantined', 'terminal_operator')
+          AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
       `),
       getStatus: prepare(`
         SELECT status FROM deferred_turn_obligations WHERE id = ?
@@ -301,8 +326,15 @@ export class DeferredTurnStore {
 
   claimNextEligible(
     scope: string,
-    opts: { claimToken: string; ttlSeconds: number },
+    opts: { conversationKey?: string; claimToken: string; ttlSeconds: number },
   ): DeferredTurnObligation | null {
+    if (scope === 'per_chat') {
+      validateBoundedRequired(
+        opts.conversationKey ?? '',
+        'Deferred turn conversation key',
+        TURN_RECOVERY_MAX_ID_BYTES,
+      );
+    }
     if (!CLAIM_TOKEN_RE.test(opts.claimToken)) {
       throw new Error('Deferred turn claim token has an invalid shape');
     }
@@ -313,6 +345,7 @@ export class DeferredTurnStore {
       opts.claimToken,
       `${opts.ttlSeconds} seconds`,
       scope,
+      opts.conversationKey ?? null,
     ) as ObligationRow | undefined;
     return row ? toObligation(row) : null;
   }

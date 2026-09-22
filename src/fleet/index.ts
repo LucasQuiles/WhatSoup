@@ -18,7 +18,7 @@ import { errorMessage } from '../lib/error-message.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetLineCheckpoints, handleRestoreCheckpoint } from './routes/checkpoints.ts';
 import { handleGetLiveSessions } from './routes/live-sessions.ts';
-import { handleGetProviders } from './routes/providers.ts';
+import { handleGetProviderModels, handleGetProviders } from './routes/providers.ts';
 import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
@@ -120,6 +120,7 @@ type NameJidRouteParams = { name: string; jid: string };
 
 type RouteParamsByHandler = {
   getProviders: EmptyRouteParams;
+  getProviderModels: NameRouteParams;
   putCredential: NameRouteParams;
   deleteCredential: NameRouteParams;
   verifyCredential: NameRouteParams;
@@ -202,6 +203,7 @@ type RouteHandler<K extends RouteKey> = (
 
 const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
+  'getProviderModels',
   'getLine',
   'getLineProviderStatus',
   'getLineCheckpoints',
@@ -263,6 +265,7 @@ function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
 
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getProviders: (req, res, _deps, _params) => handleGetProviders(req, res),
+  getProviderModels: (req, res, _deps, params) => handleGetProviderModels(req, res, params),
   putCredential: (req, res, _deps, params) => handlePutCredential(req, res, params),
   deleteCredential: (req, res, deps, params) => handleDeleteCredential(req, res, params, buildCredentialDeps(deps)),
   verifyCredential: (req, res, _deps, params) => handleVerifyCredential(req, res, params),
@@ -365,6 +368,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },
   { method: 'GET',   path: /^\/api\/providers$/, handler: 'getProviders' },
+  { method: 'GET',   path: /^\/api\/providers\/(?<name>[^/]+)\/models$/, handler: 'getProviderModels' },
   { method: 'PUT',    path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'putCredential' },
   { method: 'DELETE', path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'deleteCredential' },
   { method: 'POST',   path: /^\/api\/credentials\/(?<name>[^/]+)\/verify$/, handler: 'verifyCredential' },

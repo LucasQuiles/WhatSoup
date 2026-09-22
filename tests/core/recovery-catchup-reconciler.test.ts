@@ -146,6 +146,118 @@ describe('automatic operator catch-up reconciler', () => {
     }
   });
 
+  it('selects a same-chat_jid catch-up when a foreign-chat inbound sorts earlier', () => {
+    // Both sources sit on one chat_jid, but an unrelated inbound on a second
+    // chat_jid under the same conversation_key carries its own delivery proof
+    // and sorts ahead of the sources' own catch-up. The closure trigger
+    // requires target.chat_jid = source.chat_jid, so the foreign-chat target
+    // can never close this group: picking it wedges the group on every pass.
+    const fixture = installFixture({ echoed: true, decoyChat: 'foreign@g.us' });
+
+    // Guard the fixture itself: both targets must really carry a proof and the
+    // foreign one must sort first, or the selection defect is not reproduced.
+    expect(proofTargets()).toEqual([
+      { target_seq: fixture.decoySeq, chat_jid: 'foreign@g.us' },
+      { target_seq: fixture.catchupSeq, chat_jid: 'reconciler@g.us' },
+    ]);
+
+    const report = reconcileOperatorCatchupRecoveries(db.raw);
+
+    expect(report).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 0 });
+    expect(report.skips).toEqual([]);
+    // Closed against the sources' own chat, not the earlier foreign-chat inbound.
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([
+      { inbound_seq: fixture.sourceSeqs[0], superseded_by_seq: fixture.catchupSeq },
+      { inbound_seq: fixture.sourceSeqs[1], superseded_by_seq: fixture.catchupSeq },
+    ]);
+  });
+
+  it('does not spend the group budget on a group it cannot attempt', () => {
+    // Groups are enumerated in a stable recovery_plan_id order, so a group with
+    // no catch-up candidate sorting first used to consume the whole budget and
+    // starve the closable group behind it on every pass.
+    installFixture({
+      echoed: false, planId: 'plan-a-blocked', conversationKey: 'conv-a', chat: 'a@g.us',
+    });
+    const closable = installFixture({
+      echoed: true, planId: 'plan-b-closable', conversationKey: 'conv-b', chat: 'b@g.us',
+    });
+
+    const report = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+
+    expect(report).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 1 });
+    expect(report.skips).toEqual([
+      expect.objectContaining({ planId: 'plan-a-blocked', reason: 'no_catchup_candidate' }),
+    ]);
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([
+      { inbound_seq: closable.sourceSeqs[0], superseded_by_seq: closable.catchupSeq },
+      { inbound_seq: closable.sourceSeqs[1], superseded_by_seq: closable.catchupSeq },
+    ]);
+  });
+
+  it('stops after a bounded prefix of groups it cannot attempt', () => {
+    // Skips no longer charge the group budget, so the pass needs its own scan
+    // cap or a large backlog of candidate-less groups would be probed in full.
+    // Twenty-one blocked groups sort ahead of the closable one; a group budget
+    // of one allows twenty examinations, so the pass stops before reaching it.
+    for (let index = 0; index < 21; index += 1) {
+      const tag = String(index).padStart(2, '0');
+      installFixture({
+        echoed: false,
+        planId: `plan-blocked-${tag}`,
+        conversationKey: `conv-blocked-${tag}`,
+        chat: `blocked-${tag}@g.us`,
+      });
+    }
+    const closable = installFixture({
+      echoed: true, planId: 'plan-zz-closable', conversationKey: 'conv-zz', chat: 'zz@g.us',
+    });
+
+    const capped = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 1 });
+
+    expect(capped).toMatchObject({ attempted: 0, closed: 0, linksClosed: 0, skipped: 20 });
+    // The cap is deliberate: the closable group waits for a later pass rather
+    // than the pass scanning an unbounded backlog to reach it.
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+    expect(linkRows('recovery_pending_operator_catchup')).toHaveLength(44);
+
+    // The cap is the only thing that stopped the pass: the same fixture with a
+    // budget of two allows forty examinations, and the closable group closes.
+    const roomier = reconcileOperatorCatchupRecoveries(db.raw, { groupLimit: 2 });
+
+    expect(roomier).toMatchObject({ attempted: 1, closed: 1, linksClosed: 2, skipped: 21 });
+    expect(linkRows('superseded_by_operator_catchup')).toEqual([
+      { inbound_seq: closable.sourceSeqs[0], superseded_by_seq: closable.catchupSeq },
+      { inbound_seq: closable.sourceSeqs[1], superseded_by_seq: closable.catchupSeq },
+    ]);
+  });
+
+  it('reports an unexpected closure failure as an error skip and still charges the attempt', () => {
+    // Foreign-key enforcement is a precondition of the closure primitive, not a
+    // proof-shape rejection, so its message is deliberately absent from
+    // BENIGN_CLOSURE_REJECTIONS and has to surface as `error` for the caller to
+    // alert on. The fixture is seeded with enforcement ON so the source rows and
+    // their disposition links are valid; only the reconciler pass sees it OFF.
+    installFixture({ echoed: true });
+    db.raw.exec('PRAGMA foreign_keys = OFF');
+
+    try {
+      const report = reconcileOperatorCatchupRecoveries(db.raw);
+
+      // The attempt counter is charged before the closure is tried, so an
+      // erroring group spends the attempt budget even though nothing closed.
+      expect(report).toMatchObject({ attempted: 1, closed: 0, linksClosed: 0, skipped: 1 });
+      expect(report.skips).toEqual([
+        expect.objectContaining({ reason: 'error', nSourceSeqs: 2 }),
+      ]);
+      // Fail-closed: an unexpected error closes nothing and leaves both pending.
+      expect(linkRows('superseded_by_operator_catchup')).toEqual([]);
+      expect(linkRows('recovery_pending_operator_catchup')).toHaveLength(2);
+    } finally {
+      db.raw.exec('PRAGMA foreign_keys = ON');
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Fixture: two crash-failed source inbounds pending catch-up, plus a later
   // catch-up inbound whose terminal reply is (optionally) echoed — mirrors
@@ -162,9 +274,21 @@ describe('automatic operator catch-up reconciler', () => {
      * closure trigger fails that row closed (see the multi-chat_jid test).
      */
     sourceChats?: [string, string];
+    /**
+     * Extra completed catch-up inbound on another chat_jid under the same
+     * conversation_key, inserted after the sources and before the real catch-up
+     * so it carries its own delivery proof at a lower seq.
+     */
+    decoyChat?: string;
     /** Target database. Defaults to the in-memory `db`; a file DB is used for lock tests. */
     into?: Database;
-  }): { planId: string; conversationKey: string; sourceSeqs: number[]; catchupSeq: number } {
+  }): {
+    planId: string;
+    conversationKey: string;
+    sourceSeqs: number[];
+    catchupSeq: number;
+    decoySeq: number | null;
+  } {
     const raw = (options.into ?? db).raw;
     const planId = options.planId ?? 'pcr-reconciler';
     const conversationKey = options.conversationKey ?? 'reconciler-conversation';
@@ -189,12 +313,36 @@ describe('automatic operator catch-up reconciler', () => {
     `);
     for (const seq of sourceSeqs) insertPending.run(seq, planId);
 
+    // Inserted before the real catch-up so its seq is the lower of the two.
+    const decoySeq = options.decoyChat === undefined ? null : installCatchupTarget({
+      raw, planId, conversationKey, chat: options.decoyChat, suffix: 'decoy-catchup', echoed: true,
+    });
+    const catchupSeq = installCatchupTarget({
+      raw, planId, conversationKey, chat, suffix: 'catchup', echoed: options.echoed,
+    });
+    return { planId, conversationKey, sourceSeqs, catchupSeq, decoySeq };
+  }
+
+  /**
+   * Insert one completed catch-up inbound and its terminal reply. When echoed,
+   * the pair appears in operator_catchup_delivery_proofs for exactly this
+   * (target_seq, conversation_key, chat_jid).
+   */
+  function installCatchupTarget(options: {
+    raw: DatabaseSync;
+    planId: string;
+    conversationKey: string;
+    chat: string;
+    suffix: string;
+    echoed: boolean;
+  }): number {
+    const { raw, planId, conversationKey, chat, suffix, echoed } = options;
     const catchupSeq = Number(raw.prepare(`
       INSERT INTO inbound_events (
         message_id, conversation_key, chat_jid, processing_status, completed_at,
         terminal_reason
       ) VALUES (?, ?, ?, 'complete', datetime('now'), 'response_sent')
-    `).run(`${planId}-catchup`, conversationKey, chat).lastInsertRowid);
+    `).run(`${planId}-${suffix}`, conversationKey, chat).lastInsertRowid);
     const opId = Number(raw.prepare(`
       INSERT INTO outbound_ops (
         conversation_key, chat_jid, op_type, payload, status, source_inbound_seq,
@@ -204,9 +352,9 @@ describe('automatic operator catch-up reconciler', () => {
     `).run(
       conversationKey,
       chat,
-      options.echoed ? 'echoed' : 'submitted',
+      echoed ? 'echoed' : 'submitted',
       catchupSeq,
-      options.echoed ? 'echoed' : 'submitted',
+      echoed ? 'echoed' : 'submitted',
     ).lastInsertRowid);
     raw.prepare(`
       INSERT INTO turn_terminal_records (
@@ -214,7 +362,7 @@ describe('automatic operator catch-up reconciler', () => {
         logical_turn_id, manager_id, generation, attempt_kind,
         inbound_disposition, delivery_kind, delivery_op_id,
         reply_guarantee_disarmed
-      ) VALUES ('per_chat', ?, ?, ?, ?, 'catchup-turn',
+      ) VALUES ('per_chat', ?, ?, ?, ?, ?,
                 'catchup-manager', 1, 'replied', 'finalized_replied',
                 ?, ?, ?)
     `).run(
@@ -222,11 +370,20 @@ describe('automatic operator catch-up reconciler', () => {
       chat,
       catchupSeq,
       catchupSeq,
-      options.echoed ? 'echoed' : 'enqueued',
+      `${suffix}-turn`,
+      echoed ? 'echoed' : 'enqueued',
       opId,
-      options.echoed ? 1 : 0,
+      echoed ? 1 : 0,
     );
-    return { planId, conversationKey, sourceSeqs, catchupSeq };
+    return catchupSeq;
+  }
+
+  function proofTargets(): Array<{ target_seq: number; chat_jid: string }> {
+    return db.raw.prepare(`
+      SELECT target_seq, chat_jid
+      FROM operator_catchup_delivery_proofs
+      ORDER BY target_seq
+    `).all() as Array<{ target_seq: number; chat_jid: string }>;
   }
 
   function linkRows(disposition: string): Array<{ inbound_seq: number; superseded_by_seq: number | null }> {

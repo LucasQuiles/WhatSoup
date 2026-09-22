@@ -4,9 +4,24 @@
  * console/src/lib/agent-cwd.ts:defaultAgentWorkspacePath().
  * @vitest-environment jsdom
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { createElement } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    getProviders: vi.fn().mockResolvedValue([
+      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+    ]),
+    getProviderModels: vi.fn().mockResolvedValue({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'test' },
+      asOfLabel: 'just now',
+    }),
+  },
+}));
+
 import ConfigStep from '../../console/src/components/wizard/ConfigStep';
 import ReviewStep from '../../console/src/components/wizard/ReviewStep';
 import { defaultAgentWorkspacePath } from '../../console/src/lib/agent-cwd';
@@ -16,12 +31,17 @@ const EXPECTED_DEFAULT = '~/.local/share/whatsoup/instances/lab-test/workspace';
 const OVERRIDE = '~/work/custom';
 
 function renderConfigStep(data: Record<string, unknown>) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    createElement(ConfigStep, {
-      data,
-      onChange: () => {},
-      errors: {},
-    }),
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(ConfigStep, {
+        data,
+        onChange: () => {},
+        errors: {},
+      }),
+    ),
   );
 }
 

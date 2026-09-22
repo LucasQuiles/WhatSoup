@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -32,7 +32,12 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import new_event_fields
-from lib.target_provenance import safe_observer_provenance, safe_target_provenance
+from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
+from lib.target_provenance import (
+    safe_observer_provenance,
+    safe_release_divergence,
+    safe_target_provenance,
+)
 from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
 from lib.controller_log import (
     ControllerLogContext,
@@ -42,6 +47,7 @@ from lib.controller_log import (
 )
 from lib.durable_json import (
     JsonVersion,
+    PublicationResult,
     durable_json_target,
     observe_json,
     operation_id,
@@ -1303,6 +1309,233 @@ def _durable_target(path: Path):
     )
 
 
+# The strict durable reader (lib/durable_json.observe_json) forbids any bit in
+# 0o077 on a private leaf. Kept as a named constant so a repair and its tests
+# cannot drift onto the writer's 0o600 by accident: they are different values
+# answering different questions.
+LEGACY_RECEIPT_FORBIDDEN_MODE_BITS = 0o077
+LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS = 0o022
+LEGACY_RECEIPT_MODE_EVIDENCE_FIELD = "legacyReceiptModeRepairedFrom"
+
+LEGACY_RECEIPT_REFUSAL_SYMLINK = "symlink"
+LEGACY_RECEIPT_REFUSAL_NOT_REGULAR = "not_regular"
+LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER = "foreign_owner"
+LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS = "multiple_links"
+LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE = "parent_writable"
+LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK = "parent_symlink"
+LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE = "parent_unreadable"
+LEGACY_RECEIPT_REFUSAL_UNOPENABLE = "unopenable"
+LEGACY_RECEIPT_REFUSAL_UNSUPPORTED = "unsupported_capability"
+
+
+class LegacyReceiptRepair(NamedTuple):
+    """Outcome of one legacy durable-receipt mode repair attempt.
+
+    ``previous_mode`` is set only when a repair actually happened, so it doubles
+    as the evidence of the pre-repair state. ``refusal`` is one of the
+    LEGACY_RECEIPT_REFUSAL_* codes; both fields are None when there was nothing
+    to repair.
+    """
+
+    previous_mode: int | None
+    refusal: str | None
+
+
+class _ReceiptParentUnusable(Exception):
+    """Internal: the receipt's parent cannot be opened without following a link.
+
+    ``refusal`` is a LEGACY_RECEIPT_REFUSAL_* code, or None when the parent is
+    merely absent, which is a silent no-op rather than a refusal.
+    """
+
+    def __init__(self, refusal: str | None) -> None:
+        super().__init__(refusal or "absent")
+        self.refusal = refusal
+
+
+def _classify_parent_component_failure(component: str, *, dir_fd: int) -> str:
+    """Name the reason a parent component could not be opened as a directory.
+
+    O_NOFOLLOW|O_DIRECTORY reports ENOTDIR for a symlink on darwin and ELOOP on
+    linux, and ENOTDIR also covers a plain file, so the errno alone cannot say
+    which it was. The open is still the security boundary; this lstat only
+    labels the refusal, so a race here downgrades the message, never the guard.
+    """
+    try:
+        component_stat = os.stat(component, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+    if stat.S_ISLNK(component_stat.st_mode):
+        return LEGACY_RECEIPT_REFUSAL_PARENT_SYMLINK
+    return LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE
+
+
+def _resolved_receipt_parent(path: Path) -> Path:
+    """Resolve the receipt's parent exactly as the reader resolves its root.
+
+    _durable_target() builds the reader's target with
+    ``path.parent.resolve(strict=True)``, so a symlinked ancestor above the
+    state root, such as a linked home directory, is transparent to the reader:
+    it publishes through the link. The repair must resolve identically or it
+    would refuse on hosts the reader is happy with, and the repair would then
+    be permanently inert exactly where a legacy receipt still needs it.
+
+    The state directory ITSELF being a symlink is a different case. This
+    resolution accepts it and the leaf is repaired, but publication does not
+    get that far: record_daily_health_receipt() calls ensure_private_dir(),
+    which refuses a symlinked private directory outright. Such a host is
+    repaired and still fails to publish.
+
+    Keep this expression in lockstep with _durable_target above. It is written
+    out rather than reusing that function because _durable_target() also calls
+    ensure_private_dir(), which must not run before the repair has judged the
+    state root.
+    """
+    return path.parent.resolve(strict=True)
+
+
+def _open_receipt_parent(resolved_parent: Path) -> int:
+    """Open an already-resolved parent directory without traversing a symlink.
+
+    Walks the resolved absolute path one component at a time from the
+    filesystem root under O_NOFOLLOW|O_DIRECTORY, mirroring the strict reader's
+    _open_target_parent (lib/durable_json.py), which walks its own resolved
+    trusted_root the same way. Reimplemented here rather than imported because
+    that helper is private and durable_json.py is out of scope.
+
+    Resolution has already removed every symlink, so parent_symlink refuses
+    only when a component was replaced by a symlink between the resolution and
+    this walk. That race is the whole point of re-verifying under O_NOFOLLOW
+    instead of trusting the resolved string.
+
+    The caller owns the returned descriptor and must close it.
+    """
+    anchor = resolved_parent
+    try:
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        # Descriptor exhaustion (EMFILE/ENFILE) reaches even this open. The
+        # caller handles _ReceiptParentUnusable only, so an escaping OSError
+        # would abort the cycle instead of refusing the repair.
+        raise _ReceiptParentUnusable(LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE) from exc
+    try:
+        for component in anchor.parts[1:]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                raise _ReceiptParentUnusable(None) from exc
+            except OSError as exc:
+                raise _ReceiptParentUnusable(
+                    _classify_parent_component_failure(component, dir_fd=descriptor)
+                ) from exc
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def repair_legacy_private_receipt_mode(path: Path) -> LegacyReceiptRepair:
+    """Clear group and other permission bits from a pre-adoption durable leaf.
+
+    ensure_private_dir() re-applies 0700 to the state directory on every cycle,
+    but nothing repaired the leaf. A receipt written before the strict durable
+    reader was adopted therefore keeps its permissive mode forever and
+    observe_json() rejects it on every subsequent cycle, so the daily cycle
+    never publishes (#3501).
+
+    This is deliberately narrower than the best-effort
+    ``try: path.chmod(0o600) except OSError: pass`` idiom used elsewhere in this
+    script. A permissive mode on a state file is exactly the condition an
+    attacker would have exploited, so ownership is proven before the mode is
+    narrowed, and every guard is evaluated against the same descriptor that is
+    then chmod'ed, so the inode that was checked and the inode that is modified
+    cannot differ.
+
+    The parent is resolved exactly as the reader resolves its trusted root, so
+    a symlinked ancestor is transparent to both, and the resolved path is then
+    re-verified by walking its components under O_NOFOLLOW before the leaf is
+    opened relative to that proven descriptor.
+
+    Refusal is silent about the mode: it never chmods, never raises, and leaves
+    the leaf byte- and mode-identical, so the strict reader downstream remains
+    the sole authority on whether the leaf may be used.
+
+    The parent_writable refusal holds for one cycle only, and not because the
+    root is guaranteed to change. ensure_private_dir() ATTEMPTS to narrow the
+    state root after this returns and suppresses its own chmod errors, so on a
+    root this process cannot chmod the refusal simply repeats. The next cycle
+    re-checks the root mode either way, and repairs the leaf only if the
+    narrowing took effect and the leaf passes the remaining guards. The owner
+    guard is what protects against a foreign plant; a plant by the executing
+    uid itself is outside this threat model.
+    """
+    if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNSUPPORTED)
+    try:
+        resolved_parent = _resolved_receipt_parent(path)
+    except FileNotFoundError:
+        # No state root yet, so no legacy leaf. Not a refusal: a fresh install
+        # must not log one every cycle.
+        return LegacyReceiptRepair(None, None)
+    except (OSError, RuntimeError):
+        # RuntimeError covers a symlink loop reported by resolve() rather than
+        # by errno.
+        return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_UNREADABLE)
+    try:
+        parent_fd = _open_receipt_parent(resolved_parent)
+    except _ReceiptParentUnusable as exc:
+        # refusal None means the parent is simply absent: no leaf, no repair,
+        # and no log line on a fresh install.
+        return LegacyReceiptRepair(None, exc.refusal)
+    try:
+        parent_stat = os.stat(parent_fd)
+        if stat.S_IMODE(parent_stat.st_mode) & LEGACY_RECEIPT_PARENT_FORBIDDEN_MODE_BITS:
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE)
+        try:
+            # Opened relative to the walked parent descriptor, so the leaf is
+            # resolved in the directory this function proved, not by re-walking
+            # the path. O_NONBLOCK so a FIFO planted at the receipt path fails
+            # the regular-file guard instead of blocking the daily cycle forever
+            # on open(); it is ignored for the regular file expected here.
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return LegacyReceiptRepair(None, None)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_SYMLINK)
+            return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+        try:
+            leaf_stat = os.stat(descriptor)
+            if not stat.S_ISREG(leaf_stat.st_mode):
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_NOT_REGULAR)
+            if leaf_stat.st_uid != os.getuid():
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_FOREIGN_OWNER)
+            if leaf_stat.st_nlink != 1:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_MULTIPLE_LINKS)
+            previous_mode = stat.S_IMODE(leaf_stat.st_mode)
+            if not previous_mode & LEGACY_RECEIPT_FORBIDDEN_MODE_BITS:
+                return LegacyReceiptRepair(None, None)
+            try:
+                os.chmod(descriptor, previous_mode & ~LEGACY_RECEIPT_FORBIDDEN_MODE_BITS)
+            except OSError:
+                return LegacyReceiptRepair(None, LEGACY_RECEIPT_REFUSAL_UNOPENABLE)
+            return LegacyReceiptRepair(previous_mode, None)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_fd)
+
+
 def safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
     return (cleaned or "unknown")[:80]
@@ -2315,12 +2548,23 @@ def outbox_event(
     # target instance distinct from the producer, resolve that target's own
     # provenance (fail-closed to unknown) instead of letting producer evidence
     # stand in for it.
-    event["observerProvenance"] = redact_json_value(
-        safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
-    )
+    observer_provenance = safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
+    event["observerProvenance"] = redact_json_value(observer_provenance)
     target_instance = str(event["instance"])
     if target_instance and target_instance != "bot-errors-health":
-        event["targetProvenance"] = redact_json_value(safe_target_provenance(target_instance, HOST_PLATFORM))
+        target_provenance = safe_target_provenance(target_instance, HOST_PLATFORM)
+        event["targetProvenance"] = redact_json_value(target_provenance)
+        # #2358 C9/C10: classified only where a distinct target exists to
+        # compare against. A producer-self event has no target block, so there
+        # is nothing to diverge from and no verdict to attach.
+        #
+        # Classified from the RAW blocks, matching the runner, so both
+        # producers judge the same inputs. Reading the redacted copies here
+        # would let a future redaction rule that rewrote commit-shaped text
+        # move this verdict and not the runner. Only the verdict is redacted.
+        event["releaseDivergence"] = redact_json_value(
+            safe_release_divergence(observer_provenance, target_provenance)
+        )
     if force_notify:
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "critical"
@@ -4232,7 +4476,19 @@ def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any
     return "opencode"
 
 
+# The answer this reader owes for every input shape -- refuse, empty or map --
+# is docs/runbooks/launchd-governed-env-reader-contract.md, and
+# src/fleet/launchd-env-drift.ts reads the same file to the same contract. Both
+# are held to one corpus at tests/fixtures/launchd-env-plist-contract/. Change
+# the contract before changing either reader.
 PLIST_ENVIRONMENT_KEY_MARKER = "<key>EnvironmentVariables</key>"
+# Duplicate detection covers the canonical marker and the measured variant
+# where either key tag has only XML whitespace before ">". It does not claim
+# general XML equivalence, and the canonical literal above remains the only
+# marker that selects a dictionary to parse.
+PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE = re.compile(
+    r"<key[ \t\r\n]*>EnvironmentVariables</key[ \t\r\n]*>"
+)
 # The dict ELEMENT token, not one literal spelling of it. `<dict>`, `<dict >`,
 # `<dict\n>`, `<dict/>` and `<dict attr="x">` are the same element to any plist
 # reader, so matching the literal "<dict>" made the nested-dict guard below miss
@@ -4259,53 +4515,108 @@ PLIST_ENV_PAIR_RE = re.compile(
 )
 
 
-def mask_xml_comments(raw: str) -> str | None:
-    """Blank every XML comment, PRESERVING LENGTH. None if one is unterminated.
+# The XML region kinds this reader must never read as markup, as
+# (opener, closer) pairs. A comment, a CDATA section and a processing
+# instruction are all inert text to the system plist parser: an
+# EnvironmentVariables marker, a Label or a dict spelled inside one is not a
+# marker, a Label or a dict, however legal the surrounding file is.
+PLIST_INERT_XML_REGIONS = (
+    ("<!--", "-->"),
+    ("<![CDATA[", "]]>"),
+    ("<?", "?>"),
+)
 
-    Comments were invisible to this reader, and TWO guards were defeated by
-    that, both measured on the pre-fix code rather than reasoned about:
+
+def mask_inert_xml_regions(raw: str) -> tuple[str, list[tuple[int, int]]] | None:
+    """Blank every inert XML region, PRESERVING LENGTH, and REPORT where.
+
+    None if a region is unterminated. Returns (masked_text, spans).
+
+    Comments alone were covered before, and TWO guards were defeated by that,
+    both measured on the pre-fix code rather than reasoned about:
 
       the Label guard. A commented-out Label naming this instance, above a real
       Label naming a DIFFERENT one, was accepted: the reader returned the other
-      instance's environment ({'PATH': '/planted/bin'}) for agent-alpha. That
-      guard exists precisely so an unrelated or planted plist at the expected
-      pathname is never parsed, and one comment turned it off.
+      instance's environment for agent-alpha. That guard exists precisely so an
+      unrelated or planted plist at the expected pathname is never parsed, and
+      one comment turned it off.
 
       the EnvironmentVariables marker. A commented-out decoy dict before the
-      live one won the `find`, so the decoy's body was read as the environment
-      and the live dict never looked at. The TypeScript comparator has the same
-      shape and the same defect, so both are fixed together.
+      live one won the ``find``, so the decoy's body was read as the environment
+      and the live dict never looked at.
+
+    A CDATA section and a processing instruction are the same defect in two
+    further spellings, and they were still live text here: a decoy
+    ``<key>EnvironmentVariables</key><dict/>`` inside either one, placed ahead
+    of the live dict, was read as an empty environment. Both spellings lint
+    clean and ``plutil -extract EnvironmentVariables json`` returns the REAL
+    environment for them.
 
     MASKED, not deleted: length is preserved, so every offset below still
     indexes the real text and no offset map has to be kept honest. '-' is not
-    XML whitespace, so a comment inside the environment block still fails the
-    "fully consumed by the pairs" rule and that cell -- pinned by
-    comment_between_key_and_string -- keeps refusing exactly as before. Making
-    this reader newly ACCEPT a plist it used to refuse would be a contract
-    change, and this fix is not the place for one. '-' also carries no
-    ambiguity as filler, because `--` cannot appear inside a well-formed XML
-    comment, and it starts no token this reader searches for.
+    XML whitespace, so an inert region in a whitespace-only GAP still fails the
+    checks that require whitespace there. '-' also carries no ambiguity as
+    filler, because ``--`` cannot appear inside a well-formed XML comment, and
+    it starts no token this reader searches for.
 
-    An unterminated `<!--` is not well-formed XML. It used to be ignored, so
+    THE SPANS ARE RETURNED BECAUSE THE FILLER IS NOT ENOUGH ON ITS OWN, and
+    that is measured rather than reasoned. In a whitespace-only gap '-' is
+    correctly rejected, but in CHARACTER DATA it is perfectly legal: masking
+    ``<string><![CDATA[/opt/bin]]></string>`` yields a run of dashes that the
+    pair pattern's ``[^<]*`` group matches happily. A body that fails closed
+    today -- the literal "<" of ``<![CDATA[`` ends ``[^<]*``, the pair never
+    matches, and the body is not fully consumed -- would have started parsing to
+    a dash-valued key. The caller therefore refuses on span INTERSECTION with
+    the block, which keeps the cdata_value and cdata_key_name cells closed by a
+    rule instead of by a filler character's side effect.
+
+    The EARLIEST opener wins at each step, not the first kind in the tuple: a
+    processing instruction can carry ``<!--`` as literal text, and a comment can
+    carry ``<?``.
+
+    An unterminated opener is not well-formed XML. It used to be ignored, so
     everything after it was parsed as live markup; it is refused now.
 
     Applied once, to the whole file, BEFORE the Label search -- not just before
     the marker search. Fixing the marker alone would leave the Label decoy.
+
+    A DOCTYPE internal subset is NOT masked. plist(5) files carry an external
+    DOCTYPE with no internal subset, and inventing a fourth region kind for a
+    shape the generator never emits would widen this reader for nothing.
     """
     out: list[str] = []
+    spans: list[tuple[int, int]] = []
     cursor = 0
     while True:
-        open_at = raw.find("<!--", cursor)
+        open_at = -1
+        opener_length = 0
+        closer = ""
+        for candidate_opener, candidate_closer in PLIST_INERT_XML_REGIONS:
+            at = raw.find(candidate_opener, cursor)
+            if at < 0:
+                continue
+            if open_at < 0 or at < open_at:
+                open_at = at
+                opener_length = len(candidate_opener)
+                closer = candidate_closer
         if open_at < 0:
             out.append(raw[cursor:])
-            return "".join(out)
-        close_at = raw.find("-->", open_at + 4)
+            return ("".join(out), spans)
+        close_at = raw.find(closer, open_at + opener_length)
         if close_at < 0:
             return None
-        end = close_at + 3
+        end = close_at + len(closer)
         out.append(raw[cursor:open_at])
         out.append("-" * (end - open_at))
+        spans.append((open_at, end))
         cursor = end
+
+
+def intersects_inert_region(
+    spans: list[tuple[int, int]], start: int, end: int
+) -> bool:
+    """True when [start, end) overlaps any masked region by at least one byte."""
+    return any(span_start < end and start < span_end for span_start, span_end in spans)
 
 
 def instance_plist_environment(name: str) -> dict[str, str] | None:
@@ -4329,11 +4640,12 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     except (OSError, UnicodeDecodeError):
         return None
     # Masked FIRST: every search below -- Label, marker, dict bounds, body --
-    # must see comments as inert filler rather than as live markup.
-    masked = mask_xml_comments(raw)
+    # must see comments, CDATA sections and processing instructions as inert
+    # filler rather than as live markup.
+    masked = mask_inert_xml_regions(raw)
     if masked is None:
         return None
-    raw = masked
+    raw, inert_spans = masked
     label_match = re.search(
         r"<key>Label</key>\s*<string>(.*?)</string>", raw, re.DOTALL
     )
@@ -4343,6 +4655,11 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
     if marker < 0:
         return None
     after_marker = marker + len(PLIST_ENVIRONMENT_KEY_MARKER)
+    # Count only the canonical and XML-whitespace-padded key tags promised by
+    # this detector. A second match is ambiguous to this narrow reader, so it
+    # refuses rather than reporting a block the system parser may not load.
+    if len(PLIST_ENVIRONMENT_KEY_MARKER_COUNT_RE.findall(raw)) > 1:
+        return None
     token_match = PLIST_DICT_OPEN_TOKEN_RE.search(raw, after_marker)
     if token_match is None:
         return None
@@ -4370,6 +4687,15 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         return {}
     close_match = PLIST_DICT_CLOSE_RE.search(raw, open_match.end())
     if close_match is None:
+        return None
+    # AN INERT REGION INSIDE THE BLOCK IS NOT CONTENT THIS READER MAY CONSUME.
+    # The mask blanks it to '-', and '-' is legal character data, so a masked
+    # CDATA value satisfies the pair pattern's ``[^<]*`` group and a block that
+    # fails closed today would parse to a dash-valued key. Measured on the
+    # cdata_value and cdata_key_name cells. The whitespace checks below still
+    # catch a region in a gap; this catches one in character data, which they
+    # cannot.
+    if intersects_inert_region(inert_spans, open_match.end(), close_match.start()):
         return None
     block = raw[open_match.end():close_match.start()]
     # The block ends at the FIRST </dict>, so a nested dict truncates the map and
@@ -4407,7 +4733,13 @@ def instance_plist_environment(name: str) -> dict[str, str] | None:
         # against a parser that has its own. Refusing settles it on both sides.
         if key in environment:
             return None
-        environment[key] = html.unescape(match.group(2)).strip()
+        # NOT stripped. plist(5) <string> content is significant, and the
+        # TypeScript comparator keeps the value as written, so stripping here
+        # made the two readers disagree about the same file. Every consumer of
+        # this map reaches values through environment_value(), which applies the
+        # "empty or whitespace-only reads as absent" policy at the accessor
+        # where it belongs.
+        environment[key] = html.unescape(match.group(2))
         consumed = match.end()
     if block[consumed:].strip(PLIST_XML_SPACE):
         return None
@@ -7025,36 +7357,206 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
 }
 
 
-def active_whatsoup_service_names() -> set[str]:
-    dry_services = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
-    if dry_services is not None:
-        return {
-            item.strip().removeprefix("com.whatsoup.")
-            for item in dry_services.split(",")
-            if item.strip()
-        }
-    if HOST_PLATFORM == "darwin" or is_wsl():
-        try:
-            proc = subprocess.run(
-                ["launchctl", "list"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return set()
-        names: set[str] = set()
-        for line in proc.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            pid, label = parts[0], parts[-1]
-            if pid == "-" or not label.startswith("com.whatsoup."):
-                continue
-            names.add(label.removeprefix("com.whatsoup."))
-        return names
+# Typed active-service inventory read (#2486).
+#
+# A bare `set[str]` return cannot distinguish a healthy host running zero
+# WhatSoup services from a host whose service manager could not be read at
+# all: a missing binary, a timeout, a nonzero exit and an unreadable answer
+# all collapsed to `set()`, and profile completeness then reported full
+# coverage over an inventory that was never observed.
+#
+# The vocabulary follows the absent-vs-unobservable split this script already
+# makes for the MCP tool inventory (#2408, TOOL_PROBE_FAILURE_OUTCOMES /
+# `FAIL required_tools_probe: outcome=...`) and the typed subprocess outcome of
+# email_fallback_outcome (#2425). The result mirrors StateReadResult in
+# lib/controller_state.py: an immutable record carrying a closed-vocabulary
+# status plus the counts a reader needs to classify it.
+#
+# NamedTuple, not @dataclass: every python suite loads this script through
+# importlib WITHOUT registering it in sys.modules, and under
+# `from __future__ import annotations` the dataclass decorator resolves each
+# string annotation via sys.modules[cls.__module__] -- which is None here, so
+# a dataclass raises at import time in the tests. StateReadResult can use one
+# because lib.controller_state is imported normally.
+ServiceInventoryStatus = Literal[
+    "observed",
+    "partial",
+    "unavailable_missing_binary",
+    "unavailable_timeout",
+    "unavailable_nonzero_exit",
+    "malformed",
+]
+
+# An observation older than this cannot report coverage. Nothing on this path
+# persists a reading today, so the live value is always ~0; the bound exists so
+# a future cached inventory cannot go green on a stale one (#2486 C8).
+SERVICE_INVENTORY_MAX_AGE_SECONDS = 300
+
+
+class ServiceInventoryObservation(NamedTuple):
+    """One active-WhatSoup-service inventory read and how far it can be trusted.
+
+    `names` carries every positively observed service and is empty whenever
+    nothing usable was read, so a caller that iterates it can never act on an
+    inventory that was not seen. A `partial` read keeps its names: they were
+    observed, and hiding them would let one unreadable record conceal every
+    rogue service. It still cannot PROVE coverage, which is why the counts are
+    carried separately -- a collapsing set cannot report that a record was
+    unreadable or repeated.
+    """
+
+    status: ServiceInventoryStatus
+    backend: str
+    count: int
+    unreadable_lines: int
+    duplicate_labels: int
+    observed_at_monotonic: float
+    names: frozenset[str] = frozenset()
+
+    @property
+    def is_observed(self) -> bool:
+        return self.status == "observed"
+
+    def age_seconds(self, *, now: float | None = None) -> float:
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - self.observed_at_monotonic)
+
+    def is_fresh(self, *, now: float | None = None) -> bool:
+        return self.age_seconds(now=now) <= SERVICE_INVENTORY_MAX_AGE_SECONDS
+
+    def can_report_coverage(self, *, now: float | None = None) -> bool:
+        """True only for a read that was both observed and is still current."""
+        return self.is_observed and self.is_fresh(now=now)
+
+    def evidence_fields(self, *, now: float | None = None) -> str:
+        """Render the bounded receipt fields for daily-health evidence (#2486 C10).
+
+        Status, backend, counts and freshness only. Service names stay private
+        inputs to local comparison: `names` is never rendered here, and neither
+        is any host, account, user, path, process, instance or topology value.
+        """
+        return (
+            f"status={self.status} backend={self.backend} count={self.count} "
+            f"unreadable_lines={self.unreadable_lines} "
+            f"duplicate_labels={self.duplicate_labels} "
+            f"observed_age_s={int(self.age_seconds(now=now))} "
+            f"fresh={'true' if self.is_fresh(now=now) else 'false'}"
+        )
+
+
+# The discriminating tokens each backend's records are recognised by. A record
+# cut inside one of these keeps its field count and stops matching, so only a
+# token-level comparison can tell truncation from a job that is not ours.
+_LAUNCHCTL_LABEL_PREFIX = "com.whatsoup."
+_SYSTEMCTL_UNIT_PREFIX = "whatsoup@"
+_SYSTEMCTL_UNIT_SUFFIX = ".service"
+
+
+def _unterminated_record_count(stdout: str) -> int:
+    """1 when the stream stopped before its last record was terminated.
+
+    Every record a service manager writes ends in a newline, so output that
+    does not is output that was cut in transit. This catches the truncation a
+    per-record check cannot see: a final record severed inside an instance
+    name still parses, and would otherwise report a shorter inventory.
+    """
+    return 1 if stdout and not stdout.endswith("\n") else 0
+
+
+def _service_inventory_unavailable(
+    status: ServiceInventoryStatus, backend: str
+) -> ServiceInventoryObservation:
+    return ServiceInventoryObservation(
+        status=status,
+        backend=backend,
+        count=0,
+        unreadable_lines=0,
+        duplicate_labels=0,
+        observed_at_monotonic=time.monotonic(),
+    )
+
+
+def _service_inventory_observed(
+    backend: str, names: set[str], unreadable_lines: int, duplicate_labels: int
+) -> ServiceInventoryObservation:
+    """Classify a completed rc=0 read.
+
+    A duplicate label cannot occur on a healthy service manager, and a record
+    this parser could not read means the answer was not fully understood, so
+    either one costs the read its `observed` status. It does not cost the read
+    the names it did parse: `partial` reports an incomplete inventory that
+    still cannot prove coverage, and `malformed` is reserved for a read that
+    yielded nothing usable at all.
+    """
+    unusable = unreadable_lines + duplicate_labels
+    if not unusable:
+        status: ServiceInventoryStatus = "observed"
+    elif names:
+        status = "partial"
+    else:
+        status = "malformed"
+    return ServiceInventoryObservation(
+        status=status,
+        backend=backend,
+        count=len(names),
+        unreadable_lines=unreadable_lines,
+        duplicate_labels=duplicate_labels,
+        observed_at_monotonic=time.monotonic(),
+        names=frozenset(names),
+    )
+
+
+def _launchctl_service_observation() -> ServiceInventoryObservation:
+    backend = "launchctl"
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _service_inventory_unavailable("unavailable_missing_binary", backend)
+    except subprocess.TimeoutExpired:
+        return _service_inventory_unavailable("unavailable_timeout", backend)
+    # A failed command's stdout is not an observation: residual output from a
+    # nonzero exit used to be parsed as though the read had succeeded.
+    if proc.returncode != 0:
+        return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
+    names: set[str] = set()
+    unreadable_lines = _unterminated_record_count(proc.stdout)
+    duplicate_labels = 0
+    for line in proc.stdout.splitlines():
+        # A blank line carries no record, so it is not evidence of truncation.
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            # PID/Status/Label is the whole grammar; fewer fields means the
+            # stream was cut mid-record or came from another manager.
+            unreadable_lines += 1
+            continue
+        pid, label = parts[0], parts[-1]
+        if _LAUNCHCTL_LABEL_PREFIX.startswith(label):
+            # The field count is intact but the label stops inside our own
+            # prefix, so this record was cut mid-token rather than belonging
+            # to another job. A skip here would read as a shorter inventory.
+            unreadable_lines += 1
+            continue
+        if pid == "-" or not label.startswith(_LAUNCHCTL_LABEL_PREFIX):
+            continue
+        name = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
+        if name in names:
+            duplicate_labels += 1
+            continue
+        names.add(name)
+    return _service_inventory_observed(backend, names, unreadable_lines, duplicate_labels)
+
+
+def _systemctl_service_observation() -> ServiceInventoryObservation:
+    backend = "systemctl"
     try:
         proc = subprocess.run(
             ["systemctl", "--user", "list-units", "--type=service", "--state=running", "--no-legend"],
@@ -7064,19 +7566,100 @@ def active_whatsoup_service_names() -> set[str]:
             timeout=3,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return set()
-    names = set()
+    except FileNotFoundError:
+        return _service_inventory_unavailable("unavailable_missing_binary", backend)
+    except subprocess.TimeoutExpired:
+        return _service_inventory_unavailable("unavailable_timeout", backend)
+    if proc.returncode != 0:
+        return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
+    names: set[str] = set()
+    unreadable_lines = _unterminated_record_count(proc.stdout)
+    duplicate_labels = 0
     for line in proc.stdout.splitlines():
-        unit = line.split(maxsplit=1)[0] if line.split() else ""
-        if unit.startswith("whatsoup@") and unit.endswith(".service"):
-            names.add(unit.removeprefix("whatsoup@").removesuffix(".service"))
-    return names
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            # A --no-legend row carries UNIT LOAD ACTIVE SUB DESCRIPTION.
+            unreadable_lines += 1
+            continue
+        unit = parts[0]
+        if unit.startswith(_SYSTEMCTL_UNIT_PREFIX) and not unit.endswith(
+            _SYSTEMCTL_UNIT_SUFFIX
+        ):
+            # The query filters --type=service, so one of our units that does
+            # not end in .service was cut inside its own token.
+            unreadable_lines += 1
+            continue
+        if not (
+            unit.startswith(_SYSTEMCTL_UNIT_PREFIX)
+            and unit.endswith(_SYSTEMCTL_UNIT_SUFFIX)
+        ):
+            continue
+        name = unit.removeprefix(_SYSTEMCTL_UNIT_PREFIX).removesuffix(
+            _SYSTEMCTL_UNIT_SUFFIX
+        )
+        if name in names:
+            duplicate_labels += 1
+            continue
+        names.add(name)
+    return _service_inventory_observed(backend, names, unreadable_lines, duplicate_labels)
 
 
-def unprofiled_service_inventory(root: Path, expected_names: set[str]) -> list[str]:
+def active_whatsoup_service_observation() -> ServiceInventoryObservation:
+    dry_services = os.environ.get("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES")
+    if dry_services is not None:
+        # A declared test injection is an observation by construction; wrapping
+        # it keeps every caller on one result type instead of a bare set.
+        dry_names = frozenset(
+            item.strip().removeprefix("com.whatsoup.")
+            for item in dry_services.split(",")
+            if item.strip()
+        )
+        return ServiceInventoryObservation(
+            status="observed",
+            backend="dry_env",
+            count=len(dry_names),
+            unreadable_lines=0,
+            duplicate_labels=0,
+            observed_at_monotonic=time.monotonic(),
+            names=dry_names,
+        )
+    if HOST_PLATFORM == "darwin" or is_wsl():
+        return _launchctl_service_observation()
+    return _systemctl_service_observation()
+
+
+def unprofiled_service_inventory(
+    root: Path,
+    expected_names: set[str],
+    observation: ServiceInventoryObservation | None = None,
+) -> list[str]:
+    """Report active WhatSoup services that no health profile declares.
+
+    A reading that cannot prove coverage emits one typed FAIL line, so profile
+    completeness never reads an unreadable inventory as full coverage (#2486).
+    A `partial` reading emits that line AND still compares the names it did
+    observe: an incomplete read must not become a hiding place for a rogue
+    service. A reading that is no longer current is refused outright, because
+    a stale name proves nothing about what is running now.
+
+    `observation` lets a caller pass a reading it already holds. No production
+    caller does, so the freshness gate is reachable in production only through
+    the reading this function takes itself, which is always current; the gate
+    is what a future cached reading would have to pass. Nothing is persisted.
+    """
+    reading = active_whatsoup_service_observation() if observation is None else observation
+    unusable_line = (
+        "FAIL profile_coverage_service_inventory: "
+        "inventory not usable for profile coverage " + reading.evidence_fields()
+    )
+    if not reading.is_fresh():
+        return [unusable_line]
     lines: list[str] = []
-    for name in sorted(active_whatsoup_service_names()):
+    if not reading.can_report_coverage():
+        lines.append(unusable_line)
+    for name in sorted(reading.names):
         if name in expected_names:
             continue
         if (
@@ -8410,8 +8993,13 @@ def tree_provenance_inventory(profile: dict[str, Any]) -> list[str]:
         return [f"WARN tree_provenance: inventory_error {str(exc)[:160]}"]
 
 
-def record_daily_health_receipt(event_path: Path, severity: str) -> None:
-    """Write a durable receipt after queuing a daily-health event."""
+def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationResult:
+    """Write a durable receipt after queuing a daily-health event.
+
+    Returns the publication result so a caller can inspect the advanced
+    generation, which is carried in the result rather than in the receipt
+    payload. The daily() call site ignores it.
+    """
     root = state_root()
     receipt_path = root / "daily-health-receipt.json"
     receipt = {
@@ -8420,6 +9008,35 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         "emittedAt": now_iso(),
         "eventPath": str(event_path),
     }
+    # Before ensure_private_dir(), which re-applies 0700 to the state root: a
+    # root that is group- or world-writable is the reason the leaf may have been
+    # planted, and narrowing it first would erase that signal before the repair's
+    # parent guard could read it (#3501).
+    repair = repair_legacy_private_receipt_mode(receipt_path)
+    if repair.refusal is not None:
+        # The writable-parent refusal is not durable and the log line must not
+        # imply that it is: ensure_private_dir() below ATTEMPTS to narrow the
+        # root. It suppresses its own chmod errors, so the narrowing is not
+        # guaranteed and the next cycle re-checks the mode either way.
+        deferral = (
+            " (holds for this cycle only: ensure_private_dir then attempts to"
+            " narrow the state root to 0700, suppressing any failure, so the"
+            " next cycle re-checks the root mode and repairs the leaf only if"
+            " the narrowing took effect and the leaf passes the owner,"
+            " regular-file, single-link and non-symlinked-parent guards)"
+            if repair.refusal == LEGACY_RECEIPT_REFUSAL_PARENT_WRITABLE
+            else ""
+        )
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repair refused: "
+            f"{repair.refusal}{deferral}\n"
+        )
+    elif repair.previous_mode is not None:
+        sys.stderr.write(
+            "[bot-errors-health] daily-health receipt mode repaired from "
+            f"{repair.previous_mode:04o}\n"
+        )
+        receipt[LEGACY_RECEIPT_MODE_EVIDENCE_FIELD] = f"{repair.previous_mode:04o}"
     ensure_private_dir(root)
     target = _durable_target(receipt_path)
     observation = observe_json(target)
@@ -8438,6 +9055,7 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> None:
         generation=(observation.version.generation or 0) + 1,
     )
     require_advance(publication)
+    return publication
 
 
 def daily() -> int:
@@ -8497,13 +9115,10 @@ def daily() -> int:
     ]
     if tool_fail_line:
         lines.insert(0, tool_fail_line)
-    failures = [
-        line for line in lines
-        if line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line
-    ]
+    failures = [line for line in lines if daily_health_line_is_failure(line)]
     if tool_failure_entry:
         failures.append(tool_failure_entry)
-    warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
+    warnings = [line for line in lines if daily_health_line_is_warning(line)]
     severity = daily_summary_severity(failures, warnings)
     evidence = "\n".join(lines)
     critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None

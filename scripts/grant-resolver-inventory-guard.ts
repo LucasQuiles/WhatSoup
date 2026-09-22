@@ -27,9 +27,21 @@
 //     primitive composes `resolvePhoneFromJid`, never `isAdminPhone`, so it never
 //     matches the pattern.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  emitInventoryGuardReport,
+  inventoryGuardCliFailure,
+  inventorySourceFiles,
+  parseInventoryGuardArgs,
+  runInventoryGuardCliBoundary,
+  sourceInventoryDiagnostics,
+  type InventoryGuardExitCode,
+  type InventoryGuardReport,
+  type SourceInventoryCounts,
+  type SourceInventoryFileSystem,
+  type SourceInventoryIssue,
+} from './lib/guard-core.ts';
 
 export interface GrantResolverFinding {
   file: string;
@@ -45,11 +57,11 @@ export interface GrantResolverFinding {
 export interface GrantResolverScan {
   findings: GrantResolverFinding[];
   filesExamined: number;
+  scanIssues: SourceInventoryIssue[];
+  scanIssueCount: number;
+  scanIssuesOmitted: number;
+  inventoryCounts: SourceInventoryCounts;
 }
-
-const EXIT_PASS = 0;
-const EXIT_BLOCK = 1;
-const EXIT_INCONCLUSIVE = 2;
 
 /**
  * Allowlisted inline `isAdminPhone(resolvePhoneFromJid(...))` sites that are
@@ -109,86 +121,124 @@ export function scanFileForGrantResolvers(relPath: string, content: string): Gra
   return findings;
 }
 
-function walkTsFiles(root: string, dir: string, acc: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry === 'node_modules' || entry === '.git' || entry === 'dist') continue;
-    const full = path.join(dir, entry);
-    let st;
-    try {
-      st = statSync(full);
-    } catch {
-      continue;
-    }
-    if (st.isDirectory()) {
-      walkTsFiles(root, full, acc);
-    } else if (TS_EXT_RE.test(entry) && !entry.endsWith('.test.ts')) {
-      acc.push(path.relative(root, full));
-    }
-  }
-}
-
 /**
  * Scan every non-test `.ts` file under `src/`, reporting BOTH the findings and how many
  * files were examined. The count is what lets `main` tell "scanned src/ and found nothing"
  * apart from "src/ was empty or absent, so nothing was scanned".
  */
-export function scanRepoGrantResolversCounted(cwd: string): GrantResolverScan {
-  const candidates: string[] = [];
-  walkTsFiles(cwd, path.join(cwd, 'src'), candidates);
+export function scanRepoGrantResolversCounted(
+  cwd: string,
+  fileSystem?: SourceInventoryFileSystem,
+): GrantResolverScan {
+  const inventory = inventorySourceFiles({
+    repoRoot: cwd,
+    roots: ['src'],
+    includeFile: (file) => TS_EXT_RE.test(file) && !file.endsWith('.test.ts'),
+    excludeDirectory: (directory) => ['node_modules', '.git', 'dist'].includes(path.basename(directory)),
+    fileSystem,
+  });
   const findings: GrantResolverFinding[] = [];
-  let filesExamined = 0;
-  for (const rel of candidates) {
-    let content: string;
-    try {
-      content = readFileSync(path.join(cwd, rel), 'utf8');
-    } catch {
-      continue;
-    }
-    filesExamined += 1;
-    findings.push(...scanFileForGrantResolvers(rel, content));
+  for (const file of inventory.files) {
+    findings.push(...scanFileForGrantResolvers(file.path, file.content));
   }
-  return { findings, filesExamined };
+  return {
+    findings,
+    filesExamined: inventory.counts.filesRead,
+    scanIssues: inventory.issues,
+    scanIssueCount: inventory.counts.issuesTotal,
+    scanIssuesOmitted: inventory.counts.issuesOmitted,
+    inventoryCounts: inventory.counts,
+  };
 }
 
-/** Back-compat: findings only. Prefer `scanRepoGrantResolversCounted` for the vacuity check. */
-export function scanRepoGrantResolvers(cwd: string): GrantResolverFinding[] {
-  return scanRepoGrantResolversCounted(cwd).findings;
+export interface GrantResolverGuardEvaluation {
+  status: 'pass' | 'block' | 'inconclusive';
+  exitCode: 0 | 1 | 2;
+  scan: GrantResolverScan;
 }
 
-function main(): number {
-  const cwd = process.cwd();
-  const { findings, filesExamined } = scanRepoGrantResolversCounted(cwd);
+export function evaluateGrantResolverInventoryGuard(
+  cwd: string,
+  fileSystem?: SourceInventoryFileSystem,
+): GrantResolverGuardEvaluation {
+  const scan = scanRepoGrantResolversCounted(cwd, fileSystem);
+  if (scan.scanIssueCount > 0 || scan.filesExamined === 0) {
+    return { status: 'inconclusive', exitCode: 2, scan };
+  }
+  if (scan.findings.length > 0) return { status: 'block', exitCode: 1, scan };
+  return { status: 'pass', exitCode: 0, scan };
+}
 
+const TAG = 'grant-resolver-inventory-guard';
+
+function reportFor(evaluation: GrantResolverGuardEvaluation): InventoryGuardReport {
+  const { scan } = evaluation;
+  return {
+    schemaVersion: 1,
+    guard: TAG,
+    status: evaluation.status,
+    exitCode: evaluation.exitCode,
+    counts: {
+      filesExamined: scan.filesExamined,
+      findings: scan.findings.length,
+      scanIssues: scan.scanIssueCount,
+      scanIssuesOmitted: scan.scanIssuesOmitted,
+      rootsScanned: scan.inventoryCounts.rootsScanned,
+      directoriesScanned: scan.inventoryCounts.directoriesScanned,
+      entriesInspected: scan.inventoryCounts.entriesInspected,
+      candidatesFound: scan.inventoryCounts.candidatesFound,
+    },
+    diagnostics: [
+      ...sourceInventoryDiagnostics({ issues: scan.scanIssues }),
+      ...scan.findings.map((finding) => ({
+        code: 'invariant.qr143-grant-primitive',
+        path: finding.file,
+        line: finding.line,
+      })),
+    ],
+  };
+}
+
+function humanLines(evaluation: GrantResolverGuardEvaluation): string[] {
+  const { findings, filesExamined } = evaluation.scan;
+  if (evaluation.scan.scanIssueCount > 0) {
+    return [
+      `${TAG}: INCONCLUSIVE — ${evaluation.scan.scanIssueCount} source inventory issue(s); ` +
+        'use --verbose or --json for bounded diagnostics.',
+    ];
+  }
   if (filesExamined === 0) {
-    // No `.ts` under src/ means the tree was never examined — refusing to certify it.
-    // A location check (does src/ exist) is not a work check (were any files read).
-    console.error(
-      `grant-resolver-inventory-guard: INCONCLUSIVE — examined 0 source file(s) under ${path.join(cwd, 'src')}. ` +
+    return [
+      `${TAG}: INCONCLUSIVE — examined 0 source file(s) under src/. ` +
         'A scan that read zero files cannot certify the grant-composition invariant, which is not a pass.',
-    );
-    return EXIT_INCONCLUSIVE;
+    ];
   }
-
   if (findings.length === 0) {
-    console.log(
-      `grant-resolver-inventory-guard: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions ` +
+    return [
+      `${TAG}: no ungated isAdminPhone(resolvePhoneFromJid(...)) grant compositions ` +
         `across ${filesExamined} source file(s) (invariant.qr143-grant-primitive)`,
-    );
-    return EXIT_PASS;
+    ];
   }
-  console.error('grant-resolver-inventory-guard: ungated grant composition(s) detected — route through resolvePhoneFromJidForGrant or allowlist with justification (invariant.qr143-grant-primitive):');
+  const lines = [
+    `${TAG}: ungated grant composition(s) detected — route through resolvePhoneFromJidForGrant or allowlist with justification (invariant.qr143-grant-primitive):`,
+  ];
   for (const f of findings) {
-    console.error(`  ${f.file}:${f.line} ${f.detail}`);
+    lines.push(`  ${f.file}:${f.line} ${f.detail}`);
   }
-  return EXIT_BLOCK;
+  return lines;
+}
+
+function main(argv: readonly string[] = process.argv.slice(2)): InventoryGuardExitCode {
+  const parsed = parseInventoryGuardArgs(argv);
+  if (!parsed.ok) {
+    const report = inventoryGuardCliFailure(TAG, parsed.code);
+    return emitInventoryGuardReport(report, parsed.mode, [`${TAG}: INCONCLUSIVE — ${parsed.code}`]);
+  }
+  const evaluation = evaluateGrantResolverInventoryGuard(process.cwd());
+  return emitInventoryGuardReport(reportFor(evaluation), parsed.mode, humanLines(evaluation));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exit(main());
+  const argv = process.argv.slice(2);
+  process.exitCode = runInventoryGuardCliBoundary(TAG, argv, () => main(argv));
 }
