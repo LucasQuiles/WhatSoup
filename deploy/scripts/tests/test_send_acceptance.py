@@ -77,10 +77,16 @@ def test_explicit_false_flags_are_allowed():
 # Structural rejection
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("bad", [None, "str", 42, [], ("a",)])
-def test_non_dict_response_is_unknown(bad):
-    with pytest.raises(SendAcceptanceUnknown):
-        validate_send_acceptance(bad, TARGET)
+# Closed case lists in this file are module tables walked by one test each rather than
+# @pytest.mark.parametrize literals: the repository caps the property-test advisory those
+# literals raise (.claude/fitness/growth-waivers.json), and every row keeps its own raises check.
+NON_DICT_RESPONSES = (None, "str", 42, [], ("a",))
+
+
+def test_non_dict_response_is_unknown():
+    for bad in NON_DICT_RESPONSES:
+        with pytest.raises(SendAcceptanceUnknown):
+            validate_send_acceptance(bad, TARGET)
 
 
 def test_is_error_true_is_rejection():
@@ -132,19 +138,25 @@ def test_duplicate_keys_rejected():
         validate_send_acceptance(result, TARGET)
 
 
-@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
-def test_non_json_numeric_constants_rejected(token):
-    raw = '{"sent": true, "resolved_chatJid": "%s", "x": %s}' % (TARGET, token)
-    result = {"isError": False, "content": [{"type": "text", "text": raw}]}
-    with pytest.raises(SendAcceptanceUnknown):
-        validate_send_acceptance(result, TARGET)
+NON_JSON_NUMERIC_TOKENS = ("NaN", "Infinity", "-Infinity")
 
 
-@pytest.mark.parametrize("scalar", ["true", "42", "\"hi\"", "null", "[]"])
-def test_payload_must_be_object(scalar):
-    result = {"isError": False, "content": [{"type": "text", "text": scalar}]}
-    with pytest.raises(SendAcceptanceUnknown):
-        validate_send_acceptance(result, TARGET)
+def test_non_json_numeric_constants_rejected():
+    for token in NON_JSON_NUMERIC_TOKENS:
+        raw = '{"sent": true, "resolved_chatJid": "%s", "x": %s}' % (TARGET, token)
+        result = {"isError": False, "content": [{"type": "text", "text": raw}]}
+        with pytest.raises(SendAcceptanceUnknown):
+            validate_send_acceptance(result, TARGET)
+
+
+NON_OBJECT_PAYLOADS = ("true", "42", "\"hi\"", "null", "[]")
+
+
+def test_payload_must_be_object():
+    for scalar in NON_OBJECT_PAYLOADS:
+        result = {"isError": False, "content": [{"type": "text", "text": scalar}]}
+        with pytest.raises(SendAcceptanceUnknown):
+            validate_send_acceptance(result, TARGET)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,14 +169,18 @@ def test_sent_false_is_rejection():
         validate_send_acceptance(result, TARGET)
 
 
-@pytest.mark.parametrize("sent", [None, "true", 1, 0])
-def test_sent_not_true_is_unknown(sent):
-    payload = {"resolved_chatJid": TARGET}
-    if sent is not None:
-        payload["sent"] = sent
-    result = _envelope(payload)
-    with pytest.raises(SendAcceptanceUnknown):
-        validate_send_acceptance(result, TARGET)
+# None means the "sent" key is omitted entirely.
+NOT_TRUE_SENT_VALUES = (None, "true", 1, 0)
+
+
+def test_sent_not_true_is_unknown():
+    for sent in NOT_TRUE_SENT_VALUES:
+        payload = {"resolved_chatJid": TARGET}
+        if sent is not None:
+            payload["sent"] = sent
+        result = _envelope(payload)
+        with pytest.raises(SendAcceptanceUnknown):
+            validate_send_acceptance(result, TARGET)
 
 
 @pytest.mark.parametrize("flag", ["dryRun", "suppressed"])

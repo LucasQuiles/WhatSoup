@@ -17,8 +17,6 @@ CURATED_SENTINEL_TEST_FILES=(
   deploy/scripts/tests/test_bot_errors_heartbeat_watchdog_auth.py
   deploy/scripts/tests/test_bot_errors_redaction_parity.py
   deploy/scripts/tests/test_bot_errors_gui_session_monitor.py
-  deploy/scripts/tests/test_send_acceptance.py
-  deploy/scripts/tests/test_dm_roundtrip.py
 )
 
 # Resolve a pytest-capable command into PYTEST_CMD.

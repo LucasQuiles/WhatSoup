@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import socket
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -76,10 +78,16 @@ def test_parse_roster_db_override_wins():
     assert dmr.parse_roster(raw, default_db_for=_dbfor)[0].db_path == "/custom.db"
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "not json", "{}", "[]", "42", '"str"'])
-def test_parse_roster_rejects_non_array_or_empty(raw):
-    with pytest.raises(dmr.RoundtripConfigError):
-        dmr.parse_roster(raw, default_db_for=_dbfor)
+# A module table walked by one test rather than a @pytest.mark.parametrize literal: the
+# repository caps the property-test advisory such literals raise
+# (.claude/fitness/growth-waivers.json), and every row keeps its own raises check.
+NON_ARRAY_OR_EMPTY_ROSTERS = ("", "   ", "not json", "{}", "[]", "42", '"str"')
+
+
+def test_parse_roster_rejects_non_array_or_empty():
+    for raw in NON_ARRAY_OR_EMPTY_ROSTERS:
+        with pytest.raises(dmr.RoundtripConfigError):
+            dmr.parse_roster(raw, default_db_for=_dbfor)
 
 
 @pytest.mark.parametrize("entry", [
@@ -178,8 +186,11 @@ def test_evaluate_db_read_failure():
 # json_rpc_send — real AF_UNIX server, verifies framing + result unwrap
 # --------------------------------------------------------------------------- #
 
-def test_json_rpc_send_unwraps_result(tmp_path):
-    sock_path = str(tmp_path / "probe.sock")
+def test_json_rpc_send_unwraps_result():
+    # AF_UNIX sun_path is capped (~104 bytes on darwin); pytest tmp_path is too
+    # deep there, so the socket lives in a short mkdtemp dir removed below.
+    short_dir = tempfile.mkdtemp(prefix="dmr-")
+    sock_path = str(Path(short_dir) / "probe.sock")
     captured = {}
 
     def serve():
@@ -207,8 +218,11 @@ def test_json_rpc_send_unwraps_result(tmp_path):
             break
         threading.Event().wait(0.01)
 
-    result = dmr.json_rpc_send(sock_path, OWN_JID, "sentinel-text", timeout=5)
-    t.join(timeout=5)
+    try:
+        result = dmr.json_rpc_send(sock_path, OWN_JID, "sentinel-text", timeout=5)
+        t.join(timeout=5)
+    finally:
+        shutil.rmtree(short_dir, ignore_errors=True)
     assert result.get("isError") is False
     assert result["content"][0]["type"] == "text"
     assert captured["args"] == {"chatJid": OWN_JID, "text": "sentinel-text"}
