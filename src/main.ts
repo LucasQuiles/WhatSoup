@@ -1326,6 +1326,11 @@ async function start(): Promise<void> {
       ? runtime.popStartupNotificationEvent?.() ?? null
       : null,
     intentionalRestartReceipt: selfRestartBackOnline,
+    // #3570: each notice goes to its own chat, not the admin, so it is not
+    // gated on an admin phone or the intro.
+    chatNotices: instanceType === 'agent'
+      ? runtime.popStartupChatNotifications?.() ?? []
+      : [],
   });
 }
 
