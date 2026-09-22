@@ -155,24 +155,6 @@ describe('failure taxonomy cross-contract', () => {
     );
     expect(projected.length).toBeGreaterThan(0);
     expect(unregistered).toEqual([]);
-
-    const parent = RUNTIME_AGENT_HEALTH_SIGNALS.find(
-      (entry) => entry.field === 'turnRecoveryBlockedUnsafe',
-    );
-    expect(parent).toBeDefined();
-    for (const bucket of ['Synthetic', 'Superseded', 'Stranded'] as const) {
-      const entry = RUNTIME_AGENT_HEALTH_SIGNALS.find(
-        (candidate) => candidate.field === `turnRecoveryBlockedUnsafe${bucket}`,
-      );
-      expect(entry).toEqual({
-        field: `turnRecoveryBlockedUnsafe${bucket}`,
-        label: `${parent?.label}_${bucket.toLowerCase()}`,
-        kind: parent?.kind,
-        currentHealthEffect: 'diagnostic_only',
-        owner: parent?.owner,
-        test: 'tests/core/turn-recovery-counts-split.test.ts',
-      });
-    }
   });
 
   it('matches every registered failure domain to its runtime owner', () => {

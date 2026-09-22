@@ -452,7 +452,7 @@
       "kind": "terminal_audit_count",
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
-      "test": "tests/core/turn-recovery-counts-split.test.ts"
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
       "field": "turnRecoveryBlockedUnsafeSuperseded",
@@ -460,7 +460,7 @@
       "kind": "terminal_audit_count",
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
-      "test": "tests/core/turn-recovery-counts-split.test.ts"
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
       "field": "turnRecoveryBlockedUnsafeStranded",
@@ -468,7 +468,7 @@
       "kind": "terminal_audit_count",
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
-      "test": "tests/core/turn-recovery-counts-split.test.ts"
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
       "field": "turnRecoveryExhausted",

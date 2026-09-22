@@ -834,11 +834,15 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "3945e6f3aa8ffab6f4387fb697466ef9da1e7377358ea193ed79049323fa5f52",
+      "sha256": "9486a17b5ca55327d751cfd40facef32cf861b465ff81512ed676db00555be23",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
-        "turnRecoveryBlockedUnsafe",
+        "\"turnRecoveryBlockedUnsafe\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_synthetic\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_superseded\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_stranded\"",
         "autoCompactActiveBackoffScopes"
       ]
     },
