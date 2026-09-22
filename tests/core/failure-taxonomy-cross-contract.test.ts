@@ -44,6 +44,7 @@ import {
   RUNTIME_AGENT_HEALTH_SIGNALS,
   RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS,
 } from '../../src/lib/fault-classifier.ts';
+import { getTurnRecoveryHealthDetails } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
 
 // if an extra key is present (excess-property checking on the literal),
 // so this map's keys are exhaustively bound to the union at compile time.
@@ -110,6 +111,9 @@ describe('failure taxonomy cross-contract', () => {
       'turnRecoveryPending',
       'turnRecoveryExpiredClaimed',
       'turnRecoveryBlockedUnsafe',
+      'turnRecoveryBlockedUnsafeSynthetic',
+      'turnRecoveryBlockedUnsafeSuperseded',
+      'turnRecoveryBlockedUnsafeStranded',
       'turnRecoveryExhausted',
       'turnRecoveryOpenRecoveries',
       'turnRecoveryQuarantinedDelivery',
@@ -140,6 +144,35 @@ describe('failure taxonomy cross-contract', () => {
       ]));
     expect(new Set(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => entry.currentHealthEffect)))
       .toEqual(new Set(['positive_is_risk', 'diagnostic_only']));
+  });
+
+  it('registers every numeric turn-recovery health field the runtime projects', () => {
+    // The bot-errors health check only labels registered fields, so a
+    // projected gauge missing here is silently dropped from its evidence (#3572).
+    const projected = Object.keys(getTurnRecoveryHealthDetails(null));
+    const unregistered = projected.filter(
+      (field) => !RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS.includes(field),
+    );
+    expect(projected.length).toBeGreaterThan(0);
+    expect(unregistered).toEqual([]);
+
+    const parent = RUNTIME_AGENT_HEALTH_SIGNALS.find(
+      (entry) => entry.field === 'turnRecoveryBlockedUnsafe',
+    );
+    expect(parent).toBeDefined();
+    for (const bucket of ['Synthetic', 'Superseded', 'Stranded'] as const) {
+      const entry = RUNTIME_AGENT_HEALTH_SIGNALS.find(
+        (candidate) => candidate.field === `turnRecoveryBlockedUnsafe${bucket}`,
+      );
+      expect(entry).toEqual({
+        field: `turnRecoveryBlockedUnsafe${bucket}`,
+        label: `${parent?.label}_${bucket.toLowerCase()}`,
+        kind: parent?.kind,
+        currentHealthEffect: 'diagnostic_only',
+        owner: parent?.owner,
+        test: 'tests/core/turn-recovery-counts-split.test.ts',
+      });
+    }
   });
 
   it('matches every registered failure domain to its runtime owner', () => {

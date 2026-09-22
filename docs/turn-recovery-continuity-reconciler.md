@@ -166,7 +166,12 @@ buckets, mirrored into the health details surface
   should page an operator.
 
 `synthetic + superseded + stranded === blockedUnsafe` is asserted on real
-rows (`tests/core/turn-recovery-counts-split.test.ts`). The enrollment-side
+rows (`tests/core/turn-recovery-counts-split.test.ts`). The three fields are
+registered in `runtimeAgentHealthSignals` (`src/lib/fault-taxonomy-registry.json`)
+beside their parent, with the same `terminal_audit_count` kind and
+`diagnostic_only` effect, so the bot-errors health check labels them
+(`runtime_agent_turn_recovery_blocked_unsafe_{synthetic,superseded,stranded}`)
+when non-zero and never raises `runtime_agent_at_risk` for them. The enrollment-side
 half of ② (stop enrolling synthetic self-turns into user-facing recovery at
 all — live finalize + boot reclaim arms) is still open; the gauge split
 makes the residue visible and non-paging in the meantime.

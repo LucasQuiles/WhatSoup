@@ -447,6 +447,30 @@
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
+      "field": "turnRecoveryBlockedUnsafeSynthetic",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_synthetic",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/core/turn-recovery-counts-split.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockedUnsafeSuperseded",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_superseded",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/core/turn-recovery-counts-split.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockedUnsafeStranded",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_stranded",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/core/turn-recovery-counts-split.test.ts"
+    },
+    {
       "field": "turnRecoveryExhausted",
       "label": "runtime_agent_turn_recovery_exhausted",
       "kind": "active_episode_count",
