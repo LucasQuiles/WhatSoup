@@ -5,6 +5,7 @@ import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
+export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
 const TURN_RECOVERY_MAX_NAME_BYTES = 4096;
 export const TURN_RECOVERY_MAX_ATTEMPTS = 5;
 const TURN_RECOVERY_MAX_LEASE_SECONDS = 300;
@@ -449,6 +450,25 @@ const RECOVERY_JOB_SELECT = `
   unixepoch(i.received_at) AS source_received_at_unix_seconds
 `;
 
+const OUTSTANDING_RECOVERY_FOR_SCOPE_FROM = `
+  FROM (
+    SELECT j.scope, j.conversation_key, j.id AS job_id
+    FROM turn_recovery_jobs j
+    WHERE j.state IN ('pending', 'claimed')
+    UNION ALL
+    SELECT t.scope, t.conversation_key, j.id AS job_id
+    FROM turn_terminal_records t
+    LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
+    WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
+      AND j.id IS NULL
+  ) outstanding
+`;
+const OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE = `
+  WHERE outstanding.scope = ?
+    AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
+    AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
+`;
+
 type TurnRecoveryStatements = {
   enqueueTurnRecoveryJob: PreparedStatement;
   getTurnRecoveryJob: PreparedStatement;
@@ -476,6 +496,7 @@ type TurnRecoveryStatements = {
   getOutstandingTurnRecoveryJobsForSupervisor: PreparedStatement;
   getNewestInboundSeqForConversation: PreparedStatement;
   getTurnRecoverySupervisorCounts: PreparedStatement;
+  getTurnRecoveryAdmissionStateForScope: PreparedStatement;
   hasOutstandingTurnRecoveryForScope: PreparedStatement;
 };
 
@@ -923,22 +944,23 @@ export class TurnRecoveryStore {
       // so the exclusion is one uniform outer-query predicate instead of two
       // arm-specific ones — a job actively claimed by the caller's own
       // supervisor replay must not block that replay's own admission check.
+      getTurnRecoveryAdmissionStateForScope: prepare(`
+        SELECT COUNT(*) AS outstanding_count, COUNT(echo.job_id) AS awaiting_echo_count
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_FROM}
+        LEFT JOIN (
+          SELECT j.id AS job_id
+          ${VALID_RECOVERY_JOB_FROM}
+          WHERE j.state = 'pending'
+            AND t.attempt_kind = 'completed'
+            AND t.delivery_kind = 'flushed'
+            AND o.status = 'submitted'
+        ) echo ON echo.job_id = outstanding.job_id
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE}
+      `),
       hasOutstandingTurnRecoveryForScope: prepare(`
         SELECT 1 AS found
-        FROM (
-          SELECT j.scope, j.conversation_key, j.id AS job_id
-          FROM turn_recovery_jobs j
-          WHERE j.state IN ('pending', 'claimed')
-          UNION ALL
-          SELECT t.scope, t.conversation_key, j.id AS job_id
-          FROM turn_terminal_records t
-          LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
-          WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
-            AND j.id IS NULL
-        ) outstanding
-        WHERE outstanding.scope = ?
-          AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
-          AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_FROM}
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE}
         LIMIT 1
       `),
     };
@@ -1805,6 +1827,26 @@ export class TurnRecoveryStore {
     conversationKey: string,
     options?: { excludeJobId?: number },
   ): boolean {
+    this.validateRecoveryScopeQuery(conversationKey, options);
+    return this.statements.hasOutstandingTurnRecoveryForScope.get(
+      scope, conversationKey, options?.excludeJobId ?? null, options?.excludeJobId ?? null,
+    ) !== undefined;
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    this.validateRecoveryScopeQuery(conversationKey, options);
+    const row = this.statements.getTurnRecoveryAdmissionStateForScope.get(
+      scope, conversationKey, options?.excludeJobId ?? null, options?.excludeJobId ?? null,
+    ) as { outstanding_count: number; awaiting_echo_count: number };
+    if (row.outstanding_count === 0) return 'clear';
+    return row.outstanding_count === row.awaiting_echo_count ? 'awaiting_delivery_echo' : 'blocked';
+  }
+
+  private validateRecoveryScopeQuery(conversationKey: string, options?: { excludeJobId?: number }): void {
     validateBoundedRequired(
       conversationKey,
       'Recovery conversation key',
@@ -1814,12 +1856,6 @@ export class TurnRecoveryStore {
     if (excludeJobId !== undefined) {
       validatePositiveSafeInteger(excludeJobId, 'Recovery job ID');
     }
-    return this.statements.hasOutstandingTurnRecoveryForScope.get(
-      scope,
-      conversationKey,
-      excludeJobId ?? null,
-      excludeJobId ?? null,
-    ) !== undefined;
   }
 
   private toRecoveryEnumerationPage(

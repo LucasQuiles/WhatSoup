@@ -1,0 +1,59 @@
+{
+  "schema_version": "whatsoup.deployment-qualification-profile.v1",
+  "profile_kind": "deployment_qualification",
+  "receipt_contract": {
+    "contract": "arc.observation.v1",
+    "every_required_area": "supported_or_explicitly_unresolved",
+    "exceptions_are_nonpromoting": true
+  },
+  "scope": {
+    "platform": "macos",
+    "host_binding": "private_parameter",
+    "shared_record": "neutral"
+  },
+  "required_areas": [
+    {
+      "id": "health_boundary",
+      "subprofile": "health-deployment-qualification-profile.json",
+      "requires": ["absent_public", "invalid_public", "valid_diagnostic"]
+    },
+    {
+      "id": "host_recovery",
+      "requires": ["supported_recovery_evidence_or_unresolved"]
+    },
+    {
+      "id": "runtime_filesystem",
+      "requires": ["supported_runtime_filesystem_evidence_or_unresolved"]
+    },
+    {
+      "id": "permissions_identity",
+      "requires": ["supported_service_identity_evidence_or_unresolved"]
+    },
+    {
+      "id": "tcc",
+      "requires": ["supported_tcc_evidence_or_unresolved"],
+      "limitations": ["tcc_evidence_does_not_establish_gui_workflow"]
+    },
+    {
+      "id": "network_operations",
+      "requires": ["supported_network_operations_evidence_or_unresolved"]
+    }
+  ],
+  "source_test_reference": {
+    "source_command_location": "package.json:scripts[\"test:deployment-qualification\"]",
+    "named_profile_registration": "test:deployment-qualification",
+    "source_test_pass_qualifies_deployment": false
+  },
+  "forbidden_mutations": [
+    "restart",
+    "pairing",
+    "privilege_change",
+    "tcc_change",
+    "network_reconfiguration",
+    "queue_replay",
+    "message_read",
+    "message_send",
+    "publish",
+    "enforcement"
+  ]
+}

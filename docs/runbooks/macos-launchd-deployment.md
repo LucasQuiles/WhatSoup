@@ -264,6 +264,32 @@ cannot be enumerated. `scripts/check-launchd-drift.sh` keeps its separate
 structural-only checks for bot plists; the governed-key comparison lives in
 the reconciler because only the render path knows the expected values.
 
+### Preflight: service paths that are already persisted
+
+Plist render refuses a `service` path that is not a canonical absolute path
+inside the instance user's home directory, or whose intermediate components do not
+resolve. Only the final leaf may be absent; accepted paths are rendered in their
+physical form. The refusal happens before any bytes are written, so an instance
+carrying such a value keeps running its installed plist but cannot be installed
+or reconciled until the value is corrected. Sweep the hosts before upgrading.
+
+For each instance, dry-run the reconciler:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A normal governed-env report means the block is fine. A `LaunchdRenderConfigError`
+names the offending key, `service.claudeConfigDir` or `service.pathPrepend[N]`,
+and the rule it broke, without echoing the value. Then edit that key in the
+instance's `config.json`: make it an absolute path with no `.` or `..`
+component, inside the home directory, and create missing intermediate directories or repair unresolved symlinks. Dropping the entry is also a fix. Re-run
+the dry-run until it reports drift instead of refusing, then apply as usual.
+
+See [`service` (launchd render options)](../configuration.md#service-launchd-render-options)
+for the full rule list and for the trusted-ancestry boundary this check does
+not cover.
+
 ### Adopting a hand-patched PATH (or claude root) into config
 
 For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`
@@ -292,6 +318,14 @@ renders it instead of destroying it:
    ```bash
    bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
    ```
+
+   The dry run is refused outright when the persisted `service` block names a
+   path outside the instance user's home directory, or one whose intermediate
+   segment is absent or does not resolve. Render-admission confinement runs
+   before the dry-run early return, so the command exits with a
+   `LaunchdRenderConfigError` naming the offending field instead of printing a
+   report. Correct that entry in `config.json` — or drop it from the block — and
+   re-run; the same refusal would otherwise have stopped `--apply` at step 4.
 
 3. Read the `installed plist has N non-governed EnvironmentVariables keys
    (…) that --apply will drop` line of the same report. Reconciling
@@ -563,22 +597,76 @@ launchctl kickstart -k "$domain/com.whatsoup.<instance>"
 
 Do not turn this per-instance command into a fleet-wide loop.
 
-**Acceptance gate after any restart of a keychain-backed instance: confirm
-`turn_capability.model_usable=true`, not just health HTTP 200** (which is true even
-while degraded):
+**Acceptance after a restart requires authenticated health for the intended
+instance, `status=healthy`, `turn_capability.model_usable=true`, and explicit
+`turn_capability.model_usable_stale=false`.** Run the helper with kickstarts
+disabled so the acceptance command cannot restart the service:
 
 ```bash
-curl -s --fail-with-body http://127.0.0.1:<port>/health | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(d["status"], d["turn_capability"]["model_usable"])'
+deploy/scripts/whatsoup-keychain-heal.sh \
+  --label com.whatsoup.<instance> --port <port> --max-kickstarts 0
 ```
 
-If an instance is found model-degraded, run the bounded, fail-closed remediation
-helper (it re-probes `/health` and, while degraded, issues `kickstart -k` up to a
-bounded number of times, exiting non-zero to escalate if it cannot recover):
+Exit 0 confirms this acceptance signal. Exit 1 reports observed degradation;
+with `--max-kickstarts 0` it performs no remediation. Exit 2 reports unavailable
+runtime/token, transport, HTTP authentication or diagnostic evidence. Exit 3
+reports authenticated evidence with missing/mismatched instance identity or
+missing/invalid model freshness fields. Neither exit 2 nor exit 3 authorizes a
+kickstart. An authenticated HTTP 503 diagnostic response can establish model
+degradation; HTTP 401/403 and public health envelopes cannot.
+
+Use the canonical label `com.whatsoup.<instance>` (instance names start with a
+lowercase letter, contain only lowercase letters, digits or hyphens, and have
+at most 30 characters). Run as the same OS user that owns the instance and its
+token; `--uid`, if supplied, must equal `id -u`. The helper requires the exact
+authenticated `instance.name` to match the label. Before invocation, verify
+that the supplied port belongs to that label's current process: the helper
+does not prove the launchd label/PID-to-port relationship.
+
+The canonical token file is
+`${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/<instance>/tokens.env`.
+The config root must match the target runtime's configuration. The file must
+be a same-user, nonsymlink regular file with mode 0600, inside a same-user real
+directory that is not group/world writable. Its sole assignment must be
+`WHATSOUP_HEALTH_TOKEN=` followed by exactly 64 lowercase hexadecimal characters
+(an optional final newline is permitted). Unsafe, missing or unreadable files
+fail closed; there is no environment-token or keyring fallback. The helper
+disables shell tracing before the read and passes the token only through curl
+config stdin, never a command argument, exported variable or temporary file.
+
+Run the helper from a complete release containing `deploy/lib/resolve-node.sh`,
+`deploy/lib/bounded-exec.sh`, `deploy/lib/read-private-health-token.mjs`,
+`src/fleet/health-token-file.ts`, and both `deploy/scripts/lib/health_reader.py`
+and `classify_health.py`. Node must satisfy that release's `.nvmrc` and
+`package.json` compatibility checks; the installed dependency tree must include
+the lockfile's `zod`. `WHATSOUP_NODE` can select an already installed compatible
+binary under the existing resolver contract. The helper does not install Node
+or dependencies. A partial bot-errors scripts deployment does not supply this
+complete dependency closure. The shared token reader and timeout helper support
+Linux and macOS; kickstart remediation here is specifically for macOS launchd.
+`--health-timeout` is a positive integer budget applied separately to Node
+resolution, each token read, each HTTP request and each launchctl kickstart.
+An external timeout backend may add its bounded termination grace. A failed or
+timed-out kickstart exits 2 without another remediation attempt. The configured
+`--settle` pause and `--max-kickstarts` attempt count still apply; this is not an
+overall run deadline.
+
+For authenticated model degradation, run the bounded remediation helper. It
+re-probes `/health` and issues at most the configured number of kickstarts:
 
 ```bash
 deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port <port>
 ```
+
+The helper requires an explicit boolean `turn_capability.model_usable_stale`.
+An authenticated degraded or unhealthy response with a fresh usable model exits
+2 without a kickstart: queue, transport or other non-model failures do not
+establish a keychain remediation case. Inspect those health signals separately.
+Missing, null or malformed freshness evidence exits 3 without a kickstart; inspect
+the health projection and producer schema before retrying. The helper trusts the
+runtime's stale verdict and does not independently validate provider-proof times.
+This F1 requirement does not qualify future timestamps or other independent
+freshness policies; acceptance evidence must name the tested release revision.
 
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI

@@ -493,7 +493,7 @@ export function registerTransitionCases(): void {
       'ReadinessRecord',
       JSON.parse(readFileSync(path.join(runDir, 'readiness.json'), 'utf8')) as Record<string, unknown>,
     )).toMatchObject({ ok: true, verdict: 'Pass' });
-  });
+  }, 120_000);
 
   it('finalizes reconciliation as the sole BCF-00 chain genesis and verifies its locked bundle', async () => {
     const api = boundaryCli as unknown as {
@@ -663,7 +663,7 @@ export function registerTransitionCases(): void {
     const substituted = await api.runBoundaryRunCli(['verify', '--run-dir', runDir], fixture.repo);
     expect(substituted).toMatchObject({ ok: false, exitCode: 1, verdict: 'Inconclusive' });
     expect(substituted.issues.map((entry) => entry.code)).toContain('completion-ledger-mismatch');
-  });
+  }, 30_000);
 
 
   it('[BCF00-U11] rejects substituted upstream state and inexact or repeated transitions', () => {

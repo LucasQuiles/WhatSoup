@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import signal
@@ -862,6 +864,331 @@ def test_observe_json_reads_a_regular_bounded_record(tmp_path: Path) -> None:
     assert observation.version.raw_sha256 == hashlib.sha256(raw).hexdigest()
     assert observation.version.generation == 4
     assert observation.version.operation_id == "fixture-operation"
+
+
+def test_observe_json_default_preserves_legacy_parse_behavior(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    raw = b'{"value":NaN,"nested":{"duplicate":1,"duplicate":2}}\n'
+    record = state / "fixture.json"
+    record.write_bytes(raw)
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    observation = module.observe_json(target)
+
+    assert observation.payload is not None
+    assert math.isnan(observation.payload["value"])
+    assert observation.payload["nested"] == {"duplicate": 2}
+    assert observation.version.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert observation.identity is None
+
+
+def test_observe_json_strict_returns_the_stable_file_identity(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    raw = b'{"generation":4,"operationId":"fixture-operation","value":"ok"}\n'
+    record = state / "fixture.json"
+    record.write_bytes(raw)
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    observation = module.observe_json(target, strict=True)
+    file_stat = record.stat()
+
+    assert observation.payload == {
+        "generation": 4,
+        "operationId": "fixture-operation",
+        "value": "ok",
+    }
+    assert observation.version.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert observation.identity == module.JsonFileIdentity(
+        device=file_stat.st_dev,
+        inode=file_stat.st_ino,
+        mode=file_stat.st_mode,
+        uid=file_stat.st_uid,
+        nlink=file_stat.st_nlink,
+        size=file_stat.st_size,
+        mtime_ns=file_stat.st_mtime_ns,
+        ctime_ns=file_stat.st_ctime_ns,
+    )
+
+
+def test_observe_json_strict_rejects_duplicate_root_keys(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":1,"value":2}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    with pytest.raises(module.DurableWriteError) as raised:
+        module.observe_json(target, strict=True)
+
+    assert raised.value.error_class is module.ErrorClass.SERIALIZATION
+
+
+def test_observe_json_strict_rejects_nested_duplicate_keys(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"nested":{"value":1,"value":2}}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    with pytest.raises(module.DurableWriteError) as raised:
+        module.observe_json(target, strict=True)
+
+    assert raised.value.error_class is module.ErrorClass.SERIALIZATION
+
+
+def test_observe_json_strict_rejects_escaped_duplicate_keys(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":1,"v\\u0061lue":2}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    with pytest.raises(module.DurableWriteError) as raised:
+        module.observe_json(target, strict=True)
+
+    assert raised.value.error_class is module.ErrorClass.SERIALIZATION
+
+
+def test_observe_json_strict_rejects_nonfinite_json_values(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    for literal in (b"NaN", b"Infinity", b"-Infinity"):
+        record = state / "fixture.json"
+        record.write_bytes(b'{"value":' + literal + b"}\n")
+        record.chmod(0o600)
+
+        with pytest.raises(module.DurableWriteError) as raised:
+            module.observe_json(target, strict=True)
+
+        assert raised.value.error_class is module.ErrorClass.SERIALIZATION
+
+
+def test_observe_json_strict_rejects_invalid_utf8(tmp_path: Path) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":"\xff"}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+
+    with pytest.raises(module.DurableWriteError) as raised:
+        module.observe_json(target, strict=True)
+
+    assert raised.value.error_class is module.ErrorClass.SERIALIZATION
+
+
+def test_observe_json_strict_rejects_unsafe_leaf_types_without_blocking(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+    record = state / "fixture.json"
+
+    record.symlink_to(state / "outside.json")
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+    record.unlink()
+
+    record.mkdir(mode=0o700)
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+    record.rmdir()
+
+    record.write_bytes(b'{"value":"ok"}\n')
+    record.chmod(0o600)
+    (state / "alias.json").hardlink_to(record)
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+    (state / "alias.json").unlink()
+
+    record.unlink()
+    os.mkfifo(record, 0o600)
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+
+
+def test_observe_json_strict_rejects_leaf_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":"before"}\n')
+    record.chmod(0o600)
+    replacement = state / "replacement.json"
+    replacement.write_bytes(b'{"value":"after"}\n')
+    replacement.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+    original_read = module.os.read
+    replaced = False
+
+    def replace_before_read(descriptor: int, count: int) -> bytes:
+        nonlocal replaced
+        if not replaced:
+            replacement.replace(record)
+            replaced = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(module.os, "read", replace_before_read)
+
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+
+    assert replaced
+    assert record.read_bytes() == b'{"value":"after"}\n'
+
+
+def test_observe_json_strict_rechecks_the_opened_descriptor_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":"ok"}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+    record_stat = record.stat()
+    original_fstat = module.os.fstat
+    opened_descriptor_checks = 0
+
+    def count_opened_descriptor_checks(descriptor: int) -> os.stat_result:
+        nonlocal opened_descriptor_checks
+        result = original_fstat(descriptor)
+        if result.st_dev == record_stat.st_dev and result.st_ino == record_stat.st_ino:
+            opened_descriptor_checks += 1
+        return result
+
+    monkeypatch.setattr(module.os, "fstat", count_opened_descriptor_checks)
+
+    observation = module.observe_json(target, strict=True)
+
+    assert observation.payload == {"value": "ok"}
+    assert opened_descriptor_checks == 2
+
+
+def test_observe_json_strict_rejects_same_length_in_place_rewrite_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    before = b'{"value":"before"}\n'
+    after = b'{"value":"after!"}\n'
+    assert len(before) == len(after)
+    record = state / "fixture.json"
+    record.write_bytes(before)
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+    original_read = module.os.read
+    rewritten = False
+
+    def rewrite_before_read(descriptor: int, count: int) -> bytes:
+        nonlocal rewritten
+        if not rewritten:
+            record.write_bytes(after)
+            rewritten = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(module.os, "read", rewrite_before_read)
+
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+
+    assert rewritten
+    assert record.read_bytes() == after
+
+
+def test_observe_json_strict_rejects_parent_directory_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("deploy.scripts.lib.durable_json")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    record = state / "fixture.json"
+    record.write_bytes(b'{"value":"before"}\n')
+    record.chmod(0o600)
+    target = module.durable_json_target(
+        trusted_root=tmp_path,
+        relative_path="state/fixture.json",
+    )
+    original_read = module.os.read
+    replaced = False
+
+    def replace_parent_before_read(descriptor: int, count: int) -> bytes:
+        nonlocal replaced
+        if not replaced:
+            state.rename(tmp_path / "retired-state")
+            state.mkdir(mode=0o700)
+            replacement = state / "fixture.json"
+            replacement.write_bytes(b'{"value":"after"}\n')
+            replacement.chmod(0o600)
+            replaced = True
+        return original_read(descriptor, count)
+
+    monkeypatch.setattr(module.os, "read", replace_parent_before_read)
+
+    with pytest.raises(module.DurableWriteError):
+        module.observe_json(target, strict=True)
+
+    assert replaced
+    assert record.read_bytes() == b'{"value":"after"}\n'
 
 
 def test_publish_event_json_commits_create_once_bytes(tmp_path: Path) -> None:

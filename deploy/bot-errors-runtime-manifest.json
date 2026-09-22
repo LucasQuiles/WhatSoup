@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-14T13:00:00Z",
+  "generatedAt": "2026-09-16T00:00:00Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -10,6 +10,23 @@
       "mustContain": [
         "whatsoup_effective_runtime_path",
         "whatsoup_export_runtime_path"
+      ]
+    },
+    {
+      "path": "deploy/scripts/deployment-qualification-profile.json",
+      "sha256": "16cd78cbd35b0f24fa9df65d686361884747bae2f4fb5ad18eb63328adc224a6",
+      "mustContain": [
+        "arc.observation.v1",
+        "\"required_areas\"",
+        "\"source_test_pass_qualifies_deployment\": false"
+      ]
+    },
+    {
+      "path": "deploy/scripts/health-deployment-qualification-profile.json",
+      "sha256": "3e8746a085b72559b5b5ec38e2cd2114c829bcdb065213ffde6ae4d297cdc42a",
+      "mustContain": [
+        "health.deployment-qualification-profile.v1",
+        "\"timeout_seconds\": 5"
       ]
     },
     {
@@ -40,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c0ed4ead5b8688d66779bc43333f80a4d9070142fa64981f730c82f396126275",
+      "sha256": "ac54cd2fd8a565a159f16b02620ac053dfd7c7fe71a05c29035b74e05abf6b64",
       "mustContain": [
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -144,7 +161,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "000ae75c796d672d292f01a987404f2144fc10b1438a03ac9039190fa3a64721",
+      "sha256": "b24f9a373e018d3cb4d693b22a1df6159904c177e5129554ed29be617aec9a27",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -264,7 +281,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "343be559cfa88407bc7a1cee8161c8da3a6c37ee24bf551774ff6664bff58e8e",
+      "sha256": "957ed72e1ae06ce638b003a9139c0bcf820fd8c1b6491cb161bda624d1fc6265",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -298,11 +315,13 @@
     },
     {
       "path": "deploy/scripts/bot-errors-release-proof-run.sh",
-      "sha256": "d52598ac7204805f5f5f3e4eb6b77ebe2e9693b756e55aba248d5b7b00375fac",
+      "sha256": "509a0ebc4ff98a180e63bd0da93b6cdb85f8f8c83cd1dbf04cda2cc162d0a66e",
       "mustContain": [
         "BOT_ERRORS_RELEASE_PROOF_MODE",
         "exit 75",
-        "flock -n 9"
+        "flock -n 9",
+        "lib.producer_cadence_receipt",
+        "lock-skip"
       ]
     },
     {
@@ -438,11 +457,12 @@
     },
     {
       "path": "deploy/scripts/install-bot-errors-release-proof.sh",
-      "sha256": "12bb97ecaa8c17ab429ddc03da78997cd7ba98a724f47724df3ba60e4a6680e4",
+      "sha256": "1a050fa4cdcb2ba8c23e3f78678598919faa7db4d2f052910496107ede317ee8",
       "mustContain": [
         "host gate",
         "RECEIPT",
-        "daemon-reload"
+        "daemon-reload",
+        "deploy/scripts/lib/producer_cadence_receipt.py"
       ]
     },
     {
@@ -463,7 +483,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "45b9b3e23ffda454a8315c1ec80ffc81c691e8ef37f3b20cb3386eaaa2af5bea",
+      "sha256": "eb750aab0f6ddb1589236027fa508dfd48a8f2d432035401015369a474e0efe0",
       "mustContain": [
         "daily_health_host_from_payload",
         "normalize_hub_host",
@@ -487,7 +507,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "26b1afe5b7f57420bb90b28bf97cbe83168c3402c76d845f8777923f3722548d",
+      "sha256": "24cddb4aef0bdc497f4528f1d9cfdcdf1f58a880b69900be699e268c08a77869",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -530,7 +550,7 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "782cad21c8fff5be8e57bda78b2429d2f115457705af116518e7555e8b7b2ab7",
+      "sha256": "0070609866af404964e2693fe6553ea3e5d1afccd048422704fd2893b80b8dcd",
       "mustContain": [
         "def classify(d: object) -> str:"
       ]
@@ -559,12 +579,33 @@
     },
     {
       "path": "deploy/scripts/lib/durable_json.py",
-      "sha256": "fbc6320f29aeec6a3e4ef3d2d7625e1dc30e27809bfa103a1ec2a36b019c5fd0",
+      "sha256": "898a216383f40f0e93107eeddd1c3112fed2650250af4c37390b04d9809cb32f",
       "mustContain": [
         "publish_event_json",
         "publish_state_json",
         "require_all_advance",
         "O_NOFOLLOW"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/deployment_effective_config.py",
+      "sha256": "c3d4424e9cd45ef829108d56d4a602059fb3a7f77a7bdd72db9796f6ee4ad00a",
+      "mustContain": [
+        "class EffectiveConfigRefusal",
+        "def load_effective_config(",
+        "expected_sha256",
+        "expected_context",
+        "expected_target"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/deployment_qualification_bundle.py",
+      "sha256": "2ffe5f3bffde2c38d2a380a0b95c10f47c3335043aaf997f2b1761faec639666",
+      "mustContain": [
+        "class QualificationBundleRefusal",
+        "def load_qualification_bundle(",
+        "def recheck_qualification_bundle(",
+        "_MAX_CLOSURE_ENTRIES"
       ]
     },
     {
@@ -598,7 +639,7 @@
     },
     {
       "path": "deploy/scripts/lib/producer_cadence_receipt.py",
-      "sha256": "3974cd69316df6715c6fe646e867d29c16bac1fcf5b58ce80297c7c62aaefdb9",
+      "sha256": "c6052cfb0529317bd68a99f9ce52ab3d181ed10442a76aca0362b8a41e4e2c94",
       "mustContain": [
         "CADENCE_RECEIPT_SCHEMA_VERSION",
         "lastAttemptAt",
@@ -606,7 +647,8 @@
         "lock_skip",
         "ProducerIdentity",
         "invocationContext",
-        "not_applicable"
+        "not_applicable",
+        "record_wrapper_lock_skip"
       ]
     },
     {
@@ -678,6 +720,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/qualify-health-deployment.py",
+      "sha256": "13162afa5090b433726093c42d2b96e5688bf5fe4421ec6c12ab66391235af73",
+      "mustContain": [
+        "def qualify_health_deployment_from_effective_record(",
+        "effective_record_unavailable",
+        "def _validate_launch_agent_path(",
+        "durable_json._open_target_parent(",
+        "O_NOFOLLOW",
+        "SYNTHETIC_INVALID_TOKEN"
+      ]
+    },
+    {
       "path": "deploy/scripts/render-watchdog.py",
       "sha256": "b7c684bd207e166b0459d61a400b301602fbff8f0d8704ad879a4f2d4c8601ed",
       "mustContain": [
@@ -710,11 +764,20 @@
       ]
     },
     {
-      "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "cd7d11c44c050d519c0395aa32bf8583d434f10cf85832e3a67c254b7c2fcb88",
+      "path": "deploy/scripts/write_effective_config_record.py",
+      "sha256": "08f02e4dfd592e4b54b6497d2fa9861ff4bc787e45220e2f7010e86bfd4ef6dd",
       "mustContain": [
-        "AUTHORIZATION_BEARER",
-        "WHATSAPP_SERVICE_UNIT",
+        "def write_effective_config_record(",
+        "durable_json_target",
+        "EffectiveConfigWriteError"
+      ]
+    },
+    {
+      "path": "src/lib/bot-errors-outbox.ts",
+      "sha256": "e8ded92d38ca3c5544812cfa3b5e0276ed410b79f52f5258f05fffb4fbafe66b",
+      "mustContain": [
+        "import { redactText } from './redaction-text.ts';",
+        "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
         "constants.O_NOFOLLOW",
         "redactOutboxValue(event)",
         "recordBotErrorsWritefail",
@@ -735,7 +798,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "405975415cbbb023b19d8497afb6c3be09e411611b4dc79623f95b2c17faf60c",
+      "sha256": "d0028239196d640cbde7cc79ffc358f44d5bf2b1deff56391f9b661040db00e6",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -749,6 +812,17 @@
       ]
     },
     {
+      "path": "src/lib/redaction-text.ts",
+      "sha256": "db4747ab3584281cfdc2d895861f867c8e4ddc00b5baf83bb74e9e487418e6b3",
+      "mustContain": [
+        "AUTHORIZATION_BEARER",
+        "WHATSAPP_SERVICE_UNIT",
+        "export function redactText",
+        "jidPattern()",
+        "safeShapeCredPathEnabled"
+      ]
+    },
+    {
       "path": "src/lib/type-guards.ts",
       "sha256": "a5c720ed58c8bea11774cbc4d5eb1edb4fc7bbce4cabdd36dde74bdcc2e58e92",
       "mustContain": [
@@ -758,7 +832,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "a7580eae76cb91f3a192a6a3a72135865daba33ac263a263142f494f3d9adef6",
+      "sha256": "c337522837ae0cf72d69a4eac4a0af1bc6373801a422b68cf0abe4e847db94b9",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

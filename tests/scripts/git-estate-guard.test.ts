@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -20,6 +19,20 @@ import {
   parseWorktreePorcelain,
 } from '../../scripts/git-estate-guard.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import {
+  baselineChangeEnvironment,
+  finalClosureBaselineChangeEnvironment,
+  gitCallLogEnvironment,
+  gitInspectionFailureEnvironment,
+  readGitCalls,
+  shellQuote,
+  stashChangeEnvironment,
+  statusConcurrencyEnvironment,
+  statusOutputEnvironment,
+  statusRaceEnvironment,
+  worktreeOutputEnvironment,
+} from '../helpers/git-estate-guard-fixtures.ts';
+import * as processLocks from '../../src/lib/process-lock.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
@@ -128,6 +141,23 @@ interface BaselineWriteDocument {
   } | null;
 }
 
+interface BaselineAcceptStashDocument {
+  schemaVersion: 1;
+  command: 'baseline';
+  action: 'accept-stash';
+  exitCode: number;
+  baseline: BaselineWriteDocument['baseline'];
+  acceptedStash?: {
+    oid: string;
+    findingId: string;
+    parentCount: number;
+  };
+  admission?: {
+    reason: string;
+    reasonSha256: string;
+  };
+}
+
 function run(
   cwd: string,
   args: string[],
@@ -147,164 +177,6 @@ function run(
     status: proc.status,
     stdout: proc.stdout ?? '',
     stderr: proc.stderr ?? '',
-  };
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
-}
-
-function statusRaceEnvironment(
-  root: string,
-  target: string,
-): { env: NodeJS.ProcessEnv; marker: string } {
-  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
-  const bin = join(root, 'race-bin');
-  const marker = join(root, 'race-triggered');
-  mkdirSync(bin);
-  const wrapper = join(bin, 'git');
-  writeFileSync(wrapper, `#!/bin/sh
-is_status=0
-for arg in "$@"; do
-  if [ "$arg" = "status" ]; then
-    is_status=1
-  fi
-done
-if [ "$is_status" -eq 1 ] && [ ! -e ${shellQuote(marker)} ]; then
-  ${shellQuote(resolvedGit.stdout.trim())} "$@"
-  result=$?
-  printf 'raced\\n' > ${shellQuote(target)}
-  : > ${shellQuote(marker)}
-  exit "$result"
-fi
-exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
-`);
-  chmodSync(wrapper, 0o755);
-  return {
-    env: {
-      PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-    },
-    marker,
-  };
-}
-
-function statusOutputEnvironment(
-  root: string,
-  statusBody: string,
-): NodeJS.ProcessEnv {
-  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
-  const bin = join(root, `status-bin-${Math.random().toString(16).slice(2)}`);
-  mkdirSync(bin);
-  const wrapper = join(bin, 'git');
-  writeFileSync(wrapper, `#!/bin/sh
-is_status=0
-for arg in "$@"; do
-  if [ "$arg" = "status" ]; then
-    is_status=1
-  fi
-done
-if [ "$is_status" -eq 1 ]; then
-${statusBody}
-  exit 0
-fi
-exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
-`);
-  chmodSync(wrapper, 0o755);
-  return {
-    PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-  };
-}
-
-function worktreeOutputEnvironment(
-  root: string,
-  worktreeBody: string,
-): NodeJS.ProcessEnv {
-  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
-  const bin = join(root, `worktree-bin-${Math.random().toString(16).slice(2)}`);
-  mkdirSync(bin);
-  const wrapper = join(bin, 'git');
-  writeFileSync(wrapper, `#!/bin/sh
-is_worktree=0
-for arg in "$@"; do
-  if [ "$arg" = "worktree" ]; then
-    is_worktree=1
-  fi
-done
-if [ "$is_worktree" -eq 1 ]; then
-${worktreeBody}
-  exit 0
-fi
-exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
-`);
-  chmodSync(wrapper, 0o755);
-  return {
-    PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-  };
-}
-
-function gitCallLogEnvironment(
-  root: string,
-): { env: NodeJS.ProcessEnv; log: string } {
-  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
-  const bin = join(root, `call-log-bin-${Math.random().toString(16).slice(2)}`);
-  const log = join(root, `git-calls-${Math.random().toString(16).slice(2)}.log`);
-  mkdirSync(bin);
-  const wrapper = join(bin, 'git');
-  writeFileSync(wrapper, `#!/bin/sh
-printf '%s\\n' "$*" >> ${shellQuote(log)}
-exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
-`);
-  chmodSync(wrapper, 0o755);
-  return {
-    env: {
-      PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-    },
-    log,
-  };
-}
-
-function readGitCalls(log: string): string[] {
-  return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean);
-}
-
-function statusConcurrencyEnvironment(
-  root: string,
-): { env: NodeJS.ProcessEnv; counts: string } {
-  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
-  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
-  const bin = join(root, 'concurrency-bin');
-  const state = join(root, 'concurrency-state');
-  const counts = join(state, 'counts.log');
-  mkdirSync(bin);
-  mkdirSync(state);
-  const wrapper = join(bin, 'git');
-  writeFileSync(wrapper, `#!/bin/sh
-is_status=0
-for arg in "$@"; do
-  if [ "$arg" = "status" ]; then
-    is_status=1
-  fi
-done
-if [ "$is_status" -eq 1 ]; then
-  marker=${shellQuote(`${state}/active-`)}"$$"
-  : > "$marker"
-  active_count="$(find ${shellQuote(state)} -name 'active-*' -type f | wc -l | tr -d ' ')"
-  printf '%s\\n' "$active_count" >> ${shellQuote(counts)}
-  sleep 0.15
-  rm -f "$marker"
-fi
-exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
-`);
-  chmodSync(wrapper, 0o755);
-  return {
-    env: {
-      PATH: `${bin}:${process.env['PATH'] ?? ''}`,
-    },
-    counts,
   };
 }
 
@@ -338,6 +210,25 @@ function snapshot(repo: string): SnapshotDocument {
   const result = run(repo, ['snapshot', '--json']);
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as SnapshotDocument;
+}
+
+function expectOnlyNarrowBaselineFieldsChanged(
+  beforeRaw: string,
+  afterRaw: string,
+  addedFindingId: string,
+): void {
+  const before = JSON.parse(beforeRaw) as Record<string, unknown>;
+  const after = JSON.parse(afterRaw) as Record<string, unknown>;
+  const expected = {
+    ...before,
+    findingIds: [...(before['findingIds'] as string[]), addedFindingId].sort(),
+    snapshotHash: after['snapshotHash'],
+    payloadHash: after['payloadHash'],
+  };
+  expect(after).toEqual(expected);
+  // The normal writer is canonical, so this also checks literal preservation
+  // of every unselected baseline field rather than only semantic equality.
+  expect(afterRaw).toBe(`${JSON.stringify(expected)}\n`);
 }
 
 
@@ -1109,6 +1000,332 @@ describe('git-estate guard', () => {
       decision: { blocked: false, newConflictIds: [] },
     });
   });
+
+  it('accepts one exact retained stash without laundering other estate findings', () => {
+    const { repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const beforeRaw = readFileSync(baselinePath, 'utf8');
+
+    writeFileSync(join(repo, 'tracked.txt'), 'stash one\n');
+    git(repo, ['stash', 'push', '-m', 'accepted stash']);
+    const retained = snapshot(repo).snapshot.stashes[0]!;
+    const reason = 'recoverable qualification work retained for owner review';
+    const accepted = run(repo, [
+      'baseline', 'accept-stash', '--oid', retained.oid, '--reason', reason, '--json',
+    ]);
+    expect(accepted.status, accepted.stderr).toBe(0);
+    expect(accepted.stdout).toContain(reason);
+    const receipt = JSON.parse(accepted.stdout) as BaselineAcceptStashDocument;
+    expect(receipt).toMatchObject({
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 0,
+      acceptedStash: {
+        oid: retained.oid,
+        findingId: expect.stringMatching(/^stash:/),
+        parentCount: retained.parents.length,
+      },
+      admission: {
+        reason,
+        reasonSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expectOnlyNarrowBaselineFieldsChanged(
+      beforeRaw,
+      readFileSync(baselinePath, 'utf8'),
+      receipt.acceptedStash!.findingId,
+    );
+    expect(run(repo, ['guard', '--phase', 'pre-push', '--json']).status).toBe(0);
+    const alreadyAccepted = run(repo, [
+      'baseline', 'accept-stash', '--oid', retained.oid, '--reason', 'fixture', '--json',
+    ]);
+    expect(alreadyAccepted.status).toBe(2);
+
+    writeFileSync(join(repo, 'tracked.txt'), 'stash two\n');
+    git(repo, ['stash', 'push', '-m', 'still blocking stash']);
+    const second = snapshot(repo).snapshot.stashes.find(({ oid }) => oid !== retained.oid)!;
+    const blocked = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(blocked.status).toBe(2);
+    const decision = (JSON.parse(blocked.stdout) as GuardDocument).decision;
+    expect(decision.newCriticalFindingIds).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^stash:/),
+    ]));
+    expect((JSON.parse(blocked.stdout) as GuardDocument).snapshot?.stashes)
+      .toContainEqual(expect.objectContaining({ oid: second.oid }));
+  });
+
+  it('refuses invalid, absent, stale, changed, and uninspectable stash acceptance without writing the baseline', () => {
+    const { root, repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const original = readFileSync(baselinePath, 'utf8');
+    const invalid = run(repo, [
+      'baseline', 'accept-stash', '--oid', 'not-an-oid', '--reason', 'fixture', '--json',
+    ]);
+    expect(invalid.status).toBe(64);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(original);
+    const blankReason = run(repo, [
+      'baseline', 'accept-stash', '--oid', 'a'.repeat(40), '--reason', '', '--json',
+    ]);
+    expect(blankReason.status).toBe(64);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(original);
+
+    const absent = run(repo, [
+      'baseline', 'accept-stash', '--oid', 'a'.repeat(40), '--reason', 'fixture', '--json',
+    ]);
+    expect(absent.status).toBe(2);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(original);
+
+    writeFileSync(join(repo, 'tracked.txt'), 'stash candidate\n');
+    git(repo, ['stash', 'push', '-m', 'candidate']);
+    const oid = snapshot(repo).snapshot.stashes[0]!.oid;
+    const beforeRefusals = readFileSync(baselinePath, 'utf8');
+    const inspection = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ], gitInspectionFailureEnvironment(root));
+    expect(inspection.status).toBe(2);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
+
+    const race = statusRaceEnvironment(root, join(repo, 'tracked.txt'));
+    const stale = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ], race.env);
+    expect(stale.status).toBe(2);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
+
+    writeFileSync(join(repo, 'tracked.txt'), 'base\n');
+    const stashRace = stashChangeEnvironment(root);
+    const changed = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ], stashRace.env);
+    expect(changed.status).toBe(2);
+    expect(existsSync(stashRace.marker)).toBe(true);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(beforeRefusals);
+
+    const baselineRace = baselineChangeEnvironment(root, baselinePath);
+    const changedBaseline = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ], baselineRace.env);
+    expect(changedBaseline.status).toBe(2);
+    expect(existsSync(baselineRace.marker)).toBe(true);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(`${beforeRefusals}\n`);
+  });
+
+  it('refuses a baseline change during the second stash closure without overwriting the concurrent bytes', () => {
+    const { root, repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    writeFileSync(join(repo, 'tracked.txt'), 'stash candidate\n');
+    git(repo, ['stash', 'push', '-m', 'candidate']);
+    const oid = snapshot(repo).snapshot.stashes[0]!.oid;
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    const baselineBefore = readFileSync(baselinePath, 'utf8');
+    const race = finalClosureBaselineChangeEnvironment(root, baselinePath);
+
+    const result = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ], race.env);
+
+    expect(result.status, result.stderr).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 2,
+      baseline: null,
+      error: { kind: 'baseline_changed' },
+    });
+    expect(existsSync(race.marker)).toBe(true);
+    expect(readFileSync(baselinePath, 'utf8')).toBe(`${baselineBefore}\n`);
+  });
+
+  it.each([
+    ['tree', (oid: string) => `${oid}^{tree}`],
+    ['blob', (oid: string) => `${oid}:tracked.txt`],
+  ])('refuses a retained stash with a missing reachable %s', (_kind, objectExpression) => {
+    const { repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const baselinePath = snapshot(repo).snapshot.baselinePath;
+    writeFileSync(join(repo, 'tracked.txt'), 'recoverable only while reachable\n');
+    git(repo, ['stash', 'push', '-m', 'closure fixture']);
+    const oid = snapshot(repo).snapshot.stashes[0]!.oid;
+    const objectId = git(repo, ['rev-parse', objectExpression(oid)]);
+    const commonDir = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const objectPath = join(commonDir, 'objects', objectId.slice(0, 2), objectId.slice(2));
+    expect(existsSync(objectPath)).toBe(true);
+    const baselineBefore = readFileSync(baselinePath, 'utf8');
+    rmSync(objectPath);
+
+    const result = run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'closure fixture', '--json',
+    ]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 2,
+      baseline: null,
+    });
+    expect(readFileSync(baselinePath, 'utf8')).toBe(baselineBefore);
+  });
+
+  it('leaves conflicts and locks blocking after a narrow stash acceptance', () => {
+    const { root, repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    writeFileSync(join(repo, 'tracked.txt'), 'accepted stash\n');
+    git(repo, ['stash', 'push', '-m', 'accepted']);
+    const oid = snapshot(repo).snapshot.stashes[0]!.oid;
+    expect(run(repo, [
+      'baseline', 'accept-stash', '--oid', oid, '--reason', 'fixture', '--json',
+    ]).status).toBe(0);
+
+    const lane = join(root, 'newly-locked');
+    git(repo, ['worktree', 'add', '-b', 'newly-locked', lane]);
+    git(repo, ['worktree', 'lock', '--reason', 'fixture lock', lane]);
+    const locked = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(locked.status).toBe(2);
+    expect((JSON.parse(locked.stdout) as GuardDocument).decision.newCriticalFindingIds)
+      .toEqual(expect.arrayContaining([expect.stringMatching(/^locked:/)]));
+
+    git(repo, ['worktree', 'unlock', lane]);
+    git(repo, ['branch', 'side']);
+    writeFileSync(join(repo, 'tracked.txt'), 'main\n');
+    git(repo, ['add', 'tracked.txt']);
+    git(repo, ['commit', '-m', 'main conflict']);
+    git(repo, ['switch', 'side']);
+    writeFileSync(join(repo, 'tracked.txt'), 'side\n');
+    git(repo, ['add', 'tracked.txt']);
+    git(repo, ['commit', '-m', 'side conflict']);
+    git(repo, ['switch', 'main']);
+    git(repo, ['merge', 'side'], 1);
+    const conflicted = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(conflicted.status).toBe(2);
+    expect((JSON.parse(conflicted.stdout) as GuardDocument).decision.newConflictIds)
+      .toEqual(expect.arrayContaining([expect.stringMatching(/^conflict:/)]));
+  });
+
+  it.each(['write', 'accept-stash'])(
+    'refuses baseline %s while another baseline writer holds the common-store lock',
+    (action) => {
+    const { repo } = initRepo();
+    const accepted = run(repo, ['baseline', 'write', '--json']);
+    expect(accepted.status, accepted.stderr).toBe(0);
+    const baselinePath = (JSON.parse(accepted.stdout) as BaselineWriteDocument).baseline!.path;
+    const before = readFileSync(baselinePath);
+    writeFileSync(join(repo, 'tracked.txt'), 'a change the competing writer must not accept\n');
+    git(repo, ['stash', 'push', '-m', 'lock fixture']);
+    const oid = git(repo, ['rev-parse', 'refs/stash']);
+    const args = action === 'write'
+      ? ['baseline', 'write', '--json']
+      : ['baseline', 'accept-stash', '--oid', oid, '--reason', 'lock fixture', '--json'];
+    const lock = processLocks.acquireProcessLock(`${baselinePath}.lock`);
+    try {
+      const refused = run(repo, args);
+      expect(refused.status, refused.stderr).toBe(2);
+      expect(JSON.parse(refused.stdout)).toMatchObject({
+        error: { kind: 'baseline_locked' },
+      });
+      expect(readFileSync(baselinePath)).toEqual(before);
+      expect(existsSync(lock.path)).toBe(true);
+    } finally {
+      processLocks.releaseProcessLock(lock);
+    }
+    const retry = run(repo, args);
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(readFileSync(baselinePath)).not.toEqual(before);
+    expect(existsSync(lock.path)).toBe(false);
+  });
+
+  it.each(['write', 'accept-stash'])(
+    'reports an unknown outcome without a success receipt when baseline %s loses its lock',
+    (action) => {
+      const { root, repo } = initRepo();
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const baselinePath = snapshot(repo).snapshot.baselinePath;
+      writeFileSync(join(repo, 'tracked.txt'), 'lock-loss fixture\n');
+      git(repo, ['stash', 'push', '-m', 'lock-loss fixture']);
+      const oid = git(repo, ['rev-parse', 'refs/stash']);
+      const args = action === 'write'
+        ? ['baseline', 'write', '--json']
+        : ['baseline', 'accept-stash', '--oid', oid, '--reason', 'lock-loss fixture', '--json'];
+      const race = statusRaceEnvironment(root, `${baselinePath}.lock`);
+
+      const result = run(repo, args, race.env);
+
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        exitCode: 2,
+        error: { kind: 'baseline_lock_release_failed' },
+        outcome: 'unknown',
+      });
+      expect(existsSync(race.marker)).toBe(true);
+      expect(readFileSync(`${baselinePath}.lock`, 'utf8')).toBe('raced\n');
+    },
+  );
+
+  it.each(['write', 'accept-stash'])(
+    'reports a thrown lock release as an unknown baseline %s outcome',
+    async (action) => {
+      const { repo } = initRepo();
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      writeFileSync(join(repo, 'tracked.txt'), 'release-error fixture\n');
+      git(repo, ['stash', 'push', '-m', 'release-error fixture']);
+      const oid = git(repo, ['rev-parse', 'refs/stash']);
+      const args = action === 'write'
+        ? ['baseline', 'write', '--json']
+        : ['baseline', 'accept-stash', '--oid', oid, '--reason', 'release-error fixture', '--json'];
+      const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const release = vi.spyOn(processLocks, 'releaseProcessLock').mockImplementationOnce(() => {
+        throw new Error('injected unlink failure');
+      });
+      try {
+        expect(await runGitEstateGuard(args, repo)).toBe(2);
+        expect(stdout).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(String(stdout.mock.calls[0]![0]))).toMatchObject({
+          exitCode: 2,
+          error: { kind: 'baseline_lock_release_failed', message: 'injected unlink failure' },
+          outcome: 'unknown',
+        });
+      } finally {
+        const handle = release.mock.calls[0]?.[0];
+        release.mockRestore();
+        stdout.mockRestore();
+        stderr.mockRestore();
+        if (handle) processLocks.releaseProcessLock(handle);
+      }
+    },
+  );
+
+  it.each(['write', 'accept-stash'])(
+    'emits one JSON refusal when baseline %s both refuses its snapshot and loses its lock',
+    (action) => {
+      const { root, repo } = initRepo();
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const baselinePath = snapshot(repo).snapshot.baselinePath;
+      const before = readFileSync(baselinePath);
+      writeFileSync(join(repo, 'tracked.txt'), 'refusal fixture\n');
+      git(repo, ['stash', 'push', '-m', 'refusal fixture']);
+      const oid = git(repo, ['rev-parse', 'refs/stash']);
+      const args = action === 'write'
+        ? ['baseline', 'write', '--json']
+        : ['baseline', 'accept-stash', '--oid', oid, '--reason', 'refusal fixture', '--json'];
+      const env = statusOutputEnvironment(root,
+        `printf 'raced\\n' > ${shellQuote(`${baselinePath}.lock`)}\nprintf 'invalid-porcelain\\000'`);
+
+      const result = run(repo, args, env);
+
+      expect(result.status).toBe(2);
+      expect(result.stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        exitCode: 2,
+        error: { kind: 'snapshot_unsafe' },
+      });
+      expect(result.stderr).toContain('baseline mutation outcome unknown');
+      expect(readFileSync(baselinePath)).toEqual(before);
+      expect(readFileSync(`${baselinePath}.lock`, 'utf8')).toBe('raced\n');
+    },
+  );
 
   it('rejects canonical baseline payload tampering, unsafe integers, invalid IDs, and unknown fields', () => {
     const { repo } = initRepo();

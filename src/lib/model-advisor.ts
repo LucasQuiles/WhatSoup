@@ -372,13 +372,37 @@ export async function fetchAnthropicModelIdsWithStatus(
     headers = { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' };
   }
 
-  // Interactive `/config model` resolution — retries stay off (transient
-  // failures fall back to the static catalog immediately, no startup stall).
+  return fetchAnthropicModelsWithHeaders(headers);
+}
+
+async function fetchAnthropicModelsWithHeaders(
+  headers: Record<string, string>,
+): Promise<AnthropicModelsResult> {
+  // Both callers serve interactive catalogue resolution (`/config model` and the
+  // API adapter's catalogue), so retries stay off: a transient failure falls back
+  // to the static catalog immediately instead of stalling the request.
   const result = await fetchModelIds(ANTHROPIC_MODELS_URL, headers, 'anthropic', { retryTransient: false });
   if (result.failure) {
     return { status: 'failed', category: classifyModelFetchFailure(result.failure) };
   }
   return { status: 'ok', ids: result.ids };
+}
+
+/**
+ * Fetch the managed Anthropic API adapter's catalogue with its API-key
+ * identity. This must not prefer the Claude CLI OAuth credential: the two
+ * credentials can belong to different organizations and expose different
+ * catalogues.
+ */
+export async function fetchAnthropicApiModelIdsWithStatus(
+  deps: { resolveKey?: () => string } = {},
+): Promise<AnthropicModelsResult> {
+  const key = (deps.resolveKey ?? (() => resolveApiKey({ envVar: 'ANTHROPIC_API_KEY' })))();
+  if (!key) return { status: 'no-key' };
+  return fetchAnthropicModelsWithHeaders({
+    'x-api-key': key,
+    'anthropic-version': '2023-06-01',
+  });
 }
 
 const OPENAI_MODELS_URL = 'https://api.openai.com/v1/models';
