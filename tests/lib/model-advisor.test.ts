@@ -196,6 +196,56 @@ describe('fetchLiveModelIds', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.liveScan).toMatchObject({ mode: 'live' });
   });
+
+  // A body that does not parse, or parses to the wrong shape, fails the same way
+  // on every attempt; retrying it only adds 10 s of backoff and two requests.
+  it('does not retry a body that is not valid JSON', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected token < in JSON at position 0'); },
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.liveScan).toMatchObject({
+      mode: 'degraded',
+      degradedVendors: [{ vendor: 'anthropic', reason: 'Unexpected token < in JSON at position 0' }],
+    });
+  });
+
+  it('does not retry a parsed body whose data is not a list', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { id: 'claude-opus-4-9' } }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.liveScan).toMatchObject({ mode: 'degraded', degradedVendors: [{ vendor: 'anthropic' }] });
+  });
+
+  it('retries when reading the body times out', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.ids).toEqual(['claude-opus-4-9']);
+    expect(result.liveScan).toMatchObject({ mode: 'live' });
+  });
 });
 
 describe('startModelCurrencyMonitor startup deferral', () => {

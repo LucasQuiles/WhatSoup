@@ -133,6 +133,7 @@ async function fetchModelIdsOnce(
   headers: Record<string, string>,
   vendor: string,
 ): Promise<VendorModelFetchResult & { retryable: boolean }> {
+  let parsed = false;
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
@@ -143,18 +144,21 @@ async function fetchModelIdsOnce(
       };
     }
     const body = (await res.json()) as ModelsListResponse;
+    parsed = true;
     const ids = (body.data ?? [])
       .map((m) => m.id)
       .filter((id): id is string => typeof id === 'string');
     log.debug({ vendor, count: ids.length }, 'live model list fetched');
     return { ids, failure: null, retryable: false };
   } catch (err) {
-    // Timeouts, aborts and socket errors are transient by nature — worth a retry.
+    // A timeout, abort or socket error, whether connecting or while the body
+    // streams in, is transient and worth a retry. Malformed JSON, or a parsed
+    // body of the wrong shape, fails the same way on every attempt.
     const reason = sanitizeFetchFailureReason(err);
     return {
       ids: [],
       failure: { vendor, reason },
-      retryable: true,
+      retryable: !parsed && !(err instanceof SyntaxError),
     };
   }
 }
