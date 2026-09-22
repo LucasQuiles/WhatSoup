@@ -121,15 +121,61 @@ The safety claim above is exercised, not just asserted
 for genuinely unexpected failures (not proof-shape rejections) so the caller can
 alert on it rather than treat it as benign.
 
+## PR2 — supervisor wiring (deploy-gated)
+
+`runScan()` now invokes the reconciler once per cycle, immediately after
+`recoverStaleTurnRecoveryJobs` (so freshly-reclaimed rows are visible) and
+before job enumeration (so the cycle's totals include its outcome):
+
+- **Gate:** a new optional supervisor dep, `catchupReconcile: { groupLimit? }`.
+  Absent/null — the default everywhere today, including
+  `createTurnRecoverySupervisorForRuntime` — keeps exactly the pre-PR2
+  behavior. Enabling it is a separately-gated cutover decision, forwarded
+  verbatim through `turn-recovery-dispatch.ts`.
+- **Surface:** `DurabilityEngine.reconcileOperatorCatchupRecoveries(params?)`
+  delegates to the core selector on the engine's own raw handle; the
+  supervisor's narrow `TurnRecoverySupervisorDurability` interface carries it
+  as an optional method, so fakes/legacy surfaces simply never reconcile.
+- **Observability:** three new scan-result counters
+  (`catchupReconcileAttempted / Closed / Skipped`); a whole-call failure
+  (storage/schema drift) records `catchup_reconcile_failed` as the scan
+  failure reason and logs a warning **without aborting the rest of the scan**
+  (same contract as the stale-claim sweep). Unexpected-error skips inside a
+  successful report are logged at error level for alert wiring.
+- **Tests:** `tests/runtimes/agent/turn-recovery-catchup-reconcile-wiring.test.ts`
+  drives a REAL `Database` + `DurabilityEngine` + `TurnRecoverySupervisor`
+  end-to-end (only the socket is absent): gate-on closes a caught-up group
+  with `auto_reconciler` actors and is idempotent; gate-off (default) leaves
+  everything pending; `groupLimit` bounds a cycle and the next cycle drains
+  the remainder; a throwing reconciler resolves the scan, keeps everything
+  pending, and lands `catchup_reconcile_failed` in health.
+
+## ② — blocked-unsafe actionability split (gauge)
+
+`getTurnRecoverySupervisorCounts` now splits `blockedUnsafe` into three
+buckets, mirrored into the health details surface
+(`turnRecoveryBlockedUnsafe{Synthetic,Superseded,Stranded}`):
+
+- **synthetic** — `agentjob-%` source IDs: internal scheduled self-turns
+  that owe no user a reply. Parked synthetics are expected residue, never an
+  incident.
+- **superseded** — real sources whose conversation has ANY newer inbound
+  (the same newer-activity signal the safe-replay fence uses): the thread
+  moved on; the parked replay is correctly superseded.
+- **stranded** — real sources with no newer activity: the only class that
+  should page an operator.
+
+`synthetic + superseded + stranded === blockedUnsafe` is asserted on real
+rows (`tests/core/turn-recovery-counts-split.test.ts`). The enrollment-side
+half of ② (stop enrolling synthetic self-turns into user-facing recovery at
+all — live finalize + boot reclaim arms) is still open; the gauge split
+makes the residue visible and non-paging in the meantime.
+
 ## Follow-ups (separate PRs)
 
-- **PR2 — wiring:** invoke `reconcileOperatorCatchupRecoveries` from the
-  supervisor `runScan()` loop (bounded per cycle, right after
-  `recoverStaleTurnRecoveryJobs`). Behavior change → deploy-gated.
-- **② synthetic exclusion + actionable gauge:** stop enrolling
-  `create_agent_job` self-turns (`source_message_id LIKE 'agentjob-%'`) in
-  user-facing recovery, and split the health gauge into
-  `synthetic / superseded / genuinely_stranded` so the alert is actionable.
+- ~~**PR2 — wiring**~~: shipped — see "PR2 — supervisor wiring" above.
+- **② synthetic exclusion + actionable gauge:** the gauge split shipped
+  (see above); the enrollment-side synthetic exclusion is still open.
 - **③ user-facing catch-up nudge** for genuinely-stranded real user turns that
   the conversation has *not* resumed within a window; plus a newer-activity
   fence on the automatic replay path (today only the operator CLI has one).
