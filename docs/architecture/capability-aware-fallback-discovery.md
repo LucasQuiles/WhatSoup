@@ -70,7 +70,11 @@ completion evidence plus catalogue recency.
    lifecycle before release chronology is considered. Within one reported lifecycle, an id
    whose model segment carries a whole-word pre-release token (`exp`, `experimental`,
    `preview`, `alpha`, `beta`) ranks below an id that does not. This applies with or without
-   metadata. An explicit gateway status still outranks the naming hint.
+   metadata. An explicit gateway status still outranks the naming hint. A plain id of any age
+   therefore outranks a pre-release-named id within the same reported lifecycle; an operator
+   pin still overrides. The trade-off is deliberate: a provider whose whole current
+   generation is preview-named ranks behind its older plain model until the gateway reports a
+   lifecycle or the operator pins.
 5. Missing metadata remains compatible with older/custom gateways and uses the legacy
    conservative filter; it is never described as capability-proven.
 6. A configured operator preference wins when its exact ID is present.
@@ -78,9 +82,13 @@ completion evidence plus catalogue recency.
    only the exact model, allowing another model from the same provider to become a candidate.
 8. With equal evidence and lifecycle, a valid later month- or day-precision release date wins.
    Among equal dates, the provider's rolling alias (an id equal to its models.dev `family`)
-   wins, and descending model id breaks any remaining tie. An id's position in the listing is
-   never a ranking input. OpenCode lists ids ascending within a provider, so metadata-free
-   gateways keep the picks they had under the former later-entry rule.
+   wins. The alias flag is per model, so it also ranks a same-day alias of one family above a
+   same-day versioned id of another family; the catalogue gives no basis for ranking families
+   against each other. Descending model id, compared by UTF-16 code unit rather than locale
+   collation, breaks any remaining tie. An id's position in the listing is never a ranking
+   input. OpenCode lists ids with a locale-aware sort, so for a provider whose ids share one
+   letter case this reproduces the former later-entry pick. Mixed-case ids, `~` or `_`
+   prefixes, and pre-release ids can resolve differently.
 9. A gateway entry can fill the reserved free-tier tail only when verbose metadata confirms
    that input, output, and every nested numeric price are zero; metadata-free legacy output
    retains the prior prefix assumption.
@@ -120,7 +128,7 @@ completion evidence plus catalogue recency.
 | Response | Prefer fresh data; fall back to explicitly cached/legacy data; exclude proven-ineligible or exact-model-dead candidates; retain the prior chain on total failure. |
 | Valid exception | An exact operator preference may select an otherwise automatically ineligible model; explicit intent is logged as the basis. |
 | Positive control | Newer active text/tool metadata wins within a provider and a fresh successful canary wins across providers. |
-| Negative control | Inactive, non-tool, non-text-output, paid-tail, unknown-cost-tail, malformed-metadata, beta-over-stable, and exact-model-dead cases do not become the automatic candidate. |
+| Negative control | Inactive, non-tool, non-text-output, paid-tail, unknown-cost-tail, malformed-metadata, beta-over-stable, same-lifecycle pre-release-named, and exact-model-dead cases do not become the automatic candidate, and listing position alone never changes the pick. |
 | Bypass analysis | Unknown metadata cannot be called capability-proven; cached fallback is labeled; a dead model cannot condemn every model under its provider. |
 | Proof | Parser fixtures, ranking falsifiers, refresh-to-cache degradation tests, existing discovery wiring/canary tests, typecheck, and live shadow comparison. |
 | SSOT | Existing catalogue lister and fallback discovery modules. |
@@ -226,7 +234,7 @@ Controls added, all inside the existing ranker:
 |---|---|
 | Within one reported lifecycle, a pre-release id token ranks the id below plain siblings | The id is the only lifecycle signal left when the gateway defaults status to active, or when a legacy capture carries no status at all. |
 | Rolling alias (id equals `family`) wins among same-day, same-lifecycle, same-evidence ids | Picks the provider's canonical current id. On the fleet host the legacy `deepseek-v4-flash` alias also carries a locally configured 128K context and 8K output limit, against 1M and 384K for `deepseek-flash`. |
-| Descending model id replaces listing position as the final tie break | Makes the pure function independent of input order while preserving every metadata-free pick. |
+| Descending model id, by UTF-16 code unit, replaces listing position as the final tie break | Makes the pure function independent of input order. It matches the former pick only where locale-aware listing order and code-unit order agree, which holds for single-case ids; on both captures below it changed no pick except DeepSeek's. |
 
 Measured on two real verbose captures (125 records across 10 providers on a development host,
 30 records across 5 providers on the fleet host), comparing the pre-addendum ranker with this
@@ -240,7 +248,9 @@ one, each run over the captured order and its reverse:
 | Ids demoted by the pre-release token rule | 2 | 1 |
 
 The token rule is a naming heuristic, the same shape as the non-chat filter; it deliberately
-matches whole words only (`expert` and `betamax` do not match). An operator pin still selects
+matches whole words only (`expert` and `betamax` do not match). Words split on `-`, `_`, `.`,
+`:` and `/`, so an aggregator routing suffix (`model-preview:free`) or a nested vendor path
+is tokenized too. An operator pin still selects
 an experimental id. Config-defined models with an empty `family` and `release_date` fall back
 to descending id, which is the documented degrade.
 

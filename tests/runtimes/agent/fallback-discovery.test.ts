@@ -635,6 +635,16 @@ describe('catalogue-order invariance', () => {
     expect(result).toEqual({ orders: 24, winners: ['glm/glm-5.2'] });
   });
 
+  it('breaks the final tie by host-independent code-unit order, not locale collation', () => {
+    // A locale-aware sort (OpenCode's listing order) puts `~` and uppercase
+    // before lowercase letters; plain code-unit order puts `~` (0x7E) after
+    // `z` and uppercase before lowercase. The documented rule is the latter.
+    expect(winnersAcrossOrders(['openrouter/z-ai/glm-5v-turbo', 'openrouter/~z-ai/glm-latest']))
+      .toEqual({ orders: 2, winners: ['openrouter/~z-ai/glm-latest'] });
+    expect(winnersAcrossOrders(['acme/apple-2', 'acme/Zeta-2']))
+      .toEqual({ orders: 2, winners: ['acme/apple-2'] });
+  });
+
   it('ranks an older stable sibling above a newer experimental id', () => {
     const result = winnersAcrossOrders(
       ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash-vision-exp'],
@@ -717,6 +727,9 @@ describe('isExperimentalCatalogModel', () => {
       'acme/model_experimental',
       'acme/model.exp',
       'Acme/Model-Preview',
+      // Aggregator shapes: a routing suffix and a nested vendor path.
+      'openrouter/dots-studio/dots-3-note-preview:free',
+      'openrouter/acme/beta/model-2',
     ]) {
       expect(isExperimentalCatalogModel(id), id).toBe(true);
     }
@@ -730,6 +743,7 @@ describe('isExperimentalCatalogModel', () => {
       'acme/expert-coder',
       'acme/betamax',
       'exp/stable-model',
+      'openrouter/acme/model-2:free',
     ]) {
       expect(isExperimentalCatalogModel(id), id).toBe(false);
     }

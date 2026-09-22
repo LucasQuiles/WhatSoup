@@ -98,7 +98,9 @@ export function isNonChatCatalogModel(modelId: string): boolean {
  * arrives with the same status and release date as the stable model it
  * accompanies (observed 2026-09-21: `deepseek-v4-flash-vision-exp`). The id is
  * then the only lifecycle signal left. Tokens are matched as whole words so
- * `expert` or `betamax` never match.
+ * `expert` or `betamax` never match. `:` and `/` also delimit, because
+ * aggregators nest ids (`vendor/model`) and append routing suffixes
+ * (`model-preview:free`).
  */
 const PRE_RELEASE_ID_TOKENS = new Set(['exp', 'experimental', 'preview', 'alpha', 'beta']);
 
@@ -106,7 +108,7 @@ const PRE_RELEASE_ID_TOKENS = new Set(['exp', 'experimental', 'preview', 'alpha'
 export function isExperimentalCatalogModel(modelId: string): boolean {
   const slash = modelId.indexOf('/');
   const modelSegment = (slash >= 0 ? modelId.slice(slash + 1) : modelId).toLowerCase();
-  return modelSegment.split(/[-_.]/).some((token) => PRE_RELEASE_ID_TOKENS.has(token));
+  return modelSegment.split(/[-_.:/]/).some((token) => PRE_RELEASE_ID_TOKENS.has(token));
 }
 
 export interface DiscoveredCandidate {
@@ -196,8 +198,10 @@ export function deriveFallbackChainFromCatalog(opts: {
 
   // One representative per provider. A pin wins while it is not dead. For an
   // automatic pick, completion evidence is stronger than catalogue recency;
-  // lifecycle, release date and finally the model id break the remaining
-  // ties, so the result is a pure function of the id set and its metadata.
+  // then reported lifecycle, the pre-release naming hint, release date, the
+  // rolling alias, and finally the model id break the remaining ties. The
+  // result depends on the id set, its metadata and the evidence oracle, never
+  // on the order of the listing.
   const candidates: DiscoveredCandidate[] = [];
   for (const [catalogProvider, ids] of groups) {
     if (catalogProvider === FREE_TIER_PREFIX && !policy.includeFreeTier) continue;
@@ -295,12 +299,16 @@ export function deriveFallbackChainFromCatalog(opts: {
       // choose an alias over a newer versioned model, and after lifecycle it
       // can never choose a pre-release alias over a stable sibling. On the
       // fleet host it also avoids a legacy alias carrying a smaller locally
-      // configured output limit (observed 2026-09-22).
+      // configured output limit (observed 2026-09-22). The flag is per model,
+      // so it also applies between same-day ids of different families; the
+      // catalogue gives no basis for ranking families against each other.
       if (a.canonicalAlias !== b.canonicalAlias) return a.canonicalAlias ? -1 : 1;
-      // Total order: descending plain string comparison of the id (not
-      // locale-aware, so the result is identical on every host). OpenCode
-      // lists ids ascending within a provider, so this reproduces the former
-      // later-entry pick for metadata-free gateways without reading position.
+      // Total order: descending plain string comparison of the id (UTF-16
+      // code units, not locale-aware, so the result is identical on every
+      // host). OpenCode lists ids with a locale-aware sort, so for a provider
+      // whose ids share one letter case this reproduces the former later-entry
+      // pick; mixed-case ids, `~` or `_` prefixes, and pre-release ids can
+      // resolve differently.
       if (a.model === b.model) return 0;
       return a.model < b.model ? 1 : -1;
     });
