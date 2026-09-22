@@ -71,6 +71,22 @@
       ]
     },
     {
+      "id": "shared-turn-reclamation",
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "tests/runtimes/agent/scheduled-turn-lifecycle.test.ts",
+        "--pool=forks",
+        "--fileParallelism=false",
+        "--retry=0"
+      ],
+      "timeout": 90,
+      "criteria": [
+        "WS-3374-SHARED-SUCCESSOR"
+      ]
+    },
+    {
       "id": "source-types",
       "argv": [
         "node",
@@ -133,7 +149,8 @@
     "tests/core/deferred-turn-obligations.test.ts",
     "tests/core/database-migration-62.test.ts",
     "tests/core/database-retention-deferred-turn-hold.test.ts",
-    "tests/runtimes/agent/deferred-turn-admission.test.ts"
+    "tests/runtimes/agent/deferred-turn-admission.test.ts",
+    "tests/runtimes/agent/scheduled-turn-lifecycle.test.ts"
   ],
   "config_paths": [
     "package.json",

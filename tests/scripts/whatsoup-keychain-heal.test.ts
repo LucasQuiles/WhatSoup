@@ -283,7 +283,14 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
     const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1', '--health-timeout', '1'], {
       KICK_PID: pidPath,
     });
-    expect(kickstartCount(h)).toBe(1);
+    const admission = JSON.stringify({
+      exitCode: result.exitCode,
+      stderr: result.stderr.replaceAll(TOKEN, '[fixture token]').slice(0, 2_000),
+      curlReached: existsSync(h.curlLog),
+      curlAuthorized: existsSync(h.curlLog) && /"authorized": true/.test(readFileSync(h.curlLog, 'utf8')),
+      kickstartLogExists: existsSync(h.kickLog),
+    });
+    expect(kickstartCount(h), admission).toBe(1);
     expect(existsSync(pidPath)).toBe(true);
     expect(result.exitCode).toBe(2);
     expect(performance.now() - started).toBeLessThan(8_000);

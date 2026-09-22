@@ -7,6 +7,7 @@ from enum import Enum
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePath, PurePosixPath
 import stat
@@ -171,9 +172,22 @@ class JsonVersion:
 
 
 @dataclass(frozen=True)
+class JsonFileIdentity:
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
 class JsonObservation:
     payload: Mapping[str, Any] | None
     version: JsonVersion
+    identity: JsonFileIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -304,22 +318,111 @@ def _parent_authority_matches(target: DurableJsonTarget, parent_fd: int) -> bool
             os.close(comparison_fd)
 
 
-def observe_json(target: DurableJsonTarget) -> JsonObservation:
+def _json_file_identity(file_stat: os.stat_result) -> JsonFileIdentity:
+    return JsonFileIdentity(
+        device=file_stat.st_dev,
+        inode=file_stat.st_ino,
+        mode=file_stat.st_mode,
+        uid=file_stat.st_uid,
+        nlink=file_stat.st_nlink,
+        size=file_stat.st_size,
+        mtime_ns=file_stat.st_mtime_ns,
+        ctime_ns=file_stat.st_ctime_ns,
+    )
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate JSON object key")
+        payload[key] = value
+    return payload
+
+
+def _reject_nonfinite_json_constant(_literal: str) -> Any:
+    raise ValueError("non-finite JSON number")
+
+
+def _strict_json_float(literal: str) -> float:
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _load_json(raw: bytes, *, strict: bool) -> Any:
+    if not strict:
+        return json.loads(raw)
+    return json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonfinite_json_constant,
+        parse_float=_strict_json_float,
+    )
+
+
+def _strict_parent_is_stable(
+    target: DurableJsonTarget,
+    parent_fd: int,
+    before: JsonFileIdentity,
+) -> bool:
+    return (
+        _json_file_identity(os.fstat(parent_fd)) == before
+        and _parent_authority_matches(target, parent_fd)
+    )
+
+
+def observe_json(
+    target: DurableJsonTarget,
+    *,
+    strict: bool = False,
+) -> JsonObservation:
     if not isinstance(target, DurableJsonTarget):
         raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
-    if not getattr(os, "O_NOFOLLOW", 0) or not _HAS_OPEN_DIR_FD:
+    if (
+        not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_NONBLOCK", 0)
+        or not _HAS_OPEN_DIR_FD
+    ):
         raise DurableWriteError(ErrorClass.UNSUPPORTED_CAPABILITY.value)
     parent_fd, leaf = _open_target_parent(target)
     try:
-        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        parent_before: JsonFileIdentity | None = None
+        path_before: JsonFileIdentity | None = None
+        if strict:
+            parent_before = _json_file_identity(os.fstat(parent_fd))
+            if not _parent_authority_matches(target, parent_fd):
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            try:
+                path_before = _json_file_identity(
+                    os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                )
+            except FileNotFoundError:
+                if _strict_parent_is_stable(target, parent_fd, parent_before):
+                    return JsonObservation(None, JsonVersion(False, None, None, None))
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            except OSError as exc:
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value) from exc
+        flags = (
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             descriptor = os.open(leaf, flags, dir_fd=parent_fd)
         except FileNotFoundError:
+            if strict:
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
             return JsonObservation(None, JsonVersion(False, None, None, None))
         except OSError as exc:
             raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value) from exc
         try:
             file_stat = os.fstat(descriptor)
+            opened_identity = _json_file_identity(file_stat)
+            if strict and path_before != opened_identity:
+                raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
             if (
                 not stat.S_ISREG(file_stat.st_mode)
                 or file_stat.st_uid != os.getuid()
@@ -340,9 +443,14 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
                 raw += chunk
             if len(raw) > _MAX_JSON_BYTES:
                 raise DurableWriteError(ErrorClass.SIZE.value)
+            post_opened_identity = (
+                _json_file_identity(os.fstat(descriptor)) if strict else None
+            )
             try:
-                payload = json.loads(raw)
+                payload = _load_json(raw, strict=strict)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc
+            except ValueError as exc:
                 raise DurableWriteError(ErrorClass.SERIALIZATION.value) from exc
             if not isinstance(payload, dict):
                 raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
@@ -352,6 +460,21 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
                 raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
             if operation is not None and not isinstance(operation, str):
                 raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
+            if strict:
+                try:
+                    path_after = _json_file_identity(
+                        os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                    )
+                except OSError as exc:
+                    raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value) from exc
+                if (
+                    path_before != opened_identity
+                    or opened_identity != post_opened_identity
+                    or opened_identity != path_after
+                    or parent_before is None
+                    or not _strict_parent_is_stable(target, parent_fd, parent_before)
+                ):
+                    raise DurableWriteError(ErrorClass.IDENTITY_TYPE.value)
             return JsonObservation(
                 payload,
                 JsonVersion(
@@ -360,6 +483,7 @@ def observe_json(target: DurableJsonTarget) -> JsonObservation:
                     generation,
                     operation,
                 ),
+                opened_identity if strict else None,
             )
         finally:
             os.close(descriptor)

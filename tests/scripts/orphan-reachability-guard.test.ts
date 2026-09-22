@@ -122,7 +122,10 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/fleet/auth-loss-mode-bucket-producer.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
-  { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
+  // src/core/recovery-catchup-closure.ts graduated out of this registry when
+  // the turn-recovery supervisor wiring imported it (deploy-gated behind the
+  // catchupReconcile dependency, default off) — the guard's staleness check
+  // now enforces its continued production reachability.
   // Durable background work (Work Ledger + Results Outbox). PR1a lands the schema
   // and store DELIBERATELY unwired so it can be reviewed and verified on its own;
   // PR1b adds the registration write-path at the worker spawn sites and the

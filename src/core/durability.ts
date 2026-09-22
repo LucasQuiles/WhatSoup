@@ -17,6 +17,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
+import {
+  reconcileOperatorCatchupRecoveries,
+  type ReconcileOperatorCatchupParams,
+  type ReconcileOperatorCatchupReport,
+} from './recovery-catchup-closure.ts';
 import { isInboundStatus } from './inbound-status.ts';
 import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
@@ -98,6 +103,7 @@ import type {
   RequeueTurnRecoveryJobResult,
   RenewTurnRecoveryClaimResult,
   TurnRecoveryAssignmentFence,
+  TurnRecoveryAdmissionState,
   TurnRecoveryClaimFence,
   TurnRecoveryEnumerationPage,
   TurnRecoveryJobPersistenceParams,
@@ -1969,6 +1975,21 @@ export class DurabilityEngine {
     return this.turnRecovery.recoverStaleTurnRecoveryJobs(limit);
   }
 
+  /**
+   * Automatic catch-up reconciliation (turn-recovery continuity PR2): close
+   * open `recovery_pending_operator_catchup` links whose conversation has a
+   * delivered catch-up reply. Pure delegation to the hardened core selector —
+   * every closure is still independently re-proven by the closure primitive
+   * and the `inbound_disposition_closure_validate_insert` trigger. Never
+   * throws for per-group rejections (recorded as bounded skips in the report);
+   * see src/core/recovery-catchup-closure.ts.
+   */
+  reconcileOperatorCatchupRecoveries(
+    params: ReconcileOperatorCatchupParams = {},
+  ): ReconcileOperatorCatchupReport {
+    return reconcileOperatorCatchupRecoveries(this.db.raw, params);
+  }
+
   reassignPendingTurnRecoveryJob(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
@@ -2055,6 +2076,14 @@ export class DurabilityEngine {
     options?: { excludeJobId?: number },
   ): boolean {
     return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    return this.turnRecovery.getTurnRecoveryAdmissionStateForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
