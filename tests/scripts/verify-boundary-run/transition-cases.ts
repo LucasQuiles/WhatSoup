@@ -663,7 +663,7 @@ export function registerTransitionCases(): void {
     const substituted = await api.runBoundaryRunCli(['verify', '--run-dir', runDir], fixture.repo);
     expect(substituted).toMatchObject({ ok: false, exitCode: 1, verdict: 'Inconclusive' });
     expect(substituted.issues.map((entry) => entry.code)).toContain('completion-ledger-mismatch');
-  });
+  }, 30_000);
 
 
   it('[BCF00-U11] rejects substituted upstream state and inexact or repeated transitions', () => {

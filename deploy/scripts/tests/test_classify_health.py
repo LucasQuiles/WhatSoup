@@ -7,6 +7,7 @@ blind spot #1392 set out to close.
 """
 import importlib.util
 import pathlib
+import pytest
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "lib" / "classify_health.py"
 _spec = importlib.util.spec_from_file_location("classify_health", _MOD_PATH)
@@ -44,8 +45,9 @@ def test_healthy_model_usable_null_is_degraded():
     assert classify(body) == "degraded"
 
 
-def test_degraded_status_is_degraded():
-    assert classify({"status": "degraded", "turn_capability": _tc()}) == "degraded"
+@pytest.mark.parametrize("status", ["degraded", "unhealthy"])
+def test_non_model_degradation_is_not_a_keychain_heal_case(status):
+    assert classify({"status": status, "turn_capability": _tc()}) == "non_model"
 
 
 def test_missing_turn_capability_is_fields():
@@ -58,3 +60,30 @@ def test_missing_model_usable_is_fields():
 
 def test_non_dict_is_parse():
     assert classify(["not", "a", "dict"]) == "parse"
+
+
+@pytest.mark.parametrize("status", ["", "maintenance", None, 42, False, {}, []])
+@pytest.mark.parametrize("usable", [True, False])
+def test_unknown_status_is_fields_not_recovery(status, usable):
+    assert classify({
+        "status": status,
+        "turn_capability": _tc(model_usable=usable),
+    }) == "fields"
+
+
+@pytest.mark.parametrize("status", ["healthy", "degraded"])
+@pytest.mark.parametrize("usable", [True, False])
+@pytest.mark.parametrize("stale", [None, "false", 0, 1, {}, []])
+def test_invalid_freshness_is_fields_not_recovery(status, usable, stale):
+    assert classify({
+        "status": status,
+        "turn_capability": _tc(model_usable=usable, model_usable_stale=stale),
+    }) == "fields"
+
+
+@pytest.mark.parametrize("status", ["healthy", "degraded"])
+@pytest.mark.parametrize("usable", [True, False])
+def test_missing_freshness_is_fields_not_recovery(status, usable):
+    tc = _tc(model_usable=usable)
+    del tc["model_usable_stale"]
+    assert classify({"status": status, "turn_capability": tc}) == "fields"

@@ -40,12 +40,40 @@ afterEach(() => {
 });
 
 describe('check-bot-errors-runtime-manifest guard', () => {
+  it('pins the deployment-qualification command, helper, and profiles as one bundle', () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(repoRoot, 'deploy/bot-errors-runtime-manifest.json'), 'utf8'),
+    ) as { files: Array<{ path: string }> };
+    const paths = new Set(manifest.files.map((entry) => entry.path));
+
+    for (const required of [
+      'deploy/scripts/qualify-health-deployment.py',
+      'deploy/scripts/lib/deployment_effective_config.py',
+      'deploy/scripts/write_effective_config_record.py',
+      'deploy/scripts/deployment-qualification-profile.json',
+      'deploy/scripts/health-deployment-qualification-profile.json',
+    ]) {
+      expect(paths).toContain(required);
+    }
+  });
+
+  it('requires deployment-qualification profiles as non-Python dependencies', () => {
+    const required = computeRequiredRuntimePaths(repoRoot);
+
+    expect(required).toContain('deploy/scripts/deployment-qualification-profile.json');
+    expect(required).toContain('deploy/scripts/health-deployment-qualification-profile.json');
+  });
+
   it('requires the shared launcher PATH helper as a non-Python runtime dependency', () => {
     expect(EXPLICIT_REQUIRED_RUNTIME_PATHS).toContain('deploy/lib/runtime-path.sh');
   });
   it('requires the runtime health signal registry as an integrity-pinned dependency', () => {
     expect(computeRequiredRuntimePaths(repoRoot))
       .toContain('src/lib/fault-taxonomy-registry.json');
+  });
+
+  it('requires the shared redaction implementation as an integrity-pinned dependency', () => {
+    expect(EXPLICIT_REQUIRED_RUNTIME_PATHS).toContain('src/lib/redaction-text.ts');
   });
 
   it('pins the fenced bounded JSONL runtime module and capability markers', () => {

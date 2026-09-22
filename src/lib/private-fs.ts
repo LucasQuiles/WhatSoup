@@ -7,7 +7,7 @@
 //   forceEnsurePrivateDirectorySync (auth-bond / bot-errors pattern):
 //     mkdir-then-force-chmod. Refuses symlinks after mkdir.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -26,8 +26,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import type { Stats } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import type { BigIntStats, Stats } from 'node:fs';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 export function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
   const err = new Error(message) as NodeJS.ErrnoException;
@@ -193,6 +193,80 @@ export interface PrivateReadOptions {
   requirePrivateParent?: boolean;
 }
 
+export interface PrivateObservedReadOptions extends PrivateReadOptions {
+  observation: { root: string };
+}
+
+export interface PrivateFileIdentity {
+  device: string;
+  inode: string;
+  size: number;
+  mode: number;
+  uid: number;
+  links: number;
+  modifiedNs: string;
+  changedNs: string;
+}
+
+export interface PrivateFileObservation {
+  bytes: Buffer;
+  rawSha256: string;
+  identity: PrivateFileIdentity;
+}
+
+function observedIdentity(stat: Stats | BigIntStats): PrivateFileIdentity {
+  if (!('mtimeNs' in stat)) {
+    throw privateWriteError('private observation requires precise file metadata', 'ENOTSUP');
+  }
+  return {
+    device: String(stat.dev), inode: String(stat.ino), size: Number(stat.size),
+    mode: Number(stat.mode), uid: Number(stat.uid), links: Number(stat.nlink),
+    modifiedNs: String(stat.mtimeNs), changedNs: String(stat.ctimeNs),
+  };
+}
+
+function assertUnchangedObservation(
+  before: PrivateFileIdentity, after: PrivateFileIdentity, label: string,
+): void {
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw privateWriteError(`refusing to read changed ${label}`, 'ESTALE');
+  }
+}
+
+function observeReadParents(filePath: string, root: string, label: string) {
+  if (!isAbsolute(root) || resolve(root) !== root || !isAbsolute(filePath) || resolve(filePath) !== filePath) {
+    throw privateWriteError('private observation requires canonical absolute paths', 'EINVAL');
+  }
+  const child = relative(root, filePath);
+  if (!child || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw privateWriteError('private file is outside its observation root', 'EINVAL');
+  }
+  if (typeof process.getuid !== 'function') {
+    throw privateWriteError('private observation requires current-user ownership evidence', 'ENOTSUP');
+  }
+  const parents: { path: string; identity: PrivateFileIdentity }[] = [];
+  let path = parse(filePath).root;
+  const parts = relative(path, dirname(filePath)).split(sep).filter(Boolean);
+  for (const part of ['', ...parts]) {
+    if (part) path = join(path, part);
+    const stat = lstatSync(path, { bigint: true });
+    if (stat.isSymbolicLink()) {
+      throw privateWriteError(`refusing to read ${label} through a symlink ancestor`, 'ELOOP');
+    }
+    if (!stat.isDirectory()) {
+      throw privateWriteError(`refusing to read ${label} through a non-directory ancestor`, 'EINVAL');
+    }
+    if (path === root || path.startsWith(root + sep)) {
+      assertCurrentUserOwnsPrivatePath(stat, `refusing to use ${label} directory not owned by current user`);
+      if ((Number(stat.mode) & 0o077) !== 0) {
+        throw privateWriteError(`refusing to use ${label} directory with non-private permissions`, 'EACCES');
+      }
+    }
+    parents.push({ path, identity: observedIdentity(stat) });
+  }
+  return parents;
+}
+
 function assertOwnedDirectorySync(dirPath: string, label: string): Stats {
   const stat = lstatSync(dirPath);
   if (stat.isSymbolicLink()) {
@@ -215,15 +289,15 @@ function assertStrictPrivateDirectorySync(dirPath: string, label: string): void 
   }
 }
 
-function assertCurrentUserOwnsPrivatePath(stat: Stats, message: string): void {
+function assertCurrentUserOwnsPrivatePath(stat: Stats | BigIntStats, message: string): void {
   const currentUserId = typeof process.getuid === 'function' ? process.getuid() : null;
-  if (currentUserId !== null && stat.uid !== currentUserId) {
+  if (currentUserId !== null && Number(stat.uid) !== currentUserId) {
     throw privateWriteError(message, 'EACCES');
   }
 }
 
 function assertReadablePrivateFileStat(
-  stat: Stats,
+  stat: Stats | BigIntStats,
   label: string,
   maxBytes: number,
 ): void {
@@ -237,7 +311,7 @@ function assertReadablePrivateFileStat(
     stat,
     `refusing to read ${label} not owned by current user`,
   );
-  if ((stat.mode & 0o077) !== 0) {
+  if ((Number(stat.mode) & 0o077) !== 0) {
     throw privateWriteError(`refusing to read ${label} with non-private permissions`, 'EACCES');
   }
   if (stat.size > maxBytes) {
@@ -246,13 +320,20 @@ function assertReadablePrivateFileStat(
 }
 
 /** Read a bounded private regular file without following symlinks or FIFOs. */
-export function readPrivateFileSync(filePath: string, options: PrivateReadOptions): string | null {
+export function readPrivateFileSync(filePath: string, options: PrivateObservedReadOptions): PrivateFileObservation | null;
+export function readPrivateFileSync(filePath: string, options: PrivateReadOptions): string | null;
+export function readPrivateFileSync(
+  filePath: string, options: PrivateReadOptions | PrivateObservedReadOptions,
+): string | PrivateFileObservation | null {
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
     throw new RangeError('maxBytes must be a positive safe integer');
   }
   const label = options.label ?? 'private file';
   const dir = dirname(filePath);
+  const observation = 'observation' in options ? options.observation : null;
+  let parents: ReturnType<typeof observeReadParents> = [];
   try {
+    if (observation) parents = observeReadParents(filePath, observation.root, label);
     if (options.requirePrivateParent === false) assertOwnedDirectorySync(dir, label);
     else assertStrictPrivateDirectorySync(dir, label);
   } catch (err) {
@@ -260,14 +341,17 @@ export function readPrivateFileSync(filePath: string, options: PrivateReadOption
     throw err;
   }
 
-  let pathStat: Stats;
+  let pathStat: Stats | BigIntStats;
   try {
-    pathStat = lstatSync(filePath);
+    pathStat = observation ? lstatSync(filePath, { bigint: true }) : lstatSync(filePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
   assertReadablePrivateFileStat(pathStat, label, options.maxBytes);
+  if (observation && Number(pathStat.nlink) !== 1) {
+    throw privateWriteError(`refusing to observe ${label} with a hard link`, 'EMLINK');
+  }
 
   let fd: number | null = null;
   try {
@@ -275,8 +359,9 @@ export function readPrivateFileSync(filePath: string, options: PrivateReadOption
       filePath,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const openedStat = fstatSync(fd);
+    const openedStat = observation ? fstatSync(fd, { bigint: true }) : fstatSync(fd);
     assertReadablePrivateFileStat(openedStat, label, options.maxBytes);
+    if (observation) assertUnchangedObservation(observedIdentity(pathStat), observedIdentity(openedStat), label);
 
     const data = Buffer.alloc(options.maxBytes + 1);
     let length = 0;
@@ -288,7 +373,27 @@ export function readPrivateFileSync(filePath: string, options: PrivateReadOption
     if (length > options.maxBytes) {
       throw privateWriteError(`refusing to read ${label} above maximum size`, 'EFBIG');
     }
-    return data.subarray(0, length).toString('utf-8');
+    const bytes = data.subarray(0, length);
+    if (!observation) return bytes.toString('utf-8');
+
+    const afterStat = fstatSync(fd, { bigint: true });
+    assertReadablePrivateFileStat(afterStat, label, options.maxBytes);
+    const identity = observedIdentity(afterStat);
+    assertUnchangedObservation(observedIdentity(openedStat), identity, label);
+    assertUnchangedObservation(identity, observedIdentity(lstatSync(filePath, { bigint: true })), label);
+    if (length !== identity.size) {
+      throw privateWriteError(`refusing to read changed ${label}`, 'ESTALE');
+    }
+    const afterParents = observeReadParents(filePath, observation.root, label);
+    for (const [index, before] of parents.entries()) {
+      const after = afterParents[index];
+      if (!after || before.path !== after.path || before.identity.device !== after.identity.device
+        || before.identity.inode !== after.identity.inode || before.identity.mode !== after.identity.mode
+        || before.identity.uid !== after.identity.uid) {
+        throw privateWriteError(`refusing to read ${label} through a changed ancestor`, 'ESTALE');
+      }
+    }
+    return { bytes, rawSha256: createHash('sha256').update(bytes).digest('hex'), identity };
   } finally {
     if (fd !== null) closeSync(fd);
   }

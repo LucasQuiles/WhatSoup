@@ -59,12 +59,12 @@ case "$node_policy" in
   *) usage; exit 2 ;;
 esac
 
-WHATSOUP_CAPABILITY_PLATFORM="$(whatsoup_normalize_platform "$(uname -s 2>/dev/null)" 2>/dev/null || true)"
-export WHATSOUP_CAPABILITY_PLATFORM
-if [ -z "$WHATSOUP_CAPABILITY_PLATFORM" ]; then
+if ! WHATSOUP_CAPABILITY_PLATFORM="$(whatsoup_first_line uname -s)" ||
+   ! WHATSOUP_CAPABILITY_PLATFORM="$(whatsoup_normalize_platform "$WHATSOUP_CAPABILITY_PLATFORM")"; then
   echo "host doctor: unsupported or unreadable platform" >&2
   exit 2
 fi
+export WHATSOUP_CAPABILITY_PLATFORM
 
 records="$(whatsoup_capability_records "$profile" "$WHATSOUP_CAPABILITY_PLATFORM" "$node_policy" 2>/dev/null)" || {
   echo "host doctor: capability contract is malformed" >&2

@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
 import { TurnRecoveryClaimFenceError, isTurnRecoveryReplayEligible } from '../../core/turn-recovery-store.ts';
 import type {
+  ReconcileOperatorCatchupParams,
+  ReconcileOperatorCatchupReport,
+} from '../../core/recovery-catchup-closure.ts';
+import type {
   ClaimTurnRecoveryJobOptions,
   ClaimTurnRecoveryJobResult,
   ReassignTurnRecoveryJobResult,
@@ -79,6 +83,15 @@ export interface TurnRecoverySupervisorDurability {
   recoverStaleTurnRecoveryJobs(limit?: number): { requeued: number; exhausted: number };
   getTurnRecoveryOriginalDeliveryStatus(jobId: number): { outboundStatus: string } | undefined;
   getTurnRecoverySourceProof(jobId: number): { processingStatus: string; outboundStatus: string } | undefined;
+  /**
+   * Automatic catch-up reconciliation (PR2 wiring). Optional: a durability
+   * surface without it simply never reconciles; the supervisor's
+   * `catchupReconcile` dep independently gates invocation, so absence of
+   * either is off, never an error.
+   */
+  reconcileOperatorCatchupRecoveries?(
+    params?: ReconcileOperatorCatchupParams,
+  ): ReconcileOperatorCatchupReport;
 }
 
 /**
@@ -233,6 +246,12 @@ export interface TurnRecoveryScanResult {
    * future alert wiring can distinguish the two.
    */
   readonly processingErrors: number;
+  /** Open catch-up groups the reconciler attempted to close this scan (0 when the gate is off). */
+  readonly catchupReconcileAttempted: number;
+  /** Catch-up groups actually auto-closed this scan (proof re-verified by the closure primitive + trigger). */
+  readonly catchupReconcileClosed: number;
+  /** Catch-up groups left pending this scan (no candidate yet, or a fail-closed rejection). */
+  readonly catchupReconcileSkipped: number;
 }
 
 export interface TurnRecoverySupervisorHealth {
@@ -263,7 +282,8 @@ export type TurnRecoveryScanFailureReason =
   | 'durability_unavailable'
   | 'stale_claim_recovery_failed'
   | 'enumeration_failed'
-  | 'processing_failed';
+  | 'processing_failed'
+  | 'catchup_reconcile_failed';
 
 export interface TurnRecoverySupervisorDeps {
   readonly instanceName: string;
@@ -297,6 +317,17 @@ export interface TurnRecoverySupervisorDeps {
   readonly leaseSeconds?: number;
   readonly backoffSeconds?: number;
   readonly scanIntervalMs?: number;
+  /**
+   * Deploy gate for automatic catch-up reconciliation. Absent/null (the
+   * default) keeps the supervisor exactly on its pre-PR2 behavior — no
+   * reconciliation, no reads beyond the existing scan. Present, the sweep
+   * runs once per scan cycle right after `recoverStaleTurnRecoveryJobs`,
+   * bounded by `groupLimit` (default RECONCILE_DEFAULT_GROUP_LIMIT). The
+   * reconciler itself is best-effort and fail-closed; a whole-call failure
+   * (schema drift, storage error) is recorded as 'catchup_reconcile_failed'
+   * without aborting the rest of the scan.
+   */
+  readonly catchupReconcile?: { readonly groupLimit?: number } | null;
 }
 
 function emptyScanResult(): TurnRecoveryScanResult {
@@ -305,6 +336,7 @@ function emptyScanResult(): TurnRecoveryScanResult {
     exhausted: 0, reassigned: 0, skippedBlockedUnsafe: 0,
     skippedOriginalDeliveryPending: 0, skippedUnsupportedScope: 0,
     skippedNotDispatchable: 0, processingErrors: 0,
+    catchupReconcileAttempted: 0, catchupReconcileClosed: 0, catchupReconcileSkipped: 0,
   };
 }
 
@@ -314,6 +346,7 @@ function mergeScanResult(
     exhausted: number; reassigned: number; skippedBlockedUnsafe: number;
     skippedOriginalDeliveryPending: number; skippedUnsupportedScope: number;
     skippedNotDispatchable: number; processingErrors: number;
+    catchupReconcileAttempted: number; catchupReconcileClosed: number; catchupReconcileSkipped: number;
   },
   delta: Partial<TurnRecoveryScanResult>,
 ): void {
@@ -328,6 +361,9 @@ function mergeScanResult(
   into.skippedUnsupportedScope += delta.skippedUnsupportedScope ?? 0;
   into.skippedNotDispatchable += delta.skippedNotDispatchable ?? 0;
   into.processingErrors += delta.processingErrors ?? 0;
+  into.catchupReconcileAttempted += delta.catchupReconcileAttempted ?? 0;
+  into.catchupReconcileClosed += delta.catchupReconcileClosed ?? 0;
+  into.catchupReconcileSkipped += delta.catchupReconcileSkipped ?? 0;
 }
 
 /**
@@ -355,6 +391,7 @@ export class TurnRecoverySupervisor {
   private readonly leaseSeconds: number;
   private readonly backoffSeconds: number;
   private readonly scanIntervalMs: number;
+  private readonly catchupReconcile: { readonly groupLimit?: number } | null;
 
   private scanTimer: ReturnType<typeof setTimeout> | null = null;
   private scanInFlight: Promise<TurnRecoveryScanResult> | null = null;
@@ -391,6 +428,7 @@ export class TurnRecoverySupervisor {
     this.leaseSeconds = deps.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
     this.backoffSeconds = deps.backoffSeconds ?? DEFAULT_BACKOFF_SECONDS;
     this.scanIntervalMs = deps.scanIntervalMs ?? SCAN_INTERVAL_MS;
+    this.catchupReconcile = deps.catchupReconcile ?? null;
   }
 
   /** Start the bounded steady-state scan loop (unref'd; never blocks process exit). */
@@ -493,6 +531,36 @@ export class TurnRecoverySupervisor {
       log.warn({ err }, 'turn recovery supervisor stale-claim sweep failed');
     }
 
+    // PR2: automatic catch-up reconciliation (deploy-gated by the
+    // `catchupReconcile` dep; absent = exactly the pre-PR2 behavior). Runs
+    // after the stale-claim sweep so freshly-reclaimed rows are visible, and
+    // before enumeration so this cycle's totals include its outcome. The
+    // reconciler itself never throws for per-group rejections; only a
+    // whole-call failure (storage/schema) lands in the catch below — the
+    // scan continues, the failure is surfaced, nothing is retried mid-scan.
+    let catchupTotals: Pick<TurnRecoveryScanResult,
+      'catchupReconcileAttempted' | 'catchupReconcileClosed' | 'catchupReconcileSkipped'
+    > | null = null;
+    if (this.catchupReconcile !== null && durability.reconcileOperatorCatchupRecoveries !== undefined) {
+      try {
+        const report = durability.reconcileOperatorCatchupRecoveries({
+          groupLimit: this.catchupReconcile.groupLimit,
+        });
+        catchupTotals = {
+          catchupReconcileAttempted: report.attempted,
+          catchupReconcileClosed: report.closed,
+          catchupReconcileSkipped: report.skipped,
+        };
+        const errored = report.skips.filter((skip) => skip.reason === 'error');
+        if (errored.length > 0) {
+          log.error({ errored }, 'turn recovery catch-up reconciler recorded unexpected-error skips');
+        }
+      } catch (err) {
+        failureReason = failureReason ?? 'catchup_reconcile_failed';
+        log.warn({ err }, 'turn recovery supervisor catch-up reconciliation failed');
+      }
+    }
+
     let page: TurnRecoveryEnumerationPage;
     try {
       page = durability.getOutstandingTurnRecoveryJobsForSupervisor({
@@ -510,6 +578,7 @@ export class TurnRecoverySupervisor {
       exhausted: 0, reassigned: 0, skippedBlockedUnsafe: 0,
       skippedOriginalDeliveryPending: 0, skippedUnsupportedScope: 0,
       skippedNotDispatchable: 0, processingErrors: 0,
+      catchupReconcileAttempted: 0, catchupReconcileClosed: 0, catchupReconcileSkipped: 0,
     };
 
     try {
@@ -526,6 +595,7 @@ export class TurnRecoverySupervisor {
     if (totals.processingErrors > 0) {
       failureReason = failureReason ?? 'processing_failed';
     }
+    if (catchupTotals !== null) mergeScanResult(totals, catchupTotals);
     if (failureReason) this.recordScanFailure(failureReason);
     else this.recordScanSuccess();
     return totals;

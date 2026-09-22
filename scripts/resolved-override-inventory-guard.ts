@@ -73,9 +73,21 @@
 //   - exit 1 BLOCK on any finding outside the allowlist, or when an allowlisted file's match
 //     count differs from its pinned count (a new site in an audited file is still a new site).
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  emitInventoryGuardReport,
+  inventoryGuardCliFailure,
+  inventorySourceFiles,
+  parseInventoryGuardArgs,
+  runInventoryGuardCliBoundary,
+  sourceInventoryDiagnostics,
+  type InventoryGuardExitCode,
+  type InventoryGuardReport,
+  type SourceInventoryCounts,
+  type SourceInventoryFileSystem,
+  type SourceInventoryIssue,
+} from './lib/guard-core.ts';
 
 export type ResolvedOverrideRule =
   | 'executing-literal'
@@ -114,6 +126,10 @@ export interface ResolvedOverrideScan {
   filesExamined: Record<ScanRoot, number>;
   /** Candidate files that could not be read — any entry makes the scan inconclusive. */
   unreadable: string[];
+  scanIssues: SourceInventoryIssue[];
+  scanIssueCount: number;
+  scanIssuesOmitted: number;
+  inventoryCounts: SourceInventoryCounts;
 }
 
 export const EXIT_PASS = 0;
@@ -498,128 +514,170 @@ export function scanFileForResolvedOverrides(relPath: string, content: string): 
   return findings;
 }
 
-function walkTsFiles(root: string, dir: string, acc: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return; // an absent root yields zero candidates, which the caller refuses to certify
-  }
-  entries.sort();
-  for (const entry of entries) {
-    if (entry === 'node_modules' || entry === '.git' || entry === 'dist') continue;
-    const full = path.join(dir, entry);
-    let st;
-    try {
-      st = statSync(full);
-    } catch {
-      acc.push(path.relative(root, full)); // surfaces as unreadable below, never skipped
-      continue;
-    }
-    if (st.isDirectory()) {
-      walkTsFiles(root, full, acc);
-    } else if (SCANNED_EXT_RE.test(entry)) {
-      acc.push(path.relative(root, full));
-    }
-  }
-}
-
 /**
  * Scan every `.ts` file under each scan root of `cwd`, reporting findings outside the
  * allowlist, per-row allowlist tallies, per-root examined counts, and unreadable files.
  */
-export function scanRepoResolvedOverridesCounted(cwd: string): ResolvedOverrideScan {
+export function scanRepoResolvedOverridesCounted(
+  cwd: string,
+  fileSystem?: SourceInventoryFileSystem,
+): ResolvedOverrideScan {
   const filesExamined: Record<ScanRoot, number> = { src: 0, tests: 0 };
-  const unreadable: string[] = [];
   const tallies = new Map<string, number>(RESOLVED_OVERRIDE_ALLOWLIST.map((entry) => [entry.file, 0]));
   const findings: ResolvedOverrideFinding[] = [];
-  for (const root of SCAN_ROOTS) {
-    const candidates: string[] = [];
-    walkTsFiles(cwd, path.join(cwd, root), candidates);
-    for (const rel of candidates) {
-      let content: string;
-      try {
-        content = readFileSync(path.join(cwd, rel), 'utf8');
-      } catch {
-        unreadable.push(normalizeRel(rel));
-        continue;
-      }
-      filesExamined[root] += 1;
-      const fileFindings = scanFileForResolvedOverrides(rel, content);
-      if (fileFindings.length === 0) continue;
-      const key = normalizeRel(rel);
-      if (tallies.has(key)) {
-        tallies.set(key, (tallies.get(key) ?? 0) + fileFindings.length);
-      } else {
-        findings.push(...fileFindings);
-      }
+  const inventory = inventorySourceFiles({
+    repoRoot: cwd,
+    roots: SCAN_ROOTS,
+    includeFile: (file) => SCANNED_EXT_RE.test(file),
+    excludeDirectory: (directory) => ['node_modules', '.git', 'dist'].includes(path.basename(directory)),
+    fileSystem,
+  });
+  for (const file of inventory.files) {
+    const root = file.root as ScanRoot;
+    filesExamined[root] += 1;
+    const fileFindings = scanFileForResolvedOverrides(file.path, file.content);
+    if (fileFindings.length === 0) continue;
+    const key = normalizeRel(file.path);
+    if (tallies.has(key)) {
+      tallies.set(key, (tallies.get(key) ?? 0) + fileFindings.length);
+    } else {
+      findings.push(...fileFindings);
     }
   }
   return {
     findings,
     allowlisted: RESOLVED_OVERRIDE_ALLOWLIST.map((entry) => ({ entry, matches: tallies.get(entry.file) ?? 0 })),
     filesExamined,
-    unreadable,
+    unreadable: inventory.issues
+      .filter((issue) => issue.operation === 'read')
+      .map((issue) => issue.path),
+    scanIssues: inventory.issues,
+    scanIssueCount: inventory.counts.issuesTotal,
+    scanIssuesOmitted: inventory.counts.issuesOmitted,
+    inventoryCounts: inventory.counts,
   };
+}
+
+export interface ResolvedOverrideGuardEvaluation {
+  status: 'pass' | 'block' | 'inconclusive';
+  exitCode: 0 | 1 | 2;
+  scan: ResolvedOverrideScan;
+}
+
+export function evaluateResolvedOverrideInventoryGuard(
+  cwd: string,
+  fileSystem?: SourceInventoryFileSystem,
+): ResolvedOverrideGuardEvaluation {
+  const scan = scanRepoResolvedOverridesCounted(cwd, fileSystem);
+  const emptyRoot = SCAN_ROOTS.some((root) => scan.filesExamined[root] === 0);
+  const missingPositiveControl = scan.allowlisted.some(({ matches }) => matches === 0);
+  const inventoryMismatch = scan.allowlisted.some(
+    ({ entry, matches }) => matches > 0 && matches !== entry.expectedMatches,
+  );
+  if (scan.scanIssueCount > 0 || emptyRoot || missingPositiveControl) {
+    return { status: 'inconclusive', exitCode: 2, scan };
+  }
+  if (inventoryMismatch || scan.findings.length > 0) {
+    return { status: 'block', exitCode: 1, scan };
+  }
+  return { status: 'pass', exitCode: 0, scan };
 }
 
 const TAG = 'resolved-override-inventory-guard';
 
-function main(): number {
-  const cwd = process.cwd();
-  const scan = scanRepoResolvedOverridesCounted(cwd);
-  const examined = SCAN_ROOTS.map((root) => `${root}/=${scan.filesExamined[root]}`).join(', ');
+function reportFor(evaluation: ResolvedOverrideGuardEvaluation): InventoryGuardReport {
+  const scan = evaluation.scan;
+  return {
+    schemaVersion: 1,
+    guard: TAG,
+    status: evaluation.status,
+    exitCode: evaluation.exitCode,
+    counts: {
+      filesExamined: Object.values(scan.filesExamined).reduce((total, count) => total + count, 0),
+      findings: scan.findings.length,
+      scanIssues: scan.scanIssueCount,
+      scanIssuesOmitted: scan.scanIssuesOmitted,
+      rootsScanned: scan.inventoryCounts.rootsScanned,
+      directoriesScanned: scan.inventoryCounts.directoriesScanned,
+      entriesInspected: scan.inventoryCounts.entriesInspected,
+      candidatesFound: scan.inventoryCounts.candidatesFound,
+      allowlistEntries: scan.allowlisted.length,
+    },
+    diagnostics: [
+      ...sourceInventoryDiagnostics({ issues: scan.scanIssues }),
+      ...scan.allowlisted
+        .filter(({ entry, matches }) => matches !== entry.expectedMatches)
+        .map(({ entry, matches }) => ({
+          code: matches === 0
+            ? 'guard.resolved.allowlist-positive-control-missing'
+            : 'guard.resolved.allowlist-count-mismatch',
+          path: entry.file,
+          subject: `${matches}/${entry.expectedMatches}`,
+        })),
+      ...scan.findings.map((finding) => ({
+        code: `guard.resolved.${finding.rule}`,
+        path: finding.file,
+        line: finding.line,
+      })),
+    ],
+  };
+}
 
+function humanLines(evaluation: ResolvedOverrideGuardEvaluation): string[] {
+  const scan = evaluation.scan;
+  const examined = SCAN_ROOTS.map((root) => `${root}/=${scan.filesExamined[root]}`).join(', ');
+  if (scan.scanIssueCount > 0) {
+    return [
+      `${TAG}: INCONCLUSIVE — ${scan.scanIssueCount} source inventory issue(s); ` +
+        'use --verbose or --json for bounded diagnostics.',
+    ];
+  }
   const emptyRoots = SCAN_ROOTS.filter((root) => scan.filesExamined[root] === 0);
   if (emptyRoots.length > 0) {
-    // A location check (does the directory exist) is not a work check (were files read).
-    console.error(
-      `${TAG}: INCONCLUSIVE — examined 0 source file(s) under ${emptyRoots.map((root) => path.join(cwd, root)).join(' and ')} (${examined}). ` +
+    return [
+      `${TAG}: INCONCLUSIVE — examined 0 source file(s) under ${emptyRoots.map((root) => `${root}/`).join(' and ')} (${examined}). ` +
         'A scan that read nothing cannot certify the resolved-override inventory, which is not a pass.',
-    );
-    return EXIT_INCONCLUSIVE;
+    ];
   }
-  if (scan.unreadable.length > 0) {
-    console.error(`${TAG}: INCONCLUSIVE — ${scan.unreadable.length} candidate file(s) could not be read (a read failure is not "no findings"):`);
-    for (const file of scan.unreadable) console.error(`  ${file}`);
-    return EXIT_INCONCLUSIVE;
-  }
-
-  let inconclusive = false;
-  let block = false;
+  const lines: string[] = [];
   for (const { entry, matches } of scan.allowlisted) {
     if (matches === 0) {
-      inconclusive = true;
-      console.error(
+      lines.push(
         `${TAG}: INCONCLUSIVE — allowlisted site ${entry.file} produced 0 matches (expected ${entry.expectedMatches}). ` +
           'The allowlist is the detector\'s positive control: either the site moved (update the inventory row) or the detector no longer matches — neither certifies the tree.',
       );
     } else if (matches !== entry.expectedMatches) {
-      block = true;
-      console.error(
+      lines.push(
         `${TAG}: ${entry.file} has ${matches} resolved-override site(s) but the inventory pins ${entry.expectedMatches} — ` +
           'audit the new site (or the removal) and update expectedMatches deliberately (invariant.3435-resolved-override-inventory).',
       );
     }
   }
   if (scan.findings.length > 0) {
-    block = true;
-    console.error(
+    lines.push(
       `${TAG}: resolved-override site(s) outside the test-only allowlist — a production caller setting \`resolved\` reopens the empty-context fail-open #3438 closed (invariant.3435-resolved-override-inventory):`,
     );
-    for (const f of scan.findings) console.error(`  ${f.file}:${f.line} [${f.rule}] ${f.detail}`);
+    for (const f of scan.findings) lines.push(`  ${f.file}:${f.line} [${f.rule}] ${f.detail}`);
   }
-  if (inconclusive) return EXIT_INCONCLUSIVE;
-  if (block) return EXIT_BLOCK;
-
+  if (lines.length > 0) return lines;
   const pinned = scan.allowlisted.map(({ entry, matches }) => `${entry.file}=${matches}`).join(', ');
-  console.log(
+  return [
     `${TAG}: no resolved-override sites outside the test-only allowlist across ${examined} source file(s); ` +
       `inventory pinned (${pinned}) (invariant.3435-resolved-override-inventory)`,
-  );
-  return EXIT_PASS;
+  ];
+}
+
+function main(argv: readonly string[] = process.argv.slice(2)): InventoryGuardExitCode {
+  const parsed = parseInventoryGuardArgs(argv);
+  if (!parsed.ok) {
+    const report = inventoryGuardCliFailure(TAG, parsed.code);
+    return emitInventoryGuardReport(report, parsed.mode, [`${TAG}: INCONCLUSIVE — ${parsed.code}`]);
+  }
+  const evaluation = evaluateResolvedOverrideInventoryGuard(process.cwd());
+  return emitInventoryGuardReport(reportFor(evaluation), parsed.mode, humanLines(evaluation));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exit(main());
+  const argv = process.argv.slice(2);
+  process.exitCode = runInventoryGuardCliBoundary(TAG, argv, () => main(argv));
 }

@@ -125,6 +125,7 @@ const requiredPackageScripts = {
     'npm run guard:guard-test-coverage',
     'npm run guard:lint:src',
     'npm run test:tokenomics',
+    'npm run test:deployment-qualification',
     'npm run test:drills',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck',
@@ -720,6 +721,38 @@ describe('safeguard diagnostics', () => {
 
     expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
       status: 'pass',
+    });
+  });
+
+  it('rejects release verification without deployment qualification', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run test:deployment-qualification', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['missing npm run test:deployment-qualification']),
+    });
+  });
+
+  it('rejects deployment qualification moved after release coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run test:deployment-qualification', '')
+          .replace('npm run coverage:check -- --pool=forks --fileParallelism=false',
+            'npm run coverage:check -- --pool=forks --fileParallelism=false && npm run test:deployment-qualification'),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['exact command sequence mismatch']),
     });
   });
 

@@ -96,11 +96,15 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
 }));
-vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
-  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
-  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
-  listModelCatalog: vi.fn(() => Promise.resolve({ status: 'unavailable', reason: 'spawn-error' })),
-}));
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/binary-preflight.ts')>();
+  return {
+    ...actual,
+    probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+    probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+    listModelCatalog: vi.fn(() => Promise.resolve({ status: 'unavailable', reason: 'spawn-error' })),
+  };
+});
 
 vi.mock('../../../src/runtimes/agent/providers/chain-entry-canary.ts', () => ({
   probeChainEntryCompletion: canaryProbeMock,
@@ -143,8 +147,19 @@ const CATALOGUE = [
 ];
 
 type CatalogueListing =
-  | { status: 'ok'; ids: string[] }
-  | { status: 'unavailable'; reason: 'spawn-error' | 'timeout' | 'empty' };
+  | {
+      status: 'ok';
+      ids: string[];
+      metadata?: Record<string, {
+        status?: string;
+        releaseDate?: string;
+        textOutput?: boolean;
+        toolCall?: boolean;
+      }>;
+      captureMode?: 'refreshed' | 'cached' | 'legacy';
+      refreshFailure?: string;
+    }
+  | { status: 'unavailable'; reason: string };
 
 function makeRuntime(
   discovery: AgentFallbackDiscoveryConfig | null,
@@ -176,14 +191,30 @@ type RuntimeView = {
     runChainCanarySweep(trigger: string): Promise<void>;
     chainCanary: Map<string, { status: string; evidence: string | null; durationMs: number; checkedAt: number }>;
     chainCanaryConfig: { trustMs: number };
-    lastDiscovery: { at: number; catalogueSize: number } | null;
+    lastDiscovery: {
+      at: number;
+      catalogueSize: number;
+      captureMode: string;
+      refreshFailure: string | null;
+    } | null;
   };
   getFallbackState(): {
     fallbackDiscovery: {
       mode: 'auto';
       lastDerivedAt: number | null;
       catalogueSize: number | null;
-      candidates: Array<{ model: string; evidence: string; freeTier: boolean; selected: boolean }>;
+      captureMode: string | null;
+      refreshFailure: string | null;
+      candidates: Array<{
+        model: string;
+        evidence: string;
+        catalogStatus: string | null;
+        releaseDate: string | null;
+        zeroCost: boolean | null;
+        eligibilityBasis: string;
+        freeTier: boolean;
+        selected: boolean;
+      }>;
     } | null;
   };
 };
@@ -222,7 +253,7 @@ afterEach(() => {
 });
 
 describe('boot derivation', () => {
-  it('derives keyed picks (newest per provider) + the reserved free-tier tail into agentFallbacks in place', async () => {
+  it('derives one legacy later-entry pick per provider plus the reserved free-tier tail in place', async () => {
     const { runtime } = makeRuntime(AUTO, async () => ({ status: 'ok', ids: CATALOGUE }));
     const rv = v(runtime);
     const arrayRef = rv.agentFallbacks;
@@ -231,7 +262,7 @@ describe('boot derivation', () => {
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
 
     // maxEntries default 3, one slot reserved for free tier: 2 keyed picks in
-    // catalogue order (all evidence unknown), newest model per provider.
+    // catalogue order (all evidence unknown), later-entry tie break per provider.
     expect(models(rv.agentFallbacks)).toEqual([
       'deepseek/deepseek-v4-pro',
       'glm/glm-5.2',
@@ -325,7 +356,7 @@ describe('honest degrade + fallback_discovery_empty', () => {
 });
 
 describe('evidence-consulted derivation', () => {
-  it('excludes canary-dead candidates and ranks canary-ok ahead of unknown', async () => {
+  it('replaces an exact canary-dead model and ranks canary-ok ahead of unknown', async () => {
     const { runtime } = makeRuntime(AUTO, async () => ({ status: 'ok', ids: CATALOGUE }));
     const rv = v(runtime);
     seedCanary(rv, 'deepseek/deepseek-v4-pro', 'failed');
@@ -333,10 +364,11 @@ describe('evidence-consulted derivation', () => {
 
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
 
-    // deepseek dead → excluded; minimax ok → ranked ahead of unknown glm.
+    // The exact deepseek model is dead, so its provider falls through to the
+    // next model; minimax's proven completion still ranks first.
     expect(models(rv.agentFallbacks)).toEqual([
       'minimax/MiniMax-M3',
-      'glm/glm-5.2',
+      'deepseek/deepseek-chat',
       'opencode/big-pickle',
     ]);
   });
@@ -444,5 +476,46 @@ describe('/health surface', () => {
     expect(selected).toEqual(['deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/big-pickle']);
     const freeTier = state?.candidates.find((c) => c.freeTier);
     expect(freeTier?.model).toBe('opencode/big-pickle');
+  });
+
+  it('threads catalogue freshness and metadata-based selection into runtime state', async () => {
+    const ids = ['openai/gpt-5.6', 'openai/o3-pro'];
+    const { runtime } = makeRuntime(
+      { mode: 'auto', includeFreeTier: false },
+      async () => ({
+        status: 'ok',
+        ids,
+        metadata: {
+          'openai/gpt-5.6': {
+            status: 'active', releaseDate: '2026-08-15', textOutput: true, toolCall: true,
+          },
+          'openai/o3-pro': {
+            status: 'active', releaseDate: '2025-06-10', textOutput: true, toolCall: true,
+          },
+        },
+        captureMode: 'cached',
+        refreshFailure: 'timeout',
+      }),
+    );
+    const rv = v(runtime);
+
+    await rv.fallback.refreshDiscoveredFallbackChain('boot');
+
+    expect(models(rv.agentFallbacks)).toEqual(['openai/gpt-5.6']);
+    expect(rv.fallback.lastDiscovery).toMatchObject({
+      captureMode: 'cached',
+      refreshFailure: 'timeout',
+    });
+    expect(rv.getFallbackState().fallbackDiscovery).toMatchObject({
+      captureMode: 'cached',
+      refreshFailure: 'timeout',
+      candidates: [{
+        model: 'openai/gpt-5.6',
+        catalogStatus: 'active',
+        releaseDate: '2026-08-15',
+        eligibilityBasis: 'metadata',
+        selected: true,
+      }],
+    });
   });
 });
