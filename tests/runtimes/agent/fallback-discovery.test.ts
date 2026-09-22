@@ -630,6 +630,22 @@ describe('catalogue-order invariance', () => {
     expect(result).toEqual({ orders: 2, winners: ['acme/acme-2'] });
   });
 
+  it('matches the rolling alias against its family case-insensitively', () => {
+    // Descending code-unit order alone would pick the lowercase dated id
+    // (`m` sorts after `M`), so only a case-insensitive alias match selects
+    // the mixed-case rolling alias.
+    const metadata = {
+      'minimax/MiniMax-M3': {
+        status: 'active', family: 'minimax-m3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+      'minimax/minimax-m3-2609': {
+        status: 'active', family: 'minimax-m3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['minimax/MiniMax-M3'] });
+  });
+
   it('never lets listing order choose among metadata-free ids either', () => {
     const result = winnersAcrossOrders(['glm/glm-5', 'glm/glm-5-turbo', 'glm/glm-5.1', 'glm/glm-5.2']);
     expect(result).toEqual({ orders: 24, winners: ['glm/glm-5.2'] });
