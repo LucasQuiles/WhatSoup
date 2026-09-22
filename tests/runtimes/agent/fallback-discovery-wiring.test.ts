@@ -253,7 +253,7 @@ afterEach(() => {
 });
 
 describe('boot derivation', () => {
-  it('derives one legacy later-entry pick per provider plus the reserved free-tier tail in place', async () => {
+  it('derives one id-ordered pick per provider plus the reserved free-tier tail in place', async () => {
     const { runtime } = makeRuntime(AUTO, async () => ({ status: 'ok', ids: CATALOGUE }));
     const rv = v(runtime);
     const arrayRef = rv.agentFallbacks;
@@ -262,11 +262,13 @@ describe('boot derivation', () => {
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
 
     // maxEntries default 3, one slot reserved for free tier: 2 keyed picks in
-    // catalogue order (all evidence unknown), later-entry tie break per provider.
+    // catalogue provider order (all evidence unknown). Within a provider the
+    // metadata-free tie break is descending model id, so `small-brain` wins
+    // the free tier although the fixture lists it first.
     expect(models(rv.agentFallbacks)).toEqual([
       'deepseek/deepseek-v4-pro',
       'glm/glm-5.2',
-      'opencode/big-pickle',
+      'opencode/small-brain',
     ]);
     expect(rv.agentFallbacks.every((entry) => entry.provider === 'opencode-cli')).toBe(true);
     // In-place mutation: the SAME array object the ports captured.
@@ -286,7 +288,7 @@ describe('boot derivation', () => {
     expect(models(rv.agentFallbacks)).toEqual([
       'deepseek/deepseek-chat',
       'minimax/MiniMax-M3',
-      'opencode/big-pickle',
+      'opencode/small-brain',
     ]);
   });
 
@@ -369,7 +371,7 @@ describe('evidence-consulted derivation', () => {
     expect(models(rv.agentFallbacks)).toEqual([
       'minimax/MiniMax-M3',
       'deepseek/deepseek-chat',
-      'opencode/big-pickle',
+      'opencode/small-brain',
     ]);
   });
 
@@ -391,7 +393,7 @@ describe('mid-window re-derivation', () => {
     const rv = v(runtime);
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
     expect(models(rv.agentFallbacks)).toEqual([
-      'deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/big-pickle',
+      'deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/small-brain',
     ]);
 
     rv.activateProviderFallback(null, 'usage-limit');
@@ -473,9 +475,9 @@ describe('/health surface', () => {
     expect(state?.lastDerivedAt).not.toBeNull();
     expect(state?.catalogueSize).toBe(CATALOGUE.length);
     const selected = state?.candidates.filter((c) => c.selected).map((c) => c.model);
-    expect(selected).toEqual(['deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/big-pickle']);
+    expect(selected).toEqual(['deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/small-brain']);
     const freeTier = state?.candidates.find((c) => c.freeTier);
-    expect(freeTier?.model).toBe('opencode/big-pickle');
+    expect(freeTier?.model).toBe('opencode/small-brain');
   });
 
   it('threads catalogue freshness and metadata-based selection into runtime state', async () => {
