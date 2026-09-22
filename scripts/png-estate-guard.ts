@@ -3,13 +3,23 @@
 // git (external hosting is the owner-gated follow-up); docs/ screenshots stay
 // tracked under a shrink-only ratchet so the estate can never regrow silently.
 //
+// The docs/screenshots/ PNGs were then compressed in place, losslessly (owner
+// decision "Compress in place": no history rewrite), and are held under a
+// per-file ceiling so none can regrow to its pre-compression size.
+//
 // Modes:
 //   --staged   pre-commit: reject any staged PNG under artifacts/ (that tree
 //              is untracked by policy) and any staged NEW/CHANGED/RENAMED PNG
-//              whose INDEX blob is larger than MAX_NEW_PNG_BYTES.
+//              whose INDEX blob is larger than MAX_NEW_PNG_BYTES. One
+//              exception: an in-place modification (status M) of a tracked
+//              docs/screenshots/ PNG may exceed MAX_NEW_PNG_BYTES when its new
+//              blob is no larger than its HEAD blob and within
+//              DOCS_SCREENSHOT_MAX_BYTES, so re-compressing an existing
+//              screenshot is never blocked by the new-PNG bound.
 //   (default)  ratchet: the tracked-PNG census may only shrink — count and
-//              total bytes are both bounded by the baseline below, and
-//              artifacts/ must contain zero tracked PNGs.
+//              total bytes are both bounded by the baseline below,
+//              artifacts/ must contain zero tracked PNGs, and every tracked
+//              docs/screenshots/ PNG is within DOCS_SCREENSHOT_MAX_BYTES.
 //
 // Measurement rules (review-hardened):
 //   - all listings are NUL-separated with no pathspec, so quoted/unicode names
@@ -34,14 +44,59 @@ export const MAX_NEW_PNG_BYTES = 100 * 1024;
 // from 33 / 13_319_198 when the eight QA evidence screenshots that rendered a
 // pre-scrub operator identifier were removed rather than re-shot: a fresh
 // 1440x900 @2x render of those surfaces is 119-476 KiB, so every replacement
-// blob exceeds MAX_NEW_PNG_BYTES and the estate cannot carry them.
+// blob exceeds MAX_NEW_PNG_BYTES and the estate cannot carry them. Lowered
+// again from 10_238_137 when the 15 docs/screenshots PNGs were compressed
+// losslessly in place (6_864_376 -> 5_429_825 bytes, pixels unchanged).
 export const TRACKED_PNG_COUNT_BASELINE = 25;
-export const TRACKED_PNG_BYTES_BASELINE = 10_238_137;
+export const TRACKED_PNG_BYTES_BASELINE = 8_803_586;
+
+// Per-file ceiling for tracked docs/screenshots/ PNGs. The largest losslessly
+// compressed screenshot is 622_509 bytes; five of the pre-compression originals
+// (668_947-755_125 bytes) exceed this, so a revert to any of them is red. It is
+// a regrowth stop for the existing screenshots, not a budget for new ones:
+// additions remain bound by MAX_NEW_PNG_BYTES in --staged mode.
+export const DOCS_SCREENSHOT_MAX_BYTES = 640 * 1024;
+export const DOCS_SCREENSHOT_PREFIX = 'docs/screenshots/';
 
 const SYMLINK_MODE = '120000';
 
 function isPng(path: string): boolean {
   return path.toLowerCase().endsWith('.png');
+}
+
+function isDocsScreenshot(path: string): boolean {
+  return path.startsWith(DOCS_SCREENSHOT_PREFIX) && isPng(path);
+}
+
+interface StagedPng {
+  path: string;
+  status: string;
+  // HEAD-side blob for an in-place modification; undefined otherwise.
+  headOid: string | undefined;
+}
+
+function stagedPngs(cwd: string): StagedPng[] {
+  // `diff --raw -z`: ":<m> <m> <oid> <oid> <status>\0<path>\0" and, for R/C,
+  // a second path (the destination). Full oids so the HEAD blob is exact.
+  const tokens = nulList(
+    git(['diff', '--cached', '--raw', '-z', '--no-abbrev', '--diff-filter=ACMR'], cwd),
+  );
+  const out: StagedPng[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const meta = tokens[i]!;
+    if (!meta.startsWith(':')) throw new Error(`malformed diff --raw row: ${JSON.stringify(meta)}`);
+    const fields = meta.slice(1).split(' ');
+    const srcOid = fields[2];
+    const status = fields[4] ?? '';
+    const pathCount = status.startsWith('R') || status.startsWith('C') ? 2 : 1;
+    const path = tokens[i + pathCount];
+    if (path === undefined) throw new Error(`truncated diff --raw row: ${JSON.stringify(meta)}`);
+    i += pathCount + 1;
+    if (!isPng(path)) continue;
+    out.push({ path, status, headOid: status === 'M' ? srcOid : undefined });
+  }
+  return out;
 }
 
 function nulList(raw: string): string[] {
@@ -64,11 +119,9 @@ function fail(lines: string[]): never {
 }
 
 export function checkStaged(cwd = process.cwd()): void {
-  const staged = nulList(
-    git(['diff', '--cached', '--name-only', '-z', '--diff-filter=ACMR'], cwd),
-  ).filter(isPng);
+  const staged = stagedPngs(cwd);
   const violations: string[] = [];
-  for (const path of staged) {
+  for (const { path, headOid } of staged) {
     if (path.startsWith('artifacts/')) {
       violations.push(
         `${path}: artifacts/ images are not tracked (issue #2219 Option A) — host externally`,
@@ -76,11 +129,25 @@ export function checkStaged(cwd = process.cwd()): void {
       continue;
     }
     const size = blobSize(cwd, `:0:${path}`);
-    if (size > MAX_NEW_PNG_BYTES) {
-      violations.push(
-        `${path}: ${size} staged bytes exceeds the ${MAX_NEW_PNG_BYTES}-byte new-PNG bound — compress (e.g. WebP) or host externally`,
-      );
+    if (size <= MAX_NEW_PNG_BYTES) continue;
+    if (isDocsScreenshot(path) && headOid !== undefined) {
+      // In-place modification of a tracked screenshot: allowed only as a
+      // non-growing change within the per-file ceiling.
+      const headSize = blobSize(cwd, headOid);
+      if (size > DOCS_SCREENSHOT_MAX_BYTES) {
+        violations.push(
+          `${path}: ${size} staged bytes exceeds the ${DOCS_SCREENSHOT_MAX_BYTES}-byte docs/screenshots per-file ceiling — compress losslessly (e.g. oxipng) before committing`,
+        );
+      } else if (size > headSize) {
+        violations.push(
+          `${path}: ${size} staged bytes grows the tracked screenshot (HEAD ${headSize} bytes) above the ${MAX_NEW_PNG_BYTES}-byte new-PNG bound — an in-place change may only shrink`,
+        );
+      }
+      continue;
     }
+    violations.push(
+      `${path}: ${size} staged bytes exceeds the ${MAX_NEW_PNG_BYTES}-byte new-PNG bound — compress (e.g. WebP) or host externally`,
+    );
   }
   if (violations.length > 0) fail(violations);
   console.log(`png-estate guard passed (staged): ${staged.length} staged PNG(s) within policy`);
@@ -117,8 +184,20 @@ export function checkRatchet(cwd = process.cwd()): void {
   }
   const inArtifacts = pngs.filter((png) => png.path.startsWith('artifacts/'));
   let totalBytes = 0;
-  for (const png of pngs) totalBytes += blobSize(cwd, png.oid);
+  const oversizedScreenshots: string[] = [];
+  for (const png of pngs) {
+    const size = blobSize(cwd, png.oid);
+    totalBytes += size;
+    if (isDocsScreenshot(png.path) && size > DOCS_SCREENSHOT_MAX_BYTES) {
+      oversizedScreenshots.push(`${png.path} (${size} bytes)`);
+    }
+  }
   const violations: string[] = [];
+  if (oversizedScreenshots.length > 0) {
+    violations.push(
+      `${oversizedScreenshots.length} tracked docs/screenshots PNG(s) exceed the ${DOCS_SCREENSHOT_MAX_BYTES}-byte per-file ceiling: ${oversizedScreenshots.join(', ')}`,
+    );
+  }
   if (inArtifacts.length > 0) {
     violations.push(
       `${inArtifacts.length} tracked PNG(s) under artifacts/ — that tree is untracked by policy (#2219 Option A): ${inArtifacts.slice(0, 5).map((png) => png.path).join(', ')}`,
@@ -136,7 +215,7 @@ export function checkRatchet(cwd = process.cwd()): void {
   }
   if (violations.length > 0) fail(violations);
   console.log(
-    `png-estate guard passed (ratchet): ${pngs.length}/${TRACKED_PNG_COUNT_BASELINE} PNG(s), ${totalBytes}/${TRACKED_PNG_BYTES_BASELINE} bytes, artifacts/ clean`,
+    `png-estate guard passed (ratchet): ${pngs.length}/${TRACKED_PNG_COUNT_BASELINE} PNG(s), ${totalBytes}/${TRACKED_PNG_BYTES_BASELINE} bytes, artifacts/ clean, docs/screenshots within ${DOCS_SCREENSHOT_MAX_BYTES} bytes each`,
   );
 }
 
