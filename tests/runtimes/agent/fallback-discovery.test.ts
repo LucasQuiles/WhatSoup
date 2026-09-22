@@ -521,23 +521,28 @@ const LIVE_DEEPSEEK_IDS = [
 ] as const;
 
 // Parsed (post-capture) metadata of the live records. `deepseek-chat` is
-// config-defined: its verbose record carries an empty release date, which the
-// capture layer drops.
+// config-defined: its verbose record carries an empty family and release date,
+// which the capture layer drops. `deepseek-flash` is the id that equals its
+// family: DeepSeek's rolling V4.1 alias.
 const LIVE_DEEPSEEK_METADATA = {
   'deepseek/deepseek-chat': {
     status: 'active', textOutput: true, toolCall: true, zeroCost: true,
   },
   'deepseek/deepseek-flash': {
-    status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true, zeroCost: false,
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
   },
   'deepseek/deepseek-v4-flash': {
-    status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true, zeroCost: false,
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
   },
   'deepseek/deepseek-v4-flash-vision-exp': {
-    status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true, zeroCost: false,
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
   },
   'deepseek/deepseek-v4-pro': {
-    status: 'active', releaseDate: '2026-08-12', textOutput: true, toolCall: true, zeroCost: false,
+    status: 'active', family: 'deepseek-thinking', releaseDate: '2026-08-12',
+    textOutput: true, toolCall: true, zeroCost: false,
   },
 } satisfies Record<string, ModelCatalogMetadata>;
 
@@ -559,9 +564,70 @@ function winnersAcrossOrders(
 }
 
 describe('catalogue-order invariance', () => {
-  it('selects the same DeepSeek representative under all 120 orders of the live catalogue', () => {
+  it('selects the canonical V4.1 alias under all 120 orders of the live catalogue', () => {
     const result = winnersAcrossOrders(LIVE_DEEPSEEK_IDS, { catalogMetadata: LIVE_DEEPSEEK_METADATA });
+    expect(result).toEqual({ orders: 120, winners: ['deepseek/deepseek-flash'] });
+  });
+
+  it('reports the family of the selected representative in the basis', () => {
+    const { basis } = derive({
+      catalogIds: LIVE_DEEPSEEK_IDS,
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    });
+    expect(basis).toEqual([expect.objectContaining({
+      model: 'deepseek/deepseek-flash',
+      family: 'deepseek-flash',
+      releaseDate: '2026-09-10',
+      selected: true,
+    })]);
+  });
+
+  it('falls back to the next same-day id when the canonical alias is dead', () => {
+    const result = winnersAcrossOrders(LIVE_DEEPSEEK_IDS, {
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      evidenceFor: (id) => (id === 'deepseek/deepseek-flash' ? 'dead' : 'unknown'),
+    });
     expect(result).toEqual({ orders: 120, winners: ['deepseek/deepseek-v4-flash'] });
+  });
+
+  it('uses descending id when family metadata is absent (documented degrade)', () => {
+    const metadata = {
+      'deepseek/deepseek-flash': {
+        status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+      },
+      'deepseek/deepseek-v4-flash': {
+        status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['deepseek/deepseek-v4-flash'] });
+  });
+
+  it('never prefers an alias over a newer release in the same family', () => {
+    const metadata = {
+      'kimi/kimi-k3': {
+        status: 'active', family: 'kimi-k3', releaseDate: '2026-06-01', textOutput: true, toolCall: true,
+      },
+      'kimi/kimi-k3.1': {
+        status: 'active', family: 'kimi-k3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['kimi/kimi-k3.1'] });
+  });
+
+  it('never prefers an experimental alias over a stable sibling', () => {
+    const metadata = {
+      'acme/acme-preview': {
+        status: 'active', family: 'acme-preview', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+      'acme/acme-2': {
+        status: 'active', family: 'acme-preview', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['acme/acme-2'] });
   });
 
   it('never lets listing order choose among metadata-free ids either', () => {

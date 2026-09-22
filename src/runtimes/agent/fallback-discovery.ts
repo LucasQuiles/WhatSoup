@@ -18,10 +18,12 @@
 //  - Within a provider, a live operator pin wins. Otherwise recent successful
 //    completion evidence wins, then stable lifecycle (an id carrying a
 //    pre-release token such as `-exp` or `-preview` counts as preview even when
-//    the gateway reports it active), then validated release date, and finally
-//    descending model id. The representative never depends on where an id
-//    appears in the catalogue listing (incident 2026-09-21: three same-day
-//    DeepSeek ids tied and listing position picked an experimental variant).
+//    the gateway reports it active), then validated release date, then the
+//    provider's rolling alias (an id equal to its models.dev family), and
+//    finally descending model id. The representative never depends on where
+//    an id appears in the catalogue listing (incident 2026-09-21: three
+//    same-day DeepSeek ids tied and listing position picked an experimental
+//    variant).
 //  - A dead exact model does not condemn its provider: the next eligible model
 //    can represent that provider. An all-dead provider keeps one bounded
 //    recovery probe; a replaced dead sibling becomes eligible after its
@@ -112,6 +114,8 @@ export interface DiscoveredCandidate {
   model: string;
   evidence: CandidateEvidence;
   catalogStatus: string | null;
+  /** models.dev family of the representative, when the catalogue supplies one. */
+  family: string | null;
   releaseDate: string | null;
   zeroCost: boolean | null;
   eligibilityBasis: CandidateEligibilityBasis;
@@ -182,6 +186,10 @@ export function deriveFallbackChainFromCatalog(opts: {
     model: string;
     evidence: CandidateEvidence;
     catalogStatus: string | null;
+    family: string | null;
+    /** The id's model segment equals its family: the provider's rolling
+     *  alias for that line (e.g. `deepseek/deepseek-flash`). */
+    canonicalAlias: boolean;
     releaseDate: string | null;
     releaseDateSortKey: string | null;
     zeroCost: boolean | null;
@@ -216,6 +224,11 @@ export function deriveFallbackChainFromCatalog(opts: {
       const zeroCost = typeof rawMetadata?.zeroCost === 'boolean'
         ? rawMetadata.zeroCost
         : null;
+      const family = typeof rawMetadata?.family === 'string' && rawMetadata.family.trim() !== ''
+        ? rawMetadata.family.trim()
+        : null;
+      const canonicalAlias = family !== null
+        && id.slice(catalogProvider.length + 1).toLowerCase() === family.toLowerCase();
 
       // The opencode gateway also lists paid catalogue entries. Only a model
       // explicitly recorded as zero-cost (or a metadata-free legacy entry)
@@ -249,6 +262,8 @@ export function deriveFallbackChainFromCatalog(opts: {
         model: id,
         evidence: evidenceFor(id),
         catalogStatus: status,
+        family,
+        canonicalAlias,
         releaseDate,
         releaseDateSortKey,
         zeroCost,
@@ -274,6 +289,13 @@ export function deriveFallbackChainFromCatalog(opts: {
         if (b.releaseDateSortKey === null) return -1;
         return b.releaseDateSortKey.localeCompare(a.releaseDateSortKey);
       }
+      // Among equally evidenced, equally stable, same-day models, prefer the
+      // provider's rolling alias. Sitting after release date, this can never
+      // choose an alias over a newer versioned model, and after lifecycle it
+      // can never choose a pre-release alias over a stable sibling. On the
+      // fleet host it also avoids a legacy alias carrying a smaller locally
+      // configured output limit (observed 2026-09-22).
+      if (a.canonicalAlias !== b.canonicalAlias) return a.canonicalAlias ? -1 : 1;
       // Total order: descending plain string comparison of the id (not
       // locale-aware, so the result is identical on every host). OpenCode
       // lists ids ascending within a provider, so this reproduces the former
@@ -290,6 +312,7 @@ export function deriveFallbackChainFromCatalog(opts: {
       model: representative.model,
       evidence: representative.evidence,
       catalogStatus: representative.catalogStatus,
+      family: representative.family,
       releaseDate: representative.releaseDate,
       zeroCost: representative.zeroCost,
       eligibilityBasis: representative.eligibilityBasis,

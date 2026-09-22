@@ -26,6 +26,7 @@ import {
   listModelCatalog,
   listCodexModelCatalog,
 } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
+import { deriveFallbackChainFromCatalog } from '../../../src/runtimes/agent/fallback-discovery.ts';
 
 // ─── Fake child process builder ───────────────────────────────────────────────
 
@@ -414,6 +415,46 @@ describe('listModelCatalog', () => {
     });
   });
 
+  it('retains a trimmed non-empty family and drops the empty strings config-defined records carry', async () => {
+    const output = [
+      verboseModel('deepseek/deepseek-flash', { family: ' deepseek-flash ', release_date: '2026-09-10' }),
+      // Shape of a config-defined model on the fleet host (2026-09-22).
+      verboseModel('deepseek/deepseek-chat', { family: '', release_date: '' }),
+      verboseModel('glm/glm-5.2', { family: '   ' }),
+    ].join('');
+
+    const result = await listModelCatalog('opencode', makeSpawnImpl({ stdoutChunks: [output] }));
+
+    expect(result).toStrictEqual({
+      status: 'ok',
+      ids: ['deepseek/deepseek-flash', 'deepseek/deepseek-chat', 'glm/glm-5.2'],
+      metadata: {
+        'deepseek/deepseek-flash': {
+          status: 'active',
+          family: 'deepseek-flash',
+          releaseDate: '2026-09-10',
+          textOutput: true,
+          toolCall: true,
+          zeroCost: true,
+        },
+        'deepseek/deepseek-chat': {
+          status: 'active',
+          textOutput: true,
+          toolCall: true,
+          zeroCost: true,
+        },
+        'glm/glm-5.2': {
+          status: 'active',
+          releaseDate: '2026-08-20',
+          textOutput: true,
+          toolCall: true,
+          zeroCost: true,
+        },
+      },
+      captureMode: 'refreshed',
+    });
+  });
+
   it('retains valid month-precision release dates from the upstream schema', async () => {
     const output = verboseModel('glm/month-precision', { release_date: '2026-08' });
 
@@ -530,6 +571,72 @@ describe('listModelCatalog', () => {
     await expect(listModelCatalog('opencode', throwingSpawnImpl)).resolves.toStrictEqual({
       status: 'unavailable',
       reason: 'spawn-error',
+    });
+  });
+});
+
+// Capture-to-selection: the raw verbose stream is permuted, parsed by the real
+// capture code, and ranked by the real selector. Record shapes mirror the
+// fleet host's `opencode models --pure --verbose` output on 2026-09-22,
+// including the empty family and release date of the config-defined model.
+describe('catalogue capture to fallback selection', () => {
+  const LIVE_DEEPSEEK_RECORDS = [
+    verboseModel('deepseek/deepseek-chat', {
+      family: '', release_date: '', cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    }),
+    verboseModel('deepseek/deepseek-flash', {
+      family: 'deepseek-flash', release_date: '2026-09-10', cost: { input: 0.15, output: 0.6 },
+    }),
+    verboseModel('deepseek/deepseek-v4-flash', {
+      family: 'deepseek-flash', release_date: '2026-09-10', cost: { input: 0.15, output: 0.6 },
+    }),
+    verboseModel('deepseek/deepseek-v4-flash-vision-exp', {
+      family: 'deepseek-flash', release_date: '2026-09-10', cost: { input: 0.15, output: 0.6 },
+    }),
+    verboseModel('deepseek/deepseek-v4-pro', {
+      family: 'deepseek-thinking', release_date: '2026-08-12', cost: { input: 0.435, output: 0.87 },
+    }),
+  ];
+
+  function permutations<T>(values: readonly T[]): T[][] {
+    if (values.length <= 1) return [[...values]];
+    return values.flatMap((value, index) =>
+      permutations([...values.slice(0, index), ...values.slice(index + 1)])
+        .map((rest) => [value, ...rest]));
+  }
+
+  it('selects the canonical V4.1 alias for every order of the raw verbose stream', async () => {
+    const orders = permutations(LIVE_DEEPSEEK_RECORDS);
+    const winners = new Set<string>();
+    const captureModes = new Set<string>();
+    for (const order of orders) {
+      const listing = await listModelCatalog(
+        'opencode',
+        makeSpawnImpl({ stdoutChunks: [order.join('')] }),
+      );
+      if (listing.status !== 'ok') {
+        winners.add(`unavailable:${listing.reason}`);
+        continue;
+      }
+      captureModes.add(listing.captureMode ?? 'none');
+      const derived = deriveFallbackChainFromCatalog({
+        catalogIds: listing.ids,
+        ...(listing.metadata ? { catalogMetadata: listing.metadata } : {}),
+        gatewayProvider: 'opencode-cli',
+        primary: { provider: 'claude-cli', model: 'claude-opus-4-8' },
+        policy: { maxEntries: 1, includeFreeTier: false },
+      });
+      winners.add(derived.entries[0]?.model ?? 'none');
+    }
+
+    expect({
+      orders: orders.length,
+      captureModes: [...captureModes],
+      winners: [...winners],
+    }).toEqual({
+      orders: 120,
+      captureModes: ['refreshed'],
+      winners: ['deepseek/deepseek-flash'],
     });
   });
 });

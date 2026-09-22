@@ -155,6 +155,7 @@ type CatalogueListing =
         releaseDate?: string;
         textOutput?: boolean;
         toolCall?: boolean;
+        family?: string;
       }>;
       captureMode?: 'refreshed' | 'cached' | 'legacy';
       refreshFailure?: string;
@@ -212,6 +213,7 @@ type RuntimeView = {
         releaseDate: string | null;
         zeroCost: boolean | null;
         eligibilityBasis: string;
+        family: string | null;
         freeTier: boolean;
         selected: boolean;
       }>;
@@ -519,5 +521,51 @@ describe('/health surface', () => {
         selected: true,
       }],
     });
+  });
+
+  it('installs the canonical DeepSeek alias from live metadata and reports its family', async () => {
+    // The fleet host's DeepSeek listing on 2026-09-22, in OpenCode's own
+    // (ascending) order. Three ids tie on status, capabilities and date.
+    const ids = [
+      'deepseek/deepseek-chat',
+      'deepseek/deepseek-flash',
+      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-v4-flash-vision-exp',
+      'deepseek/deepseek-v4-pro',
+    ];
+    const sameDay = {
+      status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+    };
+    const { runtime } = makeRuntime(
+      { mode: 'auto', includeFreeTier: false },
+      async () => ({
+        status: 'ok',
+        ids,
+        metadata: {
+          'deepseek/deepseek-chat': { status: 'active', textOutput: true, toolCall: true },
+          'deepseek/deepseek-flash': sameDay,
+          'deepseek/deepseek-v4-flash': sameDay,
+          'deepseek/deepseek-v4-flash-vision-exp': sameDay,
+          'deepseek/deepseek-v4-pro': {
+            status: 'active', family: 'deepseek-thinking', releaseDate: '2026-08-12', textOutput: true, toolCall: true,
+          },
+        },
+        captureMode: 'refreshed',
+      }),
+    );
+    const rv = v(runtime);
+
+    await rv.fallback.refreshDiscoveredFallbackChain('boot');
+
+    expect(models(rv.agentFallbacks)).toEqual(['deepseek/deepseek-flash']);
+    expect(rv.getFallbackState().fallbackDiscovery?.candidates).toEqual([
+      expect.objectContaining({
+        model: 'deepseek/deepseek-flash',
+        family: 'deepseek-flash',
+        releaseDate: '2026-09-10',
+        eligibilityBasis: 'metadata',
+        selected: true,
+      }),
+    ]);
   });
 });
