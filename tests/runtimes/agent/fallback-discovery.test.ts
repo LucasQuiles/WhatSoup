@@ -551,6 +551,7 @@ function winnersAcrossOrders(
   opts: {
     catalogMetadata?: Readonly<Record<string, ModelCatalogMetadata>>;
     evidenceFor?: (id: string) => CandidateEvidence;
+    preferModels?: Record<string, string>;
   } = {},
 ): { orders: number; winners: string[] } {
   const orders = permutations(ids);
@@ -558,7 +559,11 @@ function winnersAcrossOrders(
     catalogIds: order,
     ...(opts.catalogMetadata ? { catalogMetadata: opts.catalogMetadata } : {}),
     ...(opts.evidenceFor ? { evidenceFor: opts.evidenceFor } : {}),
-    policy: { maxEntries: 1, includeFreeTier: false },
+    policy: {
+      maxEntries: 1,
+      includeFreeTier: false,
+      ...(opts.preferModels ? { preferModels: opts.preferModels } : {}),
+    },
   }).entries[0]?.model ?? 'none'));
   return { orders: orders.length, winners: [...winners].sort() };
 }
@@ -697,6 +702,33 @@ describe('catalogue-order invariance', () => {
     // pick `model-3-preview`; the pre-release key must decide first.
     const result = winnersAcrossOrders(['acme/model-2', 'acme/model-3-preview']);
     expect(result).toEqual({ orders: 2, winners: ['acme/model-2'] });
+  });
+
+  it('applies pin, evidence, lifecycle and the naming hint in the documented precedence', () => {
+    // Each case sets two adjacent keys against each other, so swapping that
+    // pair in the comparator flips the winner.
+    const okFor = (winner: string) => (id: string): CandidateEvidence => (id === winner ? 'ok' : 'unknown');
+    const agentReady = { textOutput: true, toolCall: true } as const;
+
+    // A live pin outranks a sibling with better completion evidence.
+    expect(winnersAcrossOrders(['acme/a', 'acme/b'], {
+      evidenceFor: okFor('acme/a'),
+      preferModels: { acme: 'acme/b' },
+    })).toEqual({ orders: 2, winners: ['acme/b'] });
+
+    // Completion evidence outranks a better reported lifecycle.
+    expect(winnersAcrossOrders(['acme/a', 'acme/b'], {
+      catalogMetadata: {
+        'acme/a': { status: 'beta', ...agentReady },
+        'acme/b': { status: 'active', ...agentReady },
+      },
+      evidenceFor: okFor('acme/a'),
+    })).toEqual({ orders: 2, winners: ['acme/a'] });
+
+    // Completion evidence outranks the pre-release naming hint.
+    expect(winnersAcrossOrders(['acme/model-2', 'acme/model-3-exp'], {
+      evidenceFor: okFor('acme/model-3-exp'),
+    })).toEqual({ orders: 2, winners: ['acme/model-3-exp'] });
   });
 
   it('lets an explicit gateway status outrank a naming hint', () => {
