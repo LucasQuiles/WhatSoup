@@ -666,7 +666,29 @@ describe('catalogue-order invariance', () => {
     expect(basis[0]).toMatchObject({ eligibilityBasis: 'operator-pin' });
   });
 
-  it('keeps an explicit pre-release status at its own tier rather than promoting it', () => {
+  it('ranks a pre-release id below a plain sibling even without any metadata', () => {
+    // Legacy capture: no status, no date, no family. Descending id alone would
+    // pick `model-3-preview`; the pre-release key must decide first.
+    const result = winnersAcrossOrders(['acme/model-2', 'acme/model-3-preview']);
+    expect(result).toEqual({ orders: 2, winners: ['acme/model-2'] });
+  });
+
+  it('lets an explicit gateway status outrank a naming hint', () => {
+    // Metadata beats heuristic: an active id whose name says preview still
+    // outranks a plain id the gateway explicitly labels beta.
+    const catalogMetadata = {
+      'acme/model-2-preview': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'acme/model-3': {
+        status: 'beta', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(catalogMetadata), { catalogMetadata });
+    expect(result).toEqual({ orders: 2, winners: ['acme/model-2-preview'] });
+  });
+
+  it('orders two pre-release-named ids by their explicit status tier', () => {
     const catalogIds = ['glm/glm-next-alpha', 'glm/glm-5.2-preview'];
     const catalogMetadata = {
       'glm/glm-next-alpha': {
@@ -677,8 +699,9 @@ describe('catalogue-order invariance', () => {
       },
     } satisfies Record<string, ModelCatalogMetadata>;
 
-    // The active-but-preview-named id is demoted only to the preview tier;
-    // the explicit alpha status stays in the lower alpha tier.
+    // Both ids carry a pre-release token, so the naming hint cannot separate
+    // them; the explicit status tier (active above alpha) decides before the
+    // newer release date is considered.
     const result = winnersAcrossOrders(catalogIds, { catalogMetadata });
     expect(result).toEqual({ orders: 2, winners: ['glm/glm-5.2-preview'] });
   });

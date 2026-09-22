@@ -16,10 +16,10 @@
 //    resilience (incident 2026-08-15: kimi suspended + glm quota-exhausted
 //    left a 3-entry chain with a single live entry).
 //  - Within a provider, a live operator pin wins. Otherwise recent successful
-//    completion evidence wins, then stable lifecycle (an id carrying a
-//    pre-release token such as `-exp` or `-preview` counts as preview even when
-//    the gateway reports it active), then validated release date, then the
-//    provider's rolling alias (an id equal to its models.dev family), and
+//    completion evidence wins, then stable reported lifecycle, then a plain id
+//    over one carrying a pre-release token such as `-exp` or `-preview` (the
+//    gateway usually reports those active), then validated release date, then
+//    the provider's rolling alias (an id equal to its models.dev family), and
 //    finally descending model id. The representative never depends on where
 //    an id appears in the catalogue listing (incident 2026-09-21: three
 //    same-day DeepSeek ids tied and listing position picked an experimental
@@ -175,17 +175,13 @@ export function deriveFallbackChainFromCatalog(opts: {
     if (status === 'alpha' || status === 'experimental') return 2;
     return 3;
   };
-  // A pre-release id token can only lower a model to the preview tier. It
-  // never lifts an explicit alpha status or an unknown status upward.
-  const lifecycleTier = (status: string | null, modelId: string): number => {
-    const tier = statusTier(status);
-    return isExperimentalCatalogModel(modelId) ? Math.max(tier, 1) : tier;
-  };
 
   type RankedProviderModel = {
     model: string;
     evidence: CandidateEvidence;
     catalogStatus: string | null;
+    /** The id carries a whole-word pre-release token (`-exp`, `-preview`, …). */
+    preRelease: boolean;
     family: string | null;
     /** The id's model segment equals its family: the provider's rolling
      *  alias for that line (e.g. `deepseek/deepseek-flash`). */
@@ -262,6 +258,7 @@ export function deriveFallbackChainFromCatalog(opts: {
         model: id,
         evidence: evidenceFor(id),
         catalogStatus: status,
+        preRelease: isExperimentalCatalogModel(id),
         family,
         canonicalAlias,
         releaseDate,
@@ -281,9 +278,13 @@ export function deriveFallbackChainFromCatalog(opts: {
       }
       const evidenceDifference = evidenceTier(a.evidence) - evidenceTier(b.evidence);
       if (evidenceDifference !== 0) return evidenceDifference;
-      const lifecycleDifference = lifecycleTier(a.catalogStatus, a.model)
-        - lifecycleTier(b.catalogStatus, b.model);
-      if (lifecycleDifference !== 0) return lifecycleDifference;
+      const statusDifference = statusTier(a.catalogStatus) - statusTier(b.catalogStatus);
+      if (statusDifference !== 0) return statusDifference;
+      // Within one reported lifecycle, a pre-release id ranks below a plain
+      // one. An explicit gateway status still outranks the naming hint, and
+      // the hint works without metadata (legacy capture) because it never
+      // moves a model to another status tier.
+      if (a.preRelease !== b.preRelease) return a.preRelease ? 1 : -1;
       if (a.releaseDateSortKey !== b.releaseDateSortKey) {
         if (a.releaseDateSortKey === null) return 1;
         if (b.releaseDateSortKey === null) return -1;

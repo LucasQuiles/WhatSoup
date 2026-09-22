@@ -67,10 +67,10 @@ completion evidence plus catalogue recency.
 3. Verbose output is shape-checked and bounded before metadata is trusted.
 4. Explicitly inactive, non-text-output, or non-tool-capable models are ineligible for the
    automatic agent ladder; with equal completion evidence, stable lifecycle outranks preview
-   lifecycle before release chronology is considered. An id whose model segment carries a
-   whole-word pre-release token (`exp`, `experimental`, `preview`, `alpha`, `beta`) counts as
-   preview lifecycle when the gateway reports it active or omits a status; an explicit
-   lower status is never raised.
+   lifecycle before release chronology is considered. Within one reported lifecycle, an id
+   whose model segment carries a whole-word pre-release token (`exp`, `experimental`,
+   `preview`, `alpha`, `beta`) ranks below an id that does not. This applies with or without
+   metadata. An explicit gateway status still outranks the naming hint.
 5. Missing metadata remains compatible with older/custom gateways and uses the legacy
    conservative filter; it is never described as capability-proven.
 6. A configured operator preference wins when its exact ID is present.
@@ -224,7 +224,7 @@ Controls added, all inside the existing ranker:
 
 | Control | Why it is needed |
 |---|---|
-| Pre-release id token lowers an active or status-less id to preview lifecycle | The id is the only lifecycle signal left when the gateway defaults status to active. |
+| Within one reported lifecycle, a pre-release id token ranks the id below plain siblings | The id is the only lifecycle signal left when the gateway defaults status to active, or when a legacy capture carries no status at all. |
 | Rolling alias (id equals `family`) wins among same-day, same-lifecycle, same-evidence ids | Picks the provider's canonical current id. On the fleet host the legacy `deepseek-v4-flash` alias also carries a locally configured 128K context and 8K output limit, against 1M and 384K for `deepseek-flash`. |
 | Descending model id replaces listing position as the final tie break | Makes the pure function independent of input order while preserving every metadata-free pick. |
 
