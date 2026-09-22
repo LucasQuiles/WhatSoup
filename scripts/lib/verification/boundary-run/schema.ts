@@ -726,13 +726,20 @@ class BoundaryJsonSyntaxError extends Error {
   }
 }
 
-function preflightBoundaryJson(text: string): void {
+export interface JsonBytePolicy {
+  allowCarriageReturns?: boolean;
+  allowNegativeZero?: boolean;
+  rejectNonFiniteNumbers?: boolean;
+}
+
+function preflightBoundaryJson(text: string, policy: JsonBytePolicy): void {
   let index = 0;
   const fail = (code: string, message: string): never => {
     throw new BoundaryJsonSyntaxError(code, message);
   };
   const skipWhitespace = (): void => {
-    while (index < text.length && /[\t\n ]/.test(text[index]!)) index += 1;
+    const whitespace = policy.allowCarriageReturns ? /[\t\r\n ]/ : /[\t\n ]/;
+    while (index < text.length && whitespace.test(text[index]!)) index += 1;
   };
   const parseString = (): string => {
     if (text[index] !== '"') fail('invalid-json', `expected string at byte ${index}`);
@@ -764,7 +771,12 @@ function preflightBoundaryJson(text: string): void {
     if (token === undefined) {
       throw new BoundaryJsonSyntaxError('invalid-json', `invalid number at byte ${index}`);
     }
-    if (token === '-0') fail('invalid-json-number', 'negative zero is not canonical');
+    if (token === '-0' && !policy.allowNegativeZero) {
+      fail('invalid-json-number', 'negative zero is not canonical');
+    }
+    if (policy.rejectNonFiniteNumbers && !Number.isFinite(Number(token))) {
+      fail('invalid-json-number', 'number is outside the finite range');
+    }
     index += token.length;
   };
   const parseLiteral = (literal: string): void => {
@@ -839,7 +851,7 @@ function preflightBoundaryJson(text: string): void {
   if (index !== text.length) fail('invalid-json', `trailing JSON bytes at byte ${index}`);
 }
 
-export function parseBoundaryJsonBytes(bytes: Uint8Array): {
+export function parseBoundaryJsonBytes(bytes: Uint8Array, policy: JsonBytePolicy = {}): {
   result: BoundaryValidationResult;
   value: unknown | null;
   text: string | null;
@@ -851,10 +863,10 @@ export function parseBoundaryJsonBytes(bytes: Uint8Array): {
       throw new BoundaryJsonSyntaxError('invalid-json-byte', 'UTF-8 BOM bytes are forbidden');
     }
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    if (text.startsWith('\ufeff') || text.includes('\r')) {
+    if (text.startsWith('\ufeff') || (!policy.allowCarriageReturns && text.includes('\r'))) {
       throw new BoundaryJsonSyntaxError('invalid-json-byte', 'BOM and CR bytes are forbidden');
     }
-    preflightBoundaryJson(text);
+    preflightBoundaryJson(text, policy);
     value = JSON.parse(text) as unknown;
   } catch (error) {
     const code = error instanceof BoundaryJsonSyntaxError ? error.code : 'invalid-json';

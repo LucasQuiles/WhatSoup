@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
+import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -421,7 +423,23 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
 vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
   const { FakePerChatMcpSocketManager } =
     await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
-  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
+  type Options = ConstructorParameters<
+    typeof import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts').PerChatMcpSocketManager
+  >[0];
+  class CapturingPerChatMcpSocketManager extends FakePerChatMcpSocketManager {
+    readonly consumedAllowedRoots: string[] = [];
+
+    constructor(readonly capturedOptions: Options) {
+      super();
+    }
+
+    override acquire(identity: string): { socketPath: string; ready: Promise<void> } {
+      // Observe the same option read the real manager performs at acquisition.
+      this.consumedAllowedRoots.push(this.capturedOptions.allowedRoot);
+      return super.acquire(identity);
+    }
+  }
+  return { PerChatMcpSocketManager: CapturingPerChatMcpSocketManager };
 });
 
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
@@ -504,7 +522,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -524,7 +542,7 @@ import {
   type PerChatCleanupRuntimeState, type PerChatSendTurnRuntimeState,
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
-  handlePerChatProviderEvent, currentCrashIdentity,
+  handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
   type AutoCompactView, type ImageCoalescerView,
 } from './lib/runtime-mock-scaffold.ts';
 
@@ -670,27 +688,15 @@ function handleEventDownstreamWithoutAdmission(
   );
 }
 
-describe('isUsageLimitMessage', () => {
-  it('does not suppress ordinary discussion of usage limits or quotas', () => {
-    expect(isUsageLimitMessage(
-      'Please document how usage limit and quota exceeded errors should be handled.',
-    )).toBe(false);
-  });
-
-  it('matches distinctive provider usage-cap notices', () => {
-    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
-    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
-  });
-
-  it('requires reset-time evidence for generic quota wording', () => {
-    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
-    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
-  });
-});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+// The runtime keeps its mkdir mock; only harness-owned positive roots exist.
+beforeEach(async () => {
+  const fs = await prepareRuntimeHome();
+  // Keep the real restart guard without sharing boot history between tests.
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'runtime-state-'));
+});
 
 describe('AgentRuntime', () => {
   beforeEach(async () => {
@@ -705,6 +711,7 @@ describe('AgentRuntime', () => {
     // makes the suite order-dependent and obscures the real terminal owner.
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockKillSessionTree.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));
@@ -807,6 +814,11 @@ describe('AgentRuntime', () => {
     }));
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
   });
+
+  registerRuntimeHomeConfinementTests(
+    options => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', options),
+    mockSession,
+  );
 
   it('start() calls ensureAgentSchema', async () => {
     const { ensureAgentSchema } = await import('../../../src/runtimes/agent/session-db.ts');
@@ -991,6 +1003,7 @@ describe('AgentRuntime', () => {
   });
 
   it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
+    const cwd = await ownedRuntimeCwd('whatsoup-non-home-cwd');
     const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
     const { inspectUserClaudeSettings } = await import('../../../src/core/user-claude-settings.ts');
     const { homedir } = await import('node:os');
@@ -999,7 +1012,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
     // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
-    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
+    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: cwd });
     await runtime.start();
 
     expect(inspectUserClaudeSettings).toHaveBeenCalledWith(join(homedir(), '.claude'), expect.stringMatching(/deploy\/hooks\/agent-sandbox\.sh$/));
@@ -2032,16 +2045,17 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
-      whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+      whatsoupMcpSocket: join(cwd, '.claude/whatsoup.sock'),
     });
 
     await emitAgentResultWithoutTokens('done');
@@ -2049,13 +2063,14 @@ describe('AgentRuntime', () => {
   });
 
   it('cleans up partial global MCP socket resources when startup fails', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
     mockSocketServerInstance.start.mockImplementationOnce(() => {
       throw startErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2067,12 +2082,13 @@ describe('AgentRuntime', () => {
     expect(state.globalSocketServer).toBeNull();
     expect(state.globalMcpSocketPath).toBeNull();
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
   });
 
   it('logs cleanup failures after global MCP socket startup errors', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-stop-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
@@ -2083,7 +2099,7 @@ describe('AgentRuntime', () => {
     mockSocketServerInstance.stop.mockImplementationOnce(() => {
       throw stopErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-stop-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2092,11 +2108,11 @@ describe('AgentRuntime', () => {
       globalMcpSocketPath: string | null;
     };
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      { err: stopErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: stopErr, agentCwd: cwd },
       'failed to clean up global socket server after startup error',
     );
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
     expect(state.globalSocketServer).toBeNull();
@@ -2105,10 +2121,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards configured system prompt into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('config-prompt');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/config-prompt',
+      cwd: cwd,
       configSystemPrompt: 'Configured operator prompt.',
     });
 
@@ -2121,10 +2138,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee workspace socket env for sandbox per-chat sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-workspaces');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/rgp-workspaces',
+      cwd: cwd,
       sessionScope: 'per_chat',
       sandboxPerChat: true,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
@@ -2140,9 +2158,10 @@ describe('AgentRuntime', () => {
   });
 
   it('arms and disarms reply guarantee around a non-shared turn', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-turn');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-turn' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
     const durability = {
       getInboundStatus: vi.fn(() => 'processing'),
       completeTurn: vi.fn(),
@@ -3401,12 +3420,13 @@ describe('AgentRuntime', () => {
   });
 
   it('sandbox per_chat notification preserves the crashed workspace owner and state', async () => {
+    const cwd = await ownedRuntimeCwd('cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', {
       sessionScope: 'per_chat',
       sandboxPerChat: true,
-      cwd: '/agent/cwd',
+      cwd: cwd,
     });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
       chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
@@ -3918,7 +3938,7 @@ describe('AgentRuntime', () => {
       }),
       'media processing failed — using fallback label',
     );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    await awaitDispatchedTurn(mockSession.sendTurn, '[audio message — processing failed]');
     expect(durability.markInboundSkipped).not.toHaveBeenCalled();
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
@@ -4580,7 +4600,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
-    mockSession.sendTurn.mockClear();
+    await retireDispatchedTurn(mockSession.sendTurn, 'hello');
     (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set(groupJid, [42]);
 
     await expect(runtime.handleAgentCommand({
@@ -13759,13 +13779,7 @@ describe('AgentRuntime', () => {
         chatJid: string;
         reason: string;
       }) => void;
-      registerSendPollAwaiter: (
-        pollId: string,
-        chatJid: string,
-        options: string[],
-        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
-        timeoutMs: number,
-      ) => Promise<string>;
+      registerSendPollAwaiter: AgentRuntime['registerSendPollAwaiter'];
       deletePendingPollQuestions: (mapKey: string) => void;
     };
 
@@ -13979,7 +13993,6 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState & {
-        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
         fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
       };
       await runtime.start();
@@ -13989,24 +14002,36 @@ describe('AgentRuntime', () => {
 
       const pollId = 'POLL_QR036';
       const mapKey = `send_poll:${pollId}`;
-      // Fire-and-forget the awaiter (its promise resolves only on a qualifying vote / timeout).
-      void state.registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000);
+      let settled: string | null = null;
+      const awaiter = state
+        .registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000)
+        .then((answer) => { settled = answer; })
+        .catch((err: Error) => { settled = `rejected:${err.message}`; });
 
-      await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
-      await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
+      try {
+        await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
+        await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
 
-      const pending = state.pendingPolls.questions.get(mapKey);
-      expect(pending).toBeDefined();
-      // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
-      // this was downgraded to 'first-vote-wins', letting any member resolve).
-      expect(pending!.resolution).toBe('admin-only');
-      expect(pending!.adminJids ?? null).toBeNull();
+        const pending = state.pendingPolls.questions.get(mapKey);
+        expect(pending).toBeDefined();
+        // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
+        // this was downgraded to 'first-vote-wins', letting any member resolve).
+        expect(pending!.resolution).toBe('admin-only');
+        expect(pending!.adminJids ?? null).toBeNull();
 
-      // A non-admin vote must NOT resolve the gated decision.
-      state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
-      expect(pending!.answersCollected[0]).toBeUndefined();
-      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
-      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        // A non-admin vote must NOT resolve the gated decision.
+        state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
+        await Promise.resolve();
+        expect(settled).toBeNull();
+        expect(pending!.answersCollected[0]).toBeUndefined();
+        expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      } finally {
+        state.deletePendingPollQuestions(mapKey);
+        await awaiter;
+      }
+      expect(settled).toMatch(/^rejected:Poll abandoned/);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
     });
 
     it('QR-051 — send_poll admin-only stays fail-closed when group admin metadata is unavailable', async () => {

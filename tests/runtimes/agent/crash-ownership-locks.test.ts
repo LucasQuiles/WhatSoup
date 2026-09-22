@@ -1,5 +1,6 @@
 // REGRESSION LOCKS — exactly one crash owner and one generation-owned recovery.
 import { describe, expect, it, vi } from 'vitest';
+import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -162,7 +163,7 @@ describe('B2 crash ownership regression locks', () => {
     try {
       runtime = new AgentRuntime(db as any, messenger as any, 'b2-lock', {
         sessionScope: 'per_chat',
-        cwd: '/tmp',
+        cwd: await ownedRuntimeCwd(runId),
       });
       runtime.setDurability(new DurabilityEngine(db));
       const state = runtime as any;
