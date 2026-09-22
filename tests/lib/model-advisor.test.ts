@@ -71,6 +71,13 @@ function runTimersInline(): void {
   }) as unknown as typeof globalThis.setTimeout);
 }
 
+// Every child logger shares one mock, so other modules' warnings land on it too
+// (the API-key resolver warns when its keyring lookup falls back to the env var).
+// Degradation assertions read only this module's "models API …" warnings.
+function modelsApiWarnings(): unknown[][] {
+  return logger.warn.mock.calls.filter(([, msg]) => typeof msg === 'string' && msg.startsWith('models API '));
+}
+
 describe('fetchLiveModelIds', () => {
   it('skips vendors with no API key (no network calls)', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
@@ -135,7 +142,7 @@ describe('fetchLiveModelIds', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.ids).toEqual(['claude-opus-4-9']);
     expect(result.liveScan).toMatchObject({ mode: 'live', degradedVendors: [] });
-    expect(logger.warn).not.toHaveBeenCalled();
+    expect(modelsApiWarnings()).toEqual([]);
   });
 
   it('degrades only after the retries are exhausted', async () => {
@@ -147,11 +154,10 @@ describe('fetchLiveModelIds', () => {
     const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
     expect(fetchSpy).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
     expect(result.liveScan).toMatchObject({ mode: 'degraded' });
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(
+    expect(modelsApiWarnings()).toEqual([[
       { vendor: 'anthropic', err: 'The operation was aborted due to timeout' },
       'models API unreachable; retries exhausted or disabled; using static catalog',
-    );
+    ]]);
   });
 
   it('does not retry a non-retryable auth failure', async () => {
@@ -779,6 +785,8 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     // Prior process left a marker; the configured model is current, so the
     // first check result is clean (positive proof) and the reconcile clears.
     setRecoveryMarker('model-currency:test-bot');
+    // The first run() is armed behind the startup delay; fire it inline.
+    runTimersInline();
     startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-8' });
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
     // The clean path through notifyModelAdvisories cannot emit this clear
