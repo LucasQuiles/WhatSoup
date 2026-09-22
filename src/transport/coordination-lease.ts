@@ -38,7 +38,7 @@ import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, wr
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { appendPrivateJsonLineSync, ensurePrivateDirectorySync, writeAtomicPrivateFileSync } from '../lib/private-fs.ts';
+import { appendPrivateJsonLineSync, ensurePrivateDirectorySync, writeAtomicPrivateFileIsolatedSync } from '../lib/private-fs.ts';
 import { getCurrentBootId } from '../lib/process-lock.ts';
 import { systemClock } from '../lib/clock.ts';
 import {
@@ -196,7 +196,7 @@ function readTombstoneToken(stateRoot: string, scopeId: AccountScopeIdV1): numbe
 }
 
 function writeTombstoneToken(stateRoot: string, scopeId: AccountScopeIdV1, token: number): void {
-  writeAtomicPrivateFileSync(
+  writeAtomicPrivateFileIsolatedSync(
     tombstonePath(stateRoot, scopeId),
     JSON.stringify({ lastFencingToken: token }),
     'coordination-lease tombstone',
@@ -404,7 +404,7 @@ export function renewCoordinationLease(args: {
   };
   const renewed = parseCoordinationLease(renewedCandidate);
   if (renewed === null) return { ok: false, refusal: 'lease_corrupt' };
-  writeAtomicPrivateFileSync(leasePath, JSON.stringify(renewed), 'coordination lease');
+  writeAtomicPrivateFileIsolatedSync(leasePath, JSON.stringify(renewed), 'coordination lease');
   return { ok: true, lease: renewed };
 }
 

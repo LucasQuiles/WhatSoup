@@ -98,7 +98,7 @@ describe('silence-manager corrupt-file handling', () => {
     });
     vi.doMock('../../src/lib/private-fs.ts', () => ({
       ...actualPrivateFs,
-      writeAtomicPrivateFileSync: writeLifecycleMarker,
+      writeAtomicPrivateFileIsolatedSync: writeLifecycleMarker,
     }));
     const { SilenceStoreUnavailableError, addSilence, listActiveSilences } = await importManager();
 

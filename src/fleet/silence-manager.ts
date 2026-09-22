@@ -24,7 +24,7 @@ import {
   forceEnsurePrivateDirectorySync,
   fsyncDirectory,
   readPrivateFileSync,
-  writeAtomicPrivateFileSync,
+  writeAtomicPrivateFileIsolatedSync,
 } from '../lib/private-fs.ts';
 import { acquireProcessLock, releaseProcessLock } from '../lib/process-lock.ts';
 import { MS_PER_MINUTE } from '../lib/time-units.ts';
@@ -249,7 +249,7 @@ function noteLifecycleMarkerFailure(): void {
 
 function persistObservedGeneration(revision: string, observedAt: string, force = false): void {
   if (persistedLifecycleMarkerState === 'observed' && !force) return;
-  writeAtomicPrivateFileSync(
+  writeAtomicPrivateFileIsolatedSync(
     SILENCE_REGISTRY_GENERATION_FILE,
     `${JSON.stringify({ schemaVersion: 1, state: 'observed', revision, observedAt })}\n`,
     'fleet silence registry lifecycle marker',
@@ -262,7 +262,7 @@ function persistObservedGeneration(revision: string, observedAt: string, force =
 /** A missing store is current only after its first-run lifecycle state is durable. */
 function persistUninitializedGeneration(observedAt: string): void {
   if (persistedLifecycleMarkerState !== null) return;
-  writeAtomicPrivateFileSync(
+  writeAtomicPrivateFileIsolatedSync(
     SILENCE_REGISTRY_GENERATION_FILE,
     `${JSON.stringify({ schemaVersion: 1, state: 'uninitialized', observedAt })}\n`,
     'fleet silence registry lifecycle marker',

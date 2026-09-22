@@ -14,7 +14,7 @@ import { createChildLogger } from '../logger.ts';
 import {
   deletePrivateFileSync,
   readPrivateFileSync,
-  writeAtomicPrivateFileSync,
+  writeAtomicPrivateFileIsolatedSync,
 } from './private-fs.ts';
 import { isNonEmptyString } from './type-guards.ts';
 
@@ -662,7 +662,7 @@ function fileStoreWrite(service: string, value: string): void {
   if (Buffer.byteLength(value) > FILE_STORE_MAX_BYTES) {
     throw new Error('credential exceeds file-store maximum size');
   }
-  writeAtomicPrivateFileSync(fileStorePath(service), value, 'credential');
+  writeAtomicPrivateFileIsolatedSync(fileStorePath(service), value, 'credential');
 }
 
 function fileStoreDelete(service: string): boolean {
