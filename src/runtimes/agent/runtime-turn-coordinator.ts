@@ -76,6 +76,8 @@ export type { ProviderFallbackReplayArgs, ResolvedReplayRoute } from './fallback
 export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
+const QUEUED_DELIVERY_ECHO_WAIT_MS = 10_000;
+const QUEUED_DELIVERY_ECHO_POLL_MS = 25;
 
 /**
  * #2976 residual: retire the turn's actor from a session's stored MCP conduit
@@ -376,6 +378,10 @@ export class RuntimeTurnCoordinator {
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
   private readonly outboundQueuePoisons = new OutboundQueuePoisonRegistry();
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
+  private readonly undispatchedTerminalFinalizations = new WeakMap<RuntimeTurnContext, {
+    attemptOutcome: AttemptOutcome;
+    finalization: Promise<FinalizeRuntimeTurnResult>;
+  }>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
   private readonly rejectedTurnFinalizations = new Set<Promise<void>>();
@@ -2025,7 +2031,10 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
         this.turnQueueHalts.halt(queueKey.value);
       },
     });
-    queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(queueKey, queued));
+    const liveQueue = queue;
+    queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(
+      queueKey, queued, undefined, undefined, undefined, liveQueue,
+    ));
     this.host.perChatTurnQueues.set(mapKey, queue);
     this.host.perChatTurnQueueKeys.set(queue, queueKey);
   }
@@ -2070,6 +2079,36 @@ async finalizeUndispatchedRuntimeTurn(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
+  onOwnershipProven?: () => void,
+): Promise<FinalizeRuntimeTurnResult> {
+  const existing = this.undispatchedTerminalFinalizations.get(context);
+  if (existing) {
+    const result = await existing.finalization;
+    if (result.kind !== 'terminal' && result.kind !== 'reclaimed_by_sweep') {
+      // A retained finalization still owns its original outcome after storage
+      // recovers. Settle that owner before shutdown can request a crash outcome.
+      await this.host.runtimeTurnSupervisor.retryAll();
+      await this.host.runtimeTurnSupervisor.waitForRecovery(context);
+      existing.finalization = this.runUndispatchedRuntimeTurnFinalization(
+        context, scopeRef, existing.attemptOutcome, onOwnershipProven,
+      );
+      return existing.finalization;
+    }
+    onOwnershipProven?.();
+    return result;
+  }
+  // A timeout and shutdown can overlap before the FIFO releases this exact
+  // immutable context. Join its first terminal owner instead of changing the outcome.
+  const finalization = this.runUndispatchedRuntimeTurnFinalization(context, scopeRef, attemptOutcome, onOwnershipProven);
+  this.undispatchedTerminalFinalizations.set(context, { attemptOutcome, finalization });
+  void finalization.catch(() => { this.undispatchedTerminalFinalizations.delete(context); });
+  return finalization;
+}
+
+private async runUndispatchedRuntimeTurnFinalization(
+  context: RuntimeTurnContext,
+  scopeRef: PerChatRuntimeScopeRef | undefined,
+  attemptOutcome: AttemptOutcome,
   onOwnershipProven?: () => void,
 ): Promise<FinalizeRuntimeTurnResult> {
   if (!this.host.durability) {
@@ -2455,6 +2494,63 @@ finalizeRuntimeCrash(
   });
 }
 
+private async waitForQueuedDeliveryEcho(
+  scopeRef: PerChatRuntimeScopeRef,
+  turn: QueuedTurn,
+  runtimeQueue: TurnQueue,
+): Promise<boolean> {
+  const context = turn.runtimeContext;
+  const durability = this.host.durability;
+  if (!context || context.identity.inboundSeq === null || !durability) return true;
+
+  const startedAt = performance.now();
+  let waiting = false;
+  try {
+    for (;;) {
+      if (this.isUndispatchedRuntimeTurnCancelled(context)) {
+        await this.waitForUndispatchedRuntimeCrash(context);
+        this.clearUndispatchedRuntimeTurnCancellation(context);
+        return false;
+      }
+      if (this.host.isShuttingDown?.() === true
+        || this.perChatTeardowns.has(scopeRef.value)
+        || this.host.perChatTurnQueues.get(scopeRef.value) !== runtimeQueue
+        || runtimeQueue.activeTurn !== turn
+        || runtimeQueue.isHalted) {
+        await this.terminalizeUndispatchedRuntimeCrash(context, scopeRef);
+        await this.waitForUndispatchedRuntimeCrash(context);
+        this.clearUndispatchedRuntimeTurnCancellation(context);
+        return false;
+      }
+      // Partial runtime adapters still pass through the unchanged final admission guard.
+      const state = durability.getTurnRecoveryAdmissionStateForScope?.(
+        context.identity.scope, context.identity.conversationKey,
+      );
+      if (state !== 'awaiting_delivery_echo') return true;
+      if (!waiting) {
+        waiting = true;
+        log.info({ inboundSeq: context.identity.inboundSeq, logicalTurnId: context.identity.logicalTurnId },
+          'queued turn waiting for completed answer delivery echo');
+      }
+      if (performance.now() - startedAt >= QUEUED_DELIVERY_ECHO_WAIT_MS) {
+        // Same terminal class the thrown ScopeBlockedByDurableRecoveryError already maps to in
+        // finalizePerChatProcessorError, so a follower blocked by recovery lands in one class
+        // whether it was rejected before dispatch or after the echo wait timed out.
+        // scope_blocked_recovery stays reserved for outbound-queue-poison containment (#3321).
+        await this.finalizeUndispatchedRuntimeTurnAndWait(context, scopeRef,
+          { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+          { error: new ScopeBlockedByDurableRecoveryError() });
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, QUEUED_DELIVERY_ECHO_POLL_MS));
+    }
+  } finally {
+    if (waiting) log.info({ inboundSeq: context.identity.inboundSeq,
+      logicalTurnId: context.identity.logicalTurnId, elapsedMs: performance.now() - startedAt },
+    'queued turn delivery echo wait ended');
+  }
+}
+
 async processPerChatTurn(
   scopeRef: PerChatRuntimeScopeRef,
   turn: QueuedTurn,
@@ -2464,7 +2560,29 @@ async processPerChatTurn(
   excludeJobId?: number,
   dispatchAllowed?: () => boolean,
   onProviderBoundary?: () => void,
+  // Only the live FIFO carries this receipt; supervisor dispatches use their own fence.
+  expectedLiveQueue?: TurnQueue,
 ): Promise<void> {
+  const runtimeQueue = expectedLiveQueue;
+  if (runtimeQueue !== undefined) {
+    if (!(await this.waitForQueuedDeliveryEcho(scopeRef, turn, runtimeQueue))) return;
+    const context = turn.runtimeContext;
+    // Cancellation may win the promise handoff after the wait reports ready.
+    if (context && this.isUndispatchedRuntimeTurnCancelled(context)) {
+      await this.waitForUndispatchedRuntimeCrash(context);
+      this.clearUndispatchedRuntimeTurnCancellation(context);
+      return;
+    }
+    if (context && (this.host.isShuttingDown?.() === true
+      || this.perChatTeardowns.has(scopeRef.value)
+      || this.host.perChatTurnQueues.get(scopeRef.value) !== runtimeQueue
+      || runtimeQueue.activeTurn !== turn || runtimeQueue.isHalted)) {
+      await this.terminalizeUndispatchedRuntimeCrash(context, scopeRef);
+      await this.waitForUndispatchedRuntimeCrash(context);
+      this.clearUndispatchedRuntimeTurnCancellation(context);
+      return;
+    }
+  }
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
   if (turn.inboundSeq !== undefined) seqQueue.push(turn.inboundSeq);
