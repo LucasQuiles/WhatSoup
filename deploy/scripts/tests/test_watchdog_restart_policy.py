@@ -423,6 +423,8 @@ def _run_rendered_unreachable_watchdog(
 
     rendered = (
         _TEMPLATE.read_text(encoding="utf-8")
+        # render-watchdog.py bakes the release's emitter; use this repo's.
+        .replace("__BOT_ERRORS_EMIT__", str(Path(__file__).resolve().parents[1] / "bot-errors-emit.py"))
         .replace("__HOME__", str(home))
         .replace("FLEET_PORT", "9998")
         .replace("BOT_PORT", "9999")
@@ -483,6 +485,7 @@ def _run_rendered_unreachable_watchdog(
         env=dict(
             os.environ,
             HOME=str(home),
+            BOT_ERRORS_OUTBOX_DIR=str(home / "bot-errors-outbox"),
             LAUNCHD_SNAPSHOT=launchd_snapshot,
             BOT_HEALTH_JSON=encoded_health,
             BOT_HTTP_CODE=str(bot_http_code),

@@ -190,7 +190,24 @@ instance `config.json` `service` block (schema:
   pointing the launchd service context at a dedicated claude-cli config root
   (e.g. `$HOME/.claude-<instance>`). The block governs only which config root
   the service resolves; credentials for that root stay keychain-resident and
-  are neither created nor copied by rendering.
+  are neither created nor copied by rendering. The host-level timers
+  (`com.whatsoup.harness-maintenance`, `com.whatsoup.reply-guarantee`,
+  `com.whatsoup.release-drift-check`) carry the same `CLAUDE_CONFIG_DIR` so
+  every job that runs the provider CLI uses the bot's store:
+  `deploy/setup.sh` and `scripts/check-launchd-drift.sh` inject the host's one
+  distinct value, and `deploy/scripts/render-release-drift-launchd.sh` injects
+  its `--instance` value. When config gives no value (unset, or several
+  different values), all three carry forward the `CLAUDE_CONFIG_DIR` the
+  installed plist already has (`--preserve-from <installed plist>`; pass the
+  live plist when re-rendering release-drift by hand), so a re-render keeps a
+  hand-added key and the drift check agrees with the install. A configured
+  value always wins. Make the value config-owned (below) so it is not only a
+  hand edit. An installed plist that mentions `CLAUDE_CONFIG_DIR` but whose
+  `EnvironmentVariables` the reader refuses (duplicated, unparseable, or using
+  a numeric character reference such as `&#45;`, which the reader does not
+  decode) stops
+  the render: `deploy/setup.sh` runs under `set -e`, so it aborts at that
+  timer and installs nothing further until the plist is repaired or removed.
 - `service.pathPrepend` → directories prepended, in order, ahead of the
   generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
   `$HOME/.local/bin` so an opencode fallback binary resolves under launchd), and
