@@ -372,10 +372,11 @@ def test_loss_stamp_keeps_a_producer_clock_that_runs_ahead():
     assert parent_key in state["openIncidents"]
 
 
-@pytest.mark.parametrize("path", ["suppressed-logout", "same-key-logout", "watchdog-child"])
-def test_a_far_future_loss_stamp_is_capped(path):
+def _far_future_loss_outcome(path):
     # A producer clock ten years ahead must not pin the root open until then:
     # once the clock is corrected, a connected reading beyond the cap retires it.
+    # Returns (lowest allowed stamp, highest allowed stamp, observed stamp,
+    # whether the corrected connected child was sent, whether the root is open).
     now = int(time.time())
     mod = _load()
     far = now + 10 * 365 * 86400
@@ -387,13 +388,32 @@ def test_a_far_future_loss_stamp_is_capped(path):
         loss = _alert("instance_logged_out", created=far, event_id="evt-far-future")
     mod.should_suppress_send(loss, state)
     cap = mod.CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS
-    assert now + cap - 5 <= record["lastConnectivityLossObservedAt"] <= int(time.time()) + cap
+    stamp = record["lastConnectivityLossObservedAt"]
+    high = int(time.time()) + cap
 
     after_cap = now + cap + mod.CLOCK_SKEW_TOLERANCE_SECONDS + 120
     child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=after_cap,
                    event_id="evt-corrected-connected")
-    assert mod.should_suppress_send(child, state) is None
-    assert parent_key not in state["openIncidents"]
+    sent = mod.should_suppress_send(child, state) is None
+    return now + cap - 5, high, stamp, sent, parent_key in state["openIncidents"]
+
+
+def test_a_far_future_suppressed_logout_stamp_is_capped():
+    low, high, stamp, sent, still_open = _far_future_loss_outcome("suppressed-logout")
+    assert low <= stamp <= high
+    assert sent and not still_open
+
+
+def test_a_far_future_same_key_logout_stamp_is_capped():
+    low, high, stamp, sent, still_open = _far_future_loss_outcome("same-key-logout")
+    assert low <= stamp <= high
+    assert sent and not still_open
+
+
+def test_a_far_future_watchdog_child_stamp_is_capped():
+    low, high, stamp, sent, still_open = _far_future_loss_outcome("watchdog-child")
+    assert low <= stamp <= high
+    assert sent and not still_open
 
 
 def test_folded_same_key_logout_keeps_a_producer_clock_that_runs_ahead():
