@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
@@ -82,12 +82,17 @@ export function writeSandboxArtifacts(
   return hooks;
 }
 `);
+  // The hook's import closure as a release tree ships it: rgp-state.mjs loads
+  // src/lib helpers, and process-lock.ts resolves zod from node_modules.
   for (const relativePath of [
     'deploy/hooks/poll-interaction-lint.mjs',
     'deploy/hooks/lib/rgp-state.mjs',
+    'src/lib/process-lock.ts',
+    'src/lib/private-fs.ts',
   ]) {
     writeFixtureFile(fixture, relativePath, readFileSync(path.join(repoRoot, relativePath), 'utf8'));
   }
+  symlinkSync(path.join(repoRoot, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
   writeFixtureFile(fixture, 'docs/runbooks/agent-decision-polls.md', 'AskUserQuestion send_poll multiSelect selectableCount Known Limits\n');
   writeFixtureFile(fixture, 'CLAUDE.md', 'docs/runbooks/agent-decision-polls.md\n');
   writeFixtureFile(fixture, 'README.md', 'docs/runbooks/agent-decision-polls.md\n');
