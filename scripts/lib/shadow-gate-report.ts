@@ -56,6 +56,10 @@ const EXCLUDED_ROUTES: ReadonlySet<string> = new Set(['none', 'admin', 'control'
 const KNOWN_DISPATCH_ROUTES: ReadonlySet<string> = new Set(['agentruntime', 'chatruntime', 'passiveruntime', 'agent']);
 const SYNTHETIC_ID_PREFIXES = ['agentjob-', 'obl:'] as const;
 const NULL_ROUTE = '(null)';
+// routed_to is the only free-form DB string that reaches output; anything
+// outside a runtime-name shape is bucketed rather than printed.
+const PRINTABLE_ROUTE = /^[a-z_]{1,64}$/;
+const UNPRINTABLE_ROUTE = '(unprintable)';
 const ECHOED = 'response_echoed';
 const NO_REPLY = 'no_reply_policy';
 const MISSING_WARNING = 'WARNING: rates below are computed on joined rows; missing evidence may hide disagreements';
@@ -94,7 +98,12 @@ function listSegments(dir: string, limits: SegmentLimits): Array<{ name: string;
   const out: Array<{ name: string; path: string }> = [];
   for (const name of segments) {
     const path = join(dir, name);
-    const st = lstatSync(path);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(path);
+    } catch {
+      evidenceError(`${name} is unreadable`);
+    }
     if (!st.isFile()) evidenceError(`${name} is not a regular file`);
     total += st.size;
     if (total > limits.maxTotalBytes) evidenceError(`segment files exceed ${limits.maxTotalBytes} bytes in total`);
@@ -117,7 +126,12 @@ export function readSegments(dir: string, limits: SegmentLimits = DEFAULT_SEGMEN
   let tornTail = 0;
   const segments = listSegments(dir, limits);
   for (const { name, path } of segments) {
-    const bytes = readFileSync(path);
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(path);
+    } catch {
+      evidenceError(`${name} is unreadable`);
+    }
     let start = 0;
     let lineNo = 0;
     while (start < bytes.length) {
@@ -201,7 +215,7 @@ export function readInboundWindow(dbPath: string, since: number, until: number):
     return rows.map((r) => ({
       seq: Number(r.seq),
       messageId: String(r.message_id),
-      routedTo: r.routed_to ?? NULL_ROUTE,
+      routedTo: r.routed_to === null ? NULL_ROUTE : PRINTABLE_ROUTE.test(r.routed_to) ? r.routed_to : UNPRINTABLE_ROUTE,
       terminalReason: isNonEmptyString(r.terminal_reason) ? r.terminal_reason : null,
     }));
   } catch {

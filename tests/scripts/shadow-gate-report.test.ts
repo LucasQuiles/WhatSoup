@@ -389,16 +389,28 @@ describe('shadow-gate report', () => {
     expect(report.pooled!.disagreementConservative).toEqual({ x: 7, n: 7, rate: 1, cpUpper95: 1 });
   });
 
-  it('keeps a NULL routed_to visible and eligible instead of dropping it', () => {
+  it('keeps NULL and unprintable routed_to values visible and eligible, never printing them raw', () => {
     const f = makeFixture();
     const db = new DatabaseSync(f.dbPath);
-    db.prepare(`INSERT INTO inbound_events (message_id, conversation_key, chat_jid, received_at, routed_to)
-      VALUES ('m-null-route', ?, ?, datetime(?, 'unixepoch'), NULL)`).run(FIXTURE_PHONE, FIXTURE_JID, SINCE + 30);
+    const insert = db.prepare(`INSERT INTO inbound_events (message_id, conversation_key, chat_jid, received_at, routed_to)
+      VALUES (?, ?, ?, datetime(?, 'unixepoch'), ?)`);
+    insert.run('m-null-route', FIXTURE_PHONE, FIXTURE_JID, SINCE + 30, null);
+    insert.run('m-odd-route', FIXTURE_PHONE, FIXTURE_JID, SINCE + 31, FIXTURE_JID);
     db.close();
     const { report } = runJson(baseArgs(f));
     expect(report.coverage.routedTo['(null)']).toBe(1);
-    expect(report.coverage.unknownRoutedTo).toEqual(['(null)', 'mysteryruntime']);
-    expect(report.coverage).toMatchObject({ eligible: 13, missing: 4, unknownRoutedEligible: 2 });
+    expect(report.coverage.routedTo['(unprintable)']).toBe(1);
+    expect(report.coverage.unknownRoutedTo).toEqual(['(null)', '(unprintable)', 'mysteryruntime']);
+    expect(report.coverage).toMatchObject({ eligible: 14, missing: 5, unknownRoutedEligible: 3 });
+    expect(JSON.stringify(report)).not.toContain(FIXTURE_JID);
+  });
+
+  it('exits 65 when a segment cannot be read', () => {
+    const f = makeFixture();
+    mkdirSync(path.join(f.eventsDir, 'shadow-gate-events.000009.ndjson'));
+    const result = runCli(baseArgs(f));
+    expect(result.code).toBe(65);
+    expect(result.stderr).toContain('shadow-gate-events.000009.ndjson is not a regular file');
   });
 
   it('exits 64 on a missing --since and on an inverted window', () => {

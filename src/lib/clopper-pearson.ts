@@ -3,7 +3,8 @@
 // dependency-free: the bound is found by bisection on the exact binomial CDF,
 // whose terms are computed in log space through a Lanczos log-gamma.
 
-// Lanczos coefficients (g = 7, n = 9); relative error below 1e-15 for x > 0.
+// Lanczos coefficients (g = 7, n = 9); relative error below 1e-15 for x >= 1,
+// the only range the binomial terms below need.
 const LANCZOS_G = 7;
 const LANCZOS_COEFFICIENTS = [
   0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313,
@@ -14,10 +15,6 @@ const HALF_LOG_TWO_PI = 0.5 * Math.log(2 * Math.PI);
 const BISECTION_STEPS = 200;
 
 function logGamma(x: number): number {
-  if (x < 0.5) {
-    // Reflection keeps the series in its accurate range.
-    return Math.log(Math.PI / Math.abs(Math.sin(Math.PI * x))) - logGamma(1 - x);
-  }
   const z = x - 1;
   let sum = LANCZOS_COEFFICIENTS[0];
   for (let i = 1; i < LANCZOS_COEFFICIENTS.length; i += 1) sum += LANCZOS_COEFFICIENTS[i]! / (z + i);
