@@ -126,7 +126,11 @@ function verdict(messageId: string, overrides: Partial<ShadowGateVerdictEvent> =
   return event;
 }
 
-function coverage(marker: ShadowGateCoverageEvent['marker'], ts: number): ShadowGateCoverageEvent {
+function coverage(
+  marker: ShadowGateCoverageEvent['marker'],
+  ts: number,
+  overrides: Partial<ShadowGateCoverageEvent> = {},
+): ShadowGateCoverageEvent {
   const event: ShadowGateCoverageEvent = {
     schemaVersion: 1,
     ts,
@@ -139,6 +143,7 @@ function coverage(marker: ShadowGateCoverageEvent['marker'], ts: number): Shadow
     counts: {
       evaluated: marker === 'armed' ? 0 : 12,
       recorded: marker === 'armed' ? 0 : 11,
+      written: marker === 'armed' ? 0 : 20,
       droppedQueueFull: marker === 'armed' ? 0 : 1,
       droppedOversize: 0,
       droppedClosed: 0,
@@ -155,6 +160,7 @@ function coverage(marker: ShadowGateCoverageEvent['marker'], ts: number): Shadow
     rulesSha256: RULES_A,
     featureVersion: 1,
     authority: 'advisory_only',
+    ...overrides,
   };
   expect(validateShadowGateEvent(event)).toBeNull();
   return event;
@@ -165,6 +171,7 @@ const line = (event: object): string => `${JSON.stringify(event)}\n`;
 interface FixtureOptions {
   bootBRules?: string;
   extraLineage?: boolean;
+  extraCoverageLineage?: boolean;
 }
 
 function writeSegments(dir: string, opts: FixtureOptions = {}): void {
@@ -190,6 +197,9 @@ function writeSegments(dir: string, opts: FixtureOptions = {}): void {
     line(coverage('counts', (SINCE + 600) * 1000)),
   ];
   if (opts.extraLineage) first.push(line(verdict('m-echo-spawn', { databaseLineage: 'fedcba9876543210' })));
+  if (opts.extraCoverageLineage) {
+    first.push(line(coverage('armed', (SINCE + 700) * 1000, { bootId: 'boot-c-2222', databaseLineage: 'fedcba9876543210' })));
+  }
   writeFileSync(path.join(dir, 'shadow-gate-events.000001.ndjson'), first.join(''));
   // Torn tail: a parseable verdict for a missing row, without its newline.
   const torn = JSON.stringify(verdict('m-echo-missing'));
@@ -245,7 +255,9 @@ describe('shadow-gate report', () => {
       routedTo: { agent: 2, agentruntime: 11, mysteryruntime: 1, none: 1 },
       unknownRoutedTo: ['mysteryruntime'],
       unknownRoutedEligible: 1,
+      countersScope: 'cumulative-per-boot',
       invalid: 2,
+      written: 20,
       recorderDropped: 1,
       journalFailures: 1,
       duplicate: 1,
@@ -258,13 +270,43 @@ describe('shadow-gate report', () => {
       warning: 'WARNING: rates below are computed on joined rows; missing evidence may hide disagreements',
     });
     expect(report.coverage.markers).toEqual([
-      expect.objectContaining({ bootId: BOOT_A, armed: 1, counts: 1, disarmed: 0 }),
-      { bootId: BOOT_B, armed: 0, counts: 0, disarmed: 0, lastCounts: null },
+      expect.objectContaining({
+        bootId: BOOT_A, armed: 1, counts: 1, disarmed: 0, lastSinkState: 'ready', lastSinkDegradedReason: null,
+      }),
+      {
+        bootId: BOOT_B, armed: 0, counts: 0, disarmed: 0, lastCounts: null, lastSinkState: null, lastSinkDegradedReason: null,
+      },
     ]);
-    expect(report.coverage.markers[0]!.lastCounts).toMatchObject({ evaluated: 12, recorded: 11, invalid: 2 });
+    expect(report.coverage.markers[0]!.lastCounts).toMatchObject({ evaluated: 12, recorded: 11, written: 20, invalid: 2 });
   });
 
-  it('counts ERROR as SPAWN and computes all three disagreement denominators with bounds', () => {
+  it('prints the last written sink state per boot and labels counters as cumulative per boot', () => {
+    const f = makeFixture();
+    const segment = path.join(f.eventsDir, 'shadow-gate-events.000001.ndjson');
+    writeFileSync(segment, readFileSync(segment, 'utf8') + line(coverage('counts', (SINCE + 900) * 1000, {
+      sinkState: 'degraded', sinkDegradedReason: 'segment_cap_reached',
+    })));
+    const { report } = runJson(baseArgs(f));
+    expect(report.coverage.markers[0]).toMatchObject({ lastSinkState: 'degraded', lastSinkDegradedReason: 'segment_cap_reached' });
+    let text = '';
+    runShadowGateReport(baseArgs(f), (t) => { text += t; });
+    expect(text).toContain(`boot ${BOOT_A}: armed 1, counts 2, disarmed 0; last written sink state: degraded (segment_cap_reached)`);
+    expect(text).toContain('recorder counters (cumulative per boot at last marker, not windowed):');
+    expect(text).toContain(`boot ${BOOT_B}: armed 0, counts 0, disarmed 0; last written sink state: none`);
+  });
+
+  it('excludes routed_to = agent as synthetic even without a synthetic id prefix', () => {
+    const f = makeFixture();
+    const db = new DatabaseSync(f.dbPath);
+    db.prepare(`INSERT INTO inbound_events (message_id, conversation_key, chat_jid, received_at, routed_to, terminal_reason)
+      VALUES (?, ?, ?, datetime(?, 'unixepoch'), ?, ?)`).run('m-agent-route', FIXTURE_PHONE, FIXTURE_JID, SINCE + 32, 'agent', 'response_echoed');
+    db.close();
+    const { report } = runJson(baseArgs(f));
+    expect(report.coverage).toMatchObject({ eligible: 12, excludedSynthetic: 3, unknownRoutedTo: ['mysteryruntime'] });
+    expect(report.coverage.routedTo.agent).toBe(3);
+  });
+
+  it('counts ERROR as SPAWN in proxy rates, against the gate conservatively, and prints OK-only rates', () => {
     const f = makeFixture();
     const { report } = runJson(baseArgs(f));
     expect(report.status).toEqual({ ok: 7, error: { OVERRUN: 1, E_THROW: 1, E_INPUT: 0 } });
@@ -273,27 +315,51 @@ describe('shadow-gate report', () => {
     expect(pooled.suppressOverOk).toEqual({ x: 2, n: 7, rate: 2 / 7 });
     expect(pooled.suppressOverEligible).toEqual({ x: 2, n: 12, rate: 2 / 12 });
     expect(pooled.proxyDisagreement).toBe(1);
+    // Echoed joined rows: four OK plus the E_THROW row m-error.
+    expect(pooled.disagreementOverEchoedOk).toEqual({ x: 1, n: 4, rate: 1 / 4, cpUpper95: clopperPearsonUpper(1, 4) });
     expect(pooled.disagreementOverEchoedJoined).toEqual({ x: 1, n: 5, rate: 1 / 5, cpUpper95: clopperPearsonUpper(1, 5) });
     expect(pooled.disagreementOverEchoedAll).toEqual({ x: 1, n: 7, rate: 1 / 7, cpUpper95: clopperPearsonUpper(1, 7) });
-    expect(pooled.disagreementConservative).toEqual({ x: 3, n: 7, rate: 3 / 7, cpUpper95: clopperPearsonUpper(3, 7) });
+    // One SUPPRESS, one echoed ERROR and two missing echoed rows.
+    expect(pooled.disagreementConservative).toEqual({ x: 4, n: 7, rate: 4 / 7, cpUpper95: clopperPearsonUpper(4, 7) });
     // The OVERRUN row carries SUPPRESS but counts as SPAWN, so only one row is proxy-confirmed.
     expect(pooled.proxyConfirmedOverLabeled).toEqual({ x: 1, n: 11, rate: 1 / 11 });
   });
 
-  it('reports per-rule counts, version partitions and OK latency', () => {
+  it('a boot whose every verdict is E_THROW has conservative disagreement equal to the echoed count', () => {
+    const f = makeFixture();
+    const eventsDir = tmp.make('all-throw');
+    const eligible = ROWS.filter((r) => r.routedTo !== 'none' && r.routedTo !== 'agent' && r.offset === undefined);
+    writeFileSync(path.join(eventsDir, 'shadow-gate-events.000001.ndjson'), [
+      line(coverage('armed', (SINCE + 1) * 1000)),
+      ...eligible.map((r) => line(verdict(r.messageId, { status: 'ERROR', reason: 'E_THROW', verdict: null, ruleId: null }))),
+    ].join(''));
+    const { code, report } = runJson(['--db', f.dbPath, '--events', eventsDir, '--instance', INSTANCE, '--since', String(SINCE), '--until', String(UNTIL)]);
+    expect(code).toBe(0);
+    expect(report.coverage).toMatchObject({ eligible: 12, received: 12, missing: 0 });
+    expect(report.status.error.E_THROW).toBe(12);
+    const pooled = report.pooled!;
+    expect(pooled.disagreementConservative).toEqual({ x: 7, n: 7, rate: 1, cpUpper95: 1 });
+    expect(pooled.disagreementOverEchoedJoined).toEqual({ x: 0, n: 7, rate: 0, cpUpper95: clopperPearsonUpper(0, 7) });
+    expect(pooled.disagreementOverEchoedOk).toEqual({ x: 0, n: 0, rate: null, cpUpper95: null });
+  });
+
+  it('reports per-rule counts, version partitions and latency over all and OK-only rows', () => {
     const f = makeFixture();
     const { report } = runJson(baseArgs(f));
+    // SPAWN/SUPPRESS hold OK results only: the OVERRUN SUPPRESS row is an ERROR.
     expect(report.perRule).toEqual({
-      NONE: { SPAWN: 0, SUPPRESS: 0, NONE: 1 },
-      S02_DM: { SPAWN: 5, SUPPRESS: 0, NONE: 0 },
-      X03_NO_REPLY_PATTERN: { SPAWN: 0, SUPPRESS: 3, NONE: 0 },
+      NONE: { SPAWN: 0, SUPPRESS: 0, ERROR: 1 },
+      S02_DM: { SPAWN: 5, SUPPRESS: 0, ERROR: 0 },
+      X03_NO_REPLY_PATTERN: { SPAWN: 0, SUPPRESS: 2, ERROR: 1 },
     });
     expect(report.partitions).toEqual([
       { gateVersion: 1, rulesSha256: RULES_A, featureVersion: 1, configGeneration: CONFIG_GEN, bootId: BOOT_A, count: 8 },
       { gateVersion: 1, rulesSha256: RULES_A, featureVersion: 1, configGeneration: CONFIG_GEN, bootId: BOOT_B, count: 1 },
     ]);
     expect(report.rulePartitions).toHaveLength(1);
-    expect(report.latency).toEqual({ count: 7, p50: 2, p95: 3.5, p99: 3.5, max: 3.5 });
+    // All nine received rows, including E_THROW (0) and OVERRUN (9).
+    expect(report.latency.all).toEqual({ count: 9, p50: 2, p95: 9, p99: 9, max: 9 });
+    expect(report.latency.ok).toEqual({ count: 7, p50: 2, p95: 3.5, p99: 3.5, max: 3.5 });
   });
 
   it('withholds pooled rates and reports them per rules partition when rules differ', () => {
@@ -304,7 +370,7 @@ describe('shadow-gate report', () => {
     expect(a).toMatchObject({ rulesSha256: RULES_A, received: 8 });
     expect(b).toMatchObject({ rulesSha256: RULES_B, received: 1 });
     // Missing rows (two of them echoed) are attributed to every partition.
-    expect(a!.rates.disagreementConservative).toEqual({ x: 3, n: 6, rate: 3 / 6, cpUpper95: clopperPearsonUpper(3, 6) });
+    expect(a!.rates.disagreementConservative).toEqual({ x: 4, n: 6, rate: 4 / 6, cpUpper95: clopperPearsonUpper(4, 6) });
     expect(b!.rates.disagreementOverEchoedJoined).toEqual({ x: 0, n: 1, rate: 0, cpUpper95: clopperPearsonUpper(0, 1) });
     expect(b!.rates.disagreementConservative).toEqual({ x: 2, n: 3, rate: 2 / 3, cpUpper95: clopperPearsonUpper(2, 3) });
 
@@ -377,6 +443,16 @@ describe('shadow-gate report', () => {
     expect(code).toBe(0);
     expect(report.coverage.received).toBe(9);
     expect(report.lineagesSeen).toEqual(['0123456789abcdef', 'fedcba9876543210']);
+  });
+
+  it('exits 65 when only coverage markers span a second lineage', () => {
+    const f = makeFixture({ extraCoverageLineage: true });
+    const ambiguous = runCli(baseArgs(f));
+    expect(ambiguous.code).toBe(65);
+    expect(ambiguous.stderr).toContain('2 databaseLineages in the window');
+    const { code, report } = runJson([...baseArgs(f), '--lineage', LINEAGE]);
+    expect(code).toBe(0);
+    expect(report.coverage.markers.map((m) => m.bootId)).toEqual([BOOT_A, BOOT_B]);
   });
 
   it('reports everything missing, not an error, when no verdict evidence exists', () => {

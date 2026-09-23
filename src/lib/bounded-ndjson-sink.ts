@@ -6,8 +6,8 @@
 
 import { mkdir, open, readdir, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
-import { join } from 'node:path';
-import { acquireProcessLock, isProcessLockError, releaseProcessLock } from './process-lock.ts';
+import { join, resolve } from 'node:path';
+import { acquireProcessLock, defaultIsProcessAlive, isProcessLockError, releaseProcessLock } from './process-lock.ts';
 import type { ProcessLockHandle } from './process-lock.ts';
 import { systemClock } from './clock.ts';
 
@@ -80,6 +80,16 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Lock paths held by live sinks in this process. A lock file carrying our pid
+// whose path is not in this set was left by an earlier process that had the
+// same pid (a container restart with a persistent dir, or pid reuse), so it is
+// treated as dead rather than as a competing writer.
+const heldLockPaths = new Set<string>();
+
+function lockHolderAlive(lockPath: string): (pid: number) => boolean {
+  return (pid) => (pid === process.pid ? heldLockPaths.has(lockPath) : defaultIsProcessAlive(pid));
+}
+
 function lockFailureReason(err: unknown): string {
   if (!isProcessLockError(err)) return 'lock_failed';
   if (err.reason === 'active') return 'competing_writer';
@@ -93,7 +103,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
   const segmentMaxBytes = options.segmentMaxBytes ?? DEFAULT_SEGMENT_MAX_BYTES;
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
   const { dir, filePrefix } = options;
-  const lockPath = join(dir, `${filePrefix}.lock`);
+  const lockPath = resolve(dir, `${filePrefix}.lock`);
   const segmentPattern = new RegExp(`^${escapeRegExp(filePrefix)}\\.(\\d{${SEGMENT_INDEX_DIGITS}})\\.ndjson$`);
 
   let current: SinkState = 'starting';
@@ -147,6 +157,8 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     const l = lock;
     lock = null;
     if (!l) return;
+    process.removeListener('exit', releaseLock);
+    heldLockPaths.delete(lockPath);
     try {
       releaseProcessLock(l);
     } catch {
@@ -309,11 +321,15 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     // close() may have finished during mkdir; acquiring now would leak the lock.
     if (current !== 'starting') return;
     try {
-      lock = acquireProcessLock(lockPath, { reclaimDeadSameBoot: true });
+      lock = acquireProcessLock(lockPath, { reclaimDeadSameBoot: true, isProcessAlive: lockHolderAlive(lockPath) });
     } catch (err) {
       degrade(lockFailureReason(err));
       return;
     }
+    heldLockPaths.add(lockPath);
+    // Production never calls close(); release synchronously on exit so a
+    // successor with the same pid does not see its own stale lock.
+    process.once('exit', releaseLock);
     let index: number;
     try {
       index = await resumeIndex();

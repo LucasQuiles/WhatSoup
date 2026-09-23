@@ -4,7 +4,8 @@
  * without re-reading), and the rules hash is total (a sentinel when unreadable).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 vi.mock('../../src/logger.ts', async () => {
@@ -34,6 +35,8 @@ import {
   __setShadowRulesPathForTests,
 } from '../../src/core/shadow-gate.ts';
 import type { ShadowGateInput } from '../../src/core/shadow-gate-features.ts';
+import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
+import { Database } from '../../src/core/database.ts';
 
 const tmp = trackTmpDirs('shadow-gate-lazy-');
 
@@ -81,6 +84,59 @@ describe('lazy shadow-gate rules', () => {
     expect(getRulesSha256()).toBe(UNREADABLE_RULES_SHA256);
     expect(UNREADABLE_RULES_SHA256).toMatch(/^0{64}$/);
     expect(warmShadowRules()).toBe(false);
+  });
+
+  it('once loaded, the hash describes the compiled bytes, not the file as it is now', () => {
+    const file = join(tmp.make('onceread'), 'rules.json');
+    const shipped = readFileSync(SHADOW_GATE_RULES_PATH);
+    writeFileSync(file, shipped);
+    __setShadowRulesPathForTests(file);
+    reads.paths.length = 0;
+    expect(warmShadowRules()).toBe(true);
+    // Rewrite the file after loading: the hash must not follow it.
+    writeFileSync(file, `${shipped.toString('utf8')}\n`);
+    expect(getRulesSha256()).toBe(createHash('sha256').update(shipped).digest('hex'));
+    // One read serves both the compiled rules and the hash.
+    expect(reads.paths.filter((p) => p === file)).toHaveLength(1);
+  });
+
+  it('the recorder takes its rules hash after warming, from that same single read', async () => {
+    const file = join(tmp.make('recorder-hash'), 'rules.json');
+    const shipped = readFileSync(SHADOW_GATE_RULES_PATH);
+    writeFileSync(file, shipped);
+    __setShadowRulesPathForTests(file);
+    reads.paths.length = 0;
+    const eventsDir = join(tmp.make('recorder-events'), 'events');
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      expect(getShadowGateRecorder(db, {
+        shadowGate: { mode: 'shadow', eventsDir },
+        botName: 'q',
+        adminPhones: new Set<string>(),
+        siblingPhones: new Set<string>(),
+        botErrorsJid: null,
+      })).not.toBeNull();
+      expect(reads.paths.filter((p) => p === file)).toHaveLength(1);
+      await __resetShadowGateForTests();
+      const armed = JSON.parse(readFileSync(join(eventsDir, 'shadow-gate-events.000001.ndjson'), 'utf8').split('\n')[0]!) as {
+        marker: string; rulesSha256: string;
+      };
+      expect(armed.marker).toBe('armed');
+      expect(armed.rulesSha256).toBe(createHash('sha256').update(shipped).digest('hex'));
+    } finally {
+      await __resetShadowGateForTests();
+      db.close();
+    }
+  });
+
+  it('before the first load the hash is read directly and not memoised', () => {
+    const file = join(tmp.make('prehash'), 'rules.json');
+    writeFileSync(file, 'one');
+    __setShadowRulesPathForTests(file);
+    expect(getRulesSha256()).toBe(createHash('sha256').update('one').digest('hex'));
+    writeFileSync(file, 'two');
+    expect(getRulesSha256()).toBe(createHash('sha256').update('two').digest('hex'));
   });
 
   it('restoring the shipped path recovers', () => {

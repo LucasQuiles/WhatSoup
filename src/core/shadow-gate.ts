@@ -105,31 +105,45 @@ export function compileShadowRules(raw: unknown): CompiledShadowRules & { rulesV
 export const UNREADABLE_RULES_SHA256 = '0'.repeat(64);
 
 let rulesPath = SHADOW_GATE_RULES_PATH;
-let rulesSha256: string | null = null;
-// Latched: a failed load is not retried, so a broken file is read once, not per message.
-let loadedRules: { ok: true; rules: CompiledShadowRules & { rulesVersion: number } } | { ok: false } | null = null;
+// Latched: a failed load is not retried, so a broken file is read once, not per
+// message. `sha256` hashes the very bytes that were compiled (null when the
+// read itself failed), so the recorded hash always matches the evaluated rules.
+let loadedRules: {
+  sha256: string | null;
+  rules: (CompiledShadowRules & { rulesVersion: number }) | null;
+} | null = null;
 
-/** sha256 hex of the rules file bytes; memoised and total (sentinel when unreadable). */
+function sha256Of(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/**
+ * sha256 hex of the rules bytes that were loaded. Before the first load it
+ * hashes the file directly (unmemoised). Total: sentinel when unreadable.
+ */
 export function getRulesSha256(): string {
-  if (rulesSha256 === null) {
-    try {
-      rulesSha256 = createHash('sha256').update(readFileSync(rulesPath)).digest('hex');
-    } catch {
-      rulesSha256 = UNREADABLE_RULES_SHA256;
-    }
+  if (loadedRules !== null) return loadedRules.sha256 ?? UNREADABLE_RULES_SHA256;
+  try {
+    return sha256Of(readFileSync(rulesPath));
+  } catch {
+    return UNREADABLE_RULES_SHA256;
   }
-  return rulesSha256;
 }
 
 function loadRules(): CompiledShadowRules & { rulesVersion: number } {
   if (loadedRules === null) {
+    let sha256: string | null = null;
+    let rules: (CompiledShadowRules & { rulesVersion: number }) | null = null;
     try {
-      loadedRules = { ok: true, rules: compileShadowRules(JSON.parse(readFileSync(rulesPath, 'utf8'))) };
+      const bytes = readFileSync(rulesPath);
+      sha256 = sha256Of(bytes);
+      rules = compileShadowRules(JSON.parse(bytes.toString('utf8')));
     } catch {
-      loadedRules = { ok: false };
+      // intentional: an unreadable or invalid file latches the unavailable state.
     }
+    loadedRules = { sha256, rules };
   }
-  if (!loadedRules.ok) throw new Error('shadow-gate rules unavailable');
+  if (loadedRules.rules === null) throw new Error('shadow-gate rules unavailable');
   return loadedRules.rules;
 }
 
@@ -157,7 +171,6 @@ export function getCompiledShadowPatterns(): readonly RegExp[] {
 /** Test-only: point the loader at another file (null restores the shipped rules) and clear memoised state. */
 export function __setShadowRulesPathForTests(path: string | null): void {
   rulesPath = path ?? SHADOW_GATE_RULES_PATH;
-  rulesSha256 = null;
   loadedRules = null;
 }
 

@@ -8,7 +8,6 @@
  * verdict carries the journalled inbound seq.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, Messenger } from '../../src/core/types.ts';
@@ -139,9 +138,13 @@ function makeMessenger(): Messenger {
   };
 }
 
+let msgCounter = 0;
+
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
+  msgCounter += 1;
   return {
-    messageId: `msg-${randomBytes(4).toString('hex')}`,
+    // Digits glued to letters: never a standalone phone-length run the validator rejects.
+    messageId: `MSGID${msgCounter}`,
     chatJid: SENDER,
     senderJid: SENDER,
     senderName: 'Alice',
@@ -252,6 +255,15 @@ describe('ingest shadow gate — mode off', () => {
     expect(journal).toEqual([[msg.messageId, SENDER.split('@')[0], SENDER, 'object', '<ingress-seconds>']]);
   });
 
+  it('(a) does not warm the rules at handler creation', () => {
+    const corrupt = join(tmp.make('off-rules'), 'rules.json');
+    writeFileSync(corrupt, '{ not json');
+    __setShadowRulesPathForTests(corrupt);
+    makeIngest();
+    const codes = vi.mocked(logFns.warn).mock.calls.map((call) => (call[0] as { code?: string }).code);
+    expect(codes).not.toContain('shadow_gate_rules_unavailable');
+  });
+
   it('(a) treats an absent shadowGate section (partial config mocks) as off', async () => {
     setConfigProp('shadowGate', undefined);
     const { handled } = await observe(makeMsg());
@@ -261,6 +273,17 @@ describe('ingest shadow gate — mode off', () => {
 });
 
 describe('ingest shadow gate — mode shadow', () => {
+  it('warms the rules once at handler creation, before any message', () => {
+    const corrupt = join(tmp.make('warm-rules'), 'rules.json');
+    writeFileSync(corrupt, '{ not json');
+    __setShadowRulesPathForTests(corrupt);
+    shadowMode(join(tmp.make('warm'), 'events'));
+    makeIngest();
+    const shadowWarnings = vi.mocked(logFns.warn).mock.calls.filter((call) => call[1] === 'shadow gate warning');
+    expect(shadowWarnings).toEqual([[{ code: 'shadow_gate_rules_unavailable' }, 'shadow gate warning']]);
+    expect(getShadowGateStats().evaluated).toBe(0);
+  });
+
   it('(b) records one verdict carrying the journalled seq and message id, plus an armed marker', async () => {
     const eventsDir = join(tmp.make('shadow'), 'events');
     shadowMode(eventsDir);

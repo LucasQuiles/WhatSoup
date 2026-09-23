@@ -52,6 +52,7 @@ export function clopperPearsonUpper(x: number, n: number, alpha = 0.05): number 
   if (x === n) return 1;
   if (x === 0) return 1 - alpha ** (1 / n);
   // The CDF falls monotonically in p; the bound lies above the point estimate.
+  // `hi` always satisfies CDF <= alpha, so returning it never understates the bound.
   let lo = x / n;
   let hi = 1;
   for (let i = 0; i < BISECTION_STEPS && hi - lo > 1e-15; i += 1) {
@@ -59,5 +60,5 @@ export function clopperPearsonUpper(x: number, n: number, alpha = 0.05): number 
     if (binomialCdf(x, n, mid) > alpha) lo = mid;
     else hi = mid;
   }
-  return (lo + hi) / 2;
+  return hi;
 }

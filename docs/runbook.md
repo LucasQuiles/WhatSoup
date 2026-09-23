@@ -2376,7 +2376,8 @@ startup.
 **Where events live.** NDJSON segments `shadow-gate-events.NNNNNN.ndjson` (six-digit index) in
 `eventsDir`, by default `~/.config/whatsoup/instances/<name>/`. The segments sit next to a
 `shadow-gate-events.lock` file, which the report ignores. Records contain metadata and closed codes
-only: no message text, JIDs or phone numbers.
+only, never message text. The id rules (below) rule out JIDs and standalone phone-number digit runs,
+but not digits glued to letters inside an id.
 
 **Measure.** Never read or `cp` the live database. Take a self-contained snapshot through the SQLite
 backup API, and copy the segment directory:
@@ -2398,8 +2399,8 @@ npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
 - The report opens the snapshot `immutable=1`, which creates no `-wal`/`-shm` sidecars. It refuses
   a snapshot that has a non-empty `-wal` next to it, because that mode would ignore the rows inside it.
 - The database lineage is a hash of the live database path and inode, so it cannot be recomputed from
-  a snapshot. The report prints the lineages it sees. When more than one is present it exits `65`; pick
-  one with `--lineage`.
+  a snapshot. The report prints the lineages it sees, in verdicts and in coverage markers inside the
+  window. When more than one is present it exits `65`, naming how many; pick one with `--lineage`.
 
 Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
 error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
@@ -2410,21 +2411,50 @@ an invalid interior NDJSON line (named by file and line number only), more than 
 
 - `eligible` counts `inbound_events` rows in the window whose `routed_to` is not
   `none`/`admin`/`control`/`passive`.
-- Scheduled-job (`agentjob-…`) and obligation (`obl:…`) turns never pass ingest. They are excluded
-  and counted separately.
-- Any `routed_to` value that is not a known runtime is listed and counted as eligible.
+- Scheduled-job (`agentjob-…`) and obligation (`obl:…`) turns never pass ingest; neither does any
+  row journalled with `routed_to = 'agent'` (the route scheduled jobs and obligations use). They are
+  excluded and counted separately as synthetic.
+- Any other `routed_to` value that is not a known runtime is listed and counted as eligible.
 - `missing` counts eligible rows without exactly one valid joined verdict. Conflicting verdicts,
   seq mismatches and a torn final line all leave a row missing.
-- `invalid`, `recorderDropped` and `journalFailures` come from each boot's latest coverage marker.
-  They are cumulative per process: records the recorder rejected or dropped before writing. A message
-  id outside the recorded id charset is rejected this way and shows up as missing.
+- The recorder counters (`invalid`, `written`, `recorderDropped`, `journalFailures`) are summed over
+  each boot's latest coverage marker. They are cumulative per boot up to that marker, not limited to
+  the window, and they exclude anything that happened after the boot's last marker.
+  - `recorded` (per boot) counts verdicts the recorder accepted into the sink queue, not verdicts
+    written to disk.
+  - `written` counts every record the sink wrote, verdicts and coverage markers together.
+  - `recorderDropped` sums the sink drop counters. Those also cover both verdicts and markers, so
+    they are not a count of lost verdicts.
+  - `invalid` counts records the validator rejected before queueing. A message id outside the id
+    rules is rejected this way and its row shows up as missing.
+- Each boot line also prints the sink state from its last written marker. A sink that degrades
+  (for example `segment_cap_reached` or `write_failed`) writes nothing further, not even a marker,
+  so its degraded state never appears in the segments. Look for a boot whose `counts` markers stop
+  early, and for the `shadow gate warning` log line carrying the reason code.
 
-ERROR verdicts count as SPAWN in every rate. The disagreement rate against `response_echoed` is
-printed three ways: over echoed rows with a verdict, over all echoed rows, and conservatively with
-every missing echoed row counted as a disagreement. Each carries a one-sided 95% Clopper–Pearson upper
-bound. `response_echoed` is historical behaviour, not proof that a reply was required, so none of these
-is a gold false-suppress rate. If more than one gate/rules/feature version is present, rates are printed
-per partition only, never pooled.
+The id rules: every id uses the charset `A-Za-z0-9._:-` (at most 128 characters), and `messageId` and
+`instance` also reject a standalone run of 7–15 digits, the length of a phone number. Digits glued to
+letters are not detected. Consequences:
+
+- Signal instances record no verdicts. Their message ids (`signal:` plus a JSON key) fail the
+  charset, so every Signal verdict is counted as `invalid`. The recorder logs each warning code at
+  most once per 60 s.
+- An instance whose recorded id contains a standalone 7–15 digit run (for example a name ending in
+  `-20260923`) records nothing at all. Every event is rejected, and `--instance` refuses the id.
+
+For the proxy rates, an ERROR verdict counts as SPAWN. The disagreement rate against `response_echoed`
+is printed four ways:
+
+- over echoed rows with an OK verdict;
+- over echoed rows with any verdict;
+- over all echoed rows;
+- conservatively, with every missing or ERROR echoed row counted as a disagreement.
+
+Each carries a one-sided 95% Clopper–Pearson upper bound. `response_echoed` is historical behaviour, not
+proof that a reply was required, so none of these is a gold false-suppress rate. The per-rule table
+counts SPAWN/SUPPRESS for OK results only, with ERROR in its own column. Latency is printed over every
+received row (OK and ERROR, including OVERRUN) and separately over OK rows. If more than one
+gate/rules/feature version is present, rates are printed per partition only, never pooled.
 
 **Disable / roll back.** Set `"mode": "off"` (or remove `shadowGate`) and restart. Existing segments
 are inert and can be archived.

@@ -25,7 +25,7 @@ import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './he
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
-import { startShadowGateAttempt } from './shadow-gate-adapter.ts';
+import { startShadowGateAttempt, warmShadowGate } from './shadow-gate-adapter.ts';
 
 const log = createChildLogger('ingest');
 
@@ -287,6 +287,7 @@ export function createIngestHandler(
   instanceType?: string,
   grantManager?: CapabilityGrantManager,
 ): (msg: IncomingMessage) => void {
+  if (config.shadowGate?.mode === 'shadow') warmShadowGate();
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
       let slotAcquired = false;

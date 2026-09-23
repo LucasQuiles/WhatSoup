@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSyn
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBoundedNdjsonSink } from '../../src/lib/bounded-ndjson-sink.ts';
+import { acquireProcessLock, readProcessLockPayload } from '../../src/lib/process-lock.ts';
 import type { BoundedNdjsonSink, BoundedNdjsonSinkOptions } from '../../src/lib/bounded-ndjson-sink.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -227,6 +228,42 @@ describe('createBoundedNdjsonSink', () => {
     const second = make({ dir });
     await settled(second);
     expect(second.state()).toBe('ready');
+  });
+
+  it('reclaims a lock left by an earlier process that had our pid', async () => {
+    const dir = join(tmp.make('samepid'), 'sink');
+    mkdirSync(dir, { recursive: true });
+    // A never-released lock with our pid and boot id, as a same-pid predecessor
+    // (container restart with a persistent dir) leaves it.
+    const leftover = acquireProcessLock(join(dir, 'events.lock'));
+    expect(readProcessLockPayload(join(dir, 'events.lock'))!.pid).toBe(process.pid);
+    const sink = make({ dir });
+    await settled(sink);
+    expect(sink.state()).toBe('ready');
+    const payload = readProcessLockPayload(join(dir, 'events.lock'))!;
+    expect(payload.token).not.toBe(leftover.token);
+    sink.enqueue({ after: 'restart' });
+    await drained(sink);
+    expect(readLines(dir, 'events.000001.ndjson')).toEqual([{ after: 'restart' }]);
+  });
+
+  it('releases the lock from a process exit listener, which close() removes', async () => {
+    const dir = join(tmp.make('exit'), 'sink');
+    const before = process.listeners('exit');
+    const sink = make({ dir });
+    await settled(sink);
+    const added = process.listeners('exit').filter((l) => !before.includes(l));
+    expect(added).toHaveLength(1);
+    expect(readdirSync(dir)).toContain('events.lock');
+    (added[0] as () => void)();
+    expect(readdirSync(dir)).not.toContain('events.lock');
+    expect(process.listeners('exit')).toEqual(before);
+    // A successor in the same process can now start.
+    const successor = make({ dir });
+    await settled(successor);
+    expect(successor.state()).toBe('ready');
+    await successor.close(200);
+    expect(process.listeners('exit')).toEqual(before);
   });
 
   // @skip-env: root ignores directory write permission; win32 has no chmod 0o500.

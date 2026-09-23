@@ -235,6 +235,19 @@ function recordedInstanceId(botName: string): string {
 }
 
 /**
+ * Compile the rules now so the first evaluation is not an OVERRUN. Ingest
+ * calls this at handler creation in `shadow` mode. A load failure is not a
+ * recorder failure: each evaluation then records E_THROW. Never throws.
+ */
+export function warmShadowGate(): void {
+  try {
+    if (!warmShadowRules()) warnCode('shadow_gate_rules_unavailable');
+  } catch {
+    // intentional: warming is best-effort; evaluation reports its own failure.
+  }
+}
+
+/**
  * Lazily create the process recorder on first use in `shadow` mode. Returns
  * null in `off` mode or once creation has failed (latched until reset).
  */
@@ -244,6 +257,9 @@ export function getShadowGateRecorder(db: Database, config: ShadowGateConfig): S
   try {
     const section = config.shadowGate;
     if (section?.mode !== 'shadow') return null;
+    // Warm before creating the recorder: it reads the rules hash once, and the
+    // hash must describe the bytes that were compiled.
+    warmShadowGate();
     // main.ts is sha-pinned (deploy/source-runtime-manifest.json), so there is
     // no shutdown close(): the 'disarmed' marker is absent on process exit and
     // the periodic 'counts' markers bound the unrecorded tail.
@@ -254,9 +270,6 @@ export function getShadowGateRecorder(db: Database, config: ShadowGateConfig): S
       configGeneration: computeConfigGeneration(section),
       warn: warnCode,
     });
-    // Compile the rules now so the first evaluation is not an OVERRUN. A load
-    // failure is not a recorder failure: each evaluation then records E_THROW.
-    if (!warmShadowRules()) warnCode('shadow_gate_rules_unavailable');
     return recorder;
   } catch {
     recorderDisabled = true;
@@ -275,7 +288,7 @@ export function getShadowGateStats(): ReturnType<ShadowGateRecorder['stats']> {
     }
   }
   return {
-    evaluated: 0, recorded: 0, droppedQueueFull: 0, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
+    evaluated: 0, recorded: 0, written: 0, droppedQueueFull: 0, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
     droppedWriteFailed: 0, droppedUnserializable: 0, invalid: 0, writeErrors: 0, journalFailures: 0,
   };
 }

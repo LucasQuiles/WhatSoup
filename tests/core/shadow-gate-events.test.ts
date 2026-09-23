@@ -62,7 +62,7 @@ function coverageEvent(overrides: Record<string, unknown> = {}): Record<string, 
     configGeneration: 'fedcba9876543210',
     marker: 'armed',
     counts: {
-      evaluated: 0, recorded: 0, droppedQueueFull: 0, droppedOversize: 0,
+      evaluated: 0, recorded: 0, written: 0, droppedQueueFull: 0, droppedOversize: 0,
       droppedClosed: 0, droppedDegraded: 0, droppedWriteFailed: 0, droppedUnserializable: 0,
       invalid: 0, writeErrors: 0, journalFailures: 0,
     },
@@ -138,7 +138,7 @@ describe('validateShadowGateEvent', () => {
   });
 
   const baseCounts = coverageEvent().counts as Record<string, number>;
-  it.each(['droppedWriteFailed', 'droppedUnserializable', 'invalid'])('requires the %s count', (key) => {
+  it.each(['written', 'droppedWriteFailed', 'droppedUnserializable', 'invalid'])('requires the %s count', (key) => {
     const counts = { ...baseCounts };
     delete counts[key];
     expect(validateShadowGateEvent(coverageEvent({ counts }))).toBe('counts_missing_key');
@@ -161,6 +161,29 @@ describe('validateShadowGateEvent', () => {
     for (const good of ['3EB0A1B2C3D4', 'agent-job_1.2:3', 'a'.repeat(128)]) {
       expect(validateShadowGateEvent(make({ [field]: good }))).toBeNull();
     }
+  });
+
+  it.each([
+    ['messageId', 'bad_message_id', verdictEvent],
+    ['instance', 'bad_instance', verdictEvent],
+    ['instance', 'bad_instance', coverageEvent],
+  ] as const)('rejects a standalone phone-length digit run in %s (%s)', (field, code, make) => {
+    for (const bad of ['15551234567', '1555123', '155512345678901', 'bot_15551234567', 'x-5551234.y', 'a:15551234567:b']) {
+      expect(validateShadowGateEvent(make({ [field]: bad }))).toBe(code);
+    }
+    // Hex WhatsApp ids and UUIDs carry digit runs glued to letters; short or
+    // over-long bare runs are not phone-shaped.
+    for (const good of [
+      '3EB0C767D26A8B4F1A2B', '3A1234567890ABCDEF12', 'A51234567890123456789012345678FF',
+      '3f2a9c4e-7b1d-4e8a-9c3f-5d2e1a0b7c6d', '123456', '1234567890123456', 'fixture-bot',
+    ]) {
+      expect(validateShadowGateEvent(make({ [field]: good }))).toBeNull();
+    }
+  });
+
+  it('applies the digit-run rule only to messageId and instance', () => {
+    expect(validateShadowGateEvent(verdictEvent({ attemptId: '15551234567' }))).toBeNull();
+    expect(validateShadowGateEvent(verdictEvent({ bootId: '15551234567' }))).toBeNull();
   });
 });
 
@@ -237,15 +260,35 @@ describe('createShadowGateRecorder', () => {
     expect(readEvents(dir).map((e) => e.marker ?? e.event)).toEqual(['armed', 'disarmed']);
     expect(readEvents(dir)[1]!.counts).toMatchObject({ invalid: 3, recorded: 0 });
     expect(recorder.stats()).toMatchObject({ recorded: 0, invalid: 3 });
-    expect(warnings).toEqual(['shadow_gate_invalid_verdict', 'shadow_gate_invalid_verdict', 'shadow_gate_invalid_verdict']);
+    // Rate-limited: one warn per code per 60 s; the counter carries the total.
+    expect(warnings).toEqual(['shadow_gate_invalid_verdict']);
     expect(JSON.stringify(readEvents(dir))).not.toContain('secret');
+  });
+
+  it('warns at most once per code per 60 s', async () => {
+    const warnings: string[] = [];
+    let t = 1_000_000;
+    const recorder = createShadowGateRecorder({
+      dir: join(tmp.make('ratelimit'), 'events'), instance: 'q', databaseLineage: 'memory',
+      configGeneration: 'fedcba9876543210', warn: (c) => warnings.push(c), now: () => t,
+    });
+    const signalLike = { ...verdictInput, messageId: 'signal:["x",1]' };
+    recorder.recordVerdict(signalLike);
+    t += 59_999;
+    recorder.recordVerdict(signalLike);
+    expect(warnings).toEqual(['shadow_gate_invalid_verdict']);
+    t += 1;
+    recorder.recordVerdict(signalLike);
+    expect(warnings).toEqual(['shadow_gate_invalid_verdict', 'shadow_gate_invalid_verdict']);
+    expect(recorder.stats().invalid).toBe(3);
+    await recorder.close(1000);
   });
 
   it('emits a counts marker every countsIntervalMs and stops after close', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const records: Array<Record<string, unknown>> = [];
     const stats: BoundedNdjsonSinkStats = {
-      queued: 0, written: 0, droppedQueueFull: 2, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
+      queued: 0, written: 3, droppedQueueFull: 2, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
       droppedWriteFailed: 4, droppedUnserializable: 5, writeErrors: 1, segmentIndex: 1, segmentBytes: 0,
     };
     let sinkState: SinkState = 'ready';
@@ -271,7 +314,7 @@ describe('createShadowGateRecorder', () => {
     vi.advanceTimersByTime(1);
     expect(records.map((r) => r.marker)).toEqual(['armed', 'counts']);
     expect(records[1]!.counts).toEqual({
-      evaluated: 1, recorded: 0, droppedQueueFull: 2, droppedOversize: 0,
+      evaluated: 1, recorded: 0, written: 3, droppedQueueFull: 2, droppedOversize: 0,
       droppedClosed: 0, droppedDegraded: 0, droppedWriteFailed: 4, droppedUnserializable: 5,
       invalid: 1, writeErrors: 1, journalFailures: 1,
     });

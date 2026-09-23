@@ -1,7 +1,9 @@
 // src/core/shadow-gate-events.ts
 // Shadow-gate event envelope, strict validator, and recorder. Events are
-// advisory_only metadata records: no message text, no JIDs or phone numbers,
-// no stack traces or error messages — closed codes only.
+// advisory_only metadata records: no message text, no stack traces or error
+// messages — closed codes only. Ids are restricted to a closed charset that
+// rules out JIDs, and messageId/instance reject a standalone phone-length
+// digit run; a phone number glued to letters inside an id is not detected.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
@@ -39,7 +41,7 @@ export interface ShadowGateCoverageEvent {
   instance: string; databaseLineage: string; bootId: string; configGeneration: string;
   marker: 'armed' | 'counts' | 'disarmed';
   counts: {
-    evaluated: number; recorded: number; droppedQueueFull: number; droppedOversize: number;
+    evaluated: number; recorded: number; written: number; droppedQueueFull: number; droppedOversize: number;
     droppedClosed: number; droppedDegraded: number; droppedWriteFailed: number; droppedUnserializable: number;
     invalid: number; writeErrors: number; journalFailures: number;
   };
@@ -67,8 +69,14 @@ const ERROR_REASON_SET: ReadonlySet<unknown> = new Set<ShadowGateErrorReason>(['
 const MARKER_SET: ReadonlySet<unknown> = new Set(['armed', 'counts', 'disarmed']);
 const SINK_STATE_SET: ReadonlySet<unknown> = new Set<SinkState>(['starting', 'ready', 'degraded', 'closed']);
 const MAX_ID_CHARS = 128;
-// Closed id charset: excludes '@', '+' and whitespace so a JID or phone number can never be recorded.
+// Closed id charset: excludes '@', '+' and whitespace, so a full JID or a
+// '+'-prefixed number cannot be recorded. It does not exclude bare digits.
 const ID_CHARSET = /^[A-Za-z0-9._:-]+$/;
+// messageId and instance also reject a standalone 7–15 digit run (the E.164
+// length range). A run glued to letters is not caught: hex ids contain long
+// digit runs by chance, so matching those would drop roughly a fifth of
+// WhatsApp ids.
+const STANDALONE_PHONE_DIGITS = /(?<![A-Za-z0-9])\d{7,15}(?![A-Za-z0-9])/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 const COMMON_KEYS = [
@@ -82,7 +90,7 @@ const VERDICT_INPUT_KEYS: ReadonlySet<string> = new Set(VERDICT_INPUT_KEY_LIST);
 const VERDICT_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, ...VERDICT_INPUT_KEY_LIST]);
 const COVERAGE_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, 'marker', 'counts', 'sinkState', 'sinkDegradedReason']);
 const COUNT_KEYS: ReadonlySet<string> = new Set([
-  'evaluated', 'recorded', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded',
+  'evaluated', 'recorded', 'written', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded',
   'droppedWriteFailed', 'droppedUnserializable', 'invalid', 'writeErrors', 'journalFailures',
 ]);
 
@@ -101,13 +109,17 @@ function isBoundedId(v: unknown): boolean {
   return isNonEmptyString(v) && ID_CHARSET.test(v) && v.length <= MAX_ID_CHARS;
 }
 
+function isPhoneFreeId(v: unknown): boolean {
+  return isBoundedId(v) && !STANDALONE_PHONE_DIGITS.test(v as string);
+}
+
 function isCount(v: unknown): boolean {
   return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 }
 
 function validateVerdictFields(ev: Record<string, unknown>): string | null {
   if (!isBoundedId(ev.attemptId)) return 'bad_attempt_id';
-  if (!isBoundedId(ev.messageId)) return 'bad_message_id';
+  if (!isPhoneFreeId(ev.messageId)) return 'bad_message_id';
   if (ev.inboundSeq !== null && !isCount(ev.inboundSeq)) return 'bad_inbound_seq';
   if (ev.chatScope !== 'dm' && ev.chatScope !== 'group') return 'bad_chat_scope';
   if (typeof ev.tookMs !== 'number' || !Number.isFinite(ev.tookMs) || ev.tookMs < 0) return 'bad_took_ms';
@@ -145,7 +157,7 @@ export function validateShadowGateEvent(ev: unknown): string | null {
   if (keys) return keys;
   if (ev.schemaVersion !== SHADOW_GATE_EVENT_SCHEMA_VERSION) return 'bad_schema_version';
   if (typeof ev.ts !== 'number' || !Number.isFinite(ev.ts) || ev.ts < 0) return 'bad_ts';
-  if (!isBoundedId(ev.instance)) return 'bad_instance';
+  if (!isPhoneFreeId(ev.instance)) return 'bad_instance';
   if (!isBoundedId(ev.databaseLineage)) return 'bad_database_lineage';
   if (!isBoundedId(ev.bootId)) return 'bad_boot_id';
   if (!isBoundedId(ev.configGeneration)) return 'bad_config_generation';
@@ -216,16 +228,24 @@ export interface ShadowGateRecorderOptions {
 }
 
 const DEFAULT_COUNTS_INTERVAL_MS = 600_000;
+const WARN_INTERVAL_MS = 60_000;
 
 export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): ShadowGateRecorder {
+  const now = opts.now ?? (() => systemClock.now());
+  // Per-message codes (e.g. every Signal id failing the charset) would
+  // otherwise log once per message; the counters carry the totals.
+  const lastWarnAt = new Map<string, number>();
   const warn = (code: string): void => {
     try {
+      const at = now();
+      const last = lastWarnAt.get(code);
+      if (last !== undefined && at - last < WARN_INTERVAL_MS) return;
+      lastWarnAt.set(code, at);
       opts.warn?.(code);
     } catch {
       // intentional: a throwing warn callback must not reach the caller.
     }
   };
-  const now = opts.now ?? (() => systemClock.now());
   const sink = opts.sink ?? createBoundedNdjsonSink({
     dir: opts.dir,
     filePrefix: SHADOW_GATE_EVENTS_FILE_PREFIX,
@@ -253,6 +273,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
     return {
       evaluated: own.evaluated,
       recorded: own.recorded,
+      written: s.written,
       droppedQueueFull: s.droppedQueueFull,
       droppedOversize: s.droppedOversize,
       droppedClosed: s.droppedClosed,

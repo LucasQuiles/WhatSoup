@@ -3,8 +3,8 @@
  * segments) to a read-only snapshot of `inbound_events` and computes coverage
  * first, then rates. Missing evidence is never allowed to improve a rate: a
  * row without exactly one valid joined verdict is "missing", and the
- * conservative disagreement rate counts every missing echoed row against the
- * gate.
+ * conservative disagreement rate counts every missing or ERROR echoed row
+ * against the gate.
  *
  * Privacy: only closed codes, counts, hashes and boot ids leave this module.
  * The snapshot holds message text, JIDs and phone numbers, so the query reads
@@ -52,9 +52,11 @@ export const DEFAULT_SEGMENT_LIMITS: SegmentLimits = {
 const SEGMENT_NAME = new RegExp(`^${SHADOW_GATE_EVENTS_FILE_PREFIX}\\.\\d{6}\\.ndjson$`);
 const EXCLUDED_ROUTES: ReadonlySet<string> = new Set(['none', 'admin', 'control', 'passive']);
 // Dispatch routes are the lower-cased runtime class names ingest journals
-// (`runtime.constructor.name`); `agent` is the scheduled-job journal route.
-const KNOWN_DISPATCH_ROUTES: ReadonlySet<string> = new Set(['agentruntime', 'chatruntime', 'passiveruntime', 'agent']);
+// (`runtime.constructor.name`).
+const KNOWN_DISPATCH_ROUTES: ReadonlySet<string> = new Set(['agentruntime', 'chatruntime', 'passiveruntime']);
 const SYNTHETIC_ID_PREFIXES = ['agentjob-', 'obl:'] as const;
+// Scheduled jobs and obligations journal under this route and never pass ingest.
+const SYNTHETIC_ROUTE = 'agent';
 const NULL_ROUTE = '(null)';
 // routed_to is the only free-form DB string that reaches output; anything
 // outside a runtime-name shape is bucketed rather than printed.
@@ -63,7 +65,8 @@ const UNPRINTABLE_ROUTE = '(unprintable)';
 const ECHOED = 'response_echoed';
 const NO_REPLY = 'no_reply_policy';
 const MISSING_WARNING = 'WARNING: rates below are computed on joined rows; missing evidence may hide disagreements';
-const PROXY_CAVEAT = 'response_echoed is historical behaviour, not proof a reply was required; this is not a gold false-suppress rate';
+const COUNTERS_SCOPE_LABEL = '(cumulative per boot at last marker, not windowed)';
+const PROXY_CAVEAT ='response_echoed is historical behaviour, not proof a reply was required; this is not a gold false-suppress rate';
 
 // ---------------------------------------------------------------------------
 // Segment reading
@@ -260,6 +263,8 @@ export interface Rates {
   echoedJoined: number;
   echoedAll: number;
   proxyDisagreement: number;
+  /** OK-only: SUPPRESS on echoed rows over echoed rows whose verdict is OK. */
+  disagreementOverEchoedOk: BoundedRatio;
   disagreementOverEchoedJoined: BoundedRatio;
   disagreementOverEchoedAll: BoundedRatio;
   disagreementConservative: BoundedRatio;
@@ -272,6 +277,17 @@ export interface BootMarkers {
   counts: number;
   disarmed: number;
   lastCounts: ShadowGateCoverageEvent['counts'] | null;
+  /** Sink state in the last WRITTEN marker; a degraded sink writes no further markers. */
+  lastSinkState: ShadowGateCoverageEvent['sinkState'] | null;
+  lastSinkDegradedReason: string | null;
+}
+
+export interface LatencyStats {
+  count: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  max: number | null;
 }
 
 export interface RulePartition {
@@ -297,7 +313,10 @@ export interface ShadowGateReport {
     routedTo: Record<string, number>;
     unknownRoutedTo: string[];
     unknownRoutedEligible: number;
+    /** Recorder counters are cumulative per boot at its last marker, not windowed. */
+    countersScope: 'cumulative-per-boot';
     invalid: number;
+    written: number;
     recorderDropped: number;
     journalFailures: number;
     duplicate: number;
@@ -314,12 +333,14 @@ export interface ShadowGateReport {
   labels: { labeled: number; pending: number; echoedAll: number; echoedJoined: number; echoedMissing: number };
   /** Null when more than one rules partition is present: rates are then per partition only. */
   pooled: Rates | null;
-  perRule: Record<string, { SPAWN: number; SUPPRESS: number; NONE: number }>;
+  /** SPAWN/SUPPRESS count OK results only; ERROR counts every other status. */
+  perRule: Record<string, { SPAWN: number; SUPPRESS: number; ERROR: number }>;
   partitions: Array<{
     gateVersion: number; rulesSha256: string; featureVersion: number; configGeneration: string; bootId: string; count: number;
   }>;
   rulePartitions: RulePartition[];
-  latency: { count: number; p50: number | null; p95: number | null; p99: number | null; max: number | null };
+  /** `all` covers every received row (OK and ERROR, including OVERRUN); `ok` only OK rows. */
+  latency: { all: LatencyStats; ok: LatencyStats };
   caveat: string;
 }
 
@@ -336,7 +357,11 @@ function bounded(x: number, n: number): BoundedRatio {
   return { ...ratio(x, n), cpUpper95: clopperPearsonUpper(x, n) };
 }
 
-/** ERROR (any reason, including OVERRUN which carries a verdict) counts as SPAWN. */
+/**
+ * For the proxy rates, ERROR (any reason, including OVERRUN which carries a
+ * verdict) counts as SPAWN. The conservative rate instead counts an echoed
+ * ERROR row against the gate, like a missing one.
+ */
 function effectiveVerdict(ev: ShadowGateVerdictEvent): 'SPAWN' | 'SUPPRESS' {
   return ev.status === 'OK' && ev.verdict === 'SUPPRESS' ? 'SUPPRESS' : 'SPAWN';
 }
@@ -350,6 +375,8 @@ function computeRates(received: readonly Joined[], missing: readonly InboundRow[
   const ok = received.filter((j) => j.event.status === 'OK');
   const suppressed = received.filter((j) => effectiveVerdict(j.event) === 'SUPPRESS');
   const echoedJoined = received.filter((j) => j.row.terminalReason === ECHOED);
+  const echoedOk = echoedJoined.filter((j) => j.event.status === 'OK').length;
+  const echoedError = echoedJoined.length - echoedOk;
   const echoedMissing = missing.filter((r) => r.terminalReason === ECHOED).length;
   const echoedAll = echoedJoined.length + echoedMissing;
   const disagreement = suppressed.filter((j) => j.row.terminalReason === ECHOED).length;
@@ -366,9 +393,10 @@ function computeRates(received: readonly Joined[], missing: readonly InboundRow[
     echoedJoined: echoedJoined.length,
     echoedAll,
     proxyDisagreement: disagreement,
+    disagreementOverEchoedOk: bounded(disagreement, echoedOk),
     disagreementOverEchoedJoined: bounded(disagreement, echoedJoined.length),
     disagreementOverEchoedAll: bounded(disagreement, echoedAll),
-    disagreementConservative: bounded(disagreement + echoedMissing, echoedAll),
+    disagreementConservative: bounded(disagreement + echoedError + echoedMissing, echoedAll),
     proxyConfirmedOverLabeled: ratio(confirmed, labeled),
   };
 }
@@ -378,8 +406,19 @@ function percentile(sorted: readonly number[], p: number): number | null {
   return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)]!;
 }
 
-function isSynthetic(messageId: string): boolean {
-  return SYNTHETIC_ID_PREFIXES.some((prefix) => messageId.startsWith(prefix));
+function latencyOf(joined: readonly Joined[]): LatencyStats {
+  const sorted = joined.map((j) => j.event.tookMs).sort((a, b) => a - b);
+  return {
+    count: sorted.length,
+    p50: percentile(sorted, 0.5),
+    p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
+    max: sorted.at(-1) ?? null,
+  };
+}
+
+function isSynthetic(row: InboundRow): boolean {
+  return row.routedTo === SYNTHETIC_ROUTE || SYNTHETIC_ID_PREFIXES.some((prefix) => row.messageId.startsWith(prefix));
 }
 
 function increment(map: Map<string, number>, key: string, by = 1): void {
@@ -409,7 +448,7 @@ export function buildShadowGateReport(
     increment(routedTo, row.routedTo);
     if (EXCLUDED_ROUTES.has(row.routedTo)) {
       excludedRouted += 1;
-    } else if (isSynthetic(row.messageId)) {
+    } else if (isSynthetic(row)) {
       excludedSynthetic += 1;
     } else {
       eligibleRows.push(row);
@@ -417,8 +456,8 @@ export function buildShadowGateReport(
     }
   }
   const eligibleById = new Map(eligibleRows.map((r) => [r.messageId, r]));
-  const unknownRoutedTo = [...routedTo.keys()]
-    .filter((k) => !EXCLUDED_ROUTES.has(k) && !KNOWN_DISPATCH_ROUTES.has(k))
+  const unknownRoutedTo = [...new Set(eligibleRows.map((r) => r.routedTo))]
+    .filter((k) => !KNOWN_DISPATCH_ROUTES.has(k))
     .sort();
 
   // Event side: instance, window, lineage.
@@ -426,11 +465,14 @@ export function buildShadowGateReport(
     .filter(({ event }) => event.instance === opts.instance);
   const verdictsInScope = indexed.filter(({ event }) => event.event === 'shadow_gate_verdict'
     && (eligibleById.has(event.messageId) || inWindow(event.ts)));
-  const lineagesSeen = [...new Set(verdictsInScope.map(({ event }) => event.databaseLineage))].sort();
+  const coverageInWindow = indexed.filter(({ event }) => event.event === 'shadow_gate_coverage' && inWindow(event.ts));
+  const lineagesSeen = [...new Set([...verdictsInScope, ...coverageInWindow].map(({ event }) => event.databaseLineage))].sort();
   let lineage = opts.lineage;
   if (lineage === null) {
     if (lineagesSeen.length > 1) {
-      evidenceError(`more than one databaseLineage in the window (${lineagesSeen.join(', ')}); pass --lineage`);
+      evidenceError(
+        `${lineagesSeen.length} databaseLineages in the window (${lineagesSeen.join(', ')}); pass --lineage`,
+      );
     }
     lineage = lineagesSeen[0] ?? null;
   }
@@ -490,16 +532,20 @@ export function buildShadowGateReport(
       counts: inside.filter((e) => e.marker === 'counts').length,
       disarmed: inside.filter((e) => e.marker === 'disarmed').length,
       lastCounts: latest ? { ...latest.counts } : null,
+      lastSinkState: latest?.sinkState ?? null,
+      lastSinkDegradedReason: latest?.sinkDegradedReason ?? null,
     };
   });
   const armedBoots = new Set(coverageEvents.filter(({ event }) => event.marker === 'armed').map(({ event }) => event.bootId));
   const bootsWithoutArmed = [...bootIds].filter((id) => !armedBoots.has(id)).sort();
   let invalid = 0;
+  let written = 0;
   let recorderDropped = 0;
   let journalFailures = 0;
   for (const m of markers) {
     if (!m.lastCounts) continue;
     invalid += m.lastCounts.invalid;
+    written += m.lastCounts.written;
     journalFailures += m.lastCounts.journalFailures;
     for (const key of COUNT_DROP_KEYS) recorderDropped += m.lastCounts[key];
   }
@@ -523,8 +569,8 @@ export function buildShadowGateReport(
     const group = ruleGroups.get(ruleKey) ?? [];
     group.push(j);
     ruleGroups.set(ruleKey, group);
-    const rule = perRule[e.ruleId ?? 'NONE'] ??= { SPAWN: 0, SUPPRESS: 0, NONE: 0 };
-    rule[e.verdict ?? 'NONE'] += 1;
+    const rule = perRule[e.ruleId ?? 'NONE'] ??= { SPAWN: 0, SUPPRESS: 0, ERROR: 0 };
+    rule[e.status === 'OK' && e.verdict !== null ? e.verdict : 'ERROR'] += 1;
   }
   const partitions = [...partitionCounts].map(([key, count]) => {
     const [gateVersion, rulesSha256, featureVersion, configGeneration, bootId] = JSON.parse(key) as [
@@ -537,7 +583,6 @@ export function buildShadowGateReport(
     return { gateVersion, rulesSha256, featureVersion, received: group.length, rates: computeRates(group, missingRows) };
   }).sort((a, b) => b.received - a.received || a.rulesSha256.localeCompare(b.rulesSha256));
 
-  const latencies = received.filter((j) => j.event.status === 'OK').map((j) => j.event.tookMs).sort((a, b) => a - b);
   const labeled = eligibleRows.filter((r) => r.terminalReason !== null).length;
   const echoedAll = eligibleRows.filter((r) => r.terminalReason === ECHOED).length;
   const echoedJoined = received.filter((j) => j.row.terminalReason === ECHOED).length;
@@ -557,7 +602,9 @@ export function buildShadowGateReport(
       routedTo: Object.fromEntries([...routedTo].sort(([a], [b]) => a.localeCompare(b))),
       unknownRoutedTo,
       unknownRoutedEligible,
+      countersScope: 'cumulative-per-boot',
       invalid,
+      written,
       recorderDropped,
       journalFailures,
       duplicate,
@@ -583,11 +630,8 @@ export function buildShadowGateReport(
     partitions,
     rulePartitions,
     latency: {
-      count: latencies.length,
-      p50: percentile(latencies, 0.5),
-      p95: percentile(latencies, 0.95),
-      p99: percentile(latencies, 0.99),
-      max: latencies.at(-1) ?? null,
+      all: latencyOf(received),
+      ok: latencyOf(received.filter((j) => j.event.status === 'OK')),
     },
     caveat: PROXY_CAVEAT,
   };
@@ -613,12 +657,14 @@ function rateLines(rates: Rates, indent: string): { suppression: string[]; proxy
     ],
     proxy: [
       `${indent}proxyDisagreement (SUPPRESS on response_echoed): ${rates.proxyDisagreement}`,
+      `${indent}over echoed OK-only: ${fmtRate(rates.disagreementOverEchoedOk)}`,
       `${indent}over echoed_joined: ${fmtRate(rates.disagreementOverEchoedJoined)}`,
       `${indent}over echoed_all: ${fmtRate(rates.disagreementOverEchoedAll)}`,
-      `${indent}conservative (missing echoed = disagreement): ${fmtRate(rates.disagreementConservative)}`,
+      `${indent}conservative (missing or ERROR echoed = disagreement): ${fmtRate(rates.disagreementConservative)}`,
       `${indent}proxy-confirmed (SUPPRESS on no_reply_policy) / labeled: ${fmtRate(rates.proxyConfirmedOverLabeled)}`,
     ],
     bounds: [
+      `${indent}over echoed OK-only: ${fmtBound(rates.disagreementOverEchoedOk)}`,
       `${indent}over echoed_joined: ${fmtBound(rates.disagreementOverEchoedJoined)}`,
       `${indent}over echoed_all: ${fmtBound(rates.disagreementOverEchoedAll)}`,
       `${indent}conservative: ${fmtBound(rates.disagreementConservative)}`,
@@ -638,19 +684,24 @@ export function renderShadowGateReportText(report: ShadowGateReport): string {
   if (c.unknownRoutedTo.length > 0) {
     out.push(`  unknown routed_to values (included as eligible, ${c.unknownRoutedEligible} rows): ${c.unknownRoutedTo.join(', ')}`);
   }
-  out.push(`  invalid (recorder): ${c.invalid}  recorderDropped: ${c.recorderDropped}  journalFailures: ${c.journalFailures}`);
+  out.push(`  recorder counters ${COUNTERS_SCOPE_LABEL}:`);
+  out.push(`    invalid: ${c.invalid}  written: ${c.written}  recorderDropped: ${c.recorderDropped}  journalFailures: ${c.journalFailures}`);
   out.push(`  conflicting: ${c.conflicting}  duplicate: ${c.duplicate}  seqMismatch: ${c.seqMismatch}  unjoined: ${c.unjoined}  tornTail: ${c.tornTail}`);
   out.push(`  segment files: ${c.segmentFiles}`);
   for (const m of c.markers) {
     const counts = m.lastCounts
       ? Object.entries(m.lastCounts).map(([k, v]) => `${k}=${v}`).join(' ')
       : 'none';
-    out.push(`  boot ${m.bootId}: armed ${m.armed}, counts ${m.counts}, disarmed ${m.disarmed}; last counts: ${counts}`);
+    const sink = m.lastSinkState === null
+      ? 'none'
+      : `${m.lastSinkState}${m.lastSinkDegradedReason ? ` (${m.lastSinkDegradedReason})` : ''}`;
+    out.push(`  boot ${m.bootId}: armed ${m.armed}, counts ${m.counts}, disarmed ${m.disarmed}; last written sink state: ${sink}`);
+    out.push(`    last counts ${COUNTERS_SCOPE_LABEL}: ${counts}`);
   }
   out.push(`  boots without an armed marker: ${c.bootsWithoutArmed.length === 0 ? 'none' : c.bootsWithoutArmed.join(', ')}`);
   if (c.warning) out.push(c.warning);
 
-  out.push('', '2. Status (ERROR counts as SPAWN in every rate)');
+  out.push('', '2. Status (ERROR counts as SPAWN in the proxy rates and as a disagreement in the conservative rate)');
   out.push(`  OK: ${report.status.ok}  ERROR: OVERRUN ${report.status.error.OVERRUN}, E_THROW ${report.status.error.E_THROW}, E_INPUT ${report.status.error.E_INPUT}`);
 
   const l = report.labels;
@@ -665,10 +716,10 @@ export function renderShadowGateReportText(report: ShadowGateReport): string {
   out.push('', '5. Clopper–Pearson one-sided 95% upper bound on disagreement');
   out.push(...(pooled ? pooled.bounds : [withheld]));
 
-  out.push('', '6. Per-rule breakdown (recorded verdict)');
+  out.push('', '6. Per-rule breakdown (recorded verdict; SPAWN/SUPPRESS are OK results only)');
   const rules = Object.entries(report.perRule);
   if (rules.length === 0) out.push('  none');
-  for (const [rule, v] of rules) out.push(`  ${rule}: SPAWN ${v.SPAWN}, SUPPRESS ${v.SUPPRESS}, NONE ${v.NONE}`);
+  for (const [rule, v] of rules) out.push(`  ${rule}: SPAWN ${v.SPAWN}, SUPPRESS ${v.SUPPRESS}, ERROR ${v.ERROR}`);
 
   out.push('', '7. Version partitions');
   if (report.partitions.length === 0) out.push('  none');
@@ -685,9 +736,11 @@ export function renderShadowGateReportText(report: ShadowGateReport): string {
     }
   }
 
-  const lat = report.latency;
   const ms = (v: number | null): string => (v === null ? 'n/a' : v.toFixed(3));
-  out.push('', '8. Latency (tookMs, OK results)');
-  out.push(`  count ${lat.count}  p50 ${ms(lat.p50)}  p95 ${ms(lat.p95)}  p99 ${ms(lat.p99)}  max ${ms(lat.max)}`);
+  const latencyLine = (label: string, lat: LatencyStats): string =>
+    `  ${label}: count ${lat.count}  p50 ${ms(lat.p50)}  p95 ${ms(lat.p95)}  p99 ${ms(lat.p99)}  max ${ms(lat.max)}`;
+  out.push('', '8. Latency (tookMs)');
+  out.push(latencyLine('all received (OK and ERROR, incl. OVERRUN)', report.latency.all));
+  out.push(latencyLine('OK only', report.latency.ok));
   return `${out.join('\n')}\n`;
 }
