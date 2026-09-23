@@ -24,13 +24,20 @@ import { WebSocket } from 'ws';
 // Mocks — must be set up before importing fleet modules
 // ---------------------------------------------------------------------------
 
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
-    cb(null, '');
-  }),
-  execFileSync: vi.fn(() => Buffer.from('abc1234')),
-  spawn: vi.fn(),
-}));
+// spawnSync stays the real builtin: the silence routes reach silence-manager,
+// whose store writes go through writeAtomicPrivateFileIsolatedSync (a
+// spawnSync-supervised child). Everything else stays mocked.
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return {
+    execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
+      cb(null, '');
+    }),
+    execFileSync: vi.fn(() => Buffer.from('abc1234')),
+    spawn: vi.fn(),
+    spawnSync: actual.spawnSync,
+  };
+});
 
 const mockSvcManager = {
   enable: vi.fn().mockResolvedValue(undefined),
