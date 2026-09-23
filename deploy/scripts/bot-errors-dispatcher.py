@@ -4634,6 +4634,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 open_record["unstaleIso"] = now_iso()
             open_record["lastSeenAt"] = current
             open_record["lastSeenIso"] = now_iso()
+            if _bare_root_source(key) in CONNECTIVITY_LOSS_ROOT_SOURCES:
+                note_connectivity_loss(open_record, event, current)
             open_record["lastEventId"] = event.get("id")
             open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
             open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
@@ -5266,6 +5268,42 @@ def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
     return readings or None
 
 
+def reports_connectivity_not_proven_up(event: dict[str, Any]) -> bool:
+    """True when the event carries a connectivity reading that is not
+    unambiguously positive: structured ``diagnostics.whatsappConnected`` other
+    than True, or any ``whatsapp_connected=``, bare ``connected=`` or
+    ``connection_state=`` evidence token (empty values included) that
+    positive_connectivity_readings would reject."""
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    evidence = event_text(event, "evidence")
+    present = "whatsappConnected" in diagnostics or any(
+        pattern.search(evidence)
+        for pattern in (
+            _STRICT_WHATSAPP_CONNECTED_TOKEN_RE,
+            _STRICT_CONNECTED_TOKEN_RE,
+            _STRICT_CONNECTION_STATE_TOKEN_RE,
+        )
+    )
+    return present and positive_connectivity_readings(event) is None
+
+
+def note_connectivity_loss(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+    """Advance ``lastConnectivityLossObservedAt`` for a loss seen in ``event``.
+
+    Uses the later of processing time and the event's own timezone-aware
+    createdAt: a producer clock running ahead stamps the loss later than it is
+    processed, and a connected child stamped by the same clock must still be
+    compared against that stamp. Either choice only makes retirement stricter.
+    """
+    observed = current
+    order = event_created_order(event)
+    if order is not None:
+        observed = max(observed, order // 1_000_000)
+    record["lastConnectivityLossObservedAt"] = max(
+        int_field(record, "lastConnectivityLossObservedAt"), observed
+    )
+
+
 def retire_contradicted_stronger_incident(
     event: dict[str, Any],
     incident_state: dict[str, Any],
@@ -5351,17 +5389,14 @@ def mark_suppressed_by_stronger(
     # state, so it disappears once the root incident clears (NO persistent flag).
     root_source = stronger_key.rsplit("|", 1)[-1]
     stronger_record["lastSuppressedSymptomReason"] = f"inhibited_by:{root_source}"
-    # A suppressed child that itself reports the link down (a logout folded
-    # under a bond loss, or any child with a negative reading) is a newer loss
-    # observation. Recorded at processing time, which is never earlier than the
-    # child's own createdAt, so it can only make retirement stricter.
+    # A suppressed child that does not prove the link up (a logout folded
+    # under a bond loss, or any child whose connectivity readings are negative
+    # or ambiguous) is a newer loss observation for the retirement cutoff.
     if (
         _bare_root_source(str(incident_source(event))) in CONNECTIVITY_LOSS_ROOT_SOURCES
-        or whatsapp_connected_reading(event) is False
+        or reports_connectivity_not_proven_up(event)
     ):
-        stronger_record["lastConnectivityLossObservedAt"] = max(
-            int_field(stronger_record, "lastConnectivityLossObservedAt"), current
-        )
+        note_connectivity_loss(stronger_record, event, current)
 
 
 def incident_event_fields_from_key(key: str) -> dict[str, str]:

@@ -612,11 +612,16 @@ contradicted when all of these hold:
   root being tested), that is the latest of its first alert
   (`eventCreatedAtEpoch`), its `lastSeenAt` (refreshed when a newer same-key
   logout is folded in; children no longer refresh it), and its
-  `lastConnectivityLossObservedAt`. The last is stamped when a suppressed child
-  itself reports the link down, such as a logout suppressed under a bond-loss
-  root or any child with a negative `whatsapp_connected` reading. So a child
-  queued before any newer loss cannot retire a root, and a timestamp with no
-  zone, whose meaning depends on the host clock, never does.
+  `lastConnectivityLossObservedAt`. The last is stamped when a same-key logout
+  is folded in, and when a suppressed child does not prove the link up: a
+  logout suppressed under a bond-loss root, or any child whose connectivity
+  readings are negative or ambiguous (for example the watchdog's
+  `connected=false connection_state=disconnected`). The stamp is the later of
+  processing time and the event's own timezone-aware `createdAt`, so a producer
+  clock running ahead cannot place the loss earlier than a connected child
+  stamped by the same clock. So a child queued before any newer loss cannot
+  retire a root, and a timestamp with no zone, whose meaning depends on the
+  host clock, never does.
 
 Retirement uses the same removal as a matching clear (`close_open_incident`
 drops `openIncidents`, `lastSentAt` and transient bookkeeping for the key). The

@@ -327,6 +327,67 @@ def test_connected_child_older_than_a_logout_suppressed_under_bond_loss_does_not
     assert "contradictionRetirements" not in state
 
 
+def _aged_parent(mod, root_source: str, now: int) -> tuple[dict, str, dict]:
+    state, key = _state_with_parent(mod, root_source)
+    record = state["openIncidents"][key]
+    record["eventCreatedAtEpoch"] = now - 3600
+    record["lastSeenAt"] = now - 3600
+    return state, key, record
+
+
+def test_negative_watchdog_child_advances_the_cutoff():
+    # A suppressed local_health child reporting the link down carries only
+    # bare connected= and connection_state= readings, no whatsapp_connected=.
+    now = int(time.time())
+    mod = _load()
+    state, parent_key, record = _aged_parent(mod, "instance_logged_out", now)
+    down = _alert("local_health", evidence="connected=false connection_state=disconnected", created=now - 10)
+    assert mod.should_suppress_send(down, state) is not None
+    assert record.get("lastConnectivityLossObservedAt", 0) >= now - 10
+
+    older = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now - 600)
+    assert mod.should_suppress_send(older, state) is not None
+    assert parent_key in state["openIncidents"]
+
+    # Positive control: a connected child clearly after the loss still retires.
+    newer = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now + 120,
+                   event_id="evt-newer-connected")
+    assert mod.should_suppress_send(newer, state) is None
+    assert parent_key not in state["openIncidents"]
+
+
+def test_loss_stamp_keeps_a_producer_clock_that_runs_ahead():
+    # The producer's clock runs five minutes ahead: a logout stamped now+300 is
+    # processed now. A connected child stamped now+120 by that clock predates
+    # the logout and must not retire the bond-loss root.
+    now = int(time.time())
+    mod = _load()
+    state, parent_key, record = _aged_parent(mod, "whatsapp_device_bond_lost", now)
+    logout = _alert("instance_logged_out", created=now + 300)
+    assert mod.should_suppress_send(logout, state) is not None
+    assert record.get("lastConnectivityLossObservedAt", 0) >= now + 300
+
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now + 120)
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
+
+
+def test_folded_same_key_logout_keeps_a_producer_clock_that_runs_ahead():
+    now = int(time.time())
+    mod = _load()
+    state, parent_key, record = _aged_parent(mod, "instance_logged_out", now)
+    again = _alert("instance_logged_out", created=now + 300, event_id="evt-logout-again")
+    # Folded into the open record; with the parent's last notification this
+    # old it may be sent as a still-open reminder, so only the fold is asserted.
+    mod.should_suppress_send(again, state)
+    assert parent_key in state["openIncidents"]
+    assert record.get("lastConnectivityLossObservedAt", 0) >= now + 300
+
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now + 120)
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
+
+
 def test_connected_child_older_than_a_sibling_loss_root_does_not_retire():
     # Two open loss roots for one instance: an old bond loss and a logout seen
     # ten seconds ago. A connected child from ten minutes ago predates the
