@@ -368,7 +368,18 @@ journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|qu
 
 ### Authentication
 
-The `GET /health` endpoint requires no authentication.
+`GET /health` is reachable without a token, but an unauthenticated caller gets only the public
+liveness envelope: `{ "schema_version": "health.public.v1", "status", "generated_at",
+"startupNotification" }`, with HTTP 503 when the transport is down and not recovering. Every
+other field in this section, including `whatsapp`, `sqlite`, `durability`, `runtime` and
+`shadowGate`, is in the diagnostic body. That body requires the same bearer token as the mutation
+routes:
+
+```
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health
+```
+
+The diagnostic examples in this runbook pass that header.
 
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
@@ -400,6 +411,8 @@ Optional fields:
 Request errors such as both targets, neither target, unknown alias, unknown profile, or invalid `link_preview` return HTTP 400 and do not send.
 
 ### Response Format
+
+The authenticated diagnostic body (excerpt):
 
 ```json
 {
@@ -699,7 +712,7 @@ exits 78; repair the directory boundary instead of restart-looping the service.
 # Check all instances
 for port in 9091 9092 9093 9094; do
   echo -n "Port $port: "
-  curl -s http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
+  curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
 done
 ```
 
@@ -718,7 +731,7 @@ done
 systemctl --user status whatsoup@q
 
 # 2. Check WhatsApp connection
-curl -s http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
 
 # 3. Check logs for the conversation
 journalctl --user -u whatsoup@q -n 50 | grep -E 'ingest|dispatch|session|error'
@@ -760,7 +773,7 @@ lifecycle (supported resume providers are Claude CLI, Codex CLI, and OpenCode CL
 
 ```bash
 # 1. Get the full health response
-curl -s http://127.0.0.1:9091/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -m json.tool
 
 # 2. Check enrichment last_run timestamp
 # If enrichment.last_run is > 10 minutes ago on a chat instance, this triggers degraded.
@@ -845,7 +858,7 @@ For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
 
 ```bash
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import json,sys; print(json.load(sys.stdin)['runtime']['agent']['providerExecution'])"
 pgrep -af opencode
 journalctl --user -u whatsoup@chat-bot --since '-15 min' --no-pager | \
@@ -1034,11 +1047,11 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
    ORDER BY count DESC, disposition;"
 
 # 3. Check health for durability stats
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantine dispositions:', d['outboundQuarantineDispositions'])"
 
 # 4. Check WhatsApp is connected
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print(d['whatsapp'])"
 ```
 
@@ -2001,7 +2014,7 @@ INSTANCES=( "primary-line:9094" "operator-agent:9092" "sandbox-agent:9091" "chat
 for entry in "${INSTANCES[@]}"; do
   name="${entry%%:*}"
   port="${entry##*:}"
-  result=$(curl -s --max-time 3 "http://127.0.0.1:$port/health" 2>/dev/null)
+  result=$(curl -s --max-time 3 -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null)
   if [ -z "$result" ]; then
     echo "[$name] UNREACHABLE (service may be down)"
     continue
@@ -2113,7 +2126,7 @@ grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<insta
 grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
 
 # Check current state followed by lifetime counters
-curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
 
 # Verify current threshold
 grep "autoCompactInputTokens" instances/<name>/instance.json
@@ -2152,7 +2165,7 @@ cd ~/LAB/WhatSoup && npm test
 
 ### Health checks
 ```
-curl -s localhost:<port>/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" localhost:<port>/health | python3 -m json.tool
 ```
 Instance ports: primary-line=9094, sandbox-agent=9091, operator-agent=9092, chat-bot=9093
 
@@ -2262,7 +2275,7 @@ docker compose logs -f whatsoup 2>&1 | grep fleet
 # Fleet health (from host)
 curl http://localhost:9099/api/lines
 
-# Instance health (if port exposed in compose)
+# Instance liveness (if port exposed in compose); add the bearer header for the diagnostic body
 curl http://localhost:9090/health
 ```
 
