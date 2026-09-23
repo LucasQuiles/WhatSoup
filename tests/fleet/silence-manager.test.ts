@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, sy
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockIsolatedChildWithHook, writeIsolatedChildHook } from '../helpers/isolated-child-hook.ts';
 
 let homeDir: string;
 const logWarn = vi.hoisted(() => vi.fn());
@@ -62,6 +63,8 @@ describe('silence-manager corrupt-file handling', () => {
     vi.doUnmock('node:fs');
     vi.doUnmock('node:os');
     vi.doUnmock('../../src/lib/private-fs.ts');
+    vi.doUnmock('../../src/lib/private-fs-isolated.ts');
+    vi.doUnmock('node:child_process');
     vi.doUnmock('../../src/logger.ts');
     vi.resetModules();
     rmSync(homeDir, { recursive: true, force: true });
@@ -90,15 +93,15 @@ describe('silence-manager corrupt-file handling', () => {
       createdAt: new Date().toISOString(),
     }])}\n`;
     writeFileSync(silencesFile(), priorContents, { mode: 0o600 });
-    const actualPrivateFs = await vi.importActual<typeof import('../../src/lib/private-fs.ts')>(
-      '../../src/lib/private-fs.ts',
+    const actualIsolatedFs = await vi.importActual<typeof import('../../src/lib/private-fs-isolated.ts')>(
+      '../../src/lib/private-fs-isolated.ts',
     );
     const writeLifecycleMarker = vi.fn(() => {
       throw Object.assign(new Error('marker write failure'), { code: 'EACCES' });
     });
-    vi.doMock('../../src/lib/private-fs.ts', () => ({
-      ...actualPrivateFs,
-      writeAtomicPrivateFileSync: writeLifecycleMarker,
+    vi.doMock('../../src/lib/private-fs-isolated.ts', () => ({
+      ...actualIsolatedFs,
+      writeAtomicPrivateFileIsolatedSync: writeLifecycleMarker,
     }));
     const { SilenceStoreUnavailableError, addSilence, listActiveSilences } = await importManager();
 
@@ -457,19 +460,24 @@ describe('silence-manager corrupt-file handling', () => {
       createdAt: new Date().toISOString(),
     }])}\n`;
     writeFileSync(silencesFile(), priorContents, { mode: 0o600 });
-    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
-    vi.doMock('node:fs', () => ({
-      ...actualFs,
-      openSync: vi.fn((path: string, flags: string, mode?: number) => {
-        if (path.includes('.fleet-silences.') && path.endsWith('.tmp')) {
-          throw new Error('simulated staging failure');
-        }
-        return actualFs.openSync(path, flags, mode);
-      }),
-    }));
+    // The registry temp is staged inside the isolated writer's child, so the
+    // staging fault is injected there; the child reports a sanitized EACCES.
+    const hookPath = writeIsolatedChildHook(homeDir, 'staging-fault-hook.mjs', String.raw`
+import fs from 'node:fs';
+const originalOpen = fs.openSync.bind(fs);
+fs.openSync = function (candidate, ...args) {
+  if (String(candidate).startsWith('.fleet-silences.json.') && String(candidate).endsWith('.tmp')) {
+    const error = new Error('simulated staging failure'); error.code = 'EACCES'; throw error;
+  }
+  return originalOpen(candidate, ...args);
+};
+`);
+    await mockIsolatedChildWithHook(hookPath);
     const { addSilence } = await importManager();
 
-    expect(() => addSilence('new-line', 5, 'test', 'operator')).toThrow('simulated staging failure');
+    let caught: NodeJS.ErrnoException | undefined;
+    try { addSilence('new-line', 5, 'test', 'operator'); } catch (error) { caught = error as NodeJS.ErrnoException; }
+    expect(caught?.code).toBe('EACCES');
 
     expect(readFileSync(silencesFile(), 'utf-8')).toBe(priorContents);
     expect(readdirSync(configDir()).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
@@ -956,12 +964,13 @@ describe('silence-manager corrupt-file handling', () => {
 // ---------------------------------------------------------------------------
 // #2288-M5: discriminating test — fsync before rename.
 //
-// Verifies that saveRules calls fsyncSync on the tmp file descriptor before
-// renameSync. Uses a direct write to a real temp dir + interception of the
-// fsyncSync call via vi.spyOn on the real 'node:fs' module.
+// Verifies that saveRules fsyncs the registry temp before renaming it over
+// fleet-silences.json. The write runs inside the isolated writer's child, so a
+// hook module in the child records the fsync and rename calls (by temp name)
+// into an event log.
 //
-// DISCRIMINATOR: if the fsync is removed from saveRules, this test FAILS
-// because the fsyncSync spy records zero calls.
+// DISCRIMINATOR: if the temp fsync is removed or moved after the rename, the
+// recorded sequence for the registry temp no longer reads fsync -> rename.
 // ---------------------------------------------------------------------------
 
 describe('#2288-M5 fsync before rename', () => {
@@ -982,47 +991,48 @@ describe('#2288-M5 fsync before rename', () => {
   afterEach(() => {
     vi.doUnmock('node:os');
     vi.doUnmock('node:fs');
+    vi.doUnmock('node:child_process');
     vi.doUnmock('../../src/logger.ts');
     vi.resetModules();
     rmSync(homeDirFsync, { recursive: true, force: true });
   });
 
-  it('calls fsyncSync before renameSync (MUST FAIL if fsync removed from saveRules)', async () => {
-    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
-    // Track which fd corresponds to which path so we can filter fsyncSync
-    // calls to only those on the saveRules tmp file (.fleet-silences. prefix).
-    const fdToPath = new Map<number, string>();
-    const fsyncPaths: string[] = [];
-    const renameCalls: string[] = [];
+  it('fsyncs the registry temp before renaming it over the registry (MUST FAIL if fsync removed)', async () => {
+    const eventLog = join(homeDirFsync, 'registry-write.events');
+    const hookPath = writeIsolatedChildHook(homeDirFsync, 'registry-write-hook.mjs', String.raw`
+import fs from 'node:fs';
+const originalOpen = fs.openSync.bind(fs);
+const originalFsync = fs.fsyncSync.bind(fs);
+const originalRename = fs.renameSync.bind(fs);
+const names = new Map();
+const log = (event) => fs.appendFileSync(process.env.WHATSOUP_TEST_EVENT_LOG, event + '\n');
+fs.openSync = function (candidate, ...args) {
+  const descriptor = originalOpen(candidate, ...args);
+  names.set(descriptor, String(candidate));
+  return descriptor;
+};
+fs.fsyncSync = function (descriptor) {
+  log('fsync ' + (names.get(descriptor) ?? '?'));
+  return originalFsync(descriptor);
+};
+fs.renameSync = function (from, to) {
+  log('rename ' + String(from) + ' ' + String(to));
+  return originalRename(from, to);
+};
+`);
+    await mockIsolatedChildWithHook(hookPath, { WHATSOUP_TEST_EVENT_LOG: eventLog });
 
-    vi.doMock('node:fs', () => ({
-      ...actualFs,
-      openSync: vi.fn((path: string, flags: string, mode?: number) => {
-        const fd = actualFs.openSync(path, flags, mode);
-        fdToPath.set(fd, path);
-        return fd;
-      }),
-      fsyncSync: vi.fn((fd: number) => {
-        const p = fdToPath.get(fd);
-        if (p) fsyncPaths.push(p);
-        return actualFs.fsyncSync(fd);
-      }),
-      renameSync: vi.fn((oldPath: string, newPath: string) => {
-        renameCalls.push(oldPath);
-        return actualFs.renameSync(oldPath, newPath);
-      }),
-    }));
-
-    // Re-import AFTER the mock is in place.
+    // Import AFTER the mock is in place.
     const silenceManager = await import('../../src/fleet/silence-manager.ts');
     silenceManager.addSilence('test-fsync-host', 5, 'test', 'operator');
 
-    // DISCRIMINATOR: fsyncSync must have been called on the saveRules tmp file
-    // (.fleet-silences. prefix). If the fsync is removed from saveRules, only
-    // the reset-path fsync (.reset. prefix) fires, and this filter yields 0.
-    const saveRulesFsyncs = fsyncPaths.filter((p) => p.includes('.fleet-silences.') && !p.includes('.reset.'));
-    expect(saveRulesFsyncs.length).toBeGreaterThanOrEqual(1);
-    // renameSync must also have been called (the atomic replace happened).
-    expect(renameCalls.length).toBeGreaterThanOrEqual(1);
-  });
+    const events = readFileSync(eventLog, 'utf-8').trim().split('\n');
+    const registryEvents = events.filter((event) => event.includes('.fleet-silences.json.'));
+    expect(registryEvents).toHaveLength(2);
+    expect(registryEvents[0]).toMatch(/^fsync \.fleet-silences\.json\.\d+\.[0-9a-f-]+\.tmp$/);
+    expect(registryEvents[1]).toMatch(/^rename \.fleet-silences\.json\.\d+\.[0-9a-f-]+\.tmp fleet-silences\.json$/);
+    expect(registryEvents[1]).toContain(registryEvents[0]!.slice('fsync '.length));
+    expect(JSON.parse(readFileSync(join(homeDirFsync, '.config', 'whatsoup', 'fleet-silences.json'), 'utf-8')))
+      .toMatchObject([{ instance: 'test-fsync-host' }]);
+  }, 10_000);
 });
