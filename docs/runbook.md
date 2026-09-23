@@ -2394,8 +2394,8 @@ npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
 
 - `--instance` is the recorded id: `botName` with characters outside `A-Za-z0-9._:-` replaced by `_`
   (at most 128 characters). It is not necessarily the directory name.
-- `--since`/`--until` are required unix seconds; the window is `[since, until)` over
-  `inbound_events.received_at`.
+- `--since`/`--until` are required integer unix seconds (no fractions, no milliseconds); the window
+  is `[since, until)` over `inbound_events.received_at`.
 - The report opens the snapshot `immutable=1`, which creates no `-wal`/`-shm` sidecars. It refuses
   a snapshot that has a non-empty `-wal` next to it, because that mode would ignore the rows inside it.
 - The database lineage is a hash of the live database path and inode, so it cannot be recomputed from
@@ -2405,7 +2405,9 @@ npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
 Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
 error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
 an invalid interior NDJSON line (named by file and line number only), more than 64 segments, more than
-200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage.
+200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage. The 4 KiB bound is
+checked before the torn-tail check, so a final line without a newline that is over 4 KiB also exits
+`65` rather than being counted as a torn tail.
 
 **Reading the output.** Coverage prints first:
 
@@ -2459,12 +2461,23 @@ gate/rules/feature version is present, rates are printed per partition only, nev
 **Disable / roll back.** Set `"mode": "off"` (or remove `shadowGate`) and restart. Existing segments
 are inert and can be archived.
 
+**Segment retention.** Segments never rotate out. The sink writes up to 32 segments of 5 MiB
+(160 MiB). When the next segment would exceed that, the sink degrades with `segment_cap_reached`
+and records nothing further, and every later restart degrades the same way, until an operator
+archives the segments. To archive, stop the instance (owner action), move the
+`shadow-gate-events.*.ndjson` files out of `eventsDir`, and start it again; numbering restarts at
+`000001`.
+
 **Known limits.**
 
 - Advisory only. Nothing reads verdicts at runtime.
 - There is no `disarmed` marker on process exit. The 10-minute `counts` markers bound the
   unrecorded tail, and the report flags any boot that has no `armed` marker.
 - The pending-obligation feature (whether the bot's previous message asked a question) misses a bot
-  question stored in the same second as the inbound message.
-- Rules load lazily on the first shadow evaluation. A failed load latches `ERROR`/`E_THROW` for the
-  lifetime of the process, so restart after fixing the rules file.
+  question stored in the same second as the inbound message. DMs skip the lookup entirely and record
+  it as unknown: `S02_DM` decides every DM before it matters.
+- Signal instances record no verdicts (see the id rules above).
+- In `shadow` mode the rules file is read and compiled once, when the ingest handler is created at
+  startup. Edits to the rules file take effect only after a restart.
+- The first read is final for the process: if the rules file is unreadable or invalid then, every
+  evaluation records `ERROR`/`E_THROW` until the process restarts, even after the file is fixed.

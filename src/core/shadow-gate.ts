@@ -85,6 +85,8 @@ export interface CompiledShadowRules {
  * because patterns run against member-supplied content). A pattern that fails
  * to compile throws: the shipped rules file is a checked-in constant, not
  * operator input, so there is no skip-and-warn path.
+ *
+ * @internal Exported for tests; production evaluates through shadowGate().
  */
 export function compileShadowRules(raw: unknown): CompiledShadowRules & { rulesVersion: number } {
   const rules = parseRules(raw);
@@ -179,7 +181,11 @@ function matchesWhole(re: RegExp, text: string): boolean {
   return m !== null && m.index === 0 && m[0].length === text.length;
 }
 
-/** Ordered rules, first match wins. Pure given `rules`. */
+/**
+ * Ordered rules, first match wins. Pure given `rules`.
+ *
+ * @internal Exported for tests; production evaluates through shadowGate().
+ */
 export function evaluateShadowGate(
   input: ShadowGateInput,
   rules: CompiledShadowRules,
