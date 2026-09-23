@@ -209,6 +209,8 @@ export interface ShadowGateRecorder {
   noteEvaluated(): void;
   noteJournalFailure(): void;
   stats(): ShadowGateCounts;
+  /** The sink's state and closed degraded-reason code, as written into coverage markers. */
+  sinkStatus(): { state: SinkState; degradedReason: string | null };
   close(timeoutMs?: number): Promise<void>;
 }
 
@@ -354,6 +356,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
       own.journalFailures += 1;
     },
     stats: counts,
+    sinkStatus: () => ({ state: sink.state(), degradedReason: sink.degradedReason() }),
     close(timeoutMs) {
       if (closePromise) return closePromise;
       clearInterval(timer);

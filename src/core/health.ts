@@ -66,6 +66,7 @@ import {
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
+import { getShadowGateHealth } from './shadow-gate-adapter.ts';
 import {
   readOutboundSendHealth,
   readToolDurabilityHealth,
@@ -2953,6 +2954,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           fallback: config.models.fallback,
         },
         model_advisories: getModelAdvisories(),
+        // Advisory only: never feeds status, status_reasons or degradation_causes.
+        shadowGate: getShadowGateHealth(config),
         durability: durabilityStats,
         continuity,
         recovery_debt: recoveryDebt,

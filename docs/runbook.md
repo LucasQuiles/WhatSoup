@@ -2431,8 +2431,23 @@ checked before the torn-tail check, so a final line without a newline that is ov
     rules is rejected this way and its row shows up as missing.
 - Each boot line also prints the sink state from its last written marker. A sink that degrades
   (for example `segment_cap_reached` or `write_failed`) writes nothing further, not even a marker,
-  so its degraded state never appears in the segments. Look for a boot whose `counts` markers stop
-  early, and for the `shadow gate warning` log line carrying the reason code.
+  so its degraded state never appears in the segments. For the running process, read it from
+  `shadowGate` in the authenticated `/health` body (see "Live status" below). For a past boot, look
+  for `counts` markers that stop early and for the `shadow gate warning` log line carrying the
+  reason code.
+
+**Live status.** The authenticated (bearer-token) `/health` body carries a `shadowGate` object.
+It is advisory: it never changes `status`, `status_reasons` or `degradation_causes`.
+
+- Mode `off` (or no `shadowGate` section): exactly `{ "mode": "off" }`.
+- Mode `shadow`: `{ mode, recorder, sinkState, sinkDegradedReason, counts }`, metadata only.
+  - `recorder` is `unavailable` until the first message reaches dispatch, because the recorder is
+    created then. It is also `unavailable` if the sink is closed.
+  - `recorder` is `disabled` if creating the recorder failed. This is latched until restart.
+  - `recorder` is `degraded` if the sink degraded. `sinkDegradedReason` gives the closed reason
+    code, for example `mkdir_failed`, `competing_writer`, `segment_cap_reached` or `write_failed`.
+  - Otherwise `recorder` is `ready`.
+  - `counts` carries the same counters the coverage markers carry, for the current process.
 
 The id rules: every id uses the charset `A-Za-z0-9._:-` (at most 128 characters), and `messageId` and
 `instance` also reject a standalone run of 7–15 digits, the length of a phone number. Digits glued to

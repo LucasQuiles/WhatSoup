@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
+import type { SinkState } from '../lib/bounded-ndjson-sink.ts';
 import type { Database } from './database.ts';
 import type { IncomingMessage } from './types.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from './access-list.ts';
@@ -308,6 +309,40 @@ export function getShadowGateStats(): ShadowGateCounts {
     }
   }
   return Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((key) => [key, 0])) as ShadowGateCounts;
+}
+
+export type ShadowGateRecorderHealth = 'disabled' | 'ready' | 'degraded' | 'unavailable';
+
+export type ShadowGateHealth =
+  | { mode: 'off' }
+  | {
+      mode: 'shadow';
+      recorder: ShadowGateRecorderHealth;
+      sinkState: SinkState | null;
+      sinkDegradedReason: string | null;
+      counts: ShadowGateCounts;
+    };
+
+/**
+ * Advisory health projection: closed codes and counters only. Mode off does no
+ * work. In shadow mode, `unavailable` means no recorder to read (none created
+ * yet — creation is lazy on the first dispatched message — or the sink is
+ * closed or unreadable); `disabled` means creation failed and is latched until
+ * restart. Never throws.
+ */
+export function getShadowGateHealth(config: Pick<ShadowGateConfig, 'shadowGate'>): ShadowGateHealth {
+  if (config.shadowGate?.mode !== 'shadow') return { mode: 'off' };
+  const counts = getShadowGateStats();
+  const unread = { mode: 'shadow', sinkState: null, sinkDegradedReason: null, counts } as const;
+  if (!recorder) return { ...unread, recorder: recorderDisabled ? 'disabled' : 'unavailable' };
+  try {
+    const { state, degradedReason } = recorder.sinkStatus();
+    const health: ShadowGateRecorderHealth =
+      state === 'degraded' ? 'degraded' : state === 'closed' ? 'unavailable' : 'ready';
+    return { mode: 'shadow', recorder: health, sinkState: state, sinkDegradedReason: degradedReason, counts };
+  } catch {
+    return { ...unread, recorder: 'unavailable' };
+  }
 }
 
 /** Test-only: close and forget the process recorder and clear the disabled latch. */

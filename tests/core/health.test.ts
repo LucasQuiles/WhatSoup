@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { request } from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -99,6 +99,9 @@ import type { StartupNotificationHealth } from '../../src/core/startup-notificat
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 import { systemClock } from '../../src/lib/clock.ts';
+import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
+import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -7703,5 +7706,96 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
+  });
+});
+
+describe('GET /health — shadowGate (advisory)', () => {
+  const tmp = trackTmpDirs('health-shadow-gate-');
+  const { join } = path;
+  const mutableConfig = config as unknown as Record<string, unknown>;
+  const zeroCounts = Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((k) => [k, 0]));
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db = makeDb();
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+  });
+
+  afterEach(async () => {
+    await __resetShadowGateForTests();
+    delete mutableConfig.shadowGate;
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  async function diagnostic(): Promise<Record<string, unknown>> {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    return JSON.parse(body) as Record<string, unknown>;
+  }
+
+  const statusFields = (body: Record<string, unknown>) => ({
+    status: body.status,
+    status_reasons: body.status_reasons,
+    degradation_causes: body.degradation_causes,
+  });
+
+  it('mode off (or an absent section) reports exactly { mode: "off" }', async () => {
+    expect((await diagnostic()).shadowGate).toEqual({ mode: 'off' });
+    mutableConfig.shadowGate = { mode: 'off', eventsDir: join(tmp.make('off'), 'events') };
+    expect((await diagnostic()).shadowGate).toEqual({ mode: 'off' });
+  });
+
+  it('shadow mode before the first dispatched message reports an unavailable recorder', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('lazy'), 'events') };
+    expect((await diagnostic()).shadowGate).toEqual({
+      mode: 'shadow', recorder: 'unavailable', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+    });
+  });
+
+  it('shadow mode with a live recorder reports ready, closed codes and counters only', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('ready'), 'events') };
+    expect(getShadowGateRecorder(db, config)).not.toBeNull();
+
+    await vi.waitFor(async () => {
+      expect((await diagnostic()).shadowGate).toMatchObject({ recorder: 'ready', sinkState: 'ready' });
+    });
+    const shadowGate = (await diagnostic()).shadowGate as Record<string, unknown>;
+    expect(Object.keys(shadowGate).sort()).toEqual(['counts', 'mode', 'recorder', 'sinkDegradedReason', 'sinkState']);
+    expect(shadowGate).toMatchObject({ mode: 'shadow', sinkDegradedReason: null });
+    expect(Object.keys(shadowGate.counts as object).sort()).toEqual([...SHADOW_GATE_COUNT_KEYS].sort());
+    expect(shadowGate.counts).toMatchObject({ evaluated: 0, recorded: 0 });
+  });
+
+  it('a latched creation failure reports a disabled recorder', async () => {
+    mutableConfig.shadowGate = {
+      mode: 'shadow',
+      get eventsDir(): string {
+        throw new Error('bad section');
+      },
+    };
+    expect(getShadowGateRecorder(db, config)).toBeNull();
+    expect((await diagnostic()).shadowGate).toEqual({
+      mode: 'shadow', recorder: 'disabled', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+    });
+  });
+
+  it('a degraded sink is reported with its reason code and leaves health status untouched', async () => {
+    const baseline = statusFields(await diagnostic());
+    const blocker = join(tmp.make('degraded'), 'not-a-dir');
+    writeFileSync(blocker, 'x');
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(blocker, 'events') };
+    expect(getShadowGateRecorder(db, config)).not.toBeNull();
+
+    await vi.waitFor(async () => {
+      expect((await diagnostic()).shadowGate).toMatchObject({
+        mode: 'shadow', recorder: 'degraded', sinkState: 'degraded', sinkDegradedReason: 'mkdir_failed',
+      });
+    });
+    expect(statusFields(await diagnostic())).toEqual(baseline);
   });
 });

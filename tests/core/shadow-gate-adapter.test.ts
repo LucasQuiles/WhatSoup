@@ -37,6 +37,7 @@ import { MAX_SHADOW_TEXT_UTF16 } from '../../src/core/shadow-gate-features.ts';
 import {
   buildShadowGateInput,
   evaluateShadowGateForMessage,
+  getShadowGateHealth,
   getShadowGateRecorder,
   getShadowGateStats,
   startShadowGateAttempt,
@@ -354,6 +355,8 @@ describe('recorder lifecycle', () => {
     expect(startShadowGateAttempt(makeMsg(), GROUP_KEY, db, botJid, botLid, config)).toBeNull();
     expect(touched).toEqual([]);
     expect(getShadowGateStats()).toEqual(Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((k) => [k, 0])));
+    expect(getShadowGateHealth(config)).toEqual({ mode: 'off' });
+    expect(getShadowGateHealth({})).toEqual({ mode: 'off' });
   });
 
   it('creation failure latches disabled until reset', () => {
