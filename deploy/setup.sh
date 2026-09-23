@@ -522,6 +522,9 @@ if [ "$PLATFORM" = "Darwin" ]; then
     # provider CLI uses the bot's credential store; with none configured, keep
     # the value the installed plist already has. scripts/check-launchd-drift.sh
     # applies the same filter, so install and drift check stay byte-identical.
+    # An installed plist that mentions CLAUDE_CONFIG_DIR but cannot be read makes
+    # the filter fail; the return 1 below then aborts setup under set -e rather
+    # than overwrite a value it could not carry forward.
     if ! rendered="$(printf '%s\n' "$rendered" | bash "$REPO_ROOT/scripts/run-with-pinned-node.sh" \
       "$REPO_ROOT/scripts/launchd-claude-config-env.ts" --home "$HOME" --preserve-from "$dest")"; then
       echo "  ✗ cannot resolve service.claudeConfigDir for $label; not installing" >&2

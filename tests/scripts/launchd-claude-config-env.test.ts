@@ -252,6 +252,90 @@ describe('shell render call sites apply the injector', () => {
     expect(out).toContain('ok: reply-guarantee');
   });
 
+  // Runs setup.sh's own install_launchd_timer (extracted verbatim) under the
+  // same `set -euo pipefail`, with crontab/launchctl stubbed, so the install
+  // path is exercised rather than grepped.
+  function setupInstall(home: string): { status: number | null; stdout: string; stderr: string; dest: string } {
+    const src = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
+    const start = src.indexOf('  install_launchd_timer() {');
+    const end = src.indexOf('\n  }\n', start) + '\n  }\n'.length;
+    expect(start).toBeGreaterThan(0);
+    const bin = path.join(home, 'stub-bin');
+    fs.mkdirSync(bin, { recursive: true });
+    for (const name of ['crontab', 'launchctl']) {
+      fs.writeFileSync(path.join(bin, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    }
+    const launchAgents = path.join(home, 'Library', 'LaunchAgents');
+    fs.mkdirSync(launchAgents, { recursive: true });
+    const harness = path.join(home, 'harness.sh');
+    fs.writeFileSync(harness, [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      `REPO_ROOT=${JSON.stringify(repoRoot)}`,
+      `LAUNCH_AGENTS_DIR=${JSON.stringify(launchAgents)}`,
+      src.slice(start, end),
+      'install_launchd_timer "com.whatsoup.harness-maintenance" "harness-maintenance"',
+      'echo "setup-continued"',
+      '',
+    ].join('\n'));
+    const r = spawnSync('bash', [harness], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, XDG_CONFIG_HOME: '', PATH: `${bin}:${process.env['PATH'] ?? ''}` },
+    });
+    return {
+      status: r.status,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      dest: path.join(launchAgents, 'com.whatsoup.harness-maintenance.plist'),
+    };
+  }
+
+  function installedHarness(home: string, dir: string | null): string {
+    const rendered = harnessTemplate.replaceAll('__WHATSOUP_REPO_ROOT__', repoRoot).replaceAll('__HOME__', home);
+    return injectClaudeConfigDir(rendered, dir);
+  }
+
+  it('setup keeps a hand-added dir the host config does not own', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    const launchAgents = path.join(home, 'Library', 'LaunchAgents');
+    fs.mkdirSync(launchAgents, { recursive: true });
+    const dest = path.join(launchAgents, 'com.whatsoup.harness-maintenance.plist');
+    fs.writeFileSync(dest, installedHarness(home, '/srv/hand/.claude'));
+    const r = setupInstall(home);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('already installed (unchanged)');
+    expect(plistEnv(fs.readFileSync(r.dest, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/hand/.claude');
+  });
+
+  it('setup installs the configured dir over a different hand-added one', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', { service: { claudeConfigDir: '/srv/bot/.claude' } });
+    const launchAgents = path.join(home, 'Library', 'LaunchAgents');
+    fs.mkdirSync(launchAgents, { recursive: true });
+    fs.writeFileSync(path.join(launchAgents, 'com.whatsoup.harness-maintenance.plist'),
+      installedHarness(home, '/srv/hand/.claude'));
+    const r = setupInstall(home);
+    expect(r.status, r.stderr).toBe(0);
+    expect(plistEnv(fs.readFileSync(r.dest, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/bot/.claude');
+  });
+
+  it('setup aborts under set -e when the installed plist mentions the key but cannot be read', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    const launchAgents = path.join(home, 'Library', 'LaunchAgents');
+    fs.mkdirSync(launchAgents, { recursive: true });
+    const dest = path.join(launchAgents, 'com.whatsoup.harness-maintenance.plist');
+    const ambiguous = installedHarness(home, '/srv/hand/.claude')
+      .replace('<key>RunAtLoad</key>', '<key>EnvironmentVariables</key><dict/>\n  <key>RunAtLoad</key>');
+    fs.writeFileSync(dest, ambiguous);
+    const r = setupInstall(home);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('setup-continued');
+    expect(r.stderr).toContain('not installing');
+    expect(fs.readFileSync(dest, 'utf8')).toBe(ambiguous);
+  });
+
   it('setup installs harness/reply timers through the same injection (source pin)', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
     const install = src.slice(src.indexOf('install_launchd_timer() {'), src.indexOf('install_launchd_timer "com.whatsoup.harness-maintenance"'));
