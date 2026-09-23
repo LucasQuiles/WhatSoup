@@ -39,7 +39,8 @@ export interface ShadowGateCoverageEvent {
   marker: 'armed' | 'counts' | 'disarmed';
   counts: {
     evaluated: number; recorded: number; droppedQueueFull: number; droppedOversize: number;
-    droppedClosed: number; droppedDegraded: number; writeErrors: number; journalFailures: number;
+    droppedClosed: number; droppedDegraded: number; droppedWriteFailed: number; droppedUnserializable: number;
+    invalid: number; writeErrors: number; journalFailures: number;
   };
   sinkState: SinkState; sinkDegradedReason: string | null;
   gateVersion: number; rulesSha256: string; featureVersion: number;
@@ -65,6 +66,8 @@ const ERROR_REASON_SET: ReadonlySet<unknown> = new Set<ShadowGateErrorReason>(['
 const MARKER_SET: ReadonlySet<unknown> = new Set(['armed', 'counts', 'disarmed']);
 const SINK_STATE_SET: ReadonlySet<unknown> = new Set<SinkState>(['starting', 'ready', 'degraded', 'closed']);
 const MAX_ID_CHARS = 128;
+// Closed id charset: excludes '@', '+' and whitespace so a JID or phone number can never be recorded.
+const ID_CHARSET = /^[A-Za-z0-9._:-]+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 const COMMON_KEYS = [
@@ -78,7 +81,8 @@ const VERDICT_INPUT_KEYS: ReadonlySet<string> = new Set(VERDICT_INPUT_KEY_LIST);
 const VERDICT_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, ...VERDICT_INPUT_KEY_LIST]);
 const COVERAGE_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, 'marker', 'counts', 'sinkState', 'sinkDegradedReason']);
 const COUNT_KEYS: ReadonlySet<string> = new Set([
-  'evaluated', 'recorded', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded', 'writeErrors', 'journalFailures',
+  'evaluated', 'recorded', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded',
+  'droppedWriteFailed', 'droppedUnserializable', 'invalid', 'writeErrors', 'journalFailures',
 ]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -93,7 +97,7 @@ function exactKeys(obj: Record<string, unknown>, allowed: ReadonlySet<string>): 
 }
 
 function isBoundedId(v: unknown): boolean {
-  return isNonEmptyString(v) && v.length <= MAX_ID_CHARS;
+  return isNonEmptyString(v) && ID_CHARSET.test(v) && v.length <= MAX_ID_CHARS;
 }
 
 function isCount(v: unknown): boolean {
@@ -250,6 +254,9 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
       droppedOversize: s.droppedOversize,
       droppedClosed: s.droppedClosed,
       droppedDegraded: s.droppedDegraded,
+      droppedWriteFailed: s.droppedWriteFailed,
+      droppedUnserializable: s.droppedUnserializable,
+      invalid: own.invalid,
       writeErrors: s.writeErrors,
       journalFailures: own.journalFailures,
     };

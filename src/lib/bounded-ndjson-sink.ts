@@ -53,6 +53,14 @@ export interface BoundedNdjsonSink {
   state(): SinkState;
   degradedReason(): string | null;
   stats(): BoundedNdjsonSinkStats;
+  /**
+   * Stops admission and flushes queued records until `timeoutMs` (default 1000)
+   * elapses; records still queued then count as droppedClosed. A write already
+   * in flight is then awaited for up to a further 1000 ms. When it settles in
+   * that window, the file handle is closed and the lock released before the
+   * promise resolves, so a successor on the same dir can start immediately.
+   * A write stuck beyond the window keeps the lock until it settles. Never throws.
+   */
   close(timeoutMs?: number): Promise<void>;
 }
 
@@ -62,6 +70,7 @@ const DEFAULT_FLUSH_BATCH = 32;
 const DEFAULT_SEGMENT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_SEGMENTS = 32;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1000;
+const IN_FLIGHT_SETTLE_MS = 1000;
 const WRITE_WARN_INTERVAL_MS = 60_000;
 const MAX_CONSECUTIVE_WRITE_ERRORS = 3;
 const SEGMENT_INDEX_DIGITS = 6;
@@ -167,17 +176,36 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     });
   };
 
-  const openSegment = async (index: number): Promise<void> => {
-    const h = await open(segmentPath(index), 'a', 0o600);
-    try {
-      const { size } = await h.stat();
-      handle = h;
-      segmentIndex = index;
-      segmentBytes = size;
-    } catch (err) {
-      await h.close().catch(() => undefined);
-      throw err;
+  // A segment whose last byte is not "\n" ends in a partial line (a short or
+  // failed earlier write); appending would fuse the next record onto it, so the
+  // sink moves to the next index and leaves the old segment untouched.
+  const endsMidLine = async (h: FileHandle, size: number): Promise<boolean> => {
+    if (size === 0) return false;
+    const tail = Buffer.alloc(1);
+    const { bytesRead } = await h.read(tail, 0, 1, size - 1);
+    return bytesRead !== 1 || tail[0] !== 0x0a;
+  };
+
+  /** Opens the first appendable segment at or after `index`; false when that would exceed maxSegments. */
+  const openSegment = async (index: number): Promise<boolean> => {
+    for (let i = index; i <= maxSegments; i += 1) {
+      const h = await open(segmentPath(i), 'a+', 0o600);
+      try {
+        const { size } = await h.stat();
+        if (await endsMidLine(h, size)) {
+          await h.close();
+          continue;
+        }
+        handle = h;
+        segmentIndex = i;
+        segmentBytes = size;
+        return true;
+      } catch (err) {
+        await h.close().catch(() => undefined);
+        throw err;
+      }
     }
+    return false;
   };
 
   const takeBatch = (): { lines: string[]; bytes: number; rotate: boolean } => {
@@ -216,13 +244,22 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
       // In-flight records stay visible in stats().queued until they are counted as written or dropped.
       inFlight = batch.lines.length;
       let ok = true;
+      let capped = false;
       try {
-        if (!handle) await openSegment(segmentIndex);
-        await handle!.writeFile(batch.lines.join(''), 'utf8');
+        if (!handle && !(await openSegment(segmentIndex))) {
+          capped = true;
+        } else {
+          await handle!.writeFile(batch.lines.join(''), 'utf8');
+        }
       } catch {
         ok = false;
       }
       inFlight = 0;
+      if (capped) {
+        counters.droppedDegraded += batch.lines.length;
+        degrade('segment_cap_reached');
+        return;
+      }
       if (ok) {
         segmentBytes += batch.bytes;
         counters.written += batch.lines.length;
@@ -368,16 +405,30 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
       counters.droppedClosed += queue.length;
       queue.length = 0;
       current = 'closed';
-      if (draining) {
-        // A write still in flight past the deadline keeps the lock until it settles.
-        void draining.finally(async () => {
-          await closeHandle();
-          releaseLock();
-        });
-      } else {
-        await closeHandle();
-        releaseLock();
+      const inFlightWrite = draining;
+      if (inFlightWrite) {
+        let settled = false;
+        let settleTimer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          inFlightWrite.then(() => { settled = true; }, () => { settled = true; }),
+          new Promise<void>((resolve) => {
+            settleTimer = setTimeout(resolve, IN_FLIGHT_SETTLE_MS);
+            settleTimer.unref?.();
+          }),
+        ]);
+        if (settleTimer) clearTimeout(settleTimer);
+        if (!settled) {
+          // A write stuck past the settle bound keeps the lock until it settles,
+          // so a successor cannot interleave with it.
+          void inFlightWrite.finally(async () => {
+            await closeHandle();
+            releaseLock();
+          });
+          return;
+        }
       }
+      await closeHandle();
+      releaseLock();
     })();
     return closePromise;
   };

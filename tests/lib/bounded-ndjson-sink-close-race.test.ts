@@ -1,17 +1,20 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-// Parks one startup stage so close() provably finishes while startup is mid-flight.
+type Stage = 'mkdir' | 'readdir' | 'write';
+
+// Parks one sink stage so close() provably overlaps a startup step or an in-flight write.
 const gate = vi.hoisted(() => {
   const state = {
-    on: null as 'mkdir' | 'readdir' | null,
+    on: null as Stage | null,
     entered: false,
     done: false,
     release: () => undefined as void,
     opened: Promise.resolve(),
-    arm(stage: 'mkdir' | 'readdir') {
+    arm(stage: Stage) {
       state.on = stage;
       state.entered = false;
       state.done = false;
@@ -23,11 +26,25 @@ const gate = vi.hoisted(() => {
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  const parked = async (stage: 'mkdir' | 'readdir'): Promise<void> => {
+  const parked = async (stage: Stage): Promise<void> => {
     if (gate.on !== stage) return;
     gate.entered = true;
     await gate.opened;
   };
+  const gatedHandle = (h: FileHandle): FileHandle => new Proxy(h, {
+    get(target, prop) {
+      if (prop === 'writeFile') {
+        return async (...args: Parameters<FileHandle['writeFile']>) => {
+          await parked('write');
+          const result = await target.writeFile(...args);
+          if (gate.on === 'write') gate.done = true;
+          return result;
+        };
+      }
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
   return {
     ...actual,
     mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
@@ -42,6 +59,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (gate.on === 'readdir') gate.done = true;
       return result;
     },
+    open: async (...args: Parameters<typeof actual.open>) => gatedHandle(await actual.open(...args)),
   };
 });
 
@@ -97,5 +115,35 @@ describe('createBoundedNdjsonSink close/startup race', () => {
     await afterGatedStage();
     expect(sink.state()).toBe('closed');
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('waits for a slow in-flight write and releases the lock before close() resolves', async () => {
+    gate.arm('write');
+    const dir = join(tmp.make('inflight'), 'sink');
+    const lockPath = join(dir, 'events.lock');
+    const sink = createBoundedNdjsonSink({ dir, filePrefix: 'events' });
+    sink.enqueue({ slow: true });
+    await vi.waitFor(() => {
+      expect(gate.entered).toBe(true);
+    });
+    const closing = sink.close(0);
+    // The write is still parked after close's flush deadline has passed.
+    const slowWrite = setTimeout(() => gate.release(), 100);
+    await closing;
+    clearTimeout(slowWrite);
+    expect(gate.done).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(sink.stats()).toMatchObject({ written: 1, queued: 0, droppedClosed: 0 });
+
+    gate.on = null;
+    const successor = createBoundedNdjsonSink({ dir, filePrefix: 'events' });
+    await vi.waitFor(() => {
+      expect(successor.state()).not.toBe('starting');
+    });
+    expect(successor.state()).toBe('ready');
+    successor.enqueue({ next: true });
+    await successor.close(1000);
+    const lines = readFileSync(join(dir, 'events.000001.ndjson'), 'utf8').split('\n').filter(Boolean);
+    expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([{ slow: true }, { next: true }]);
   });
 });

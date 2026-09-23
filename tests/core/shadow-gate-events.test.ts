@@ -63,7 +63,8 @@ function coverageEvent(overrides: Record<string, unknown> = {}): Record<string, 
     marker: 'armed',
     counts: {
       evaluated: 0, recorded: 0, droppedQueueFull: 0, droppedOversize: 0,
-      droppedClosed: 0, droppedDegraded: 0, writeErrors: 0, journalFailures: 0,
+      droppedClosed: 0, droppedDegraded: 0, droppedWriteFailed: 0, droppedUnserializable: 0,
+      invalid: 0, writeErrors: 0, journalFailures: 0,
     },
     sinkState: 'starting',
     sinkDegradedReason: null,
@@ -134,6 +135,32 @@ describe('validateShadowGateEvent', () => {
     ['coverage wrong authority', coverageEvent({ authority: 'advisory' }), 'bad_authority'],
   ])('rejects %s', (_name, ev, code) => {
     expect(validateShadowGateEvent(ev)).toBe(code);
+  });
+
+  const baseCounts = coverageEvent().counts as Record<string, number>;
+  it.each(['droppedWriteFailed', 'droppedUnserializable', 'invalid'])('requires the %s count', (key) => {
+    const counts = { ...baseCounts };
+    delete counts[key];
+    expect(validateShadowGateEvent(coverageEvent({ counts }))).toBe('counts_missing_key');
+    expect(validateShadowGateEvent(coverageEvent({ counts: { ...baseCounts, [key]: -1 } }))).toBe('bad_count_value');
+    expect(validateShadowGateEvent(coverageEvent({ counts: { ...baseCounts, [key]: 1.5 } }))).toBe('bad_count_value');
+    expect(validateShadowGateEvent(coverageEvent({ counts: { ...baseCounts, [key]: 3 } }))).toBeNull();
+  });
+
+  it.each([
+    ['messageId', 'bad_message_id', verdictEvent],
+    ['attemptId', 'bad_attempt_id', verdictEvent],
+    ['bootId', 'bad_boot_id', verdictEvent],
+    ['instance', 'bad_instance', verdictEvent],
+    ['databaseLineage', 'bad_database_lineage', coverageEvent],
+    ['configGeneration', 'bad_config_generation', coverageEvent],
+  ] as const)('rejects a %s outside the closed id charset', (field, code, make) => {
+    for (const bad of ['user@s.whatsapp.net', '+0000000', 'group@g.us', 'has space', 'tab\there', 'é', '']) {
+      expect(validateShadowGateEvent(make({ [field]: bad }))).toBe(code);
+    }
+    for (const good of ['3EB0A1B2C3D4', 'agent-job_1.2:3', 'a'.repeat(128)]) {
+      expect(validateShadowGateEvent(make({ [field]: good }))).toBeNull();
+    }
   });
 });
 
@@ -208,6 +235,7 @@ describe('createShadowGateRecorder', () => {
     expect(() => recorder.recordVerdict(null as unknown as ShadowGateVerdictInput)).not.toThrow();
     await recorder.close(1000);
     expect(readEvents(dir).map((e) => e.marker ?? e.event)).toEqual(['armed', 'disarmed']);
+    expect(readEvents(dir)[1]!.counts).toMatchObject({ invalid: 3, recorded: 0 });
     expect(recorder.stats()).toMatchObject({ recorded: 0, invalid: 3 });
     expect(warnings).toEqual(['shadow_gate_invalid_verdict', 'shadow_gate_invalid_verdict', 'shadow_gate_invalid_verdict']);
     expect(JSON.stringify(readEvents(dir))).not.toContain('secret');
@@ -218,7 +246,7 @@ describe('createShadowGateRecorder', () => {
     const records: Array<Record<string, unknown>> = [];
     const stats: BoundedNdjsonSinkStats = {
       queued: 0, written: 0, droppedQueueFull: 2, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
-      droppedWriteFailed: 0, droppedUnserializable: 0, writeErrors: 1, segmentIndex: 1, segmentBytes: 0,
+      droppedWriteFailed: 4, droppedUnserializable: 5, writeErrors: 1, segmentIndex: 1, segmentBytes: 0,
     };
     let sinkState: SinkState = 'ready';
     const sink: BoundedNdjsonSink = {
@@ -235,13 +263,17 @@ describe('createShadowGateRecorder', () => {
     expect(records.map((r) => r.marker)).toEqual(['armed']);
     recorder.noteEvaluated();
     recorder.noteJournalFailure();
+    // A JID-shaped id is rejected by the validator and surfaces as counts.invalid.
+    recorder.recordVerdict({ ...verdictInput, messageId: 'user@s.whatsapp.net' });
+    expect(records).toHaveLength(1);
     vi.advanceTimersByTime(999);
     expect(records).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(records.map((r) => r.marker)).toEqual(['armed', 'counts']);
     expect(records[1]!.counts).toEqual({
       evaluated: 1, recorded: 0, droppedQueueFull: 2, droppedOversize: 0,
-      droppedClosed: 0, droppedDegraded: 0, writeErrors: 1, journalFailures: 1,
+      droppedClosed: 0, droppedDegraded: 0, droppedWriteFailed: 4, droppedUnserializable: 5,
+      invalid: 1, writeErrors: 1, journalFailures: 1,
     });
     for (const r of records) expect(validateShadowGateEvent(r)).toBeNull();
     vi.advanceTimersByTime(1000);

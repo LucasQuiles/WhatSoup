@@ -151,6 +151,38 @@ describe('createBoundedNdjsonSink', () => {
     expect(sink.stats().segmentIndex).toBe(3);
   });
 
+  it('never appends onto a segment that ends mid-line; rotates and leaves it untouched', async () => {
+    const dir = join(tmp.make('partial'), 'sink');
+    mkdirSync(dir, { mode: 0o700 });
+    const partial = '{"old":1}\n{"trunc';
+    writeFileSync(join(dir, 'events.000001.ndjson'), partial, { mode: 0o600 });
+    const sink = make({ dir });
+    for (let i = 0; i < 3; i += 1) sink.enqueue({ i });
+    await settled(sink);
+    await drained(sink);
+    expect(segments(dir)).toEqual(['events.000001.ndjson', 'events.000002.ndjson']);
+    expect(readFileSync(join(dir, 'events.000001.ndjson'), 'utf8')).toBe(partial);
+    const raw = readFileSync(join(dir, 'events.000002.ndjson'), 'utf8');
+    expect(raw.endsWith('\n')).toBe(true);
+    const lines = raw.split('\n').filter(Boolean);
+    expect(lines.map((l) => JSON.parse(l) as unknown)).toEqual([0, 1, 2].map((i) => ({ i })));
+    expect(sink.stats()).toMatchObject({ written: 3, segmentIndex: 2 });
+  });
+
+  it('degrades with segment_cap_reached when the only allowed segment ends mid-line', async () => {
+    const dir = join(tmp.make('partial-cap'), 'sink');
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, 'events.000001.ndjson'), '{"trunc', { mode: 0o600 });
+    const sink = make({ dir, maxSegments: 1 });
+    sink.enqueue({ i: 0 });
+    await vi.waitFor(() => {
+      expect(sink.state()).toBe('degraded');
+    });
+    expect(sink.degradedReason()).toBe('segment_cap_reached');
+    expect(readFileSync(join(dir, 'events.000001.ndjson'), 'utf8')).toBe('{"trunc');
+    expect(sink.stats()).toMatchObject({ written: 0, droppedDegraded: 1, queued: 0 });
+  });
+
   it('starts the next segment when the highest one is full', async () => {
     const dir = join(tmp.make('resume-full'), 'sink');
     mkdirSync(dir, { mode: 0o700 });
