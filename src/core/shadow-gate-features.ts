@@ -2,6 +2,8 @@
 // Input contract and text normalization for the logged-only shadow gate.
 // Pure: no I/O, no logging, no clock, no randomness.
 
+import { avoidTrailingHighSurrogateBreak } from '../lib/text-chunking.ts';
+
 export const FEATURE_VERSION = 1;
 
 /** Upper bound on normalized text length, in UTF-16 code units. */
@@ -24,10 +26,6 @@ export interface ShadowGateInput {
   featureVersion: 1;
 }
 
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff;
-}
-
 export function normalizeShadowText(
   raw: string | null | undefined,
 ): { text: string | null; truncated: boolean; replaced: boolean } {
@@ -39,11 +37,9 @@ export function normalizeShadowText(
 
   let truncated = false;
   if (text.length > MAX_SHADOW_TEXT_UTF16) {
-    let cut = MAX_SHADOW_TEXT_UTF16;
     // The string is well-formed, so a high surrogate just before the cut is
     // always paired with the unit at the cut; keeping it would leave it lone.
-    if (isHighSurrogate(text.charCodeAt(cut - 1))) cut -= 1;
-    text = text.slice(0, cut);
+    text = text.slice(0, avoidTrailingHighSurrogateBreak(text, 0, MAX_SHADOW_TEXT_UTF16));
     truncated = true;
   }
 

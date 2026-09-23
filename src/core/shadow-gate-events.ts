@@ -5,7 +5,7 @@
 // rules out JIDs, and messageId/instance reject a standalone phone-length
 // digit run; a phone number glued to letters inside an id is not detected.
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { createBoundedNdjsonSink } from '../lib/bounded-ndjson-sink.ts';
 import type { BoundedNdjsonSink, SinkState } from '../lib/bounded-ndjson-sink.ts';
@@ -13,7 +13,8 @@ import { getRulesSha256, SHADOW_GATE_VERSION } from './shadow-gate.ts';
 import { systemClock } from '../lib/clock.ts';
 import type { ShadowRuleId, ShadowVerdict } from './shadow-gate.ts';
 import { FEATURE_VERSION } from './shadow-gate-features.ts';
-import { isNonEmptyString } from '../lib/type-guards.ts';
+import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
+import { shortHash } from '../lib/short-hash.ts';
 
 export const SHADOW_GATE_EVENT_SCHEMA_VERSION = 1;
 // Union + validator derive from this one list (route-events C2).
@@ -94,10 +95,6 @@ const COUNT_KEYS: ReadonlySet<string> = new Set([
   'droppedWriteFailed', 'droppedUnserializable', 'invalid', 'writeErrors', 'journalFailures',
 ]);
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
 function exactKeys(obj: Record<string, unknown>, allowed: ReadonlySet<string>): string | null {
   const keys = Object.keys(obj);
   for (const k of keys) if (!allowed.has(k)) return 'unknown_key';
@@ -140,7 +137,7 @@ function validateVerdictFields(ev: Record<string, unknown>): string | null {
 
 function validateCoverageFields(ev: Record<string, unknown>): string | null {
   if (!MARKER_SET.has(ev.marker)) return 'bad_marker';
-  if (!isPlainObject(ev.counts)) return 'bad_counts';
+  if (!isRecord(ev.counts)) return 'bad_counts';
   const countsKeys = exactKeys(ev.counts, COUNT_KEYS);
   if (countsKeys) return `counts_${countsKeys}`;
   for (const v of Object.values(ev.counts)) if (!isCount(v)) return 'bad_count_value';
@@ -151,7 +148,7 @@ function validateCoverageFields(ev: Record<string, unknown>): string | null {
 
 /** Returns null when valid, otherwise a short closed problem code. */
 export function validateShadowGateEvent(ev: unknown): string | null {
-  if (!isPlainObject(ev)) return 'not_object';
+  if (!isRecord(ev)) return 'not_object';
   if (!EVENT_TYPE_SET.has(ev.event)) return 'unknown_event';
   const keys = exactKeys(ev, ev.event === 'shadow_gate_verdict' ? VERDICT_KEYS : COVERAGE_KEYS);
   if (keys) return keys;
@@ -168,17 +165,13 @@ export function validateShadowGateEvent(ev: unknown): string | null {
   return ev.event === 'shadow_gate_verdict' ? validateVerdictFields(ev) : validateCoverageFields(ev);
 }
 
-function sha256Hex16(input: string): string {
-  return createHash('sha256').update(input).digest('hex').slice(0, 16);
-}
-
 /** Called once at startup; sync fs is deliberate. */
 export function computeDatabaseLineage(dbPath: string): string {
   if (dbPath === ':memory:') return 'memory';
   try {
     const real = realpathSync(dbPath);
     const { ino } = statSync(real);
-    return sha256Hex16(`${real}:${ino}`);
+    return shortHash(`${real}:${ino}`, 16);
   } catch {
     return 'unknown';
   }
@@ -186,7 +179,7 @@ export function computeDatabaseLineage(dbPath: string): string {
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
-  if (isPlainObject(value)) {
+  if (isRecord(value)) {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value).sort()) out[key] = canonicalize(value[key]);
     return out;
@@ -196,7 +189,7 @@ function canonicalize(value: unknown): unknown {
 
 export function computeConfigGeneration(section: unknown): string {
   try {
-    return sha256Hex16(JSON.stringify(canonicalize(section)) ?? 'undefined');
+    return shortHash(JSON.stringify(canonicalize(section)) ?? 'undefined', 16);
   } catch {
     return 'unknown';
   }
@@ -319,7 +312,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
     recordVerdict(e) {
       try {
         // Caller keys outside the input contract are rejected, not silently dropped.
-        if (!isPlainObject(e) || Object.keys(e).some((k) => !VERDICT_INPUT_KEYS.has(k))) {
+        if (!isRecord(e) || Object.keys(e).some((k) => !VERDICT_INPUT_KEYS.has(k))) {
           own.invalid += 1;
           warn('shadow_gate_invalid_verdict');
           return;

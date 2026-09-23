@@ -210,6 +210,11 @@ describe('identity helpers', () => {
     expect(computeConfigGeneration({ enabled: false, nested: { x: 1, y: [1, { a: 1, b: 2 }] } })).not.toBe(a);
   });
 
+  it('computeConfigGeneration keeps its pinned output (first 16 hex of sha256 over canonical JSON)', () => {
+    // sha256('{"eventsDir":null,"mode":"shadow"}') begins 9ae116ba8eed3a23.
+    expect(computeConfigGeneration({ mode: 'shadow', eventsDir: null })).toBe('9ae116ba8eed3a23');
+  });
+
   it('SHADOW_GATE_PROCESS_BOOT_ID is a UUID', () => {
     expect(SHADOW_GATE_PROCESS_BOOT_ID).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });

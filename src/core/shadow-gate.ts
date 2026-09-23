@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import RE2 from 're2';
 import type { ShadowGateInput } from './shadow-gate-features.ts';
+import { isRecord } from '../lib/type-guards.ts';
 
 export const SHADOW_GATE_VERSION = 1;
 
@@ -44,10 +45,8 @@ interface RulesFile {
 const RULES_KEYS = ['rulesVersion', 'flags', 'statusOnly', 'obligation', 'noReplyKnown'] as const;
 
 function parseRules(raw: unknown): RulesFile {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error('shadow-gate rules: top level must be an object');
-  }
-  const obj = raw as Record<string, unknown>;
+  if (!isRecord(raw)) throw new Error('shadow-gate rules: top level must be an object');
+  const obj = raw;
   const keys = Object.keys(obj).sort();
   if (keys.join(',') !== [...RULES_KEYS].sort().join(',')) {
     throw new Error(`shadow-gate rules: keys must be exactly ${RULES_KEYS.join(', ')}; got ${keys.join(', ')}`);

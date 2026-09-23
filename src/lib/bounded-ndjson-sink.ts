@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { acquireProcessLock, defaultIsProcessAlive, isProcessLockError, releaseProcessLock } from './process-lock.ts';
 import type { ProcessLockHandle } from './process-lock.ts';
 import { systemClock } from './clock.ts';
+import { escapeRegExp } from './regex-utils.ts';
 
 export interface BoundedNdjsonSinkOptions {
   dir: string;
@@ -75,10 +76,6 @@ const IN_FLIGHT_SETTLE_MS = 1000;
 const WRITE_WARN_INTERVAL_MS = 60_000;
 const MAX_CONSECUTIVE_WRITE_ERRORS = 3;
 const SEGMENT_INDEX_DIGITS = 6;
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Lock paths held by live sinks in this process. A lock file carrying our pid
 // whose path is not in this set was left by an earlier process that had the
