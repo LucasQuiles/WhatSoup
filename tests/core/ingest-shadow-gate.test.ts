@@ -342,6 +342,35 @@ describe('ingest shadow gate — mode shadow', () => {
     expect(events.every((e) => e.instance === 'My_Bot')).toBe(true);
   });
 
+  it('a redelivered message id dropped by store-dedupe records no second verdict or journal row', async () => {
+    const msg = makeMsg({ messageId: 'msg-redelivered' });
+    async function deliverTwice() {
+      vi.mocked(logFns.debug).mockClear();
+      const { durability, handler, handled } = makeIngest();
+      await runIngest(handler, structuredClone(msg));
+      await runIngest(handler, structuredClone(msg));
+      const duplicateDrops = vi.mocked(logFns.debug).mock.calls.filter((call) =>
+        call[1] === 'skipping duplicate message delivery');
+      return { handled, journalCalls: durability.journalInbound.mock.calls.length, duplicateDrops };
+    }
+
+    const baseline = await deliverTwice();
+    const eventsDir = join(tmp.make('redelivery'), 'events');
+    shadowMode(eventsDir);
+    const observed = await deliverTwice();
+
+    expect(observed.duplicateDrops).toEqual([
+      [{ messageId: 'msg-redelivered', reason: 'duplicate' }, 'skipping duplicate message delivery'],
+    ]);
+    expect(observed.handled).toEqual(baseline.handled);
+    expect(observed.handled).toHaveLength(1);
+    expect(observed.journalCalls).toBe(baseline.journalCalls);
+    expect(observed.journalCalls).toBe(1);
+    expect(getShadowGateStats()).toMatchObject({ evaluated: 1, recorded: 1, journalFailures: 0 });
+    const verdicts = verdictsOf(await readEvents(eventsDir));
+    expect(verdicts.map((v) => [v.messageId, v.inboundSeq])).toEqual([['msg-redelivered', FIRST_SEQ]]);
+  });
+
   it('(c) records E_THROW when input build throws, dispatch unchanged', async () => {
     const eventsDir = join(tmp.make('throw'), 'events');
     shadowMode(eventsDir);
