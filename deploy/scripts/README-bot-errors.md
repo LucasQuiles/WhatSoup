@@ -692,9 +692,18 @@ field contract. Each registered field declares its evidence label, signal kind,
 and whether a positive value represents current risk or diagnostic evidence.
 The checker does not infer severity from numeric type.
 
-Cumulative totals, historical maxima, and terminal audit counts remain visible
-without independently adding `runtime_agent_at_risk`. Active episode counts and
-declared current gauges still add that marker. If the registry is missing,
+Every registered field with a non-zero value is rendered as a label. Only a
+field whose `currentHealthEffect` is `positive_is_risk` adds
+`runtime_agent_at_risk` when positive; `diagnostic_only` fields stay visible
+without adding it, whatever their signal kind. The signal kind describes what
+the number counts and does not change the marker. The registry loop labels only
+registered fields; the few agent fields the checker names in its own key list
+(for example `fallbackActiveUntil`) are rendered separately.
+`tests/core/failure-taxonomy-cross-contract.test.ts` fails when an idle
+`per_chat` or single-mode agent health snapshot projects a numeric field that
+is neither registered nor on its named exclusion list. Fields that are `null`
+while idle, such as fallback timestamps, are outside what that test can see.
+If the registry is missing,
 malformed, or uses an unsupported schema or disposition, the health line warns
 with a bounded registry error class and does not invent per-field severity.
 

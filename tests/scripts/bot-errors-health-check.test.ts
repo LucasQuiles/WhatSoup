@@ -5052,6 +5052,33 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
     });
 
+    it('labels the remaining agent counters as diagnostic evidence without raising risk', () => {
+      // Distinct value per field so a swapped label cannot pass.
+      const line = probeRuntimeAgent({
+        perChatSessionsWithoutOwner: 2,
+        perChatRespawnAbandoned: 3,
+        turnQueueHaltedScopes: 4,
+        proactiveResumeIdentityRejects: 11,
+        unownedProviderEventRejects: 12,
+        suppressedSystemTurnEffectRejects: 13,
+        chronologyDelayedDispatches: 21,
+        chronologyRecoveryReplayDispatches: 22,
+        chronologyMaxQueueAgeSeconds: 23,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_per_chat_sessions_without_owner=2');
+      expect(line).toContain('runtime_agent_per_chat_respawn_abandoned=3');
+      expect(line).toContain('runtime_agent_turn_queue_halted_scopes=4');
+      expect(line).toContain('runtime_agent_proactive_resume_identity_rejects=11');
+      expect(line).toContain('runtime_agent_unowned_provider_event_rejects=12');
+      expect(line).toContain('runtime_agent_suppressed_system_turn_effect_rejects=13');
+      expect(line).toContain('runtime_agent_chronology_delayed_dispatches=21');
+      expect(line).toContain('runtime_agent_chronology_recovery_replay_dispatches=22');
+      expect(line).toContain('runtime_agent_chronology_max_queue_age_seconds=23');
+    });
+
     it('warns for declared current-risk signals and renders bounded backoff state', () => {
       const backoff = probeRuntimeAgent({
         autoCompactState: 'backoff',
