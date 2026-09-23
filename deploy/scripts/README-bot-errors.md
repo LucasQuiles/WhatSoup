@@ -619,7 +619,9 @@ contradicted when all of these hold:
   `connected=false connection_state=disconnected`). The stamp is the later of
   processing time and the event's own timezone-aware `createdAt`, so a producer
   clock running ahead cannot place the loss earlier than a connected child
-  stamped by the same clock. So a child queued before any newer loss cannot
+  stamped by the same clock. The event's own stamp counts only up to one hour
+  ahead of processing time (`CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS`), so a clock
+  wrong by days or years delays retirement by at most an hour once corrected. So a child queued before any newer loss cannot
   retire a root, and a timestamp with no zone, whose meaning depends on the
   host clock, never does.
 

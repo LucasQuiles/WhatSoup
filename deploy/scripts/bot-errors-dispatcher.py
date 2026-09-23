@@ -5287,18 +5287,26 @@ def reports_connectivity_not_proven_up(event: dict[str, Any]) -> bool:
     return present and positive_connectivity_readings(event) is None
 
 
+# A producer clock can run ahead; honour that for up to an hour, which covers
+# ordinary drift. A stamp further out (a clock wrong by days or years) is
+# capped, so a later correction can retire the root within the hour instead of
+# never.
+CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS = 3600
+
+
 def note_connectivity_loss(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
     """Advance ``lastConnectivityLossObservedAt`` for a loss seen in ``event``.
 
     Uses the later of processing time and the event's own timezone-aware
     createdAt: a producer clock running ahead stamps the loss later than it is
     processed, and a connected child stamped by the same clock must still be
-    compared against that stamp. Either choice only makes retirement stricter.
+    compared against that stamp. The event's stamp is capped at
+    CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS ahead of processing time.
     """
     observed = current
     order = event_created_order(event)
     if order is not None:
-        observed = max(observed, order // 1_000_000)
+        observed = max(observed, min(order // 1_000_000, current + CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS))
     record["lastConnectivityLossObservedAt"] = max(
         int_field(record, "lastConnectivityLossObservedAt"), observed
     )

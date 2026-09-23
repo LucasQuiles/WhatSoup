@@ -372,6 +372,30 @@ def test_loss_stamp_keeps_a_producer_clock_that_runs_ahead():
     assert parent_key in state["openIncidents"]
 
 
+@pytest.mark.parametrize("path", ["suppressed-logout", "same-key-logout", "watchdog-child"])
+def test_a_far_future_loss_stamp_is_capped(path):
+    # A producer clock ten years ahead must not pin the root open until then:
+    # once the clock is corrected, a connected reading beyond the cap retires it.
+    now = int(time.time())
+    mod = _load()
+    far = now + 10 * 365 * 86400
+    root = "instance_logged_out" if path != "suppressed-logout" else "whatsapp_device_bond_lost"
+    state, parent_key, record = _aged_parent(mod, root, now)
+    if path == "watchdog-child":
+        loss = _alert("local_health", evidence="connected=false connection_state=disconnected", created=far)
+    else:
+        loss = _alert("instance_logged_out", created=far, event_id="evt-far-future")
+    mod.should_suppress_send(loss, state)
+    cap = mod.CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS
+    assert now + cap - 5 <= record["lastConnectivityLossObservedAt"] <= int(time.time()) + cap
+
+    after_cap = now + cap + mod.CLOCK_SKEW_TOLERANCE_SECONDS + 120
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=after_cap,
+                   event_id="evt-corrected-connected")
+    assert mod.should_suppress_send(child, state) is None
+    assert parent_key not in state["openIncidents"]
+
+
 def test_folded_same_key_logout_keeps_a_producer_clock_that_runs_ahead():
     now = int(time.time())
     mod = _load()
