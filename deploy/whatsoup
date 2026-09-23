@@ -146,12 +146,17 @@ DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
 )
+# Git probes that decide git mode vs release mode stop upward discovery at the
+# physical parent of REPO_ROOT, so an unrelated ancestor .git cannot turn a
+# non-git release into git mode.
+_repo_root_git_ceiling="$(dirname "$(cd "$REPO_ROOT" && pwd -P)")"
 _database_bootstrap_trust_git() (
   while IFS='=' read -r git_env_name _; do
     case "$git_env_name" in
       GIT_*) unset "$git_env_name" ;;
     esac
   done < <(env)
+  export GIT_CEILING_DIRECTORIES="$_repo_root_git_ceiling"
   exec git -C "$REPO_ROOT" "$@"
 )
 # Verify one closure file against the release manifest: entry must exist and
@@ -314,7 +319,9 @@ fi
 
 # Expose checkout version metadata to the running instance so /health can report
 # the code that was launched. Best-effort only: git failure must not block startup.
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# The ceiling keeps an unrelated ancestor .git from claiming a non-git release.
+if GIT_CEILING_DIRECTORIES="$(dirname "$(cd "$REPO_ROOT" && pwd -P)")" \
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   WHATSOUP_GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
   _branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   WHATSOUP_GIT_BRANCH="${_branch:-HEAD-detached}"
