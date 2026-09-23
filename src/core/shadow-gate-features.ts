@@ -26,6 +26,11 @@ export interface ShadowGateInput {
   featureVersion: 1;
 }
 
+/** ASCII or full-width question mark. */
+export function containsQuestionMark(text: string): boolean {
+  return text.includes('?') || text.includes('？');
+}
+
 export function normalizeShadowText(
   raw: string | null | undefined,
 ): { text: string | null; truncated: boolean; replaced: boolean } {

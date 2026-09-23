@@ -77,6 +77,11 @@ const WRITE_WARN_INTERVAL_MS = 60_000;
 const MAX_CONSECUTIVE_WRITE_ERRORS = 3;
 const SEGMENT_INDEX_DIGITS = 6;
 
+/** Matches a segment file name for `prefix`; group 1 is the zero-padded index. */
+export function segmentNamePattern(prefix: string): RegExp {
+  return new RegExp(`^${escapeRegExp(prefix)}\\.(\\d{${SEGMENT_INDEX_DIGITS}})\\.ndjson$`);
+}
+
 // Lock paths held by live sinks in this process. A lock file carrying our pid
 // whose path is not in this set was left by an earlier process that had the
 // same pid (a container restart with a persistent dir, or pid reuse), so it is
@@ -101,7 +106,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
   const maxSegments = options.maxSegments ?? DEFAULT_MAX_SEGMENTS;
   const { dir, filePrefix } = options;
   const lockPath = resolve(dir, `${filePrefix}.lock`);
-  const segmentPattern = new RegExp(`^${escapeRegExp(filePrefix)}\\.(\\d{${SEGMENT_INDEX_DIGITS}})\\.ndjson$`);
+  const segmentPattern = segmentNamePattern(filePrefix);
 
   let current: SinkState = 'starting';
   let reason: string | null = null;

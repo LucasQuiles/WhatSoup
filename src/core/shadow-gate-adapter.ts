@@ -17,18 +17,24 @@ import { bareNumber, isAuthenticatedSenderJid } from './jid-constants.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { isAdminPhone } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
-import { FEATURE_VERSION, normalizeShadowText } from './shadow-gate-features.ts';
+import { containsQuestionMark, FEATURE_VERSION, normalizeShadowText } from './shadow-gate-features.ts';
 import type { ShadowGateInput, Tri } from './shadow-gate-features.ts';
 import { shadowGate, warmShadowRules } from './shadow-gate.ts';
 import type { ShadowRuleId, ShadowVerdict } from './shadow-gate.ts';
-import { computeConfigGeneration, computeDatabaseLineage, createShadowGateRecorder } from './shadow-gate-events.ts';
-import type { ShadowGateRecorder } from './shadow-gate-events.ts';
+import {
+  computeConfigGeneration,
+  computeDatabaseLineage,
+  createShadowGateRecorder,
+  SHADOW_GATE_COUNT_KEYS,
+  SHADOW_GATE_ID_CHARS,
+  SHADOW_GATE_ID_MAX_CHARS,
+} from './shadow-gate-events.ts';
+import type { ShadowGateCounts, ShadowGateErrorReason, ShadowGateRecorder } from './shadow-gate-events.ts';
 
 const log = createChildLogger('shadow-gate');
 
 /** Evaluation budget; exceeding it is reported as OVERRUN, never interrupted. */
 const SHADOW_GATE_BUDGET_MS = 5;
-const MAX_INSTANCE_CHARS = 128;
 
 /**
  * The config fields the adapter reads. Callers pass the live `config` object
@@ -146,7 +152,7 @@ function obligationFeature(
     const pending = row !== undefined
       && row.is_from_me === 1
       && isNonEmptyString(row.content)
-      && (row.content.includes('?') || row.content.includes('？'));
+      && containsQuestionMark(row.content);
     return { pendingObligation: pending, contextStatus: 'known' };
   } catch {
     return { pendingObligation: 'unknown', contextStatus: 'unknown' };
@@ -191,7 +197,7 @@ export function buildShadowGateInput(
 
 export interface ShadowGateEvaluation {
   status: 'OK' | 'ERROR';
-  reason: 'OVERRUN' | 'E_THROW' | null;
+  reason: ShadowGateErrorReason | null;
   verdict: ShadowVerdict | null;
   ruleId: ShadowRuleId | null;
   tookMs: number;
@@ -239,9 +245,11 @@ export function evaluateShadowGateForMessage(
 let recorder: ShadowGateRecorder | null = null;
 let recorderDisabled = false;
 
+const OUTSIDE_ID_CHARS = new RegExp(`[^${SHADOW_GATE_ID_CHARS}]`, 'g');
+
 /** Recorded instance id: the validator's closed id charset, bounded length. */
 function recordedInstanceId(botName: string): string {
-  const id = botName.replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, MAX_INSTANCE_CHARS);
+  const id = botName.replace(OUTSIDE_ID_CHARS, '_').slice(0, SHADOW_GATE_ID_MAX_CHARS);
   return id.length > 0 ? id : 'unnamed';
 }
 
@@ -296,7 +304,7 @@ export function getShadowGateRecorder(db: Database, config: ShadowGateConfig): S
 }
 
 /** Snapshot of recorder counters; all zero when no recorder exists. */
-export function getShadowGateStats(): ReturnType<ShadowGateRecorder['stats']> {
+export function getShadowGateStats(): ShadowGateCounts {
   if (recorder) {
     try {
       return recorder.stats();
@@ -304,10 +312,7 @@ export function getShadowGateStats(): ReturnType<ShadowGateRecorder['stats']> {
       // intentional: fall through to the zero snapshot.
     }
   }
-  return {
-    evaluated: 0, recorded: 0, written: 0, droppedQueueFull: 0, droppedOversize: 0, droppedClosed: 0, droppedDegraded: 0,
-    droppedWriteFailed: 0, droppedUnserializable: 0, invalid: 0, writeErrors: 0, journalFailures: 0,
-  };
+  return Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((key) => [key, 0])) as ShadowGateCounts;
 }
 
 /** Test-only: close and forget the process recorder and clear the disabled latch. */

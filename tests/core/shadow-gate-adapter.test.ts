@@ -46,6 +46,7 @@ import {
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { config } from '../../src/config.ts';
 import { __setShadowRulesPathForTests } from '../../src/core/shadow-gate.ts';
+import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
 import { createChildLogger } from '../../src/logger.ts';
 import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
 
@@ -352,7 +353,7 @@ describe('recorder lifecycle', () => {
     expect(getShadowGateRecorder(db, config)).toBeNull();
     expect(startShadowGateAttempt(makeMsg(), GROUP_KEY, db, botJid, botLid, config)).toBeNull();
     expect(touched).toEqual([]);
-    expect(Object.values(getShadowGateStats()).every((v) => v === 0)).toBe(true);
+    expect(getShadowGateStats()).toEqual(Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((k) => [k, 0])));
   });
 
   it('creation failure latches disabled until reset', () => {

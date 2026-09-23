@@ -96,7 +96,6 @@ describe('validateShadowGateEvent', () => {
       status: 'ERROR', reason: 'OVERRUN', verdict: 'SUPPRESS', ruleId: 'X03_NO_REPLY_PATTERN',
     }))).toBeNull();
     expect(validateShadowGateEvent(verdictEvent({ status: 'ERROR', reason: 'E_THROW', verdict: null, ruleId: null }))).toBeNull();
-    expect(validateShadowGateEvent(verdictEvent({ status: 'ERROR', reason: 'E_INPUT', verdict: null, ruleId: null }))).toBeNull();
     expect(validateShadowGateEvent(verdictEvent({ inboundSeq: null }))).toBeNull();
   });
 
@@ -123,6 +122,7 @@ describe('validateShadowGateEvent', () => {
     ['unknown verdict', verdictEvent({ verdict: 'MAYBE' }), 'bad_verdict'],
     ['unknown ruleId', verdictEvent({ ruleId: 'Z99' }), 'bad_rule_id'],
     ['ERROR without reason', verdictEvent({ status: 'ERROR', reason: null }), 'bad_reason'],
+    ['retired E_INPUT reason', verdictEvent({ status: 'ERROR', reason: 'E_INPUT', verdict: null, ruleId: null }), 'bad_reason'],
     ['E_THROW with verdict', verdictEvent({ status: 'ERROR', reason: 'E_THROW' }), 'error_with_verdict'],
     ['OVERRUN without verdict', verdictEvent({ status: 'ERROR', reason: 'OVERRUN', verdict: null, ruleId: null }), 'overrun_without_verdict'],
     ['unknown status', verdictEvent({ status: 'MAYBE' }), 'bad_status'],

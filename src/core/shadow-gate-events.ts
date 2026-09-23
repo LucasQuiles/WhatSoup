@@ -17,12 +17,21 @@ import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { shortHash } from '../lib/short-hash.ts';
 
 export const SHADOW_GATE_EVENT_SCHEMA_VERSION = 1;
-// Union + validator derive from this one list (route-events C2).
-export const SHADOW_GATE_EVENT_TYPES = ['shadow_gate_verdict', 'shadow_gate_coverage'] as const;
-export type ShadowGateEventType = typeof SHADOW_GATE_EVENT_TYPES[number];
-export type ShadowGateStatus = 'OK' | 'ERROR';
-export type ShadowGateErrorReason = 'OVERRUN' | 'E_THROW' | 'E_INPUT';
+const SHADOW_GATE_EVENT_TYPES = ['shadow_gate_verdict', 'shadow_gate_coverage'] as const;
+type ShadowGateStatus = 'OK' | 'ERROR';
+export type ShadowGateErrorReason = 'OVERRUN' | 'E_THROW';
 export const SHADOW_GATE_EVENTS_FILE_PREFIX = 'shadow-gate-events';
+
+/** Recorded id alphabet (a regex character-class body) and length bound. */
+export const SHADOW_GATE_ID_CHARS = 'A-Za-z0-9._:-';
+export const SHADOW_GATE_ID_MAX_CHARS = 128;
+
+/** Coverage-marker count keys; the counts type, validator and report derive from this list. */
+export const SHADOW_GATE_COUNT_KEYS = [
+  'evaluated', 'recorded', 'written', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded',
+  'droppedWriteFailed', 'droppedUnserializable', 'invalid', 'writeErrors', 'journalFailures',
+] as const;
+export type ShadowGateCounts = Record<typeof SHADOW_GATE_COUNT_KEYS[number], number>;
 
 /** Per-process identity, minted once (mirrors lifecycle-emission's per-process boot id). */
 export const SHADOW_GATE_PROCESS_BOOT_ID: string = randomUUID();
@@ -41,11 +50,7 @@ export interface ShadowGateCoverageEvent {
   schemaVersion: 1; ts: number; event: 'shadow_gate_coverage';
   instance: string; databaseLineage: string; bootId: string; configGeneration: string;
   marker: 'armed' | 'counts' | 'disarmed';
-  counts: {
-    evaluated: number; recorded: number; written: number; droppedQueueFull: number; droppedOversize: number;
-    droppedClosed: number; droppedDegraded: number; droppedWriteFailed: number; droppedUnserializable: number;
-    invalid: number; writeErrors: number; journalFailures: number;
-  };
+  counts: ShadowGateCounts;
   sinkState: SinkState; sinkDegradedReason: string | null;
   gateVersion: number; rulesSha256: string; featureVersion: number;
   authority: 'advisory_only';
@@ -66,13 +71,12 @@ void ruleIdsExhaustive;
 const RULE_ID_SET: ReadonlySet<unknown> = new Set(SHADOW_RULE_IDS);
 const VERDICT_SET: ReadonlySet<unknown> = new Set<ShadowVerdict>(['SPAWN', 'SUPPRESS']);
 const EVENT_TYPE_SET: ReadonlySet<unknown> = new Set(SHADOW_GATE_EVENT_TYPES);
-const ERROR_REASON_SET: ReadonlySet<unknown> = new Set<ShadowGateErrorReason>(['OVERRUN', 'E_THROW', 'E_INPUT']);
+const ERROR_REASON_SET: ReadonlySet<unknown> = new Set<ShadowGateErrorReason>(['OVERRUN', 'E_THROW']);
 const MARKER_SET: ReadonlySet<unknown> = new Set(['armed', 'counts', 'disarmed']);
 const SINK_STATE_SET: ReadonlySet<unknown> = new Set<SinkState>(['starting', 'ready', 'degraded', 'closed']);
-const MAX_ID_CHARS = 128;
 // Closed id charset: excludes '@', '+' and whitespace, so a full JID or a
 // '+'-prefixed number cannot be recorded. It does not exclude bare digits.
-const ID_CHARSET = /^[A-Za-z0-9._:-]+$/;
+const ID_CHARSET = new RegExp(`^[${SHADOW_GATE_ID_CHARS}]+$`);
 // messageId and instance also reject a standalone 7–15 digit run (the E.164
 // length range). A run glued to letters is not caught: hex ids contain long
 // digit runs by chance, so matching those would drop roughly a fifth of
@@ -90,10 +94,7 @@ const VERDICT_INPUT_KEY_LIST = [
 const VERDICT_INPUT_KEYS: ReadonlySet<string> = new Set(VERDICT_INPUT_KEY_LIST);
 const VERDICT_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, ...VERDICT_INPUT_KEY_LIST]);
 const COVERAGE_KEYS: ReadonlySet<string> = new Set([...COMMON_KEYS, 'marker', 'counts', 'sinkState', 'sinkDegradedReason']);
-const COUNT_KEYS: ReadonlySet<string> = new Set([
-  'evaluated', 'recorded', 'written', 'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded',
-  'droppedWriteFailed', 'droppedUnserializable', 'invalid', 'writeErrors', 'journalFailures',
-]);
+const COUNT_KEYS: ReadonlySet<string> = new Set(SHADOW_GATE_COUNT_KEYS);
 
 function exactKeys(obj: Record<string, unknown>, allowed: ReadonlySet<string>): string | null {
   const keys = Object.keys(obj);
@@ -102,12 +103,14 @@ function exactKeys(obj: Record<string, unknown>, allowed: ReadonlySet<string>): 
   return null;
 }
 
-function isBoundedId(v: unknown): boolean {
-  return isNonEmptyString(v) && ID_CHARSET.test(v) && v.length <= MAX_ID_CHARS;
+/** An id in the recorded charset and length bound. */
+export function isShadowGateId(v: unknown): v is string {
+  return isNonEmptyString(v) && ID_CHARSET.test(v) && v.length <= SHADOW_GATE_ID_MAX_CHARS;
 }
 
-function isPhoneFreeId(v: unknown): boolean {
-  return isBoundedId(v) && !STANDALONE_PHONE_DIGITS.test(v as string);
+/** A recordable messageId or instance: a valid id with no standalone phone-length digit run. */
+export function isShadowGatePhoneFreeId(v: unknown): v is string {
+  return isShadowGateId(v) && !STANDALONE_PHONE_DIGITS.test(v);
 }
 
 function isCount(v: unknown): boolean {
@@ -115,8 +118,8 @@ function isCount(v: unknown): boolean {
 }
 
 function validateVerdictFields(ev: Record<string, unknown>): string | null {
-  if (!isBoundedId(ev.attemptId)) return 'bad_attempt_id';
-  if (!isPhoneFreeId(ev.messageId)) return 'bad_message_id';
+  if (!isShadowGateId(ev.attemptId)) return 'bad_attempt_id';
+  if (!isShadowGatePhoneFreeId(ev.messageId)) return 'bad_message_id';
   if (ev.inboundSeq !== null && !isCount(ev.inboundSeq)) return 'bad_inbound_seq';
   if (ev.chatScope !== 'dm' && ev.chatScope !== 'group') return 'bad_chat_scope';
   if (typeof ev.tookMs !== 'number' || !Number.isFinite(ev.tookMs) || ev.tookMs < 0) return 'bad_took_ms';
@@ -142,7 +145,7 @@ function validateCoverageFields(ev: Record<string, unknown>): string | null {
   if (countsKeys) return `counts_${countsKeys}`;
   for (const v of Object.values(ev.counts)) if (!isCount(v)) return 'bad_count_value';
   if (!SINK_STATE_SET.has(ev.sinkState)) return 'bad_sink_state';
-  if (ev.sinkDegradedReason !== null && !isBoundedId(ev.sinkDegradedReason)) return 'bad_sink_degraded_reason';
+  if (ev.sinkDegradedReason !== null && !isShadowGateId(ev.sinkDegradedReason)) return 'bad_sink_degraded_reason';
   return null;
 }
 
@@ -154,10 +157,10 @@ export function validateShadowGateEvent(ev: unknown): string | null {
   if (keys) return keys;
   if (ev.schemaVersion !== SHADOW_GATE_EVENT_SCHEMA_VERSION) return 'bad_schema_version';
   if (typeof ev.ts !== 'number' || !Number.isFinite(ev.ts) || ev.ts < 0) return 'bad_ts';
-  if (!isPhoneFreeId(ev.instance)) return 'bad_instance';
-  if (!isBoundedId(ev.databaseLineage)) return 'bad_database_lineage';
-  if (!isBoundedId(ev.bootId)) return 'bad_boot_id';
-  if (!isBoundedId(ev.configGeneration)) return 'bad_config_generation';
+  if (!isShadowGatePhoneFreeId(ev.instance)) return 'bad_instance';
+  if (!isShadowGateId(ev.databaseLineage)) return 'bad_database_lineage';
+  if (!isShadowGateId(ev.bootId)) return 'bad_boot_id';
+  if (!isShadowGateId(ev.configGeneration)) return 'bad_config_generation';
   if (!isCount(ev.gateVersion)) return 'bad_gate_version';
   if (!isCount(ev.featureVersion)) return 'bad_feature_version';
   if (typeof ev.rulesSha256 !== 'string' || !SHA256_HEX.test(ev.rulesSha256)) return 'bad_rules_sha256';
@@ -205,7 +208,7 @@ export interface ShadowGateRecorder {
   recordVerdict(e: ShadowGateVerdictInput): void;
   noteEvaluated(): void;
   noteJournalFailure(): void;
-  stats(): ShadowGateCoverageEvent['counts'] & { invalid: number };
+  stats(): ShadowGateCounts;
   close(timeoutMs?: number): Promise<void>;
 }
 
@@ -261,7 +264,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
   const own = { evaluated: 0, recorded: 0, journalFailures: 0, invalid: 0 };
   let closePromise: Promise<void> | null = null;
 
-  const counts = (): ShadowGateCoverageEvent['counts'] => {
+  const counts = (): ShadowGateCounts => {
     const s = sink.stats();
     return {
       evaluated: own.evaluated,
@@ -350,9 +353,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
     noteJournalFailure() {
       own.journalFailures += 1;
     },
-    stats() {
-      return { ...counts(), invalid: own.invalid };
-    },
+    stats: counts,
     close(timeoutMs) {
       if (closePromise) return closePromise;
       clearInterval(timer);

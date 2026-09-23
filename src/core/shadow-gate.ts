@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import RE2 from 're2';
+import { containsQuestionMark } from './shadow-gate-features.ts';
 import type { ShadowGateInput } from './shadow-gate-features.ts';
 import { isRecord } from '../lib/type-guards.ts';
 
@@ -206,8 +207,7 @@ export function evaluateShadowGate(
 
   if (
     input.pendingObligation === true ||
-    text.includes('?') ||
-    text.includes('？') ||
+    containsQuestionMark(text) ||
     rules.obligation.some((re) => re.test(text))
   ) {
     return { verdict: 'SPAWN', ruleId: 'S08_OBLIGATION' };

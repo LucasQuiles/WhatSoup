@@ -18,9 +18,11 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import {
+  SHADOW_GATE_COUNT_KEYS,
   SHADOW_GATE_EVENTS_FILE_PREFIX,
   validateShadowGateEvent,
 } from '../../src/core/shadow-gate-events.ts';
+import { segmentNamePattern } from '../../src/lib/bounded-ndjson-sink.ts';
 import type {
   ShadowGateCoverageEvent,
   ShadowGateErrorReason,
@@ -50,7 +52,7 @@ export const DEFAULT_SEGMENT_LIMITS: SegmentLimits = {
   maxLineBytes: 4096,
 };
 
-const SEGMENT_NAME = new RegExp(`^${SHADOW_GATE_EVENTS_FILE_PREFIX}\\.\\d{6}\\.ndjson$`);
+const SEGMENT_NAME = segmentNamePattern(SHADOW_GATE_EVENTS_FILE_PREFIX);
 const EXCLUDED_ROUTES: ReadonlySet<string> = new Set(['none', 'admin', 'control', 'passive']);
 // Dispatch routes are the lower-cased runtime class names ingest journals
 // (`runtime.constructor.name`).
@@ -428,9 +430,7 @@ function increment(map: Map<string, number>, key: string, by = 1): void {
   map.set(key, (map.get(key) ?? 0) + by);
 }
 
-const COUNT_DROP_KEYS = [
-  'droppedQueueFull', 'droppedOversize', 'droppedClosed', 'droppedDegraded', 'droppedWriteFailed', 'droppedUnserializable',
-] as const;
+const COUNT_DROP_KEYS = SHADOW_GATE_COUNT_KEYS.filter((key) => key.startsWith('dropped'));
 
 export function buildShadowGateReport(
   rows: readonly InboundRow[],
@@ -554,7 +554,7 @@ export function buildShadowGateReport(
   }
 
   // Status.
-  const error: Record<ShadowGateErrorReason, number> = { OVERRUN: 0, E_THROW: 0, E_INPUT: 0 };
+  const error: Record<ShadowGateErrorReason, number> = { OVERRUN: 0, E_THROW: 0 };
   let ok = 0;
   for (const { event } of received) {
     if (event.status === 'OK') ok += 1;
@@ -705,7 +705,7 @@ export function renderShadowGateReportText(report: ShadowGateReport): string {
   if (c.warning) out.push(c.warning);
 
   out.push('', '2. Status (ERROR counts as SPAWN in the proxy rates and as a disagreement in the conservative rate)');
-  out.push(`  OK: ${report.status.ok}  ERROR: OVERRUN ${report.status.error.OVERRUN}, E_THROW ${report.status.error.E_THROW}, E_INPUT ${report.status.error.E_INPUT}`);
+  out.push(`  OK: ${report.status.ok}  ERROR: OVERRUN ${report.status.error.OVERRUN}, E_THROW ${report.status.error.E_THROW}`);
 
   const l = report.labels;
   const pooled = report.pooled ? rateLines(report.pooled, '  ') : null;

@@ -309,7 +309,7 @@ describe('shadow-gate report', () => {
   it('counts ERROR as SPAWN in proxy rates, against the gate conservatively, and prints OK-only rates', () => {
     const f = makeFixture();
     const { report } = runJson(baseArgs(f));
-    expect(report.status).toEqual({ ok: 7, error: { OVERRUN: 1, E_THROW: 1, E_INPUT: 0 } });
+    expect(report.status).toEqual({ ok: 7, error: { OVERRUN: 1, E_THROW: 1 } });
     expect(report.labels).toEqual({ labeled: 11, pending: 1, echoedAll: 7, echoedJoined: 5, echoedMissing: 2 });
     const pooled = report.pooled!;
     expect(pooled.suppressOverOk).toEqual({ x: 2, n: 7, rate: 2 / 7 });
@@ -501,5 +501,14 @@ describe('shadow-gate report', () => {
     expect(() => parseArgs(['--db', 'a', '--events', 'b', '--instance', 'x@y', '--since', '1', '--until', '5'])).toThrow(
       '--instance must be a recorded instance id',
     );
+    // The validator's digit-run rule: such an instance can never have recorded events.
+    expect(() => parseArgs(['--db', 'a', '--events', 'b', '--instance', 'bot-15551234567', '--since', '1', '--until', '5'])).toThrow(
+      '--instance must be a recorded instance id',
+    );
+    // --lineage keeps the charset-only rule (lineages are hex hashes).
+    expect(parseArgs(['--db', 'a', '--events', 'b', '--instance', INSTANCE, '--lineage', '1234567890123456', '--since', '1', '--until', '5']).lineage)
+      .toBe('1234567890123456');
+    expect(() => parseArgs(['--db', 'a', '--events', 'b', '--instance', INSTANCE, '--lineage', 'x'.repeat(129), '--since', '1', '--until', '5']))
+      .toThrow('--lineage must be a recorded databaseLineage');
   });
 });

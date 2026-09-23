@@ -22,11 +22,11 @@ import {
   ShadowGateEvidenceError,
 } from './lib/shadow-gate-report.ts';
 import { printErr } from '../src/lib/cli-print.ts';
+import { isShadowGateId, isShadowGatePhoneFreeId } from '../src/core/shadow-gate-events.ts';
 
 const EX_OK = 0;
 const EX_USAGE = 64;
 const EX_DATAERR = 65;
-const ID_CHARSET = /^[A-Za-z0-9._:-]{1,128}$/;
 const UNIX_SECONDS = /^\d{1,12}$/;
 
 export const USAGE = 'usage: shadow-gate-report --db <snapshot.db> --events <dir> --instance <id> '
@@ -66,9 +66,9 @@ export function parseArgs(argv: readonly string[]): ReportArgs {
     return { db: '', events: '', instance: '', since: 0, until: 0, lineage: null, json: false, help };
   }
   const instance = required(parsed.values, '--instance');
-  if (!ID_CHARSET.test(instance)) throw new CliArgError('--instance must be a recorded instance id');
+  if (!isShadowGatePhoneFreeId(instance)) throw new CliArgError('--instance must be a recorded instance id');
   const lineage = parsed.values.get('--lineage') ?? null;
-  if (lineage !== null && !ID_CHARSET.test(lineage)) throw new CliArgError('--lineage must be a recorded databaseLineage');
+  if (lineage !== null && !isShadowGateId(lineage)) throw new CliArgError('--lineage must be a recorded databaseLineage');
   const since = seconds(parsed.values, '--since');
   const until = seconds(parsed.values, '--until');
   if (!(since < until)) throw new CliArgError('--since must be earlier than --until');
