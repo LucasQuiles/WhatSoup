@@ -37,6 +37,8 @@ import { checkRateLimit } from './rate-limiter.ts';
 import { getConversationWindow } from './window.ts';
 import { summarizeWindowBeforeTrim } from './window-trim.ts';
 import { loadContextDetailed, type ContextLoadResult } from './context.ts';
+import { chatRecallBoundary } from '../../core/memory-scope.ts';
+import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import { ChatQueue } from './queue.ts';
 import { processMedia } from './media/processor.ts';
 import type { ProcessedMedia } from './media/processor.ts';
@@ -409,7 +411,22 @@ export class ChatRuntime implements Runtime {
     let contextTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const contextResult = await Promise.race([
-        loadContextDetailed(this.pinecone, msg.chatJid, msg.senderJid, mediaContent, traceId),
+        loadContextDetailed(
+          this.pinecone,
+          msg.chatJid,
+          msg.senderJid,
+          mediaContent,
+          traceId,
+          chatRecallBoundary({
+            chatJid: msg.chatJid,
+            senderJid: msg.senderJid,
+            operatorInstance: isOperatorInstance(config.botName),
+            adminPhones: config.adminPhones,
+            db: this.db,
+            sharedWorkflowGroups: config.sharedWorkflowGroups,
+            contactRecallScopes: config.contactRecallScopes,
+          }),
+        ),
         new Promise<ContextLoadResult>((resolve) => {
           contextTimeout = setTimeout(
             () => resolve(unavailableContextResult('timeout', true)),
