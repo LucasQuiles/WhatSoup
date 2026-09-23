@@ -371,6 +371,27 @@ describe('ingest shadow gate — mode shadow', () => {
     expect(verdicts.map((v) => [v.messageId, v.inboundSeq])).toEqual([['msg-redelivered', FIRST_SEQ]]);
   });
 
+  it('a concurrent redelivery (both deliveries before either drains) records one verdict', async () => {
+    const eventsDir = join(tmp.make('redelivery-concurrent'), 'events');
+    shadowMode(eventsDir);
+    const msg = makeMsg({ messageId: 'msg-concurrent' });
+    const { durability, handler, handled } = makeIngest();
+    vi.mocked(logFns.debug).mockClear();
+
+    handler(structuredClone(msg));
+    handler(structuredClone(msg));
+    await drainIngest();
+
+    const duplicateDrops = vi.mocked(logFns.debug).mock.calls.filter((call) =>
+      call[1] === 'skipping duplicate message delivery');
+    expect(duplicateDrops).toHaveLength(1);
+    expect(handled).toHaveLength(1);
+    expect(durability.journalInbound).toHaveBeenCalledTimes(1);
+    expect(getShadowGateStats()).toMatchObject({ evaluated: 1, recorded: 1 });
+    const verdicts = verdictsOf(await readEvents(eventsDir));
+    expect(verdicts.map((v) => v.messageId)).toEqual(['msg-concurrent']);
+  });
+
   it('(c) records E_THROW when input build throws, dispatch unchanged', async () => {
     const eventsDir = join(tmp.make('throw'), 'events');
     shadowMode(eventsDir);
