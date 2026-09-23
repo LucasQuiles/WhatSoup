@@ -19,6 +19,9 @@ set -euo pipefail
 #       (0 with --allow-missing-launchd-dir).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Where this checker's own helpers live (independent of --repo-root, which
+# names the templates under comparison).
+TOOL_ROOT="$REPO_ROOT"
 LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 BIN_DIR="$HOME/.local/bin"
 ALLOW_MISSING_LAUNCHD_DIR=0
@@ -120,8 +123,8 @@ resolve_plist_python() {
 
 resolve_plist_python
 
-subst_render() { # TEMPLATE_ABS DEST BOT(optional)
-  local template="$1" dest="$2" bot="${3:-}"
+subst_render() { # TEMPLATE_ABS DEST BOT(optional) INSTALLED_ABS(optional)
+  local template="$1" dest="$2" bot="${3:-}" installed="${4:-}"
   local v nl
   nl=$'\n'
   for v in "$REPO_ROOT" "$HOME" "$bot"; do
@@ -140,6 +143,21 @@ subst_render() { # TEMPLATE_ABS DEST BOT(optional)
     echo "unsubstituted placeholder survived render of: $template" >&2
     return 2
   fi
+  # Host-level timers get the host's service.claudeConfigDir exactly as
+  # deploy/setup.sh installs them (same filter and --preserve-from source, run
+  # from THIS checkout), so a hand-added key the config does not own is kept
+  # on both sides rather than reported as drift and stripped on reinstall.
+  case "$(basename "$template")" in
+    com.whatsoup.harness-maintenance.plist|com.whatsoup.reply-guarantee.plist)
+      if ! bash "$TOOL_ROOT/scripts/run-with-pinned-node.sh" "$TOOL_ROOT/scripts/launchd-claude-config-env.ts" \
+        --home "$HOME" --preserve-from "$installed" < "$dest" > "$dest.env"; then
+        rm -f "$dest.env"
+        echo "cannot resolve service.claudeConfigDir for render of: $template" >&2
+        return 2
+      fi
+      mv "$dest.env" "$dest"
+      ;;
+  esac
   return 0
 }
 
@@ -156,7 +174,7 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
   fi
   local rendered
   rendered="$(mktemp "${TMPDIR:-/tmp}/launchd-drift.XXXXXX")"
-  if ! subst_render "$repo_template" "$rendered" "$bot"; then
+  if ! subst_render "$repo_template" "$rendered" "$bot" "$installed"; then
     rm -f "$rendered"
     exit 2
   fi
@@ -212,7 +230,8 @@ check_release_drift_surface() { # host-level; uses INSTANCES
   tmpd="$(mktemp -d "${TMPDIR:-/tmp}/launchd-drift-rd.XXXXXX")"
   for bot in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
     out="$tmpd/render-$bot.plist"
-    if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" >/dev/null 2>&1 \
+    if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" \
+         --preserve-from "$installed" >/dev/null 2>&1 \
        && cmp -s "$out" "$installed"; then
       matched=1
       echo "ok: release-drift-check (renders for instance $bot)"

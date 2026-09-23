@@ -15,8 +15,12 @@ export function gitFixtureEnv(): NodeJS.ProcessEnv {
   };
 }
 
+// maintenance.auto=false: `git commit` otherwise starts a detached
+// `git maintenance run --auto` that deletes .git/objects/maintenance.lock after
+// commit returns. A fixture that then removes .git races that delete, and
+// Node's rmSync reports success while leaving the rest of .git behind.
 export function gitFixture(repoRoot: string, args: string[]): void {
-  const result = spawnSync('git', args, {
+  const result = spawnSync('git', ['-c', 'maintenance.auto=false', ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: gitFixtureEnv(),

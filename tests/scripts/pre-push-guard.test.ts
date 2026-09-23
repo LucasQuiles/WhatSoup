@@ -1057,7 +1057,7 @@ describe('verify chain composition (push-gate manifest)', () => {
     expect(release).toMatch(/\bnpm run verify:console-browser\b/);
   });
 
-  it('verify:release runs the root full suite once through serialized coverage', () => {
+  it('verify:release runs the root full suite once through parallel coverage', () => {
     const release = releaseChain;
     expect(release, 'verify:release script must exist').toBeDefined();
 
@@ -1071,7 +1071,7 @@ describe('verify chain composition (push-gate manifest)', () => {
       .filter((command) => rootFullSuitePatterns.some((pattern) => pattern.test(command)));
 
     expect(rootFullSuiteCommands).toEqual([
-      'npm run coverage:check -- --pool=forks --fileParallelism=false',
+      'npm run coverage:check -- --pool=forks',
     ]);
   });
 
