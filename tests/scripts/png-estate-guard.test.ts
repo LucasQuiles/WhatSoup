@@ -1,23 +1,26 @@
-// #2219 Option A — png-estate guard companion test: invokes the EXACT guard
-// (ratchet mode against this repo; staged/ratchet red cases against fixture
+// #2219 png-estate guard companion test: invokes the EXACT guard (ratchet mode
+// against this repo; staged/ratchet red and boundary cases against fixture
 // repos with a mutation-proven red case per rule), and pins the live census to
 // the exported baselines so a stale baseline is red, not silent headroom.
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach } from 'vitest';
 
 import {
   MAX_NEW_PNG_BYTES,
   TRACKED_PNG_BYTES_BASELINE,
   TRACKED_PNG_COUNT_BASELINE,
+  TRACKED_PNG_SIZE_BASELINE,
 } from '../../scripts/png-estate-guard.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const GUARD = join(REPO_ROOT, 'scripts/png-estate-guard.ts');
 const NODE = process.execPath;
+const WIZARD = 'docs/screenshots/add-line-wizard.png';
+const WIZARD_ORIGINAL_BYTES = 755_125; // pre-compression blob size
 
 const scratchDirs: string[] = [];
 afterEach(() => {
@@ -33,7 +36,14 @@ function runGuard(cwd: string, args: string[] = []): { status: number | null; ou
   return { status: res.status, out: `${res.stdout}\n${res.stderr}` };
 }
 
-function makeFixtureRepo(): { root: string; git: (args: string[]) => string } {
+interface Fixture {
+  root: string;
+  git: (args: string[]) => string;
+  put: (path: string, bytes: number, fill?: number) => void;
+  commit: (paths: string[]) => void;
+}
+
+function makeFixtureRepo(): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'png-guard-'));
   scratchDirs.push(root);
   const git = (args: string[]): string =>
@@ -41,11 +51,19 @@ function makeFixtureRepo(): { root: string; git: (args: string[]) => string } {
   git(['init', '--quiet']);
   git(['config', 'user.email', 'guard-test@example.invalid']);
   git(['config', 'user.name', 'guard-test']);
-  return { root, git };
+  const put = (path: string, bytes: number, fill = 1): void => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), Buffer.alloc(bytes, fill));
+  };
+  const commit = (paths: string[]): void => {
+    git(['add', '-f', ...paths]);
+    git(['commit', '-qm', 'fixture', '--no-verify']);
+  };
+  return { root, git, put, commit };
 }
 
-describe('png-estate guard (#2219 Option A)', () => {
-  it('ratchet mode passes against this repository (artifacts/ clean, census within baseline)', () => {
+describe('png-estate guard (#2219)', () => {
+  it('ratchet mode passes against this repository', () => {
     const { status, out } = runGuard(REPO_ROOT);
     expect(out).toContain('png-estate guard passed (ratchet)');
     expect(status).toBe(0);
@@ -59,30 +77,29 @@ describe('png-estate guard (#2219 Option A)', () => {
       maxBuffer: 64 * 1024 * 1024,
       timeout: 30_000,
     }).split('\0').filter(Boolean);
-    let count = 0;
-    let bytes = 0;
+    const sizes: Record<string, number> = {};
     for (const row of rows) {
       const tab = row.indexOf('\t');
       const [mode, oid] = row.slice(0, tab).split(' ');
       const path = row.slice(tab + 1);
       if (mode === '120000' || !path.toLowerCase().endsWith('.png')) continue;
-      count += 1;
-      bytes += Number.parseInt(
+      sizes[path] = Number.parseInt(
         execFileSync('git', ['cat-file', '-s', oid!], { cwd: REPO_ROOT, encoding: 'utf8', timeout: 30_000 }),
         10,
       );
     }
-    expect({ count, bytes }).toEqual({
+    expect(sizes).toEqual(TRACKED_PNG_SIZE_BASELINE);
+    const values = Object.values(sizes);
+    expect({ count: values.length, bytes: values.reduce((a, b) => a + b, 0) }).toEqual({
       count: TRACKED_PNG_COUNT_BASELINE,
       bytes: TRACKED_PNG_BYTES_BASELINE,
     });
   });
 
   it('staged mode rejects a staged PNG under artifacts/, including non-ASCII names', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'artifacts/dashboard-polish'), { recursive: true });
-    writeFileSync(join(root, 'artifacts/dashboard-polish/regrown.png'), Buffer.alloc(64, 7));
-    writeFileSync(join(root, 'artifacts/dashboard-polish/ä-regrown.png'), Buffer.alloc(64, 8));
+    const { root, git, put } = makeFixtureRepo();
+    put('artifacts/dashboard-polish/regrown.png', 64, 7);
+    put('artifacts/dashboard-polish/ä-regrown.png', 64, 8);
     git(['add', '-f', 'artifacts/dashboard-polish']);
 
     const { status, out } = runGuard(root, ['--staged']);
@@ -92,13 +109,12 @@ describe('png-estate guard (#2219 Option A)', () => {
   });
 
   it('staged mode sizes the INDEX blob: oversized staged bytes stay red after a worktree truncation, small ones stay green', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'docs/screenshots'), { recursive: true });
-    writeFileSync(join(root, 'docs/screenshots/huge.png'), Buffer.alloc(150 * 1024, 1));
+    const { root, git, put } = makeFixtureRepo();
+    put('docs/screenshots/huge.png', 150 * 1024);
     git(['add', 'docs/screenshots/huge.png']);
     // Post-staging truncation must not change the verdict (the index blob is
     // what lands in history).
-    writeFileSync(join(root, 'docs/screenshots/huge.png'), Buffer.alloc(8, 1));
+    put('docs/screenshots/huge.png', 8);
 
     const oversized = runGuard(root, ['--staged']);
     expect(oversized.status).toBe(1);
@@ -106,7 +122,7 @@ describe('png-estate guard (#2219 Option A)', () => {
     expect(oversized.out).toContain(String(MAX_NEW_PNG_BYTES));
 
     git(['reset']);
-    writeFileSync(join(root, 'docs/screenshots/small.png'), Buffer.alloc(8 * 1024, 1));
+    put('docs/screenshots/small.png', 8 * 1024);
     git(['add', 'docs/screenshots/small.png']);
     const small = runGuard(root, ['--staged']);
     expect(small.out).toContain('png-estate guard passed (staged)');
@@ -114,14 +130,12 @@ describe('png-estate guard (#2219 Option A)', () => {
   });
 
   it('staged mode catches an oversized rename-with-modification (diff-filter includes R)', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'docs/screenshots'), { recursive: true });
-    writeFileSync(join(root, 'docs/screenshots/before.png'), Buffer.alloc(90 * 1024, 2));
-    git(['add', 'docs/screenshots/before.png']);
-    git(['commit', '-qm', 'fixture', '--no-verify']);
+    const { root, git, put, commit } = makeFixtureRepo();
+    put('docs/screenshots/before.png', 90 * 1024, 2);
+    commit(['docs/screenshots/before.png']);
 
     renameSync(join(root, 'docs/screenshots/before.png'), join(root, 'docs/screenshots/after.png'));
-    writeFileSync(join(root, 'docs/screenshots/after.png'), Buffer.alloc(150 * 1024, 3));
+    put('docs/screenshots/after.png', 150 * 1024, 3);
     git(['add', '-A', 'docs/screenshots']);
 
     const { status, out } = runGuard(root, ['--staged']);
@@ -130,12 +144,58 @@ describe('png-estate guard (#2219 Option A)', () => {
     expect(out).toContain('exceeds the');
   });
 
+  describe('staged: a tracked docs/screenshots PNG may not grow', () => {
+    function staged(headBytes: number, newBytes: number, path = 'docs/screenshots/shot.png') {
+      const fx = makeFixtureRepo();
+      fx.put(path, headBytes, 9);
+      fx.commit([path]);
+      fx.put(path, newBytes, 10);
+      fx.git(['add', path]);
+      return runGuard(fx.root, ['--staged']);
+    }
+
+    it('passes at exactly the HEAD size, above the new-PNG bound', () => {
+      const res = staged(500 * 1024, 500 * 1024);
+      expect(res.out).toContain('png-estate guard passed (staged): 1 staged PNG(s)');
+      expect(res.status).toBe(0);
+    });
+
+    it('passes a shrink that stays above the new-PNG bound', () => {
+      const res = staged(700 * 1024, 300 * 1024);
+      expect(res.status).toBe(0);
+    });
+
+    it('rejects one byte of growth, even below the new-PNG bound', () => {
+      const res = staged(47 * 1024, 47 * 1024 + 1);
+      expect(res.status).toBe(1);
+      expect(res.out).toContain('a tracked screenshot may not grow');
+    });
+
+    it('does not extend to a changed PNG outside docs/screenshots/', () => {
+      const res = staged(300 * 1024, 200 * 1024, 'docs/design-system/tracked.png');
+      expect(res.status).toBe(1);
+      expect(res.out).toContain('new-PNG bound');
+    });
+
+    it('holds a NEW docs/screenshots PNG to the new-PNG bound: exactly the bound passes, one byte over fails', () => {
+      const fx = makeFixtureRepo();
+      fx.put('docs/screenshots/seed.png', 16);
+      fx.commit(['docs/screenshots/seed.png']);
+      fx.put('docs/screenshots/new.png', MAX_NEW_PNG_BYTES, 11);
+      fx.git(['add', 'docs/screenshots/new.png']);
+      expect(runGuard(fx.root, ['--staged']).status).toBe(0);
+      fx.put('docs/screenshots/new.png', MAX_NEW_PNG_BYTES + 1, 11);
+      fx.git(['add', 'docs/screenshots/new.png']);
+      const over = runGuard(fx.root, ['--staged']);
+      expect(over.status).toBe(1);
+      expect(over.out).toContain('new-PNG bound');
+    });
+  });
+
   it('ratchet mode rejects a tracked PNG under artifacts/ regardless of extension case', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'artifacts'), { recursive: true });
-    writeFileSync(join(root, 'artifacts/tracked.PnG'), Buffer.alloc(64, 3));
-    git(['add', '-f', 'artifacts/tracked.PnG']);
-    git(['commit', '-qm', 'fixture', '--no-verify']);
+    const { root, put, commit } = makeFixtureRepo();
+    put('artifacts/tracked.PnG', 64, 3);
+    commit(['artifacts/tracked.PnG']);
 
     const { status, out } = runGuard(root);
     expect(status).toBe(1);
@@ -143,13 +203,9 @@ describe('png-estate guard (#2219 Option A)', () => {
   });
 
   it('ratchet mode rejects census growth beyond the count baseline', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'docs/screenshots'), { recursive: true });
-    for (let i = 0; i < TRACKED_PNG_COUNT_BASELINE + 1; i += 1) {
-      writeFileSync(join(root, `docs/screenshots/s${i}.png`), Buffer.alloc(16, i % 251));
-    }
-    git(['add', 'docs/screenshots']);
-    git(['commit', '-qm', 'fixture', '--no-verify']);
+    const { root, put, commit } = makeFixtureRepo();
+    for (let i = 0; i < TRACKED_PNG_COUNT_BASELINE + 1; i += 1) put(`docs/screenshots/s${i}.png`, 16, i % 251);
+    commit(['docs/screenshots']);
 
     const { status, out } = runGuard(root);
     expect(status).toBe(1);
@@ -158,17 +214,61 @@ describe('png-estate guard (#2219 Option A)', () => {
     );
   });
 
-  it('ratchet mode rejects byte growth beyond the bytes baseline', () => {
-    const { root, git } = makeFixtureRepo();
-    mkdirSync(join(root, 'docs/screenshots'), { recursive: true });
-    const half = Math.ceil(TRACKED_PNG_BYTES_BASELINE / 2) + 1024;
-    writeFileSync(join(root, 'docs/screenshots/big-a.png'), Buffer.alloc(half, 4));
-    writeFileSync(join(root, 'docs/screenshots/big-b.png'), Buffer.alloc(half, 5));
-    git(['add', 'docs/screenshots']);
-    git(['commit', '-qm', 'fixture', '--no-verify']);
+  it('ratchet mode rejects total-byte growth when every file is within its own bound', () => {
+    // 24 baselined paths at exactly their baseline plus one unbaselined PNG at
+    // exactly the new-PNG bound (larger than the dropped path): count and every
+    // per-file rule hold, only the total exceeds.
+    const { root, put, commit } = makeFixtureRepo();
+    const entries = Object.entries(TRACKED_PNG_SIZE_BASELINE).sort((a, b) => a[1] - b[1]);
+    const [dropped, ...kept] = entries;
+    expect(dropped![1]).toBeLessThan(MAX_NEW_PNG_BYTES);
+    for (const [path, bytes] of kept) put(path, bytes);
+    put('docs/screenshots/extra.png', MAX_NEW_PNG_BYTES);
+    commit(['docs']);
 
     const { status, out } = runGuard(root);
     expect(status).toBe(1);
     expect(out).toMatch(/tracked PNG bytes \d+ exceed the ratchet baseline/);
+    expect(out).not.toContain('per-path size baseline');
+    expect(out).not.toContain('new-PNG bound');
+    expect(out).not.toContain('tracked PNG count');
+  });
+
+  describe('ratchet: per-path size baseline (CI enforcement)', () => {
+    function ratchet(files: Array<[string, number]>) {
+      const fx = makeFixtureRepo();
+      for (const [path, bytes] of files) fx.put(path, bytes);
+      fx.commit(files.map(([path]) => path));
+      return runGuard(fx.root);
+    }
+
+    it('rejects a NEW unbaselined 600 KB screenshot', () => {
+      const res = ratchet([['docs/screenshots/new-shot.png', 600 * 1024]]);
+      expect(res.status).toBe(1);
+      expect(res.out).toContain('outside the per-path baseline exceed the');
+      expect(res.out).toContain('docs/screenshots/new-shot.png');
+    });
+
+    it('holds an unbaselined PNG anywhere to the new-PNG bound: exactly the bound passes, one byte over fails', () => {
+      expect(ratchet([['docs/other/new.png', MAX_NEW_PNG_BYTES]]).status).toBe(0);
+      const over = ratchet([['docs/other/new.png', MAX_NEW_PNG_BYTES + 1]]);
+      expect(over.status).toBe(1);
+      expect(over.out).toContain('new-PNG bound');
+    });
+
+    it('rejects a baselined screenshot regrown to its pre-compression size', () => {
+      const res = ratchet([[WIZARD, WIZARD_ORIGINAL_BYTES]]);
+      expect(res.status).toBe(1);
+      expect(res.out).toContain(`${WIZARD} (${WIZARD_ORIGINAL_BYTES} > ${TRACKED_PNG_SIZE_BASELINE[WIZARD]} bytes)`);
+    });
+
+    it('passes a baselined screenshot at exactly its baseline, fails one byte over, passes a shrink', () => {
+      const base = TRACKED_PNG_SIZE_BASELINE[WIZARD]!;
+      expect(ratchet([[WIZARD, base]]).status).toBe(0);
+      const over = ratchet([[WIZARD, base + 1]]);
+      expect(over.status).toBe(1);
+      expect(over.out).toContain('a tracked PNG may not grow');
+      expect(ratchet([[WIZARD, base - 1024]]).status).toBe(0);
+    });
   });
 });
