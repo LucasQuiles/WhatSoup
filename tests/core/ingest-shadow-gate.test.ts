@@ -328,7 +328,7 @@ describe('ingest shadow gate — mode shadow', () => {
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
     const verdicts = verdictsOf(await readEvents(eventsDir));
     expect(verdicts).toHaveLength(1);
-    expect(verdicts[0].inboundSeq).toBeNull();
+    expect(verdicts[0]).toMatchObject({ inboundSeq: null, status: 'OK', verdict: 'SPAWN', ruleId: 'S02_DM' });
   });
 
   it('defaults the events dir under HOME and sanitizes a bot name containing a space', async () => {

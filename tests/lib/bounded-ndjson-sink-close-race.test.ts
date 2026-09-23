@@ -127,10 +127,14 @@ describe('createBoundedNdjsonSink close/startup race', () => {
       expect(gate.entered).toBe(true);
     });
     const closing = sink.close(0);
-    // The write is still parked after close's flush deadline has passed.
-    const slowWrite = setTimeout(() => gate.release(), 100);
+    // close() marks the sink closed only once its flush deadline has passed;
+    // the write is still parked, so it is now waiting on the in-flight write.
+    await vi.waitFor(() => {
+      expect(sink.state()).toBe('closed');
+    });
+    expect(gate.done).toBe(false);
+    gate.release();
     await closing;
-    clearTimeout(slowWrite);
     expect(gate.done).toBe(true);
     expect(existsSync(lockPath)).toBe(false);
     expect(sink.stats()).toMatchObject({ written: 1, queued: 0, droppedClosed: 0 });
