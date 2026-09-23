@@ -841,7 +841,49 @@
         "verdict": "SPAWN",
         "ruleId": "D00_DEFAULT"
       }
+    },
+    {
+      "name": "long s after a request lead is a non-word character for the word boundary",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "sendſ the file",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "long s after remind is a non-word character for the word boundary",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "remindſ me",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
     }
   ],
-  "notes": "Expected results are what the TypeScript gate returns: patterns compiled by RE2 with the rules file's flags (\"i\"). Python ports must compile with re.IGNORECASE | re.ASCII, use fullmatch for statusOnly patterns (search for obligation and noReplyKnown), and consume already-normalized text. The TypeScript normalizer replaces lone surrogates, applies NFC, truncates, then trims. Do not re-normalize, because JS String.prototype.trim and Python str.strip remove different character sets. re.ASCII makes \\b ASCII-only, as RE2's is ('sendé the file' matches the request lead), and stops re.IGNORECASE from folding dotless and dotted i to i ('nıce' is not 'nice'). One difference remains: RE2 case-folds U+017F (long s) to s, which re.ASCII does not, so a port must map U+017F to s before matching ('ſend the file' is an obligation). NFC already rewrites the other such character, U+212A (Kelvin sign), to K."
+  "notes": "Expected results are what the TypeScript gate returns: patterns compiled by RE2 with the rules file's flags (\"i\"). Python ports must compile with re.IGNORECASE | re.ASCII, use fullmatch for statusOnly patterns (search for obligation and noReplyKnown), and consume already-normalized text. The TypeScript normalizer replaces lone surrogates, applies NFC, truncates, then trims. Do not re-normalize, because JS String.prototype.trim and Python str.strip remove different character sets. re.ASCII makes \\b ASCII-only, as RE2's is ('sendé the file' matches the request lead), and stops re.IGNORECASE from folding dotless and dotted i to i ('nıce' is not 'nice'). One difference remains: U+017F (long s). RE2 case-folds it to match a literal s in a pattern ('ſend the file' is an obligation, 'thankſ' is an ack), but its \\b still treats it as a non-word character ('sendſ the file' and 'remindſ me' are obligations, because \\b holds between 'd' and 'ſ'). Rewriting the text (ſ to s) therefore breaks the word-boundary cases: 'sends' has no boundary after 'send'. Rewrite the patterns instead: replace every literal s or S in a pattern (not an escape sequence) with the class [sSſ] and keep re.ASCII. That reproduces both RE2 behaviours. NFC already rewrites U+212A (Kelvin sign), the only other such character, to K."
 }
