@@ -15,7 +15,7 @@ import {
   memoryHitTier,
   memoryIdentityFold,
   resolveMemoryScope,
-  senderRecallCrossesChats,
+  chatRecallBoundary,
   type GroupParticipantInfo,
   type InstanceIdentities,
   type MemoryScopeDeps,
@@ -144,12 +144,12 @@ describe('resolveMemoryScope', () => {
     expect('verifiedSender' in spoofed).toBe(false);
   });
 
-  it('classifies a direct chat as dm', async () => {
+  it('classifies a direct chat by the contact scope, with every spelling of the chat', async () => {
     const scope = await resolveMemoryScope(
       { tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, actorJid: `${MEMBER}@s.whatsapp.net` },
       deps(),
     );
-    expect(scope.kind).toBe('dm');
+    expect(scope.kind).toBe('dm_chat');
     expect(scope.chatSpellings).toEqual(expect.arrayContaining([MEMBER, `${MEMBER}@s.whatsapp.net`, `${MEMBER_LID}@lid`]));
   });
 
@@ -190,10 +190,10 @@ describe('resolveMemoryScope', () => {
 describe('memoryHitTier', () => {
   const fold = () => memoryIdentityFold(db);
 
-  it('ranks this chat, other chats, then untagged for a dm', async () => {
+  it('ranks this chat, other chats, then untagged for a whole-instance dm', async () => {
     const scope = await resolveMemoryScope(
       { tier: 'chat-scoped', conversationKey: MEMBER, operatorInstance: false, actorJid: `${MEMBER}@s.whatsapp.net` },
-      deps(),
+      deps({ contactRecallScopes: { [MEMBER]: 'instance' } }),
     );
     expect(memoryHitTier({ chat_jid: `${MEMBER_LID}@lid` }, scope, fold())).toBe(0);
     expect(memoryHitTier({ chat_jid: GROUP_JID }, scope, fold())).toBe(1);
@@ -223,21 +223,71 @@ describe('memoryHitTier', () => {
   });
 });
 
-describe('senderRecallCrossesChats (chat runtime)', () => {
+describe('direct-chat contact scope', () => {
+  const dm = (actorJid: string) => ({
+    tier: 'chat-scoped', conversationKey: MEMBER, deliveryJid: `${MEMBER}@s.whatsapp.net`, operatorInstance: false, actorJid,
+  });
+
+  it('holds a non-admin direct chat to this chat by default', async () => {
+    const scope = await resolveMemoryScope(dm(`${MEMBER}@s.whatsapp.net`), deps());
+    expect(scope).toMatchObject({ kind: 'dm_chat', reason: 'contact_scope_chat' });
+    const f = memoryIdentityFold(db);
+    expect(memoryHitTier({ chat_jid: `${MEMBER_LID}@lid` }, scope, f)).toBe(0);
+    expect(memoryHitTier({ chat_jid: `${OWNER}@s.whatsapp.net` }, scope, f)).toBeNull();
+    expect(memoryHitTier({ chat_jid: GROUP_JID }, scope, f)).toBeNull();
+    expect(memoryHitTier({}, scope, f)).toBe(2);
+  });
+
+  it('gives a contact configured as instance the whole instance, matched through its LID', async () => {
+    const scope = await resolveMemoryScope(
+      dm(`${MEMBER_LID}@lid`),
+      deps({ contactRecallScopes: { [`+${MEMBER}`]: 'instance' } }),
+    );
+    expect(scope).toMatchObject({ kind: 'dm', reason: 'contact_scope_instance' });
+  });
+
+  it('ignores an instance setting for an unauthenticated sender, and an unknown value', async () => {
+    const spoofed = await resolveMemoryScope(dm(`+${MEMBER}@sms`), deps({ contactRecallScopes: { [MEMBER]: 'instance' } }));
+    expect(spoofed.kind).toBe('dm_chat');
+    const unknown = await resolveMemoryScope(dm(`${MEMBER}@s.whatsapp.net`), deps({ contactRecallScopes: { [MEMBER]: 'everything' } }));
+    expect(unknown.kind).toBe('dm_chat');
+  });
+
+  it('keeps an admin and the operator instance whole-instance', async () => {
+    const admin = await resolveMemoryScope(
+      { ...dm(`${OWNER}@s.whatsapp.net`), conversationKey: OWNER, deliveryJid: `${OWNER}@s.whatsapp.net` },
+      deps(),
+    );
+    expect(admin.kind).toBe('unrestricted');
+    const operator = await resolveMemoryScope({ ...dm(`${MEMBER}@s.whatsapp.net`), operatorInstance: true }, deps());
+    expect(operator.kind).toBe('unrestricted');
+  });
+});
+
+describe('chatRecallBoundary (chat runtime)', () => {
   // Built per test: `db` is opened in beforeEach.
-  let base: { adminPhones: Set<string>; db: Database; operatorInstance: boolean };
+  let base: { adminPhones: Set<string>; db: Database; operatorInstance: boolean; sharedWorkflowGroups: string[] };
   beforeEach(() => {
-    base = { adminPhones: identities.adminPhones, db, operatorInstance: false };
+    base = { adminPhones: identities.adminPhones, db, operatorInstance: false, sharedWorkflowGroups: [] };
   });
 
-  it('crosses chats in a direct chat, for the operator instance and for a verified admin', () => {
-    expect(senderRecallCrossesChats({ ...base, chatJid: `${MEMBER}@s.whatsapp.net`, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe(true);
-    expect(senderRecallCrossesChats({ ...base, operatorInstance: true, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe(true);
-    expect(senderRecallCrossesChats({ ...base, chatJid: GROUP_JID, senderJid: `${OWNER}@s.whatsapp.net` })).toBe(true);
+  it('is open for the operator instance, a verified admin, and a contact configured as instance', () => {
+    expect(chatRecallBoundary({ ...base, operatorInstance: true, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe('open');
+    expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `${OWNER}@s.whatsapp.net` })).toBe('open');
+    expect(chatRecallBoundary({
+      ...base, chatJid: `${MEMBER}@s.whatsapp.net`, senderJid: `${MEMBER}@s.whatsapp.net`, contactRecallScopes: { [MEMBER]: 'instance' },
+    })).toBe('open');
   });
 
-  it('stays in the group for any other group sender', () => {
-    expect(senderRecallCrossesChats({ ...base, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe(false);
-    expect(senderRecallCrossesChats({ ...base, chatJid: GROUP_JID, senderJid: `+${OWNER}@sms` })).toBe(false);
+  it('holds a default direct chat and a shared-workflow group to this chat', () => {
+    expect(chatRecallBoundary({ ...base, chatJid: `${MEMBER}@s.whatsapp.net`, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe('this_chat');
+    expect(chatRecallBoundary({
+      ...base, sharedWorkflowGroups: [GROUP_KEY], chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net`,
+    })).toBe('this_chat');
+  });
+
+  it('applies the group rule to any other group sender', () => {
+    expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `${MEMBER}@s.whatsapp.net` })).toBe('group');
+    expect(chatRecallBoundary({ ...base, chatJid: GROUP_JID, senderJid: `+${OWNER}@sms` })).toBe('group');
   });
 });

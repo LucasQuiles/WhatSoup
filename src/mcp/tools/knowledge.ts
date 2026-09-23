@@ -58,10 +58,12 @@ interface ParsedHit {
   text: string;
   entityType: string;
   fields: Record<string, unknown>;
+  namespace?: string;
 }
 
 interface TieredHit extends ParsedHit {
-  tier: MemoryTier;
+  /** Memory tier, or null for a document hit (not chat-scoped). */
+  tier: MemoryTier | null;
 }
 
 /**
@@ -75,6 +77,7 @@ export interface KnowledgeSearchDeps {
   identities?: () => InstanceIdentities;
   membership?: GroupMembershipReader | null;
   sharedWorkflowGroups?: Iterable<string>;
+  contactRecallScopes?: Readonly<Record<string, string>>;
 }
 
 function pineconeMemoryConfig(): {
@@ -160,50 +163,96 @@ interface SearchLeg {
 }
 
 /**
- * The queries for one search. Outside the memory index each namespace is queried
- * once, as before. In the memory index a scope with a pinned conversation also
- * queries that conversation's records, so they are not crowded out of topK by
- * other chats; a configurable group queries only this conversation. The filters
- * only narrow the fetch: memoryHitTier decides what the caller may see.
+ * Namespaces of the memory index whose records are chat memories, so the chat
+ * tiers and the group boundary apply to them: the memory_write namespace, and the
+ * WhatsApp conversation roles in `memory.pinecone.namespaces` (facts, chunks,
+ * summaries, and the legacy message namespace). Every other namespace, including
+ * the contacts, local-docs and OneDrive roles, is a document namespace: searched
+ * unfiltered in every context and merged in by relevance, as before scoping.
  */
-function searchLegs(namespaces: string[], scope: MemoryScope | null): SearchLeg[] {
-  if (!scope) return namespaces.map((namespace) => ({ namespace }));
-  if (scope.kind === 'no_context') return [];
-  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
-  if (scope.kind === 'configurable_group') {
-    return thisChat ? namespaces.map((namespace) => ({ namespace, filter: thisChat })) : [];
-  }
-  return namespaces.flatMap((namespace) =>
-    thisChat ? [{ namespace, filter: thisChat }, { namespace }] : [{ namespace }],
-  );
+function chatAttributedNamespaces(namespaces: ReturnType<typeof pineconeMemoryConfig>['namespaces']): Set<string> {
+  const roles = [namespaces?.facts, namespaces?.chunks, namespaces?.summaries, namespaces?.['legacy']];
+  return new Set(['', MEMORY_WRITE_NAMESPACE, ...roles.filter(isNonEmptyString)]);
 }
 
 /**
- * Gate and rank the merged hits. Duplicates (one record returned by the chat leg
- * and the unfiltered leg) are removed first so they cannot take two result slots;
- * the copy with the better tier, then the better score, is kept. Sorted by tier,
- * then score.
+ * The queries for one search. Outside the memory index, and for document
+ * namespaces, each namespace is queried once, unfiltered. For a chat namespace a
+ * scope with a pinned conversation also queries that conversation's records, so
+ * they are not crowded out of topK by other chats; a configurable group queries
+ * only this conversation. The filters only narrow the fetch: memoryHitTier
+ * decides what the caller may see.
  */
-function tierHits(hits: ParsedHit[], scope: MemoryScope | null, db: Database | null | undefined): TieredHit[] {
+function searchLegs(
+  namespaces: string[],
+  scope: MemoryScope | null,
+  isChatNamespace: (namespace: string) => boolean,
+): SearchLeg[] {
+  if (!scope) return namespaces.map((namespace) => ({ namespace }));
+  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
+  return namespaces.flatMap((namespace): SearchLeg[] => {
+    if (!isChatNamespace(namespace)) return [{ namespace }];
+    if (scope.kind === 'no_context') return [];
+    if (scope.kind === 'configurable_group') return thisChat ? [{ namespace, filter: thisChat }] : [];
+    return thisChat ? [{ namespace, filter: thisChat }, { namespace }] : [{ namespace }];
+  });
+}
+
+/** Better duplicate: the better memory tier, then the higher score. */
+function preferHit(candidate: TieredHit, existing: TieredHit): boolean {
+  if (candidate.tier !== null && existing.tier !== null && candidate.tier !== existing.tier) {
+    return candidate.tier < existing.tier;
+  }
+  return candidate.score > existing.score;
+}
+
+/**
+ * Gate the merged hits and remove duplicates (one record returned by the chat leg
+ * and the unfiltered leg) so they cannot take two result slots. Chat-memory hits
+ * get a tier or are dropped; document hits pass ungated with tier null.
+ */
+function tierHits(
+  hits: ParsedHit[],
+  scope: MemoryScope | null,
+  isChatNamespace: (namespace: string) => boolean,
+  db: Database | null | undefined,
+): TieredHit[] {
   const fold = memoryIdentityFold(db);
   const byId = new Map<string, TieredHit>();
   for (const hit of hits) {
-    const tier = scope ? memoryHitTier(hit.fields, scope, fold) : 0;
-    if (tier === null) continue;
+    const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
+    const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
+    if (!isDocument && tier === null) continue;
+    const candidate: TieredHit = { ...hit, tier };
     const existing = byId.get(hit.id);
-    if (!existing || tier < existing.tier || (tier === existing.tier && hit.score > existing.score)) {
-      byId.set(hit.id, { ...hit, tier });
-    }
+    if (!existing || preferHit(candidate, existing)) byId.set(hit.id, candidate);
   }
-  return [...byId.values()].sort((a, b) => a.tier - b.tier || b.score - a.score);
+  return [...byId.values()];
 }
 
-/** Stable re-sort by tier after rerank, keeping rerank order within a tier. */
-function byTierStable(hits: TieredHit[]): TieredHit[] {
-  return hits
+/**
+ * Final order. Memories keep tier order (this chat -> other chats -> untagged),
+ * ordered by score within a tier, or by their current order when `reranked`
+ * (rerank orders within a tier only). Documents are merged in by score, so a
+ * relevant document can sit above a weakly relevant memory.
+ */
+function orderHits(hits: TieredHit[], reranked: boolean): TieredHit[] {
+  const memory = hits
     .map((hit, position) => ({ hit, position }))
-    .sort((a, b) => a.hit.tier - b.hit.tier || a.position - b.position)
+    .filter(({ hit }) => hit.tier !== null)
+    .sort((a, b) => (a.hit.tier ?? 0) - (b.hit.tier ?? 0)
+      || (reranked ? a.position - b.position : b.hit.score - a.hit.score))
     .map(({ hit }) => hit);
+  const documents = hits.filter((hit) => hit.tier === null);
+  if (!reranked) documents.sort((a, b) => b.score - a.score);
+  const merged: TieredHit[] = [];
+  let m = 0;
+  let d = 0;
+  while (m < memory.length || d < documents.length) {
+    const takeMemory = d >= documents.length || (m < memory.length && memory[m]!.score >= documents[d]!.score);
+    merged.push(takeMemory ? memory[m++]! : documents[d++]!);
+  }
+  return merged;
 }
 
 function resolveNamespacesToSearch(
@@ -410,6 +459,8 @@ export function registerKnowledgeTools(
 
   const memoryConfig = pineconeMemoryConfig();
   const envVarName = memoryConfig.apiKeyEnv;
+  const chatNamespaces = chatAttributedNamespaces(memoryConfig.namespaces);
+  const isChatNamespace = (namespace: string): boolean => chatNamespaces.has(namespace);
   const noIdentities: InstanceIdentities = {
     adminPhones: new Set(), siblingPhones: new Set(), botJid: null, botLid: null,
   };
@@ -426,6 +477,7 @@ export function registerKnowledgeTools(
       identities: deps.identities?.() ?? noIdentities,
       membership: deps.membership,
       sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
+      contactRecallScopes: deps.contactRecallScopes,
     },
   );
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
@@ -515,7 +567,7 @@ export function registerKnowledgeTools(
         // an explicit namespace argument; other indexes are not memory and are
         // searched as configured.
         const scope = isMemoryIndex(indexName) ? await scopeFor(session) : null;
-        const legs = searchLegs(namespacesToSearch, scope);
+        const legs = searchLegs(namespacesToSearch, scope, isChatNamespace);
         const projectError = await validatePineconeProject(pc, indexName, {
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
@@ -568,8 +620,8 @@ export function registerKnowledgeTools(
             });
           });
           const responses = await Promise.all(queryPromises);
-          for (const response of responses) {
-            if (!response || !Array.isArray(response.matches)) continue;
+          responses.forEach((response, legIndex) => {
+            if (!response || !Array.isArray(response.matches)) return;
             for (const match of response.matches) {
               const fields = (match.metadata ?? {}) as Record<string, unknown>;
               hits.push({
@@ -578,9 +630,10 @@ export function registerKnowledgeTools(
                 text: (fields['text'] as string) ?? '',
                 entityType: (fields['entity_type'] as string) ?? 'document',
                 fields,
+                namespace: legs[legIndex]!.namespace,
               });
             }
-          }
+          });
         } else {
           // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
           const searchPromises = legs.map(({ namespace: ns, filter }) => {
@@ -599,20 +652,24 @@ export function registerKnowledgeTools(
           });
 
           const responses = await Promise.all(searchPromises);
-          for (const response of responses) {
+          responses.forEach((response, legIndex) => {
             if (response?.result?.hits) {
-              hits.push(...parseHits(response.result.hits));
+              const namespace = legs[legIndex]!.namespace;
+              hits.push(...parseHits(response.result.hits).map((hit) => ({ ...hit, namespace })));
             }
-          }
+          });
         }
 
-        // Gate, dedup by id, then order by tier (this chat -> other chats ->
-        // untagged) and score. Outside the memory index every hit is tier 0.
-        let ranked = tierHits(hits, scope, deps.db).slice(0, RERANK_CANDIDATE_CAP);
+        // Gate, dedup by id, then order: memories by tier (this chat -> other
+        // chats -> untagged) and score, documents merged in by score. Outside the
+        // memory index every hit is tier 0.
+        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false)
+          .slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 
         // Client-side rerank if configured. It scores every candidate, then the
-        // tier order is restored so rerank reorders within a tier only.
+        // tier order is restored so rerank reorders memories within a tier only;
+        // documents are merged back in by their rerank score.
         if (profile.rerank && ranked.length > 0) {
           try {
             const rerankResult = await pc.inference.rerank({
@@ -634,7 +691,7 @@ export function registerKnowledgeTools(
                 reranked.push({ ...original, score: doc.score });
               }
             }
-            ranked = byTierStable(reranked);
+            ranked = orderHits(reranked, true);
             limit = Math.min(profile.rerankTopN, MAX_RESULTS);
           } catch (rerankErr) {
             log.warn({ err: rerankErr }, 'Rerank failed — using vector scores');

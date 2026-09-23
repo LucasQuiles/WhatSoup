@@ -159,6 +159,11 @@ function seed(records = RECORDS): void {
   store.set('mw-mind/__default__', records.map((r) => ({ ...r, fields: { ...r.fields } })));
 }
 
+const AS_INSTANCE: KnowledgeSearchDeps = {
+  identities: () => identities,
+  contactRecallScopes: { [MEMBER_A]: 'instance' },
+};
+
 function groupSession(actor: string): SessionContext {
   return { tier: 'chat-scoped', conversationKey: GROUP_KEY, deliveryJid: GROUP_JID, actorJid: actor };
 }
@@ -244,17 +249,44 @@ describe('memory_write / knowledge_search namespace agreement', () => {
   });
 });
 
-describe('knowledge_search ranking outside configurable groups', () => {
-  it('ranks a DM: this chat, then other chats by score, then untagged last', async () => {
-    seed();
-    const { knowledgeSearch } = registerTools();
+describe('knowledge_search in direct chats', () => {
+  const WHOLE_INSTANCE = [
+    'dm-a', 'dm-owner', 'g-own-b', 'g-context', 'g-own-a', 'g-unattributed', 'untagged',
+  ];
 
-    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toEqual([
-      'dm-a', 'dm-owner', 'g-own-b', 'g-context', 'g-own-a', 'g-unattributed', 'untagged',
-    ]);
+  it('holds a non-admin contact to this chat and untagged records by default', async () => {
+    seed();
+    const unconfigured = registerTools();
+    expect(await search(unconfigured.knowledgeSearch, dmSession(MEMBER_A))).toEqual(['dm-a', 'untagged']);
+
+    // Another contact's setting does not widen this one.
+    const otherConfigured = registerTools({
+      identities: () => identities,
+      contactRecallScopes: { [MEMBER_B]: 'instance', [MEMBER_A]: 'chat' },
+    });
+    expect(await search(otherConfigured.knowledgeSearch, dmSession(MEMBER_A))).toEqual(['dm-a', 'untagged']);
   });
 
-  it('queries this chat in every namespace alongside the unfiltered leg', async () => {
+  it('ranks the whole instance for a contact configured as instance: this chat, other chats, untagged', async () => {
+    seed();
+    const { knowledgeSearch } = registerTools(AS_INSTANCE);
+
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toEqual(WHOLE_INSTANCE);
+  });
+
+  it('ranks the whole instance for an admin and for the operator instance', async () => {
+    seed();
+    const admin = registerTools({ identities: () => identities, db: adminDb() });
+    expect(await search(admin.knowledgeSearch, dmSession(OWNER))).toEqual([
+      'dm-owner', 'dm-a', 'g-own-b', 'g-context', 'g-own-a', 'g-unattributed', 'untagged',
+    ]);
+
+    configState.botName = 'q';
+    const operator = registerTools();
+    expect(await search(operator.knowledgeSearch, dmSession(MEMBER_A))).toEqual(WHOLE_INSTANCE);
+  });
+
+  it('queries this chat in every memory namespace alongside the unfiltered leg, and documents once', async () => {
     const { knowledgeSearch } = registerTools();
 
     await knowledgeSearch.handler({ index: 'mw-mind', query: 'this chat first' }, dmSession(MEMBER_A));
@@ -264,14 +296,29 @@ describe('knowledge_search ranking outside configurable groups', () => {
       { namespace: '__default__', filter: { chat_jid: { $in: expect.arrayContaining([MEMBER_A, pn(MEMBER_A)]) } } },
       { namespace: '__default__' },
     ]);
+    expect(queries.filter((q) => q.namespace === 'onedrive')).toEqual([{ namespace: 'onedrive' }]);
   });
+
+  it('merges documents by relevance: a relevant document outranks weakly relevant memories', async () => {
+    seed();
+    store.set('mw-mind/onedrive', [{ id: 'doc-relevant', score: 0.8, fields: { text: 'relevant document' } }]);
+    store.set('mw-mind/local-docs', [{ id: 'doc-weak', score: 0.05, fields: { text: 'weak document' } }]);
+    const { knowledgeSearch } = registerTools(AS_INSTANCE);
+
+    expect(await search(knowledgeSearch, dmSession(MEMBER_A))).toEqual([
+      'dm-a', 'dm-owner', 'g-own-b', 'doc-relevant', 'g-context', 'g-own-a', 'g-unattributed', 'untagged',
+    ]);
+  });
+});
+
+describe('knowledge_search ranking outside configurable groups', () => {
 
   it('does not let duplicate ids from the two legs take result slots', async () => {
     const extra = Array.from({ length: 6 }, (_, i) => ({
       id: `other-${i}`, score: 0.4 - i * 0.01, fields: { text: `other chat ${i}`, chat_jid: `1555000100${i}` },
     }));
     seed([...RECORDS, ...extra]);
-    const { knowledgeSearch } = registerTools();
+    const { knowledgeSearch } = registerTools(AS_INSTANCE);
 
     const ids = await search(knowledgeSearch, dmSession(MEMBER_A));
     expect(ids).toHaveLength(8);
@@ -316,12 +363,14 @@ describe('knowledge_search ranking outside configurable groups', () => {
     expect(ids.at(-1)).toBe('untagged');
   });
 
-  it('returns nothing from the memory index for a chat session with no conversation', async () => {
+  it('returns no memories for a chat session with no conversation, but still searches documents', async () => {
     seed();
+    store.set('mw-mind/onedrive', [{ id: 'doc', score: 0.4, fields: { text: 'document' } }]);
     const { knowledgeSearch } = registerTools();
 
-    expect(await search(knowledgeSearch, { tier: 'chat-scoped' })).toEqual([]);
-    expect(queries).toEqual([]);
+    expect(await search(knowledgeSearch, { tier: 'chat-scoped' })).toEqual(['doc']);
+    expect(queries.map((q) => q.namespace).sort()).toEqual(['local-docs', 'onedrive', 'whatsapp-contacts']);
+    expect(queries.every((q) => q.filter === undefined)).toBe(true);
   });
 
   it('keeps tier order after rerank and minScore', async () => {
@@ -336,7 +385,7 @@ describe('knowledge_search ranking outside configurable groups', () => {
         .map((doc, index) => ({ index, score: doc.id === 'untagged' ? 0.99 : doc.id === 'g-own-a' ? 0.1 : 0.5 - index * 0.01 }))
         .sort((a, b) => b.score - a.score),
     }));
-    const { knowledgeSearch } = registerTools();
+    const { knowledgeSearch } = registerTools(AS_INSTANCE);
 
     const ids = await search(knowledgeSearch, dmSession(MEMBER_A));
     expect(rerankMock.mock.calls[0]![0].topN).toBe(7);
@@ -353,8 +402,11 @@ describe('knowledge_search in configurable groups', () => {
     });
 
     expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)))).toEqual(['g-context', 'g-own-a', 'g-unattributed']);
+    const documentNamespaces = new Set(['local-docs', 'onedrive', 'whatsapp-contacts']);
     for (const query of queries) {
-      expect(query.filter).toEqual({ chat_jid: { $in: expect.arrayContaining([GROUP_KEY, GROUP_JID]) } });
+      expect(query.filter).toEqual(documentNamespaces.has(query.namespace)
+        ? undefined
+        : { chat_jid: { $in: expect.arrayContaining([GROUP_KEY, GROUP_JID]) } });
     }
   });
 
@@ -384,15 +436,30 @@ describe('knowledge_search in configurable groups', () => {
     ]);
   });
 
-  it('keeps the boundary under an explicit namespace argument', async () => {
-    seed();
-    store.set('mw-mind/onedrive', [{ id: 'doc', score: 0.9, fields: { text: 'owner document' } }]);
+  it('keeps the boundary under an explicit memory namespace argument', async () => {
+    store.set('mw-mind/whatsapp-facts', [
+      { id: 'fact-dm', score: 0.9, fields: { text: 'fact from a direct chat', chat_jid: pn(MEMBER_B), sender_jid: pn(MEMBER_B) } },
+      { id: 'fact-untagged', score: 0.8, fields: { text: 'fact without a chat' } },
+    ]);
     const { knowledgeSearch } = registerTools();
 
-    expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)), { namespace: 'onedrive' })).toEqual([]);
+    expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)), { namespace: 'whatsapp-facts' })).toEqual([]);
     expect(queries).toEqual([
-      { namespace: 'onedrive', filter: { chat_jid: { $in: expect.arrayContaining([GROUP_KEY]) } } },
+      { namespace: 'whatsapp-facts', filter: { chat_jid: { $in: expect.arrayContaining([GROUP_KEY]) } } },
     ]);
+  });
+
+  it('returns documents in a configurable group as main does, merged by relevance', async () => {
+    seed();
+    store.set('mw-mind/onedrive', [{ id: 'doc-relevant', score: 0.8, fields: { text: 'relevant document' } }]);
+    store.set('mw-mind/local-docs', [{ id: 'doc-weak', score: 0.05, fields: { text: 'weak document' } }]);
+    const { knowledgeSearch } = registerTools();
+
+    expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)))).toEqual([
+      'doc-relevant', 'g-context', 'g-own-a', 'g-unattributed', 'doc-weak',
+    ]);
+    expect(await search(knowledgeSearch, groupSession(pn(MEMBER_A)), { namespace: 'onedrive' })).toEqual(['doc-relevant']);
+    expect(queries.filter((q) => q.namespace === 'onedrive').every((q) => q.filter === undefined)).toBe(true);
   });
 });
 

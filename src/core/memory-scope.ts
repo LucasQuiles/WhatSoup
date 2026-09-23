@@ -6,8 +6,13 @@
 // it came from or is about (`sender_jid`). Recall is ranked, not locked, except in
 // groups where other people can read the bot's replies:
 //
-//   dm                 a direct chat: the whole instance, ranked
-//                      this chat -> other chats -> untagged.
+//   dm_chat            a direct chat with a non-admin contact (the default,
+//                      `contactRecallScopes` value 'chat'): this chat, then
+//                      untagged. Other chats are excluded, so a shared instance
+//                      never recalls one contact's memories to another.
+//   dm                 a direct chat with a contact configured as 'instance', or a
+//                      global session with no conversation: the whole instance,
+//                      ranked this chat -> other chats -> untagged.
 //   dm_lane            a group whose every member is the instance owner or a bot
 //                      account: same as dm.
 //   unrestricted       the operator instance, or a sender verified as one of the
@@ -19,6 +24,9 @@
 //                      `sharedWorkflowGroups` gets all of this group's records.
 //   no_context         a chat-scoped session with no pinned conversation: nothing
 //                      from the memory index (fail closed).
+//
+// These kinds gate chat-attributed memory only. Document namespaces are not
+// scoped; knowledge_search merges them by relevance (see knowledge.ts).
 //
 // The predicates here are pure over explicit inputs so the MCP knowledge_search
 // tool and the chat runtime apply one rule.
@@ -33,7 +41,10 @@ import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 
-export type MemoryScopeKind = 'dm' | 'dm_lane' | 'unrestricted' | 'configurable_group' | 'no_context';
+export type MemoryScopeKind = 'dm_chat' | 'dm' | 'dm_lane' | 'unrestricted' | 'configurable_group' | 'no_context';
+
+/** Per-contact recall scope for a non-admin direct chat (`contactRecallScopes`). */
+export type ContactRecallScope = 'chat' | 'instance';
 
 /** 0 = this chat, 1 = another chat, 2 = untagged (no chat attribution). */
 export type MemoryTier = 0 | 1 | 2;
@@ -262,6 +273,32 @@ export interface MemoryScopeDeps {
   membership?: GroupMembershipReader | null;
   /** Group JIDs or conversation keys configured as shared workflows. */
   sharedWorkflowGroups: Iterable<string>;
+  /** Phone -> recall scope for non-admin direct chats; unset means 'chat'. */
+  contactRecallScopes?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The recall scope configured for a direct-chat contact. Only a sender on an
+ * authenticated transport is looked up (a spoofable SMS number never widens
+ * recall); phones compare after E.164 normalisation, LIDs after folding to a
+ * phone. Anything unset, unverified or not 'instance' is 'chat'.
+ */
+export function contactRecallScope(
+  actorJid: string | undefined,
+  scopes: Readonly<Record<string, string>> | undefined,
+  db?: Database | null,
+): ContactRecallScope {
+  if (!actorJid || !scopes || !isAuthenticatedSenderJid(actorJid)) return 'chat';
+  // WhatsApp senders compare as phones; other transports (Signal UUIDs,
+  // iMessage addresses) must match their configured identifier exactly.
+  const whatsapp = isPnJid(actorJid) || isLidJid(actorJid);
+  const identity = whatsapp ? normalizePhoneE164(foldSenderIdentity(actorJid, db)) : bareNumber(actorJid);
+  if (!identity) return 'chat';
+  for (const [contact, scope] of Object.entries(scopes)) {
+    if (scope !== 'instance') continue;
+    if ((whatsapp ? normalizePhoneE164(contact) : contact.trim()) === identity) return 'instance';
+  }
+  return 'chat';
 }
 
 /**
@@ -306,7 +343,11 @@ export async function resolveMemoryScope(
   if (isVerifiedAdminSender(request.actorJid, deps.identities.adminPhones, db)) {
     return { ...base, kind: 'unrestricted', reason: 'admin_sender' };
   }
-  if (!isGroupContext(rawKey, request.deliveryJid)) return { ...base, kind: 'dm', reason: 'direct_chat' };
+  if (!isGroupContext(rawKey, request.deliveryJid)) {
+    return contactRecallScope(request.actorJid, deps.contactRecallScopes, db) === 'instance'
+      ? { ...base, kind: 'dm', reason: 'contact_scope_instance' }
+      : { ...base, kind: 'dm_chat', reason: 'contact_scope_chat' };
+  }
 
   const groupJid = groupJidFor(rawKey, request.deliveryJid);
   const participants = deps.membership ? await deps.membership.participants(groupJid) : null;
@@ -317,9 +358,7 @@ export async function resolveMemoryScope(
   const shared = new Set([...deps.sharedWorkflowGroups].map((g) => foldChatAttribution(g, db)));
   // Only an authenticated transport identifies the sender; anything else
   // leaves the group's shared records only.
-  const verifiedSender = request.actorJid && isAuthenticatedSenderJid(request.actorJid)
-    ? foldSenderIdentity(request.actorJid, db)
-    : undefined;
+  const verifiedSender = verifiedSenderIdentity(request.actorJid, db);
   return {
     ...base,
     kind: 'configurable_group',
@@ -330,23 +369,36 @@ export async function resolveMemoryScope(
 }
 
 /**
- * Chat runtime recall: may the per-sender leg (the sender's records from every
- * chat) run unfiltered here? Yes in a direct chat, for the operator instance, and
- * for a verified admin sender. In any other group it is held to this group, so a
- * member's DM memories are never recalled into a group. The chat runtime has no
- * membership reader, so it cannot prove a DM lane and treats every group as
- * configurable.
+ * Chat runtime recall boundary, the same rule as knowledge_search applied to its
+ * three legs (chat, sender, self):
+ *   open       nothing held: the operator instance, a verified admin, or a
+ *              direct-chat contact configured as 'instance'.
+ *   this_chat  the sender leg keeps only this chat's records: a direct chat with
+ *              a default ('chat') contact, or a shared-workflow group.
+ *   group      as this_chat, and the chat leg keeps only the group's shared
+ *              records and the sender's own: any other group.
+ * The chat runtime has no membership reader, so it cannot prove a DM lane and
+ * treats every group as configurable.
  */
-export function senderRecallCrossesChats(input: {
+export type ChatRecallBoundary = 'open' | 'this_chat' | 'group';
+
+export function chatRecallBoundary(input: {
   chatJid: string;
   senderJid: string;
   operatorInstance: boolean;
   adminPhones: Set<string>;
   db?: Database | null;
-}): boolean {
-  if (!isGroupJid(input.chatJid)) return true;
-  if (input.operatorInstance) return true;
-  return isVerifiedAdminSender(input.senderJid, input.adminPhones, input.db);
+  sharedWorkflowGroups?: Iterable<string>;
+  contactRecallScopes?: Readonly<Record<string, string>>;
+}): ChatRecallBoundary {
+  if (input.operatorInstance) return 'open';
+  if (isVerifiedAdminSender(input.senderJid, input.adminPhones, input.db)) return 'open';
+  if (!isGroupJid(input.chatJid)) {
+    return contactRecallScope(input.senderJid, input.contactRecallScopes, input.db) === 'instance' ? 'open' : 'this_chat';
+  }
+  const chat = foldChatAttribution(input.chatJid, input.db);
+  const shared = [...(input.sharedWorkflowGroups ?? [])].some((g) => foldChatAttribution(g, input.db) === chat);
+  return shared ? 'this_chat' : 'group';
 }
 
 // ── per-record gate and ranking ────────────────────────────────────────────
@@ -384,10 +436,25 @@ export function memoryHitTier(
   if (!rawChat.trim()) return includesUntagged(scope) ? 2 : null;
   const thisChat = scope.chatKey !== undefined && fold.chat(rawChat) === scope.chatKey;
 
+  if (scope.kind === 'dm_chat') return thisChat ? 0 : null;
   if (scope.kind !== 'configurable_group') return thisChat ? 0 : 1;
 
   if (!thisChat) return null;
-  if (scope.sharedWorkflow || isGroupSharedRecord(fields)) return 0;
+  return scope.sharedWorkflow || isOwnOrSharedGroupRecord(fields, scope.verifiedSender, fold) ? 0 : null;
+}
+
+/** A record of this group that the verified sender may see: shared, or their own. */
+export function isOwnOrSharedGroupRecord(
+  fields: Record<string, unknown>,
+  verifiedSender: string | undefined,
+  fold: MemoryIdentityFold,
+): boolean {
+  if (isGroupSharedRecord(fields)) return true;
   const sender = typeof fields['sender_jid'] === 'string' ? fold.sender(fields['sender_jid']) : '';
-  return scope.verifiedSender !== undefined && sender === scope.verifiedSender ? 0 : null;
+  return verifiedSender !== undefined && sender === verifiedSender;
+}
+
+/** The folded sender identity when the transport authenticates it, else undefined. */
+export function verifiedSenderIdentity(actorJid: string | undefined, db?: Database | null): string | undefined {
+  return actorJid && isAuthenticatedSenderJid(actorJid) ? foldSenderIdentity(actorJid, db) : undefined;
 }

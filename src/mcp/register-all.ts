@@ -91,6 +91,7 @@ function knowledgeSearchDeps(
     }),
     membership,
     sharedWorkflowGroups: config.sharedWorkflowGroups,
+    contactRecallScopes: config.contactRecallScopes,
   };
 }
 

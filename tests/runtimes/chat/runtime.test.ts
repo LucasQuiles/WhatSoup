@@ -856,15 +856,15 @@ describe('Media processing', () => {
 
     // loadContext uses the processed content
     // QR-006: 5th arg is the per-message traceId, threaded through so
-    // the read path's logs correlate with the rest of the request. The 6th
-    // lets the sender leg cross chats: a direct chat may.
+    // the read path's logs correlate with the rest of the request. The 6th is
+    // the recall boundary: a non-admin contact's direct chat defaults to itself.
     expect(mockLoadContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
       expect.any(String),
       processedContent,
       expect.any(String),
-      true,
+      'this_chat',
     );
 
     // LLM request uses processed content
@@ -895,11 +895,11 @@ describe('Media processing', () => {
       expect.any(String),
       expect.any(String),
       traceId,
-      true,
+      'this_chat',
     );
   });
 
-  it('holds the sender recall leg to the group when a group sender is not a verified admin', async () => {
+  it('applies the group recall boundary when a group sender is not a verified admin', async () => {
     const { handler } = makeHandler();
 
     await handleAndDrain(handler, makeIncomingMessage({
@@ -914,7 +914,7 @@ describe('Media processing', () => {
       '15550009999@s.whatsapp.net',
       expect.any(String),
       expect.any(String),
-      false,
+      'group',
     );
   });
 

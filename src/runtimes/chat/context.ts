@@ -13,7 +13,13 @@ import {
   type MemoryOperationFailureCode,
 } from '../../lib/memory-operation-telemetry.ts';
 import { routeQuery } from './memory/query-router.ts';
-import { foldChatAttribution } from '../../core/memory-scope.ts';
+import {
+  foldChatAttribution,
+  isOwnOrSharedGroupRecord,
+  memoryIdentityFold,
+  verifiedSenderIdentity,
+  type ChatRecallBoundary,
+} from '../../core/memory-scope.ts';
 
 const log = createChildLogger('conversation');
 
@@ -122,10 +128,12 @@ export async function loadContextDetailed(
   messageText: string,
   traceId?: string,
   /**
-   * False holds the sender leg to this chat (see senderRecallCrossesChats), so a
-   * group never recalls a member's records from other chats or their DMs.
+   * Recall boundary (see chatRecallBoundary). 'this_chat' holds the sender leg to
+   * this chat; 'group' also holds the chat leg to the group's shared records and
+   * the sender's own, so a group never recalls a member's DMs or another
+   * member's private records.
    */
-  senderAcrossChats: boolean = true,
+  boundary: ChatRecallBoundary = 'open',
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -180,9 +188,15 @@ export async function loadContextDetailed(
         : pinecone.searchSelfFactsDetailed(messageText),
     ),
   ]);
-  const chatResults = chatDetails.results;
   const thisChat = foldChatAttribution(chatJid);
-  const senderResults = senderAcrossChats
+  const fold = memoryIdentityFold();
+  const sender = verifiedSenderIdentity(senderJid);
+  const chatResults = boundary === 'group'
+    ? chatDetails.results.filter((result) => isOwnOrSharedGroupRecord(
+      { sender_jid: result.record.senderJid, memory_type: result.record.memoryType }, sender, fold,
+    ))
+    : chatDetails.results;
+  const senderResults = boundary === 'open'
     ? senderDetails.results
     : senderDetails.results.filter((result) => foldChatAttribution(result.record.chatJid) === thisChat);
   const selfResults = selfDetails.results;

@@ -478,6 +478,7 @@ into place during deployment.
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
 | `adminPhones` | string[] | yes | — | Non-empty array of configured administrator identities. Canonical form depends on `transport`: phone digits for Baileys/Twilio, lowercase Signal UUID or E.164 wire identity for Signal, and AppleID email or E.164 wire identity for iMessage. All elements must be non-empty strings. |
+| `contactRecallScopes` | object | no | `{}` | Memory recall scope per direct-chat contact: phone number (any spelling; compared as E.164 digits) → `chat` or `instance`. A contact who is not an `adminPhones` identity recalls only that direct chat's memories plus untagged records unless set to `instance`, which gives the whole instance (this chat, then other chats, then untagged). Unset means `chat`. Only a sender on an authenticated transport is matched, and other values are dropped. `adminPhones` identities and the `q` instance always get the whole instance. See [Memory recall scope](#memory-recall-scope). |
 | `internalPeerJids` | string[] | no | `[]` | Exact authenticated direct-chat JIDs whose outbound messages are internal operator coordination. Ordinary paths and operator vocabulary are preserved, while secrets and credential paths remain masked. This does not grant inbound admin access. Group JIDs, duplicate entries, whitespace, and spoofable transports such as `@sms` are rejected. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
@@ -1147,19 +1148,30 @@ profile that already lists the default namespace is searched as configured.
 ##### Memory recall scope
 
 Every `knowledge_search` of `memory.pinecone.index`, with or without a
-`namespace` argument, is scoped to the calling conversation
-(`src/core/memory-scope.ts`). Recall ranks records; it does not lock them out,
-except in groups other people can read:
+`namespace` argument, scopes its chat memories to the calling conversation
+(`src/core/memory-scope.ts`). Recall ranks memories; it does not lock them out,
+except in groups other people can read and in direct chats with contacts who
+are not instance admins:
 
-| Calling context | How it is recognised | What is returned, in order |
+| Calling context | How it is recognised | Memories returned, in order |
 |---|---|---|
-| Direct chat | the conversation is not a group | this chat, then other chats, then untagged records |
-| DM-lane group | every group member is an `adminPhones` identity, this bot, or a `siblingPhones` bot (membership read live and re-read on any participant change) | same as a direct chat |
-| Operator or admin | the instance is `q`, or the sender is an `adminPhones` identity on an authenticated transport | same as a direct chat |
+| Direct chat, contact scope `chat` (default) | a non-admin contact with no `contactRecallScopes` entry, or one set to `chat` | this chat, then untagged records |
+| Direct chat, contact scope `instance` | a contact set to `instance` in `contactRecallScopes`, sending over an authenticated transport | this chat, then other chats, then untagged records |
+| DM-lane group | every group member is an `adminPhones` identity, this bot, or a `siblingPhones` bot (membership read live and re-read on any participant change) | this chat, then other chats, then untagged records |
+| Operator or admin | the instance is `q`, or the sender is an `adminPhones` identity on an authenticated transport (WhatsApp's per-group admin role does not count) | this chat, then other chats, then untagged records |
 | Configurable group | any other group, including one whose membership cannot be read or contains an unmapped LID | this group's shared records, and records of the verified sender in this group |
 | Global session, no conversation | tier `global` with no pinned conversation | other chats, then untagged records |
 | Chat session, no conversation | tier `chat-scoped` with no pinned conversation | nothing |
 
+- **Chat memories and documents.** The scope applies only to the memory
+  namespaces: the default namespace `memory_write` writes to, and the WhatsApp
+  conversation roles in `memory.pinecone.namespaces` (`facts`, `chunks`,
+  `summaries`, `legacy`). Every other namespace of the index (for example the
+  `contacts`, `localDocs` and `oneDrive` roles) is a document namespace: it is
+  searched unfiltered in every context, as before scoping, and its hits are
+  merged into the memory order by relevance score (after rerank when the
+  profile reranks), so a relevant document can sit above a weakly relevant
+  memory.
 - **Untagged** records have no `chat_jid`. They predate per-chat attribution,
   so direct chats rank them last and configurable groups never see them.
 - **Shared** group records are facts about the group (`memory_type:
@@ -1173,11 +1185,13 @@ except in groups other people can read:
 - Stored `chat_jid` spellings (`<id>@g.us` and `<id>_at_g.us`, a phone JID and
   its bare digits, a mapped `@lid`) all count as the same chat.
 
-The chat runtime applies the same group rule to its per-sender recall: in a
-group, unless the instance is `q` or the sender is a verified admin, recall of
-the sender's records is held to that group, so a member's direct-chat records are
-never recalled into it. It has no membership reader, so it does not detect
-DM-lane groups.
+The chat runtime applies the same rules to its recall (`chatRecallBoundary`).
+Unless the instance is `q` or the sender is a verified admin: in a direct chat
+with a contact whose scope is `chat`, and in a shared-workflow group, recall of
+the sender's records is held to this chat; in any other group it is held to the
+group, and the group's own records are limited to shared records and the
+sender's own. It has no membership reader, so it does not detect DM-lane groups
+and treats them as configurable groups.
 
 #### Legacy Migration
 

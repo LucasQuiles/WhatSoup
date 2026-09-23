@@ -1455,6 +1455,14 @@ export const config = {
       .map((jid: string) => jid.trim()),
   ),
 
+  // Memory recall scope per direct-chat contact (phone -> 'chat' | 'instance').
+  // A non-admin contact's direct chat recalls only its own memories unless set
+  // to 'instance'. Other values are dropped. See src/core/memory-scope.ts.
+  contactRecallScopes: Object.fromEntries(
+    Object.entries(stringRecordProp(instance, 'contactRecallScopes'))
+      .filter(([, scope]) => scope === 'chat' || scope === 'instance'),
+  ) as Record<string, 'chat' | 'instance'>,
+
   // Control peers — phones trusted to send self-healing control messages.
   // stringRecordProp fails loud on non-string values (and trims), replacing
   // the former unchecked Record cast.
