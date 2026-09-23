@@ -14,7 +14,9 @@ import {
   findPineconeIndex,
   hasPineconeProjectGuard,
   matchesPineconeProjectGuard,
+  isOperatorInstance,
   pineconeProjectGuardError,
+  resolvePineconeProjectGuard,
   type PineconeProjectGuard,
 } from '../../../lib/pinecone-project-guard.ts';
 import {
@@ -398,18 +400,24 @@ function resolvePineconeApiKey(): string {
   });
 }
 
-function configuredPineconeProjectGuard(): PineconeProjectGuard {
+function resolvedPineconeProjectGuard(): ReturnType<typeof resolvePineconeProjectGuard> {
   const memory = (config as { memory?: { pinecone?: { projectId?: string; expectedHostSuffix?: string } } }).memory;
-  return {
+  return resolvePineconeProjectGuard((config as { botName?: unknown }).botName, {
     projectId: memory?.pinecone?.projectId,
     expectedHostSuffix: memory?.pinecone?.expectedHostSuffix,
-  };
+  });
 }
 
+function configuredPineconeProjectGuard(): PineconeProjectGuard {
+  return resolvedPineconeProjectGuard().guard;
+}
+
+// The operator instance is not exempt from the project check: when its config
+// sets no guard, resolvePineconeProjectGuard supplies the operator project.
 function pineconeProjectGuardRequired(): boolean {
   const botName = (config as { botName?: unknown }).botName;
   if (!isNonEmptyString(botName)) return false;
-  return botName.trim().toLowerCase() !== 'q';
+  return !isOperatorInstance(botName);
 }
 
 function missingRequiredProjectGuardError(guard: PineconeProjectGuard): string | null {
@@ -419,13 +427,27 @@ function missingRequiredProjectGuardError(guard: PineconeProjectGuard): string |
 }
 
 async function configuredProjectGuardError(client: Pinecone, targetIndex: string): Promise<string | null> {
-  const guard = configuredPineconeProjectGuard();
+  const { guard, source } = resolvedPineconeProjectGuard();
   const missingGuardError = missingRequiredProjectGuardError(guard);
   if (missingGuardError) return missingGuardError;
-  return pineconeProjectGuardError(client, targetIndex, guard, {
+  const guardError = await pineconeProjectGuardError(client, targetIndex, guard, {
     missingIndex: (indexName) => `Pinecone index "${indexName}" is missing for the configured key`,
     projectMismatch: (indexName) => `Pinecone index "${indexName}" is not in the configured project`,
   });
+  if (guardError) {
+    // Fail closed, loudly: every memory read and write on this instance is
+    // refused until the key and the expected project agree. Index, project
+    // and host stay out of the event, per the memory telemetry
+    // confidentiality contract.
+    logger.error(
+      {
+        instance: (config as { botName?: unknown }).botName,
+        guard_source: source,
+      },
+      'Pinecone project guard refused the configured key; memory reads and writes are disabled',
+    );
+  }
+  return guardError;
 }
 
 export interface MemoryRecord {
