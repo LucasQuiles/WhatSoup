@@ -7750,10 +7750,20 @@ describe('GET /health — shadowGate (advisory)', () => {
     expect((await diagnostic()).shadowGate).toEqual({ mode: 'off' });
   });
 
-  it('shadow mode before the first dispatched message reports an unavailable recorder', async () => {
+  it('shadow mode before the first dispatched message reports a not_started recorder', async () => {
     mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('lazy'), 'events') };
     expect((await diagnostic()).shadowGate).toEqual({
-      mode: 'shadow', recorder: 'unavailable', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+      mode: 'shadow', recorder: 'not_started', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+    });
+  });
+
+  it('a closed sink behind a registered recorder reports unavailable, not not_started', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('closed'), 'events') };
+    const recorder = getShadowGateRecorder(db, config);
+    expect(recorder).not.toBeNull();
+    await recorder!.close();
+    expect((await diagnostic()).shadowGate).toMatchObject({
+      mode: 'shadow', recorder: 'unavailable', sinkState: 'closed',
     });
   });
 

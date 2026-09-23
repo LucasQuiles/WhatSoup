@@ -311,7 +311,7 @@ export function getShadowGateStats(): ShadowGateCounts {
   return Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((key) => [key, 0])) as ShadowGateCounts;
 }
 
-export type ShadowGateRecorderHealth = 'disabled' | 'ready' | 'degraded' | 'unavailable';
+export type ShadowGateRecorderHealth = 'not_started' | 'disabled' | 'ready' | 'degraded' | 'unavailable';
 
 export type ShadowGateHealth =
   | { mode: 'off' }
@@ -325,16 +325,16 @@ export type ShadowGateHealth =
 
 /**
  * Advisory health projection: closed codes and counters only. Mode off does no
- * work. In shadow mode, `unavailable` means no recorder to read (none created
- * yet — creation is lazy on the first dispatched message — or the sink is
- * closed or unreadable); `disabled` means creation failed and is latched until
- * restart. Never throws.
+ * work. In shadow mode, `not_started` is the normal state before the first
+ * dispatched message (creation is lazy); `disabled` means creation failed and
+ * is latched until restart; `unavailable` means the sink is closed or its
+ * status is unreadable. Never throws.
  */
 export function getShadowGateHealth(config: Pick<ShadowGateConfig, 'shadowGate'>): ShadowGateHealth {
   if (config.shadowGate?.mode !== 'shadow') return { mode: 'off' };
   const counts = getShadowGateStats();
   const unread = { mode: 'shadow', sinkState: null, sinkDegradedReason: null, counts } as const;
-  if (!recorder) return { ...unread, recorder: recorderDisabled ? 'disabled' : 'unavailable' };
+  if (!recorder) return { ...unread, recorder: recorderDisabled ? 'disabled' : 'not_started' };
   try {
     const { state, degradedReason } = recorder.sinkStatus();
     const health: ShadowGateRecorderHealth =
