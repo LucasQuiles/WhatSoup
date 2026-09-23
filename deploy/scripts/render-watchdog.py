@@ -6,13 +6,19 @@ Replaces the ad-hoc `sed`/here-doc rendering done by hand on each host. Two
 host-free modes (NO ssh, NO host mutation, NO secret access):
 
   render  --template T --bot-name N --bot-port P --fleet-port F --home H
-          [--username U] [--out FILE] [--json]
+          [--username U] [--bot-errors-emit PATH] [--out FILE] [--json]
       Substitute the host tokens, FAIL CLOSED if any known placeholder survives
       (the exact bug that churned mini7/8/9: literal BOT_PORT/FLEET_PORT), reject
       non-numeric/out-of-range ports AND shell-unsafe identity values (the
       substitution is raw text replacement, so an unvalidated bot name, home, or
       username would become executable fragments in the rendered script), and
       emit the rendered script + its sha256.
+      A template carrying __BOT_ERRORS_EMIT__ gets the BOT ERRORS emitter of
+      the release tree it is rendered from
+      (<template>/../../scripts/bot-errors-emit.py) unless --bot-errors-emit
+      names another; hosts run from per-release trees, so this is the emitter
+      the host actually runs. A missing emitter is BAD_INPUT: a watchdog that
+      cannot page is not installed.
 
   verify  --script FILE [--json]
       Report any surviving placeholder tokens + sha256 for an already-installed
@@ -25,7 +31,7 @@ Exit codes (typed failure classes):
   3 BAD_PORT                   (bot/fleet port not an integer in 1..65535)
   4 BAD_INPUT                  (missing arg / unreadable template)
   5 IO_ERROR                   (write failed)
-  6 UNSAFE_VALUE               (bot name / home / username outside the safe charset)
+  6 UNSAFE_VALUE               (bot name / home / username / emitter path outside the safe charset)
 
 The tool never reads credentials and never contacts a host. Installation
 (backup + checksum transfer + launchctl) stays an explicit owner-gated step.
@@ -41,7 +47,8 @@ from pathlib import Path
 
 # The exact tokens the watchdog template carries. Order: longest/disjoint first;
 # all are mutually non-substring so order does not affect correctness.
-PLACEHOLDER_TOKENS = ("__HOME__", "FLEET_PORT", "BOT_PORT", "BOT_NAME", "USERNAME")
+PLACEHOLDER_TOKENS = ("__HOME__", "FLEET_PORT", "BOT_PORT", "BOT_NAME", "USERNAME", "__BOT_ERRORS_EMIT__")
+EMIT_TOKEN = "__BOT_ERRORS_EMIT__"
 
 EXIT_OK = 0
 EXIT_UNSUBSTITUTED = 2
@@ -56,6 +63,20 @@ EXIT_UNSAFE_VALUE = 6
 _BOT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 _USERNAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,31}\Z")
 _HOME_RE = re.compile(r"/[A-Za-z0-9._/-]*\Z")
+_EMIT_RE = re.compile(r"/[A-Za-z0-9._/-]*\.py\Z")
+
+
+def default_emitter(template: str) -> str:
+    """The emitter of the release tree the template lives in."""
+    return str(Path(template).resolve().parent.parent / "scripts" / "bot-errors-emit.py")
+
+
+def _unsafe_emitter(value: str) -> str | None:
+    if any(token in value for token in PLACEHOLDER_TOKENS):
+        return "must not contain a reserved template placeholder token"
+    if not _EMIT_RE.fullmatch(value) or ".." in value.split("/"):
+        return "must be an absolute [A-Za-z0-9._/-] path to a .py file without .. segments"
+    return None
 
 
 def _unsafe_value(*, bot_name: str, home: str, username: str) -> tuple[str, str] | None:
@@ -92,8 +113,13 @@ def _valid_port(value: str) -> bool:
 
 
 def render(template_text: str, *, bot_name: str, bot_port: str, fleet_port: str,
-           home: str, username: str) -> str:
-    """Substitute host tokens into the template. Pure; no I/O."""
+           home: str, username: str, bot_errors_emit: str = "") -> str:
+    """Substitute host tokens into the template. Pure; no I/O.
+
+    The emitter token is substituted LAST so no other token is ever replaced
+    inside the emitter path; an empty value leaves the token for
+    find_placeholders to report.
+    """
     out = template_text
     for token, value in (
         ("__HOME__", home),
@@ -103,6 +129,8 @@ def render(template_text: str, *, bot_name: str, bot_port: str, fleet_port: str,
         ("USERNAME", username),
     ):
         out = out.replace(token, value)
+    if bot_errors_emit:
+        out = out.replace(EMIT_TOKEN, bot_errors_emit)
     return out
 
 
@@ -147,8 +175,22 @@ def cmd_render(args: argparse.Namespace) -> int:
               as_json=args.json, human=f"BAD_INPUT: cannot read template: {err}")
         return EXIT_BAD_INPUT
 
+    emitter = ""
+    if EMIT_TOKEN in template_text:
+        emitter = args.bot_errors_emit or default_emitter(args.template)
+        reason = _unsafe_emitter(emitter)
+        if reason is not None:
+            _emit({"mode": "render", "status": "unsafe_value", "field": "--bot-errors-emit", "reason": reason},
+                  as_json=args.json, human=f"UNSAFE_VALUE: --bot-errors-emit {reason}")
+            return EXIT_UNSAFE_VALUE
+        if not Path(emitter).is_file():
+            _emit({"mode": "render", "status": "bad_input", "error": f"BOT ERRORS emitter not found: {emitter}"},
+                  as_json=args.json, human=f"BAD_INPUT: BOT ERRORS emitter not found: {emitter}")
+            return EXIT_BAD_INPUT
+
     rendered = render(template_text, bot_name=args.bot_name, bot_port=args.bot_port,
-                      fleet_port=args.fleet_port, home=args.home, username=args.username)
+                      fleet_port=args.fleet_port, home=args.home, username=args.username,
+                      bot_errors_emit=emitter)
     remaining = find_placeholders(rendered)
     digest = sha256(rendered)
     payload = {
@@ -157,6 +199,8 @@ def cmd_render(args: argparse.Namespace) -> int:
         "bytes": len(rendered.encode("utf-8")), "placeholders_remaining": remaining,
         "status": "ok" if not remaining else "unsubstituted",
     }
+    if emitter:
+        payload["bot_errors_emit"] = emitter
     if remaining:
         _emit(payload, as_json=args.json,
               human=f"UNSUBSTITUTED_PLACEHOLDER: {', '.join(remaining)} survived render")
@@ -215,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--fleet-port", required=True)
     r.add_argument("--home", required=True)
     r.add_argument("--username", default="")
+    r.add_argument("--bot-errors-emit", default="")
     r.add_argument("--out", default=None)
     r.add_argument("--json", action="store_true")
     r.set_defaults(func=cmd_render)

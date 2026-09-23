@@ -129,6 +129,8 @@ class Harness:
 
         rendered = (
             _TEMPLATE.read_text(encoding="utf-8")
+            # render-watchdog.py bakes the release's emitter; use this repo's.
+            .replace("__BOT_ERRORS_EMIT__", str(Path(__file__).resolve().parents[1] / "bot-errors-emit.py"))
             .replace("__HOME__", str(self.home))
             .replace("FLEET_PORT", "9998")
             .replace("BOT_PORT", "9999")
@@ -258,7 +260,8 @@ class Harness:
     def run(self) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["zsh", str(self.script)],
-            env=dict(os.environ, HOME=str(self.home)),
+            env=dict(os.environ, HOME=str(self.home),
+                     BOT_ERRORS_OUTBOX_DIR=str(self.home / "bot-errors-outbox")),
             capture_output=True,
             text=True,
             timeout=20,

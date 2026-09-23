@@ -219,3 +219,71 @@ def test_find_placeholders_no_username_substring_false_positive():
     assert rw.find_placeholders("# operator account: USERNAME") == ["USERNAME"]
     # __HOME__ still detected when quoted/spaced despite its underscores.
     assert rw.find_placeholders('HOME_DIR="__HOME__"') == ["__HOME__"]
+
+
+# --- BOT ERRORS emitter path (baked at render time) ---------------------------
+# Hosts run from immutable release trees, not from a fixed checkout, so the
+# watchdog cannot guess where the emitter lives. The render bakes the emitter
+# of the release the template was rendered from, and refuses a path that does
+# not exist rather than installing a watchdog that can never page.
+
+_EMIT_FIXTURE = '#!/bin/zsh\nHOME_DIR="__HOME__"\nBOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"\n'
+
+
+def _release_tree(tmp_path: Path, with_emitter: bool = True) -> Path:
+    release = tmp_path / "releases" / "WhatSoup-release-abc123"
+    template = release / "deploy" / "templates" / "watchdog-script.sh"
+    template.parent.mkdir(parents=True)
+    template.write_text(_EMIT_FIXTURE, encoding="utf-8")
+    if with_emitter:
+        emitter = release / "deploy" / "scripts" / "bot-errors-emit.py"
+        emitter.parent.mkdir(parents=True)
+        emitter.write_text("# emitter\n", encoding="utf-8")
+    return template
+
+
+def _render_emit(template: Path, *extra: str) -> subprocess.CompletedProcess:
+    return _run("render", "--template", str(template), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", "/opt/zz-home", "--json", *extra)
+
+
+def test_render_bakes_the_emitter_of_the_release_it_renders_from(tmp_path):
+    template = _release_tree(tmp_path)
+    proc = _render_emit(template)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    expected = template.resolve().parents[1] / "scripts" / "bot-errors-emit.py"
+    assert payload["bot_errors_emit"] == str(expected)
+    body = _run("render", "--template", str(template), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002", "--home", "/opt/zz-home").stdout
+    assert f'BOT_ERRORS_EMIT="{expected}"' in body
+
+
+def test_render_refuses_a_release_without_an_emitter(tmp_path):
+    proc = _render_emit(_release_tree(tmp_path, with_emitter=False))
+    assert proc.returncode == 4, proc.stdout
+    assert json.loads(proc.stdout)["status"] == "bad_input"
+
+
+def test_render_accepts_an_explicit_existing_emitter(tmp_path):
+    template = _release_tree(tmp_path, with_emitter=False)
+    emitter = tmp_path / "other" / "bot-errors-emit.py"
+    emitter.parent.mkdir()
+    emitter.write_text("# emitter\n", encoding="utf-8")
+    proc = _render_emit(template, "--bot-errors-emit", str(emitter))
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(proc.stdout)["bot_errors_emit"] == str(emitter)
+
+
+def test_render_rejects_an_unsafe_emitter_path(tmp_path):
+    template = _release_tree(tmp_path)
+    for value in ("relative/bot-errors-emit.py", "/opt/x$(id)/bot-errors-emit.py", "/opt/BOT_NAME/e.py"):
+        proc = _render_emit(template, "--bot-errors-emit", value)
+        assert proc.returncode == 6, (value, proc.stdout)
+        assert json.loads(proc.stdout)["field"] == "--bot-errors-emit"
+
+
+def test_real_template_carries_the_emitter_placeholder():
+    assert "__BOT_ERRORS_EMIT__" in rw.PLACEHOLDER_TOKENS
+    assert 'BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"' in _TEMPLATE.read_text(encoding="utf-8")

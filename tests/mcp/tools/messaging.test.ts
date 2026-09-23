@@ -513,19 +513,21 @@ describe('registerMessagingTools', () => {
         { tier: 'global', conversationKey: 'main-chat' },
       );
 
+      // Issue 3457: the registry's post-resolution guard point denies in the
+      // same plain text as its pre-handler point (no JSON envelope).
       expect(result.isError).toBe(true);
       expect(calls).toHaveLength(0);
-      const body = JSON.parse(result.content[0].text);
-      expect(body.error).toMatch(/does not match session conversation/);
+      expect(result.content[0].text).toMatch(/does not match session conversation/);
+      expect(() => JSON.parse(result.content[0].text)).toThrow();
     });
 
     // ── session-pin fold (issue 3150 companion) ────────────────────────────
-    // BOTH pin layers — the registry's pre-handler cross-conversation guard
-    // and the handler's beforeAudit check — compare canonicalConversationKey
-    // (phone-folded, matching ingest QR-050), not bare toConversationKey. Two
-    // directions are pinned at each layer: the fold must let an own-thread
-    // @lid target SURVIVE its own pin, and it must NOT open a hole for a
-    // FOREIGN @lid mapped to a different phone.
+    // BOTH points of the registry's cross-conversation guard — pre-handler,
+    // and post-resolution (the beforeAudit call, issue 3457) — compare
+    // canonicalConversationKey (phone-folded, matching ingest QR-050), not bare
+    // toConversationKey. Two directions are pinned at each point: the fold
+    // must let an own-thread @lid target SURVIVE its own pin, and it must NOT
+    // open a hole for a FOREIGN @lid mapped to a different phone.
 
     describe('session-pin fold across LID canonicalization (3150)', () => {
       const PIN_PHONE = '15551230777';
@@ -585,10 +587,9 @@ describe('registerMessagingTools', () => {
       });
 
       it('still rejects a foreign @lid target mapped to a DIFFERENT phone (handler fold path, via alias)', async () => {
-        // Alias route: the registry's own pre-handler cross-conversation
-        // guard is skipped for `to` targets ("alias targets are resolved
-        // inside the tool handler, then checked there" — registry.ts), so
-        // this exercises the messaging beforeAudit fold's REJECT direction.
+        // Alias route: the guard's pre-handler point skips `to` targets (the
+        // alias is not resolved yet), so this exercises the post-resolution
+        // point's REJECT direction, called from send_message's beforeAudit.
         seedPinMapping(PIN_LID, PIN_PHONE_JID);
         seedPinMapping('11111110888', '15551230999@s.whatsapp.net');
         seedAlias(db, 'foreign-lid', '11111110888@lid');
@@ -601,8 +602,8 @@ describe('registerMessagingTools', () => {
 
         expect(result.isError).toBe(true);
         expect(calls).toHaveLength(0);
-        const body = JSON.parse(result.content[0].text);
-        expect(body.error).toMatch(/does not match session conversation/);
+        expect(result.content[0].text).toMatch(/does not match session conversation/);
+        expect(result.content[0].text).toContain('resolves to conversation "15551230999"');
       });
 
       it('still rejects a direct foreign @lid chatJid at the registry layer (defense in depth)', async () => {
@@ -707,8 +708,10 @@ describe('registerMessagingTools', () => {
         { tier: 'global', conversationKey: 'main-chat' },
       );
 
-      const body = JSON.parse(result.content[0].text);
-      expect(body.error).toBe('Invalid chatJid "not-a-jid": must be a valid JID');
+      // Issue 3457: the guard's post-resolution point rejects on the same
+      // validation channel and plain-text shape as its pre-handler point.
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe('Invalid chatJid "not-a-jid": must be a valid JID');
       expect(calls).toHaveLength(0);
     });
 
