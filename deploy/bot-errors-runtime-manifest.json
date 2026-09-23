@@ -735,7 +735,7 @@
     },
     {
       "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "b7c684bd207e166b0459d61a400b301602fbff8f0d8704ad879a4f2d4c8601ed",
+      "sha256": "ce15a87ea77ab5a15ca0bec8b6f8dcf8b02dbdddde2f2dae3abeddddc1e54f18",
       "mustContain": [
         "PLACEHOLDER_TOKENS",
         "EXIT_UNSUBSTITUTED",

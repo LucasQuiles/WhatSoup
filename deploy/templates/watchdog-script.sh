@@ -10,6 +10,9 @@
 #                   some hosts run the fleet API on a non-default port — see the host port map)
 #   NODE_BIN      — absolute path to pinned node binary, e.g.
 #                   __HOME__/.nvm/versions/node/v24.15.0/bin/node
+#   __BOT_ERRORS_EMIT__ — absolute path of the BOT ERRORS emitter. Render with
+#                   deploy/scripts/render-watchdog.py, which bakes the emitter
+#                   of the release tree the template is rendered from.
 #
 # Install to: ~/.local/bin/BOT_NAME-watchdog
 # chmod +x that file after writing.
@@ -43,13 +46,17 @@ CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
 # CRED_CLEAR_MAX_ATTEMPTS failures so an unreachable outbox cannot keep the
 # watchdog in ERROR forever.
 CRED_PAGED="$LOG_DIR/BOT_NAME-credential-dead.paged"
-# Present once this dead episode has logged "no emitter" (L3: warn once per
-# episode, not every two minutes). Removed on recovery and after a page lands.
+# Present once this dead episode has logged the "no emitter" detail line, so
+# it is written once per episode, not every two minutes (the ERROR state and
+# nonzero exit still repeat every cycle). Removed on recovery and after a page
+# lands.
 CRED_UNPAGED="$LOG_DIR/BOT_NAME-credential-dead.unpaged"
 CRED_CLEAR_MAX_ATTEMPTS=3
-# The shipped BOT ERRORS emitter writes to the host's durable outbox. Same
-# repo-root convention as deploy/scripts/install-bot-errors-launchd.sh.
-BOT_ERRORS_EMIT="${BOT_ERRORS_REPO_ROOT:-$HOME_DIR/LAB/WhatSoup}/deploy/scripts/bot-errors-emit.py"
+# The shipped BOT ERRORS emitter writes to the host's durable outbox. Hosts run
+# from per-release trees, so the path is baked at render time by
+# render-watchdog.py (the emitter of the release this was rendered from) rather
+# than guessed from a checkout location at run time.
+BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"
 CRED_ALERT_SOURCE="provider_credential_dead"
 WD_FINAL="ok"
 WD_EXIT=0
@@ -201,7 +208,8 @@ health_unknown() {
 # second argument selects another state file under the same rules (the
 # CRED_PAGED / CRED_UNPAGED stamps); the default is CRED_MARKER. `bump`
 # increments the integer an EXISTING file holds (empty = 0), prints the new
-# value, and exits 1 when the file is absent.
+# value, exits 1 when the file is absent, and exits 3 when its content is not a
+# count (so the caller can stop retrying instead of failing forever).
 credential_marker() {
   python3 - "$1" "${2:-$CRED_MARKER}" 2>>"$LOG" <<'MARKER_PY'
 import os
@@ -269,8 +277,11 @@ try:
         opened = os.fstat(marker_fd)
         if (opened.st_dev, opened.st_ino) != (marker.st_dev, marker.st_ino):
             reject()
-        raw = os.read(marker_fd, 64).decode("ascii").strip()
-        count = (int(raw) if raw else 0) + 1
+        try:
+            raw = os.read(marker_fd, 64).decode("ascii").strip()
+            count = (int(raw) if raw else 0) + 1
+        except ValueError:
+            raise SystemExit(3)
         os.lseek(marker_fd, 0, os.SEEK_SET)
         os.ftruncate(marker_fd, 0)
         os.write(marker_fd, f"{count}\n".encode("ascii"))
@@ -996,11 +1007,14 @@ PY
         fi
         credential_marker clear "$CRED_UNPAGED" || true
       elif [ "$page_rc" -eq 2 ]; then
-        # Retried every cycle (the emitter may be deployed mid-episode), but
-        # logged once per episode rather than every two minutes.
+        # A dead credential nobody is told about is an error, every cycle. The
+        # page is retried each cycle (the emitter may reappear); the detail
+        # line is written once per episode.
+        wd_note ERROR
+        WD_EXIT=1
         credential_marker state "$CRED_UNPAGED"
         if [ $? -eq 1 ]; then
-          log "WARN: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-DEAD not paged (set BOT_ERRORS_REPO_ROOT; retried each cycle, logged once per episode)"
+          log "ERROR: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-DEAD not paged (re-render this watchdog from the running release with render-watchdog.py; retried each cycle, logged once per episode)"
           credential_marker create "$CRED_UNPAGED" || true
         fi
       else
@@ -1048,7 +1062,13 @@ PY
     # after the clear was accepted, so a failed clear retries; after
     # CRED_CLEAR_MAX_ATTEMPTS consecutive failures (a missing emitter counts)
     # it is dropped with a WARN instead of holding the watchdog in ERROR.
-    if credential_marker state "$CRED_PAGED"; then
+    credential_marker state "$CRED_PAGED"
+    recovered_paged_rc=$?
+    if [ "$recovered_paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; not clearing"
+      wd_note ERROR
+      WD_EXIT=1
+    elif [ "$recovered_paged_rc" -eq 0 ]; then
       credential_page clear
       clear_rc=$?
       if [ "$clear_rc" -eq 0 ]; then
@@ -1059,8 +1079,18 @@ PY
           WD_EXIT=1
         fi
       else
-        clear_failures="$(credential_marker bump "$CRED_PAGED")" || clear_failures=""
-        if [ -z "$clear_failures" ]; then
+        clear_failures="$(credential_marker bump "$CRED_PAGED")"
+        bump_rc=$?
+        if [ "$bump_rc" -eq 3 ]; then
+          # A corrupt count cannot be trusted to ever reach the cap: treat it
+          # as the cap rather than retrying without bound.
+          log "WARN: unreadable clear-failure count in $CRED_PAGED; dropping it — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$bump_rc" -ne 0 ] || [ -z "$clear_failures" ]; then
           log "ERROR: cannot count failed clears in $CRED_PAGED; retrying next cycle"
           wd_note ERROR
           WD_EXIT=1

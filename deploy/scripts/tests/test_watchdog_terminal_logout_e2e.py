@@ -24,6 +24,7 @@ import json
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,10 +88,20 @@ _UNKNOWN_PROVIDER_BODY = json.dumps({
 })
 
 
-def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str = "9998") -> Path:
+_REPO_EMITTER = Path(__file__).resolve().parents[1] / "bot-errors-emit.py"
+
+
+def _render(
+    home: Path,
+    bot_name: str,
+    bot_port: str = "9999",
+    fleet_port: str = "9998",
+    emitter: Path = _REPO_EMITTER,
+) -> Path:
     text = _TEMPLATE.read_text(encoding="utf-8")
     rendered = (
-        text.replace("__HOME__", str(home))
+        text.replace("__BOT_ERRORS_EMIT__", str(emitter))
+        .replace("__HOME__", str(home))
         .replace("FLEET_PORT", fleet_port)
         .replace("BOT_PORT", bot_port)
         .replace("BOT_NAME", bot_name)
@@ -172,7 +183,8 @@ def _run_with_state(
         marker.symlink_to(home / "missing-parent" / "marker")
     elif marker_setup != "absent":
         raise AssertionError(f"unsupported marker setup: {marker_setup}")
-    env = dict(os.environ, HOME=str(home))
+    env = dict(os.environ, HOME=str(home), BOT_ERRORS_OUTBOX_DIR=str(tmp_path / "outbox"),
+               BOT_ERRORS_STATE_DIR=str(tmp_path / "bot-errors-state"))
     proc = subprocess.run(
         ["zsh", str(script)], env=env, capture_output=True, text=True, timeout=20
     )
@@ -316,38 +328,36 @@ class _PagingHost:
         token_file.parent.mkdir(parents=True)
         token_file.write_text(f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n", encoding="utf-8")
         token_file.chmod(0o600)
-        self.script = _render(self.home, bot_name)
+        # The emitter path is baked at render time (render-watchdog.py);
+        # tests swap what lives at that path instead of setting any env.
+        self.emitter = tmp_path / "release" / "deploy" / "scripts" / "bot-errors-emit.py"
+        self.emitter.parent.mkdir(parents=True)
+        self.stub_calls = tmp_path / "emit.calls"
+        self.script = _render(self.home, bot_name, emitter=self.emitter)
         self.logs = self.home / "Library" / "Logs" / "whatsoup"
         self.logs.mkdir(parents=True, exist_ok=True)
         self.marker = self.logs / f"{bot_name}-credential-dead.marker"
         self.stamp = self.logs / f"{bot_name}-credential-dead.paged"
         self.outbox = tmp_path / "bot-errors-state" / "outbox"
         self.state = tmp_path / "bot-errors-state"
-        # A repo root with no emitter at all: the "missing emitter" host.
-        self.fake_root = tmp_path / "fake-repo"
-        self.stub_calls = tmp_path / "emit.calls"
-        self.repo_root = self.fake_root
 
     def use_real_emitter(self) -> None:
-        self.repo_root = _REPO_ROOT
+        self.remove_emitter()
+        self.emitter.symlink_to(_REPO_EMITTER)
 
     def use_stub_emitter(self, rc: int) -> None:
-        emitter = self.fake_root / "deploy" / "scripts" / "bot-errors-emit.py"
-        emitter.parent.mkdir(parents=True, exist_ok=True)
-        emitter.write_text(
+        self.remove_emitter()
+        self.emitter.write_text(
             "import sys\n"
             f"with open({str(self.stub_calls)!r}, 'a', encoding='utf-8') as fh:\n"
             "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
             f"raise SystemExit({rc})\n",
             encoding="utf-8",
         )
-        self.repo_root = self.fake_root
 
     def remove_emitter(self) -> None:
-        emitter = self.fake_root / "deploy" / "scripts" / "bot-errors-emit.py"
-        if emitter.exists():
-            emitter.unlink()
-        self.repo_root = self.fake_root
+        if self.emitter.exists() or self.emitter.is_symlink():
+            self.emitter.unlink()
 
     def run(self, body: str, http: str = "200") -> subprocess.CompletedProcess:
         _make_stubs(self.home, body, http)
@@ -358,7 +368,6 @@ class _PagingHost:
         }
         env.update(
             HOME=str(self.home),
-            BOT_ERRORS_REPO_ROOT=str(self.repo_root),
             BOT_ERRORS_STATE_DIR=str(self.state),
             BOT_ERRORS_OUTBOX_DIR=str(self.outbox),
         )
@@ -442,13 +451,16 @@ def test_failed_page_leaves_no_stamp_and_retries_next_cycle(tmp_path):
     assert host.stamp.exists()
 
 
-def test_missing_emitter_warns_once_per_episode_and_pages_when_it_appears(tmp_path):
+def test_missing_emitter_is_an_error_detailed_once_per_episode_and_pages_when_it_appears(tmp_path):
     host = _PagingHost(tmp_path, "noemitter-bot")
     for _ in range(3):
-        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+        assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
     assert host.marker.exists()
     assert not host.stamp.exists()
-    assert host.log_text().count("CREDENTIAL-DEAD not paged") == 1
+    log_text = host.log_text()
+    assert log_text.count("ERROR: BOT ERRORS emitter") == 1
+    assert "WARN: BOT ERRORS emitter" not in log_text
+    assert log_text.count("CREDENTIAL-DEAD not paged") == 1
 
     # The once-per-episode WARN must not suppress the page itself.
     host.use_stub_emitter(rc=0)
@@ -460,8 +472,8 @@ def test_missing_emitter_warns_once_per_episode_and_pages_when_it_appears(tmp_pa
     assert host.run(_recovered_body()).returncode == 0
     assert not host.stamp.exists()
     host.remove_emitter()
-    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
-    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
+    assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
     assert host.log_text().count("CREDENTIAL-DEAD not paged") == 2
 
 
@@ -546,6 +558,65 @@ def test_page_source_is_a_registered_bot_errors_source():
     # Not a WhatsApp-health recovery source: a daily-health WhatsApp recovery
     # must never close a provider-credential incident.
     assert "whatsapp" not in entry["disposition"]
+
+
+def test_corrupt_clear_count_is_treated_as_the_cap(tmp_path):
+    host = _PagingHost(tmp_path, "corruptcount-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.stamp.write_text("not-a-number\n", encoding="utf-8")
+    host.use_stub_emitter(rc=1)
+    proc = host.run(_recovered_body())
+    assert proc.returncode == 0
+    assert not host.stamp.exists()
+    log_text = host.log_text()
+    assert "WARN: unreadable clear-failure count" in log_text
+    assert "ERROR: cannot count failed clears" not in log_text
+
+
+def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):
+    host = _PagingHost(tmp_path, "unsafestamp-bot")
+    host.use_stub_emitter(rc=0)
+    host.stamp.symlink_to(tmp_path / "elsewhere")
+    proc = host.run(_recovered_body())
+    assert proc.returncode != 0
+    assert "ERROR: unsafe credential page stamp" in host.log_text()
+    assert host.stub_argv() == []
+
+
+def test_production_render_bakes_the_release_emitter_and_pages_without_env(tmp_path):
+    # The production shape: render-watchdog.py renders from a release tree and
+    # bakes that release's emitter; launchd sets no BOT_ERRORS_* variables.
+    render_tool = Path(__file__).resolve().parents[1] / "render-watchdog.py"
+    home = tmp_path / "home"
+    home.mkdir()
+    token_file = home / ".config" / "whatsoup" / "instances" / "prod-bot" / "tokens.env"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    script = home / "prod-bot-watchdog"
+    proc = subprocess.run(
+        [sys.executable, str(render_tool), "render", "--template", str(_TEMPLATE),
+         "--bot-name", "prod-bot", "--bot-port", "9999", "--fleet-port", "9998",
+         "--home", str(home), "--out", str(script)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rendered = script.read_text(encoding="utf-8")
+    assert f'BOT_ERRORS_EMIT="{_REPO_EMITTER}"' in rendered
+    assert "BOT_ERRORS_REPO_ROOT" not in rendered
+    script.chmod(0o755)
+    _make_stubs(home, _DEAD_PROVIDER_BODY, "200")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("BOT_ERRORS_", "WHATSOUP_"))}
+    # Only the outbox location is redirected, so the test never writes a live
+    # outbox; nothing tells the watchdog where the emitter is.
+    env.update(HOME=str(home), BOT_ERRORS_OUTBOX_DIR=str(tmp_path / "outbox"))
+    run = subprocess.run(["zsh", str(script)], env=env, capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stderr
+    events = [json.loads(p.read_text(encoding="utf-8")) for p in (tmp_path / "outbox").glob("*.json")]
+    assert [(e["eventType"], e["instance"], e["source"]) for e in events] == [
+        ("alert", "prod-bot", _PAGE_SOURCE)
+    ]
 
 
 if __name__ == "__main__":

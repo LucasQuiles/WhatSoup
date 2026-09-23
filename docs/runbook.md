@@ -515,13 +515,17 @@ transport and process liveness pass:
   first dead cycle with no page outstanding it writes ONE critical BOT ERRORS
   alert (`--instance <instance> --source provider_credential_dead`) to the
   durable outbox through the shipped emitter,
-  `$BOT_ERRORS_REPO_ROOT/deploy/scripts/bot-errors-emit.py` (same repo-root
-  default as `deploy/scripts/install-bot-errors-launchd.sh`), and records `<instance>-credential-dead.paged`. The stamp is written only
+  `deploy/scripts/bot-errors-emit.py` of the release the watchdog was rendered
+  from (`deploy/scripts/render-watchdog.py` bakes that absolute path into the
+  script, or `--bot-errors-emit <path>`; it refuses to render when the emitter
+  is missing), and records `<instance>-credential-dead.paged`. The stamp is written only
   after the emitter accepts the page, so a failed write logs
   `ERROR: CREDENTIAL-DEAD page failed …` and retries next cycle. With no
-  emitter at that path it logs `WARN: … CREDENTIAL-DEAD not paged` once per
-  dead episode (tracked by `<instance>-credential-dead.unpaged`) and keeps
-  retrying the page every cycle.
+  emitter at the baked path (for example, the release tree was removed) every
+  cycle exits nonzero in the ERROR state and retries the page; the detail line
+  `ERROR: BOT ERRORS emitter … not found; CREDENTIAL-DEAD not paged` is written
+  once per dead episode (tracked by `<instance>-credential-dead.unpaged`).
+  Re-render the watchdog from the running release to fix it.
 - **recovered** — recovery is affirmative AND fresh: HTTP `200`, `generated_at`
   within the freshness window, `model_usable=true`, the result is not stale,
   status is `usable`, and no fallback window is active. Only this state clears
@@ -531,7 +535,10 @@ transport and process liveness pass:
   emitter accepts it. A failed clear logs `ERROR` and retries; after 3
   consecutive failures (a missing emitter counts, logged as `WARN`) the watchdog
   drops the stamp with `WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive
-  times …` and the BOT ERRORS incident stays open until cleared by hand.
+  times …` and the BOT ERRORS incident stays open until cleared by hand. A
+  stamp whose count is unreadable is treated as having reached the cap
+  (`WARN: unreadable clear-failure count …`), and an unsafe stamp (symlink,
+  foreign owner, writable by others) is an `ERROR` that is never followed.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.
