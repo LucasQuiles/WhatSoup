@@ -2441,6 +2441,10 @@ letters are not detected. Consequences:
 - Signal instances record no verdicts. Their message ids (`signal:` plus a JSON key) fail the
   charset, so every Signal verdict is counted as `invalid`. The recorder logs each warning code at
   most once per 60 s.
+- iMessage message ids are the Messages `guid`, normally a bare UUID. A UUID whose 8- or
+  12-character group happens to be all digits is rejected, which is roughly 3% of messages. Those
+  rows show up as `invalid` and missing. Twilio SIDs (`SM` plus hex) and WhatsApp hex ids are not
+  affected.
 - An instance whose recorded id contains a standalone 7–15 digit run (for example a name ending in
   `-20260923`) records nothing at all. Every event is rejected, and `--instance` refuses the id.
 
