@@ -13,6 +13,7 @@ import {
   type MemoryOperationFailureCode,
 } from '../../lib/memory-operation-telemetry.ts';
 import { routeQuery } from './memory/query-router.ts';
+import { foldChatAttribution } from '../../core/memory-scope.ts';
 
 const log = createChildLogger('conversation');
 
@@ -120,6 +121,11 @@ export async function loadContextDetailed(
   senderJid: string,
   messageText: string,
   traceId?: string,
+  /**
+   * False holds the sender leg to this chat (see senderRecallCrossesChats), so a
+   * group never recalls a member's records from other chats or their DMs.
+   */
+  senderAcrossChats: boolean = true,
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -175,7 +181,10 @@ export async function loadContextDetailed(
     ),
   ]);
   const chatResults = chatDetails.results;
-  const senderResults = senderDetails.results;
+  const thisChat = foldChatAttribution(chatJid);
+  const senderResults = senderAcrossChats
+    ? senderDetails.results
+    : senderDetails.results.filter((result) => foldChatAttribution(result.record.chatJid) === thisChat);
   const selfResults = selfDetails.results;
   const scopes = [
     scopeOutcome('chat', chatDetails),

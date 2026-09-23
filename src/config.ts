@@ -1508,6 +1508,11 @@ export const config = {
   // equivalent of a hand-inserted access grant. See seedAutoRespondGroups.
   autoRespondGroups: stringArrayProp(instance, 'autoRespondGroups'),
 
+  // Group JIDs run as shared workflows: every member's memory recall in the group
+  // covers all of that group's memories, not only the group's shared records plus
+  // the sender's own. See src/core/memory-scope.ts.
+  sharedWorkflowGroups: stringArrayProp(instance, 'sharedWorkflowGroups'),
+
   // Per-instance send decoration policies.
   profiles: profileRecordProp(instance, 'profiles'),
 

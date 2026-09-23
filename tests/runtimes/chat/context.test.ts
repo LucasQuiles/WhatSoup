@@ -505,6 +505,28 @@ describe('loadContext', () => {
     expect(result).toContain('Things you (Loops) have said about yourself before');
     expect(result).toContain('Loops likes electronic music');
   });
+
+  it('holds the sender leg to this group when it may not cross chats, matching both key spellings', async () => {
+    const fromDm = makeResult('s-dm', 'sender fact from their direct chat');
+    fromDm.record.chatJid = '15550000002@s.whatsapp.net';
+    const fromGroupRaw = makeResult('s-raw', 'sender fact in this group, raw spelling');
+    fromGroupRaw.record.chatJid = '111111100000123@g.us';
+    const fromGroupKey = makeResult('s-key', 'sender fact in this group, key spelling');
+    fromGroupKey.record.chatJid = '111111100000123_at_g.us';
+    const pinecone = makeMockPinecone([], [fromDm, fromGroupRaw, fromGroupKey]);
+
+    const held = await loadContextDetailed(
+      pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, false,
+    );
+    expect(held.text).not.toContain('from their direct chat');
+    expect(held.text).toContain('raw spelling');
+    expect(held.text).toContain('key spelling');
+
+    const crossing = await loadContextDetailed(
+      pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, true,
+    );
+    expect(crossing.text).toContain('from their direct chat');
+  });
 });
 
 // ---------------------------------------------------------------------------

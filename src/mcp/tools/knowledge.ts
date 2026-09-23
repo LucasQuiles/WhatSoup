@@ -19,10 +19,21 @@ import {
   type ToolDeclaration,
 } from '../types.ts';
 import {
+  isOperatorInstance,
   pineconeProjectGuardError,
   resolvePineconeProjectGuard,
   type PineconeProjectGuard,
 } from '../../lib/pinecone-project-guard.ts';
+import type { Database } from '../../core/database.ts';
+import {
+  memoryHitTier,
+  memoryIdentityFold,
+  resolveMemoryScope,
+  type GroupMembershipReader,
+  type InstanceIdentities,
+  type MemoryScope,
+  type MemoryTier,
+} from '../../core/memory-scope.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -35,12 +46,35 @@ const MAX_TEXT_PER_RESULT = 600;
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
 
+/**
+ * Most candidates sent to rerank. Candidates are cut in tier order, so this-chat
+ * hits are never the ones dropped to fit a rerank model's document limit.
+ */
+const RERANK_CANDIDATE_CAP = 100;
+
 interface ParsedHit {
   id: string;
   score: number;
   text: string;
   entityType: string;
   fields: Record<string, unknown>;
+}
+
+interface TieredHit extends ParsedHit {
+  tier: MemoryTier;
+}
+
+/**
+ * Instance facts knowledge_search needs to scope a search of the memory index.
+ * Optional so callers without a connection (tests, tools) still register; with
+ * none, admin and DM-lane checks cannot be proven and groups fall back to the
+ * configurable-group rule.
+ */
+export interface KnowledgeSearchDeps {
+  db?: Database | null;
+  identities?: () => InstanceIdentities;
+  membership?: GroupMembershipReader | null;
+  sharedWorkflowGroups?: Iterable<string>;
 }
 
 function pineconeMemoryConfig(): {
@@ -101,12 +135,11 @@ interface ResolvedNamespaces {
   namespacesToSearch: string[];
   queryIntent?: string;
   error?: string;
-  /**
-   * Set when the memory_write namespace was added on top of the profile. That
-   * leg holds per-conversation records, so it is searched only with the
-   * caller's conversation filter (see conversationScopedSearch).
-   */
-  memoryWriteNamespace?: string;
+}
+
+function isMemoryIndex(indexName: string): boolean {
+  const memoryIndex = (config as { pineconeIndex?: unknown }).pineconeIndex;
+  return isNonEmptyString(memoryIndex) && indexName === memoryIndex;
 }
 
 /**
@@ -115,43 +148,62 @@ interface ResolvedNamespaces {
  * writes to, so the bot can find what it saved. Other indexes are unchanged,
  * and a profile that already lists the default namespace keeps its behaviour.
  */
-function withMemoryWriteNamespace(
-  indexName: string,
-  namespacesToSearch: string[],
-): Pick<ResolvedNamespaces, 'namespacesToSearch' | 'memoryWriteNamespace'> {
-  const memoryIndex = (config as { pineconeIndex?: unknown }).pineconeIndex;
-  if (!isNonEmptyString(memoryIndex) || indexName !== memoryIndex) return { namespacesToSearch };
+function withMemoryWriteNamespace(indexName: string, namespacesToSearch: string[]): { namespacesToSearch: string[] } {
+  if (!isMemoryIndex(indexName)) return { namespacesToSearch };
   if (namespacesToSearch.some(isDefaultNamespace)) return { namespacesToSearch };
-  return {
-    namespacesToSearch: [...namespacesToSearch, MEMORY_WRITE_NAMESPACE],
-    memoryWriteNamespace: MEMORY_WRITE_NAMESPACE,
-  };
+  return { namespacesToSearch: [...namespacesToSearch, MEMORY_WRITE_NAMESPACE] };
+}
+
+interface SearchLeg {
+  namespace: string;
+  filter?: Record<string, unknown>;
 }
 
 /**
- * memory_write files each record under the writer's conversation key
- * (`chat_jid`), and every other reader of those records filters on it. The
- * added memory_write leg keeps that boundary: it is filtered to the caller's
- * conversation, and dropped when the session has no pinned conversation.
+ * The queries for one search. Outside the memory index each namespace is queried
+ * once, as before. In the memory index a scope with a pinned conversation also
+ * queries that conversation's records, so they are not crowded out of topK by
+ * other chats; a configurable group queries only this conversation. The filters
+ * only narrow the fetch: memoryHitTier decides what the caller may see.
  */
-function conversationScopedSearch(
-  resolved: ResolvedNamespaces,
-  session: SessionContext,
-): { namespacesToSearch: string[]; filterFor: (namespace: string) => Record<string, unknown> | undefined } {
-  const scoped = resolved.memoryWriteNamespace;
-  if (!scoped) return { namespacesToSearch: resolved.namespacesToSearch, filterFor: () => undefined };
-  const conversationKey = conversationBoundKey(session) ?? session.conversationKey;
-  if (!conversationKey) {
-    return {
-      namespacesToSearch: resolved.namespacesToSearch.filter((ns) => ns !== scoped),
-      filterFor: () => undefined,
-    };
+function searchLegs(namespaces: string[], scope: MemoryScope | null): SearchLeg[] {
+  if (!scope) return namespaces.map((namespace) => ({ namespace }));
+  if (scope.kind === 'no_context') return [];
+  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
+  if (scope.kind === 'configurable_group') {
+    return thisChat ? namespaces.map((namespace) => ({ namespace, filter: thisChat })) : [];
   }
-  const filter = { chat_jid: { $eq: conversationKey } };
-  return {
-    namespacesToSearch: resolved.namespacesToSearch,
-    filterFor: (namespace) => (namespace === scoped ? filter : undefined),
-  };
+  return namespaces.flatMap((namespace) =>
+    thisChat ? [{ namespace, filter: thisChat }, { namespace }] : [{ namespace }],
+  );
+}
+
+/**
+ * Gate and rank the merged hits. Duplicates (one record returned by the chat leg
+ * and the unfiltered leg) are removed first so they cannot take two result slots;
+ * the copy with the better tier, then the better score, is kept. Sorted by tier,
+ * then score.
+ */
+function tierHits(hits: ParsedHit[], scope: MemoryScope | null, db: Database | null | undefined): TieredHit[] {
+  const fold = memoryIdentityFold(db);
+  const byId = new Map<string, TieredHit>();
+  for (const hit of hits) {
+    const tier = scope ? memoryHitTier(hit.fields, scope, fold) : 0;
+    if (tier === null) continue;
+    const existing = byId.get(hit.id);
+    if (!existing || tier < existing.tier || (tier === existing.tier && hit.score > existing.score)) {
+      byId.set(hit.id, { ...hit, tier });
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.tier - b.tier || b.score - a.score);
+}
+
+/** Stable re-sort by tier after rerank, keeping rerank order within a tier. */
+function byTierStable(hits: TieredHit[]): TieredHit[] {
+  return hits
+    .map((hit, position) => ({ hit, position }))
+    .sort((a, b) => a.hit.tier - b.hit.tier || a.position - b.position)
+    .map(({ hit }) => hit);
 }
 
 function resolveNamespacesToSearch(
@@ -173,10 +225,7 @@ function resolveNamespacesToSearch(
     const routed = routeQuery(query, { namespaces });
     const routedSet = new Set(routed.namespaces);
     const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
-    return {
-      ...withMemoryWriteNamespace(indexName, [...routed.namespaces, ...others]),
-      queryIntent: routed.intent,
-    };
+    return { ...withMemoryWriteNamespace(indexName, [...routed.namespaces, ...others]), queryIntent: routed.intent };
   }
 
   if (profile.namespaces.length > 0) {
@@ -355,11 +404,30 @@ export function registerKnowledgeTools(
   // Injectable so search duration can be driven to a known instant (#2200).
   // Optional and defaulted, so this slice changes no existing call site.
   clock: Clock = systemClock,
+  deps: KnowledgeSearchDeps = {},
 ): void {
   if (allowedIndexes.length === 0) return;
 
   const memoryConfig = pineconeMemoryConfig();
   const envVarName = memoryConfig.apiKeyEnv;
+  const noIdentities: InstanceIdentities = {
+    adminPhones: new Set(), siblingPhones: new Set(), botJid: null, botLid: null,
+  };
+  const scopeFor = (session: SessionContext): Promise<MemoryScope> => resolveMemoryScope(
+    {
+      operatorInstance: isOperatorInstance((config as { botName?: unknown }).botName),
+      tier: session.tier,
+      conversationKey: conversationBoundKey(session) ?? session.conversationKey,
+      deliveryJid: session.deliveryJid,
+      actorJid: session.actorJid,
+    },
+    {
+      db: deps.db,
+      identities: deps.identities?.() ?? noIdentities,
+      membership: deps.membership,
+      sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
+    },
+  );
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
@@ -439,10 +507,15 @@ export function registerKnowledgeTools(
       if (routed.error) {
         return errorResult(routed.error);
       }
-      const { namespacesToSearch, filterFor } = conversationScopedSearch(routed, session);
+      const namespacesToSearch = routed.namespacesToSearch;
       const queryIntent = routed.queryIntent;
 
       try {
+        // Scope applies to every search of the instance's memory index, including
+        // an explicit namespace argument; other indexes are not memory and are
+        // searched as configured.
+        const scope = isMemoryIndex(indexName) ? await scopeFor(session) : null;
+        const legs = searchLegs(namespacesToSearch, scope);
         const projectError = await validatePineconeProject(pc, indexName, {
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
@@ -450,7 +523,7 @@ export function registerKnowledgeTools(
         if (projectError) return errorResult(projectError);
 
         const index = pc.index(indexName);
-        let hits: ParsedHit[] = [];
+        const hits: ParsedHit[] = [];
 
         if (profile.searchMode === 'vector') {
           // Standalone index: embed the query client-side and call index.query.
@@ -483,8 +556,7 @@ export function registerKnowledgeTools(
           }
 
           const topK = top_k ?? profile.topK;
-          const queryPromises = namespacesToSearch.map((ns) => {
-            const filter = filterFor(ns);
+          const queryPromises = legs.map(({ namespace: ns, filter }) => {
             return index.namespace(ns).query({
               topK,
               vector: vec,
@@ -511,8 +583,7 @@ export function registerKnowledgeTools(
           }
         } else {
           // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
-          const searchPromises = namespacesToSearch.map((ns) => {
-            const filter = filterFor(ns);
+          const searchPromises = legs.map(({ namespace: ns, filter }) => {
             return index.searchRecords({
               namespace: ns,
               query: {
@@ -535,55 +606,48 @@ export function registerKnowledgeTools(
           }
         }
 
-        // Sort merged results by score descending
-        hits.sort((a, b) => b.score - a.score);
+        // Gate, dedup by id, then order by tier (this chat -> other chats ->
+        // untagged) and score. Outside the memory index every hit is tier 0.
+        let ranked = tierHits(hits, scope, deps.db).slice(0, RERANK_CANDIDATE_CAP);
+        let limit = MAX_RESULTS;
 
-        // Client-side rerank if configured
-        if (profile.rerank && hits.length > 0) {
+        // Client-side rerank if configured. It scores every candidate, then the
+        // tier order is restored so rerank reorders within a tier only.
+        if (profile.rerank && ranked.length > 0) {
           try {
             const rerankResult = await pc.inference.rerank({
               model: profile.rerankModel,
               query,
-              documents: hits.map((h) => ({
+              documents: ranked.map((h) => ({
                 id: h.id,
                 text: truncateForRerank(h.text),
               })),
-              topN: Math.min(profile.rerankTopN, MAX_RESULTS),
+              topN: ranked.length,
               rankFields: ['text'],
               returnDocuments: false,
             });
 
-            const reranked: ParsedHit[] = [];
+            const reranked: TieredHit[] = [];
             for (const doc of rerankResult.data) {
-              const original = hits[doc.index];
+              const original = ranked[doc.index];
               if (original) {
                 reranked.push({ ...original, score: doc.score });
               }
             }
-            hits = reranked;
+            ranked = byTierStable(reranked);
+            limit = Math.min(profile.rerankTopN, MAX_RESULTS);
           } catch (rerankErr) {
             log.warn({ err: rerankErr }, 'Rerank failed — using vector scores');
-            // Fall through with unreranked results, capped
-            hits = hits.slice(0, MAX_RESULTS);
           }
-        } else {
-          hits = hits.slice(0, MAX_RESULTS);
         }
 
-        const hitsBeforeScoreFilter = hits.length;
+        const hitsBeforeScoreFilter = ranked.length;
         const minScore = profile.minScore;
         if (typeof minScore === 'number') {
-          hits = hits.filter((hit) => hit.score >= minScore);
+          ranked = ranked.filter((hit) => hit.score >= minScore);
         }
-        const discardedLowScore = hitsBeforeScoreFilter - hits.length;
-
-        // Dedup by ID
-        const seen = new Set<string>();
-        const deduped = hits.filter((h) => {
-          if (seen.has(h.id)) return false;
-          seen.add(h.id);
-          return true;
-        });
+        const discardedLowScore = hitsBeforeScoreFilter - ranked.length;
+        const deduped: ParsedHit[] = ranked.slice(0, limit);
 
         const durationMs = clock.now() - startMs;
         // PII hygiene: the raw query text may contain personal details
@@ -608,6 +672,7 @@ export function registerKnowledgeTools(
             routedNamespaces: namespacesToSearch,
             hits: deduped.length,
             discardedLowScore,
+            ...(scope ? { memoryScope: scope.kind, memoryScopeReason: scope.reason } : {}),
             ...(typeof minScore === 'number' ? { minScore } : {}),
             durationMs,
             ...(queryIntent ? { queryIntent } : {}),

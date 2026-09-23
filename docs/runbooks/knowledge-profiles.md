@@ -119,7 +119,7 @@ Each entry in `knowledgeProfiles` must satisfy:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `namespace` | string | yes | Primary namespace; use `""` to query the default. Searched only when `namespaces` is empty; otherwise it only widens the `namespace` override allowlist |
-| `namespaces` | string[] | yes | Namespaces searched in order. For the instance's own memory index (`memory.pinecone.index`), the default namespace `__default__`, where `memory_write` writes, is always searched as well, filtered to the caller's conversation (`chat_jid`) and skipped when the session has no pinned conversation |
+| `namespaces` | string[] | yes | Namespaces searched in order. For the instance's own memory index (`memory.pinecone.index`), the default namespace `__default__`, where `memory_write` writes, is always searched as well. Every search of the memory index is ranked this chat, then other chats, then untagged records, and in groups held to the group boundary; see [Memory recall scope](../configuration.md#memory-recall-scope) |
 | `searchMode` | `"entity"` \| `"text"` \| `"vector"` | yes | `entity` = structured records; `text` = BM25; `vector` = dense embedding |
 | `rerank` | boolean | yes | Enable Pinecone rerank pass |
 | `rerankModel` | string | yes | e.g. `"pinecone-rerank-v0"`; `""` when `rerank: false` |

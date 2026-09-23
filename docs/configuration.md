@@ -497,6 +497,7 @@ into place during deployment.
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
 | `chatAliases` | object | no | `{}` | Per-instance alias map used by send surfaces. Keys are aliases such as `ops` or `support`; values are raw WhatsApp JIDs. Seeded into the instance's `chat_aliases` table at startup. |
 | `autoRespondGroups` | string[] | no | `[]` | Group JIDs (e.g. `120363...@g.us`) the bot auto-responds to without an `@mention`. At startup each JID is seeded into `access_list` as `allowed` (insert-only-when-absent: a group that already has any `allowed`/`blocked`/`pending` row is left untouched, so an explicit decision is never overridden). Non-string and blank entries are dropped. Skipped entirely when `accessMode` is `self_only`, which rejects all group messages at the policy layer. The durable, source-reproducible equivalent of a hand-inserted group access grant. |
+| `sharedWorkflowGroups` | string[] | no | `[]` | Group JIDs (`120363...@g.us`, or the `_at_g.us` conversation key) run as shared workflows: `knowledge_search` gives every member all of that group's memories, instead of the group's shared records plus the sender's own. It never adds other chats, direct-chat records or untagged records. Non-string and blank entries are dropped. See [Memory recall scope](#memory-recall-scope). |
 | `profiles` | object | no | `{}` | Per-instance send decoration policies. Keys are profile names; values can define `prefix`, `tag`, and `linkPreview`. Loaded from private instance config at startup. |
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
@@ -1140,11 +1141,43 @@ level.
 `memory_write` writes to the SDK default namespace (`__default__`) of
 `memory.pinecone.index`. When `knowledge_search` searches that same index
 without an explicit `namespace` argument, it always includes `__default__`
-alongside the profile's namespaces, so an instance can find what it wrote.
-That added leg is filtered to the caller's conversation (`chat_jid`), like
-every other reader of `memory_write` records, and is skipped when the session
-has no pinned conversation. A profile that already lists the default namespace
-is searched as configured.
+alongside the profile's namespaces, so an instance can find what it wrote. A
+profile that already lists the default namespace is searched as configured.
+
+##### Memory recall scope
+
+Every `knowledge_search` of `memory.pinecone.index`, with or without a
+`namespace` argument, is scoped to the calling conversation
+(`src/core/memory-scope.ts`). Recall ranks records; it does not lock them out,
+except in groups other people can read:
+
+| Calling context | How it is recognised | What is returned, in order |
+|---|---|---|
+| Direct chat | the conversation is not a group | this chat, then other chats, then untagged records |
+| DM-lane group | every group member is an `adminPhones` identity, this bot, or a `siblingPhones` bot (membership read live and re-read on any participant change) | same as a direct chat |
+| Operator or admin | the instance is `q`, or the sender is an `adminPhones` identity on an authenticated transport | same as a direct chat |
+| Configurable group | any other group, including one whose membership cannot be read or contains an unmapped LID | this group's shared records, and records of the verified sender in this group |
+| Global session, no conversation | tier `global` with no pinned conversation | other chats, then untagged records |
+| Chat session, no conversation | tier `chat-scoped` with no pinned conversation | nothing |
+
+- **Untagged** records have no `chat_jid`. They predate per-chat attribution,
+  so direct chats rank them last and configurable groups never see them.
+- **Shared** group records are facts about the group (`memory_type:
+  group_context`) or records attributed to no member (`sender_jid` empty).
+- **Verified sender** is the message sender (`actorJid`) on an authenticated
+  transport; LIDs fold to phones through `lid_mappings`. For enrichment records
+  `sender_jid` is the person the fact is about; for `memory_write` records it is
+  the speaker.
+- A group listed in `sharedWorkflowGroups` gives every member all of that
+  group's records. It never adds other chats or untagged records.
+- Stored `chat_jid` spellings (`<id>@g.us` and `<id>_at_g.us`, a phone JID and
+  its bare digits, a mapped `@lid`) all count as the same chat.
+
+The chat runtime applies the same group rule to its per-sender recall: in a
+group, unless the instance is `q` or the sender is a verified admin, recall of
+the sender's records is held to that group, so a member's direct-chat records are
+never recalled into it. It has no membership reader, so it does not detect
+DM-lane groups.
 
 #### Legacy Migration
 

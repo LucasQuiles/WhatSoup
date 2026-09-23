@@ -47,8 +47,52 @@ import type { Database } from '../core/database.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
+import { GroupMembershipCache } from '../core/memory-scope.ts';
+import type { KnowledgeSearchDeps } from './tools/knowledge.ts';
 
 const log = createChildLogger('register-all');
+
+/**
+ * Instance identities and group membership for knowledge_search's memory scope.
+ * Membership is read live from the socket (the groups table keeps only a count),
+ * cached briefly, and dropped on any participant change so a join takes effect on
+ * the next search. No socket, or a failed read, leaves membership unproven.
+ */
+function knowledgeSearchDeps(
+  connection: RuntimeConnection,
+  getSock: () => ExtendedBaileysSocket | null,
+  db: Database,
+): KnowledgeSearchDeps {
+  const membership = new GroupMembershipCache(async (groupJid) => {
+    const sock = getSock();
+    if (!sock) return null;
+    const metadata = await sock.groupMetadata(groupJid);
+    return Array.isArray(metadata?.participants)
+      ? metadata.participants.map((p) => ({
+        id: p.id,
+        ...(p.lid ? { lid: p.lid } : {}),
+        ...(p.phoneNumber ? { phoneNumber: p.phoneNumber } : {}),
+      }))
+      : null;
+  });
+  // Without the event, entries still expire on the cache TTL.
+  if (typeof connection.on === 'function') {
+    connection.on('groupParticipantsUpdate', (update: { groupJid?: unknown }) => {
+      if (typeof update?.groupJid === 'string') membership.invalidate(update.groupJid);
+    });
+  }
+  return {
+    db,
+    identities: () => ({
+      adminPhones: config.adminPhones,
+      siblingPhones: config.siblingPhones,
+      botJid: connection.botJid,
+      botLid: connection.botLid,
+    }),
+    membership,
+    sharedWorkflowGroups: config.sharedWorkflowGroups,
+  };
+}
 
 export interface RegisterAllToolsOptions {
   enableKnowledgeSearch?: boolean;
@@ -212,7 +256,12 @@ export function registerAllTools(
     : Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
   const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
   if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
-    runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
+    runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(
+      allowedIndexes,
+      register,
+      undefined,
+      knowledgeSearchDeps(connection, getSock, db),
+    ));
   }
 
   // Memory write — agent-facing episodic WRITE into the configured per-person

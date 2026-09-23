@@ -289,7 +289,7 @@ Example profile for a customer-owned docs index:
 }
 ```
 
-With that config, `knowledge_search` cannot query an unlisted namespace such as `private-archive`, even if the same Pinecone key can technically access it. One namespace is added on top of the profile: when the searched index is the instance's own memory index (`memory.pinecone.index`) and no `namespace` argument is given, the default namespace `__default__`, where `memory_write` writes, is always searched, so the bot can find its own memories. That leg is filtered to the caller's conversation (`chat_jid`) and skipped when the session has no pinned conversation.
+With that config, `knowledge_search` cannot query an unlisted namespace such as `private-archive`, even if the same Pinecone key can technically access it. One namespace is added on top of the profile: when the searched index is the instance's own memory index (`memory.pinecone.index`) and no `namespace` argument is given, the default namespace `__default__`, where `memory_write` writes, is always searched, so the bot can find its own memories. Results from the memory index are ranked this chat, then other chats, then untagged records; in groups other people can read, they are held to the group's shared records and the sender's own (see [Memory recall scope](../configuration.md#memory-recall-scope)).
 
 ## Migration Helper
 
