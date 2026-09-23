@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import RE2 from 're2';
 import { containsQuestionMark } from './shadow-gate-features.ts';
@@ -28,7 +29,8 @@ export type ShadowRuleId =
   | 'X03_NO_REPLY_PATTERN'
   | 'D00_DEFAULT';
 
-export const SHADOW_GATE_RULES_PATH = fileURLToPath(new URL('./shadow-gate-rules.json', import.meta.url));
+// String form, not new URL(): jsdom replaces the global URL, which fileURLToPath rejects.
+export const SHADOW_GATE_RULES_PATH = join(dirname(fileURLToPath(import.meta.url)), 'shadow-gate-rules.json');
 
 interface RuleEntry {
   id: string;
