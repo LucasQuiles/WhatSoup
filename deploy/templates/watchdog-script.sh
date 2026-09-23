@@ -1014,11 +1014,13 @@ PY
         if credential_marker clear "$CRED_PAGED"; then
           paged_rc=1
           if ! credential_marker clear "$CRED_RECOVERED"; then
-            # The next cycle would treat the new stamp as stale again: loud,
-            # never silent.
-            log "ERROR: failed to remove recovery flag $CRED_RECOVERED; the page may repeat next cycle"
+            # Paging now would write a stamp beside a live flag, and the next
+            # cycle would read that stamp as stale and page again. Hold the
+            # page: the next cycle finds a flag with no stamp and retries.
+            log "ERROR: failed to remove recovery flag $CRED_RECOVERED; page deferred to next cycle"
             wd_note ERROR
             WD_EXIT=1
+            paged_rc=3
           fi
         else
           # The flag stays, so the next cycle retries the invalidation.
@@ -1033,11 +1035,14 @@ PY
       # cycle would read the new stamp as stale and page again.
       credential_marker state "$CRED_RECOVERED"
       if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
-        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; the page may repeat next cycle"
+        # Same hold as above: a page now would be followed by a second one.
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; page deferred to next cycle"
         wd_note ERROR
         WD_EXIT=1
+        paged_rc=3
       fi
     fi
+    # paged_rc 3 = page deferred until the recovery flag is gone.
     if [ "$paged_rc" -eq 1 ]; then
       credential_page alert
       page_rc=$?

@@ -664,6 +664,25 @@ def _alerts(host: _PagingHost) -> list[str]:
     return [line for line in host.stub_argv() if not line.startswith("--clear")]
 
 
+def _run_with_failing_clear(host: _PagingHost, suffix: str, body: str) -> subprocess.CompletedProcess:
+    # The watchdog puts $HOME/.local/bin first on PATH, so this python3 wrapper
+    # intercepts the marker helper and fails only `clear` of files ending in
+    # `suffix`; every other python3 call runs normally.
+    wrapper = host.home / ".local" / "bin" / "python3"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = "clear" ]; then case "$3" in *{suffix}) exit 2;; esac; fi\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    try:
+        return host.run(body)
+    finally:
+        wrapper.unlink()
+
+
 def test_failed_stale_stamp_removal_is_retried_and_then_pages(tmp_path):
     # The stamp of a recovered episode could not be removed. The flag must
     # survive that failure so the next cycle retries and pages; dropping it
@@ -675,21 +694,7 @@ def test_failed_stale_stamp_removal_is_retried_and_then_pages(tmp_path):
     host.recovered.write_text("", encoding="utf-8")
     host.recovered.chmod(0o600)
 
-    # The watchdog puts $HOME/.local/bin first on PATH, so this wrapper
-    # intercepts the marker helper and fails only the stamp removal.
-    wrapper = host.home / ".local" / "bin" / "python3"
-    wrapper.parent.mkdir(parents=True, exist_ok=True)
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        'if [ "$2" = "clear" ]; then case "$3" in *.paged) exit 2;; esac; fi\n'
-        f'exec {shlex.quote(sys.executable)} "$@"\n',
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
-    try:
-        proc = host.run(_DEAD_PROVIDER_BODY)
-    finally:
-        wrapper.unlink()
+    proc = _run_with_failing_clear(host, ".paged", _DEAD_PROVIDER_BODY)
     assert proc.returncode != 0
     assert "failed to drop stale credential page stamp" in host.log_text()
     assert host.stamp.exists() and host.recovered.exists()
@@ -722,8 +727,10 @@ def test_recovery_that_cannot_record_its_flag_changes_nothing(tmp_path):
 
 
 def test_crash_after_recording_the_flag_still_pages_the_next_episode(tmp_path):
-    # Recovery died right after writing the flag: stamp, flag and marker all
-    # remain. A new dead episode must page.
+    # State consumption, not ordering: seeds the state a recovery leaves when
+    # it dies right after writing the flag (stamp, flag and marker) and checks
+    # that a new dead episode pages. The ordering that guarantees this state
+    # is covered by test_recovery_that_cannot_record_its_flag_changes_nothing.
     host = _PagingHost(tmp_path, "flagcrash-bot")
     host.use_stub_emitter(rc=0)
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
@@ -746,6 +753,45 @@ def test_leftover_flag_without_a_stamp_pages_once(tmp_path):
     for _ in range(3):
         assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
     assert len(_alerts(host)) == 1, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_failed_leftover_flag_removal_defers_the_page_without_a_duplicate(tmp_path):
+    # Paging while a flag cannot be removed would write a stamp beside it, and
+    # the next cycle would read that stamp as stale and page again.
+    host = _PagingHost(tmp_path, "flagstuck-bot")
+    host.use_stub_emitter(rc=0)
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "page deferred to next cycle" in host.log_text()
+    assert _alerts(host) == []
+    assert host.recovered.exists() and not host.stamp.exists()
+
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_failed_flag_removal_after_a_stale_stamp_defers_the_page_without_a_duplicate(tmp_path):
+    host = _PagingHost(tmp_path, "stalestuck-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "page deferred to next cycle" in host.log_text()
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert host.recovered.exists() and not host.stamp.exists()
+
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 2, host.stub_argv()
     assert host.stamp.exists() and not host.recovered.exists()
 
 

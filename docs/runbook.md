@@ -550,8 +550,10 @@ transport and process liveness pass:
   It logs `WARN: credential page stamp … is left from a previous episode`,
   drops the stamp and the flag, and pages the new episode. A failed stamp
   removal keeps the flag, so the next cycle retries. A flag with no stamp is
-  dropped before the new episode's stamp is written. Without the flag, the
-  stamp belongs to the current episode and keeps suppressing repeats.
+  dropped before the new episode's stamp is written. Whenever the flag cannot
+  be removed, the page waits for the next cycle (`… page deferred to next
+  cycle`), so a stamp is never written beside a live flag. Without the flag,
+  the stamp belongs to the current episode and keeps suppressing repeats.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.
