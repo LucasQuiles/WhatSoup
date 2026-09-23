@@ -304,6 +304,55 @@ def test_connected_child_does_not_retire_non_connectivity_root():
 # (d2) unsafe evidence never retires (review round 1)
 # ---------------------------------------------------------------------------
 
+def test_connected_child_older_than_a_logout_suppressed_under_bond_loss_does_not_retire():
+    # The logout arrives as a CHILD of an older bond-loss root and is
+    # suppressed, so it never touches the root's lastSeenAt. It is still a
+    # newer loss observation, and an older connected child must not retire
+    # the bond-loss root.
+    now = int(time.time())
+    mod = _load()
+    assert mod.symptom_source_matches("instance_logged_out", mod.INHIBITION_MAP["whatsapp_device_bond_lost"])
+    state, parent_key = _state_with_parent(mod, "whatsapp_device_bond_lost")
+    record = state["openIncidents"][parent_key]
+    record["eventCreatedAtEpoch"] = now - 3600
+    record["lastSeenAt"] = now - 3600
+
+    logout = _alert("instance_logged_out", created=now - 10)
+    assert mod.should_suppress_send(logout, state) is not None
+    assert record.get("lastConnectivityLossObservedAt", 0) >= now - 10
+
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now - 600)
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
+    assert "contradictionRetirements" not in state
+
+
+def test_connected_child_older_than_a_sibling_loss_root_does_not_retire():
+    # Two open loss roots for one instance: an old bond loss and a logout seen
+    # ten seconds ago. A connected child from ten minutes ago predates the
+    # logout, so neither root may be retired.
+    now = int(time.time())
+    mod = _load()
+    state, bond_key = _state_with_parent(mod, "whatsapp_device_bond_lost")
+    bond = state["openIncidents"][bond_key]
+    bond["eventCreatedAtEpoch"] = now - 3600
+    bond["lastSeenAt"] = now - 3600
+    logout_key = bond_key.rsplit("|", 1)[0] + "|instance_logged_out"
+    state["openIncidents"][logout_key] = {
+        **bond,
+        "eventCreatedAtEpoch": now - 1800,
+        "lastSeenAt": now - 10,
+    }
+
+    contradiction = mod.stronger_incident_contradiction(
+        _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now - 600),
+        bond_key,
+        bond,
+        state["openIncidents"],
+    )
+    assert contradiction is None
+
+
 def test_connected_child_older_than_a_newer_folded_logout_does_not_retire():
     # Root opened an hour ago; a newer same-key logout was folded into it ten
     # seconds ago (refreshing lastSeenAt, not eventCreatedAtEpoch). A connected
@@ -331,6 +380,9 @@ def test_connected_child_older_than_a_newer_folded_logout_does_not_retire():
         ({}, "connected=false connection_state=connected"),
         ({}, "whatsapp_connected=unknown connection_state=connected"),
         ({}, "whatsapp_connected=true connection_state=connecting"),
+        ({}, "connected= connection_state=connected"),
+        ({}, "whatsapp_connected=true connection_state="),
+        ({}, "whatsapp_connected= connection_state=connected"),
     ],
     ids=[
         "string-false",
@@ -340,6 +392,9 @@ def test_connected_child_older_than_a_newer_folded_logout_does_not_retire():
         "watchdog-connected-false",
         "text-unknown",
         "state-connecting",
+        "empty-connected",
+        "empty-connection-state",
+        "empty-whatsapp-connected",
     ],
 )
 def test_ambiguous_or_negative_readings_never_retire(diagnostics, evidence):

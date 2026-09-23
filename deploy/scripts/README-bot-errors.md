@@ -600,18 +600,23 @@ contradicted when all of these hold:
   `"false"` or `"unknown"`, or `null`, blocks retirement); every
   `whatsapp_connected=` and bare `connected=` evidence token must be `true`
   (`1`/`yes` also accepted); every `connection_state=` token must be
-  `connected`. At least one reading must be present. A structured `true` next to
+  `connected`. An empty value (`connected=`) is ambiguous and blocks retirement.
+  At least one reading must be present. A structured `true` next to
   a text `whatsapp_connected=false`, or the watchdog's
   `connected=false connection_state=connected`, never retires a root. The
   health poller's `health_body_degraded` evidence and the watchdog's
   `local_health` evidence carry these tokens.
-- The child's `createdAt` is timezone-aware and later than the root's **latest
-  observation** by more than the clock-skew tolerance. The latest observation is
-  the later of the root's first alert (`eventCreatedAtEpoch`) and its
-  `lastSeenAt`, which a newer same-key logout refreshes when it is folded into
-  the open record (children no longer refresh it). So a child queued before
-  either logout cannot retire it, and a timestamp with no zone, whose meaning
-  depends on the host clock, never does.
+- The child's `createdAt` is timezone-aware and later than the **latest
+  connectivity-loss observation** for that instance by more than the clock-skew
+  tolerance. For each open connectivity-loss root of the instance (not only the
+  root being tested), that is the latest of its first alert
+  (`eventCreatedAtEpoch`), its `lastSeenAt` (refreshed when a newer same-key
+  logout is folded in; children no longer refresh it), and its
+  `lastConnectivityLossObservedAt`. The last is stamped when a suppressed child
+  itself reports the link down, such as a logout suppressed under a bond-loss
+  root or any child with a negative `whatsapp_connected` reading. So a child
+  queued before any newer loss cannot retire a root, and a timestamp with no
+  zone, whose meaning depends on the host clock, never does.
 
 Retirement uses the same removal as a matching clear (`close_open_incident`
 drops `openIncidents`, `lastSentAt` and transient bookkeeping for the key). The

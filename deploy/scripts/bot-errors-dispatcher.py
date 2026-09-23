@@ -4577,7 +4577,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # logout) and stronger_open_incident_for returns only the first match. Each
     # pass removes one open record, so the loop is bounded by the map size.
     while stronger is not None:
-        contradiction = stronger_incident_contradiction(event, stronger[0], stronger[1])
+        contradiction = stronger_incident_contradiction(
+            event, stronger[0], stronger[1], incident_state.get("openIncidents")
+        )
         if contradiction is None:
             break
         retire_contradicted_stronger_incident(
@@ -5153,10 +5155,22 @@ def _bare_root_source(stronger_key: str) -> str:
     return root_source
 
 
+def latest_connectivity_loss_observation(record: dict[str, Any]) -> int:
+    """Newest epoch at which ``record`` saw this instance's link down: its own
+    first alert, a later folded same-key alert (lastSeenAt), or a loss reported
+    by a child suppressed under it (lastConnectivityLossObservedAt)."""
+    return max(
+        int_field(record, "eventCreatedAtEpoch"),
+        int_field(record, "lastSeenAt"),
+        int_field(record, "lastConnectivityLossObservedAt"),
+    )
+
+
 def stronger_incident_contradiction(
     event: dict[str, Any],
     stronger_key: str,
     stronger_record: dict[str, Any],
+    open_incidents: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Evidence that ``event`` proves the stronger incident's condition false.
 
@@ -5164,10 +5178,12 @@ def stronger_incident_contradiction(
     the root is not contradicted. Conservative: every connectivity reading the
     child carries must be unambiguously positive (positive_connectivity_readings),
     at least one must be present, and the child's timezone-aware createdAt must
-    follow the root's LATEST observation (first alert or a later folded
-    same-key alert) beyond clock-skew tolerance. A child queued before that
-    observation, or one with no usable timestamp, never retires the root, so a
-    genuine logout keeps suppressing its symptoms.
+    follow the LATEST connectivity-loss observation in the root's scope beyond
+    clock-skew tolerance: the root's own first or folded alert, a loss child
+    suppressed under it, or any other open connectivity-loss root of the same
+    instance. A child queued before that observation, or one with no usable
+    timestamp, never retires the root, so a genuine logout keeps suppressing its
+    symptoms.
     """
     if _bare_root_source(stronger_key) not in CONNECTIVITY_LOSS_ROOT_SOURCES:
         return None
@@ -5177,12 +5193,21 @@ def stronger_incident_contradiction(
     opened = int_field(stronger_record, "eventCreatedAtEpoch")
     if opened <= 0:
         return None
-    # Compare against the root's LATEST observation, not its first: a newer
-    # same-key logout is folded into the open record (refreshing lastSeenAt)
-    # without moving eventCreatedAtEpoch, and an older connected child must not
-    # retire it. Children no longer refresh lastSeenAt, so it tracks the root's
-    # own observations only.
-    last_observed = max(opened, int_field(stronger_record, "lastSeenAt"))
+    # Compare against the LATEST loss observation, not the root's first: a
+    # newer same-key logout is folded into the open record (refreshing
+    # lastSeenAt), a newer logout suppressed under a bond-loss root is recorded
+    # as lastConnectivityLossObservedAt, and a sibling root of the same instance
+    # keeps its own record. An older connected child must not retire any of
+    # them.
+    last_observed = latest_connectivity_loss_observation(stronger_record)
+    scope = stronger_key.rsplit("|", 1)[0]
+    for other_key, other in (open_incidents or {}).items():
+        if (
+            isinstance(other, dict)
+            and str(other_key).rsplit("|", 1)[0] == scope
+            and _bare_root_source(str(other_key)) in CONNECTIVITY_LOSS_ROOT_SOURCES
+        ):
+            last_observed = max(last_observed, latest_connectivity_loss_observation(other))
     order = event_created_order(event)
     if order is None:
         # Missing, unparseable or timezone-less createdAt: ordering unknown.
@@ -5198,7 +5223,11 @@ def stronger_incident_contradiction(
     }
 
 
-_STRICT_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)connected=([^\s]+)")
+# \S* rather than the lenient readers' [^\s]+: an EMPTY value is a reading
+# too, and an ambiguous one, so it must block retirement rather than vanish.
+_STRICT_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)connected=(\S*)")
+_STRICT_WHATSAPP_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)whatsapp_connected=(\S*)")
+_STRICT_CONNECTION_STATE_TOKEN_RE = re.compile(r"(?:^|\s)connection_state=(\S*)")
 _POSITIVE_TOKENS = frozenset({"true", "1", "yes"})
 
 
@@ -5209,8 +5238,9 @@ def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
     whatsapp_connected_reading: a structured ``diagnostics.whatsappConnected``
     must be the boolean True (a string, None or False blocks retirement); every
     ``whatsapp_connected=`` and bare ``connected=`` evidence token must be
-    positive; every ``connection_state=`` token must be ``connected``. Returns
-    None when any reading is negative or ambiguous, or when there is none.
+    positive; every ``connection_state=`` token must be ``connected``. An empty
+    value counts as ambiguous. Returns None when any reading is negative or
+    ambiguous, or when there is none.
     """
     readings: list[str] = []
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
@@ -5220,7 +5250,7 @@ def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
         readings.append("diagnostics.whatsappConnected=true")
     evidence = event_text(event, "evidence")
     for label, pattern in (
-        ("whatsapp_connected", _WHATSAPP_CONNECTED_EVIDENCE_RE),
+        ("whatsapp_connected", _STRICT_WHATSAPP_CONNECTED_TOKEN_RE),
         ("connected", _STRICT_CONNECTED_TOKEN_RE),
     ):
         tokens = pattern.findall(evidence)
@@ -5228,7 +5258,7 @@ def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
             return None
         if tokens:
             readings.append(f"{label}=true")
-    states = [token.strip().lower() for token in _CONNECTION_STATE_EVIDENCE_RE.findall(evidence)]
+    states = [token.strip().lower() for token in _STRICT_CONNECTION_STATE_TOKEN_RE.findall(evidence)]
     if any(state != "connected" for state in states):
         return None
     if states:
@@ -5321,6 +5351,17 @@ def mark_suppressed_by_stronger(
     # state, so it disappears once the root incident clears (NO persistent flag).
     root_source = stronger_key.rsplit("|", 1)[-1]
     stronger_record["lastSuppressedSymptomReason"] = f"inhibited_by:{root_source}"
+    # A suppressed child that itself reports the link down (a logout folded
+    # under a bond loss, or any child with a negative reading) is a newer loss
+    # observation. Recorded at processing time, which is never earlier than the
+    # child's own createdAt, so it can only make retirement stricter.
+    if (
+        _bare_root_source(str(incident_source(event))) in CONNECTIVITY_LOSS_ROOT_SOURCES
+        or whatsapp_connected_reading(event) is False
+    ):
+        stronger_record["lastConnectivityLossObservedAt"] = max(
+            int_field(stronger_record, "lastConnectivityLossObservedAt"), current
+        )
 
 
 def incident_event_fields_from_key(key: str) -> dict[str, str]:
