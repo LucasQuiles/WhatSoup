@@ -539,15 +539,19 @@ transport and process liveness pass:
   stamp whose count is unreadable or negative is treated as having reached the
   cap (`WARN: unreadable clear-failure count …`), and an unsafe stamp (symlink,
   foreign owner, writable by others) is an `ERROR` that is never followed.
-  While a page is outstanding, recovery writes
-  `<instance>-credential-dead.recovered` before sending its clear, and removes
-  it once the stamp is gone. A dead cycle that finds both the stamp and this
-  flag knows the stamp is left over from the previous episode (its clear was
-  still being retried, or its removal failed). It logs
-  `WARN: credential page stamp … is left from a previous episode`, drops the
-  stamp and the flag, and pages the new episode. A failed stamp removal keeps
-  the flag, so the next cycle retries. Without the flag, the stamp belongs to
-  the current episode and keeps suppressing repeats.
+  While a page is outstanding, recovery first writes
+  `<instance>-credential-dead.recovered`, before it removes the credential
+  marker or sends its clear, and removes the flag once the stamp is gone. If
+  the flag cannot be written, recovery changes nothing (`ERROR: failed to
+  record recovery flag …`): the marker, the stamp and the open page stay, and
+  the next healthy cycle retries. A dead cycle that finds both the stamp and
+  this flag knows the stamp is left over from the previous episode (its clear
+  was still being retried, its removal failed, or the watchdog died mid-way).
+  It logs `WARN: credential page stamp … is left from a previous episode`,
+  drops the stamp and the flag, and pages the new episode. A failed stamp
+  removal keeps the flag, so the next cycle retries. A flag with no stamp is
+  dropped before the new episode's stamp is written. Without the flag, the
+  stamp belongs to the current episode and keeps suppressing repeats.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.

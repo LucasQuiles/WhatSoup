@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import json
+import shlex
 import shutil
 import stat
 import subprocess
@@ -657,6 +658,95 @@ def test_recovery_flag_is_removed_once_the_stamp_is_gone(tmp_path):
     host.use_stub_emitter(rc=0)
     assert host.run(_recovered_body()).returncode == 0
     assert not host.stamp.exists() and not host.recovered.exists()
+
+
+def _alerts(host: _PagingHost) -> list[str]:
+    return [line for line in host.stub_argv() if not line.startswith("--clear")]
+
+
+def test_failed_stale_stamp_removal_is_retried_and_then_pages(tmp_path):
+    # The stamp of a recovered episode could not be removed. The flag must
+    # survive that failure so the next cycle retries and pages; dropping it
+    # would turn the stale stamp into permanent suppression.
+    host = _PagingHost(tmp_path, "staleretry-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.marker.unlink()
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    # The watchdog puts $HOME/.local/bin first on PATH, so this wrapper
+    # intercepts the marker helper and fails only the stamp removal.
+    wrapper = host.home / ".local" / "bin" / "python3"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$2" = "clear" ]; then case "$3" in *.paged) exit 2;; esac; fi\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    try:
+        proc = host.run(_DEAD_PROVIDER_BODY)
+    finally:
+        wrapper.unlink()
+    assert proc.returncode != 0
+    assert "failed to drop stale credential page stamp" in host.log_text()
+    assert host.stamp.exists() and host.recovered.exists()
+    assert len(_alerts(host)) == 1, host.stub_argv()
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 2, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_recovery_that_cannot_record_its_flag_changes_nothing(tmp_path):
+    # The flag is written before the dead marker goes. When it cannot be
+    # written, the marker, the stamp and the open page all stay, so no state
+    # exists in which a stamp has lost both its marker and its flag.
+    host = _PagingHost(tmp_path, "flagfail-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.symlink_to(tmp_path / "missing" / "flag")
+
+    proc = host.run(_recovered_body())
+    assert proc.returncode != 0
+    assert "failed to record recovery flag" in host.log_text()
+    assert host.marker.exists() and host.stamp.exists()
+    assert [line for line in host.stub_argv() if line.startswith("--clear")] == []
+
+    host.recovered.unlink()
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.marker.exists() and not host.stamp.exists()
+    assert not host.recovered.exists()
+
+
+def test_crash_after_recording_the_flag_still_pages_the_next_episode(tmp_path):
+    # Recovery died right after writing the flag: stamp, flag and marker all
+    # remain. A new dead episode must page.
+    host = _PagingHost(tmp_path, "flagcrash-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 2, host.stub_argv()
+    assert not host.recovered.exists()
+
+
+def test_leftover_flag_without_a_stamp_pages_once(tmp_path):
+    # Recovery died after removing the stamp but before removing the flag.
+    # The next episode pages once; the fresh stamp must not be read as stale.
+    host = _PagingHost(tmp_path, "flagonly-bot")
+    host.use_stub_emitter(rc=0)
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
 
 
 def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):

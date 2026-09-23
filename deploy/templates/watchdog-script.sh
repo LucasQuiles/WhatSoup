@@ -1027,6 +1027,16 @@ PY
           WD_EXIT=1
         fi
       fi
+    elif [ "$paged_rc" -eq 1 ]; then
+      # A flag with no stamp is left from a recovery that died after removing
+      # the stamp. Drop it before this episode's stamp exists, or the next
+      # cycle would read the new stamp as stale and page again.
+      credential_marker state "$CRED_RECOVERED"
+      if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; the page may repeat next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
     fi
     if [ "$paged_rc" -eq 1 ]; then
       credential_page alert
@@ -1082,33 +1092,39 @@ PY
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    if ! credential_marker clear; then
-      # Recovery evidence remains valid, but the watchdog invocation is not
-      # healthy while an unsafe or unusable marker path persists.
-      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
-      wd_note ERROR
-      WD_EXIT=1
-    fi
-    # Recovery ends the episode: the next dead episode may warn again.
-    credential_marker clear "$CRED_UNPAGED" || true
     # Recovery closes an outstanding page exactly once. The stamp is removed
     # after the clear was accepted, so a failed clear retries; after
     # CRED_CLEAR_MAX_ATTEMPTS consecutive failures (a missing emitter counts)
     # it is dropped with a WARN instead of holding the watchdog in ERROR.
     credential_marker state "$CRED_PAGED"
     recovered_paged_rc=$?
+    # The recovery flag is written before anything else changes, so a process
+    # that dies at any later step still leaves the stamp marked as belonging to
+    # a recovered episode. If it cannot be written, nothing else changes: the
+    # page stays open and the next healthy cycle retries the whole recovery.
+    recovery_recorded=1
+    if [ "$recovered_paged_rc" -eq 0 ] && ! credential_marker create "$CRED_RECOVERED"; then
+      log "ERROR: failed to record recovery flag $CRED_RECOVERED; recovery not applied, retrying next cycle"
+      wd_note ERROR
+      WD_EXIT=1
+      recovery_recorded=0
+    fi
+    if [ "$recovery_recorded" -eq 1 ]; then
+      if ! credential_marker clear; then
+        # Recovery evidence remains valid, but the watchdog invocation is not
+        # healthy while an unsafe or unusable marker path persists.
+        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+      # Recovery ends the episode: the next dead episode may warn again.
+      credential_marker clear "$CRED_UNPAGED" || true
+    fi
     if [ "$recovered_paged_rc" -eq 2 ]; then
       log "ERROR: unsafe credential page stamp $CRED_PAGED; not clearing"
       wd_note ERROR
       WD_EXIT=1
-    elif [ "$recovered_paged_rc" -eq 0 ]; then
-      # Mark the outstanding stamp as belonging to a recovered episode before
-      # trying to close it, so a death before it is gone still pages.
-      if ! credential_marker create "$CRED_RECOVERED"; then
-        log "ERROR: failed to record recovery flag $CRED_RECOVERED; a new episode before the page clears may not page"
-        wd_note ERROR
-        WD_EXIT=1
-      fi
+    elif [ "$recovered_paged_rc" -eq 0 ] && [ "$recovery_recorded" -eq 1 ]; then
       credential_page clear
       clear_rc=$?
       if [ "$clear_rc" -eq 0 ]; then
