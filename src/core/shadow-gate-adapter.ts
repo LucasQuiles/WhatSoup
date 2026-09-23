@@ -26,6 +26,7 @@ import {
   computeConfigGeneration,
   computeDatabaseLineage,
   createShadowGateRecorder,
+  isShadowGateId,
   SHADOW_GATE_COUNT_KEYS,
   SHADOW_GATE_ID_CHARS,
   SHADOW_GATE_ID_MAX_CHARS,
@@ -311,7 +312,8 @@ export function getShadowGateStats(): ShadowGateCounts {
   return Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((key) => [key, 0])) as ShadowGateCounts;
 }
 
-export type ShadowGateRecorderHealth = 'not_started' | 'disabled' | 'ready' | 'degraded' | 'unavailable';
+export type ShadowGateRecorderHealth =
+  | 'not_started' | 'disabled' | 'starting' | 'ready' | 'degraded' | 'unavailable';
 
 export type ShadowGateHealth =
   | { mode: 'off' }
@@ -327,8 +329,10 @@ export type ShadowGateHealth =
  * Advisory health projection: closed codes and counters only. Mode off does no
  * work. In shadow mode, `not_started` is the normal state before the first
  * dispatched message (creation is lazy); `disabled` means creation failed and
- * is latched until restart; `unavailable` means the sink is closed or its
- * status is unreadable. Never throws.
+ * is latched until restart; `degraded` wins whenever the sink has a degraded
+ * reason, even once closed; `unavailable` means the sink is closed or its
+ * status is unreadable. A reason outside the recorded id charset is reported as
+ * `unknown` so no free text reaches the body. Never throws.
  */
 export function getShadowGateHealth(config: Pick<ShadowGateConfig, 'shadowGate'>): ShadowGateHealth {
   if (config.shadowGate?.mode !== 'shadow') return { mode: 'off' };
@@ -337,9 +341,13 @@ export function getShadowGateHealth(config: Pick<ShadowGateConfig, 'shadowGate'>
   if (!recorder) return { ...unread, recorder: recorderDisabled ? 'disabled' : 'not_started' };
   try {
     const { state, degradedReason } = recorder.sinkStatus();
+    const reason = degradedReason === null ? null : isShadowGateId(degradedReason) ? degradedReason : 'unknown';
     const health: ShadowGateRecorderHealth =
-      state === 'degraded' ? 'degraded' : state === 'closed' ? 'unavailable' : 'ready';
-    return { mode: 'shadow', recorder: health, sinkState: state, sinkDegradedReason: degradedReason, counts };
+      reason !== null || state === 'degraded' ? 'degraded'
+        : state === 'closed' ? 'unavailable'
+          : state === 'starting' ? 'starting'
+            : 'ready';
+    return { mode: 'shadow', recorder: health, sinkState: state, sinkDegradedReason: reason, counts };
   } catch {
     return { ...unread, recorder: 'unavailable' };
   }

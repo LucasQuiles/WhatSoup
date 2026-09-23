@@ -7717,8 +7717,10 @@ describe('GET /health — shadowGate (advisory)', () => {
   let db: Database;
   let server: ReturnType<typeof createServer>;
   let port: number;
+  let savedShadowGate: PropertyDescriptor | undefined;
 
   beforeEach(async () => {
+    savedShadowGate = Object.getOwnPropertyDescriptor(config, 'shadowGate');
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     db = makeDb();
     ({ server, port } = await buildTestServer(makeDeps(db)));
@@ -7726,7 +7728,8 @@ describe('GET /health — shadowGate (advisory)', () => {
 
   afterEach(async () => {
     await __resetShadowGateForTests();
-    delete mutableConfig.shadowGate;
+    if (savedShadowGate) Object.defineProperty(config, 'shadowGate', savedShadowGate);
+    else delete mutableConfig.shadowGate;
     db.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     delete process.env.WHATSOUP_HEALTH_TOKEN;
@@ -7807,5 +7810,50 @@ describe('GET /health — shadowGate (advisory)', () => {
       });
     });
     expect(statusFields(await diagnostic())).toEqual(baseline);
+  });
+
+  it('a degraded sink that is later closed still reports degraded with its reason', async () => {
+    const blocker = join(tmp.make('degraded-closed'), 'not-a-dir');
+    writeFileSync(blocker, 'x');
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(blocker, 'events') };
+    const recorder = getShadowGateRecorder(db, config)!;
+    await vi.waitFor(() => expect(recorder.sinkStatus().state).toBe('degraded'));
+    await recorder.close();
+    expect((await diagnostic()).shadowGate).toMatchObject({
+      recorder: 'degraded', sinkState: 'closed', sinkDegradedReason: 'mkdir_failed',
+    });
+  });
+
+  describe('with a stubbed sink status', () => {
+    function stubbedRecorder() {
+      mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('stub'), 'events') };
+      return vi.spyOn(getShadowGateRecorder(db, config)!, 'sinkStatus');
+    }
+
+    it('reports a sink that is still starting as starting, not ready', async () => {
+      stubbedRecorder().mockReturnValue({ state: 'starting', degradedReason: null });
+      expect((await diagnostic()).shadowGate).toMatchObject({
+        recorder: 'starting', sinkState: 'starting', sinkDegradedReason: null,
+      });
+    });
+
+    it('replaces a degraded reason outside the id charset with unknown', async () => {
+      stubbedRecorder().mockReturnValue({ state: 'degraded', degradedReason: '/var/lib/whatsoup/events: EACCES' });
+      const { body } = await healthReq(port);
+      expect(body).not.toContain('/var/lib/whatsoup');
+      expect((JSON.parse(body) as Record<string, unknown>).shadowGate).toMatchObject({
+        recorder: 'degraded', sinkDegradedReason: 'unknown',
+      });
+    });
+
+    it('a throwing sink status still answers 200 and reports unavailable', async () => {
+      stubbedRecorder().mockImplementation(() => {
+        throw new Error('sink status failed');
+      });
+      expect((await diagnostic()).shadowGate).toEqual({
+        mode: 'shadow', recorder: 'unavailable', sinkState: null, sinkDegradedReason: null,
+        counts: expect.objectContaining({ evaluated: 0 }),
+      });
+    });
   });
 });

@@ -437,6 +437,18 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
       }
     ]
   },
+  "shadowGate": {
+    "mode": "shadow",
+    "recorder": "ready",
+    "sinkState": "ready",
+    "sinkDegradedReason": null,
+    "counts": {
+      "evaluated": 42, "recorded": 42, "written": 43,
+      "droppedQueueFull": 0, "droppedOversize": 0, "droppedClosed": 0, "droppedDegraded": 0,
+      "droppedWriteFailed": 0, "droppedUnserializable": 0,
+      "invalid": 0, "writeErrors": 0, "journalFailures": 0
+    }
+  },
   "durability": {
     "pendingOutbound": 0,
     "quarantinedOutbound": 0,
@@ -444,6 +456,8 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
   }
 }
 ```
+
+`shadowGate` is `{ "mode": "off" }` unless the shadow gate is enabled; see [Shadow Gate](#shadow-gate) → "Live status" for every field and `recorder` value.
 
 `model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
@@ -2445,11 +2459,19 @@ disabled recorder leaves the instance `healthy`, so a monitor that needs to catc
 - Mode `shadow`: `{ mode, recorder, sinkState, sinkDegradedReason, counts }`, metadata only.
   - `recorder` is `not_started` until the first message reaches dispatch, because the recorder is
     created then. This is the normal state after a restart.
-  - `recorder` is `unavailable` if the sink is closed or its status cannot be read.
+  - `recorder` is `starting` while the sink is still creating its directory and taking its lock.
+    This normally lasts well under a second. `starting` for more than about 30 seconds is a fault,
+    usually a stalled `mkdir` or lock on the events directory's filesystem. Verdicts queue and then
+    drop as `droppedQueueFull` while it lasts.
+  - `recorder` is `ready` once the sink is ready.
   - `recorder` is `disabled` if creating the recorder failed. This is latched until restart.
-  - `recorder` is `degraded` if the sink degraded. `sinkDegradedReason` gives the closed reason
-    code, for example `mkdir_failed`, `competing_writer`, `segment_cap_reached` or `write_failed`.
-  - Otherwise `recorder` is `ready`.
+  - `recorder` is `degraded` whenever the sink has a degraded reason, even if the sink has since
+    closed. `sinkDegradedReason` gives the closed reason code, for example `mkdir_failed`,
+    `competing_writer`, `segment_cap_reached` or `write_failed`. A reason outside the recorded id
+    charset is reported as `unknown`, so no free text or path reaches the body.
+  - `recorder` is `unavailable` if the sink is closed without a degraded reason, or its status
+    cannot be read. A running service never closes the sink, so `unavailable` is not expected in
+    production. If it appears, report it as a defect.
   - `counts` carries the same counters the coverage markers carry, for the current process.
 
 The id rules: every id uses the charset `A-Za-z0-9._:-` (at most 128 characters), and `messageId` and
