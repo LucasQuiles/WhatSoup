@@ -51,6 +51,11 @@ CRED_PAGED="$LOG_DIR/BOT_NAME-credential-dead.paged"
 # nonzero exit still repeat every cycle). Removed on recovery and after a page
 # lands.
 CRED_UNPAGED="$LOG_DIR/BOT_NAME-credential-dead.unpaged"
+# Present while a recovery has happened but its page stamp is still on disk (the
+# clear is being retried, or the stamp could not be removed). A dead cycle that
+# finds both files knows the stamp belongs to the previous episode and pages
+# again. Written by recovery, removed with the stamp.
+CRED_RECOVERED="$LOG_DIR/BOT_NAME-credential-dead.recovered"
 CRED_CLEAR_MAX_ATTEMPTS=3
 # The shipped BOT ERRORS emitter writes to the host's durable outbox. Hosts run
 # from per-release trees, so the path is baked at render time by
@@ -988,10 +993,6 @@ PY
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
-    # An absent marker means this cycle starts a new dead episode: recovery
-    # removes the marker before it touches the page stamp.
-    credential_marker state
-    prior_marker_rc=$?
     if ! credential_marker create; then
       # The verdict stands; the ERROR line and the nonzero invocation exit
       # carry the failure, and the next scheduled run retries the create.
@@ -1002,17 +1003,29 @@ PY
     # Page once per transition: only while no page is outstanding.
     credential_marker state "$CRED_PAGED"
     paged_rc=$?
-    # A stamp that outlived its episode (the recovery clear was accepted but
-    # the stamp could not be removed, or a timed-out clear was retained) must
-    # not suppress this episode's page.
-    if [ "$prior_marker_rc" -eq 1 ] && [ "$paged_rc" -eq 0 ]; then
-      log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
-      if credential_marker clear "$CRED_PAGED"; then
-        paged_rc=1
-      else
-        log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; not paging this cycle"
-        wd_note ERROR
-        WD_EXIT=1
+    # A stamp that outlived a recovery (its clear is still being retried, or it
+    # could not be removed) must not suppress this new episode's page. The
+    # recovery flag, not marker history, identifies it: a failed marker create
+    # never makes the current episode's stamp look stale.
+    if [ "$paged_rc" -eq 0 ]; then
+      credential_marker state "$CRED_RECOVERED"
+      if [ $? -eq 0 ]; then
+        log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
+        if credential_marker clear "$CRED_PAGED"; then
+          paged_rc=1
+          if ! credential_marker clear "$CRED_RECOVERED"; then
+            # The next cycle would treat the new stamp as stale again: loud,
+            # never silent.
+            log "ERROR: failed to remove recovery flag $CRED_RECOVERED; the page may repeat next cycle"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        else
+          # The flag stays, so the next cycle retries the invalidation.
+          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
       fi
     fi
     if [ "$paged_rc" -eq 1 ]; then
@@ -1089,6 +1102,13 @@ PY
       wd_note ERROR
       WD_EXIT=1
     elif [ "$recovered_paged_rc" -eq 0 ]; then
+      # Mark the outstanding stamp as belonging to a recovered episode before
+      # trying to close it, so a death before it is gone still pages.
+      if ! credential_marker create "$CRED_RECOVERED"; then
+        log "ERROR: failed to record recovery flag $CRED_RECOVERED; a new episode before the page clears may not page"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
       credential_page clear
       clear_rc=$?
       if [ "$clear_rc" -eq 0 ]; then
@@ -1129,6 +1149,11 @@ PY
           WD_EXIT=1
         fi
       fi
+    fi
+    # Once no page stamp remains, the recovery flag has nothing to mark.
+    credential_marker state "$CRED_PAGED"
+    if [ $? -eq 1 ]; then
+      credential_marker clear "$CRED_RECOVERED" || true
     fi
   fi
   fi

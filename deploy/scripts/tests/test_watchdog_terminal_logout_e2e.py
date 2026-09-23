@@ -338,6 +338,7 @@ class _PagingHost:
         self.logs.mkdir(parents=True, exist_ok=True)
         self.marker = self.logs / f"{bot_name}-credential-dead.marker"
         self.stamp = self.logs / f"{bot_name}-credential-dead.paged"
+        self.recovered = self.logs / f"{bot_name}-credential-dead.recovered"
         self.outbox = tmp_path / "bot-errors-state" / "outbox"
         self.state = tmp_path / "bot-errors-state"
 
@@ -596,14 +597,19 @@ def test_stamp_left_from_a_recovered_episode_does_not_suppress_the_next_page(tmp
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
     assert host.run(_recovered_body()).returncode == 0
     assert not host.marker.exists() and not host.stamp.exists()
-    host.stamp.write_text("", encoding="utf-8")
-    host.stamp.chmod(0o600)
+    assert not host.recovered.exists()
+    # Recovery writes the flag before it clears; a stamp that then survives
+    # leaves both files behind.
+    for path in (host.stamp, host.recovered):
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o600)
 
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
     alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
     assert len(alerts) == 2, host.stub_argv()
     assert "left from a previous episode" in host.log_text()
     assert host.marker.exists() and host.stamp.exists()
+    assert not host.recovered.exists()
 
     # Within one episode the stamp still suppresses repeats.
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
@@ -618,11 +624,39 @@ def test_death_right_after_a_failed_clear_pages_the_new_episode(tmp_path):
     assert host.run(_recovered_body()).returncode != 0
     assert host.stamp.exists() and not host.marker.exists()
 
+    assert host.recovered.exists()
+
     host.use_stub_emitter(rc=0)
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
     alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
     assert len(alerts) == 2, host.stub_argv()
     assert host.stamp.exists()
+    assert not host.recovered.exists()
+
+
+def test_a_current_episode_stamp_without_the_recovery_flag_still_suppresses(tmp_path):
+    # Control: with no recovery in between, the stamp is this episode's and
+    # repeated dead cycles must not page again, whatever the marker's state.
+    host = _PagingHost(tmp_path, "curstamp-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.marker.unlink()
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 1, host.stub_argv()
+
+
+def test_recovery_flag_is_removed_once_the_stamp_is_gone(tmp_path):
+    host = _PagingHost(tmp_path, "flagclean-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.recovered.exists() and host.stamp.exists()
+    host.use_stub_emitter(rc=0)
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists() and not host.recovered.exists()
 
 
 def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):

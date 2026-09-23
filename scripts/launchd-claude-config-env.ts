@@ -79,18 +79,18 @@ export function readInstalledClaudeConfigDir(file: string): string | null {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
+  // The reader decodes only the five named XML entities. A numeric character
+  // reference in the raw XML would be carried forward as literal text (&#45;
+  // changes the path) or would hide the key itself (CLAUDE_CONFIG_DI&#82;), so
+  // refuse it before any other branch can return "nothing to preserve". This
+  // checks the raw bytes: an escaped literal (&amp;#45;) is not a reference.
+  if (source.includes('&#')) {
+    throw new Error(`--preserve-from ${file}: plist uses a numeric character reference, which is not supported`);
+  }
   const environment = readLaunchdEnvironment(source);
   if (environment === null) {
     if (!source.includes(KEY)) return null;
     throw new Error(`--preserve-from ${file}: mentions ${KEY} but its EnvironmentVariables dict is duplicated or unparseable`);
-  }
-  // The reader decodes only the five named XML entities. A numeric character
-  // reference (&#45;) would be carried forward as literal text, changing the
-  // path, or would hide the key itself (CLAUDE_CONFIG_DI&#82;), so refuse it.
-  for (const [name, value] of environment.env) {
-    if (name.includes('&#') || value.includes('&#')) {
-      throw new Error(`--preserve-from ${file}: EnvironmentVariables uses a numeric character reference, which is not supported`);
-    }
   }
   return environment.env.get(KEY) ?? null;
 }

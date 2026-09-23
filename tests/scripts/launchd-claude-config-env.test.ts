@@ -159,6 +159,23 @@ describe('--preserve-from carries a hand-added CLAUDE_CONFIG_DIR forward', () =>
     fs.writeFileSync(file, base.replace('<key>CLAUDE_CONFIG_DIR</key>', '<key>CLAUDE_CONFIG_DI&#82;</key>'));
     expect(plistEnv(fs.readFileSync(file, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/claude-bot');
     expect(() => render(home, file)).toThrow(/numeric character reference/);
+    // An encoded key beside a comment in the dict body makes the reader give up;
+    // the refusal must still come first, not "nothing to preserve".
+    const commented = base
+      .replace('<key>CLAUDE_CONFIG_DIR</key>', '<!-- hand edit --><key>CLAUDE_CONFIG_DI&#82;</key>');
+    fs.writeFileSync(file, commented);
+    expect(plistEnv(fs.readFileSync(file, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/claude-bot');
+    expect(() => render(home, file)).toThrow(/numeric character reference/);
+  });
+
+  it('keeps an escaped literal that only looks like a reference', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    const file = path.join(home, 'installed.plist');
+    // &amp;#45; is the literal text "&#45;", not a reference.
+    fs.writeFileSync(file, injectClaudeConfigDir(harnessTemplate, '/srv/literal&#45;bot'));
+    expect(fs.readFileSync(file, 'utf8')).toContain('/srv/literal&amp;#45;bot');
+    expect(plistEnv(render(home, file).output)['CLAUDE_CONFIG_DIR']).toBe('/srv/literal&#45;bot');
   });
 
   it('preserves nothing from an installed plist with no environment at all', () => {
