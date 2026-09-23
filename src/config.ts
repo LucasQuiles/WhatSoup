@@ -1170,6 +1170,7 @@ const echoGuardSection = configSection(instance?.echoGuard, 'echoGuard');
 const elevenlabsSection = configSection(instance?.elevenlabs, 'elevenlabs');
 const mediaRetentionSection = configSection(instance?.mediaRetention, 'mediaRetention');
 const ingestSection = configSection(instance?.ingest, 'ingest');
+const shadowGateSection = configSection(instance?.shadowGate, 'shadowGate');
 const advancedSection = configSection(instance?.advanced, 'advanced');
 const instancePathsSection = instance ? configSection(instance.paths, 'paths') : undefined;
 
@@ -1662,6 +1663,12 @@ export const config = {
   ingest: {
     maxConcurrent: optionalFiniteNumber(ingestSection?.maxConcurrent, 'ingest.maxConcurrent') ?? 20,
     maxQueueDepth: optionalFiniteNumber(ingestSection?.maxQueueDepth, 'ingest.maxQueueDepth') ?? 500,
+  },
+
+  // Shadow gate: advisory, logged-only reply-worthiness verdicts (never changes dispatch)
+  shadowGate: {
+    mode: optionalEnum(shadowGateSection?.mode, 'shadowGate.mode', ['off', 'shadow'] as const) ?? 'off',
+    eventsDir: optionalString(shadowGateSection?.eventsDir, 'shadowGate.eventsDir') ?? null,
   },
 
   // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart

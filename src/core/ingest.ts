@@ -25,6 +25,7 @@ import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './he
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
+import { startShadowGateAttempt } from './shadow-gate-adapter.ts';
 
 const log = createChildLogger('ingest');
 
@@ -501,17 +502,28 @@ export function createIngestHandler(
           return;
         }
 
+        // 4b. Shadow gate: logged-only verdict on raw content; never changes dispatch
+        const shadowAttempt = config.shadowGate?.mode === 'shadow'
+          ? startShadowGateAttempt(msg, conversationKey, db, getBotJid, getBotLid, config)
+          : null;
+
         // 5. Journal inbound event before dispatch so runtime can link outbound ops
         const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
         let seq: number | undefined;
         if (durability) {
-          seq = durability.journalInbound(
-            msg.messageId,
-            conversationKey,
-            msg.chatJid,
-            routedTo,
-            ingressReceivedAtUnixSeconds,
-          );
+          try {
+            seq = durability.journalInbound(
+              msg.messageId,
+              conversationKey,
+              msg.chatJid,
+              routedTo,
+              ingressReceivedAtUnixSeconds,
+            );
+          } catch (err) {
+            shadowAttempt?.journalFailed();
+            throw err;
+          }
+          shadowAttempt?.settle(seq);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
           msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
           if (msg.receivedAtUnixSeconds === undefined) {
@@ -520,6 +532,8 @@ export function createIngestHandler(
               'journaled inbound receipt is invalid — dispatching without chronology',
             );
           }
+        } else {
+          shadowAttempt?.settle(null);
         }
 
         // Strip the bot's own @mention token from inbound GROUP text so the agent
