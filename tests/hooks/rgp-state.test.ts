@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -244,7 +244,12 @@ describe('rgp-state lock and rate-limit helpers', () => {
       releaseOwner = () => resolve('owner-done');
     });
     const owner = withQueueLock('lock-long', async () => ownerDone, { staleMs: 20 });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Age the live owner's lock far past the legacy stale interval instead of
+    // sleeping: only holder liveness may keep the lock, never its mtime.
+    const lockPath = queueLockPath('lock-long');
+    expect(existsSync(lockPath)).toBe(true);
+    const longAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    utimesSync(lockPath, longAgo, longAgo);
 
     const contender = await withQueueLock('lock-long', async () => 'stolen', { staleMs: 20 });
 
