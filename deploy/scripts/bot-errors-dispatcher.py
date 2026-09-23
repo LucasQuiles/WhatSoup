@@ -3648,7 +3648,21 @@ class AmbiguousSendOutcome(RuntimeError):
         self.phase = phase
 
 
-def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def json_rpc_call(
+    socket_path: str,
+    method: str,
+    params: dict[str, Any],
+    timeout: float = 15.0,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """One JSON-RPC tool call over the instance socket.
+
+    ``timeout`` bounds each phase separately. ``deadline`` (a time.monotonic()
+    value, used by the owner route) additionally bounds the WHOLE call: every
+    blocking step gets only the time left, and a spent deadline raises. Without
+    it the behaviour is exactly the per-phase one the group send relies on.
+    """
     if not socket_path:
         raise RuntimeError("socket path missing")
     if not os.path.exists(socket_path):
@@ -3656,8 +3670,16 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
 
     init_id = int(time.time() * 1000)
     call_id = init_id + 1
+    def step_timeout() -> float:
+        if deadline is None:
+            return timeout
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("json-rpc deadline spent")
+        return min(timeout, left)
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
+        sock.settimeout(step_timeout())
         sock.connect(socket_path)
         reader = sock.makefile("r", encoding="utf-8", newline="\n")
         writer = sock.makefile("w", encoding="utf-8", newline="\n")
@@ -3675,7 +3697,10 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: everything up to and including this handshake wait happens
         # before the tool call is written, so nothing can have been accepted.
-        wait_for_response(reader, init_id, timeout, phase=JSON_RPC_HANDSHAKE_PHASE)
+        wait_for_response(
+            reader, init_id, step_timeout(), phase=JSON_RPC_HANDSHAKE_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -3686,11 +3711,14 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: past this flush the remote may already have acted on the
         # request, so a missing reply is an ambiguous outcome, not a failure.
-        return wait_for_response(reader, call_id, timeout, phase=JSON_RPC_POST_REQUEST_PHASE)
+        return wait_for_response(
+            reader, call_id, step_timeout(), phase=JSON_RPC_POST_REQUEST_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
 
 def wait_for_response(
-    reader: Any, expected_id: int, timeout: float, *, phase: str
+    reader: Any, expected_id: int, timeout: float, *, phase: str, sock: Any = None
 ) -> dict[str, Any]:
     """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
 
@@ -3714,7 +3742,11 @@ def wait_for_response(
         while time.monotonic() < deadline:
             # The socket carries the same timeout as this deadline, so readline
             # raises socket.timeout("timed out") first; that is the text an
-            # operator sees, not the deadline message below.
+            # operator sees, not the deadline message below. With ``sock``
+            # (deadline-bound callers) each read gets only the time left, so
+            # a late read cannot overrun the deadline by a full timeout.
+            if sock is not None:
+                sock.settimeout(max(0.001, deadline - time.monotonic()))
             line = reader.readline()
             if not line:
                 raise RuntimeError("socket closed before response")
@@ -9835,6 +9867,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 # loses it (a missed copy, never a duplicate: the group copy exists).
 _owner_route_queue: list[tuple[dict[str, Any], str, bool, str]] = []
 OWNER_ROUTE_DEFAULT_BUDGET_SECONDS = 30.0
+# A cycle that fails after its sends skips the drain; the cap stops a run of
+# such cycles from growing the queue without bound. Overflow is a logged
+# skip: the group copy of every alert exists regardless.
+OWNER_ROUTE_QUEUE_MAX = 20
 
 
 def owner_route_enabled() -> bool:
@@ -9855,6 +9891,13 @@ def route_to_owner(event: dict[str, Any], paths: dict[str, Path], text: str) -> 
     send in the same cycle.
     """
     if not owner_route_enabled():
+        return
+    if len(_owner_route_queue) >= OWNER_ROUTE_QUEUE_MAX:
+        try:
+            append_dispatch_log(paths, {"type": "owner_route_skipped", "eventId": event.get("id"),
+                                        "skippedQueueFull": True})
+        except Exception:  # noqa: BLE001
+            pass
         return
     try:
         _owner_route_queue.append((

@@ -173,6 +173,14 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise _StateUnreadable(str(exc)) from exc
     if not isinstance(data, dict):
         raise _StateUnreadable("state is not an object")
+    # Every entry must carry a usable floor. A null, empty or non-integer
+    # entry would read as "never sent" and permit a duplicate, and dropping it
+    # while pruning would forget that key's floor, so the whole state is
+    # uncertain.
+    for entry in data.values():
+        last_at = entry.get("lastAt") if isinstance(entry, dict) else None
+        if isinstance(last_at, bool) or not isinstance(last_at, int) or last_at <= 0:
+            raise _StateUnreadable("state entry has no usable lastAt")
     return data
 
 
@@ -234,15 +242,12 @@ def route_owner_critical(
             skip(stateUnreadable=True)
             return
         entry = state.get(key)
-        last = int(entry.get("lastAt") or 0) if isinstance(entry, dict) else 0
+        last = entry["lastAt"] if entry is not None else 0
         if last and now - last < cfg["min_interval"]:
             skip(skippedMinInterval=True, sinceLastSeconds=now - last)
             return
         retention = max(STATE_RETENTION_SECONDS, cfg["min_interval"])
-        state = {
-            k: v for k, v in state.items()
-            if isinstance(v, dict) and now - int(v.get("lastAt") or 0) < retention
-        }
+        state = {k: v for k, v in state.items() if now - v["lastAt"] < retention}
         state[key] = {"lastAt": now, "eventId": event.get("id")}
         _save_state(state_path, state)
 
@@ -255,6 +260,7 @@ def route_owner_critical(
             "tools/call",
             {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
             timeout=max(1.0, min(cfg["timeout"], remaining())),
+            **({"deadline": deadline} if deadline is not None else {}),
         )
         receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
         whatsapp_accepted = True

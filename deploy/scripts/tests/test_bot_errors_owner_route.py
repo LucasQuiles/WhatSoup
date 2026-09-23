@@ -30,6 +30,10 @@ import time
 import types
 from pathlib import Path
 
+import socket
+import tempfile
+import threading
+
 import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -76,7 +80,7 @@ class _Recorder:
         self.send_raises = send_raises
         self.email_ok = email_ok
 
-    def rpc(self, socket_path, method, params, timeout=15.0):
+    def rpc(self, socket_path, method, params, timeout=15.0, **_kwargs):
         self.sends.append({"socket": socket_path, "method": method, "params": params})
         if self.send_raises:
             raise OSError("socket unavailable")
@@ -241,6 +245,95 @@ def test_unreadable_state_skips_instead_of_forgetting_floors(route_env, content)
     assert len(_skips(rec, "stateUnreadable")) == 1
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [None, {}, {"lastAt": None}, {"lastAt": True}, {"lastAt": "1"}, {"lastAt": 0}],
+    ids=["null", "empty", "null-lastAt", "bool-lastAt", "string-lastAt", "zero-lastAt"],
+)
+@pytest.mark.parametrize("which", ["same-key", "other-key"])
+def test_a_malformed_entry_makes_the_state_unreadable(route_env, entry, which):
+    key = "host-a|sample|provider_fallback_activated"
+    other = "host-a|other|provider_fallback_activated"
+    good = {"lastAt": int(time.time()) - 60, "eventId": "ok"}
+    state = {key: entry, other: good} if which == "same-key" else {key: good, other: entry}
+    (route_env / "owner-route-state.json").write_text(json.dumps(state))
+    rec = _Recorder()
+    _route(_alert(), rec, route_env, key=key if which == "same-key" else "host-a|third|provider_fallback_activated")
+    assert rec.sends == []
+    assert len(_skips(rec, "stateUnreadable")) == 1
+
+
+def test_the_queue_is_capped(monkeypatch, tmp_path):
+    for key in list(os.environ):
+        if key.startswith("BOT_ERRORS_OWNER_ROUTE_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", _JID)
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
+    dispatcher = _load_dispatcher()
+    logged: list[dict] = []
+    monkeypatch.setattr(dispatcher, "append_dispatch_log", lambda paths, record: logged.append(record))
+    for i in range(dispatcher.OWNER_ROUTE_QUEUE_MAX + 3):
+        dispatcher.route_to_owner(_alert(event_id=f"evt-{i}"), {"root": tmp_path}, "group text")
+    assert len(dispatcher._owner_route_queue) == dispatcher.OWNER_ROUTE_QUEUE_MAX
+    assert [r["eventId"] for r in logged if r.get("skippedQueueFull") is True] == [
+        f"evt-{i}" for i in range(dispatcher.OWNER_ROUTE_QUEUE_MAX, dispatcher.OWNER_ROUTE_QUEUE_MAX + 3)
+    ]
+
+
+def _slow_rpc_server(sock_path: str, delay: float, stop: threading.Event) -> threading.Thread:
+    """Answer initialize and the tool call, each after ``delay`` seconds."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        f = conn.makefile("rwb", buffering=0)
+        try:
+            for _ in range(2):
+                line = f.readline()
+                if not line or stop.wait(delay):
+                    break
+                msg = json.loads(line)
+                body = {"sent": True} if msg.get("method") != "initialize" else {"ok": True}
+                f.write((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": body}) + "\n").encode())
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            srv.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.mark.parametrize("bounded", [True, False])
+def test_the_deadline_bounds_the_whole_rpc_call(bounded):
+    # Each phase answers after 0.6 s: 1.2 s in total. A 0.8 s deadline must end
+    # the call near 0.8 s even though every phase alone is inside the 8 s
+    # per-phase timeout; without a deadline the call completes.
+    dispatcher = _load_dispatcher()
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+    stop = threading.Event()
+    thread = _slow_rpc_server(sock_path, 0.6, stop)
+    started = time.monotonic()
+    try:
+        if bounded:
+            with pytest.raises(Exception):
+                dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
+                                         deadline=started + 0.8)
+            assert time.monotonic() - started < 1.1
+        else:
+            assert dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8) == {"sent": True}
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
 def test_a_held_state_lock_skips_the_copy(route_env):
     rec = _Recorder()
     with (route_env / "owner-route.lock").open("a") as lock:
@@ -347,7 +440,9 @@ def test_run_once_sends_every_group_alert_before_any_owner_copy(tmp_path, monkey
         order.append("group")
         return {"audit_receipt": f"g{len(order)}"} if require_acceptance else None
 
-    def owner_send(socket_path, method, params, timeout=15.0):
+    def owner_send(socket_path, method, params, timeout=15.0, *, deadline=None):
+        # The drain passes its shared budget as an absolute deadline.
+        assert deadline is not None
         order.append("owner")
         return {"ok": True}
 

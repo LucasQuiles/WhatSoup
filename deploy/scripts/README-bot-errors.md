@@ -665,7 +665,12 @@ phone notifies, plus an e-mail through the existing fallback script. Code:
 `route_to_owner()` only queues the copy; `drain_owner_route_queue()` sends the
 queued copies once the cycle has sent every group alert and recorded
 `cycleCompletedAt`, so an owner copy never delays a group send. The drain
-shares one time budget, which bounds how late the next cycle can start.
+shares one time budget, enforced end to end: the socket call receives an
+absolute deadline, and every blocking step, the handshake and each read
+included, gets only the time left. The budget therefore bounds how late the
+next cycle can start. The queue holds at most 20 copies; a cycle that fails
+after its sends skips the drain, and a copy arriving at a full queue is
+logged as `skippedQueueFull` and dropped (its group copy exists).
 
 **Inert by default.** Nothing is read, parsed or logged unless both
 `BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
@@ -690,7 +695,8 @@ reminder; plain still-open renotifies are skipped. The per-key interval is
 recorded before the send, so a crash yields a missed copy, never a duplicate.
 The group copy exists either way. When deduplication cannot be established the
 copy is skipped rather than risked: an existing state file that cannot be read
-or parsed, the state lock (`owner-route.lock`) held by another caller, or a
+or parsed, or that holds any entry without a positive integer `lastAt`, the
+state lock (`owner-route.lock`) held by another caller, or a
 spent budget. A budget skip records no interval, so the next occurrence is sent.
 State entries are kept for at least the configured interval (seven days or the
 interval, whichever is longer). Stale-incident digests are info severity and
@@ -699,8 +705,8 @@ are never routed. The default sources exclude the
 
 **Log records.** `owner_route_sent` carries booleans only (`whatsappAccepted`,
 `emailEnabled`, `emailAccepted`, `emailSkippedBudget`); `owner_route_skipped`
-carries one of `skippedMinInterval`, `stateUnreadable`, `skippedLocked` or
-`skippedBudget`. The controller log keeps a string only when it is on its fixed
+carries one of `skippedMinInterval`, `stateUnreadable`, `skippedLocked`,
+`skippedBudget` or `skippedQueueFull`. The controller log keeps a string only when it is on its fixed
 allowlist, so a free-text status would be dropped. A persistent
 `stateUnreadable` means every copy is being skipped: inspect or remove
 `owner-route-state.json` in the dispatcher state root.
