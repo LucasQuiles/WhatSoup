@@ -2361,3 +2361,80 @@ uses to call an open inbound stale) block the stop. Older open rows are reported
 stay restartable, since restart is how a wedge gets cleared.
 
 The verdict reports `liveTurns.windowSeconds`, so a deploy receipt can record the exact predicate applied.
+
+## Shadow Gate
+
+The shadow gate is a logged-only reply-worthiness classifier (`src/core/shadow-gate-adapter.ts`). For
+every message that passes the access policy and reaches dispatch it records an advisory SPAWN/SUPPRESS
+verdict. It is advisory only: it never changes dispatch, and there is no enforcing mode.
+
+**Enable.** Set `"shadowGate": { "mode": "shadow" }` in the instance's `config.json` (optionally
+`"eventsDir": "/abs/path"`; see [configuration](configuration.md)), then restart the instance. The
+restart is an owner action: run the `--mode stop` check above first. The section is read only at
+startup.
+
+**Where events live.** NDJSON segments `shadow-gate-events.NNNNNN.ndjson` (six-digit index) in
+`eventsDir`, by default `~/.config/whatsoup/instances/<name>/`. The segments sit next to a
+`shadow-gate-events.lock` file, which the report ignores. Records contain metadata and closed codes
+only: no message text, JIDs or phone numbers.
+
+**Measure.** Never read or `cp` the live database. Take a self-contained snapshot through the SQLite
+backup API, and copy the segment directory:
+
+```bash
+INSTANCE=operator-agent
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+SNAP=$(mktemp -d)
+sqlite3 "$DB" ".backup '$SNAP/bot.db'"
+cp -p ~/.config/whatsoup/instances/$INSTANCE/shadow-gate-events.*.ndjson "$SNAP/"
+npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
+  --instance "$INSTANCE" --since 1790000000 --until 1790086400 [--lineage <hash>] [--json]
+```
+
+- `--instance` is the recorded id: `botName` with characters outside `A-Za-z0-9._:-` replaced by `_`
+  (at most 128 characters). It is not necessarily the directory name.
+- `--since`/`--until` are required unix seconds; the window is `[since, until)` over
+  `inbound_events.received_at`.
+- The report opens the snapshot `immutable=1`, which creates no `-wal`/`-shm` sidecars. It refuses
+  a snapshot that has a non-empty `-wal` next to it, because that mode would ignore the rows inside it.
+- The database lineage is a hash of the live database path and inode, so it cannot be recomputed from
+  a snapshot. The report prints the lineages it sees. When more than one is present it exits `65`; pick
+  one with `--lineage`.
+
+Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
+error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
+an invalid interior NDJSON line (named by file and line number only), more than 64 segments, more than
+200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage.
+
+**Reading the output.** Coverage prints first:
+
+- `eligible` counts `inbound_events` rows in the window whose `routed_to` is not
+  `none`/`admin`/`control`/`passive`.
+- Scheduled-job (`agentjob-…`) and obligation (`obl:…`) turns never pass ingest. They are excluded
+  and counted separately.
+- Any `routed_to` value that is not a known runtime is listed and counted as eligible.
+- `missing` counts eligible rows without exactly one valid joined verdict. Conflicting verdicts,
+  seq mismatches and a torn final line all leave a row missing.
+- `invalid`, `recorderDropped` and `journalFailures` come from each boot's latest coverage marker.
+  They are cumulative per process: records the recorder rejected or dropped before writing. A message
+  id outside the recorded id charset is rejected this way and shows up as missing.
+
+ERROR verdicts count as SPAWN in every rate. The disagreement rate against `response_echoed` is
+printed three ways: over echoed rows with a verdict, over all echoed rows, and conservatively with
+every missing echoed row counted as a disagreement. Each carries a one-sided 95% Clopper–Pearson upper
+bound. `response_echoed` is historical behaviour, not proof that a reply was required, so none of these
+is a gold false-suppress rate. If more than one gate/rules/feature version is present, rates are printed
+per partition only, never pooled.
+
+**Disable / roll back.** Set `"mode": "off"` (or remove `shadowGate`) and restart. Existing segments
+are inert and can be archived.
+
+**Known limits.**
+
+- Advisory only. Nothing reads verdicts at runtime.
+- There is no `disarmed` marker on process exit. The 10-minute `counts` markers bound the
+  unrecorded tail, and the report flags any boot that has no `armed` marker.
+- The pending-obligation feature (whether the bot's previous message asked a question) misses a bot
+  question stored in the same second as the inbound message.
+- Rules load lazily on the first shadow evaluation. A failed load latches `ERROR`/`E_THROW` for the
+  lifetime of the process, so restart after fixing the rules file.
