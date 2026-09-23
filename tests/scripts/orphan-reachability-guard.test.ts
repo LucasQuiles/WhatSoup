@@ -107,7 +107,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/status-reaction-controller.ts', issue: '#1823', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
   // auth-loss durability signal modules: the store now has a production writer —
   // HealthPoller records the durable row on a confirmed logged_out (#1786) — so it
   // graduated out of this list, and the recovery-owner wiring (#1786) graduated the
