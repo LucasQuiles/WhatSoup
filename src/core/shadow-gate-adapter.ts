@@ -19,7 +19,7 @@ import { isAdminPhone } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { FEATURE_VERSION, normalizeShadowText } from './shadow-gate-features.ts';
 import type { ShadowGateInput, Tri } from './shadow-gate-features.ts';
-import { shadowGate } from './shadow-gate.ts';
+import { shadowGate, warmShadowRules } from './shadow-gate.ts';
 import type { ShadowRuleId, ShadowVerdict } from './shadow-gate.ts';
 import { computeConfigGeneration, computeDatabaseLineage, createShadowGateRecorder } from './shadow-gate-events.ts';
 import type { ShadowGateRecorder } from './shadow-gate-events.ts';
@@ -109,6 +109,10 @@ function previousMessageStatement(db: Database): StatementSync {
   let stmt = previousMessageStatements.get(raw);
   if (!stmt) {
     // Served by idx_messages_conversation_ts (conversation_key, timestamp).
+    // Known blind spot: timestamps are whole seconds and the comparison is
+    // strict, so a bot message stored in the same second as this inbound one is
+    // not "previous" and cannot set pendingObligation. Among several earlier rows
+    // sharing the latest second, which one is returned is unspecified.
     stmt = raw.prepare(
       `SELECT is_from_me, content FROM messages
        WHERE conversation_key = ? AND timestamp < ?
@@ -250,6 +254,9 @@ export function getShadowGateRecorder(db: Database, config: ShadowGateConfig): S
       configGeneration: computeConfigGeneration(section),
       warn: warnCode,
     });
+    // Compile the rules now so the first evaluation is not an OVERRUN. A load
+    // failure is not a recorder failure: each evaluation then records E_THROW.
+    if (!warmShadowRules()) warnCode('shadow_gate_rules_unavailable');
     return recorder;
   } catch {
     recorderDisabled = true;

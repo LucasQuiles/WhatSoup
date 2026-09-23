@@ -9,6 +9,7 @@ import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock } from './process-lock.ts';
 import type { ProcessLockHandle } from './process-lock.ts';
+import { systemClock } from './clock.ts';
 
 export interface BoundedNdjsonSinkOptions {
   dir: string;
@@ -269,7 +270,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
         counters.droppedWriteFailed += batch.lines.length;
         consecutiveWriteErrors += 1;
         await closeHandle();
-        const now = Date.now();
+        const now = systemClock.now();
         if (now - lastWriteWarnAt >= WRITE_WARN_INTERVAL_MS) {
           lastWriteWarnAt = now;
           warn('write_failed');

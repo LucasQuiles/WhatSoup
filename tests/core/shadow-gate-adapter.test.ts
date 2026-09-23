@@ -5,7 +5,7 @@
  * (mode off never touches the database; creation failure latches).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
@@ -44,8 +44,12 @@ import {
 } from '../../src/core/shadow-gate-adapter.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { config } from '../../src/config.ts';
+import { __setShadowRulesPathForTests } from '../../src/core/shadow-gate.ts';
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
 
 const tmp = trackTmpDirs('shadow-gate-adapter-');
+const logFns = createChildLogger('shadow-gate') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 const BOT_JID = '15551230004@s.whatsapp.net';
 const BOT_LID = '15559876543@lid';
@@ -322,6 +326,31 @@ describe('recorder lifecycle', () => {
     expect(getShadowGateRecorder(db, config)).toBeNull();
     expect(startShadowGateAttempt(makeMsg(), GROUP_KEY, db, botJid, botLid, config)).toBeNull();
     expect(reads).toBe(1);
+  });
+
+  it('warms the rules at creation; a broken rules file warns but does not latch the recorder', () => {
+    setConfigProp('shadowGate', { mode: 'shadow', eventsDir: join(tmp.make('warm'), 'events') });
+    const corrupt = join(tmp.make('rules'), 'rules.json');
+    writeFileSync(corrupt, '{ not json');
+    __setShadowRulesPathForTests(corrupt);
+    try {
+      const db = makeDb();
+      expect(getShadowGateRecorder(db, config)).not.toBeNull();
+      expect(vi.mocked(logFns.warn)).toHaveBeenCalledWith({ code: 'shadow_gate_rules_unavailable' }, 'shadow gate warning');
+      expect(evaluateShadowGateForMessage(makeMsg(), db, botJid, botLid, config)).toMatchObject({
+        status: 'ERROR', reason: 'E_THROW', verdict: null,
+      });
+      expect(startShadowGateAttempt(makeMsg(), GROUP_KEY, db, botJid, botLid, config)).not.toBeNull();
+    } finally {
+      __setShadowRulesPathForTests(null);
+    }
+  });
+
+  it('warm-up with good rules emits no rules warning', () => {
+    setConfigProp('shadowGate', { mode: 'shadow', eventsDir: join(tmp.make('warm-ok'), 'events') });
+    expect(getShadowGateRecorder(makeDb(), config)).not.toBeNull();
+    const codes = vi.mocked(logFns.warn).mock.calls.map((call) => (call[0] as { code?: string }).code);
+    expect(codes).not.toContain('shadow_gate_rules_unavailable');
   });
 
   it('creates one recorder, settles once, and counts journal failures', async () => {

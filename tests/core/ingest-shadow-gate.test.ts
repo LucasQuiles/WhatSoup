@@ -65,6 +65,9 @@ vi.mock('../../src/core/shadow-gate-features.ts', async (importOriginal) => {
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler } from '../../src/core/ingest.ts';
 import { getShadowGateStats, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
+import { __setShadowRulesPathForTests } from '../../src/core/shadow-gate.ts';
+import { createChildLogger } from '../../src/logger.ts';
+import type { singletonLoggerMock } from '../helpers/logger-mock.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
@@ -72,6 +75,8 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { config } from '../../src/config.ts';
 
 const tmp = trackTmpDirs('ingest-shadow-gate-');
+// The singleton from the logger vi.mock factory, retyped to its Mock shape.
+const logFns = createChildLogger('ingest') as unknown as ReturnType<typeof singletonLoggerMock>;
 
 const BOT_JID = '15551230004@s.whatsapp.net';
 const SENDER = '15551230008@s.whatsapp.net';
@@ -111,6 +116,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await __resetShadowGateForTests();
+  __setShadowRulesPathForTests(null);
   for (const [key, descriptor] of savedDescriptors) restoreConfigProp(key, descriptor);
   if (savedHome === undefined) delete process.env.HOME;
   else process.env.HOME = savedHome;
@@ -338,20 +344,61 @@ describe('ingest shadow gate — mode shadow', () => {
     await expect(__resetShadowGateForTests()).resolves.toBeUndefined();
   });
 
-  it('counts a journalInbound failure without recording a verdict and rethrows unchanged', async () => {
+  it('counts a journalInbound failure without recording a verdict; ingest behaves as in mode off', async () => {
+    const journalError = new Error('journal down');
+    const msg = makeMsg({ messageId: 'msg-jfail' });
+    async function runWithFailingJournal() {
+      vi.mocked(logFns.error).mockClear();
+      const { durability, handler, runtime } = makeIngest();
+      durability.journalInbound.mockImplementationOnce(() => {
+        throw journalError;
+      });
+      await runIngest(handler, structuredClone(msg));
+      return {
+        handleCalls: vi.mocked(runtime.handleMessage).mock.calls.length,
+        errorLogs: vi.mocked(logFns.error).mock.calls,
+      };
+    }
+
+    const baseline = await runWithFailingJournal();
     const eventsDir = join(tmp.make('jfail'), 'events');
     shadowMode(eventsDir);
-    const { durability, handler, runtime } = makeIngest();
-    durability.journalInbound.mockImplementationOnce(() => {
-      throw new Error('journal down');
-    });
+    const observed = await runWithFailingJournal();
 
-    await runIngest(handler, makeMsg());
-
-    // Existing behaviour: the outer catch swallows the error and nothing dispatches.
-    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    // The rethrown error reaches the same outer catch with the same object.
+    expect(observed).toEqual(baseline);
+    expect(observed.handleCalls).toBe(0);
+    expect(observed.errorLogs).toEqual([
+      [{ err: journalError, messageId: 'msg-jfail' }, 'unhandled error in ingest handler'],
+    ]);
     expect(getShadowGateStats()).toMatchObject({ evaluated: 1, recorded: 0, journalFailures: 1 });
     expect(verdictsOf(await readEvents(eventsDir))).toHaveLength(0);
+  });
+
+  it('a corrupt rules file records one E_THROW per message; recorder writes, dispatch unchanged', async () => {
+    const corrupt = join(tmp.make('rules'), 'rules.json');
+    writeFileSync(corrupt, '{ not json');
+    const base = makeMsg({ messageId: 'msg-rules', chatJid: GROUP, isGroup: true, content: 'ok' });
+
+    const baseline = await observe(structuredClone(base));
+    const eventsDir = join(tmp.make('corrupt-rules'), 'events');
+    shadowMode(eventsDir);
+    __setShadowRulesPathForTests(corrupt);
+    const first = await observe(structuredClone(base));
+    const second = await observe({ ...structuredClone(base), messageId: 'msg-rules-2' });
+
+    expect(first.handled).toEqual(baseline.handled);
+    expect(first.journal).toEqual(baseline.journal);
+    expect(second.handled).toHaveLength(1);
+    expect(getShadowGateStats()).toMatchObject({ evaluated: 2, recorded: 2, invalid: 0 });
+    const events = await readEvents(eventsDir);
+    const verdicts = verdictsOf(events);
+    expect(verdicts.map((v) => v.messageId)).toEqual(['msg-rules', 'msg-rules-2']);
+    for (const v of verdicts) {
+      expect(v).toMatchObject({ status: 'ERROR', reason: 'E_THROW', verdict: null, ruleId: null });
+      expect(v.rulesSha256).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(coverageOf(events).map((e) => e.marker)).toContain('armed');
   });
 
   describe('(e) early-return paths are not instrumented', () => {

@@ -14,7 +14,7 @@ import type {
   ShadowGateVerdictEvent,
   ShadowGateVerdictInput,
 } from '../../src/core/shadow-gate-events.ts';
-import { RULES_SHA256, SHADOW_GATE_VERSION } from '../../src/core/shadow-gate.ts';
+import { getRulesSha256, SHADOW_GATE_VERSION } from '../../src/core/shadow-gate.ts';
 import { FEATURE_VERSION } from '../../src/core/shadow-gate-features.ts';
 import type { BoundedNdjsonSink, BoundedNdjsonSinkStats, SinkState } from '../../src/lib/bounded-ndjson-sink.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -44,7 +44,7 @@ function verdictEvent(overrides: Record<string, unknown> = {}): Record<string, u
     ruleId: 'S02_DM',
     tookMs: 0.4,
     gateVersion: SHADOW_GATE_VERSION,
-    rulesSha256: RULES_SHA256,
+    rulesSha256: getRulesSha256(),
     featureVersion: FEATURE_VERSION,
     authority: 'advisory_only',
   };
@@ -69,7 +69,7 @@ function coverageEvent(overrides: Record<string, unknown> = {}): Record<string, 
     sinkState: 'starting',
     sinkDegradedReason: null,
     gateVersion: SHADOW_GATE_VERSION,
-    rulesSha256: RULES_SHA256,
+    rulesSha256: getRulesSha256(),
     featureVersion: FEATURE_VERSION,
     authority: 'advisory_only',
   };
@@ -216,7 +216,7 @@ describe('createShadowGateRecorder', () => {
       schemaVersion: SHADOW_GATE_EVENT_SCHEMA_VERSION,
       instance: 'q',
       bootId: SHADOW_GATE_PROCESS_BOOT_ID,
-      rulesSha256: RULES_SHA256,
+      rulesSha256: getRulesSha256(),
       authority: 'advisory_only',
       ts: 1002,
     });

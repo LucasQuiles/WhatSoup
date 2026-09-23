@@ -1,8 +1,8 @@
 // src/core/shadow-gate.ts
 // Logged-only shadow gate: predicts whether an admitted inbound message needs
 // a reply (SPAWN) or is a suppression candidate (SUPPRESS). It never changes
-// behaviour. shadowGate() is pure; the rules JSON is read and compiled once at
-// module load.
+// behaviour. shadowGate() is pure apart from loading the rules JSON, which is
+// read and compiled once, on first use.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -97,21 +97,69 @@ export function compileShadowRules(raw: unknown): CompiledShadowRules & { rulesV
   };
 }
 
-const rulesBytes = readFileSync(SHADOW_GATE_RULES_PATH);
+// Rules are read lazily on first use, never at module load: importing ingest in
+// mode off must not touch the file, and a corrupt file must surface as a
+// per-message E_THROW verdict rather than a startup failure.
 
-/** sha256 hex of the rules JSON file bytes, computed at load. */
-export const RULES_SHA256: string = createHash('sha256').update(rulesBytes).digest('hex');
+/** Recorded in place of the rules hash when the rules file cannot be read. */
+export const UNREADABLE_RULES_SHA256 = '0'.repeat(64);
 
-const loadedRules = compileShadowRules(JSON.parse(rulesBytes.toString('utf8')));
+let rulesPath = SHADOW_GATE_RULES_PATH;
+let rulesSha256: string | null = null;
+// Latched: a failed load is not retried, so a broken file is read once, not per message.
+let loadedRules: { ok: true; rules: CompiledShadowRules & { rulesVersion: number } } | { ok: false } | null = null;
 
-export const RULES_VERSION: number = loadedRules.rulesVersion;
+/** sha256 hex of the rules file bytes; memoised and total (sentinel when unreadable). */
+export function getRulesSha256(): string {
+  if (rulesSha256 === null) {
+    try {
+      rulesSha256 = createHash('sha256').update(readFileSync(rulesPath)).digest('hex');
+    } catch {
+      rulesSha256 = UNREADABLE_RULES_SHA256;
+    }
+  }
+  return rulesSha256;
+}
 
-/** Every compiled pattern of the shipped rules, for tests. */
-export const COMPILED_SHADOW_PATTERNS: readonly RegExp[] = [
-  ...loadedRules.statusOnly,
-  ...loadedRules.obligation,
-  ...loadedRules.noReplyKnown,
-];
+function loadRules(): CompiledShadowRules & { rulesVersion: number } {
+  if (loadedRules === null) {
+    try {
+      loadedRules = { ok: true, rules: compileShadowRules(JSON.parse(readFileSync(rulesPath, 'utf8'))) };
+    } catch {
+      loadedRules = { ok: false };
+    }
+  }
+  if (!loadedRules.ok) throw new Error('shadow-gate rules unavailable');
+  return loadedRules.rules;
+}
+
+/** Load and compile the rules now; false when they are unavailable. Never throws. */
+export function warmShadowRules(): boolean {
+  try {
+    loadRules();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Throws when the rules are unavailable. */
+export function getRulesVersion(): number {
+  return loadRules().rulesVersion;
+}
+
+/** Every compiled pattern of the shipped rules, for tests. Throws when unavailable. */
+export function getCompiledShadowPatterns(): readonly RegExp[] {
+  const rules = loadRules();
+  return [...rules.statusOnly, ...rules.obligation, ...rules.noReplyKnown];
+}
+
+/** Test-only: point the loader at another file (null restores the shipped rules) and clear memoised state. */
+export function __setShadowRulesPathForTests(path: string | null): void {
+  rulesPath = path ?? SHADOW_GATE_RULES_PATH;
+  rulesSha256 = null;
+  loadedRules = null;
+}
 
 function matchesWhole(re: RegExp, text: string): boolean {
   const m = re.exec(text);
@@ -158,6 +206,7 @@ export function evaluateShadowGate(
   return { verdict: 'SPAWN', ruleId: 'D00_DEFAULT' };
 }
 
+/** Throws when the rules are unavailable; the adapter records that as E_THROW. */
 export function shadowGate(input: ShadowGateInput): { verdict: ShadowVerdict; ruleId: ShadowRuleId } {
-  return evaluateShadowGate(input, loadedRules);
+  return evaluateShadowGate(input, loadRules());
 }

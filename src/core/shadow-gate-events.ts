@@ -7,7 +7,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { createBoundedNdjsonSink } from '../lib/bounded-ndjson-sink.ts';
 import type { BoundedNdjsonSink, SinkState } from '../lib/bounded-ndjson-sink.ts';
-import { RULES_SHA256, SHADOW_GATE_VERSION } from './shadow-gate.ts';
+import { getRulesSha256, SHADOW_GATE_VERSION } from './shadow-gate.ts';
+import { systemClock } from '../lib/clock.ts';
 import type { ShadowRuleId, ShadowVerdict } from './shadow-gate.ts';
 import { FEATURE_VERSION } from './shadow-gate-features.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -224,7 +225,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
       // intentional: a throwing warn callback must not reach the caller.
     }
   };
-  const now = opts.now ?? Date.now;
+  const now = opts.now ?? (() => systemClock.now());
   const sink = opts.sink ?? createBoundedNdjsonSink({
     dir: opts.dir,
     filePrefix: SHADOW_GATE_EVENTS_FILE_PREFIX,
@@ -238,7 +239,9 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
   };
   const versions = {
     gateVersion: SHADOW_GATE_VERSION,
-    rulesSha256: RULES_SHA256,
+    // Total: an unreadable rules file yields a sentinel, never a throw that
+    // would latch the recorder disabled.
+    rulesSha256: getRulesSha256(),
     featureVersion: FEATURE_VERSION,
     authority: 'advisory_only' as const,
   };

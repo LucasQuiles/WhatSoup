@@ -9,9 +9,9 @@ import {
   type ShadowGateInput,
 } from '../../src/core/shadow-gate-features.ts';
 import {
-  COMPILED_SHADOW_PATTERNS,
-  RULES_SHA256,
-  RULES_VERSION,
+  getCompiledShadowPatterns,
+  getRulesSha256,
+  getRulesVersion,
   SHADOW_GATE_RULES_PATH,
   compileShadowRules,
   evaluateShadowGate,
@@ -53,7 +53,7 @@ const groupAck: ShadowGateInput = {
 describe('shadowGate conformance fixture', () => {
   it('is versioned against the shipped rules and has at least 30 cases', () => {
     expect(fixture.fixtureVersion).toBe(1);
-    expect(fixture.rulesVersion).toBe(RULES_VERSION);
+    expect(fixture.rulesVersion).toBe(getRulesVersion());
     expect(fixture.cases.length).toBeGreaterThanOrEqual(30);
     expect(new Set(fixture.cases.map((c) => c.name)).size).toBe(fixture.cases.length);
   });
@@ -131,11 +131,11 @@ describe('shadowGate rule semantics', () => {
   });
 });
 
-describe('RULES_SHA256', () => {
+describe('getRulesSha256', () => {
   it('equals sha256 of the rules JSON file bytes', () => {
     const expected = createHash('sha256').update(readFileSync(SHADOW_GATE_RULES_PATH)).digest('hex');
-    expect(RULES_SHA256).toBe(expected);
-    expect(RULES_SHA256).toMatch(/^[0-9a-f]{64}$/);
+    expect(getRulesSha256()).toBe(expected);
+    expect(getRulesSha256()).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
@@ -206,8 +206,8 @@ describe('ReDoS sanity', () => {
   const adversarial = ['ok'.repeat(2048), 'a'.repeat(4096), `${'ok '.repeat(1365)}!`, '👍'.repeat(2048)];
 
   it('every compiled pattern returns on 4096-unit adversarial input', () => {
-    expect(COMPILED_SHADOW_PATTERNS.length).toBeGreaterThan(0);
-    for (const re of COMPILED_SHADOW_PATTERNS) {
+    expect(getCompiledShadowPatterns().length).toBeGreaterThan(0);
+    for (const re of getCompiledShadowPatterns()) {
       for (const s of adversarial) {
         expect(typeof re.test(s)).toBe('boolean');
       }
