@@ -10,6 +10,9 @@
 #                   some hosts run the fleet API on a non-default port — see the host port map)
 #   NODE_BIN      — absolute path to pinned node binary, e.g.
 #                   __HOME__/.nvm/versions/node/v24.15.0/bin/node
+#   __BOT_ERRORS_EMIT__ — absolute path of the BOT ERRORS emitter. Render with
+#                   deploy/scripts/render-watchdog.py, which bakes the emitter
+#                   of the release tree the template is rendered from.
 #
 # Install to: ~/.local/bin/BOT_NAME-watchdog
 # chmod +x that file after writing.
@@ -35,6 +38,31 @@ LOCK="$LOG_DIR/BOT_NAME-watchdog.lock"
 # "dead until proven recovered", not "dead as of the last cycle". External
 # alert paths may stat this file; no in-repo consumer exists.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
+# Present while a CREDENTIAL-DEAD page is outstanding. Written only AFTER the
+# emitter accepted the page, so a failed send retries next cycle and a host
+# that was already dead (marker, no stamp) when paging shipped still pages.
+# Its content counts consecutive failed recovery clears (empty = 0); it is
+# removed after the clear is accepted, or abandoned after
+# CRED_CLEAR_MAX_ATTEMPTS failures so an unreachable outbox cannot keep the
+# watchdog in ERROR forever.
+CRED_PAGED="$LOG_DIR/BOT_NAME-credential-dead.paged"
+# Present once this dead episode has logged the "no emitter" detail line, so
+# it is written once per episode, not every two minutes (the ERROR state and
+# nonzero exit still repeat every cycle). Removed on recovery and after a page
+# lands.
+CRED_UNPAGED="$LOG_DIR/BOT_NAME-credential-dead.unpaged"
+# Present while a recovery has happened but its page stamp is still on disk (the
+# clear is being retried, or the stamp could not be removed). A dead cycle that
+# finds both files knows the stamp belongs to the previous episode and pages
+# again. Written by recovery, removed with the stamp.
+CRED_RECOVERED="$LOG_DIR/BOT_NAME-credential-dead.recovered"
+CRED_CLEAR_MAX_ATTEMPTS=3
+# The shipped BOT ERRORS emitter writes to the host's durable outbox. Hosts run
+# from per-release trees, so the path is baked at render time by
+# render-watchdog.py (the emitter of the release this was rendered from) rather
+# than guessed from a checkout location at run time.
+BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"
+CRED_ALERT_SOURCE="provider_credential_dead"
 WD_FINAL="ok"
 WD_EXIT=0
 
@@ -181,9 +209,14 @@ health_unknown() {
 # for the state operation, and exit 2 means unsafe or otherwise unusable.
 # Existing owned 0644 markers remain valid for upgrade compatibility; newly
 # created markers are 0600. Symlinks and non-regular paths are never followed,
-# cleared, or treated as evidence of prior credential death.
+# cleared, or treated as evidence of prior credential death. The optional
+# second argument selects another state file under the same rules (the
+# CRED_PAGED / CRED_UNPAGED stamps); the default is CRED_MARKER. `bump`
+# increments the integer an EXISTING file holds (empty = 0), prints the new
+# value, exits 1 when the file is absent, and exits 3 when its content is not a
+# count (so the caller can stop retrying instead of failing forever).
 credential_marker() {
-  python3 - "$1" "$CRED_MARKER" 2>>"$LOG" <<'MARKER_PY'
+  python3 - "$1" "${2:-$CRED_MARKER}" 2>>"$LOG" <<'MARKER_PY'
 import os
 import stat
 import sys
@@ -242,6 +275,26 @@ try:
         if marker is not None:
             os.unlink(name, dir_fd=directory_fd)
         raise SystemExit(0)
+    if operation == "bump":
+        if marker is None:
+            raise SystemExit(1)
+        marker_fd = os.open(name, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        opened = os.fstat(marker_fd)
+        if (opened.st_dev, opened.st_ino) != (marker.st_dev, marker.st_ino):
+            reject()
+        try:
+            raw = os.read(marker_fd, 64).decode("ascii").strip()
+            count = (int(raw) if raw else 0) + 1
+        except ValueError:
+            raise SystemExit(3)
+        # A negative stored count is corrupt too: it would defer the cap.
+        if count < 1:
+            raise SystemExit(3)
+        os.lseek(marker_fd, 0, os.SEEK_SET)
+        os.ftruncate(marker_fd, 0)
+        os.write(marker_fd, f"{count}\n".encode("ascii"))
+        print(count)
+        raise SystemExit(0)
     reject()
 except SystemExit:
     raise
@@ -294,6 +347,32 @@ run_with_timeout() {
     return 124
   fi
   return $exit_code
+}
+
+# credential_page alert|clear — one BOT ERRORS event for a CREDENTIAL-DEAD
+# episode, written to the durable outbox by the shipped emitter. Both events
+# carry --instance and --source, so the clear keys to the same
+# machine|instance|source incident the alert opened. Returns 0 when the
+# emitter accepted it, 1 when it failed or timed out, 2 when this host has no
+# emitter at BOT_ERRORS_EMIT.
+credential_page() {
+  if [ ! -r "$BOT_ERRORS_EMIT" ]; then
+    return 2
+  fi
+  if [ "$1" = "alert" ]; then
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --severity critical \
+      --summary "BOT_NAME provider credential is dead; reauth required (restart suppressed)" \
+      --evidence "watchdog=BOT_NAME-watchdog marker=$CRED_MARKER log=$LOG" >> "$LOG" 2>&1 || return 1
+  else
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" --clear \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --summary "BOT_NAME provider credential recovered" >> "$LOG" 2>&1 || return 1
+  fi
+  return 0
 }
 
 # Ensure a launchd job is loaded; bootstrap from its plist if not.
@@ -921,6 +1000,86 @@ PY
       wd_note ERROR
       WD_EXIT=1
     fi
+    # Page once per transition: only while no page is outstanding.
+    #
+    # Invariant: no failure of these state files may silence a page. When the
+    # stamp or the recovery flag cannot be read safely or removed, the watchdog
+    # pages anyway and logs ERROR. The worst case is a repeated page on a later
+    # cycle, which BOT ERRORS folds into the open machine|instance|source
+    # incident. (A stamp suppresses only an incident that is still open: the
+    # recovery flag is written before any clear is sent, so a stamp whose clear
+    # went out always has its flag.)
+    credential_marker state "$CRED_PAGED"
+    paged_rc=$?
+    if [ "$paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; paging without it (repeats are possible)"
+      wd_note ERROR
+      WD_EXIT=1
+      paged_rc=1
+    elif [ "$paged_rc" -eq 0 ]; then
+      # A stamp that outlived a recovery (its clear is still being retried, or
+      # it could not be removed) must not suppress this new episode's page. The
+      # recovery flag, not marker history, identifies it: a failed marker
+      # create never makes the current episode's stamp look stale.
+      credential_marker state "$CRED_RECOVERED"
+      flag_rc=$?
+      if [ "$flag_rc" -eq 2 ]; then
+        log "ERROR: unsafe recovery flag $CRED_RECOVERED; cannot tell whether $CRED_PAGED is current, paging (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+        paged_rc=1
+      elif [ "$flag_rc" -eq 0 ]; then
+        log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
+        paged_rc=1
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        elif ! credential_marker clear "$CRED_RECOVERED"; then
+          log "ERROR: failed to remove recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    else
+      # A flag with no stamp is left from a recovery that died after removing
+      # the stamp. Drop it before this episode's stamp exists, or the next
+      # cycle would read the new stamp as stale and page again.
+      credential_marker state "$CRED_RECOVERED"
+      if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
+    if [ "$paged_rc" -eq 1 ]; then
+      credential_page alert
+      page_rc=$?
+      if [ "$page_rc" -eq 0 ]; then
+        log "CREDENTIAL-DEAD: paged BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker create "$CRED_PAGED"; then
+          log "ERROR: failed to record credential page stamp $CRED_PAGED; the page may repeat next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+        credential_marker clear "$CRED_UNPAGED" || true
+      elif [ "$page_rc" -eq 2 ]; then
+        # A dead credential nobody is told about is an error, every cycle. The
+        # page is retried each cycle (the emitter may reappear); the detail
+        # line is written once per episode.
+        wd_note ERROR
+        WD_EXIT=1
+        credential_marker state "$CRED_UNPAGED"
+        if [ $? -eq 1 ]; then
+          log "ERROR: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-DEAD not paged (re-render this watchdog from the running release with render-watchdog.py; retried each cycle, logged once per episode)"
+          credential_marker create "$CRED_UNPAGED" || true
+        fi
+      else
+        log "ERROR: CREDENTIAL-DEAD page failed via $BOT_ERRORS_EMIT; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
     wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
     # Inconclusive credential evidence: never restart, never touch the marker.
@@ -943,12 +1102,84 @@ PY
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    if ! credential_marker clear; then
-      # Recovery evidence remains valid, but the watchdog invocation is not
-      # healthy while an unsafe or unusable marker path persists.
-      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+    # Recovery closes an outstanding page exactly once. The stamp is removed
+    # after the clear was accepted, so a failed clear retries; after
+    # CRED_CLEAR_MAX_ATTEMPTS consecutive failures (a missing emitter counts)
+    # it is dropped with a WARN instead of holding the watchdog in ERROR.
+    credential_marker state "$CRED_PAGED"
+    recovered_paged_rc=$?
+    # The recovery flag is written before anything else changes, so a process
+    # that dies at any later step still leaves the stamp marked as belonging to
+    # a recovered episode. If it cannot be written, nothing else changes: the
+    # page stays open and the next healthy cycle retries the whole recovery.
+    recovery_recorded=1
+    if [ "$recovered_paged_rc" -eq 0 ] && ! credential_marker create "$CRED_RECOVERED"; then
+      log "ERROR: failed to record recovery flag $CRED_RECOVERED; recovery not applied, retrying next cycle"
       wd_note ERROR
       WD_EXIT=1
+      recovery_recorded=0
+    fi
+    if [ "$recovery_recorded" -eq 1 ]; then
+      if ! credential_marker clear; then
+        # Recovery evidence remains valid, but the watchdog invocation is not
+        # healthy while an unsafe or unusable marker path persists.
+        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+      # Recovery ends the episode: the next dead episode may warn again.
+      credential_marker clear "$CRED_UNPAGED" || true
+    fi
+    if [ "$recovered_paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; not clearing"
+      wd_note ERROR
+      WD_EXIT=1
+    elif [ "$recovered_paged_rc" -eq 0 ] && [ "$recovery_recorded" -eq 1 ]; then
+      credential_page clear
+      clear_rc=$?
+      if [ "$clear_rc" -eq 0 ]; then
+        log "CREDENTIAL-RECOVERED: cleared BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to clear credential page stamp $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      else
+        clear_failures="$(credential_marker bump "$CRED_PAGED")"
+        bump_rc=$?
+        if [ "$bump_rc" -eq 3 ]; then
+          # A corrupt count cannot be trusted to ever reach the cap: treat it
+          # as the cap rather than retrying without bound.
+          log "WARN: unreadable clear-failure count in $CRED_PAGED; dropping it — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$bump_rc" -ne 0 ] || [ -z "$clear_failures" ]; then
+          log "ERROR: cannot count failed clears in $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        elif [ "$clear_failures" -ge "$CRED_CLEAR_MAX_ATTEMPTS" ]; then
+          log "WARN: CREDENTIAL-RECOVERED clear failed $clear_failures consecutive times via $BOT_ERRORS_EMIT; dropping $CRED_PAGED — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$clear_rc" -eq 2 ]; then
+          log "WARN: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-RECOVERED clear not sent (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS)"
+        else
+          log "ERROR: CREDENTIAL-RECOVERED clear failed via $BOT_ERRORS_EMIT (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS); retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    fi
+    # Once no page stamp remains, the recovery flag has nothing to mark.
+    credential_marker state "$CRED_PAGED"
+    if [ $? -eq 1 ]; then
+      credential_marker clear "$CRED_RECOVERED" || true
     fi
   fi
   fi
