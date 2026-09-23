@@ -1,0 +1,783 @@
+{
+  "fixtureVersion": 1,
+  "rulesVersion": 1,
+  "cases": [
+    {
+      "name": "owner with ack text spawns via S01",
+      "input": {
+        "chatKind": "group",
+        "isOwner": true,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S01_OWNER"
+      }
+    },
+    {
+      "name": "owner in dm spawns via S01 before S02",
+      "input": {
+        "chatKind": "dm",
+        "isOwner": true,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S01_OWNER"
+      }
+    },
+    {
+      "name": "dm with ack text spawns via S02",
+      "input": {
+        "chatKind": "dm",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S02_DM"
+      }
+    },
+    {
+      "name": "dm with unknown owner spawns via S02",
+      "input": {
+        "chatKind": "dm",
+        "isOwner": "unknown",
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S02_DM"
+      }
+    },
+    {
+      "name": "control chat with ack spawns via S03",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": true,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S03_CONTROL"
+      }
+    },
+    {
+      "name": "mention with ack spawns via S04",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": true,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S04_MENTION"
+      }
+    },
+    {
+      "name": "quoted true with ack spawns via S05",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": true,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S05_QUOTED"
+      }
+    },
+    {
+      "name": "quoted unknown with ack spawns via S05",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": "unknown",
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S05_QUOTED"
+      }
+    },
+    {
+      "name": "image with ack caption spawns via S06",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "image",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S06_NONTEXT"
+      }
+    },
+    {
+      "name": "text type with null text spawns via S06",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": null,
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S06_NONTEXT"
+      }
+    },
+    {
+      "name": "unknown control flag falls to S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": "unknown",
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "unknown owner flag falls to S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": "unknown",
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "unknown mention flag falls to S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": "unknown",
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "unknown pending obligation spawns via S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": "unknown",
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "unknown context with ack spawns via S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "unknown",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "truncated ack spawns via S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": true,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "empty text spawns via S07",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S07_UNKNOWN"
+      }
+    },
+    {
+      "name": "unknown bot sender is ignored by every rule",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": "unknown",
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "ok with question mark spawns via S08",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok?",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "ok with pending obligation spawns via S08",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": true,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "please check spawns via S08",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "please check",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "Can you request lead is case-insensitive",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "Can you send the report",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "full-width question mark spawns via S08",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "好的？",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "S08_OBLIGATION"
+      }
+    },
+    {
+      "name": "request word inside a longer word does not match obligation",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "sending love to everyone",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "OK. is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "OK.",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "Thanks!! is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "Thanks!!",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "thank you is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "thank you",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "okay pre-normalized from trailing spaces is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "okay",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "double thumbs up is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "👍👍",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "skin-tone thumbs up is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "👍🏽",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "mixed emoji run is status only",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "✅🙏",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SUPPRESS",
+        "ruleId": "X02_STATUS_ONLY"
+      }
+    },
+    {
+      "name": "ok thanks sentence falls to default",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "ok thanks for the update on the deploy",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "thumbs up with trailing word falls to default",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "👍 nice work team",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "NFC-composed e-acute sentence falls to default",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "café was lovely today",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "decomposed e-acute sentence falls to default",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "café was lovely today",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "Turkish dotted capital I sentence falls to default",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "İstanbul trip was great",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    },
+    {
+      "name": "dotted capital I alone is not an ack",
+      "input": {
+        "chatKind": "group",
+        "isOwner": false,
+        "isBotSender": false,
+        "mentionedSelf": false,
+        "isControlChat": false,
+        "contentType": "text",
+        "quoted": false,
+        "text": "İ",
+        "truncated": false,
+        "contextStatus": "known",
+        "pendingObligation": false,
+        "featureVersion": 1
+      },
+      "expected": {
+        "verdict": "SPAWN",
+        "ruleId": "D00_DEFAULT"
+      }
+    }
+  ]
+}
