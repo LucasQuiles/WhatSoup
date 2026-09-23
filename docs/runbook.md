@@ -511,12 +511,27 @@ transport and process liveness pass:
   `fallbackReason=auth-required`, or an `auth-required` turn error that has not
   been superseded by a later successful turn. The watchdog creates/retains the
   marker (`~/Library/Logs/whatsoup/<instance>-credential-dead.marker`) and does
-  not restart the bot; a restart cannot restore provider credentials.
+  not restart the bot; a restart cannot restore provider credentials. On the
+  first dead cycle with no page outstanding it writes ONE critical BOT ERRORS
+  alert (`--instance <instance> --source provider_credential_dead`) to the
+  durable outbox through the shipped emitter,
+  `$BOT_ERRORS_REPO_ROOT/deploy/scripts/bot-errors-emit.py` (same repo-root
+  default as `deploy/scripts/install-bot-errors-launchd.sh`), and records `<instance>-credential-dead.paged`. The stamp is written only
+  after the emitter accepts the page, so a failed write logs
+  `ERROR: CREDENTIAL-DEAD page failed …` and retries next cycle. With no
+  emitter at that path it logs `WARN: … CREDENTIAL-DEAD not paged` once per
+  dead episode (tracked by `<instance>-credential-dead.unpaged`) and keeps
+  retrying the page every cycle.
 - **recovered** — recovery is affirmative AND fresh: HTTP `200`, `generated_at`
   within the freshness window, `model_usable=true`, the result is not stale,
   status is `usable`, and no fallback window is active. Only this state clears
   an existing credential marker; missing, stale, or HTTP-incoherent evidence
-  never does.
+  never does. When a page is outstanding, recovery writes one `--clear` with
+  the same `--instance` and `--source` and removes the `.paged` stamp after the
+  emitter accepts it. A failed clear logs `ERROR` and retries; after 3
+  consecutive failures (a missing emitter counts, logged as `WARN`) the watchdog
+  drops the stamp with `WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive
+  times …` and the BOT ERRORS incident stays open until cleared by hand.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.
