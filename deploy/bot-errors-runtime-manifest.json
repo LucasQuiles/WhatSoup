@@ -57,9 +57,10 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "42d07271c2cd2089ed447bc3889892f887f45ce775f6d559b32a005e50d5bbcc",
+      "sha256": "5202afc802c69f451bf3fd99c91a24672b2ce4f6d8d0953205e5379db2611ac7",
       "mustContain": [
         "require_acceptance=True",
+        "drain_owner_route_queue(paths)",
         "auditReceipt",
         "append_bounded_jsonl",
         "append_private_jsonl",
@@ -875,12 +876,13 @@
     },
     {
       "path": "deploy/scripts/lib/owner_route.py",
-      "sha256": "babaf398e510a9a1b6390a13e10419c143d461609bbaba8266f3198ddbaf8e21",
+      "sha256": "bcc9742726ad3f5cc538097789048030ab2b9dd6a13234d0f8f2fd8aaaf20d18",
       "mustContain": [
         "def route_owner_critical(",
         "def qualifies(",
         "BOT_ERRORS_OWNER_ROUTE_JID",
-        "whatsappAccepted"
+        "whatsappAccepted",
+        "class _StateUnreadable("
       ]
     }
   ]

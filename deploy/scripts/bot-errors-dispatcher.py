@@ -3796,7 +3796,7 @@ def send_whatsapp(
         raise AmbiguousSendOutcome(str(exc), phase=JSON_RPC_POST_REQUEST_PHASE) from exc
 
 
-def email_fallback(subject: str, body: str) -> bool:
+def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     fallback = Path(EMAIL_FALLBACK)
     if not fallback.exists() or not os.access(fallback, os.X_OK):
         return False
@@ -3806,7 +3806,7 @@ def email_fallback(subject: str, body: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=20,
+            timeout=timeout,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -9829,31 +9829,85 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     return True, "sent"
 
 
+# Owner copies queued by process_one and sent by drain_owner_route_queue after
+# the cycle's group work. Module-level so an item queued by a cycle that raised
+# before its drain is sent by the next daemon cycle; a --once run that raises
+# loses it (a missed copy, never a duplicate: the group copy exists).
+_owner_route_queue: list[tuple[dict[str, Any], str, bool, str]] = []
+OWNER_ROUTE_DEFAULT_BUDGET_SECONDS = 30.0
+
+
+def owner_route_enabled() -> bool:
+    env = os.environ
+    return bool(
+        env.get("BOT_ERRORS_OWNER_ROUTE_JID", "").strip()
+        and env.get("BOT_ERRORS_OWNER_ROUTE_SOCKET", "").strip()
+    )
+
+
 def route_to_owner(event: dict[str, Any], paths: dict[str, Path], text: str) -> None:
-    """Fail-open copy of selected critical alerts to the owner (lib/owner_route.py).
+    """Queue a fail-open owner copy of a sent alert (lib/owner_route.py).
 
-    Runs only after the group send is archived. Inert unless the
-    BOT_ERRORS_OWNER_ROUTE_* environment is set; any failure is logged and
-    swallowed so it can never affect group delivery.
+    Called only after the group send is archived. Inert, with no parsing and no
+    log record, unless both BOT_ERRORS_OWNER_ROUTE_JID and
+    BOT_ERRORS_OWNER_ROUTE_SOCKET are set. Nothing is sent here: the owner
+    delivery waits for drain_owner_route_queue so it cannot delay a later group
+    send in the same cycle.
     """
+    if not owner_route_enabled():
+        return
     try:
-        from lib.owner_route import route_owner_critical
-
-        route_owner_critical(
-            event,
-            key=incident_key(event),
-            is_alert=is_incident_alert(event) and not is_incident_clear(event),
-            group_text=text,
-            state_dir=paths["root"],
-            json_rpc_call=json_rpc_call,
-            email_fallback=email_fallback,
-            log=lambda record: append_dispatch_log(paths, record),
-        )
+        _owner_route_queue.append((
+            json.loads(json.dumps(event)),
+            incident_key(event),
+            is_incident_alert(event) and not is_incident_clear(event),
+            text,
+        ))
     except Exception:  # noqa: BLE001 - must never affect group delivery
+        _log_owner_route_error(paths, event)
+
+
+def _log_owner_route_error(paths: dict[str, Path], event: dict[str, Any]) -> None:
+    try:
+        append_dispatch_log(paths, {"type": "owner_route_error", "eventId": event.get("id")})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def drain_owner_route_queue(paths: dict[str, Path]) -> None:
+    """Send the queued owner copies within one shared time budget.
+
+    Runs after the cycle has recorded completion, so neither a group send nor
+    the cycle-completion stamp waits for it. The budget
+    (BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS, default 30) bounds how long the next
+    cycle can start late. Every failure is logged and swallowed.
+    """
+    if not _owner_route_queue:
+        return
+    items = list(_owner_route_queue)
+    _owner_route_queue.clear()
+    try:
+        budget = float(os.environ.get("BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS", "") or OWNER_ROUTE_DEFAULT_BUDGET_SECONDS)
+    except ValueError:
+        budget = OWNER_ROUTE_DEFAULT_BUDGET_SECONDS
+    deadline = time.monotonic() + max(0.0, budget)
+    for event, key, is_alert, text in items:
         try:
-            append_dispatch_log(paths, {"type": "owner_route_error", "eventId": event.get("id")})
-        except Exception:  # noqa: BLE001
-            pass
+            from lib.owner_route import route_owner_critical
+
+            route_owner_critical(
+                event,
+                key=key,
+                is_alert=is_alert,
+                group_text=text,
+                state_dir=paths["root"],
+                json_rpc_call=json_rpc_call,
+                email_fallback=email_fallback,
+                log=lambda record: append_dispatch_log(paths, record),
+                deadline=deadline,
+            )
+        except Exception:  # noqa: BLE001 - must never affect group delivery
+            _log_owner_route_error(paths, event)
 
 
 @controller_cycle(
@@ -10096,6 +10150,9 @@ def run_once(max_events: int) -> dict[str, Any]:
                 unrenderableMetaAlerted=unrenderable_meta_alerted,
                 lastError=last_error,
             )
+            # After the completion stamp and every group send of this cycle,
+            # still under the dispatcher lock that serialises the owner state.
+            drain_owner_route_queue(paths)
             return {
                 "processed": processed,
                 "sent": sent,

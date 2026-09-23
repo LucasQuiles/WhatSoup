@@ -6,8 +6,10 @@ instance to the owner's direct chat, plus an e-mail through the existing
 fallback script.
 
 Inert unless BOT_ERRORS_OWNER_ROUTE_JID and BOT_ERRORS_OWNER_ROUTE_SOCKET are
-set. Always called AFTER the group send has been archived, and every failure is
-swallowed: this route can never delay, fail, or re-send the group alert.
+set: nothing else is read or parsed without them. The dispatcher queues each
+sent alert and calls this route after the cycle's group work and completion
+stamp, within one shared time budget, and swallows every failure: this route
+can never delay, fail, or re-send a group alert.
 
 Policy:
   * severity critical, incident ALERT (never a clear);
@@ -17,7 +19,12 @@ Policy:
   * at most one owner message per incident key per
     BOT_ERRORS_OWNER_ROUTE_MIN_INTERVAL_SECONDS (default 21600 = 6 h). The
     floor is recorded BEFORE the send, so a crash yields a missed copy, never
-    a duplicate; the group copy exists either way.
+    a duplicate; the group copy exists either way;
+  * whenever deduplication cannot be established the copy is skipped, never
+    risked: an unreadable or corrupt state file, a state lock held by another
+    caller, or a spent time budget each log a skip and send nothing.
+
+Stale-incident digests are info severity and are never routed.
 
 Dispatch-log records carry only booleans (``whatsappAccepted``,
 ``emailAccepted``, ``emailEnabled``, ``skippedMinInterval``): the controller log
@@ -26,6 +33,7 @@ would be silently dropped.
 """
 from __future__ import annotations
 
+import fcntl
 import fnmatch
 import json
 import os
@@ -65,6 +73,7 @@ TITLES = {
 }
 
 STATE_RETENTION_SECONDS = 7 * 86400
+EMAIL_TIMEOUT_SECONDS = 20.0
 
 _FLEET_MODEL = re.compile(
     r"^agent365-reliability-fleet_([a-z0-9]+)_(.+?)_primary_model_usable(_unverified)?$"
@@ -142,12 +151,29 @@ def qualifies(event: dict[str, Any], sources: list[str], is_alert: bool) -> str 
     return None
 
 
+class _StateUnreadable(Exception):
+    """The state file exists but cannot be read or parsed."""
+
+
 def _load_state(path: Path) -> dict[str, Any]:
+    """Return the throttle state; a missing file is the empty initial state.
+
+    Any other failure raises _StateUnreadable: treating an existing but
+    unreadable file as empty would forget every floor and permit duplicates.
+    """
     try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        raw = path.read_text()
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise _StateUnreadable(str(exc)) from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise _StateUnreadable(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise _StateUnreadable("state is not an object")
+    return data
 
 
 def _save_state(path: Path, data: dict[str, Any]) -> None:
@@ -155,6 +181,14 @@ def _save_state(path: Path, data: dict[str, Any]) -> None:
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def enabled() -> bool:
+    env = os.environ
+    return bool(
+        env.get("BOT_ERRORS_OWNER_ROUTE_JID", "").strip()
+        and env.get("BOT_ERRORS_OWNER_ROUTE_SOCKET", "").strip()
+    )
 
 
 def route_owner_critical(
@@ -165,28 +199,52 @@ def route_owner_critical(
     group_text: str,
     state_dir: Path,
     json_rpc_call: Callable[..., dict[str, Any]],
-    email_fallback: Callable[[str, str], bool],
+    email_fallback: Callable[..., bool],
     log: Callable[[dict[str, Any]], None],
+    deadline: float | None = None,
 ) -> None:
-    cfg = _cfg()
-    if not cfg["jid"] or not cfg["socket"]:
+    if not enabled():
         return
+    cfg = _cfg()
     if qualifies(event, cfg["sources"], is_alert):
         return
-    now = int(time.time())
-    state_path = state_dir / "owner-route-state.json"
-    state = _load_state(state_path)
-    last = int(state.get(key, {}).get("lastAt") or 0) if isinstance(state.get(key), dict) else 0
-    if last and now - last < cfg["min_interval"]:
-        log({"type": "owner_route_skipped", "eventId": event.get("id"), "incidentKey": key,
-             "skippedMinInterval": True, "sinceLastSeconds": now - last})
+
+    def skip(**flags: Any) -> None:
+        log({"type": "owner_route_skipped", "eventId": event.get("id"), "incidentKey": key, **flags})
+
+    def remaining() -> float:
+        return float("inf") if deadline is None else deadline - time.monotonic()
+
+    # Checked before the floor is recorded: a copy skipped for time must not
+    # also block the next occurrence for a whole interval.
+    if remaining() < 1:
+        skip(skippedBudget=True)
         return
-    state = {
-        k: v for k, v in state.items()
-        if isinstance(v, dict) and now - int(v.get("lastAt") or 0) < STATE_RETENTION_SECONDS
-    }
-    state[key] = {"lastAt": now, "eventId": event.get("id")}
-    _save_state(state_path, state)
+    state_path = state_dir / "owner-route-state.json"
+    with (state_dir / "owner-route.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            skip(skippedLocked=True)
+            return
+        now = int(time.time())
+        try:
+            state = _load_state(state_path)
+        except _StateUnreadable:
+            skip(stateUnreadable=True)
+            return
+        entry = state.get(key)
+        last = int(entry.get("lastAt") or 0) if isinstance(entry, dict) else 0
+        if last and now - last < cfg["min_interval"]:
+            skip(skippedMinInterval=True, sinceLastSeconds=now - last)
+            return
+        retention = max(STATE_RETENTION_SECONDS, cfg["min_interval"])
+        state = {
+            k: v for k, v in state.items()
+            if isinstance(v, dict) and now - int(v.get("lastAt") or 0) < retention
+        }
+        state[key] = {"lastAt": now, "eventId": event.get("id")}
+        _save_state(state_path, state)
 
     line = owner_line(event)
     whatsapp_accepted = False
@@ -196,19 +254,25 @@ def route_owner_critical(
             cfg["socket"],
             "tools/call",
             {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
-            timeout=cfg["timeout"],
+            timeout=max(1.0, min(cfg["timeout"], remaining())),
         )
         receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
         whatsapp_accepted = True
     except Exception:  # noqa: BLE001 - fail-open by design
         whatsapp_accepted = False
     email_accepted: bool | None = None
+    email_skipped_budget = False
     if cfg["email"]:
-        try:
-            email_accepted = bool(email_fallback(line, f"{line}\n\n{group_text}"))
-        except Exception:  # noqa: BLE001
-            email_accepted = False
+        email_timeout = min(EMAIL_TIMEOUT_SECONDS, remaining())
+        if email_timeout < 1:
+            email_skipped_budget = True
+        else:
+            try:
+                email_accepted = bool(email_fallback(line, f"{line}\n\n{group_text}", timeout=email_timeout))
+            except Exception:  # noqa: BLE001
+                email_accepted = False
     log({"type": "owner_route_sent", "eventId": event.get("id"), "incidentKey": key,
          "source": event.get("source"), "whatsappAccepted": whatsapp_accepted,
          "emailEnabled": cfg["email"], "emailAccepted": email_accepted,
+         "emailSkippedBudget": email_skipped_budget,
          "auditReceipt": receipt.get("audit_receipt")})

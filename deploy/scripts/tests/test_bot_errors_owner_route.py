@@ -10,14 +10,21 @@ after the group send. Covered:
 - a failed WhatsApp send still sends the e-mail, and neither failure raises;
 - the dispatch-log record keeps its delivery outcome through the controller-log
   metadata filter (free-text statuses were silently dropped);
-- the dispatcher hook never lets a route failure affect group delivery.
+- when deduplication cannot be established (unreadable state, a held state
+  lock, a spent budget) the copy is skipped, and retention never undercuts the
+  configured interval;
+- without its environment neither the hook nor the route parses anything;
+- through run_once, every group alert of a cycle is sent before any owner copy,
+  and a route failure is logged and swallowed.
 
 Neutral fixtures only: host label ``host-a``, instance ``sample``.
 """
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
+import os
 import sys
 import time
 import types
@@ -48,7 +55,9 @@ def _load_dispatcher():
 def _alert(source: str = "provider_fallback_activated", *, severity: str = "critical",
            evidence: str = "", event_id: str = "0123456789abcdef") -> dict:
     return {
+        "schemaVersion": 1,
         "id": event_id,
+        "summary": "sample alert",
         "source": source,
         "severity": severity,
         "eventType": "alert",
@@ -62,6 +71,7 @@ class _Recorder:
     def __init__(self, *, send_raises: bool = False, email_ok: bool = True) -> None:
         self.sends: list[dict] = []
         self.emails: list[tuple[str, str]] = []
+        self.email_timeouts: list[float] = []
         self.logs: list[dict] = []
         self.send_raises = send_raises
         self.email_ok = email_ok
@@ -72,8 +82,9 @@ class _Recorder:
             raise OSError("socket unavailable")
         return {"ok": True}
 
-    def email(self, subject: str, body: str) -> bool:
+    def email(self, subject: str, body: str, timeout: float = 20) -> bool:
         self.emails.append((subject, body))
+        self.email_timeouts.append(timeout)
         return self.email_ok
 
     def log(self, record: dict) -> None:
@@ -92,7 +103,8 @@ def route_env(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _route(event: dict, rec: _Recorder, state_dir: Path, *, is_alert: bool = True, key: str | None = None) -> None:
+def _route(event: dict, rec: _Recorder, state_dir: Path, *, is_alert: bool = True, key: str | None = None,
+           deadline: float | None = None) -> None:
     owner_route.route_owner_critical(
         event,
         key=key or f"host-a|sample|{event['source']}",
@@ -102,6 +114,7 @@ def _route(event: dict, rec: _Recorder, state_dir: Path, *, is_alert: bool = Tru
         json_rpc_call=rec.rpc,
         email_fallback=rec.email,
         log=rec.log,
+        deadline=deadline,
     )
 
 
@@ -214,16 +227,146 @@ def test_owner_line_is_plain_and_names_host_and_instance():
     assert "still open after 25 h (escalated reminder)" in escalated
 
 
-def test_dispatcher_hook_swallows_route_failures(tmp_path, monkeypatch):
+def _skips(rec: _Recorder, flag: str) -> list[dict]:
+    return [r for r in rec.logs if r["type"] == "owner_route_skipped" and r.get(flag) is True]
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", ""])
+def test_unreadable_state_skips_instead_of_forgetting_floors(route_env, content):
+    rec = _Recorder()
+    _route(_alert(), rec, route_env)
+    (route_env / "owner-route-state.json").write_text(content)
+    _route(_alert(), rec, route_env)
+    assert len(rec.sends) == 1
+    assert len(_skips(rec, "stateUnreadable")) == 1
+
+
+def test_a_held_state_lock_skips_the_copy(route_env):
+    rec = _Recorder()
+    with (route_env / "owner-route.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _route(_alert(), rec, route_env)
+    assert rec.sends == []
+    assert len(_skips(rec, "skippedLocked")) == 1
+
+
+def test_retention_never_undercuts_the_configured_interval(route_env, monkeypatch):
+    day = 86400
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_MIN_INTERVAL_SECONDS", str(14 * day))
+    eight_days_ago = int(time.time()) - 8 * day
+    (route_env / "owner-route-state.json").write_text(
+        json.dumps({"host-a|sample|provider_fallback_activated": {"lastAt": eight_days_ago, "eventId": "old"}})
+    )
+    rec = _Recorder()
+    # Routing another key must not prune the first key's reservation...
+    _route(_alert(), rec, route_env, key="host-a|other|provider_fallback_activated")
+    # ...so the first key is still inside its 14-day interval.
+    _route(_alert(), rec, route_env)
+    assert len(rec.sends) == 1
+    assert len(_skips(rec, "skippedMinInterval")) == 1
+
+
+def test_a_spent_budget_skips_without_recording_a_floor(route_env):
+    rec = _Recorder()
+    _route(_alert(), rec, route_env, deadline=time.monotonic() - 1)
+    assert rec.sends == [] and rec.emails == []
+    assert len(_skips(rec, "skippedBudget")) == 1
+    assert not (route_env / "owner-route-state.json").exists()
+    # The next occurrence is therefore not throttled.
+    _route(_alert(), rec, route_env)
+    assert len(rec.sends) == 1
+
+
+def test_email_timeout_is_clamped_to_the_budget(route_env):
+    rec = _Recorder()
+    _route(_alert(), rec, route_env, deadline=time.monotonic() + 5)
+    assert len(rec.email_timeouts) == 1 and rec.email_timeouts[0] <= 5
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"BOT_ERRORS_OWNER_ROUTE_MIN_INTERVAL_SECONDS": "six hours"},
+        {"BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS": "soon"},
+    ],
+)
+def test_invalid_settings_are_not_parsed_while_disabled(monkeypatch, tmp_path, bad):
+    for key in list(os.environ):
+        if key.startswith("BOT_ERRORS_OWNER_ROUTE_"):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in bad.items():
+        monkeypatch.setenv(key, value)
+    rec = _Recorder()
+    _route(_alert(), rec, tmp_path)
+    assert rec.logs == [] and rec.sends == []
+
     dispatcher = _load_dispatcher()
     logged: list[dict] = []
     monkeypatch.setattr(dispatcher, "append_dispatch_log", lambda paths, record: logged.append(record))
+    dispatcher.route_to_owner(_alert(), {"root": tmp_path}, "group text")
+    dispatcher.drain_owner_route_queue({"root": tmp_path})
+    assert dispatcher._owner_route_queue == [] and logged == []
+
+
+def test_drain_logs_and_swallows_a_route_failure(route_env, monkeypatch):
+    dispatcher = _load_dispatcher()
+    logged: list[dict] = []
+    monkeypatch.setattr(dispatcher, "append_dispatch_log", lambda paths, record: logged.append(record))
+    calls: list[str] = []
     failing = types.ModuleType("lib.owner_route")
 
-    def boom(*_args, **_kwargs):
+    def boom(event, **_kwargs):
+        calls.append(event["id"])
         raise RuntimeError("route exploded")
 
     failing.route_owner_critical = boom
     monkeypatch.setitem(sys.modules, "lib.owner_route", failing)
-    dispatcher.route_to_owner(_alert(), {"root": tmp_path}, "group text")
+    dispatcher.route_to_owner(_alert(), {"root": route_env}, "group text")
+    assert calls == []  # queued, not sent, inside the send path
+    dispatcher.drain_owner_route_queue({"root": route_env})
+    assert calls == ["0123456789abcdef"]
     assert logged == [{"type": "owner_route_error", "eventId": "0123456789abcdef"}]
+    assert dispatcher._owner_route_queue == []
+
+
+def test_run_once_sends_every_group_alert_before_any_owner_copy(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(root / "outbox"))
+    monkeypatch.setenv("BOT_ERRORS_JID", "group.invalid")
+    for key in list(os.environ):
+        if key.startswith("BOT_ERRORS_OWNER_ROUTE_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", _JID)
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_EMAIL", "0")
+    dispatcher = _load_dispatcher()
+    order: list[str] = []
+
+    def group_send(text, socket_path="", *, require_acceptance=False):
+        order.append("group")
+        return {"audit_receipt": f"g{len(order)}"} if require_acceptance else None
+
+    def owner_send(socket_path, method, params, timeout=15.0):
+        order.append("owner")
+        return {"ok": True}
+
+    monkeypatch.setattr(dispatcher, "send_whatsapp", group_send)
+    monkeypatch.setattr(dispatcher, "json_rpc_call", owner_send)
+    monkeypatch.setattr(owner_route, "validate_send_acceptance", lambda result, jid: {"audit_receipt": "o"})
+    paths = dispatcher.setup_dirs()
+    now = int(time.time())
+    for i, (source, instance) in enumerate(
+        [("provider_fallback_activated", "sample"), ("provider_credential_dead", "other")]
+    ):
+        event = {**_alert(source, event_id=f"evt-owner-{i}"), "instance": instance,
+                 "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+        target = paths["outbox"] / f"{now}.{i}.evt-owner-{i}.json"
+        target.write_text(json.dumps(event), encoding="utf-8")
+        target.chmod(0o600)
+
+    result = dispatcher.run_once(max_events=25)
+
+    assert result["sent"] == 2, result
+    assert order == ["group", "group", "owner", "owner"]
+    assert dispatcher._owner_route_queue == []
