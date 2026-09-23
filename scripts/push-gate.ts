@@ -245,7 +245,7 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   step('console-ci', 'bash scripts/run-with-pinned-npm.sh --prefix console ci'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('typecheck:all', 'npm run typecheck:all'),
-  step('coverage:check', 'npm run coverage:check -- --pool=forks --fileParallelism=false'),
+  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('verify:console-design:live', 'npm run verify:console-design:live'),
   step('verify:console-browser', 'npm run verify:console-browser'),
