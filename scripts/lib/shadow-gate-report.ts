@@ -19,7 +19,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import {
   SHADOW_GATE_COUNT_KEYS,
+  SHADOW_GATE_EVENT_SCHEMA_VERSION,
   SHADOW_GATE_EVENTS_FILE_PREFIX,
+  SHADOW_GATE_UNSUPPORTED_SCHEMA_VERSION,
   validateShadowGateEvent,
 } from '../../src/core/shadow-gate-events.ts';
 import { segmentNamePattern } from '../../src/lib/bounded-ndjson-sink.ts';
@@ -122,14 +124,19 @@ const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 /**
  * Read, validate and de-duplicate every segment. An invalid interior line is
- * fatal and named by file and line number only; a final line without a
- * trailing newline is a torn tail and is excluded even when it parses.
+ * fatal and named by file, line number and the validator's closed problem code,
+ * never its content. Lines from a newer schema are counted across every segment
+ * first, so the error says how much was written by a newer release. A final
+ * line without a trailing newline is a torn tail and is excluded even when it
+ * parses.
  */
 export function readSegments(dir: string, limits: SegmentLimits = DEFAULT_SEGMENT_LIMITS): SegmentReadResult {
   const events: ShadowGateEvent[] = [];
   const duplicateCopies: number[] = [];
   const seen = new Map<string, number>();
   let tornTail = 0;
+  let newerSchemaLines = 0;
+  let firstNewerSchema = '';
   const segments = listSegments(dir, limits);
   for (const { name, path } of segments) {
     let bytes: Buffer;
@@ -160,6 +167,11 @@ export function readSegments(dir: string, limits: SegmentLimits = DEFAULT_SEGMEN
         evidenceError(`${name}:${lineNo} is not valid JSON`);
       }
       const problem = validateShadowGateEvent(parsed);
+      if (problem === SHADOW_GATE_UNSUPPORTED_SCHEMA_VERSION) {
+        newerSchemaLines += 1;
+        if (!firstNewerSchema) firstNewerSchema = `${name}:${lineNo}`;
+        continue;
+      }
       if (problem) evidenceError(`${name}:${lineNo} is not a valid shadow-gate event (${problem})`);
       // Keyed by digest so the map holds 32 bytes per line, not the line itself.
       const digest = createHash('sha256').update(line).digest('base64');
@@ -171,6 +183,13 @@ export function readSegments(dir: string, limits: SegmentLimits = DEFAULT_SEGMEN
       seen.set(digest, events.length);
       events.push(parsed as ShadowGateEvent);
     }
+  }
+  if (newerSchemaLines > 0) {
+    evidenceError(
+      `${newerSchemaLines} line(s) have a schemaVersion newer than ${SHADOW_GATE_EVENT_SCHEMA_VERSION} `
+        + `(${SHADOW_GATE_UNSUPPORTED_SCHEMA_VERSION}), first at ${firstNewerSchema}; `
+        + 'they were written by a newer release, so run that release\'s report',
+    );
   }
   return { events, duplicateCopies, tornTail, files: segments.length };
 }

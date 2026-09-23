@@ -422,7 +422,23 @@ describe('shadow-gate report', () => {
     writeFileSync(segment, lines.join('\n'));
     const result = runCli(baseArgs(f));
     expect(result.code).toBe(65);
-    expect(result.stderr).toContain('shadow-gate-events.000001.ndjson:3');
+    expect(result.stderr).toContain('shadow-gate-events.000001.ndjson:3 is not a valid shadow-gate event (unknown_key)');
+    expect(result.stderr).not.toContain(FIXTURE_TEXT);
+  });
+
+  it('exits 65 on records from a newer schema, naming the closed code and the count', () => {
+    const f = makeFixture();
+    const v2Marker = { ...coverage('counts', (SINCE + 900) * 1000), schemaVersion: 2 };
+    const v2Model = { ...verdict('m-model'), schemaVersion: 2, event: 'shadow_gate_model_verdict', note: FIXTURE_TEXT };
+    writeFileSync(
+      path.join(f.eventsDir, 'shadow-gate-events.000003.ndjson'),
+      [line(v2Marker), line(v2Model), line(v2Model)].join(''),
+    );
+    const result = runCli(baseArgs(f));
+    expect(result.code).toBe(65);
+    expect(result.stderr).toContain('3 line(s) have a schemaVersion newer than 1 (unsupported_schema_version)');
+    expect(result.stderr).toContain('first at shadow-gate-events.000003.ndjson:1');
+    expect(result.stderr).toContain("run that release's report");
     expect(result.stderr).not.toContain(FIXTURE_TEXT);
   });
 

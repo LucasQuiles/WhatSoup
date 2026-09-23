@@ -17,6 +17,8 @@ import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 import { shortHash } from '../lib/short-hash.ts';
 
 export const SHADOW_GATE_EVENT_SCHEMA_VERSION = 1;
+/** Validator code for a record whose schemaVersion is newer than this reader supports. */
+export const SHADOW_GATE_UNSUPPORTED_SCHEMA_VERSION = 'unsupported_schema_version';
 const SHADOW_GATE_EVENT_TYPES = ['shadow_gate_verdict', 'shadow_gate_coverage'] as const;
 type ShadowGateStatus = 'OK' | 'ERROR';
 export type ShadowGateErrorReason = 'OVERRUN' | 'E_THROW';
@@ -152,6 +154,11 @@ function validateCoverageFields(ev: Record<string, unknown>): string | null {
 /** Returns null when valid, otherwise a short closed problem code. */
 export function validateShadowGateEvent(ev: unknown): string | null {
   if (!isRecord(ev)) return 'not_object';
+  // Checked first: a newer writer may add event types and keys this reader
+  // would otherwise misreport as unknown_event or corruption.
+  if (typeof ev.schemaVersion === 'number' && ev.schemaVersion > SHADOW_GATE_EVENT_SCHEMA_VERSION) {
+    return SHADOW_GATE_UNSUPPORTED_SCHEMA_VERSION;
+  }
   if (!EVENT_TYPE_SET.has(ev.event)) return 'unknown_event';
   const keys = exactKeys(ev, ev.event === 'shadow_gate_verdict' ? VERDICT_KEYS : COVERAGE_KEYS);
   if (keys) return keys;

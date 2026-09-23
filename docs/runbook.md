@@ -2431,10 +2431,15 @@ npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
 
 Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
 error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
-an invalid interior NDJSON line (named by file and line number only), more than 64 segments, more than
+an invalid interior NDJSON line (named by file, line number and the validator's closed problem code,
+never its content), more than 64 segments, more than
 200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage. The 4 KiB bound is
 checked before the torn-tail check, so a final line without a newline that is over 4 KiB also exits
 `65` rather than being counted as a torn tail.
+
+Events written by a newer release carry a newer `schemaVersion`. An older report counts them across
+all segments and exits `65` with `unsupported_schema_version`, the count and the first file and
+line. Run the report from the newest release that wrote the segments.
 
 **Reading the output.** Coverage prints first:
 
