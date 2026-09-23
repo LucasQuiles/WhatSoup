@@ -262,6 +262,12 @@ export interface ToolDeclaration {
     params: Record<string, unknown>,
     session: SessionContext,
     recordBondEffectDispatch?: () => void,
+    /**
+     * Issue 3457: the registry's cross-conversation guard, for a target the
+     * handler resolves itself (an alias). Throws CrossConversationDenied,
+     * which the handler must let escape. The registry always passes it.
+     */
+    assertTargetConversation?: import('./cross-conversation-guard.ts').AssertTargetConversation,
   ) => Promise<unknown>;
 }
 
