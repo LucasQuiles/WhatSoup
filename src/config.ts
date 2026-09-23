@@ -1668,7 +1668,9 @@ export const config = {
   // Shadow gate: advisory, logged-only reply-worthiness verdicts (never changes dispatch)
   shadowGate: {
     mode: optionalEnum(shadowGateSection?.mode, 'shadowGate.mode', ['off', 'shadow'] as const) ?? 'off',
-    eventsDir: optionalString(shadowGateSection?.eventsDir, 'shadowGate.eventsDir') ?? null,
+    eventsDir: shadowGateSection?.eventsDir === undefined || shadowGateSection?.eventsDir === null
+      ? null
+      : requireAbsolutePathString(shadowGateSection.eventsDir, 'shadowGate.eventsDir'),
   },
 
   // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart
