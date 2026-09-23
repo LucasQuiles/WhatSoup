@@ -134,8 +134,8 @@ function writeValidReleaseManifest(root: string): void {
 function makeFixtureTree(
   mainTs: string,
   extraFiles: Record<string, string> = {},
+  root: string = makeTmpDir(),
 ): string {
-  const root = makeTmpDir();
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
@@ -271,8 +271,18 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-function makeWrapperFixture(): WrapperFixture {
-  const root = makeTmpDir();
+// An empty directory nested inside a committed git repo, reproducing a
+// release root whose ancestor (e.g. a CI TMPDIR) happens to hold a .git.
+function makeDirInsideAncestorRepo(): string {
+  const parent = makeTmpDir();
+  gitFixture(parent, ['init', '-q']);
+  gitFixture(parent, ['commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  const nested = join(parent, 'release');
+  mkdirSync(nested);
+  return nested;
+}
+
+function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   const deploy = join(root, 'deploy');
   const lib = join(deploy, 'lib');
   const scripts = join(root, 'scripts');
@@ -934,6 +944,29 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.stderr).toContain('file-sha256-drift');
   });
 
+  it('runs from a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
+    convertWrapperFixtureToRelease(fixture);
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('rejects a manifest-drifted bootstrap graph in a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
+  });
+
   it('still runs database check when restart preflight is skipped', () => {
     const fixture = makeWrapperFixture();
 
@@ -1390,6 +1423,19 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
     const root = makeFixtureTree(
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('fails closed when a manifest-less release dir is nested inside an ancestor git repo', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+      makeDirInsideAncestorRepo(),
     );
     rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
     const { status, stderr } = runPreflight(root);

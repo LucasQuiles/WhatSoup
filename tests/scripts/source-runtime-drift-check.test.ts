@@ -55,9 +55,9 @@ function runGit(cwd: string, args: string[]): {
   };
 }
 
-function makeRepo(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-'));
-  tmpRoot = root;
+function makeRepo(parent?: string): string {
+  const root = mkdtempSync(path.join(parent ?? tmpdir(), 'whatsoup-source-runtime-'));
+  tmpRoot = parent ?? root;
   execGit(root, ['init', '-q']);
   execGit(root, ['config', 'user.email', 'test.invalid']);
   execGit(root, ['config', 'user.name', 'Test']);
@@ -143,6 +143,16 @@ function convertRepoToRelease(root: string): void {
     files,
     requiredOutputs: [],
   }), 'utf8');
+}
+
+// A committed git repo that encloses the release fixture, reproducing a
+// fixture tree whose ancestor (e.g. a CI TMPDIR) happens to hold a .git.
+function makeAncestorRepo(): string {
+  const parent = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-ancestor-'));
+  tmpRoot = parent;
+  execGit(parent, ['init', '-q']);
+  execGit(parent, ['-c', 'user.email=test.invalid', '-c', 'user.name=Test', 'commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  return parent;
 }
 
 describe('source runtime drift check', () => {
@@ -400,6 +410,50 @@ describe('source runtime drift check', () => {
   it('rejects a drifted source-runtime control manifest in a non-git snapshot', () => {
     const root = makeRepo();
     convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps release mode for a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual([]);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('rejects a drifted control manifest in a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('treats a release root that is itself a bare git dir as outside a work tree', () => {
+    // `rev-parse --is-inside-work-tree` exits 0 and prints "false" here, so an
+    // exit-status-only probe would skip the control-manifest check.
+    const root = makeRepo();
+    convertRepoToRelease(root);
+    execGit(root, ['init', '-q', '--bare']);
+    expect(runGit(root, ['rev-parse', '--is-inside-work-tree'])).toEqual(
+      expect.objectContaining({ status: 0, stdout: 'false\n' }),
+    );
     writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
       schemaVersion: 1,
       scope: 'retargeted',
