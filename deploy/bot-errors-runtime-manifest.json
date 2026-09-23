@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "478a3144cee77a7da60e59c595cb54a9619d1f80185bcda6371c08850e2fba13",
+      "sha256": "42d07271c2cd2089ed447bc3889892f887f45ce775f6d559b32a005e50d5bbcc",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",
@@ -871,6 +871,16 @@
         "RoundtripConfigError",
         "parse_roster",
         "evaluate_target"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/owner_route.py",
+      "sha256": "babaf398e510a9a1b6390a13e10419c143d461609bbaba8266f3198ddbaf8e21",
+      "mustContain": [
+        "def route_owner_critical(",
+        "def qualifies(",
+        "BOT_ERRORS_OWNER_ROUTE_JID",
+        "whatsappAccepted"
       ]
     }
   ]

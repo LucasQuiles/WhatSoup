@@ -9825,7 +9825,35 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         "path": str(sent_path),
         "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
     })
+    route_to_owner(event, paths, text)
     return True, "sent"
+
+
+def route_to_owner(event: dict[str, Any], paths: dict[str, Path], text: str) -> None:
+    """Fail-open copy of selected critical alerts to the owner (lib/owner_route.py).
+
+    Runs only after the group send is archived. Inert unless the
+    BOT_ERRORS_OWNER_ROUTE_* environment is set; any failure is logged and
+    swallowed so it can never affect group delivery.
+    """
+    try:
+        from lib.owner_route import route_owner_critical
+
+        route_owner_critical(
+            event,
+            key=incident_key(event),
+            is_alert=is_incident_alert(event) and not is_incident_clear(event),
+            group_text=text,
+            state_dir=paths["root"],
+            json_rpc_call=json_rpc_call,
+            email_fallback=email_fallback,
+            log=lambda record: append_dispatch_log(paths, record),
+        )
+    except Exception:  # noqa: BLE001 - must never affect group delivery
+        try:
+            append_dispatch_log(paths, {"type": "owner_route_error", "eventId": event.get("id")})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @controller_cycle(
