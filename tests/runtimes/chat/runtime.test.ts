@@ -900,7 +900,7 @@ describe('Media processing', () => {
   });
 
   it('applies the group recall boundary when a group sender is not a verified admin', async () => {
-    const { handler } = makeHandler();
+    const { handler, pinecone } = makeHandler();
 
     await handleAndDrain(handler, makeIncomingMessage({
       chatJid: '111111100000001@g.us',
@@ -909,7 +909,7 @@ describe('Media processing', () => {
     }));
 
     expect(mockLoadContext).toHaveBeenCalledWith(
-      expect.anything(),
+      pinecone,
       '111111100000001@g.us',
       '15550009999@s.whatsapp.net',
       expect.any(String),

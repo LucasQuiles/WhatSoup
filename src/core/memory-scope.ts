@@ -38,6 +38,7 @@ import {
   bareNumber, isAuthenticatedSenderJid, isGroupJid, isLidJid, isPnJid, normalizeLid, toLidJid, toPersonalJid,
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
+import { systemClock } from '../lib/clock.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 
@@ -182,7 +183,7 @@ export class GroupMembershipCache implements GroupMembershipReader {
   ) {
     this.fetchParticipants = fetchParticipants;
     this.ttlMs = options.ttlMs ?? 5 * 60_000;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => systemClock.now());
     this.maxEntries = options.maxEntries ?? 500;
   }
 
