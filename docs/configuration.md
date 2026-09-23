@@ -1128,6 +1128,24 @@ without one of those guards so same-name indexes cannot silently route to the
 wrong project. Existing load/discovery configs are not hard-failed for this
 guard; runtime Pinecone calls still fail closed when the guard is missing.
 
+The operator instance `q` is project-checked too. When its config sets neither
+guard, the runtime holds it to the operator project slug
+`OPERATOR_PINECONE_PROJECT_ID` (`src/lib/pinecone-project-guard.ts`); a
+configured `projectId` or `expectedHostSuffix` takes precedence. If `q`'s key
+resolves its memory index in any other project, readiness reports
+`project_mismatch`, memory reads and `memory_write` are refused, and the
+provider logs `Pinecone project guard refused the configured key` at error
+level.
+
+`memory_write` writes to the SDK default namespace (`__default__`) of
+`memory.pinecone.index`. When `knowledge_search` searches that same index
+without an explicit `namespace` argument, it always includes `__default__`
+alongside the profile's namespaces, so an instance can find what it wrote.
+That added leg is filtered to the caller's conversation (`chat_jid`), like
+every other reader of `memory_write` records, and is skipped when the session
+has no pinned conversation. A profile that already lists the default namespace
+is searched as configured.
+
 #### Legacy Migration
 
 Dry-run all local instance configs:

@@ -11,8 +11,18 @@ import { type Clock, systemClock } from '../../lib/clock.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
-import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
-import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
+import {
+  conversationBoundKey,
+  errorResult,
+  toolError,
+  type SessionContext,
+  type ToolDeclaration,
+} from '../types.ts';
+import {
+  pineconeProjectGuardError,
+  resolvePineconeProjectGuard,
+  type PineconeProjectGuard,
+} from '../../lib/pinecone-project-guard.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -53,13 +63,17 @@ function pineconeMemoryConfig(): {
       };
     };
   }).memory?.pinecone;
+  const { guard } = resolvePineconeProjectGuard((config as { botName?: unknown }).botName, {
+    projectId: pinecone?.projectId,
+    expectedHostSuffix: pinecone?.expectedHostSuffix,
+  });
   return {
     apiKeyEnv: pinecone?.apiKeyEnv || 'PINECONE_API_KEY',
     apiKeyService: isNonEmptyString(pinecone?.apiKeyService)
       ? pinecone.apiKeyService
       : undefined,
-    projectId: pinecone?.projectId,
-    expectedHostSuffix: pinecone?.expectedHostSuffix,
+    projectId: guard.projectId,
+    expectedHostSuffix: guard.expectedHostSuffix,
     namespaces: pinecone?.namespaces,
     knowledgeProfiles: pinecone?.knowledgeProfiles ?? {},
   };
@@ -72,13 +86,81 @@ function namespaceAllowlist(profile: KnowledgeProfileConfig): Set<string> {
   );
 }
 
+/**
+ * Namespace that memory_write (PineconeMemory.upsert) writes to. PineconeMemory
+ * opens `config.pineconeIndex` without a namespace, which the SDK resolves to
+ * its default namespace, spelled `__default__` (the SDK maps `''` to it too).
+ */
+const MEMORY_WRITE_NAMESPACE = '__default__';
+
+function isDefaultNamespace(namespace: string): boolean {
+  return namespace === '' || namespace === MEMORY_WRITE_NAMESPACE;
+}
+
+interface ResolvedNamespaces {
+  namespacesToSearch: string[];
+  queryIntent?: string;
+  error?: string;
+  /**
+   * Set when the memory_write namespace was added on top of the profile. That
+   * leg holds per-conversation records, so it is searched only with the
+   * caller's conversation filter (see conversationScopedSearch).
+   */
+  memoryWriteNamespace?: string;
+}
+
+/**
+ * Keep memory_write and knowledge_search in agreement: a search of the
+ * instance's own memory index always includes the namespace memory_write
+ * writes to, so the bot can find what it saved. Other indexes are unchanged,
+ * and a profile that already lists the default namespace keeps its behaviour.
+ */
+function withMemoryWriteNamespace(
+  indexName: string,
+  namespacesToSearch: string[],
+): Pick<ResolvedNamespaces, 'namespacesToSearch' | 'memoryWriteNamespace'> {
+  const memoryIndex = (config as { pineconeIndex?: unknown }).pineconeIndex;
+  if (!isNonEmptyString(memoryIndex) || indexName !== memoryIndex) return { namespacesToSearch };
+  if (namespacesToSearch.some(isDefaultNamespace)) return { namespacesToSearch };
+  return {
+    namespacesToSearch: [...namespacesToSearch, MEMORY_WRITE_NAMESPACE],
+    memoryWriteNamespace: MEMORY_WRITE_NAMESPACE,
+  };
+}
+
+/**
+ * memory_write files each record under the writer's conversation key
+ * (`chat_jid`), and every other reader of those records filters on it. The
+ * added memory_write leg keeps that boundary: it is filtered to the caller's
+ * conversation, and dropped when the session has no pinned conversation.
+ */
+function conversationScopedSearch(
+  resolved: ResolvedNamespaces,
+  session: SessionContext,
+): { namespacesToSearch: string[]; filterFor: (namespace: string) => Record<string, unknown> | undefined } {
+  const scoped = resolved.memoryWriteNamespace;
+  if (!scoped) return { namespacesToSearch: resolved.namespacesToSearch, filterFor: () => undefined };
+  const conversationKey = conversationBoundKey(session) ?? session.conversationKey;
+  if (!conversationKey) {
+    return {
+      namespacesToSearch: resolved.namespacesToSearch.filter((ns) => ns !== scoped),
+      filterFor: () => undefined,
+    };
+  }
+  const filter = { chat_jid: { $eq: conversationKey } };
+  return {
+    namespacesToSearch: resolved.namespacesToSearch,
+    filterFor: (namespace) => (namespace === scoped ? filter : undefined),
+  };
+}
+
 function resolveNamespacesToSearch(
   indexName: string,
   query: string,
   profile: KnowledgeProfileConfig,
   nsOverride: string | undefined,
   namespaces: ReturnType<typeof pineconeMemoryConfig>['namespaces'],
-): { namespacesToSearch: string[]; queryIntent?: string; error?: string } {
+): ResolvedNamespaces {
   const allowed = namespaceAllowlist(profile);
   if (nsOverride) {
     if (allowed.size > 0 && !allowed.has(nsOverride)) {
@@ -91,14 +173,17 @@ function resolveNamespacesToSearch(
     const routed = routeQuery(query, { namespaces });
     const routedSet = new Set(routed.namespaces);
     const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
-    return { namespacesToSearch: [...routed.namespaces, ...others], queryIntent: routed.intent };
+    return {
+      ...withMemoryWriteNamespace(indexName, [...routed.namespaces, ...others]),
+      queryIntent: routed.intent,
+    };
   }
 
   if (profile.namespaces.length > 0) {
-    return { namespacesToSearch: profile.namespaces };
+    return withMemoryWriteNamespace(indexName, profile.namespaces);
   }
 
-  return { namespacesToSearch: [profile.namespace] };
+  return withMemoryWriteNamespace(indexName, [profile.namespace]);
 }
 
 async function validatePineconeProject(
@@ -325,7 +410,7 @@ export function registerKnowledgeTools(
     // Optional vendor-gated tool: Pinecone may be absent/misconfigured, in which case
     // registerAllTools logs and continues rather than aborting boot.
     core: false,
-    handler: async (params) => {
+    handler: async (params, session) => {
       const parsed = KnowledgeSearchSchema.safeParse(params);
       if (!parsed.success) {
         return errorResult(`Invalid parameters: ${parsed.error.issues.map(i => i.message).join(', ')}`);
@@ -354,7 +439,7 @@ export function registerKnowledgeTools(
       if (routed.error) {
         return errorResult(routed.error);
       }
-      const namespacesToSearch = routed.namespacesToSearch;
+      const { namespacesToSearch, filterFor } = conversationScopedSearch(routed, session);
       const queryIntent = routed.queryIntent;
 
       try {
@@ -398,16 +483,18 @@ export function registerKnowledgeTools(
           }
 
           const topK = top_k ?? profile.topK;
-          const queryPromises = namespacesToSearch.map((ns) =>
-            index.namespace(ns).query({
+          const queryPromises = namespacesToSearch.map((ns) => {
+            const filter = filterFor(ns);
+            return index.namespace(ns).query({
               topK,
               vector: vec,
               includeMetadata: true,
+              ...(filter ? { filter } : {}),
             }).catch((err) => {
               log.warn({ err, namespace: ns }, 'namespace vector query failed — skipping');
               return null;
-            }),
-          );
+            });
+          });
           const responses = await Promise.all(queryPromises);
           for (const response of responses) {
             if (!response || !Array.isArray(response.matches)) continue;
@@ -424,19 +511,21 @@ export function registerKnowledgeTools(
           }
         } else {
           // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
-          const searchPromises = namespacesToSearch.map((ns) =>
-            index.searchRecords({
+          const searchPromises = namespacesToSearch.map((ns) => {
+            const filter = filterFor(ns);
+            return index.searchRecords({
               namespace: ns,
               query: {
                 topK: top_k ?? profile.topK,
                 inputs: { text: query },
+                ...(filter ? { filter } : {}),
               },
               fields: ['*'],
             }).catch((err) => {
               log.warn({ err, namespace: ns }, 'namespace search failed — skipping');
               return null;
-            }),
-          );
+            });
+          });
 
           const responses = await Promise.all(searchPromises);
           for (const response of responses) {

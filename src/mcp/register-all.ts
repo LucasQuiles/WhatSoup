@@ -218,7 +218,8 @@ export function registerAllTools(
   // Memory write — agent-facing episodic WRITE into the configured per-person
   // Pinecone index (agent instances don't run the chat-runtime enrichment poller).
   // Vendor-gated (Pinecone): core: false. Registered whenever a Pinecone API key
-  // is available; PineconeMemory.upsert enforces the non-q project guard.
+  // is available; PineconeMemory.upsert enforces the project guard (the
+  // operator project for `q` when its config sets none).
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
   // env-allowed: memory-write API key resolver; secret surface stays env-late
