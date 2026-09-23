@@ -194,10 +194,10 @@ function sha256(body: Buffer | string): string {
 // Intentional local wrapper: this guard needs status/stdout/stderr together to
 // distinguish untracked, dirty, staged, and git-error states. guard-core's
 // gitList/readText helpers intentionally expose narrower contracts.
-function git(cwd: string, args: string[]): GitCommandResult {
+function git(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): GitCommandResult {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
-    env: cleanGitEnv(),
+    env: { ...cleanGitEnv(), ...extraEnv },
     maxBuffer: 16 * 1024 * 1024,
     timeout: 30_000,
   });
@@ -207,6 +207,20 @@ function git(cwd: string, args: string[]): GitCommandResult {
     stderr: proc.stderr ?? '',
     error: proc.error?.message,
   };
+}
+
+// Git probes that decide git mode vs release mode for a release root. The
+// ceiling stops upward discovery at the root's parent, so an unrelated
+// ancestor .git (e.g. a CI TMPDIR) cannot turn a non-git release into git mode.
+function releaseRootGit(cwd: string, args: string[]): GitCommandResult {
+  return git(cwd, args, { GIT_CEILING_DIRECTORIES: path.dirname(realpathSync(cwd)) });
+}
+
+// Only git's literal "true" means a work tree: inside a git dir or a bare repo
+// the probe exits 0 and prints "false".
+function isInsideWorkTree(cwd: string): boolean {
+  const probe = releaseRootGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  return probe.status === 0 && probe.stdout.trim() === 'true';
 }
 
 function nulPaths(value: string): Set<string> {
@@ -552,7 +566,7 @@ export function collectSourceRuntimeIssues(
 ): SourceRuntimeIssue[] {
   const issues: SourceRuntimeIssue[] = [];
   const repoRealPath = realpathSync(cwd);
-  let gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? git);
+  let gitSnapshot = loadGitStateSnapshot(cwd, dependencies.git ?? releaseRootGit);
   if (gitSnapshot.error) {
     // Non-git release export: fall back to the release snapshot manifest as
     // the trust root; with neither, fail closed exactly as before.
@@ -610,7 +624,7 @@ export function collectSourceRuntimeIssues(
   }
 
   if (!gitSnapshot.releaseFiles) {
-    const finalGitError = refreshGitDriftSnapshot(cwd, gitSnapshot, dependencies.git ?? git);
+    const finalGitError = refreshGitDriftSnapshot(cwd, gitSnapshot, dependencies.git ?? releaseRootGit);
     if (finalGitError) {
       return [issue('git-error', 'critical', `source runtime final Git verification failed: ${finalGitError}`)];
     }
@@ -714,8 +728,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
   // In a non-git release export the control manifest itself is not part of the
   // walked graph, so a tampered manifest could silently redirect the walk.
   // Verify its bytes against the release snapshot manifest before trusting it.
-  if (manifest && options.manifestPath !== '/dev/stdin'
-    && git(cwd, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
+  if (manifest && options.manifestPath !== '/dev/stdin' && !isInsideWorkTree(cwd)) {
     const releaseSnapshot = loadReleaseManifestSnapshot(cwd);
     if (releaseSnapshot?.releaseFiles) {
       const manifestAbsolute = path.resolve(cwd, options.manifestPath);
