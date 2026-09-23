@@ -35,7 +35,7 @@ import type { Database } from './database.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { conversationKeyToJid, isGroupConversationKey, toConversationKey } from './conversation-key.ts';
 import {
-  bareNumber, isAuthenticatedSenderJid, isGroupJid, isLidJid, isPnJid, normalizeLid,
+  bareNumber, isAuthenticatedSenderJid, isGroupJid, isLidJid, isPnJid, normalizeLid, toLidJid, toPersonalJid,
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
@@ -139,11 +139,11 @@ export function chatAttributionSpellings(
     spellings.add(conversationKeyToJid(key));
     spellings.add(key.replace('@g.us', '_at_g.us'));
   } else if (/^\d+$/.test(key)) {
-    spellings.add(`${key}@s.whatsapp.net`);
+    spellings.add(toPersonalJid(key));
     if (db) {
       for (const lid of resolveLidsForPhone(db, key)) {
         spellings.add(lid);
-        spellings.add(`${lid}@lid`);
+        spellings.add(toLidJid(lid));
       }
     }
   }
