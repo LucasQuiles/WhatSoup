@@ -557,6 +557,78 @@
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "perChatSessionsWithoutOwner",
+      "label": "runtime_agent_per_chat_sessions_without_owner",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "perChatRespawnAbandoned",
+      "label": "runtime_agent_per_chat_respawn_abandoned",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "turnQueueHaltedScopes",
+      "label": "runtime_agent_turn_queue_halted_scopes",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-queue-halt-latch.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "proactiveResumeIdentityRejects",
+      "label": "runtime_agent_proactive_resume_identity_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "unownedProviderEventRejects",
+      "label": "runtime_agent_unowned_provider_event_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "suppressedSystemTurnEffectRejects",
+      "label": "runtime_agent_suppressed_system_turn_effect_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyDelayedDispatches",
+      "label": "runtime_agent_chronology_delayed_dispatches",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyRecoveryReplayDispatches",
+      "label": "runtime_agent_chronology_recovery_replay_dispatches",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyMaxQueueAgeSeconds",
+      "label": "runtime_agent_chronology_max_queue_age_seconds",
+      "kind": "historical_maximum",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
     }
   ],
   "terminalAttemptToInboundFailureClass": {

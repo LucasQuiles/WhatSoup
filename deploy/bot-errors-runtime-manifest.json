@@ -834,7 +834,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "9db11a56d8a38bee15dbd9a4884a41ef2d83cfeb572492b09690ee29b710e12e",
+      "sha256": "09c6ece2986911562c4086874e6fe41fa70ced1cf3614d612faba2c5ef90a354",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -843,6 +843,15 @@
         "\"runtime_agent_turn_recovery_blocked_unsafe_synthetic\"",
         "\"runtime_agent_turn_recovery_blocked_unsafe_superseded\"",
         "\"runtime_agent_turn_recovery_blocked_unsafe_stranded\"",
+        "\"runtime_agent_per_chat_sessions_without_owner\"",
+        "\"runtime_agent_per_chat_respawn_abandoned\"",
+        "\"runtime_agent_turn_queue_halted_scopes\"",
+        "\"runtime_agent_proactive_resume_identity_rejects\"",
+        "\"runtime_agent_unowned_provider_event_rejects\"",
+        "\"runtime_agent_suppressed_system_turn_effect_rejects\"",
+        "\"runtime_agent_chronology_delayed_dispatches\"",
+        "\"runtime_agent_chronology_recovery_replay_dispatches\"",
+        "\"runtime_agent_chronology_max_queue_age_seconds\"",
         "autoCompactActiveBackoffScopes"
       ]
     },
