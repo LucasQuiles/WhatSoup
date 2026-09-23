@@ -262,6 +262,7 @@ def test_last_reading_wins_disconnected_after_connected_keeps_suppressing():
 
     assert mod.should_suppress_send(child, state) is not None
     assert parent_key in state["openIncidents"]
+    assert state["openIncidents"][parent_key]["lastSeenAt"] == _PARENT_LAST_SEEN
 
 
 def test_child_without_connectivity_reading_keeps_being_suppressed():
