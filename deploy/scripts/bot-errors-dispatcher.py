@@ -5161,37 +5161,79 @@ def stronger_incident_contradiction(
     """Evidence that ``event`` proves the stronger incident's condition false.
 
     Returns a bounded description of the contradicting readings, or None when
-    the root is not contradicted. Conservative: every reading the child carries
-    must be positive (``whatsapp_connected`` truthy, ``connection_state`` equal
-    to ``connected``), at least one must be present, and the child must be
-    created after the root opened (beyond clock-skew tolerance). A child queued
-    before the root opened, or one with no usable timestamps, never retires it,
-    so a genuine logout keeps suppressing its symptoms.
+    the root is not contradicted. Conservative: every connectivity reading the
+    child carries must be unambiguously positive (positive_connectivity_readings),
+    at least one must be present, and the child's timezone-aware createdAt must
+    follow the root's LATEST observation (first alert or a later folded
+    same-key alert) beyond clock-skew tolerance. A child queued before that
+    observation, or one with no usable timestamp, never retires the root, so a
+    genuine logout keeps suppressing its symptoms.
     """
     if _bare_root_source(stronger_key) not in CONNECTIVITY_LOSS_ROOT_SOURCES:
         return None
-    connected = whatsapp_connected_reading(event)
-    state = connection_state_reading(event)
-    if connected is None and state is None:
-        return None
-    if connected is False:
-        return None
-    if state is not None and state != "connected":
+    readings = positive_connectivity_readings(event)
+    if not readings:
         return None
     opened = int_field(stronger_record, "eventCreatedAtEpoch")
-    created = event_created_epoch(event)
-    if opened <= 0 or created is None or created <= opened + CLOCK_SKEW_TOLERANCE_SECONDS:
+    if opened <= 0:
         return None
-    readings = []
-    if connected is not None:
-        readings.append("whatsapp_connected=true")
-    if state is not None:
-        readings.append(f"connection_state={state}")
+    # Compare against the root's LATEST observation, not its first: a newer
+    # same-key logout is folded into the open record (refreshing lastSeenAt)
+    # without moving eventCreatedAtEpoch, and an older connected child must not
+    # retire it. Children no longer refresh lastSeenAt, so it tracks the root's
+    # own observations only.
+    last_observed = max(opened, int_field(stronger_record, "lastSeenAt"))
+    order = event_created_order(event)
+    if order is None:
+        # Missing, unparseable or timezone-less createdAt: ordering unknown.
+        return None
+    created = order // 1_000_000
+    if created <= last_observed + CLOCK_SKEW_TOLERANCE_SECONDS:
+        return None
     return {
         "readings": readings,
         "childCreatedAtEpoch": created,
         "rootOpenedAtEpoch": opened,
+        "rootLastObservedAtEpoch": last_observed,
     }
+
+
+_STRICT_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)connected=([^\s]+)")
+_POSITIVE_TOKENS = frozenset({"true", "1", "yes"})
+
+
+def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
+    """Every connectivity reading the event carries, if ALL are positive.
+
+    Used only for destructive retirement, so it is stricter than
+    whatsapp_connected_reading: a structured ``diagnostics.whatsappConnected``
+    must be the boolean True (a string, None or False blocks retirement); every
+    ``whatsapp_connected=`` and bare ``connected=`` evidence token must be
+    positive; every ``connection_state=`` token must be ``connected``. Returns
+    None when any reading is negative or ambiguous, or when there is none.
+    """
+    readings: list[str] = []
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    if "whatsappConnected" in diagnostics:
+        if diagnostics.get("whatsappConnected") is not True:
+            return None
+        readings.append("diagnostics.whatsappConnected=true")
+    evidence = event_text(event, "evidence")
+    for label, pattern in (
+        ("whatsapp_connected", _WHATSAPP_CONNECTED_EVIDENCE_RE),
+        ("connected", _STRICT_CONNECTED_TOKEN_RE),
+    ):
+        tokens = pattern.findall(evidence)
+        if any(token.strip().lower() not in _POSITIVE_TOKENS for token in tokens):
+            return None
+        if tokens:
+            readings.append(f"{label}=true")
+    states = [token.strip().lower() for token in _CONNECTION_STATE_EVIDENCE_RE.findall(evidence)]
+    if any(state != "connected" for state in states):
+        return None
+    if states:
+        readings.append("connection_state=connected")
+    return readings or None
 
 
 def retire_contradicted_stronger_incident(
@@ -5221,6 +5263,7 @@ def retire_contradicted_stronger_incident(
         "contradictingEvidence": " ".join(contradiction["readings"]),
         "childCreatedAtEpoch": contradiction["childCreatedAtEpoch"],
         "rootOpenedAtEpoch": contradiction["rootOpenedAtEpoch"],
+        "rootLastObservedAtEpoch": contradiction["rootLastObservedAtEpoch"],
     }
     close_open_incident(incident_state, stronger_key)
     history = incident_state.get("contradictionRetirements")

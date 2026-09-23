@@ -30,6 +30,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
@@ -296,6 +298,71 @@ def test_connected_child_does_not_retire_non_connectivity_root():
     assert mod.should_suppress_send(child, state) is not None
     assert parent_key in state["openIncidents"]
     assert state["openIncidents"][parent_key]["lastSeenAt"] == _PARENT_LAST_SEEN
+
+
+# ---------------------------------------------------------------------------
+# (d2) unsafe evidence never retires (review round 1)
+# ---------------------------------------------------------------------------
+
+def test_connected_child_older_than_a_newer_folded_logout_does_not_retire():
+    # Root opened an hour ago; a newer same-key logout was folded into it ten
+    # seconds ago (refreshing lastSeenAt, not eventCreatedAtEpoch). A connected
+    # child created ten minutes ago predates that newer logout.
+    now = int(time.time())
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    record = state["openIncidents"][parent_key]
+    record["eventCreatedAtEpoch"] = now - 3600
+    record["lastSeenAt"] = now - 10
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE, created=now - 600)
+
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
+    assert "contradictionRetirements" not in state
+
+
+@pytest.mark.parametrize(
+    ("diagnostics", "evidence"),
+    [
+        ({"whatsappConnected": "false"}, "health_status=degraded"),
+        ({"whatsappConnected": "unknown"}, "health_status=degraded"),
+        ({"whatsappConnected": None}, "health_status=degraded"),
+        ({"whatsappConnected": True}, "whatsapp_connected=false"),
+        ({}, "connected=false connection_state=connected"),
+        ({}, "whatsapp_connected=unknown connection_state=connected"),
+        ({}, "whatsapp_connected=true connection_state=connecting"),
+    ],
+    ids=[
+        "string-false",
+        "string-unknown",
+        "none",
+        "structured-true-text-false",
+        "watchdog-connected-false",
+        "text-unknown",
+        "state-connecting",
+    ],
+)
+def test_ambiguous_or_negative_readings_never_retire(diagnostics, evidence):
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _alert("health_body_degraded", evidence=evidence)
+    child["diagnostics"] = dict(diagnostics)
+
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
+    assert "contradictionRetirements" not in state
+
+
+def test_timezone_less_child_timestamp_never_retires():
+    # Without a zone the parse depends on the host clock; the ordering is
+    # unknown, so the root stays.
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _alert("health_body_degraded", evidence=_CONNECTED_EVIDENCE)
+    child["createdAt"] = child["createdAt"].rstrip("Z")
+
+    assert mod.should_suppress_send(child, state) is not None
+    assert parent_key in state["openIncidents"]
 
 
 # ---------------------------------------------------------------------------

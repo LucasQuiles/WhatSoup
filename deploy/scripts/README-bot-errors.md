@@ -594,15 +594,24 @@ send). The rule is currently implemented for WhatsApp connectivity-loss roots:
 `daily-health:`-prefixed form that has been added to the map. Such a root is
 contradicted when all of these hold:
 
-- The child reports the instance connected. That means
-  `diagnostics.whatsappConnected=true`, or a last `whatsapp_connected=` evidence
-  token that is truthy. It also accepts a last `connection_state=connected`. Every
-  reading present must be positive: `false`, `unknown` or any other state never
-  contradicts. The health poller's `health_body_degraded` evidence and the
-  watchdog's `local_health` evidence carry these tokens.
-- The child's `createdAt` is later than the root's `eventCreatedAtEpoch` by more
-  than the clock-skew tolerance, so a child queued before the logout cannot
-  retire it.
+- The child reports the instance connected, and **every** connectivity reading
+  it carries is unambiguously positive: a structured
+  `diagnostics.whatsappConnected` must be the boolean `true` (a string such as
+  `"false"` or `"unknown"`, or `null`, blocks retirement); every
+  `whatsapp_connected=` and bare `connected=` evidence token must be `true`
+  (`1`/`yes` also accepted); every `connection_state=` token must be
+  `connected`. At least one reading must be present. A structured `true` next to
+  a text `whatsapp_connected=false`, or the watchdog's
+  `connected=false connection_state=connected`, never retires a root. The
+  health poller's `health_body_degraded` evidence and the watchdog's
+  `local_health` evidence carry these tokens.
+- The child's `createdAt` is timezone-aware and later than the root's **latest
+  observation** by more than the clock-skew tolerance. The latest observation is
+  the later of the root's first alert (`eventCreatedAtEpoch`) and its
+  `lastSeenAt`, which a newer same-key logout refreshes when it is folded into
+  the open record (children no longer refresh it). So a child queued before
+  either logout cannot retire it, and a timestamp with no zone, whose meaning
+  depends on the host clock, never does.
 
 Retirement uses the same removal as a matching clear (`close_open_incident`
 drops `openIncidents`, `lastSentAt` and transient bookkeeping for the key). The
