@@ -40,6 +40,7 @@ import type { MessageRow } from '../../core/messages.ts';
 import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
+import { CrossConversationDenied } from '../cross-conversation-guard.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
@@ -214,10 +215,11 @@ export function registerMessagingTools(
 ): void {
   const { connection, db } = deps;
 
-  // Issue 3150 registry layer: the registry's pre-handler cross-conversation
-  // guard must fold `@lid` -> phone exactly like the beforeAudit session-pin
-  // check below (canonicalConversationKey, matching ingest QR-050). The guard
-  // has no db of its own, so it is armed here, where the handlers get theirs.
+  // Issue 3150 registry layer: the registry's cross-conversation guard must
+  // fold `@lid` -> phone (canonicalConversationKey, matching ingest QR-050).
+  // The guard has no db of its own, so it is armed here, where the handlers
+  // get theirs. Issue 3457: send_message's post-resolution check uses this
+  // same fold, through the registry callback.
   registry.setCanonicalConversationKeyResolver((jid) => canonicalConversationKey(jid, deps.dbWrapper));
 
   const sendPipeline = createSendPipeline({
@@ -262,45 +264,32 @@ export function registerMessagingTools(
       link_preview: z.enum(['auto', 'off']).optional().describe('Control link preview generation. "auto" (default) uses Baileys auto-preview. "off" suppresses the preview entirely.'),
       dryRun: z.boolean().optional().describe('Resolve the recipient — including @lid canonicalization onto an existing conversation — and report the resolved chatJid WITHOUT sending. No message is transmitted and no audit record is written; use it to verify outbound routing (issue 3150).'),
     }),
-    handler: async (params, session: SessionContext) => {
-      // Cross-conversation routing guard (issue 3150): a global-tier session
-      // pinned to a conversation may only send to a chatJid that folds to that
-      // same conversation. prepared.chatJid may be an `@lid` JID (canonicalized
-      // onto the existing conversation); session conversation keys are stored
-      // PHONE-folded at ingest (QR-050), so the comparison folds `@lid` -> phone
-      // the same way — a bare toConversationKey would yield the raw LID digits
-      // and falsely reject the pinned conversation. Shared by the live send
-      // (beforeAudit) and the dryRun preview so both report identical routing.
-      const assertConversationMatch = (resolvedChatJidArg: string): void => {
-        if (session.tier !== 'global' || !session.conversationKey) return;
-        let resolvedConversationKey: string;
-        try {
-          resolvedConversationKey = canonicalConversationKey(resolvedChatJidArg, deps.dbWrapper);
-        } catch {
-          throw new Error(`Invalid chatJid "${resolvedChatJidArg}": must be a valid JID`);
-        }
-        if (resolvedConversationKey !== session.conversationKey) {
-          throw new Error(
-            `chatJid "${resolvedChatJidArg}" resolves to conversation "${resolvedConversationKey}" which does not match session conversation "${session.conversationKey}"`,
-          );
-        }
-      };
+    handler: async (params, session: SessionContext, _recordBondEffectDispatch, assertTargetConversation) => {
+      // Cross-conversation guard, post-resolution point (issue 3457): the
+      // registry owns the guard and its `@lid` fold; this handler only calls
+      // it on prepared.chatJid, the target after alias and `@lid` resolution.
+      // Its CrossConversationDenied must escape the handler: the registry maps
+      // it onto the same authorization channel as a pre-handler denial. A
+      // registry always passes the callback; its absence fails closed before
+      // any resolution or send.
+      if (!assertTargetConversation) {
+        throw new Error('send_message invoked without the registry cross-conversation guard');
+      }
+      const assertTarget = assertTargetConversation;
 
       // Issue 3150 dry-run: resolve the recipient (alias + `@lid`
       // canonicalization via prepareSend) and report the resolved chatJid
-      // WITHOUT transmitting or writing an audit record. The cross-conversation
-      // guard is re-run here for faithfulness; for `chatJid` targets the
-      // registry pre-handler guard (registry.ts) already rejected a mismatch
-      // before this handler ran, so this only adds coverage for `to` aliases
-      // (whose resolution happens inside the handler). Text-safety transforms
-      // are NOT applied in a dry run, so the resolved text is deliberately not
-      // echoed — only the routing target is reported.
+      // WITHOUT transmitting or writing an audit record. The guard runs here
+      // too, so the preview reports the routing a live send would get.
+      // Text-safety transforms are NOT applied in a dry run, so the resolved
+      // text is deliberately not echoed — only the routing target is reported.
       if (params['dryRun'] === true) {
         let prepared: PreparedTextSend;
         try {
           prepared = sendPipeline.prepareSend(params);
-          assertConversationMatch(prepared.chatJid);
+          assertTarget(prepared.chatJid);
         } catch (err) {
+          if (err instanceof CrossConversationDenied) throw err;
           if (
             err instanceof AliasNotFoundError ||
             err instanceof MissingTargetError ||
@@ -309,9 +298,6 @@ export function registerMessagingTools(
             err instanceof MissingTextError ||
             err instanceof UnknownProfileError
           ) {
-            return errorResult(err.message);
-          }
-          if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
             return errorResult(err.message);
           }
           return errorResult(sanitizeError(err));
@@ -372,13 +358,14 @@ export function registerMessagingTools(
             };
           },
           beforeAudit(prepared: PreparedTextSend): void {
-            assertConversationMatch(prepared.chatJid);
+            assertTarget(prepared.chatJid);
           },
           onAuditReceipt(receipt: string): void {
             auditReceipt = receipt;
           },
         });
       } catch (err) {
+        if (err instanceof CrossConversationDenied) throw err;
         if (err instanceof SuppressedOutboundMessageError) {
           return suppressedResult(err.reason);
         }
@@ -390,9 +377,6 @@ export function registerMessagingTools(
           err instanceof MissingTextError ||
           err instanceof UnknownProfileError
         ) {
-          return errorResult(err.message);
-        }
-        if (err instanceof Error && (err.message.startsWith('chatJid "') || err.message.startsWith('Invalid chatJid "'))) {
           return errorResult(err.message);
         }
         return errorResult(sanitizeError(err));
