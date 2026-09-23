@@ -1167,7 +1167,8 @@ are not instance admins:
   namespaces: the default namespace `memory_write` writes to, and the WhatsApp
   conversation roles in `memory.pinecone.namespaces` (`facts`, `chunks`,
   `summaries`, `legacy`). Every other namespace of the index (for example the
-  `contacts`, `localDocs` and `oneDrive` roles) is a document namespace: it is
+  `namespaces.contacts`, `namespaces.localDocs` and `namespaces.oneDrive`
+  roles) is a document namespace: it is
   searched unfiltered in every context, as before scoping, and its hits are
   merged into the memory order by relevance score (after rerank when the
   profile reranks), so a relevant document can sit above a weakly relevant
