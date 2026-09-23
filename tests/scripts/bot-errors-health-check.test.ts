@@ -5031,6 +5031,9 @@ print(m.probe_health(9092))
         autoCompactConsecutiveRapidRearmsMax: 3,
         autoCompactNextTurnOverThreshold: 7,
         turnRecoveryBlockedUnsafe: 6,
+        turnRecoveryBlockedUnsafeSynthetic: 3,
+        turnRecoveryBlockedUnsafeSuperseded: 2,
+        turnRecoveryBlockedUnsafeStranded: 1,
         turnRecoveryQuarantinedDelivery: 2,
         turnRecoveryOrphanTransfers: 1,
         turnFinalizationRetryAttempts: 8,
@@ -5043,6 +5046,9 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_auto_compact_ineffective=5');
       expect(line).toContain('runtime_agent_auto_compact_rapid_rearms_max=3');
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe=6');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_synthetic=3');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_superseded=2');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_stranded=1');
       expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
     });
 
