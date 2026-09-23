@@ -203,7 +203,9 @@ instance `config.json` `service` block (schema:
   hand-added key and the drift check agrees with the install. A configured
   value always wins. Make the value config-owned (below) so it is not only a
   hand edit. An installed plist that mentions `CLAUDE_CONFIG_DIR` but whose
-  `EnvironmentVariables` the reader refuses (duplicated or unparseable) stops
+  `EnvironmentVariables` the reader refuses (duplicated, unparseable, or using
+  a numeric character reference such as `&#45;`, which the reader does not
+  decode) stops
   the render: `deploy/setup.sh` runs under `set -e`, so it aborts at that
   timer and installs nothing further until the plist is repaired or removed.
 - `service.pathPrepend` → directories prepended, in order, ahead of the

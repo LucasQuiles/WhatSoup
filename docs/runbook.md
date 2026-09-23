@@ -536,9 +536,14 @@ transport and process liveness pass:
   consecutive failures (a missing emitter counts, logged as `WARN`) the watchdog
   drops the stamp with `WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive
   times …` and the BOT ERRORS incident stays open until cleared by hand. A
-  stamp whose count is unreadable is treated as having reached the cap
-  (`WARN: unreadable clear-failure count …`), and an unsafe stamp (symlink,
+  stamp whose count is unreadable or negative is treated as having reached the
+  cap (`WARN: unreadable clear-failure count …`), and an unsafe stamp (symlink,
   foreign owner, writable by others) is an `ERROR` that is never followed.
+  A stamp still present when a new dead episode starts (the marker was absent at
+  the start of the cycle) is left over from the previous episode, because its
+  removal failed or its clear was still being retried. The watchdog logs
+  `WARN: credential page stamp … is left from a previous episode`, drops the
+  stamp and pages the new episode.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.

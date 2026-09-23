@@ -574,6 +574,57 @@ def test_corrupt_clear_count_is_treated_as_the_cap(tmp_path):
     assert "ERROR: cannot count failed clears" not in log_text
 
 
+def test_negative_clear_count_is_treated_as_the_cap(tmp_path):
+    # A negative count would otherwise defer the three-attempt cap by up to
+    # a million failed clears.
+    host = _PagingHost(tmp_path, "negcount-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.stamp.write_text("-1000000\n", encoding="utf-8")
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists()
+    assert "WARN: unreadable clear-failure count" in host.log_text()
+
+
+def test_stamp_left_from_a_recovered_episode_does_not_suppress_the_next_page(tmp_path):
+    # Recovery removed the marker and its clear was accepted, but the stamp
+    # survived (its removal failed, or the process died first). The next
+    # episode must still page.
+    host = _PagingHost(tmp_path, "stalestamp-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.marker.exists() and not host.stamp.exists()
+    host.stamp.write_text("", encoding="utf-8")
+    host.stamp.chmod(0o600)
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 2, host.stub_argv()
+    assert "left from a previous episode" in host.log_text()
+    assert host.marker.exists() and host.stamp.exists()
+
+    # Within one episode the stamp still suppresses repeats.
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len([line for line in host.stub_argv() if not line.startswith("--clear")]) == 2
+
+
+def test_death_right_after_a_failed_clear_pages_the_new_episode(tmp_path):
+    host = _PagingHost(tmp_path, "redeath-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.stamp.exists() and not host.marker.exists()
+
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 2, host.stub_argv()
+    assert host.stamp.exists()
+
+
 def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):
     host = _PagingHost(tmp_path, "unsafestamp-bot")
     host.use_stub_emitter(rc=0)

@@ -521,7 +521,9 @@ if [ "$PLATFORM" = "Darwin" ]; then
     # Carry the host's single service.claudeConfigDir (if any) so the job's
     # provider CLI uses the bot's credential store; with none configured, keep
     # the value the installed plist already has. scripts/check-launchd-drift.sh
-    # applies the same filter, so install and drift check stay byte-identical.
+    # applies the same filter, so its render of this job matches what setup
+    # installs. A carried-forward value is re-rendered in the template's layout;
+    # a hand-edited plist's own formatting is not kept.
     # An installed plist that mentions CLAUDE_CONFIG_DIR but cannot be read makes
     # the filter fail; the return 1 below then aborts setup under set -e rather
     # than overwrite a value it could not carry forward.

@@ -282,6 +282,9 @@ try:
             count = (int(raw) if raw else 0) + 1
         except ValueError:
             raise SystemExit(3)
+        # A negative stored count is corrupt too: it would defer the cap.
+        if count < 1:
+            raise SystemExit(3)
         os.lseek(marker_fd, 0, os.SEEK_SET)
         os.ftruncate(marker_fd, 0)
         os.write(marker_fd, f"{count}\n".encode("ascii"))
@@ -985,6 +988,10 @@ PY
     # marker: BOT_NAME-credential-dead.marker — deliberately no restart on this
     # branch (a restart cannot fix auth; see the exit-3 decision-block comment).
     log "CREDENTIAL-DEAD: claude credential unavailable — reauth required; restart suppressed"
+    # An absent marker means this cycle starts a new dead episode: recovery
+    # removes the marker before it touches the page stamp.
+    credential_marker state
+    prior_marker_rc=$?
     if ! credential_marker create; then
       # The verdict stands; the ERROR line and the nonzero invocation exit
       # carry the failure, and the next scheduled run retries the create.
@@ -995,6 +1002,19 @@ PY
     # Page once per transition: only while no page is outstanding.
     credential_marker state "$CRED_PAGED"
     paged_rc=$?
+    # A stamp that outlived its episode (the recovery clear was accepted but
+    # the stamp could not be removed, or a timed-out clear was retained) must
+    # not suppress this episode's page.
+    if [ "$prior_marker_rc" -eq 1 ] && [ "$paged_rc" -eq 0 ]; then
+      log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
+      if credential_marker clear "$CRED_PAGED"; then
+        paged_rc=1
+      else
+        log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; not paging this cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
     if [ "$paged_rc" -eq 1 ]; then
       credential_page alert
       page_rc=$?

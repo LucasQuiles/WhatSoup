@@ -68,6 +68,23 @@ describe('injectClaudeConfigDir', () => {
     expect(() => injectClaudeConfigDir(once, '/srv/other/.claude')).toThrow(/already/);
   });
 
+  it('inserts inside a compact EnvironmentVariables dict, never after the next newline', () => {
+    // The whole plist on one line: the first newline is past </dict>, so the
+    // old "after the next newline" insertion put the key outside the dict.
+    const compact = '<plist version="1.0"><dict><key>Label</key><string>x</string>'
+      + '<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict>'
+      + '<key>RunAtLoad</key><false/></dict></plist>\n';
+    const env = plistEnv(injectClaudeConfigDir(compact, '/srv/bot/.claude'));
+    expect(env).toEqual({ CLAUDE_CONFIG_DIR: '/srv/bot/.claude', PATH: '/usr/bin' });
+  });
+
+  it('keeps the plist valid when an existing value contains a newline', () => {
+    const multiline = '<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>'
+      + '<key>NOTE</key><string>line one\nline two</string></dict></dict></plist>\n';
+    const env = plistEnv(injectClaudeConfigDir(multiline, '/srv/bot/.claude'));
+    expect(env).toEqual({ CLAUDE_CONFIG_DIR: '/srv/bot/.claude', NOTE: 'line one\nline two' });
+  });
+
   it('reuses the shared escaper and the hardened plist reader instead of local copies', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'scripts', 'launchd-claude-config-env.ts'), 'utf8');
     expect(src).not.toMatch(/function escapeXml/);
@@ -127,6 +144,21 @@ describe('--preserve-from carries a hand-added CLAUDE_CONFIG_DIR forward', () =>
       .replace('<key>RunAtLoad</key>', '<key>EnvironmentVariables</key><dict/>\n  <key>RunAtLoad</key>');
     fs.writeFileSync(file, ambiguous);
     expect(() => render(home, file)).toThrow(/preserve-from/);
+  });
+
+  it('refuses numeric character references instead of changing or dropping the installed value', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    const file = path.join(home, 'installed.plist');
+    const base = injectClaudeConfigDir(harnessTemplate, '/srv/claude-bot');
+    // &#45; is "-": carried forward literally it would name a different path.
+    fs.writeFileSync(file, base.replace('/srv/claude-bot', '/srv/claude&#45;bot'));
+    expect(plistEnv(fs.readFileSync(file, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/claude-bot');
+    expect(() => render(home, file)).toThrow(/numeric character reference/);
+    // An encoded key would otherwise hide the value and silently drop it.
+    fs.writeFileSync(file, base.replace('<key>CLAUDE_CONFIG_DIR</key>', '<key>CLAUDE_CONFIG_DI&#82;</key>'));
+    expect(plistEnv(fs.readFileSync(file, 'utf8'))['CLAUDE_CONFIG_DIR']).toBe('/srv/claude-bot');
+    expect(() => render(home, file)).toThrow(/numeric character reference/);
   });
 
   it('preserves nothing from an installed plist with no environment at all', () => {

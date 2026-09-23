@@ -54,11 +54,13 @@ export function injectClaudeConfigDir(plist: string, dir: string | null): string
     throw new Error('plist has no EnvironmentVariables dict to extend');
   }
   if (environment.env.has(KEY)) throw new Error(`plist already carries ${KEY}`);
+  // Insert at the dict body's first byte, never after "the next newline": in a
+  // compact dict that newline can lie past </dict> or inside a string value.
+  // For the usual one-entry-per-line layout the bytes are the same either way.
   const lineStart = plist.lastIndexOf('\n', environment.bodyStart) + 1;
   const indent = `${/^[ \t]*/.exec(plist.slice(lineStart))?.[0] ?? ''}  `;
-  const newline = plist.indexOf('\n', environment.bodyStart);
-  const at = newline === -1 ? environment.bodyStart : newline + 1;
-  const entry = `${indent}<key>${KEY}</key>\n${indent}<string>${escapeXml(dir)}</string>\n`;
+  const at = environment.bodyStart;
+  const entry = `\n${indent}<key>${KEY}</key>\n${indent}<string>${escapeXml(dir)}</string>`;
   return plist.slice(0, at) + entry + plist.slice(at);
 }
 
@@ -81,6 +83,14 @@ export function readInstalledClaudeConfigDir(file: string): string | null {
   if (environment === null) {
     if (!source.includes(KEY)) return null;
     throw new Error(`--preserve-from ${file}: mentions ${KEY} but its EnvironmentVariables dict is duplicated or unparseable`);
+  }
+  // The reader decodes only the five named XML entities. A numeric character
+  // reference (&#45;) would be carried forward as literal text, changing the
+  // path, or would hide the key itself (CLAUDE_CONFIG_DI&#82;), so refuse it.
+  for (const [name, value] of environment.env) {
+    if (name.includes('&#') || value.includes('&#')) {
+      throw new Error(`--preserve-from ${file}: EnvironmentVariables uses a numeric character reference, which is not supported`);
+    }
   }
   return environment.env.get(KEY) ?? null;
 }
