@@ -518,6 +518,15 @@ if [ "$PLATFORM" = "Darwin" ]; then
     local dest="$LAUNCH_AGENTS_DIR/$label.plist"
     local rendered backup
     rendered="$(sed -e "s|__WHATSOUP_REPO_ROOT__|$REPO_ROOT|g" -e "s|__HOME__|$HOME|g" -e "s|\${WHATSOUP_REPO_ROOT}|$REPO_ROOT|g" -e "s|\${HOME}|$HOME|g" "$src")"
+    # Carry the host's single service.claudeConfigDir (if any) so the job's
+    # provider CLI uses the bot's credential store; with none configured, keep
+    # the value the installed plist already has. scripts/check-launchd-drift.sh
+    # applies the same filter, so install and drift check stay byte-identical.
+    if ! rendered="$(printf '%s\n' "$rendered" | bash "$REPO_ROOT/scripts/run-with-pinned-node.sh" \
+      "$REPO_ROOT/scripts/launchd-claude-config-env.ts" --home "$HOME" --preserve-from "$dest")"; then
+      echo "  ✗ cannot resolve service.claudeConfigDir for $label; not installing" >&2
+      return 1
+    fi
     # Duplicate-scheduler guard: an equivalent cron entry means this job is
     # already scheduled by another mechanism — warn and skip, don't double-run.
     if crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -q "$cron_marker"; then
