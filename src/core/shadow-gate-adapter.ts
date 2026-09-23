@@ -13,9 +13,9 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { IncomingMessage } from './types.ts';
 import { canonicalConversationKey, resolvePhoneFromJid } from './access-list.ts';
-import { bareNumber, isAuthenticatedSenderJid } from './jid-constants.ts';
+import { isAuthenticatedSenderJid } from './jid-constants.ts';
+import { isAuthenticatedAdmin, isBotMentioned } from './access-predicates.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
-import { isAdminPhone } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { containsQuestionMark, FEATURE_VERSION, normalizeShadowText } from './shadow-gate-features.ts';
 import type { ShadowGateInput, Tri } from './shadow-gate-features.ts';
@@ -70,11 +70,12 @@ function resolveSenderPhone(msg: IncomingMessage, db: Database): string | null {
   }
 }
 
-// Same transport-gated admin match as access-policy's self_only path (QR-143).
+// The access policy's admin predicate. An unauthenticated sender is decided
+// (false) even when phone resolution failed.
 function ownerFeature(msg: IncomingMessage, phone: string | null, config: ShadowGateConfig): Tri {
   try {
     if (!isAuthenticatedSenderJid(msg.senderJid)) return false;
-    return phone === null ? 'unknown' : isAdminPhone(phone, config.adminPhones);
+    return phone === null ? 'unknown' : isAuthenticatedAdmin(msg.senderJid, phone, config.adminPhones);
   } catch {
     return 'unknown';
   }
@@ -90,18 +91,12 @@ function botSenderFeature(msg: IncomingMessage, phone: string | null, config: Sh
   }
 }
 
-// Mirrors access-policy's group @mention check.
+// The access policy's group @mention predicate; unknown before the bot JID is known.
 function mentionFeature(msg: IncomingMessage, getBotJid: () => string, getBotLid: () => string | null): Tri {
   try {
     const botJid = getBotJid();
     if (!botJid) return 'unknown';
-    const botIds = new Set<string>([botJid, bareNumber(botJid)]);
-    const botLid = getBotLid();
-    if (botLid) {
-      botIds.add(botLid);
-      botIds.add(bareNumber(botLid));
-    }
-    return msg.mentionedJids.some((jid) => botIds.has(jid) || botIds.has(bareNumber(jid)));
+    return isBotMentioned(msg.mentionedJids, botJid, getBotLid());
   } catch {
     return 'unknown';
   }
