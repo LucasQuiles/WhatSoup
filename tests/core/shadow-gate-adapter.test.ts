@@ -40,6 +40,7 @@ import {
   getShadowGateRecorder,
   getShadowGateStats,
   startShadowGateAttempt,
+  warmShadowGate,
   __resetShadowGateForTests,
 } from '../../src/core/shadow-gate-adapter.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -237,6 +238,48 @@ describe('buildShadowGateInput — pendingObligation / contextStatus', () => {
     seed(db, { fromMe: true, content: 'Deploy now?', timestamp: T - 5, key: 'other-key' });
     expect(build(makeMsg(), db).pendingObligation).toBe(false);
     expect(buildShadowGateInput(makeMsg(), db, botJid, botLid, config, 'other-key').pendingObligation).toBe(true);
+  });
+
+  it('a DM skips the previous-message lookup (unknown / unknown); a group runs it once', () => {
+    const db = makeDb();
+    const get = vi.fn(() => undefined);
+    const prepare = vi.spyOn(db.raw, 'prepare').mockReturnValue({ get } as unknown as ReturnType<typeof db.raw.prepare>);
+    expect(build(makeMsg({ isGroup: false, chatJid: SENDER }), db)).toMatchObject({
+      chatKind: 'dm', pendingObligation: 'unknown', contextStatus: 'unknown',
+    });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(build(makeMsg(), db)).toMatchObject({ pendingObligation: false, contextStatus: 'known' });
+    expect(get).toHaveBeenCalledOnce();
+  });
+
+  it('warmShadowGate prepares the lookup so the first evaluation does not', () => {
+    const db = makeDb();
+    const get = vi.fn(() => undefined);
+    const prepare = vi.spyOn(db.raw, 'prepare').mockReturnValue({ get } as unknown as ReturnType<typeof db.raw.prepare>);
+    warmShadowGate(db);
+    expect(prepare).toHaveBeenCalledOnce();
+    build(makeMsg(), db);
+    build(makeMsg(), db);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it('warmShadowGate never throws on a database that is not open', () => {
+    const broken = {
+      get raw(): never {
+        throw new Error('database closed');
+      },
+    } as unknown as Database;
+    expect(() => warmShadowGate(broken)).not.toThrow();
+  });
+
+  it('resolves the sender phone once for both owner and bot-sender features', () => {
+    setConfigProp('siblingPhones', new Set(['15551230008']));
+    setConfigProp('adminPhones', new Set(['15551230008']));
+    vi.mocked(resolvePhoneFromJid).mockClear();
+    expect(build(makeMsg())).toMatchObject({ isOwner: true, isBotSender: true });
+    expect(vi.mocked(resolvePhoneFromJid).mock.calls.filter(([jid]) => jid === SENDER)).toHaveLength(1);
   });
 
   it('a database failure yields unknown / unknown', () => {

@@ -287,7 +287,7 @@ export function createIngestHandler(
   instanceType?: string,
   grantManager?: CapabilityGrantManager,
 ): (msg: IncomingMessage) => void {
-  if (config.shadowGate?.mode === 'shadow') warmShadowGate();
+  if (config.shadowGate?.mode === 'shadow') warmShadowGate(db);
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
       let slotAcquired = false;

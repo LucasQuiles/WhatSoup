@@ -12,6 +12,7 @@
  * never printed.
  */
 
+import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -158,12 +159,14 @@ export function readSegments(dir: string, limits: SegmentLimits = DEFAULT_SEGMEN
       }
       const problem = validateShadowGateEvent(parsed);
       if (problem) evidenceError(`${name}:${lineNo} is not a valid shadow-gate event (${problem})`);
-      const kept = seen.get(text);
+      // Keyed by digest so the map holds 32 bytes per line, not the line itself.
+      const digest = createHash('sha256').update(line).digest('base64');
+      const kept = seen.get(digest);
       if (kept !== undefined) {
         duplicateCopies[kept] = (duplicateCopies[kept] ?? 0) + 1;
         continue;
       }
-      seen.set(text, events.length);
+      seen.set(digest, events.length);
       events.push(parsed as ShadowGateEvent);
     }
   }

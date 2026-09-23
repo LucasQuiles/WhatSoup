@@ -12,8 +12,8 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { IncomingMessage } from './types.ts';
-import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
-import { bareNumber } from './jid-constants.ts';
+import { canonicalConversationKey, resolvePhoneFromJid } from './access-list.ts';
+import { bareNumber, isAuthenticatedSenderJid } from './jid-constants.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { isAdminPhone } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -55,22 +55,30 @@ function warnCode(code: string): void {
 // Input construction
 // ---------------------------------------------------------------------------
 
-// Same transport-gated admin match as access-policy's self_only path (QR-143).
-function ownerFeature(msg: IncomingMessage, db: Database, config: ShadowGateConfig): Tri {
+/** The sender's phone, resolved once per message; null when resolution throws. */
+function resolveSenderPhone(msg: IncomingMessage, db: Database): string | null {
   try {
-    const phone = resolvePhoneFromJidForGrant(msg.senderJid, db);
-    return phone !== null && isAdminPhone(phone, config.adminPhones);
+    return resolvePhoneFromJid(msg.senderJid, db);
+  } catch {
+    return null;
+  }
+}
+
+// Same transport-gated admin match as access-policy's self_only path (QR-143).
+function ownerFeature(msg: IncomingMessage, phone: string | null, config: ShadowGateConfig): Tri {
+  try {
+    if (!isAuthenticatedSenderJid(msg.senderJid)) return false;
+    return phone === null ? 'unknown' : isAdminPhone(phone, config.adminPhones);
   } catch {
     return 'unknown';
   }
 }
 
 // Mirrors access-policy's isSiblingBot.
-function botSenderFeature(msg: IncomingMessage, db: Database, config: ShadowGateConfig): Tri {
+function botSenderFeature(msg: IncomingMessage, phone: string | null, config: ShadowGateConfig): Tri {
   try {
-    return msg.isGroup
-      && config.siblingPhones?.size > 0
-      && config.siblingPhones.has(resolvePhoneFromJid(msg.senderJid, db));
+    if (!msg.isGroup || !(config.siblingPhones?.size > 0)) return false;
+    return phone === null ? 'unknown' : config.siblingPhones.has(phone);
   } catch {
     return 'unknown';
   }
@@ -128,6 +136,8 @@ function obligationFeature(
   conversationKey: string | undefined,
   db: Database,
 ): { pendingObligation: Tri; contextStatus: 'known' | 'unknown' } {
+  // S02_DM decides every DM before the gate reads these, so skip the lookup.
+  if (!msg.isGroup) return { pendingObligation: 'unknown', contextStatus: 'unknown' };
   try {
     const key = conversationKey ?? canonicalConversationKey(msg.chatJid, db);
     const row = previousMessageStatement(db).get(key, normalizeUnixTimestampSeconds(msg.timestamp)) as
@@ -158,10 +168,11 @@ export function buildShadowGateInput(
 ): ShadowGateInput {
   const { text, truncated } = normalizeShadowText(msg.content);
   const { pendingObligation, contextStatus } = obligationFeature(msg, conversationKey, db);
+  const phone = resolveSenderPhone(msg, db);
   return {
     chatKind: msg.isGroup ? 'group' : 'dm',
-    isOwner: ownerFeature(msg, db, config),
-    isBotSender: botSenderFeature(msg, db, config),
+    isOwner: ownerFeature(msg, phone, config),
+    isBotSender: botSenderFeature(msg, phone, config),
     mentionedSelf: mentionFeature(msg, getBotJid, getBotLid),
     isControlChat: controlChatFeature(msg, config),
     contentType: msg.contentType,
@@ -235,15 +246,21 @@ function recordedInstanceId(botName: string): string {
 }
 
 /**
- * Compile the rules now so the first evaluation is not an OVERRUN. Ingest
- * calls this at handler creation in `shadow` mode. A load failure is not a
- * recorder failure: each evaluation then records E_THROW. Never throws.
+ * Compile the rules and prepare the previous-message statement now, so the
+ * first evaluation's tookMs covers neither. Ingest calls this at handler
+ * creation in `shadow` mode. A rules load failure is not a recorder failure:
+ * each evaluation then records E_THROW. Never throws.
  */
-export function warmShadowGate(): void {
+export function warmShadowGate(db: Database): void {
   try {
     if (!warmShadowRules()) warnCode('shadow_gate_rules_unavailable');
   } catch {
     // intentional: warming is best-effort; evaluation reports its own failure.
+  }
+  try {
+    previousMessageStatement(db);
+  } catch {
+    // intentional: a database that is not open yet is prepared on first use.
   }
 }
 
@@ -259,7 +276,7 @@ export function getShadowGateRecorder(db: Database, config: ShadowGateConfig): S
     if (section?.mode !== 'shadow') return null;
     // Warm before creating the recorder: it reads the rules hash once, and the
     // hash must describe the bytes that were compiled.
-    warmShadowGate();
+    warmShadowGate(db);
     // main.ts is sha-pinned (deploy/source-runtime-manifest.json), so there is
     // no shutdown close(): the 'disarmed' marker is absent on process exit and
     // the periodic 'counts' markers bound the unrecorded tail.

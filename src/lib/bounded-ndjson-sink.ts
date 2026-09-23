@@ -109,7 +109,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
   let current: SinkState = 'starting';
   let reason: string | null = null;
   let admissionClosed = false;
-  const queue: string[] = [];
+  const queue: Array<{ line: string; bytes: number }> = [];
   const counters = {
     written: 0,
     droppedQueueFull: 0,
@@ -225,14 +225,14 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     const lines: string[] = [];
     let bytes = 0;
     while (lines.length < flushBatch && lines.length < queue.length) {
-      const lineBytes = Buffer.byteLength(queue[lines.length]!, 'utf8');
-      if (segmentBytes + bytes + lineBytes > segmentMaxBytes) {
+      const next = queue[lines.length]!;
+      if (segmentBytes + bytes + next.bytes > segmentMaxBytes) {
         // An empty segment always takes at least one line, so rotation cannot loop.
         if (lines.length === 0 && segmentBytes > 0) return { lines, bytes, rotate: true };
         if (lines.length > 0) break;
       }
-      lines.push(queue[lines.length]!);
-      bytes += lineBytes;
+      lines.push(next.line);
+      bytes += next.bytes;
     }
     return { lines, bytes, rotate: false };
   };
@@ -374,7 +374,8 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
         return 'dropped_unserializable';
       }
       line += '\n';
-      if (Buffer.byteLength(line, 'utf8') > maxLineBytes) {
+      const bytes = Buffer.byteLength(line, 'utf8');
+      if (bytes > maxLineBytes) {
         counters.droppedOversize += 1;
         return 'dropped_oversize';
       }
@@ -382,7 +383,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
         counters.droppedQueueFull += 1;
         return 'dropped_queue_full';
       }
-      queue.push(line);
+      queue.push({ line, bytes });
       scheduleDrain();
       return 'queued';
     } catch {
