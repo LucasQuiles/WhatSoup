@@ -53,6 +53,7 @@ describe('createBoundedNdjsonSink', () => {
     expect(sink.stats()).toMatchObject({ written: 5, queued: 0, segmentIndex: 1 });
   });
 
+  // @skip-env: POSIX mode bits are not enforced for root or on win32.
   it.skipIf(isRoot || process.platform === 'win32')('creates the directory 0700 and segments 0600', async () => {
     const dir = join(tmp.make('modes'), 'sink');
     const sink = make({ dir });
@@ -196,6 +197,7 @@ describe('createBoundedNdjsonSink', () => {
     expect(second.state()).toBe('ready');
   });
 
+  // @skip-env: root ignores directory write permission; win32 has no chmod 0o500.
   it.skipIf(isRoot || process.platform === 'win32')('degrades on an unwritable directory and enqueue never throws', async () => {
     const parent = tmp.make('ro');
     const dir = join(parent, 'sink');
@@ -258,9 +260,12 @@ describe('createBoundedNdjsonSink', () => {
     const sink = createBoundedNdjsonSink({ dir, filePrefix: PREFIX });
     for (let i = 0; i < 10; i += 1) sink.enqueue({ i });
     await expect(sink.close(0)).resolves.toBeUndefined();
-    const s = sink.stats();
     expect(sink.state()).toBe('closed');
-    expect(s.written + s.droppedClosed).toBe(10);
+    const s = sink.stats();
+    expect(s.written + s.droppedClosed + s.droppedWriteFailed + s.queued).toBe(10);
+    await drained(sink);
+    const settledStats = sink.stats();
+    expect(settledStats.written + settledStats.droppedClosed + settledStats.droppedWriteFailed).toBe(10);
     // Startup that finishes after close must not leave the lock behind.
     await vi.waitFor(() => {
       expect(readdirSync(dir)).not.toContain('events.lock');

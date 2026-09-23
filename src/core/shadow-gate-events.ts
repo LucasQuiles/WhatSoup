@@ -10,6 +10,7 @@ import type { BoundedNdjsonSink, SinkState } from '../lib/bounded-ndjson-sink.ts
 import { RULES_SHA256, SHADOW_GATE_VERSION } from './shadow-gate.ts';
 import type { ShadowRuleId, ShadowVerdict } from './shadow-gate.ts';
 import { FEATURE_VERSION } from './shadow-gate-features.ts';
+import { isNonEmptyString } from '../lib/type-guards.ts';
 
 export const SHADOW_GATE_EVENT_SCHEMA_VERSION = 1;
 // Union + validator derive from this one list (route-events C2).
@@ -57,12 +58,12 @@ type MissingRuleIds = Exclude<ShadowRuleId, typeof SHADOW_RULE_IDS[number]>;
 const ruleIdsExhaustive: [MissingRuleIds] extends [never] ? true : never = true;
 void ruleIdsExhaustive;
 
-const RULE_ID_SET: ReadonlySet<string> = new Set(SHADOW_RULE_IDS);
-const VERDICT_SET: ReadonlySet<string> = new Set<ShadowVerdict>(['SPAWN', 'SUPPRESS']);
-const EVENT_TYPE_SET: ReadonlySet<string> = new Set(SHADOW_GATE_EVENT_TYPES);
-const ERROR_REASON_SET: ReadonlySet<string> = new Set<ShadowGateErrorReason>(['OVERRUN', 'E_THROW', 'E_INPUT']);
-const MARKER_SET: ReadonlySet<string> = new Set(['armed', 'counts', 'disarmed']);
-const SINK_STATE_SET: ReadonlySet<string> = new Set<SinkState>(['starting', 'ready', 'degraded', 'closed']);
+const RULE_ID_SET: ReadonlySet<unknown> = new Set(SHADOW_RULE_IDS);
+const VERDICT_SET: ReadonlySet<unknown> = new Set<ShadowVerdict>(['SPAWN', 'SUPPRESS']);
+const EVENT_TYPE_SET: ReadonlySet<unknown> = new Set(SHADOW_GATE_EVENT_TYPES);
+const ERROR_REASON_SET: ReadonlySet<unknown> = new Set<ShadowGateErrorReason>(['OVERRUN', 'E_THROW', 'E_INPUT']);
+const MARKER_SET: ReadonlySet<unknown> = new Set(['armed', 'counts', 'disarmed']);
+const SINK_STATE_SET: ReadonlySet<unknown> = new Set<SinkState>(['starting', 'ready', 'degraded', 'closed']);
 const MAX_ID_CHARS = 128;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
@@ -92,7 +93,7 @@ function exactKeys(obj: Record<string, unknown>, allowed: ReadonlySet<string>): 
 }
 
 function isBoundedId(v: unknown): boolean {
-  return typeof v === 'string' && v.length > 0 && v.length <= MAX_ID_CHARS;
+  return isNonEmptyString(v) && v.length <= MAX_ID_CHARS;
 }
 
 function isCount(v: unknown): boolean {
@@ -106,8 +107,8 @@ function validateVerdictFields(ev: Record<string, unknown>): string | null {
   if (ev.chatScope !== 'dm' && ev.chatScope !== 'group') return 'bad_chat_scope';
   if (typeof ev.tookMs !== 'number' || !Number.isFinite(ev.tookMs) || ev.tookMs < 0) return 'bad_took_ms';
   const hasVerdict = ev.verdict !== null || ev.ruleId !== null;
-  if (ev.verdict !== null && !(typeof ev.verdict === 'string' && VERDICT_SET.has(ev.verdict))) return 'bad_verdict';
-  if (ev.ruleId !== null && !(typeof ev.ruleId === 'string' && RULE_ID_SET.has(ev.ruleId))) return 'bad_rule_id';
+  if (ev.verdict !== null && !VERDICT_SET.has(ev.verdict)) return 'bad_verdict';
+  if (ev.ruleId !== null && !RULE_ID_SET.has(ev.ruleId)) return 'bad_rule_id';
   if ((ev.verdict === null) !== (ev.ruleId === null)) return 'verdict_rule_mismatch';
   if (ev.status === 'OK') {
     if (ev.reason !== null) return 'ok_with_reason';
@@ -115,18 +116,18 @@ function validateVerdictFields(ev: Record<string, unknown>): string | null {
     return null;
   }
   if (ev.status !== 'ERROR') return 'bad_status';
-  if (typeof ev.reason !== 'string' || !ERROR_REASON_SET.has(ev.reason)) return 'bad_reason';
+  if (!ERROR_REASON_SET.has(ev.reason)) return 'bad_reason';
   if (ev.reason === 'OVERRUN') return hasVerdict ? null : 'overrun_without_verdict';
   return hasVerdict ? 'error_with_verdict' : null;
 }
 
 function validateCoverageFields(ev: Record<string, unknown>): string | null {
-  if (typeof ev.marker !== 'string' || !MARKER_SET.has(ev.marker)) return 'bad_marker';
+  if (!MARKER_SET.has(ev.marker)) return 'bad_marker';
   if (!isPlainObject(ev.counts)) return 'bad_counts';
   const countsKeys = exactKeys(ev.counts, COUNT_KEYS);
   if (countsKeys) return `counts_${countsKeys}`;
   for (const v of Object.values(ev.counts)) if (!isCount(v)) return 'bad_count_value';
-  if (typeof ev.sinkState !== 'string' || !SINK_STATE_SET.has(ev.sinkState)) return 'bad_sink_state';
+  if (!SINK_STATE_SET.has(ev.sinkState)) return 'bad_sink_state';
   if (ev.sinkDegradedReason !== null && !isBoundedId(ev.sinkDegradedReason)) return 'bad_sink_degraded_reason';
   return null;
 }
@@ -134,7 +135,7 @@ function validateCoverageFields(ev: Record<string, unknown>): string | null {
 /** Returns null when valid, otherwise a short closed problem code. */
 export function validateShadowGateEvent(ev: unknown): string | null {
   if (!isPlainObject(ev)) return 'not_object';
-  if (typeof ev.event !== 'string' || !EVENT_TYPE_SET.has(ev.event)) return 'unknown_event';
+  if (!EVENT_TYPE_SET.has(ev.event)) return 'unknown_event';
   const keys = exactKeys(ev, ev.event === 'shadow_gate_verdict' ? VERDICT_KEYS : COVERAGE_KEYS);
   if (keys) return keys;
   if (ev.schemaVersion !== SHADOW_GATE_EVENT_SCHEMA_VERSION) return 'bad_schema_version';
@@ -216,7 +217,7 @@ export function createShadowGateRecorder(opts: ShadowGateRecorderOptions): Shado
     try {
       opts.warn?.(code);
     } catch {
-      // A throwing warn callback must not reach the caller.
+      // intentional: a throwing warn callback must not reach the caller.
     }
   };
   const now = opts.now ?? Date.now;

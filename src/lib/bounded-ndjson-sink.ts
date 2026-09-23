@@ -33,6 +33,7 @@ export type EnqueueResult =
 export type SinkState = 'starting' | 'ready' | 'degraded' | 'closed';
 
 export interface BoundedNdjsonSinkStats {
+  /** Admitted records not yet written or dropped, including a batch whose write is in flight. */
   queued: number;
   written: number;
   droppedQueueFull: number;
@@ -103,6 +104,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
   let segmentBytes = 0;
   let handle: FileHandle | null = null;
   let lock: ProcessLockHandle | null = null;
+  let inFlight = 0;
   let drainScheduled = false;
   let draining: Promise<void> | null = null;
   let consecutiveWriteErrors = 0;
@@ -113,7 +115,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     try {
       options.warn?.(code);
     } catch {
-      // A throwing warn callback must not break the sink.
+      // intentional: a throwing warn callback must not break the sink.
     }
   };
 
@@ -127,7 +129,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     try {
       await h.close();
     } catch {
-      // Nothing further can be done with a handle that fails to close.
+      // intentional: nothing further can be done with a handle that fails to close.
     }
   };
 
@@ -138,7 +140,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     try {
       releaseProcessLock(l);
     } catch {
-      // Release is best-effort; the payload identity check prevents deleting another writer's lock.
+      // intentional: release is best-effort; the payload identity check prevents deleting another writer's lock.
     }
   };
 
@@ -205,16 +207,27 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
         await closeHandle();
         segmentIndex += 1;
         segmentBytes = 0;
+        // A close() that landed during the handle close must not open a new, empty segment.
+        if (current !== 'ready') return;
         batch = takeBatch();
+        if (batch.lines.length === 0) continue;
       }
       queue.splice(0, batch.lines.length);
+      // In-flight records stay visible in stats().queued until they are counted as written or dropped.
+      inFlight = batch.lines.length;
+      let ok = true;
       try {
         if (!handle) await openSegment(segmentIndex);
         await handle!.writeFile(batch.lines.join(''), 'utf8');
+      } catch {
+        ok = false;
+      }
+      inFlight = 0;
+      if (ok) {
         segmentBytes += batch.bytes;
         counters.written += batch.lines.length;
         consecutiveWriteErrors = 0;
-      } catch {
+      } else {
         counters.writeErrors += 1;
         counters.droppedWriteFailed += batch.lines.length;
         consecutiveWriteErrors += 1;
@@ -243,7 +256,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     try {
       size = (await stat(segmentPath(highest))).size;
     } catch {
-      // An unreadable highest segment is surfaced by the first write attempt.
+      // intentional: an unreadable highest segment is surfaced by the first write attempt.
     }
     return size < segmentMaxBytes ? highest : highest + 1;
   };
@@ -348,7 +361,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
       try {
         await Promise.race([flushed, deadline]);
       } catch {
-        // close() never throws.
+        // intentional: close() never throws; unflushed records are counted below.
       } finally {
         if (timer) clearTimeout(timer);
       }
@@ -374,7 +387,7 @@ export function createBoundedNdjsonSink(options: BoundedNdjsonSinkOptions): Boun
     state: () => current,
     degradedReason: () => reason,
     stats: () => ({
-      queued: queue.length,
+      queued: queue.length + inFlight,
       ...counters,
       segmentIndex,
       segmentBytes,
