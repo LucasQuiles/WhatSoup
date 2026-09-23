@@ -251,6 +251,8 @@ describe('buildShadowGateInput — pendingObligation / contextStatus', () => {
 
 describe('evaluateShadowGateForMessage', () => {
   it('OK with a verdict inside the budget', () => {
+    // Pinned clock: the real 5 ms budget is not a property of this test (coverage runs are slow).
+    vi.spyOn(performance, 'now').mockReturnValue(0);
     const result = evaluateShadowGateForMessage(makeMsg({ isGroup: false, chatJid: SENDER }), makeDb(), botJid, botLid, config);
     expect(result).toMatchObject({ status: 'OK', reason: null, verdict: 'SPAWN', ruleId: 'S02_DM', chatScope: 'dm' });
     expect(result.tookMs).toBeGreaterThanOrEqual(0);
