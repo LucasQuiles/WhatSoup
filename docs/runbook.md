@@ -548,12 +548,20 @@ transport and process liveness pass:
   this flag knows the stamp is left over from the previous episode (its clear
   was still being retried, its removal failed, or the watchdog died mid-way).
   It logs `WARN: credential page stamp … is left from a previous episode`,
-  drops the stamp and the flag, and pages the new episode. A failed stamp
-  removal keeps the flag, so the next cycle retries. A flag with no stamp is
-  dropped before the new episode's stamp is written. Whenever the flag cannot
-  be removed, the page waits for the next cycle (`… page deferred to next
-  cycle`), so a stamp is never written beside a live flag. Without the flag,
-  the stamp belongs to the current episode and keeps suppressing repeats.
+  drops the stamp and the flag, and pages the new episode. A flag with no
+  stamp is dropped before the new episode's stamp is written. Without the
+  flag, the stamp belongs to the current episode and keeps suppressing
+  repeats.
+
+  **No state-file failure silences a page.** When the stamp or the flag is
+  unsafe (symlink, foreign owner, writable by others) or cannot be removed,
+  the watchdog pages anyway and logs `ERROR` (`… paging anyway (repeats are
+  possible)`, `… paging without it …`, `ERROR: unsafe recovery flag …`). The
+  cost is a repeated page on a later cycle; BOT ERRORS folds a repeat into the
+  open `machine|instance|source` incident, so the group and the owner are not
+  paged again. A stamp suppresses only an incident that is still open, because
+  the flag is written before any clear is sent: if the flag cannot be written,
+  recovery changes nothing and the incident stays open.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.

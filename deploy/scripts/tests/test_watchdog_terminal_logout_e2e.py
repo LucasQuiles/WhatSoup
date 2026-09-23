@@ -683,10 +683,12 @@ def _run_with_failing_clear(host: _PagingHost, suffix: str, body: str) -> subpro
         wrapper.unlink()
 
 
-def test_failed_stale_stamp_removal_is_retried_and_then_pages(tmp_path):
-    # The stamp of a recovered episode could not be removed. The flag must
-    # survive that failure so the next cycle retries and pages; dropping it
-    # would turn the stale stamp into permanent suppression.
+# Invariant for the tests below: no failure of the stamp or the recovery flag
+# may silence a page. The watchdog pages anyway and logs ERROR; a repeat on a
+# later cycle is accepted, because BOT ERRORS folds it into the open incident.
+
+
+def test_failed_stale_stamp_removal_still_pages(tmp_path):
     host = _PagingHost(tmp_path, "staleretry-bot")
     host.use_stub_emitter(rc=0)
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
@@ -697,11 +699,14 @@ def test_failed_stale_stamp_removal_is_retried_and_then_pages(tmp_path):
     proc = _run_with_failing_clear(host, ".paged", _DEAD_PROVIDER_BODY)
     assert proc.returncode != 0
     assert "failed to drop stale credential page stamp" in host.log_text()
-    assert host.stamp.exists() and host.recovered.exists()
-    assert len(_alerts(host)) == 1, host.stub_argv()
-
-    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
     assert len(_alerts(host)) == 2, host.stub_argv()
+    # The flag stays, so the next cycle still recognises the old stamp.
+    assert host.stamp.exists() and host.recovered.exists()
+
+    # One accepted repeat while the old stamp is retired, then suppression.
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 3, host.stub_argv()
     assert host.stamp.exists() and not host.recovered.exists()
 
 
@@ -756,9 +761,7 @@ def test_leftover_flag_without_a_stamp_pages_once(tmp_path):
     assert host.stamp.exists() and not host.recovered.exists()
 
 
-def test_failed_leftover_flag_removal_defers_the_page_without_a_duplicate(tmp_path):
-    # Paging while a flag cannot be removed would write a stamp beside it, and
-    # the next cycle would read that stamp as stale and page again.
+def test_failed_leftover_flag_removal_still_pages(tmp_path):
     host = _PagingHost(tmp_path, "flagstuck-bot")
     host.use_stub_emitter(rc=0)
     host.recovered.write_text("", encoding="utf-8")
@@ -766,17 +769,17 @@ def test_failed_leftover_flag_removal_defers_the_page_without_a_duplicate(tmp_pa
 
     proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
     assert proc.returncode != 0
-    assert "page deferred to next cycle" in host.log_text()
-    assert _alerts(host) == []
-    assert host.recovered.exists() and not host.stamp.exists()
+    assert "failed to remove leftover recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 1, host.stub_argv()
 
+    # One accepted repeat while the flag is retired, then suppression.
     for _ in range(3):
         assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
-    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert len(_alerts(host)) == 2, host.stub_argv()
     assert host.stamp.exists() and not host.recovered.exists()
 
 
-def test_failed_flag_removal_after_a_stale_stamp_defers_the_page_without_a_duplicate(tmp_path):
+def test_failed_flag_removal_after_a_stale_stamp_still_pages(tmp_path):
     host = _PagingHost(tmp_path, "stalestuck-bot")
     host.use_stub_emitter(rc=0)
     assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
@@ -785,14 +788,39 @@ def test_failed_flag_removal_after_a_stale_stamp_defers_the_page_without_a_dupli
 
     proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
     assert proc.returncode != 0
-    assert "page deferred to next cycle" in host.log_text()
-    assert len(_alerts(host)) == 1, host.stub_argv()
-    assert host.recovered.exists() and not host.stamp.exists()
+    assert "failed to remove recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 2, host.stub_argv()
 
     for _ in range(3):
         assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
-    assert len(_alerts(host)) == 2, host.stub_argv()
+    assert len(_alerts(host)) == 3, host.stub_argv()
     assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_unsafe_recovery_flag_beside_a_stamp_still_pages(tmp_path):
+    # An unsafe flag cannot say whether the stamp is current, so the watchdog
+    # pages rather than trusting the stamp.
+    host = _PagingHost(tmp_path, "unsafeflag-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.symlink_to(tmp_path / "elsewhere")
+
+    proc = host.run(_DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "ERROR: unsafe recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 2, host.stub_argv()
+
+
+def test_unsafe_page_stamp_on_a_dead_cycle_still_pages(tmp_path):
+    host = _PagingHost(tmp_path, "unsafedead-bot")
+    host.use_stub_emitter(rc=0)
+    host.stamp.symlink_to(tmp_path / "elsewhere")
+
+    proc = host.run(_DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "ERROR: unsafe credential page stamp" in host.log_text()
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):

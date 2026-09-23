@@ -1001,48 +1001,57 @@ PY
       WD_EXIT=1
     fi
     # Page once per transition: only while no page is outstanding.
+    #
+    # Invariant: no failure of these state files may silence a page. When the
+    # stamp or the recovery flag cannot be read safely or removed, the watchdog
+    # pages anyway and logs ERROR. The worst case is a repeated page on a later
+    # cycle, which BOT ERRORS folds into the open machine|instance|source
+    # incident. (A stamp suppresses only an incident that is still open: the
+    # recovery flag is written before any clear is sent, so a stamp whose clear
+    # went out always has its flag.)
     credential_marker state "$CRED_PAGED"
     paged_rc=$?
-    # A stamp that outlived a recovery (its clear is still being retried, or it
-    # could not be removed) must not suppress this new episode's page. The
-    # recovery flag, not marker history, identifies it: a failed marker create
-    # never makes the current episode's stamp look stale.
-    if [ "$paged_rc" -eq 0 ]; then
+    if [ "$paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; paging without it (repeats are possible)"
+      wd_note ERROR
+      WD_EXIT=1
+      paged_rc=1
+    elif [ "$paged_rc" -eq 0 ]; then
+      # A stamp that outlived a recovery (its clear is still being retried, or
+      # it could not be removed) must not suppress this new episode's page. The
+      # recovery flag, not marker history, identifies it: a failed marker
+      # create never makes the current episode's stamp look stale.
       credential_marker state "$CRED_RECOVERED"
-      if [ $? -eq 0 ]; then
+      flag_rc=$?
+      if [ "$flag_rc" -eq 2 ]; then
+        log "ERROR: unsafe recovery flag $CRED_RECOVERED; cannot tell whether $CRED_PAGED is current, paging (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+        paged_rc=1
+      elif [ "$flag_rc" -eq 0 ]; then
         log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
-        if credential_marker clear "$CRED_PAGED"; then
-          paged_rc=1
-          if ! credential_marker clear "$CRED_RECOVERED"; then
-            # Paging now would write a stamp beside a live flag, and the next
-            # cycle would read that stamp as stale and page again. Hold the
-            # page: the next cycle finds a flag with no stamp and retries.
-            log "ERROR: failed to remove recovery flag $CRED_RECOVERED; page deferred to next cycle"
-            wd_note ERROR
-            WD_EXIT=1
-            paged_rc=3
-          fi
-        else
-          # The flag stays, so the next cycle retries the invalidation.
-          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; retrying next cycle"
+        paged_rc=1
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        elif ! credential_marker clear "$CRED_RECOVERED"; then
+          log "ERROR: failed to remove recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
           wd_note ERROR
           WD_EXIT=1
         fi
       fi
-    elif [ "$paged_rc" -eq 1 ]; then
+    else
       # A flag with no stamp is left from a recovery that died after removing
       # the stamp. Drop it before this episode's stamp exists, or the next
       # cycle would read the new stamp as stale and page again.
       credential_marker state "$CRED_RECOVERED"
       if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
-        # Same hold as above: a page now would be followed by a second one.
-        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; page deferred to next cycle"
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
         wd_note ERROR
         WD_EXIT=1
-        paged_rc=3
       fi
     fi
-    # paged_rc 3 = page deferred until the recovery flag is gone.
     if [ "$paged_rc" -eq 1 ]; then
       credential_page alert
       page_rc=$?
@@ -1070,10 +1079,6 @@ PY
         wd_note ERROR
         WD_EXIT=1
       fi
-    elif [ "$paged_rc" -eq 2 ]; then
-      log "ERROR: unsafe credential page stamp $CRED_PAGED; not paging"
-      wd_note ERROR
-      WD_EXIT=1
     fi
     wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
