@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "478a3144cee77a7da60e59c595cb54a9619d1f80185bcda6371c08850e2fba13",
+      "sha256": "58d0e3a8b471c0e2efaf4d5d1fb1037b2df16ba8acf2cb7660452a5228db19ff",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",

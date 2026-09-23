@@ -569,6 +569,62 @@ sidecar by design. No state migration is
 needed in either direction.
 
 
+## Root-cause inhibition and stronger-incident retirement
+
+While a root-cause ("stronger") incident is open for a `machine|instance`
+scope, the dispatcher suppresses that scope's downstream symptom incidents
+(`INHIBITION_MAP`, seeded from `SUPERSEDED_SOURCES_BY_ALERT_SOURCE` and
+extended by `BOT_ERRORS_INHIBITION_MAP`). A root in any status other than
+`closed`, `resolved` or `stale` suppresses, and that includes `awaiting_physical`.
+Setting `BOT_ERRORS_INHIBITION_ENABLED=0` turns the lookup off (fail-open: nothing
+is suppressed and nothing is retired).
+
+**Parent liveness comes only from the parent's own source.** A suppressed child
+increments the root's `suppressedCount` and writes `lastSuppressedSymptomAt`/`Iso`,
+`...Source`, `...Summary`, `...Evidence` and `...Reason`. It does not touch the root's
+`lastSeenAt`/`lastSeenIso`. The earlier behaviour did refresh them, so a root opened
+weeks earlier never looked quiet, never reached the stale digest, and went on
+masking every later child.
+
+**Contradiction retirement.** When a child that would be suppressed carries
+evidence that proves the root's condition false, the dispatcher closes the root
+instead of suppressing the child, then processes the child normally (so it may
+send). The rule is currently implemented for WhatsApp connectivity-loss roots:
+`instance_logged_out` and `whatsapp_device_bond_lost`, including a
+`daily-health:`-prefixed form that has been added to the map. Such a root is
+contradicted when all of these hold:
+
+- The child reports the instance connected. That means
+  `diagnostics.whatsappConnected=true`, or a last `whatsapp_connected=` evidence
+  token that is truthy. It also accepts a last `connection_state=connected`. Every
+  reading present must be positive: `false`, `unknown` or any other state never
+  contradicts. The health poller's `health_body_degraded` evidence and the
+  watchdog's `local_health` evidence carry these tokens.
+- The child's `createdAt` is later than the root's `eventCreatedAtEpoch` by more
+  than the clock-skew tolerance, so a child queued before the logout cannot
+  retire it.
+
+Retirement uses the same removal as a matching clear (`close_open_incident`
+drops `openIncidents`, `lastSentAt` and transient bookkeeping for the key). The
+next genuine logout on that instance therefore opens a fresh incident and sends,
+with no fold and no cooldown. Every retirement is recorded in three places: a
+bounded `contradictionRetirements` list in incident state (key, prior status,
+`suppressedCount`, child event id and source, contradicting readings), the
+child event's `diagnostics.retiredStrongerIncidents` in the sent or suppressed
+archive, and a `retired stronger incident` line on the dispatcher's stderr.
+
+This path accepts a connected reading on its own. That is weaker than the
+daily-health recovery path, which also wants outbound proof or sustained
+stability before it closes these auto-close-protected sources. The reason: a
+connected socket with a bot JID cannot coexist with a logout or a lost device
+bond. A root whose condition still holds keeps suppressing its children.
+
+**Operator check.** `jq '.contradictionRetirements' incident-state.json` lists
+recent retirements. An `awaiting_physical` root with a large `suppressedCount`
+and an old `lastSeenIso` is now expected to show up in the stale digest instead
+of staying silent.
+
+
 ## NORMATIVE — Alert source and ownership index
 
 This table is the canonical index for the in-repository BOT ERRORS runtime.
