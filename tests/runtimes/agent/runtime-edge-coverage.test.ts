@@ -12,7 +12,9 @@ import type {
 import type {
   PendingPollQuestion,
   PollVote,
+  RuntimePrimaryModelUsability,
 } from '../../../src/runtimes/agent/runtime.ts';
+import type { DiagnosticProbeBuilderDeps } from '../../../src/runtimes/agent/diagnostic-probes.ts';
 import type { ResponseWorkflow } from '../../../src/runtimes/agent/response-registry.ts';
 import {
   FallbackReplayOwnershipChangedError,
@@ -471,6 +473,7 @@ type RuntimeView = {
     isSystemResult?: boolean,
   ): void;
   kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void;
+  primaryModelUsability: RuntimePrimaryModelUsability | null;
   recreatePerChatSessionForFallback(
     mapKey: string,
     chatJid: string,
@@ -1980,6 +1983,49 @@ describe('AgentRuntime edge coverage', () => {
       expect.objectContaining({ reportId: 'report-callbacks', sessionId: 'control-session' }),
       'control session crashed',
     );
+  });
+
+  it.each([
+    { status: 'usable', age: -1, inFlight: false, usable: null, stale: true },
+    { status: 'usable', age: 30 * 60_000 + 1, inFlight: false, usable: null, stale: true },
+    { status: 'credential-unavailable', age: 30 * 60_000 + 1, inFlight: false, usable: null, stale: true },
+    { status: 'usable', age: 0, inFlight: true, usable: null, stale: false },
+    { status: 'usable', age: 0, inFlight: false, usable: true, stale: false },
+    { status: 'credential-unavailable', age: 0, inFlight: false, usable: false, stale: false },
+  ] as const)('binds canonical runtime readiness to the diagnostic verdict: %j', async (testCase) => {
+    const { buildDiagnosticProbes } = await vi.importActual<typeof import('../../../src/runtimes/agent/diagnostic-probes.ts')>(
+      '../../../src/runtimes/agent/diagnostic-probes.ts',
+    );
+    const usability = await import('../../../src/runtimes/agent/providers/primary-model-usability.ts');
+    const actualUsability = await vi.importActual<typeof usability>(
+      '../../../src/runtimes/agent/providers/primary-model-usability.ts',
+    );
+    vi.spyOn(usability, 'primaryModelUsabilityRequiresAlert')
+      .mockImplementation(actualUsability.primaryModelUsabilityRequiresAlert);
+    const runtime = makeRuntime();
+    const state = view(runtime);
+    const checkedAt = Date.now() - testCase.age;
+    state.primaryModelUsability = {
+      provider: 'claude-cli', model: null, status: testCase.status,
+      checkedAt, probeInFlight: testCase.inFlight,
+    };
+
+    state.kickDiagnosticBundle(RESPONSE_WORKFLOWS.provider_usage_limit, 'usage limit');
+
+    expect(mockBuildDiagnosticProbes).toHaveBeenCalledTimes(1);
+    const args = mockBuildDiagnosticProbes.mock.calls[0]![0] as DiagnosticProbeBuilderDeps;
+    const probes = buildDiagnosticProbes(args);
+    await expect(probes['health-snapshot']!(new AbortController().signal)).resolves.toMatchObject({
+      ok: testCase.usable === true,
+      confidence: testCase.usable === null ? 'suspected' : 'confirmed',
+      summary: expect.stringContaining(`modelUsable=${testCase.usable ?? 'unknown'}`),
+      data: {
+        modelUsable: testCase.usable,
+        modelUsableStale: testCase.stale,
+        modelUsableCheckedAt: checkedAt,
+        modelUsabilityStatus: testCase.status,
+      },
+    });
   });
 
   it('builds diagnostic probes with runtime health and primary recovery callbacks', async () => {
