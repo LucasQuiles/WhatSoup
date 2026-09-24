@@ -2213,6 +2213,9 @@ $XDG_CONFIG_HOME/whatsoup/instances/<name>/   (default: ~/.config/...)
 $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
   bot.db            — SQLite database (messages, contacts, access list, sessions, outbound_sends audit)
   logs/             — Pino log files (daily rotation via pino-roll)
+  bond-events.ndjson — redacted bond lifecycle records; rotated at 50 MiB into
+                      bond-events.ndjson.<id>.gz, newest 10 archives kept
+                      (see runbook §3 "Bond Event Log")
   media/tmp/        — Temporary media files for agent Read access
 
 $XDG_DATA_HOME/whatsoup/tmp/<name>/           (default: ~/.local/share/...)

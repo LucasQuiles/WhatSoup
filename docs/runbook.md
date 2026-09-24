@@ -353,6 +353,63 @@ journalctl --user -u whatsoup@sandbox-agent | grep '15551234567'
 journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|quarantine'
 ```
 
+### Bond Event Log (`bond-events.ndjson`)
+
+Each instance appends redacted WhatsApp bond lifecycle records (one JSON object
+per line, fsynced per record) to `<dataRoot>/bond-events.ndjson`. Storage is
+bounded and crash-recoverable (`src/transport/bond-event-log.ts`):
+
+- **Rotation.** Before an append would take the live file past 50 MiB, the live
+  file is renamed to `bond-events.ndjson.<id>` and the record starts a new live
+  file. `<id>` is a UTC stamp plus a random suffix
+  (`20260924T010339123Z-1a2b3c4d`). Each new stamp is forced past the newest
+  existing one, so sorting the names gives the order the segments were closed.
+  A record larger than 50 MiB is written on its own and is never dropped. If a
+  rotation fails, the record is still appended to the live file and
+  `failed to rotate WhatsApp bond event log` is logged. An append failure logs
+  `failed to persist WhatsApp bond event`. Neither failure affects the
+  WhatsApp connection.
+- **Compression.** Compression runs asynchronously at startup and after each
+  rotation, under `bond-events.ndjson.maintenance.lock`. Each closed segment is
+  gzipped to `<id>.gz.partial` and fsynced, then decompressed and compared
+  (byte count and SHA-256) with the segment. Only after that comparison passes
+  is it renamed to `<id>.gz`, followed by a directory fsync. The closed segment
+  is unlinked last.
+- **Retention.** The 10 newest finalized `.gz` archives are kept. Older ones
+  are deleted. This is the only intended loss of history: roughly the newest
+  10 × 50 MiB of uncompressed records plus the live file survive.
+- **Crash recovery.** Recovery runs at startup and at the start of every pass.
+  - A `.gz.partial` next to its closed segment is discarded and the segment is
+    compressed again.
+  - A `.gz` next to its closed segment is verified again. The segment is
+    unlinked only when the `.gz` matches.
+  - A missing live file is recreated by the next append.
+- **Ambiguous states are kept and reported.** Recovery keeps the files and logs
+  `bond event log maintenance kept segments for operator review`, with a
+  per-segment reason, in these cases:
+  - a `.gz` that does not match its segment (`archive_does_not_match_source`)
+  - a `.gz.partial` with no segment (`partial_without_source`)
+  - a `.gz.partial` next to a `.gz` (`partial_beside_archive`)
+  - a non-regular file under a segment name (`non_regular_entry`)
+  - a segment that keeps failing to compress (`compression_failed`)
+
+  Recovery never deletes these files. Inspect them by hand: for example, compare
+  `gzip -dc <id>.gz` against `<id>` before removing either one. Closed segments
+  that keep failing are not subject to retention and accumulate until they are
+  resolved. `pendingSegments` in that warning counts them.
+- **Maintenance lock.** A corrupt `bond-events.ndjson.maintenance.lock` makes
+  every maintenance pass fail closed (`bond event log maintenance failed`).
+  Confirm that no WhatSoup process for the instance is running before you
+  remove that lock (§5.6).
+
+To read the full history, decompress the archives in name order, then read the
+live file:
+
+```bash
+cd ~/.local/share/whatsoup/instances/<name>
+for f in $(ls bond-events.ndjson.*.gz | sort); do gzip -dc "$f"; done; cat bond-events.ndjson
+```
+
 ---
 
 ## 4. Health Endpoint
@@ -860,7 +917,11 @@ On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, 
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
 cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
-degraded so the exhausted episode is not hidden.
+degraded so the exhausted episode is not hidden. Each exhaustion episode is retained as an alert
+owner until the chat respawns successfully or one hour passes; only that episode's own timer can
+retire it, so a later re-exhaustion of the same chat is never retired early by an older timer.
+Retirement attempts the shared `agent_respawn_failed` clear under the same rule as abandonment
+below: only once no chat is either exhausted or abandoned, with a refused clear kept as retry debt.
 
 The same alert source has a second path, and the two behave differently, so read the body first.
 An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
@@ -876,9 +937,15 @@ The chat recovers on its own. The abandonment settles when the chat's next inbou
 it back into service, when a new owned session is indexed for it, or when the record ages out of
 the retention window. Which of the first two routes the turn takes depends on the shape: a session
 that had gone inactive is respawned in place and settled by that re-activation, while one that
-still reported active when it was abandoned is settled on the served-turn path. Settling clears
-this alert only when no chat is either exhausted or abandoned. Health reports
-`per_chat_respawn_abandoned` until it settles.
+still reported active when it was abandoned is settled at the provider-ready served-turn boundary,
+after the before-send hook, executing-actor publication, and typing indication. Settlement retires
+the chat's abandonment immediately. Once no chat is either exhausted or abandoned, the runtime
+attempts the shared alert clear. An accepted clear finishes the incident; a refused or throwing
+clear leaves the content-free `agentRespawnFailedClearPending: true` health field and the
+`runtime.agent_respawn_failed_clear_pending` / `agent_respawn_failed_clear_pending` reason/cause
+pair degraded. Later health polls and provider-ready settlement boundaries retry while both owner
+populations remain empty. A new abandonment or exhaustion blocks the retry without erasing the
+obligation. Health reports `per_chat_respawn_abandoned` only until the abandonment itself settles.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
