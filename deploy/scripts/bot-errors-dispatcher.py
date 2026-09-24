@@ -1348,12 +1348,16 @@ def append_dispatch_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(details),
+        # The dispatch log is diagnostic: it keeps the shared lock, bound and
+        # rejection policy but skips per-record fsyncs. The outbox, state and
+        # claim publications stay on the default durable path.
         append_record=lambda record: require_bounded_jsonl_commit(
             append_bounded_jsonl(
                 log_path,
                 record,
                 component="dispatcher.dispatch_log",
                 max_bytes=MAX_DISPATCH_JSONL_BYTES,
+                durability="best_effort",
             )
         ),
         persist_health=lambda record: persist_controller_log_health(paths, record),

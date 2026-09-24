@@ -315,11 +315,12 @@ def test_dispatcher_bounded_adapter_uses_one_exact_shared_publication(
     calls = []
     consumed = []
 
-    def append_bounded(path, record, *, component, max_bytes):
+    def append_bounded(path, record, *, component, max_bytes, durability):
         calls.append({
             "path": path,
             "component": component,
             "max_bytes": max_bytes,
+            "durability": durability,
             "record_kind": record["recordKind"],
         })
         return publication
@@ -349,6 +350,7 @@ def test_dispatcher_bounded_adapter_uses_one_exact_shared_publication(
         "path": tmp_path / "dispatch.jsonl",
         "component": "dispatcher.dispatch_log",
         "max_bytes": dispatcher.MAX_DISPATCH_JSONL_BYTES,
+        "durability": "best_effort",
         "record_kind": "sent",
     }]
     assert consumed == [publication]

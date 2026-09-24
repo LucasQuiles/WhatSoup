@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "d8dc7b18aef81c3022c09177c9479753b980b109ce03096cfbbf1d722cc53989",
+      "sha256": "e34c470139ce892527985dd1c2ef737fd4850407f5b47cc85cb413218846af4a",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",
@@ -539,7 +539,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "d192a2a639b248a92dbb037dd313dedef9ddb46f4c984d04d5e83039d46e8991",
+      "sha256": "1d0aae38e1c95d9c9c3e7761113a8c295a8d10e9add499161335405f29b66231",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",
@@ -747,7 +747,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
+      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",

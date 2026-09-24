@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -30,8 +31,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// maintenance.auto=false: `git commit` otherwise starts a detached
+// `git maintenance run --auto` that deletes .git/objects/maintenance.lock after
+// commit returns. A fixture that then removes .git races that delete, and
+// Node's rmSync reports success while leaving the rest of .git behind.
 function execGit(cwd: string, args: string[]): void {
-  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-C', cwd, ...args], {
+  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-c', 'maintenance.auto=false', '-C', cwd, ...args], {
     env: cleanGitEnv(),
     stdio: 'pipe',
   });
@@ -55,9 +60,9 @@ function runGit(cwd: string, args: string[]): {
   };
 }
 
-function makeRepo(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-'));
-  tmpRoot = root;
+function makeRepo(parent?: string): string {
+  const root = mkdtempSync(path.join(parent ?? tmpdir(), 'whatsoup-source-runtime-'));
+  tmpRoot = parent ?? root;
   execGit(root, ['init', '-q']);
   execGit(root, ['config', 'user.email', 'test.invalid']);
   execGit(root, ['config', 'user.name', 'Test']);
@@ -117,6 +122,7 @@ function makeContainedSymlinkRepo(): {
 
 function convertRepoToRelease(root: string): void {
   rmSync(path.join(root, '.git'), { recursive: true, force: true });
+  if (existsSync(path.join(root, '.git'))) throw new Error(`fixture .git was not fully removed: ${root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -143,6 +149,16 @@ function convertRepoToRelease(root: string): void {
     files,
     requiredOutputs: [],
   }), 'utf8');
+}
+
+// A committed git repo that encloses the release fixture: a release root
+// nested under an unrelated ancestor .git must stay in release mode.
+function makeAncestorRepo(): string {
+  const parent = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-ancestor-'));
+  tmpRoot = parent;
+  execGit(parent, ['init', '-q']);
+  execGit(parent, ['-c', 'user.email=test.invalid', '-c', 'user.name=Test', 'commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  return parent;
 }
 
 describe('source runtime drift check', () => {
@@ -400,6 +416,51 @@ describe('source runtime drift check', () => {
   it('rejects a drifted source-runtime control manifest in a non-git snapshot', () => {
     const root = makeRepo();
     convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps release mode for a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+
+    const issues = run(['--manifest', 'manifest.json'], root);
+    expect(process.exitCode).toBeUndefined();
+    expect(issues).toEqual([]);
+  });
+
+  it('rejects a drifted control manifest in a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('treats a release root that is itself a bare git dir as outside a work tree', () => {
+    // `rev-parse --is-inside-work-tree` exits 0 and prints "false" here, so an
+    // exit-status-only probe would skip the control-manifest check.
+    const root = makeRepo();
+    convertRepoToRelease(root);
+    execGit(root, ['init', '-q', '--bare']);
+    expect(runGit(root, ['rev-parse', '--is-inside-work-tree'])).toEqual(
+      expect.objectContaining({ status: 0, stdout: 'false\n' }),
+    );
     writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
       schemaVersion: 1,
       scope: 'retargeted',
