@@ -207,7 +207,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:grant-resolver',
       'npm run guard:resolved-override',
       'npm run guard:instance-config',
-      'npm run guard:guard-test-coverage',
+      'npm run guard:guard-test-coverage -- --semantic-mode enforce',
       'npm run guard:lint:src',
       'npm run test:tokenomics',
       'npm run test:deployment-qualification',
