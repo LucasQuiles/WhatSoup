@@ -557,9 +557,11 @@ export function deriveModelUsable(
   if (!usability || usability.probeInFlight) {
     return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
   }
+  // A future-dated or non-finite proof time, clock or window is not current evidence.
+  const ageMs = typeof modelUsableCheckedAt === 'number' ? nowMs - modelUsableCheckedAt : NaN;
+  const fresh = Number.isFinite(ageMs) && Number.isFinite(freshnessMs)
+    && ageMs >= 0 && ageMs <= freshnessMs;
   if (usability.status === 'usable') {
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
@@ -569,8 +571,6 @@ export function deriveModelUsable(
     // than freshnessMs (e.g. a credential-unavailable cached at startup) is
     // stale evidence, not an authoritative red — report null (unknown) +
     // modelUsableStale=true so it re-probes rather than caching a stale false.
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
@@ -9600,6 +9600,9 @@ export class AgentRuntime implements Runtime {
               fallbackReason: s.fallbackReason,
               fallbackActiveUntil: s.fallbackActiveUntil,
               modelUsabilityStatus: s.turnCapability.modelUsabilityStatus,
+              modelUsable: s.turnCapability.modelUsable,
+              modelUsableStale: s.turnCapability.modelUsableStale,
+              modelUsableCheckedAt: s.turnCapability.modelUsableCheckedAt,
             },
           };
         },

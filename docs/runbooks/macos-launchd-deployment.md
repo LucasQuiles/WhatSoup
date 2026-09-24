@@ -728,6 +728,14 @@ the health projection and producer schema before retrying. The helper trusts the
 runtime's stale verdict and does not independently validate provider-proof times.
 This F1 requirement does not qualify future timestamps or other independent
 freshness policies; acceptance evidence must name the tested release revision.
+The runtime itself reports a future-dated or non-finite provider proof time as
+stale (`model_usable` null, `model_usable_stale` true).
+
+The diagnostic bundle's `health-snapshot` finding uses the same canonical
+readiness and freshness fields. Missing, stale, future-dated or in-flight
+provider proof is inconclusive (`ok: false`, confidence `suspected`); the raw
+model status alone cannot confirm health or failure. An active fallback window
+still confirms degraded primary service.
 
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI

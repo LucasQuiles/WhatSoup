@@ -53,11 +53,51 @@ describe('buildDiagnosticProbes', () => {
   it('health-snapshot surfaces the runtime-curated summary + data', async () => {
     const map = buildDiagnosticProbes(deps());
     const r = await map['health-snapshot']!(signal());
-    expect(r).toMatchObject({ ok: true, confidence: 'confirmed', summary: 'effective provider opencode-cli' });
+    expect(r).toMatchObject({ ok: false, confidence: 'suspected', summary: 'effective provider opencode-cli' });
     expect(r.data).toEqual({ effectiveProvider: 'opencode-cli' });
   });
 
-  it('health-snapshot returns ok:true when snapshot shows no active fallback and no unusable model status', async () => {
+  it.each([undefined, null, 'unknown', 'timeout', 'probe-blocked', 'probe-error', 'unexpected', 1, {}])(
+    'health-snapshot leaves model usability %s inconclusive',
+    async (status) => {
+      const data = { effectiveProvider: 'claude-cli', fallbackReason: null, modelUsabilityStatus: status };
+      const map = buildDiagnosticProbes(deps({
+        getHealthSnapshot: () => ({ summary: 'model usability not established', data }),
+      }));
+
+      await expect(map['health-snapshot']!(signal())).resolves.toEqual({
+        ok: false,
+        confidence: 'suspected',
+        summary: 'model usability not established',
+        data,
+      });
+    },
+  );
+
+  it.each([
+    { modelUsable: undefined, modelUsableStale: false },
+    { modelUsable: null, modelUsableStale: false },
+    { modelUsable: 'true', modelUsableStale: false },
+    { modelUsable: true, modelUsableStale: undefined },
+    { modelUsable: true, modelUsableStale: null },
+    { modelUsable: true, modelUsableStale: 'false' },
+    { modelUsable: true, modelUsableStale: true },
+    { modelUsable: false, modelUsableStale: true },
+  ])('health-snapshot requires fresh canonical readiness: %j', async (readiness) => {
+    const data = {
+      fallbackReason: null,
+      modelUsabilityStatus: readiness.modelUsable === false ? 'credential-unavailable' : 'usable',
+      ...readiness,
+    };
+    const map = buildDiagnosticProbes(deps({
+      getHealthSnapshot: () => ({ summary: 'readiness not established', data }),
+    }));
+    await expect(map['health-snapshot']!(signal())).resolves.toEqual({
+      ok: false, confidence: 'suspected', summary: 'readiness not established', data,
+    });
+  });
+
+  it('health-snapshot confirms fresh canonical readiness', async () => {
     const map = buildDiagnosticProbes(deps({
       getHealthSnapshot: () => ({
         summary: 'effective=claude-cli fallbackReason=none modelUsable=true',
@@ -66,6 +106,9 @@ describe('buildDiagnosticProbes', () => {
           fallbackReason: null,
           fallbackActiveUntil: null,
           modelUsabilityStatus: 'usable',
+          modelUsable: true,
+          modelUsableStale: false,
+          modelUsableCheckedAt: NOW,
         },
       }),
     }));
@@ -89,7 +132,7 @@ describe('buildDiagnosticProbes', () => {
     expect(r).toMatchObject({ ok: false, confidence: 'confirmed' });
   });
 
-  it('health-snapshot returns ok:false for each unusable modelUsabilityStatus', async () => {
+  it('health-snapshot confirms fresh canonical failure for each unusable status', async () => {
     const unusableStatuses = ['model-unavailable', 'credential-unavailable', 'provider-unavailable'] as const;
     for (const status of unusableStatuses) {
       const map = buildDiagnosticProbes(deps({
@@ -100,6 +143,9 @@ describe('buildDiagnosticProbes', () => {
             fallbackReason: null,
             fallbackActiveUntil: null,
             modelUsabilityStatus: status,
+            modelUsable: false,
+            modelUsableStale: false,
+            modelUsableCheckedAt: NOW,
           },
         }),
       }));
