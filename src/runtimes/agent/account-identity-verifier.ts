@@ -9,9 +9,9 @@
 //
 // Alert contract (sources are the same literals as the degradedReasons):
 //   match        -> no alert; clears any active identity alert. The first
-//                   match of a process clears BOTH sources idempotently so an
-//                   incident a prior process opened does not outlive it
-//                   (same rule as primary_model_unusable, #2394).
+//                   match of a process attempts BOTH sources idempotently for
+//                   prior-process incidents. Each source stays pending until
+//                   its clear is durably queued; later matches retry failures.
 //   mismatch     -> critical `credential_identity_mismatch`.
 //   unverifiable -> warning  `credential_identity_unverifiable`. Does NOT
 //                   clear an open mismatch: unknown is not resolution.
@@ -66,8 +66,7 @@ export class AccountIdentityVerifier {
   private readonly log: NonNullable<AccountIdentityVerifierDeps['log']>;
   private inFlight: Promise<AccountIdentityVerification | null> | null = null;
   private disabledNoted = false;
-  private carryOverCleared = false;
-  private readonly activeAlerts = new Set<CredentialIdentityAlertSource>();
+  private readonly pendingClears = new Set<CredentialIdentityAlertSource>(CREDENTIAL_IDENTITY_ALERT_SOURCES);
 
   constructor(host: AccountIdentityVerifierHost, deps: AccountIdentityVerifierDeps = {}) {
     this.host = host;
@@ -129,12 +128,12 @@ export class AccountIdentityVerifier {
     };
 
     if (result.status === 'match') {
-      const toClear: CredentialIdentityAlertSource[] = this.carryOverCleared
-        ? [...this.activeAlerts]
-        : [...CREDENTIAL_IDENTITY_ALERT_SOURCES];
-      this.carryOverCleared = true;
-      for (const source of toClear) this.clearAlert(this.host.instanceName, source, evidence);
-      this.activeAlerts.clear();
+      for (const source of this.pendingClears) {
+        const accepted = this.clearAlert(
+          this.host.instanceName, source, evidence, undefined, { requireDurableOutbox: true },
+        );
+        if (accepted === true) this.pendingClears.delete(source);
+      }
       this.log.info(fields, 'account identity verified against the ratified digest');
       return result;
     }
@@ -148,7 +147,7 @@ export class AccountIdentityVerifier {
         evidence,
         'critical',
       );
-      this.activeAlerts.add('credential_identity_mismatch');
+      this.pendingClears.add('credential_identity_mismatch');
       return result;
     }
 
@@ -161,7 +160,7 @@ export class AccountIdentityVerifier {
         evidence,
         'warning',
       );
-      this.activeAlerts.add('credential_identity_unverifiable');
+      this.pendingClears.add('credential_identity_unverifiable');
       return result;
     }
 
