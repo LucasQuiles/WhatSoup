@@ -53,7 +53,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "7ad6fd3809fdfae6457de8c2b22a5c14de1e2ef640b328f134b9f60009cc5508",
+      "sha256": "b50b9a1e2976381569eccde196f291856f17f3c6ad32740a7219815d53fcb96d",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
