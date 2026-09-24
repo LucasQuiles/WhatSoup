@@ -568,13 +568,6 @@
       "line": 4753,
       "rule_id": "py-property-test-suggestion",
       "signature": "f5747ffe3693d004ab13026233e5fa2bacd37d559bb34fd2fb637c9d581aa7c9"
-    },
-    {
-      "content_signature": "a22f09c333892f3619523a1e0a9a01577e4b7627826d360ea9c483f9d19debe9",
-      "file": "deploy/scripts/tests/test_bot_errors_owner_route.py",
-      "line": 238,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "4dba06660f09e33c7301d4c2cffc08ac368517b04ccf57efb519d883f4833a59"
     }
   ],
   "schema_version": "1"

@@ -235,7 +235,16 @@ def _skips(rec: _Recorder, flag: str) -> list[dict]:
     return [r for r in rec.logs if r["type"] == "owner_route_skipped" and r.get(flag) is True]
 
 
-@pytest.mark.parametrize("content", ["{not json", "[]", ""])
+# Named regression cases (not a sampled input space): each is a distinct way the state
+# file can be corrupted, and each must skip the copy rather than forget the floors.
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("{not json", id="invalid-json"),
+        pytest.param("[]", id="json-array-not-object"),
+        pytest.param("", id="empty-file"),
+    ],
+)
 def test_unreadable_state_skips_instead_of_forgetting_floors(route_env, content):
     rec = _Recorder()
     _route(_alert(), rec, route_env)
