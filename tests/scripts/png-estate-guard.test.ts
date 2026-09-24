@@ -17,7 +17,6 @@ import {
 } from '../../scripts/png-estate-guard.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
-const GUARD = join(REPO_ROOT, 'scripts/png-estate-guard.ts');
 const NODE = process.execPath;
 const WIZARD = 'docs/screenshots/add-line-wizard.png';
 const WIZARD_ORIGINAL_BYTES = 755_125; // pre-compression blob size
@@ -28,7 +27,11 @@ afterEach(() => {
 });
 
 function runGuard(cwd: string, args: string[] = []): { status: number | null; out: string } {
-  const res = spawnSync(NODE, ['--experimental-strip-types', GUARD, ...args], {
+  const res = spawnSync(NODE, [
+    '--experimental-strip-types',
+    join(REPO_ROOT, 'scripts/png-estate-guard.ts'),
+    ...args,
+  ], {
     cwd,
     encoding: 'utf8',
     timeout: 60_000,
@@ -102,8 +105,20 @@ describe('png-estate guard (#2219)', () => {
     put('artifacts/dashboard-polish/ä-regrown.png', 64, 8);
     git(['add', '-f', 'artifacts/dashboard-polish']);
 
-    const { status, out } = runGuard(root, ['--staged']);
-    expect(status).toBe(1);
+    // Keep one exact subprocess call in a live test body so the coverage
+    // meta-guard can prove this guard's failure path without trusting the
+    // helper call graph.
+    const result = spawnSync(NODE, [
+      '--experimental-strip-types',
+      join(REPO_ROOT, 'scripts/png-estate-guard.ts'),
+      '--staged',
+    ], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    const out = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(1);
     expect(out).toContain('regrown.png: artifacts/ images are not tracked');
     expect(out).toContain('ä-regrown.png: artifacts/ images are not tracked');
   });
