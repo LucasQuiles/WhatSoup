@@ -48,9 +48,18 @@ FailureClass = Literal[
     "io_error",
     "internal_error",
 ]
+# "durable" (the default) proves every committed append crash-durable with
+# file, parent and grandparent fsyncs. "best_effort" is an explicit opt-in for
+# diagnostic logs only: it keeps the same lock, bound, privacy checks and
+# result/rejection policy but skips the append-path and parent-entry fsyncs, so
+# a crash may lose the newest records. Compaction stays fully synced in both
+# modes because it replaces the whole file.
+Durability = Literal["durable", "best_effort"]
+_DURABILITIES = ("durable", "best_effort")
 
 __all__ = [
     "BoundedJsonlResult",
+    "Durability",
     "append_bounded_jsonl",
     "require_bounded_jsonl_commit",
 ]
@@ -175,8 +184,11 @@ def _serialize_record(
     component: str,
     max_bytes: int,
     lock_timeout_seconds: float,
+    durability: object = "durable",
 ) -> tuple[bytes, str]:
     if not isinstance(component, str) or _COMPONENT_RE.fullmatch(component) is None:
+        raise _ValidationFailure("invalid_input")
+    if not isinstance(durability, str) or durability not in _DURABILITIES:
         raise _ValidationFailure("invalid_input")
     if not isinstance(record, Mapping):
         raise _ValidationFailure("invalid_input")
@@ -257,11 +269,12 @@ def _sync_grandparent(parent: Path) -> None:
     fsync on the parent fd durably records what is INSIDE the parent. The parent's
     directory entry lives in the grandparent, so until the grandparent has been
     synced a crash can leave the fsynced record inside a directory that no longer
-    exists. Called unconditionally on every append: mkdir() makes a parent VISIBLE
-    before its entry is durable, so observing a pre-existing parent proves nothing —
-    a retry after a failed sync and a concurrent caller both see an unproven
-    directory. Failures propagate; the caller converts them into a non-committed
-    result.
+    exists. Called on every durable append, whether or not this call created the
+    parent: mkdir() makes a parent VISIBLE before its entry is durable, so
+    observing a pre-existing parent proves nothing — a retry after a failed sync
+    and a concurrent caller both see an unproven directory. Only an explicit
+    ``durability="best_effort"`` caller skips it. Failures propagate; the caller
+    converts them into a non-committed result.
     """
     grandparent_fd = os.open(
         parent.parent,
@@ -558,7 +571,10 @@ def _is_private_regular(entry: os.stat_result) -> bool:
     return _is_safe_regular(entry) and stat.S_IMODE(entry.st_mode) == 0o600
 
 
-def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
+def _open_parent(
+    path: Path,
+    durability: Durability = "durable",
+) -> tuple[int | None, BoundedJsonlResult | None]:
     parent = path.parent
     parent_created = False
     try:
@@ -606,17 +622,22 @@ def _open_parent(path: Path) -> tuple[int | None, BoundedJsonlResult | None]:
             oversized_record=False,
             failure_class="unsafe_parent",
         )
-    # The barrier is UNCONDITIONAL, not gated on parent_created. Gating it was a
-    # fail-open: mkdir() makes the parent VISIBLE before its directory entry is
-    # durable, so
+    # For durable appends the barrier is never gated on parent_created. Gating
+    # it was a fail-open: mkdir() makes the parent VISIBLE before its directory
+    # entry is durable, so
     #   * a retry after a failed sync sees a pre-existing parent and skips the
     #     barrier entirely, then commits; and
     #   * a concurrent caller sees the creator's not-yet-synced parent and commits
     #     while the creator is still mid-barrier.
     # Both were reproduced against the gated version. "Visible" does not mean
-    # "durably linked", so no caller may return committed until this parent's own
-    # entry has been proven durable on THIS call. The cost is one directory fsync
-    # per append; in a module whose purpose is durability that is the right trade.
+    # "durably linked", so no durable caller may return committed until this
+    # parent's own entry has been proven durable on THIS call. The cost is one
+    # directory fsync per append. A caller that explicitly opts into
+    # durability="best_effort" (diagnostic logs only) accepts losing the newest
+    # records on a crash and skips this barrier; the parent's privacy checks
+    # above still apply.
+    if durability == "best_effort":
+        return parent_fd, None
     try:
         _sync_grandparent(parent)
     except OSError:
@@ -669,7 +690,9 @@ def _append_under_fence(
     line: bytes,
     record_sha256: str,
     max_bytes: int,
+    durability: Durability = "durable",
 ) -> BoundedJsonlResult:
+    durable = durability == "durable"
     temp_name = f".{target_name}.bounded-jsonl.compact.tmp"
     try:
         temp_stat = _entry_stat(parent_fd, temp_name)
@@ -702,7 +725,8 @@ def _append_under_fence(
             )
         try:
             os.unlink(temp_name, dir_fd=parent_fd)
-            _sync_parent(parent_fd)
+            if durable:
+                _sync_parent(parent_fd)
         except OSError:
             return _result(
                 component=component,
@@ -857,7 +881,8 @@ def _append_under_fence(
                 failure_class="short_write",
             )
         try:
-            _sync_file(target_fd)
+            if durable:
+                _sync_file(target_fd)
             os.fchmod(target_fd, 0o600)
             verified = os.fstat(target_fd)
             if stat.S_IMODE(verified.st_mode) != 0o600:
@@ -876,7 +901,8 @@ def _append_under_fence(
                 failure_class="io_error",
             )
         try:
-            _sync_parent(parent_fd)
+            if durable:
+                _sync_parent(parent_fd)
         except OSError:
             return _result(
                 component=component,
@@ -942,6 +968,7 @@ def append_bounded_jsonl(
     component: str,
     max_bytes: int,
     lock_timeout_seconds: float = 5.0,
+    durability: Durability = "durable",
 ) -> BoundedJsonlResult:
     safe_component = _safe_component(component)
     try:
@@ -951,6 +978,7 @@ def append_bounded_jsonl(
             component,
             max_bytes,
             lock_timeout_seconds,
+            durability,
         )
     except _ValidationFailure as exc:
         return _result(
@@ -992,7 +1020,7 @@ def append_bounded_jsonl(
             failure_class="unsupported",
         )
 
-    parent_fd, parent_failure = _open_parent(path)
+    parent_fd, parent_failure = _open_parent(path, durability)
     if parent_failure is not None:
         return _failure_with_context(
             parent_failure,
@@ -1050,7 +1078,7 @@ def append_bounded_jsonl(
             os.fchmod(lock_fd, 0o600)
             if stat.S_IMODE(os.fstat(lock_fd).st_mode) != 0o600:
                 raise OSError("lock privacy verification failed")
-            if lock_created:
+            if lock_created and durability == "durable":
                 _sync_parent(parent_fd)
         except OSError:
             return _result(
@@ -1102,6 +1130,7 @@ def append_bounded_jsonl(
             line=line,
             record_sha256=record_sha256,
             max_bytes=max_bytes,
+            durability=durability,
         )
     except OSError:
         return _result(

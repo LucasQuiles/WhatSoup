@@ -207,7 +207,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:grant-resolver',
       'npm run guard:resolved-override',
       'npm run guard:instance-config',
-      'npm run guard:guard-test-coverage',
+      'npm run guard:guard-test-coverage -- --semantic-mode enforce',
       'npm run guard:lint:src',
       'npm run test:tokenomics',
       'npm run test:deployment-qualification',
@@ -218,7 +218,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'bash scripts/run-with-pinned-npm.sh --prefix console ci',
       'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
       'npm run typecheck:all',
-      'npm run coverage:check -- --pool=forks --fileParallelism=false',
+      'npm run coverage:check -- --pool=forks',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design:live',
       'npm run verify:console-browser',
@@ -237,7 +237,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'bash scripts/run-coverage-check.sh',
     ],
     exactSteps: [
-      'npm run coverage:check -- --pool=forks --fileParallelism=false',
+      'npm run coverage:check -- --pool=forks',
     ],
     singleRunSteps: [
       'npm run coverage:check',

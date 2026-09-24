@@ -3264,7 +3264,7 @@ Search company knowledge bases using natural language queries. Results are pre-f
 | top_k | number | optional | Number of results (1-20) |
 | namespace | string | optional | Override default namespace(s) |
 
-**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results.
+**Returns:** `index`, `query`, `results_count`, a structured `results` array containing each result's `id`, numeric `score`, and `entity_type`, plus a human-readable `formatted` summary. Available indexes are dynamically configured per instance. When an index profile defines `minScore`, lower-scoring hits are omitted and an all-low-score search returns zero results. A search of the instance's own memory index (`memory.pinecone.index`) without a `namespace` argument also covers the default namespace `__default__`, where `memory_write` writes. Memories in that index are scoped to the calling conversation: this chat first; in groups that are not owner-and-bot only, only the group's shared records and the verified sender's own; in a non-admin contact's direct chat, only that chat unless `contactRecallScopes` sets `instance`. Document namespaces are merged in by relevance in every context (see `docs/configuration.md`, Memory recall scope).
 
 ---
 
@@ -3278,7 +3278,7 @@ Agent-facing episodic memory write into the configured per-person Pinecone index
 
 Persist a durable memory about the current conversation into the instance's configured Pinecone memory index (`memory.pinecone.index`) via the integrated-embedding upsert path. Intended for agent instances, which do not run the chat-runtime enrichment poller.
 
-> **Conditional registration.** Registered only when a Pinecone API key is available (`memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The configured project guard is enforced by `PineconeMemory.upsert`. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
+> **Conditional registration.** Registered only when a Pinecone API key is available (`memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The project guard (configured, or the operator project for `q` when none is configured) is enforced by `PineconeMemory.upsert`. Records land in the default namespace `__default__` of the memory index, which `knowledge_search` always includes for that index, ranked this chat first and held to the group boundary in groups. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
 
 | | |
 |---|---|
