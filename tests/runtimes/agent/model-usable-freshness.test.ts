@@ -5,6 +5,31 @@ const NOW = 1_000_000_000_000;
 const base = { provider: 'claude-cli', model: 'claude-opus-4-8' };
 
 describe('deriveModelUsable — modelUsable freshness gate (RCA 2026-06-24)', () => {
+  describe.each(['usable', 'credential-unavailable'] as const)('%s evidence clock', (status) => {
+    it.each([NOW + 1, NOW + 86_400_000, Infinity, -Infinity, NaN])(
+      'does not accept invalid proof time %s as current evidence', (checkedAt) => {
+        const evidence = { ...base, status, probeInFlight: false, checkedAt };
+        expect(deriveModelUsable(evidence, NOW)).toEqual({
+          modelUsable: null, modelUsableStale: true, modelUsableCheckedAt: checkedAt,
+        });
+      },
+    );
+
+    it.each([Infinity, -Infinity, NaN])('requires a finite observation clock: %s', (nowMs) => {
+      const evidence = { ...base, status, probeInFlight: false, checkedAt: NOW };
+      expect(deriveModelUsable(evidence, nowMs)).toMatchObject({
+        modelUsable: null, modelUsableStale: true,
+      });
+    });
+
+    it.each([Infinity, NaN, -1])('does not accept invalid freshness window %s', (freshnessMs) => {
+      const evidence = { ...base, status, probeInFlight: false, checkedAt: NOW };
+      expect(deriveModelUsable(evidence, NOW, freshnessMs)).toMatchObject({
+        modelUsable: null, modelUsableStale: true,
+      });
+    });
+  });
+
   it('null usability → unknown, not stale', () => {
     expect(deriveModelUsable(null, NOW)).toEqual({
       modelUsable: null, modelUsableStale: false, modelUsableCheckedAt: null,
