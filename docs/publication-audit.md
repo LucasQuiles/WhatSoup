@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 404
+**Total classification rows:** 405
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 206 |
+| PRIVATE-ARCHIVE | 207 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 404 |
+| Total | 405 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -34,6 +34,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/research/2026-06-30-continuity-rd/CLOUD-GROUPS-API-ELIGIBILITY-MAP.md` | PRIVATE-ARCHIVE | Internal continuity research; retained in the repository but excluded from public publication by default. |
 | `docs/research/2026-06-30-continuity-rd/WHATSOUP-FLEET-CONTINUITY-MATRIX.md` | PRIVATE-ARCHIVE | Internal continuity research; retained in the repository but excluded from public publication by default. |
 | `docs/research/gemini-cli-stream-json-investigation-2026-04-04.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/account-identity-recovery.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/agent-decision-polls.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/agent-job-dispatch-gap.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/capability-obligation-operator.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
