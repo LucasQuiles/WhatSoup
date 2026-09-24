@@ -81,6 +81,12 @@ BOT_HEALTH="http://127.0.0.1:BOT_PORT/health"
 FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
 HEALTH_READER_PATH="__HEALTH_READER_PATH__"
 HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
+# The reader's per-socket timeout must expire well before the wall deadline,
+# so a target that accepts TCP but never answers yields a typed transport
+# failure (restart) instead of a killed reader. The deadline is the backstop
+# for a read that still has not finished (e.g. a trickling response).
+HEALTH_READ_TIMEOUT_SECONDS=5
+HEALTH_READ_DEADLINE_SECONDS=8
 
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
@@ -608,11 +614,13 @@ PY
 read_health_response() {
   # FD 3 preserves the anonymous token pipe through the timeout's background
   # command. Execute the bytes just hashed, avoiding a path reopen after check.
-  run_with_timeout 8 python3 -c '
+  run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3 -c '
 import errno, hashlib, os, re, stat, sys
 try:
-    source_path, expected, port_text, request_path = sys.argv[1:]
+    source_path, expected, port_text, request_path, timeout_text = sys.argv[1:]
     if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ValueError()
+    if re.fullmatch(r"[1-9][0-9]?", timeout_text) is None:
         raise ValueError()
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(source_path, flags)
@@ -640,7 +648,7 @@ try:
     else:
         raise ValueError()
     try:
-        code, body = namespace["fetch_loopback_health"](int(port_text), request_path, headers, timeout=8)
+        code, body = namespace["fetch_loopback_health"](int(port_text), request_path, headers, timeout=int(timeout_text))
     except namespace["HealthTransportError"] as error:
         if (error.stage not in ("connect", "request", "response", "read")
                 or (error.errno is not None and type(error.errno) is not int)):
@@ -658,7 +666,7 @@ try:
 except Exception:
     print("watchdog: health reader unavailable or invalid", file=sys.stderr)
     raise SystemExit(3)
-' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" 3<&0
+' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" 3<&0
 }
 
 # An unverifiable reader leaves this cycle without evidence: no restart, no
@@ -679,7 +687,11 @@ fi
 # Only a typed transport failure with no HTTP response is unreachable, and only
 # a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
 # HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
-# Ordinary refusal retains the existing restart policy.
+# Ordinary refusal retains the existing restart policy. A read killed at the
+# wall deadline (run_with_timeout 124, no output) is restart evidence too, as
+# `curl --max-time` was: the reader's own shorter socket timeout already turns
+# a silent target into a typed failure, so reaching the deadline means the
+# response did not complete in time (e.g. a trickling target).
 HEALTH_TOKEN=""
 if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
   bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
@@ -691,6 +703,8 @@ if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
     health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
   elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
     restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
+    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
   elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
     health_unknown "bot health reader unavailable or invalid"
   elif [ -z "$bot_json" ]; then
@@ -1287,6 +1301,8 @@ if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
   health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
 elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
+  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
 elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
   health_unknown "fleet health reader unavailable or invalid"
 elif [ "$fleet_code" -ge 400 ]; then

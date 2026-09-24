@@ -589,7 +589,8 @@ with status `2`, never restarts, and never changes the credential marker. It
 also covers a loopback read that could not start: a connect-stage
 `EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
 read, or a bound health reader that is missing or fails its digest check.
-Ordinary connection refusal is still restart evidence. A job that is not loaded
+Ordinary connection refusal is still restart evidence, and so is a target that
+accepts the connection but does not answer within the read deadline. A job that is not loaded
 is bootstrapped only on the restart path, and a successful bootstrap is not
 followed by a kickstart.
 `ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker

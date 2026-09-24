@@ -536,9 +536,16 @@ gates, and a successful bootstrap does not also kickstart the newly loaded job.
 A mixed cycle can restart the refused target while leaving the target that saw
 `EADDRNOTAVAIL` untouched.
 
-Review the final watchdog status and the per-target log lines together. Reader
-invocations have an eight-second process deadline; incomplete or malformed
-reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
+Review the final watchdog status and the per-target log lines together. The
+reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
+below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
+target that accepts the connection but never answers yields a typed transport
+failure and is restarted (`health endpoint unreachable` / `fleet console
+unreachable`), as `curl --max-time 8` did. A read killed at the deadline with no
+output (for example a trickling response) is also restart evidence, logged as
+`health read exceeded 8s`; a hang and a slow response are indistinguishable at
+that point, and the previous curl contract restarted both. Any other malformed
+or incomplete reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
 the watchdog against the new manifest digest. Keep the previous script and its
 matching release tree available for rollback; installing either alone leaves
 diagnostics unknown. Rendering does not install or activate any job.
