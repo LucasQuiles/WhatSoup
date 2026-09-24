@@ -137,7 +137,7 @@ function makeDeps(
 /** A runtime snapshot carrying the given degraded reasons and matching counters. */
 function ownershipSnapshot(
   degradedReasons: string[],
-  counts: { withoutOwner?: number; abandoned?: number } = {},
+  counts: { withoutOwner?: number; abandoned?: number; clearPending?: boolean } = {},
 ): { status: string; details: Record<string, unknown> } {
   return {
     status: degradedReasons.length > 0 ? 'degraded' : 'healthy',
@@ -149,6 +149,7 @@ function ownershipSnapshot(
       providerExecution: { pressureActive: false },
       perChatSessionsWithoutOwner: counts.withoutOwner ?? 0,
       perChatRespawnAbandoned: counts.abandoned ?? 0,
+      agentRespawnFailedClearPending: counts.clearPending ?? false,
     },
   };
 }
@@ -198,11 +199,15 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     };
   }
 
-  it('neither ownership reason is turn-provable — the premise the latch defect rests on', () => {
+  it('none of the directly re-probed recovery reasons is turn-provable', () => {
     // Named as literals rather than imported from the fix, so this file asserts
     // behaviour and a pre-existing constant and can therefore run unchanged
     // against the tree before the fix — which is what makes its red meaningful.
-    for (const reason of ['runtime.per_chat_session_without_owner', 'runtime.per_chat_respawn_abandoned']) {
+    for (const reason of [
+      'runtime.per_chat_session_without_owner',
+      'runtime.per_chat_respawn_abandoned',
+      'runtime.agent_respawn_failed_clear_pending',
+    ]) {
       expect(TURN_PROVABLE_STATUS_REASONS.has(reason), `${reason} must not be turn-provable`).toBe(false);
     }
   });
@@ -214,6 +219,7 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     // reason that does NOT self-clear on repair would be a real silence hole.
     // Test-owned literals, compared for equality rather than containment.
     expect([...DIRECTLY_REPROBED_STATUS_REASONS].sort()).toEqual([
+      'runtime.agent_respawn_failed_clear_pending',
       'runtime.per_chat_respawn_abandoned',
       'runtime.per_chat_session_without_owner',
     ]);
@@ -244,6 +250,19 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     expect(degraded.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
   });
 
+  it('a pending respawn-alert clear names its own cause and content-free field', async () => {
+    const instance = await openInstance(
+      'cause-respawn-clear-pending',
+      ownershipSnapshot(['agent_respawn_failed_clear_pending'], { clearPending: true }),
+    );
+    const degraded = await instance.poll();
+    expect(degraded.status).toBe('degraded');
+    expect(degraded.status_reasons).toContain('runtime.agent_respawn_failed_clear_pending');
+    expect(degraded.degradation_causes).toContain('agent_respawn_failed_clear_pending');
+    expect(degraded.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
+    expect(degraded.runtime.agent.agentRespawnFailedClearPending).toBe(true);
+  });
+
   it('health does not latch an unowned-session reason once the runtime reports it clear', async () => {
     // Scope, stated honestly: this drives health.ts across two polls with the
     // runtime's snapshot supplied by the fixture, so it pins the LATCH
@@ -271,6 +290,20 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     expect(repaired.status_reasons).not.toContain('degradation_silence_unproven');
   });
 
+  it('health does not latch a pending-clear reason once the runtime reports an accepted clear', async () => {
+    const instance = await openInstance(
+      'latch-respawn-clear-pending',
+      ownershipSnapshot(['agent_respawn_failed_clear_pending'], { clearPending: true }),
+    );
+    expect((await instance.poll()).status).toBe('degraded');
+
+    instance.setSnapshot(ownershipSnapshot([]));
+    const repaired = await instance.poll();
+    expect(repaired.status).toBe('healthy');
+    expect(repaired.status_reasons).not.toContain('degradation_silence_unproven');
+    expect(repaired.status_reasons).not.toContain('runtime.agent_respawn_failed_clear_pending');
+  });
+
   it('a silence-prone reason alongside a re-probed one still arms, so the fix removes no protection', async () => {
     // Only turn_queue_halted is silence-prone; the ownership reason is re-probed
     // every evaluation. Filtering the re-probed reason out of the latched set
@@ -296,11 +329,15 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
   it('the ownership gauges reach the authenticated wire as counts, carrying no chat identity', async () => {
     const instance = await openInstance(
       'latch-gauges',
-      ownershipSnapshot(['per_chat_session_without_owner', 'per_chat_respawn_abandoned'], { withoutOwner: 2, abandoned: 3 }),
+      ownershipSnapshot(
+        ['per_chat_session_without_owner', 'per_chat_respawn_abandoned', 'agent_respawn_failed_clear_pending'],
+        { withoutOwner: 2, abandoned: 3, clearPending: true },
+      ),
     );
     const json = await instance.poll();
     expect(json.runtime.agent.perChatSessionsWithoutOwner).toBe(2);
     expect(json.runtime.agent.perChatRespawnAbandoned).toBe(3);
+    expect(json.runtime.agent.agentRespawnFailedClearPending).toBe(true);
     // Counts only. The whole payload must carry no conversation-key shape.
     const body = JSON.stringify(json);
     expect(body).not.toMatch(/\d{9,}/);

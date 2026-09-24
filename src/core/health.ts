@@ -271,7 +271,7 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  * SETTLED by the repair that fixes it, so the reason disappears on its own once
  * the system is healthy again. Being a runtime reason is not sufficient.
  *
- * The two members satisfy it by different mechanisms, and the distinction is
+ * The members satisfy it by different mechanisms, and the distinction is
  * the point:
  *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
  *     every poll (the runtime walks its session map), so a still-broken map
@@ -283,13 +283,18 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     new owned session is indexed for it, and it also expires on age.
  *     Admitted here because it self-clears on repair, not because it is
  *     re-probed.
+ *   - `runtime.agent_respawn_failed_clear_pending` is a retry obligation whose
+ *     runtime reason disappears only after the shared alert clear is accepted.
+ *     Health itself re-attempts that clear while no abandonment or exhaustion
+ *     owns the source, so an accepted retry is immediately re-probed as clean.
  *
- * Why either needs it: neither is in TURN_PROVABLE_STATUS_REASONS above — a turn
+ * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
  * in an unrelated chat proves nothing about a per-chat ownership map — so a
  * latch carrying one could never be released by the only release channel that
  * exists, and the instance would report degraded until process restart even
  * after the runtime had repaired itself and its own snapshot read healthy. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',
 ]);
@@ -492,6 +497,7 @@ export type HealthDegradationCause =
   // and a mismatch never hides behind "unknown").
   | 'credential_identity_mismatch'
   | 'credential_identity_unverifiable'
+  | 'agent_respawn_failed_clear_pending'
   // per-chat dispatch-ownership conditions: named and deliberate, so they do not
   // belong in the unclassified fall-through below.
   | 'per_chat_session_without_owner'
@@ -593,6 +599,9 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   // verdict (runtime.agent.accountIdentity.status).
   credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
   credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
+  agent_respawn_failed_clear_pending: {
+    reasonTwins: ['runtime.agent_respawn_failed_clear_pending'],
+  },
   // per-chat dispatch ownership: both conditions are named, deliberate and
   // directly re-probed, so each carries its own cause rather than landing in the
   // fall-through where an operator cannot separate it from a genuine unknown.
@@ -2707,6 +2716,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       }
       if (positiveRuntimeCounter('perChatRespawnAbandoned')) {
         addDegradationCause('per_chat_respawn_abandoned');
+      }
+      if (runtimeDetails?.['agentRespawnFailedClearPending'] === true) {
+        addDegradationCause('agent_respawn_failed_clear_pending');
       }
       // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
       // cause registry: a newly registered runtime-scoped cause classifies

@@ -127,6 +127,7 @@
         "delivery_identity_debt",
         "provider_execution_pressure",
         "agent_outbound_queue_poisoned",
+        "agent_respawn_failed_clear_pending",
         "credential_identity_mismatch",
         "credential_identity_unverifiable",
         "agent_runtime_degraded_unclassified",
@@ -973,6 +974,14 @@
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
+      "agent_respawn_failed_clear_pending": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "the content-free obligation persists through a refused or throwing clear and retires only after the shared agent_respawn_failed clear is accepted while no chat is exhausted or abandoned",
+        "requiresCorroborationBeforePaging": false
+      },
       "credential_identity_mismatch": {
         "family": "credential_identity",
         "impactTier": "page",
@@ -1090,7 +1099,7 @@
         "impactTier": "page",
         "notification": "critical",
         "rootOwner": "agent_runtime_supervisor",
-        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it settles as soon as the chat serves again by either route \u2014 the next inbound message respawns an inactive session in place, or is served by a session that never went inactive \u2014 or when a new owned session is indexed for it, or when the record ages out; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned, including on the age-out path",
+        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it settles as soon as the chat serves again by either route \u2014 the next inbound message respawns an inactive session in place, or is served by a session that never went inactive \u2014 or when a new owned session is indexed for it, or when the record ages out; the shared agent_respawn_failed source is cleared only once no chat is either exhausted or abandoned, and a refused or throwing clear is retained and retried as content-free clear debt",
         "requiresCorroborationBeforePaging": false
       }
     }

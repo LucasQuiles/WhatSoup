@@ -262,7 +262,9 @@ import {
   type PollVote,
 } from '../../../src/runtimes/agent/runtime.ts';
 import {
+  markOwnedSystemTurn,
   makeRuntimeTurnContext,
+  pendingSystemResults,
   publishSingletonTestOwner,
   sendAndDrain,
 } from './lib/runtime-mock-scaffold.ts';
@@ -462,6 +464,8 @@ function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
 describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockClearAlertSource.mockReset();
+    mockClearAlertSource.mockReturnValue(true);
     vi.useFakeTimers();
     capturedOnEventRef.current = null;
     capturedOnCrashRef.current = null;
@@ -1302,12 +1306,34 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       perChatInboundSeqQueue: Map<string, number[]>;
       ownedSessionManagers: Map<string, unknown>;
       abandonedRespawnOwners: Map<string, number>;
-      exhaustedRespawnOwners: Set<string>;
+      exhaustedRespawnOwners: Map<string, symbol>;
+      agentRespawnFailedClearPending: boolean;
+      perChatExecActorQueue: Map<string, Array<{ actorJid: string | undefined }>>;
       sessionOwnership: {
         get(mapKey: string): { managerId: string; state: string } | undefined;
         discardIfOwned(mapKey: string, managerId: string): boolean;
       };
       perChatTurnQueues: Map<string, { idle(): Promise<void> }>;
+      sendTurnPerChat(
+        chatJid: string,
+        text: string,
+        mapKey?: string,
+        actorJid?: string,
+        runtimeContext?: undefined,
+        scopeRef?: undefined,
+        systemTurnLease?: undefined,
+        excludeJobId?: undefined,
+        requestedDeliveryKind?: undefined,
+        targetDispatchAllowed?: () => boolean,
+      ): Promise<void>;
+      sendTurnToSession(
+        session: typeof mockSession,
+        chatJid: string,
+        text: string,
+        mapKey?: string,
+        actorJid?: string,
+        beforeUserSend?: () => void,
+      ): Promise<void>;
     };
     const ownedView = (s: PollRuntimeState): OwnedSessionView => s as unknown as OwnedSessionView;
 
@@ -1452,7 +1478,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
      * first one red. Each named test below asserts on one observation and
      * carries its own independent red.
      */
-    async function abandonRespawnAndObserve(): Promise<{
+    async function abandonRespawnAndObserve(mapKey: string = dmJid): Promise<{
       mapKey: string;
       managerId: string;
       state: PollRuntimeState;
@@ -1470,7 +1496,6 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as PollRuntimeState;
-      const mapKey = dmJid;
       seedPerChatSession(state, mapKey);
       // Captured during arrange: reading it after the act throws on a tree that
       // releases the session, which would mask each case's own assertion.
@@ -1613,10 +1638,11 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     });
 
     it('does NOT report an abandoned respawn for a chat that merely exhausted its crash budget', async () => {
-      // Negative control for the dedicated set. The crash-exhaustion path writes
-      // `exhaustedRespawnOwners`, and those chats already alert under
-      // agent_respawn_failed with their own operator surface. A counter reading
-      // that set instead of the abandonment set would degrade health for every
+      // Negative control for the dedicated owner collection. The
+      // crash-exhaustion path marks `exhaustedRespawnOwners`, and those chats
+      // already alert under agent_respawn_failed with their own operator
+      // surface. A counter reading that owner collection instead of the
+      // abandonment owner collection would degrade health for every
       // crash-exhausted chat too — a behaviour change this item's scope forbids.
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -1626,7 +1652,8 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       seedPerChatSession(state, mapKey);
 
       // Crash-exhausted, and NOT abandoned.
-      (state as unknown as { exhaustedRespawnOwners: Set<string> }).exhaustedRespawnOwners.add(mapKey);
+      (state as unknown as { exhaustedRespawnOwners: Map<string, symbol> })
+        .exhaustedRespawnOwners.set(mapKey, Symbol());
 
       const details = runtime.getHealthSnapshot().details as Record<string, unknown>;
       expect((details['degradedReasons'] as string[] | undefined) ?? [])
@@ -1666,7 +1693,163 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
 
-    it('shape (b): a session that never went inactive settles on the served turn', async () => {
+    it('retains an active-session abandonment when cancellation wins at the second dispatch barrier', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      mockClearAlertSource.mockClear();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-cancelled', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+
+      let dispatchChecks = 0;
+      let dispatchCancelled = false;
+      let blockerLease!: SystemTurnLeaseToken;
+      let armSecondBarrier!: () => void;
+      const secondBarrierArmed = new Promise<void>((resolve) => { armSecondBarrier = resolve; });
+      const dispatchAllowed = (): boolean => {
+        dispatchChecks += 1;
+        if (dispatchChecks === 2) {
+          blockerLease = markOwnedSystemTurn(
+            observed.runtime,
+            mockSession,
+            observed.mapKey,
+            'fresh_session_context',
+            dmJid,
+          );
+          armSecondBarrier();
+        }
+        return !dispatchCancelled;
+      };
+
+      const dispatch = ownedView(state).sendTurnPerChat(
+        dmJid,
+        'cancel before the provider boundary',
+        observed.mapKey,
+        dmJid,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        dispatchAllowed,
+      );
+      await secondBarrierArmed;
+      dispatchCancelled = true;
+      const blockerReleased = pendingSystemResults(observed.runtime).cancel(blockerLease);
+      await dispatch;
+
+      const health = observed.runtime.getHealthSnapshot();
+      const details = health.details as Record<string, unknown>;
+      expect.soft(dispatchChecks, 'dispatch rechecked after the second barrier').toBe(3);
+      expect.soft(blockerReleased, 'the real blocking lease was released').toBe(true);
+      expect.soft(mockSession.sendTurnAtProviderBoundary, 'exact provider boundary was never reached').not.toHaveBeenCalled();
+      expect.soft(mockSession.sendTurn, 'provider send was never reached').not.toHaveBeenCalled();
+      expect.soft(ownedView(state).abandonedRespawnOwners.has(observed.mapKey), 'abandonment retained').toBe(true);
+      expect.soft(details['perChatRespawnAbandoned'], 'abandonment remains in health').toBe(1);
+      expect.soft((details['degradedReasons'] as string[] | undefined) ?? [], 'health remains degraded')
+        .toContain('per_chat_respawn_abandoned');
+      expect.soft(mockClearAlertSource, 'cancellation cannot clear the abandonment alert')
+        .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('retains an active-session abandonment when the exact session refuses before onReady', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      mockClearAlertSource.mockClear();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-refused', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      const beforeUserSend = vi.fn();
+      const refusal = new Error('provider refused before onReady');
+      mockSession.sendTurnAtProviderBoundary.mockRejectedValueOnce(refusal);
+
+      const dispatch = ownedView(state).sendTurnToSession(
+        mockSession,
+        dmJid,
+        'refuse before the provider boundary',
+        observed.mapKey,
+        dmJid,
+        beforeUserSend,
+      );
+
+      await expect(dispatch).rejects.toBe(refusal);
+      expect.soft(mockSession.sendTurnAtProviderBoundary, 'exact provider boundary attempted once').toHaveBeenCalledTimes(1);
+      expect.soft(beforeUserSend, 'provider-ready bookkeeping never ran').not.toHaveBeenCalled();
+      expect.soft(mockSession.sendTurn, 'legacy provider send never ran').not.toHaveBeenCalled();
+      expect.soft(ownedView(state).abandonedRespawnOwners.has(observed.mapKey), 'abandonment retained').toBe(true);
+      expect.soft(liveAbandonedCount(observed.runtime), 'abandonment remains in health').toBe(1);
+      expect.soft(mockClearAlertSource, 'pre-boundary refusal cannot clear the abandonment alert')
+        .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('retains an active-session abandonment when beforeUserSend throws', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      mockClearAlertSource.mockClear();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-bookkeeping-refused', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      const refusal = new Error('beforeUserSend refused');
+      const beforeUserSend = vi.fn(() => { throw refusal; });
+
+      const dispatch = ownedView(state).sendTurnToSession(
+        mockSession,
+        dmJid,
+        'refuse during provider-ready bookkeeping',
+        observed.mapKey,
+        dmJid,
+        beforeUserSend,
+      );
+
+      await expect(dispatch).rejects.toBe(refusal);
+      expect.soft(mockSession.sendTurnAtProviderBoundary, 'exact provider boundary attempted once').toHaveBeenCalledTimes(1);
+      expect.soft(beforeUserSend, 'provider-ready bookkeeping ran once').toHaveBeenCalledTimes(1);
+      expect.soft(mockSession.sendTurn, 'provider send never ran').not.toHaveBeenCalled();
+      expect.soft(ownedView(state).abandonedRespawnOwners.has(observed.mapKey), 'abandonment retained').toBe(true);
+      expect.soft(liveAbandonedCount(observed.runtime), 'abandonment remains in health').toBe(1);
+      expect.soft(mockClearAlertSource, 'failed provider-ready bookkeeping cannot clear the abandonment alert')
+        .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('settles only after beforeUserSend, actor publication, and typing', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const state = observed.state;
+      const view = ownedView(state);
+      mockClearAlertSource.mockClear();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-ordering', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+
+      let abandonedDuringBeforeUserSend: unknown;
+      let abandonedDuringTyping: unknown;
+      let actorDuringTyping: string | undefined;
+      mockQueue.indicateTyping.mockImplementationOnce(() => {
+        abandonedDuringTyping = liveAbandonedCount(observed.runtime);
+        const actors = view.perChatExecActorQueue.get(observed.mapKey) ?? [];
+        actorDuringTyping = actors[actors.length - 1]?.actorJid;
+      });
+
+      await view.sendTurnToSession(
+        mockSession,
+        dmJid,
+        'prove final callback ordering',
+        observed.mapKey,
+        dmJid,
+        () => { abandonedDuringBeforeUserSend = liveAbandonedCount(observed.runtime); },
+      );
+
+      expect.soft(abandonedDuringBeforeUserSend, 'beforeUserSend precedes settlement').toBe(1);
+      expect.soft(actorDuringTyping, 'actor publication precedes typing').toBe(dmJid);
+      expect.soft(abandonedDuringTyping, 'typing precedes settlement').toBe(1);
+      expect.soft(liveAbandonedCount(observed.runtime), 'settlement is the callback final operation').toBe(0);
+      expect.soft(mockClearAlertSource).toHaveBeenCalledTimes(1);
+    });
+
+    it('shape (b): a session that never went inactive settles only at the provider-ready boundary', async () => {
       // The abandon path fires when termination is not PROVED, and an active
       // session is itself one of the blocking conjuncts — so a chat can be
       // abandoned while it keeps serving. That turn skips the respawn block
@@ -1684,15 +1867,171 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         active: true, pid: 4242, providerTerminated: false,
         sessionId: 'sess-serving', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
       }));
+      let abandonedBeforeReady: unknown;
+      let abandonedAfterReady: unknown;
+      mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (text: string, onReady?: () => void) => {
+        abandonedBeforeReady = liveAbandonedCount(observed.runtime);
+        onReady?.();
+        abandonedAfterReady = liveAbandonedCount(observed.runtime);
+        await mockSession.sendTurn(text);
+      });
 
       await sendAndDrain(observed.runtime, makeMsg({ messageId: 'msg-recover-b' }));
       await vi.advanceTimersByTimeAsync(0);
       await ownedView(state).perChatTurnQueues.get(observed.mapKey)?.idle();
 
-      // The discriminator: no respawn happened, and it still settled.
-      expect(mockSession.spawnSession, 'no respawn on this shape').not.toHaveBeenCalled();
-      expect(liveAbandonedCount(observed.runtime), 'settled by the served turn').toBe(0);
-      expect(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      expect.soft(abandonedBeforeReady, 'still abandoned immediately before onReady').toBe(1);
+      expect.soft(abandonedAfterReady, 'settled inside onReady').toBe(0);
+      expect.soft(mockSession.sendTurnAtProviderBoundary, 'exact provider boundary reached once').toHaveBeenCalledTimes(1);
+      expect.soft(mockSession.sendTurn, 'provider send followed readiness').toHaveBeenCalledTimes(1);
+      expect.soft(mockSession.spawnSession, 'no respawn on this shape').not.toHaveBeenCalled();
+      expect.soft(liveAbandonedCount(observed.runtime), 'settled by the provider-ready boundary').toBe(0);
+      expect.soft(mockClearAlertSource, 'one exact abandonment clear')
+        .toHaveBeenCalledTimes(1);
+      expect.soft(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+    });
+
+    it('retries a refused clear on a later provider-ready boundary and never repeats an accepted clear', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const view = ownedView(observed.state);
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-clear-retry', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      mockClearAlertSource.mockReset();
+      mockClearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+      await view.sendTurnToSession(mockSession, dmJid, 'first recovered turn', observed.mapKey, dmJid);
+
+      expect.soft(view.abandonedRespawnOwners.has(observed.mapKey), 'service recovery retires abandonment').toBe(false);
+      expect.soft(view.agentRespawnFailedClearPending, 'refused clear stays retryable').toBe(true);
+      expect.soft(mockClearAlertSource, 'one refused clear').toHaveBeenCalledTimes(1);
+
+      await view.sendTurnToSession(mockSession, dmJid, 'second recovered turn', observed.mapKey, dmJid);
+
+      expect.soft(view.agentRespawnFailedClearPending, 'accepted clear retires the latch').toBe(false);
+      expect.soft(mockClearAlertSource, 'later provider boundary retries once').toHaveBeenCalledTimes(2);
+
+      await view.sendTurnToSession(mockSession, dmJid, 'third recovered turn', observed.mapKey, dmJid);
+      expect.soft(mockClearAlertSource, 'accepted clear is never duplicated').toHaveBeenCalledTimes(2);
+    });
+
+    it('retains a thrown clear as pending and retries it on a later provider-ready boundary', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const view = ownedView(observed.state);
+      const clearFailure = new Error('clear transport threw');
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-clear-throw', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      mockClearAlertSource.mockReset();
+      mockClearAlertSource
+        .mockImplementationOnce(() => { throw clearFailure; })
+        .mockReturnValueOnce(true);
+
+      await expect(view.sendTurnToSession(
+        mockSession, dmJid, 'recovered turn with throwing clear', observed.mapKey, dmJid,
+      )).resolves.toBeUndefined();
+      expect.soft(view.agentRespawnFailedClearPending, 'throwing clear stays retryable').toBe(true);
+      expect.soft(mockSession.sendTurn, 'alert bookkeeping cannot suppress the provider send').toHaveBeenCalled();
+
+      await view.sendTurnToSession(mockSession, dmJid, 'retry after throwing clear', observed.mapKey, dmJid);
+      expect.soft(view.agentRespawnFailedClearPending, 'later accepted clear retires the latch').toBe(false);
+      expect.soft(mockClearAlertSource).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a pending clear blocked by a new abandonment until the new owner settles', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const view = ownedView(observed.state);
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-new-owner', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      mockClearAlertSource.mockReset();
+      mockClearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+      await view.sendTurnToSession(mockSession, dmJid, 'establish pending clear', observed.mapKey, dmJid);
+      const otherKey = 'new-abandonment-owner';
+      view.abandonedRespawnOwners.set(otherKey, Date.now());
+
+      const blocked = observed.runtime.getHealthSnapshot();
+      const blockedDetails = blocked.details as Record<string, unknown>;
+      expect.soft(mockClearAlertSource, 'new owner blocks the pending retry').toHaveBeenCalledTimes(1);
+      expect.soft(blockedDetails['perChatRespawnAbandoned'], 'new owner is the only abandonment').toBe(1);
+      expect.soft(blockedDetails['agentRespawnFailedClearPending'], 'clear debt remains visible').toBe(true);
+      expect.soft((blockedDetails['degradedReasons'] as string[] | undefined) ?? [])
+        .toEqual(expect.arrayContaining(['per_chat_respawn_abandoned', 'agent_respawn_failed_clear_pending']));
+
+      const otherSession = { getStatus: () => ({ active: false }), bindGenerationOwnership: vi.fn() };
+      setOwnedTestSessionWith(observed.runtime, otherKey, otherSession);
+
+      expect.soft(view.abandonedRespawnOwners.size, 'new owner retired').toBe(0);
+      expect.soft(view.agentRespawnFailedClearPending, 'accepted shared clear retires the debt').toBe(false);
+      expect.soft(mockClearAlertSource, 'one refused and one accepted clear').toHaveBeenCalledTimes(2);
+    });
+
+    it('retires a recovered abandonment without clearing while an exhausted owner holds the source', async () => {
+      const observed = await abandonRespawnAndObserve();
+      const view = ownedView(observed.state);
+      view.exhaustedRespawnOwners.set('exhausted-source-owner', Symbol());
+      mockClearAlertSource.mockClear();
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-exhausted-gate', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+
+      await view.sendTurnToSession(mockSession, dmJid, 'recover under exhausted owner', observed.mapKey, dmJid);
+
+      const health = observed.runtime.getHealthSnapshot();
+      const details = health.details as Record<string, unknown>;
+      expect.soft(view.abandonedRespawnOwners.size, 'recovered abandonment retires immediately').toBe(0);
+      expect.soft(details['perChatRespawnAbandoned'], 'service health no longer claims abandonment').toBe(0);
+      expect.soft(details['agentRespawnFailedClearPending'], 'no clear is due while another owner holds the source').toBe(false);
+      expect.soft(mockClearAlertSource, 'exhausted owner prevents a shared-source clear').not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['LID timestamp is newer', -1_000, -2_000],
+      ['canonical timestamp is newer', -2_000, -1_000],
+    ])('atomically rekeys an abandonment with latest-wins collision semantics when %s', async (
+      _caseName,
+      lidOffset,
+      canonicalOffset,
+    ) => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const view = ownedView(state);
+      const conversationKey = '15550001';
+      const lidKey = `${conversationKey}@lid`;
+      const canonical = dmJid;
+      seedPerChatSession(state, lidKey);
+      const now = Date.now();
+      const lidTimestamp = now + lidOffset;
+      const canonicalTimestamp = now + canonicalOffset;
+      view.abandonedRespawnOwners.set(lidKey, lidTimestamp);
+      view.abandonedRespawnOwners.set(canonical, canonicalTimestamp);
+      mockClearAlertSource.mockClear();
+
+      runtime.handleJidAliasChanged(conversationKey, canonical, false);
+
+      expect.soft(state.chatSessions.has(lidKey), 'session left the retired LID key').toBe(false);
+      expect.soft(state.chatSessions.get(canonical), 'session moved to the canonical key').toBe(mockSession);
+      expect.soft(view.abandonedRespawnOwners.has(lidKey), 'abandonment left the retired LID key').toBe(false);
+      expect.soft(view.abandonedRespawnOwners.get(canonical), 'latest timestamp controls retention')
+        .toBe(Math.max(lidTimestamp, canonicalTimestamp));
+      expect.soft(liveAbandonedCount(runtime), 'the collision collapses to one owner').toBe(1);
+
+      mockSession.getStatus.mockReturnValue({
+        active: true, pid: 4242, providerTerminated: false,
+        sessionId: 'sess-rekeyed', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null,
+      });
+      await view.sendTurnToSession(mockSession, canonical, 'serve after rekey', canonical, canonical);
+
+      expect.soft(view.abandonedRespawnOwners.size, 'canonical boundary retires the migrated owner').toBe(0);
+      expect.soft(view.agentRespawnFailedClearPending, 'accepted clear leaves no debt').toBe(false);
+      expect.soft(mockClearAlertSource, 'one canonical recovery clears once').toHaveBeenCalledTimes(1);
     });
 
     it('does not clear the shared alert while another chat is still abandoned', async () => {
@@ -1715,6 +2054,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       ownedView(state).setOwnedPerChatSession(otherKey, otherSession);
 
       expect(liveAbandonedCount(observed.runtime), 'chat A is still abandoned').toBe(1);
+      expect(ownedView(state).agentRespawnFailedClearPending, 'no shared clear is due yet').toBe(false);
       expect(mockClearAlertSource, 'must not retract a page that is still true')
         .not.toHaveBeenCalledWith('test', 'agent_respawn_failed');
     });
@@ -1794,6 +2134,36 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       // A later poll with nothing newly expired must not write again.
       liveAbandonedCount(observed.runtime);
       expect(clears(), 'one expiry, one durable write').toBe(1);
+    });
+
+    it('keeps a refused lazy-expiry clear visible, retries it, and retires it exactly once', async () => {
+      const observed = await abandonRespawnAndObserve();
+      mockClearAlertSource.mockReset();
+      mockClearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+      await vi.advanceTimersByTimeAsync(61 * 60_000);
+
+      const refused = observed.runtime.getHealthSnapshot();
+      const refusedDetails = refused.details as Record<string, unknown>;
+      expect.soft(refusedDetails['perChatRespawnAbandoned'], 'expired service incident leaves the gauge').toBe(0);
+      expect.soft(refusedDetails['agentRespawnFailedClearPending'], 'refused clear is independently visible').toBe(true);
+      expect.soft((refusedDetails['degradedReasons'] as string[] | undefined) ?? [])
+        .toContain('agent_respawn_failed_clear_pending');
+      expect.soft((refusedDetails['degradedReasons'] as string[] | undefined) ?? [])
+        .not.toContain('per_chat_respawn_abandoned');
+      expect.soft(refused.status, 'clear debt keeps health degraded').toBe('degraded');
+      expect.soft(mockClearAlertSource, 'expiry attempted one clear').toHaveBeenCalledTimes(1);
+
+      const accepted = observed.runtime.getHealthSnapshot();
+      const acceptedDetails = accepted.details as Record<string, unknown>;
+      expect.soft(acceptedDetails['agentRespawnFailedClearPending'], 'accepted retry retires the debt').toBe(false);
+      expect.soft((acceptedDetails['degradedReasons'] as string[] | undefined) ?? [])
+        .not.toContain('agent_respawn_failed_clear_pending');
+      expect.soft(accepted.status, 'expired incident and accepted clear restore healthy state').toBe('healthy');
+      expect.soft(mockClearAlertSource, 'false then true').toHaveBeenCalledTimes(2);
+
+      observed.runtime.getHealthSnapshot();
+      expect.soft(mockClearAlertSource, 'accepted lazy clear is never duplicated').toHaveBeenCalledTimes(2);
     });
 
     it('a second abandonment inside the window is not aged out by the first', async () => {
@@ -2100,6 +2470,114 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       });
     });
 
+    it('successful respawn that retires an exhausted owner retains a refused clear for health retry without double reconciliation', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const view = ownedView(state);
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      view.exhaustedRespawnOwners.set(mapKey, Symbol());
+      mockClearAlertSource.mockReset();
+      mockClearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+      mockSession.getStatus
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-exhausted-recovery', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
+
+      let admit!: () => void;
+      const admitted = new Promise<void>((resolve) => { admit = resolve; });
+      mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (text: string, onReady?: () => void) => {
+        await admitted;
+        onReady?.();
+        await mockSession.sendTurn(text);
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-exhausted-recovery',
+        dbRowId: 13,
+      });
+      await vi.advanceTimersByTimeAsync(62_000);
+
+      expect.soft(mockSession.sendTurnAtProviderBoundary).toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+        expect.any(Function),
+      );
+      expect.soft(view.exhaustedRespawnOwners.has(mapKey), 'provider admission still owns retirement').toBe(true);
+      expect.soft(mockClearAlertSource, 'nothing clears before provider readiness').not.toHaveBeenCalled();
+
+      admit();
+      await vi.waitFor(() => {
+        expect(mockClearAlertSource, 'provider readiness attempts exactly one clear').toHaveBeenCalledTimes(1);
+      });
+      expect.soft(view.exhaustedRespawnOwners.has(mapKey), 'provider readiness retires the exhausted owner').toBe(false);
+      expect.soft(view.agentRespawnFailedClearPending, 'refused clear remains durable debt').toBe(true);
+
+      const retryHealth = runtime.getHealthSnapshot();
+      expect.soft(mockClearAlertSource, 'health retries once and accepts').toHaveBeenCalledTimes(2);
+      expect.soft(view.agentRespawnFailedClearPending, 'accepted health retry retires the debt').toBe(false);
+      expect.soft((retryHealth.details as Record<string, unknown>)['agentRespawnFailedClearPending'])
+        .toBe(false);
+
+      runtime.getHealthSnapshot();
+      expect.soft(mockClearAlertSource, 'accepted clear is never reconciled again').toHaveBeenCalledTimes(2);
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
+      expect.soft(mockClearAlertSource, 'provider completion cannot duplicate the accepted clear').toHaveBeenCalledTimes(2);
+    });
+
+    it('successful respawn requests one recovery clear when no exhausted owner was recorded', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as PollRuntimeState;
+      const view = ownedView(state);
+      const mapKey = dmJid;
+      seedPerChatSession(state, mapKey);
+      expect.soft(view.exhaustedRespawnOwners.has(mapKey), 'no exhausted owner arranged').toBe(false);
+      expect.soft(view.abandonedRespawnOwners.has(mapKey), 'no abandoned owner arranged').toBe(false);
+      mockSession.getStatus
+        .mockReturnValueOnce({ active: false, pid: null, providerTerminated: true, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null })
+        .mockReturnValue({ active: true, pid: 321, providerTerminated: false, sessionId: 'sess-ownerless-recovery', startedAt: '2026-06-16T00:00:00Z', messageCount: 1, lastMessageAt: null });
+
+      let admit!: () => void;
+      const admitted = new Promise<void>((resolve) => { admit = resolve; });
+      mockSession.sendTurnAtProviderBoundary.mockImplementationOnce(async (text: string, onReady?: () => void) => {
+        await admitted;
+        onReady?.();
+        await mockSession.sendTurn(text);
+      });
+
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1,
+        signal: null,
+        sessionId: 'sess-ownerless-recovery',
+        dbRowId: 14,
+      });
+      await vi.advanceTimersByTimeAsync(62_000);
+
+      expect.soft(mockSession.sendTurnAtProviderBoundary).toHaveBeenCalledWith(
+        expect.stringContaining('session resumed after crash'),
+        expect.any(Function),
+      );
+      expect.soft(mockClearAlertSource, 'unconditional recovery clear waits for readiness').not.toHaveBeenCalled();
+
+      admit();
+      await vi.waitFor(() => {
+        expect(mockClearAlertSource, 'ownerless successful recovery still clears once').toHaveBeenCalledTimes(1);
+      });
+      expect.soft(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+      expect.soft(view.agentRespawnFailedClearPending, 'accepted ownerless clear leaves no debt').toBe(false);
+
+      runtime.getHealthSnapshot();
+      expect.soft(mockClearAlertSource, 'later health cannot repeat the unconditional clear').toHaveBeenCalledTimes(1);
+      admitPendingSystemResult(state, mapKey, 'respawn_continuation');
+      expect.soft(mockClearAlertSource, 'provider completion cannot repeat the unconditional clear').toHaveBeenCalledTimes(1);
+    });
+
     it('injects missed messages before the continuation turn when any arrived during the crash window (~7447-7449)', async () => {
       const db = makeDb();
       const { messenger } = makeMessenger();
@@ -2227,7 +2705,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
     };
     type CrashBudgetState = PollRuntimeState & {
       getCrashCount: (key: string) => number;
-      exhaustedRespawnOwners: Set<string>;
+      exhaustedRespawnOwners: Map<string, symbol>;
       sessionOwnership: OwnershipView;
     };
 
@@ -2386,6 +2864,146 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         expect.stringContaining('respawn exhausted'),
         expect.stringContaining('Last exit'),
       );
+    });
+  });
+
+  // ── crash-exhaustion owner retirement (#3052 successor) ─────────────────────
+  //
+  // Each exhaustion episode owns exactly one retention timer, and only that
+  // episode's timer may retire it. Retirement is a shared-alert clear
+  // obligation: an accepted clear retires it once, a refused clear stays
+  // visible as `agentRespawnFailedClearPending` until a health poll retries it.
+  // Kept here rather than in runtime.test.ts, which sits at its file-size
+  // ceiling.
+  describe('exhausted respawn owner retirement', () => {
+    const HOUR_MS = 3_600_000;
+    type ExhaustionState = PollRuntimeState & {
+      crashes: { record: (mapKey: string) => number };
+      exhaustedRespawnOwners: Map<string, symbol>;
+      agentRespawnFailedClearPending: boolean;
+    };
+
+    function exhaust(runtime: AgentRuntime, state: ExhaustionState, mapKey: string, sessionId: string): void {
+      // Pre-charge the budget so this one crash crosses AUTO_RESPAWN_MAX_CRASHES
+      // without scheduling intermediate respawn timers.
+      state.crashes.record(mapKey);
+      state.crashes.record(mapKey);
+      state.crashes.record(mapKey);
+      state.handlePerChatCrash(mapKey, dmJid, {
+        ...currentCrashIdentity(runtime, mapKey),
+        exitCode: 1,
+        signal: null,
+        sessionId,
+        dbRowId: null,
+      });
+    }
+
+    function makeExhaustionRuntime(): { runtime: AgentRuntime; state: ExhaustionState } {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as ExhaustionState;
+      setOwnedTestSession(runtime, dmJid);
+      state.chatQueues.set(dmJid, mockQueue);
+      return { runtime, state };
+    }
+
+    it('keeps an exhausted owner through T-1ms, retires it at T, and clears exactly once', async () => {
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { runtime, state } = makeExhaustionRuntime();
+        const timerBaseline = vi.getTimerCount();
+
+        exhaust(runtime, state, dmJid, 'sess-exhaust-t');
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'owner starts retained').toBe(true);
+        expect.soft(vi.getTimerCount(), 'one retirement timer per mark').toBe(timerBaseline + 1);
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS - 1);
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'owner survives T-1ms').toBe(true);
+        expect.soft(vi.getTimerCount(), 'retirement timer remains armed through T-1ms').toBe(timerBaseline + 1);
+        expect.soft(mockClearAlertSource, 'no early clear').not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'owner retires at T').toBe(false);
+        expect.soft(vi.getTimerCount(), 'hour timer drains to baseline at T').toBe(timerBaseline);
+        expect.soft(mockClearAlertSource, 'expiry clears exactly once').toHaveBeenCalledTimes(1);
+        expect.soft(mockClearAlertSource).toHaveBeenCalledWith('test', 'agent_respawn_failed');
+        expect.soft(state.agentRespawnFailedClearPending, 'accepted clear leaves no debt').toBe(false);
+
+        runtime.getHealthSnapshot();
+        expect.soft(mockClearAlertSource, 'health never repeats an accepted clear').toHaveBeenCalledTimes(1);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+
+    it('does not let an older exhaustion timer retire a newer episode for the same chat', async () => {
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { runtime, state } = makeExhaustionRuntime();
+        const timerBaseline = vi.getTimerCount();
+
+        exhaust(runtime, state, dmJid, 'sess-old');
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'first episode retained').toBe(true);
+        expect.soft(vi.getTimerCount(), 'first mark owns exactly one hour timer').toBe(timerBaseline + 1);
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS / 2);
+        const newerSession = {
+          ...mockSession,
+          getStatus: vi.fn(() => ({
+            active: false, pid: null, providerTerminated: true,
+            sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null,
+          })),
+        };
+        setOwnedTestSessionWith(runtime, dmJid, newerSession);
+        state.chatQueues.set(dmJid, mockQueue);
+        exhaust(runtime, state, dmJid, 'sess-new');
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'new episode retained').toBe(true);
+        expect.soft(vi.getTimerCount(), 'new mark adds exactly one hour timer').toBe(timerBaseline + 2);
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS / 2);
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'old timer cannot retire the newer episode').toBe(true);
+        expect.soft(mockClearAlertSource, 'stale timer cannot clear the shared source').not.toHaveBeenCalled();
+        expect.soft(vi.getTimerCount(), 'only the newer hour timer remains').toBe(timerBaseline + 1);
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS / 2);
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'new episode retires on its own timer').toBe(false);
+        expect.soft(mockClearAlertSource, 'current episode clears exactly once').toHaveBeenCalledTimes(1);
+        expect.soft(vi.getTimerCount(), 'all hour timers drain to baseline').toBe(timerBaseline);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+
+    it('keeps a refused exhaustion-expiry clear pending, retries it on health, and never repeats an accepted clear', async () => {
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { runtime, state } = makeExhaustionRuntime();
+        mockClearAlertSource.mockReset();
+        mockClearAlertSource.mockReturnValueOnce(false).mockReturnValueOnce(true);
+        const timerBaseline = vi.getTimerCount();
+
+        exhaust(runtime, state, dmJid, 'sess-clear-debt');
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'owner starts retained').toBe(true);
+        expect.soft(vi.getTimerCount(), 'mark adds exactly one hour timer').toBe(timerBaseline + 1);
+
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+        expect.soft(state.exhaustedRespawnOwners.has(dmJid), 'expiry retires the owner').toBe(false);
+        expect.soft(mockClearAlertSource, 'expiry attempts the clear once').toHaveBeenCalledTimes(1);
+        expect.soft(state.agentRespawnFailedClearPending, 'refused clear stays pending').toBe(true);
+        expect.soft(vi.getTimerCount(), 'hour timer drains to baseline at expiry').toBe(timerBaseline);
+
+        const pendingHealth = runtime.getHealthSnapshot();
+        expect.soft(mockClearAlertSource, 'health retries the pending clear once').toHaveBeenCalledTimes(2);
+        expect.soft(state.agentRespawnFailedClearPending, 'accepted retry retires the debt').toBe(false);
+        expect.soft((pendingHealth.details as Record<string, unknown>)['agentRespawnFailedClearPending'])
+          .toBe(false);
+
+        runtime.getHealthSnapshot();
+        expect.soft(mockClearAlertSource, 'accepted clear is never repeated').toHaveBeenCalledTimes(2);
+      } finally {
+        randomSpy.mockRestore();
+      }
     });
   });
 });
