@@ -1606,8 +1606,10 @@ log line proves it either:
   notification was discarded before download: a spoof, or a library regression like Baileys
   7.0.0-rc12's.
 - `history sync notifications received but no history batch arrived` means eligible notifications
-  were stored but never processed within five minutes. FULL notifications are skipped by policy
-  and never raise this.
+  were stored and no history batch at all arrived within five minutes afterwards. It is a liveness
+  check: Baileys can merge several notifications' history into one batch, so a batch clears every
+  pending notification and its absence of warnings never proves completeness. FULL notifications
+  are skipped by policy and never raise this.
 
 Prove recovery per message instead. Take the message IDs you expect from the primary phone or
 from an independent continuity manifest, and check each one against a consistent snapshot of the

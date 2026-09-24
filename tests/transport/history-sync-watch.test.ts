@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { proto } from '../../node_modules/@whiskeysockets/baileys/WAProto/index.js';
+import { makeEventBuffer } from '../../node_modules/@whiskeysockets/baileys/lib/Utils/event-buffer.js';
 import {
   HistorySyncWatch,
   HISTORY_SYNC_NOTIFICATION_TYPE,
@@ -82,16 +83,28 @@ describe('HistorySyncWatch', () => {
     );
   });
 
-  it('stays quiet when every eligible notification is followed by a batch', () => {
+  it('treats any batch as proof the history path is alive for everything pending', () => {
     const { log, clock, watch } = makeWatch();
     watch.observeUpsert(notification(RECENT, true));
     watch.observeUpsert(notification(RECENT, true));
     watch.observeBatch();
-    expect(clock.armed()).toBe(true);
-    watch.observeBatch();
 
     expect(clock.armed()).toBe(false);
+    clock.fire();
     expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('re-arms for notifications that arrive after a batch', () => {
+    const { log, clock, watch } = makeWatch();
+    watch.observeUpsert(notification(RECENT, true));
+    watch.observeBatch();
+    watch.observeUpsert(notification(ON_DEMAND, true));
+    clock.fire();
+
+    expect(log.warn).toHaveBeenCalledWith(
+      { pending: 1, syncTypes: [ON_DEMAND], timeoutMs: 300_000 },
+      'history sync notifications received but no history batch arrived',
+    );
   });
 
   it('counts FULL notifications as intentionally skipped, never as a loss', () => {
@@ -114,6 +127,46 @@ describe('HistorySyncWatch', () => {
     clock.fire();
 
     expect(clock.timers.clear).toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('accepts one coalesced batch from the real Baileys event buffer for several notifications', () => {
+    const { log, clock, watch } = makeWatch();
+    const ev = makeEventBuffer(
+      { warn() {}, debug() {}, trace() {}, info() {}, error() {} } as unknown as Parameters<typeof makeEventBuffer>[0],
+    );
+    let notifications = 0;
+    let batches = 0;
+    let rows = 0;
+    // Same order as ConnectionManager: upserts are observed before the history event.
+    ev.process((events: Record<string, any>) => {
+      for (const message of events['messages.upsert']?.messages ?? []) {
+        notifications++;
+        watch.observeUpsert(message);
+      }
+      if (events['messaging-history.set']) {
+        batches++;
+        rows += events['messaging-history.set'].messages.length;
+        watch.observeBatch();
+      }
+    });
+    ev.buffer();
+    for (const n of [1, 2]) {
+      ev.emit('messages.upsert', { type: 'notify', messages: [{
+        ...notification(RECENT, true),
+        key: { id: `WATCHNOTIF000${n}`, fromMe: true, remoteJid: '11111110001@lid' },
+      }] } as any);
+      ev.emit('messaging-history.set', { chats: [], contacts: [], messages: [{
+        key: { id: `WATCHHIST000${n}`, fromMe: false, remoteJid: '15550003333@s.whatsapp.net' },
+        message: { conversation: `synthetic row ${n}` },
+      }], syncType: RECENT, isLatest: false } as any);
+    }
+    ev.flush();
+    ev.destroy();
+
+    expect({ notifications, batches, rows }).toEqual({ notifications: 2, batches: 1, rows: 2 });
+    expect(clock.armed()).toBe(false);
+    clock.fire();
     expect(log.warn).not.toHaveBeenCalled();
   });
 

@@ -11,7 +11,8 @@
  * This watch observes both sides and reports, with no message content:
  *   - a notification not marked fromMe: the self-only guard drops it
  *     (a spoof, or a decoder regression like rc12's);
- *   - eligible notifications with no messaging-history.set within the timeout.
+ *   - eligible notifications followed by no messaging-history.set at all
+ *     within the timeout (a liveness check, not a per-notification count).
  * FULL notifications are expected to be skipped (Baileys' default
  * shouldSyncHistoryMessage, which WhatSoup does not override) and are only
  * counted, never alarmed on.
@@ -96,13 +97,17 @@ export class HistorySyncWatch {
     }
   }
 
-  /** Call for every messaging-history.set event, empty or not. */
+  /**
+   * Call for every messaging-history.set event, empty or not. Baileys' event
+   * buffer merges the history of several notifications into one event, so a
+   * batch proves the history path is alive for everything observed before it,
+   * not a one-to-one match. Completeness is checked per message ID instead
+   * (docs/runbook.md "Verify history backfill after a relink").
+   */
   observeBatch(): void {
-    if (this.pending > 0) {
-      this.pending--;
-      this.pendingSyncTypes.shift();
-    }
-    if (this.pending === 0) this.clearTimer();
+    this.pending = 0;
+    this.pendingSyncTypes = [];
+    this.clearTimer();
   }
 
   /** Call when the socket is replaced or shut down. */
