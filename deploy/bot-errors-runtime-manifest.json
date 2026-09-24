@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "478a3144cee77a7da60e59c595cb54a9619d1f80185bcda6371c08850e2fba13",
+      "sha256": "089ee137d43d2dde9ecb05cb1d67f2678944e8947009fb0440b008c391754847",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",
@@ -539,7 +539,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "d192a2a639b248a92dbb037dd313dedef9ddb46f4c984d04d5e83039d46e8991",
+      "sha256": "1d0aae38e1c95d9c9c3e7761113a8c295a8d10e9add499161335405f29b66231",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",
