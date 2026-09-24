@@ -78,6 +78,7 @@ FILES=(
   "deploy/scripts/lib/dm_roundtrip.py"
   "deploy/scripts/lib/durable_json.py"
   "deploy/scripts/lib/health_reader.py"
+  "deploy/scripts/lib/owner_route.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"
   "deploy/scripts/lib/queue_age.py"
   "deploy/scripts/lib/send_acceptance.py"
