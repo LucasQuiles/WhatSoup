@@ -500,6 +500,20 @@ export function writePrivateJsonMarkerSync(
  * close so an event is durable before a process parks or exits.
  */
 export function appendPrivateJsonLineSync(filePath: string, value: unknown): void {
+  appendPrivateSerializedJsonLineSync(filePath, JSON.stringify(value) + '\n');
+}
+
+/**
+ * Append an already-serialized JSON line with the same guarantees as
+ * appendPrivateJsonLineSync. Callers that must measure the exact bytes before
+ * writing (size-bounded rotation) serialize once and pass the line here. The
+ * line must be exactly one newline-terminated record so a caller cannot split
+ * or merge records by accident.
+ */
+export function appendPrivateSerializedJsonLineSync(filePath: string, line: string): void {
+  if (!line.endsWith('\n') || line.indexOf('\n') !== line.length - 1) {
+    throw privateWriteError('refusing to append an event log line that is not exactly one record', 'EINVAL');
+  }
   const dir = dirname(filePath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   assertPrivateDirectorySync(dir);
@@ -527,7 +541,7 @@ export function appendPrivateJsonLineSync(filePath: string, value: unknown): voi
       throw privateWriteError('refusing to write event log over non-regular path', 'EINVAL');
     }
     fchmodSync(fd, 0o600);
-    writeFileSync(fd, JSON.stringify(value) + '\n', 'utf-8');
+    writeFileSync(fd, line, 'utf-8');
     fsyncSync(fd);
     fchmodSync(fd, 0o600);
   } finally {
@@ -590,7 +604,8 @@ export function fsyncDirectory(path: string): void {
   }
 }
 
-function fsyncDirectoryRequired(path: string): void {
+/** Fsync a directory and throw when the platform or filesystem refuses. */
+export function fsyncDirectoryRequired(path: string): void {
   let fd: number | null = null;
   let failure: unknown;
   let failed = false;
