@@ -1591,6 +1591,42 @@ sqlite3 $DB \
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
 
+#### Verify history backfill after a relink (read-only)
+
+After a relink, the primary phone pushes history-sync notifications. WhatSoup stores each
+notification envelope from `messages.upsert` and, separately, stores the downloaded history from
+`messaging-history.set`. Stored envelopes therefore do not prove that history arrived, and no single
+log line proves it either:
+
+- `historyMessages: batch processed` also fires for batches that were only skipped or failed; read
+  its `inserted`, `upgraded`, `placeholders`, `skipped`, `noop` and `failed` counts.
+- A batch whose rows all already existed logs only at debug (`historyMessages: batch already stored`).
+- `historyMessages: some history messages failed to store` means usable messages were lost.
+- `history sync notification is not marked as ours; the self-only guard drops it` means a
+  notification was discarded before download: a spoof, or a library regression like Baileys
+  7.0.0-rc12's.
+- `history sync notifications received but no history batch arrived` means eligible notifications
+  were stored and no history batch at all arrived within five minutes afterwards. It is a liveness
+  check: Baileys can merge several notifications' history into one batch, so a batch clears every
+  pending notification and its absence of warnings never proves completeness. FULL notifications
+  are skipped by policy and never raise this.
+
+Prove recovery per message instead. Take the message IDs you expect from the primary phone or
+from an independent continuity manifest, and check each one against a consistent snapshot of the
+instance database (never open a live WAL database with `immutable=1`):
+
+```bash
+sqlite3 "$SNAPSHOT_DB" \
+  "SELECT message_id, conversation_key, content_type, is_from_me, timestamp
+   FROM messages WHERE message_id IN ('<id-1>', '<id-2>');"
+```
+
+A returned row with a real `content_type` means the body is stored. `content_type = 'history'` is
+an envelope-only placeholder; the body never arrived. A missing row means the message is absent.
+Treat a repeated batch as successful only when the expected row already exists. Stored history is
+not an inbound admission: backfilled messages are never answered automatically, so use the
+continuity manifest audit below to decide on any catch-up.
+
 #### Audit an independent continuity manifest (read-only)
 
 Receiver-local health and an empty durability queue cannot prove that a linked client received

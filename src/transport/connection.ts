@@ -68,6 +68,7 @@ import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-par
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
+import { HistorySyncWatch } from './history-sync-watch.ts';
 import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
@@ -731,6 +732,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     getBotLid: () => this.botLid,
   });
 
+  private readonly historySyncWatch = new HistorySyncWatch(this.log);
+
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
     return this.sock;
@@ -1006,6 +1009,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // is a false positive in the one direction that matters: a bond event would
       // then name a client that never existed.
       const sock = makeWASocket(socketConfig);
+      this.historySyncWatch.reset();
       effectiveClientRegistry.record(
         buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'connection'),
       );
@@ -1288,6 +1292,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
+    this.historySyncWatch.reset();
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -2100,6 +2105,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             chats?: Array<{ id: string; [key: string]: unknown }>;
             isLatest?: boolean;
           };
+          this.historySyncWatch.observeBatch();
           this.log.info(
             { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
             'history sync received',
@@ -3114,6 +3120,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages as WAMessage[]) {
+      this.historySyncWatch.observeUpsert(msg);
       if (msg.key.id && msg.key.fromMe === true) {
         this.confirmLocalAuthBondSendProof(msg.key.id, 'own_message_echo', msg.key.remoteJid ?? undefined);
       }
