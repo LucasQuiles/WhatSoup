@@ -622,11 +622,13 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
+      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
-        "def instance_health_token(name: str) -> Optional[str]:"
+        "def instance_health_token(name: str) -> Optional[str]:",
+        "class HealthTransportError(RuntimeError):",
+        "def fetch_loopback_health("
       ]
     },
     {
@@ -735,7 +737,7 @@
     },
     {
       "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "ce15a87ea77ab5a15ca0bec8b6f8dcf8b02dbdddde2f2dae3abeddddc1e54f18",
+      "sha256": "38a294f401fd78ed997b0ee26e8d090753a1db419e7b41260b22da2d79ab6cce",
       "mustContain": [
         "PLACEHOLDER_TOKENS",
         "EXIT_UNSUBSTITUTED",
