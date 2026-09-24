@@ -29,7 +29,8 @@ import { decideConnectActivation, readTerminalLatchJournal, type ConnectActivati
 import { observeActiveTree, resolveAuthGenerationEvidenceV2 } from './auth-generation-v2.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
-import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { appendBondEventSync, scheduleBondEventMaintenance } from './bond-event-log.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 
 import { config } from '../config.ts';
@@ -779,6 +780,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.on('exhausted', () => {
       void this.handleExhausted();
     });
+    // Startup recovery of an interrupted bond-event rotation or compression.
+    // One directory read when there is nothing to do; never blocks connect.
+    this.scheduleBondEventLogMaintenance('startup');
+  }
+
+  private scheduleBondEventLogMaintenance(trigger: 'startup' | 'rotation'): void {
+    if (!config.dataRoot) return;
+    try {
+      scheduleBondEventMaintenance(config.dataRoot).then(
+        (report) => {
+          if (report.anomalies.length > 0 || report.pendingSegments > 0) {
+            this.log.warn(
+              { trigger, anomalies: report.anomalies, pendingSegments: report.pendingSegments },
+              'bond event log maintenance kept segments for operator review',
+            );
+          }
+        },
+        (err: unknown) => {
+          this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+        },
+      );
+    } catch (err) {
+      this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+    }
   }
 
   /**
@@ -1425,7 +1450,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     try {
       const authBond = this.authBond.inspect();
-      const eventPath = join(config.dataRoot, 'bond-events.ndjson');
       const payload = {
         version: 1,
         eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
@@ -1507,7 +1531,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // `no_receipt_written`, which is the honest answer, not a bug.
         authGeneration: resolveAuthGenerationEvidence(config.stateRoot),
       };
-      appendPrivateJsonLineSync(eventPath, payload);
+      // Bounded by size rotation (see bond-event-log.ts). A rotation failure
+      // still appends the record; only the append itself can throw here.
+      const appended = appendBondEventSync(config.dataRoot, payload);
+      if (appended.rotationError) {
+        this.log.warn({ err: appended.rotationError }, 'failed to rotate WhatsApp bond event log');
+      }
+      if (appended.rotated) this.scheduleBondEventLogMaintenance('rotation');
     } catch (err) {
       this.log.warn({ err }, 'failed to persist WhatsApp bond event');
     }
