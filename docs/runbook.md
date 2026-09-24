@@ -353,6 +353,63 @@ journalctl --user -u whatsoup@sandbox-agent | grep '15551234567'
 journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|quarantine'
 ```
 
+### Bond Event Log (`bond-events.ndjson`)
+
+Each instance appends redacted WhatsApp bond lifecycle records (one JSON object
+per line, fsynced per record) to `<dataRoot>/bond-events.ndjson`. Storage is
+bounded and crash-recoverable (`src/transport/bond-event-log.ts`):
+
+- **Rotation.** Before an append would take the live file past 50 MiB, the live
+  file is renamed to `bond-events.ndjson.<id>` and the record starts a new live
+  file. `<id>` is a UTC stamp plus a random suffix
+  (`20260924T010339123Z-1a2b3c4d`). Each new stamp is forced past the newest
+  existing one, so sorting the names gives the order the segments were closed.
+  A record larger than 50 MiB is written on its own and is never dropped. If a
+  rotation fails, the record is still appended to the live file and
+  `failed to rotate WhatsApp bond event log` is logged. An append failure logs
+  `failed to persist WhatsApp bond event`. Neither failure affects the
+  WhatsApp connection.
+- **Compression.** Compression runs asynchronously at startup and after each
+  rotation, under `bond-events.ndjson.maintenance.lock`. Each closed segment is
+  gzipped to `<id>.gz.partial` and fsynced, then decompressed and compared
+  (byte count and SHA-256) with the segment. Only after that comparison passes
+  is it renamed to `<id>.gz`, followed by a directory fsync. The closed segment
+  is unlinked last.
+- **Retention.** The 10 newest finalized `.gz` archives are kept. Older ones
+  are deleted. This is the only intended loss of history: roughly the newest
+  10 × 50 MiB of uncompressed records plus the live file survive.
+- **Crash recovery.** Recovery runs at startup and at the start of every pass.
+  - A `.gz.partial` next to its closed segment is discarded and the segment is
+    compressed again.
+  - A `.gz` next to its closed segment is verified again. The segment is
+    unlinked only when the `.gz` matches.
+  - A missing live file is recreated by the next append.
+- **Ambiguous states are kept and reported.** Recovery keeps the files and logs
+  `bond event log maintenance kept segments for operator review`, with a
+  per-segment reason, in these cases:
+  - a `.gz` that does not match its segment (`archive_does_not_match_source`)
+  - a `.gz.partial` with no segment (`partial_without_source`)
+  - a `.gz.partial` next to a `.gz` (`partial_beside_archive`)
+  - a non-regular file under a segment name (`non_regular_entry`)
+  - a segment that keeps failing to compress (`compression_failed`)
+
+  Recovery never deletes these files. Inspect them by hand: for example, compare
+  `gzip -dc <id>.gz` against `<id>` before removing either one. Closed segments
+  that keep failing are not subject to retention and accumulate until they are
+  resolved. `pendingSegments` in that warning counts them.
+- **Maintenance lock.** A corrupt `bond-events.ndjson.maintenance.lock` makes
+  every maintenance pass fail closed (`bond event log maintenance failed`).
+  Confirm that no WhatSoup process for the instance is running before you
+  remove that lock (§5.6).
+
+To read the full history, decompress the archives in name order, then read the
+live file:
+
+```bash
+cd ~/.local/share/whatsoup/instances/<name>
+for f in $(ls bond-events.ndjson.*.gz | sort); do gzip -dc "$f"; done; cat bond-events.ndjson
+```
+
 ---
 
 ## 4. Health Endpoint
@@ -545,7 +602,8 @@ transport and process liveness pass:
   `deploy/scripts/bot-errors-emit.py` of the release the watchdog was rendered
   from (`deploy/scripts/render-watchdog.py` bakes that absolute path into the
   script, or `--bot-errors-emit <path>`; it refuses to render when the emitter
-  is missing), and records `<instance>-credential-dead.paged`. The stamp is written only
+  is missing; it binds that release's loopback health reader the same way,
+  see `docs/runbooks/macos-launchd-deployment.md`), and records `<instance>-credential-dead.paged`. The stamp is written only
   after the emitter accepts the page, so a failed write logs
   `ERROR: CREDENTIAL-DEAD page failed …` and retries next cycle. With no
   emitter at the baked path (for example, the release tree was removed) every
@@ -611,7 +669,14 @@ window is active; a quiescent unknown (healthy idle bot past the 30-minute
 usability-probe TTL, or any non-agent instance) stays `ok`.
 `HEALTH-UNKNOWN` means the authenticated diagnostic body or its supporting
 token/timestamp evidence could not be trusted; it exits the watchdog invocation
-with status `2`, never restarts, and never changes the credential marker.
+with status `2`, never restarts, and never changes the credential marker. It
+also covers a loopback read that could not start: a connect-stage
+`EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
+read, or a bound health reader that is missing or fails its digest check.
+Ordinary connection refusal is still restart evidence, and so is a target that
+accepts the connection but does not answer within the read deadline. A job that is not loaded
+is bootstrapped only on the restart path, and a successful bootstrap is not
+followed by a kickstart.
 `ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
 path when no stronger credential, health-evidence, or restart outcome applies.
 
@@ -879,7 +944,11 @@ On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, 
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
 cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
-degraded so the exhausted episode is not hidden.
+degraded so the exhausted episode is not hidden. Each exhaustion episode is retained as an alert
+owner until the chat respawns successfully or one hour passes; only that episode's own timer can
+retire it, so a later re-exhaustion of the same chat is never retired early by an older timer.
+Retirement attempts the shared `agent_respawn_failed` clear under the same rule as abandonment
+below: only once no chat is either exhausted or abandoned, with a refused clear kept as retry debt.
 
 The same alert source has a second path, and the two behave differently, so read the body first.
 An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
@@ -895,9 +964,15 @@ The chat recovers on its own. The abandonment settles when the chat's next inbou
 it back into service, when a new owned session is indexed for it, or when the record ages out of
 the retention window. Which of the first two routes the turn takes depends on the shape: a session
 that had gone inactive is respawned in place and settled by that re-activation, while one that
-still reported active when it was abandoned is settled on the served-turn path. Settling clears
-this alert only when no chat is either exhausted or abandoned. Health reports
-`per_chat_respawn_abandoned` until it settles.
+still reported active when it was abandoned is settled at the provider-ready served-turn boundary,
+after the before-send hook, executing-actor publication, and typing indication. Settlement retires
+the chat's abandonment immediately. Once no chat is either exhausted or abandoned, the runtime
+attempts the shared alert clear. An accepted clear finishes the incident; a refused or throwing
+clear leaves the content-free `agentRespawnFailedClearPending: true` health field and the
+`runtime.agent_respawn_failed_clear_pending` / `agent_respawn_failed_clear_pending` reason/cause
+pair degraded. Later health polls and provider-ready settlement boundaries retry while both owner
+populations remain empty. A new abandonment or exhaustion blocks the retry without erasing the
+obligation. Health reports `per_chat_respawn_abandoned` only until the abandonment itself settles.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
@@ -1542,6 +1617,77 @@ sqlite3 $DB \
   "SELECT conversation_key, session_id, session_status, claude_pid, updated_at
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
+
+#### Verify history backfill after a relink (read-only)
+
+After a relink, the primary phone pushes history-sync notifications. WhatSoup stores each
+notification envelope from `messages.upsert` and, separately, stores the downloaded history from
+`messaging-history.set`. Stored envelopes therefore do not prove that history arrived, and no single
+log line proves it either:
+
+- `historyMessages: batch processed` also fires for batches that were only skipped or failed; read
+  its `inserted`, `upgraded`, `placeholders`, `skipped`, `noop` and `failed` counts.
+- A batch whose rows all already existed logs only at debug (`historyMessages: batch already stored`).
+- `historyMessages: some history messages failed to store` means usable messages were lost.
+- `history sync notification is not marked as ours; the self-only guard drops it` means a
+  notification was discarded before download: a spoof, or a library regression like Baileys
+  7.0.0-rc12's.
+- `history sync notifications received but no history batch arrived` means eligible notifications
+  were stored and no history batch at all arrived within five minutes afterwards. It is a liveness
+  check: Baileys can merge several notifications' history into one batch, so a batch clears every
+  pending notification and its absence of warnings never proves completeness. FULL notifications
+  are skipped by policy and never raise this.
+
+Prove recovery per message instead. Take the message IDs you expect from the primary phone or
+from an independent continuity manifest, and check each one against a consistent snapshot of the
+instance database (never open a live WAL database with `immutable=1`):
+
+```bash
+sqlite3 "$SNAPSHOT_DB" \
+  "SELECT message_id, conversation_key, content_type, is_from_me, timestamp
+   FROM messages WHERE message_id IN ('<id-1>', '<id-2>');"
+```
+
+A returned row with a real `content_type` means the body is stored. `content_type = 'history'` is
+an envelope-only placeholder; the body never arrived. A missing row means the message is absent.
+Treat a repeated batch as successful only when the expected row already exists. Stored history is
+not an inbound admission: backfilled messages are never answered automatically, so use the
+continuity manifest audit below to decide on any catch-up.
+
+#### Prepare recovered voice notes before catch-up
+
+History sync stores voice notes without media or a transcript, and nothing transcribes them
+automatically. In agent context an untranscribed voice note appears as
+`[Voice note — not transcribed (message <id>)]`, never as raw JSON; a stored transcript appears as
+`[Voice note transcription]: …`, truncated at the context-line cap with a pointer to the message.
+Before any catch-up that depends on recovered voice notes, prepare exactly the selected messages:
+
+```bash
+# 1. Preview against a consistent snapshot: validates the selection and budgets, writes only the manifest.
+npm run prepare-recovered-audio -- --db "$SNAPSHOT_DB" --out preview.json \
+  --message-id '<id-1>' --message-id '<id-2>'
+# 2. Apply on the live database with a deliberately chosen local provider.
+npm run prepare-recovered-audio -- --db "$DB" --out prepared.json --apply \
+  --provider whisper.cpp --media-dir "$MEDIA_DIR" \
+  --message-id '<id-1>' --message-id '<id-2>' [--exclude '<id>'] [--max-wall-seconds 900]
+```
+
+- Only the local providers `whisper.cpp` and `faster-whisper` are accepted: no paid API calls and
+  no provider alert markers. The provider must already be installed on the host.
+- Hard limits: 10 messages, 3600 seconds of audio, 100 MB declared size and 1800 seconds of wall
+  time per run. Any unusable selection (not found, not audio, deleted, unreadable raw message,
+  unknown duration, over budget) blocks the whole run before any work (exit 2).
+- Each item is downloaded from its stored `raw_message`, transcribed, and written with a
+  compare-and-set: if the row changed meanwhile, it is left alone and reported `row_changed`.
+  The transcription fallback text is never stored as a transcript.
+- After the wall budget is spent, no new item starts and a late result is discarded; the command
+  waits for an in-flight provider call (bounded by the provider's own timeout) before exiting.
+- The manifest (mode 0600, never overwritten) records per item the status and reason, row, audio
+  and transcript SHA-256, and the media path.
+- **Catch-up is blocked unless the apply run exits 0**: every selected item is `ready` or
+  explicitly `--exclude`d by the operator. Exit 3 means at least one item failed, was cancelled by
+  the budget or changed; fix or exclude it and run again. Already transcribed items report
+  `already_transcribed` without new work.
 
 #### Audit an independent continuity manifest (read-only)
 

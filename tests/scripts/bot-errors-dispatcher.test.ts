@@ -213,6 +213,55 @@ afterEach(() => {
 });
 
 describe('bot-errors-dispatcher', () => {
+  it('keeps bounded dispatch diagnostics best-effort while durable JSONL stays synced', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatch-log-'));
+    const probe = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import importlib.util, os, sys',
+          'from pathlib import Path',
+          "sys.path.insert(0, 'deploy/scripts')",
+          "spec = importlib.util.spec_from_file_location('dispatch_log_probe', 'deploy/scripts/bot-errors-dispatcher.py')",
+          'disp = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(disp)',
+          `root = Path(${JSON.stringify(tmpRoot)})`,
+          "paths = {'root': root, 'logs': root / 'logs'}",
+          "paths['logs'].mkdir(parents=True, mode=0o700)",
+          'syncs = []',
+          'real_fsync = disp.os.fsync',
+          'disp.os.fsync = lambda fd: syncs.append(fd)',
+          'try:',
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_probe', 'detail': 'normal'}) == 'written'",
+          "    assert syncs == [], f'diagnostic append unexpectedly synced: {syncs}'",
+          "    disp.append_private_jsonl(root / 'durable.jsonl', {'type': 'durable_probe'})",
+          "    assert len(syncs) >= 2, f'durable JSONL lost syncs: {syncs}'",
+          'finally:',
+          '    disp.os.fsync = real_fsync',
+          "log = paths['logs'] / 'dispatch.jsonl'",
+          "assert oct(log.stat().st_mode & 0o777) == '0o600'",
+          "assert oct(paths['logs'].stat().st_mode & 0o777) == '0o700'",
+          'disp.MAX_DISPATCH_JSONL_BYTES = 512',
+          'for index in range(8):',
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_probe', 'detail': 'x' * 80, 'index': index}) == 'written'",
+          'assert log.stat().st_size <= disp.MAX_DISPATCH_JSONL_BYTES',
+          'real_append = disp.append_bounded_jsonl',
+          'try:',
+          "    disp.append_bounded_jsonl = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('expected diagnostic failure'))",
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_failure'}) == 'diagnostic_degraded'",
+          'finally:',
+          '    disp.append_bounded_jsonl = real_append',
+          "assert (root / 'controller-log-health' / 'dispatcher.json').is_file()",
+          "print('OK')",
+        ].join('\n'),
+      ],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(probe.stdout).toContain('OK');
+  });
+
   it('increments attempts before a successful send and persists the sent event', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');

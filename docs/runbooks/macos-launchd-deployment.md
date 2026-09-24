@@ -499,6 +499,57 @@ Those are wrong tiers. `.gitignore` covers `*.db` to prevent accidental commit.
 
 ## Restart Procedures
 
+### Watchdog health reader binding
+
+Render the watchdog from the release tree the host runs, the same way the BOT
+ERRORS emitter is baked. `deploy/scripts/render-watchdog.py` binds that tree's
+`deploy/scripts/lib/health_reader.py` and takes its digest from that tree's
+`deploy/bot-errors-runtime-manifest.json`; `--health-reader` and
+`--runtime-manifest` name others. The render refuses (`BAD_INPUT`, exit 4) when
+the reader is missing, is not listed exactly once in the manifest, or differs
+from its pinned digest. For example, from the release tree:
+
+```bash
+python3 deploy/scripts/render-watchdog.py render \
+  --template deploy/templates/watchdog-script.sh \
+  --bot-name example-agent --bot-port 9001 --fleet-port 9002 \
+  --home /opt/operator-home --out ./watchdog-rendered.sh --json
+```
+
+The render receipt reports `health_reader_path` and `health_reader_sha256`.
+Before its first health read, each watchdog cycle verifies the reader digest
+and executes those verified bytes. A missing, changed, or invalid reader
+produces `HEALTH-UNKNOWN` and exit 2 without authorizing any service action,
+and that cycle reaches no credential verdict, so credential paging state is
+left unchanged.
+
+The shared reader makes one direct IPv4 loopback connection, without proxies,
+redirects, or a separate connectivity probe. The watchdog keeps its private
+token-file validation and passes the token to the reader through an anonymous
+descriptor. Only a connect-stage `EADDRNOTAVAIL` (local ephemeral-port
+exhaustion) suppresses restart for that target: the bot or fleet console is
+logged `HEALTH-UNKNOWN` instead of being restarted, because restarting a healthy
+target cannot free local ports. It remains a diagnostic failure, not an auth
+verdict. Ordinary connection refusal keeps the restart policy. Bootstrap now
+happens only after a restart-worthy observation passes the existing restart
+gates, and a successful bootstrap does not also kickstart the newly loaded job.
+A mixed cycle can restart the refused target while leaving the target that saw
+`EADDRNOTAVAIL` untouched.
+
+Review the final watchdog status and the per-target log lines together. The
+reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
+below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
+target that accepts the connection but never answers yields a typed transport
+failure and is restarted (`health endpoint unreachable` / `fleet console
+unreachable`), as `curl --max-time 8` did. A read killed at the deadline with no
+output (for example a trickling response) is also restart evidence, logged as
+`health read exceeded 8s`; a hang and a slow response are indistinguishable at
+that point, and the previous curl contract restarted both. Any other malformed
+or incomplete reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
+the watchdog against the new manifest digest. Keep the previous script and its
+matching release tree available for rollback; installing either alone leaves
+diagnostics unknown. Rendering does not install or activate any job.
+
 Restart fleet only:
 
 ```bash
@@ -684,6 +735,14 @@ the health projection and producer schema before retrying. The helper trusts the
 runtime's stale verdict and does not independently validate provider-proof times.
 This F1 requirement does not qualify future timestamps or other independent
 freshness policies; acceptance evidence must name the tested release revision.
+The runtime itself reports a future-dated or non-finite provider proof time as
+stale (`model_usable` null, `model_usable_stale` true).
+
+The diagnostic bundle's `health-snapshot` finding uses the same canonical
+readiness and freshness fields. Missing, stale, future-dated or in-flight
+provider proof is inconclusive (`ok: false`, confidence `suspected`); the raw
+model status alone cannot confirm health or failure. An active fallback window
+still confirms degraded primary service.
 
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI

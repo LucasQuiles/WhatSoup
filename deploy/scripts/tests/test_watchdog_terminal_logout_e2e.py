@@ -7,10 +7,10 @@ only runs if the body actually REACHES it. A logged-out bot returns HTTP 503
 which discards the body on 503 and falls into the "health endpoint unreachable
 -> restart" path, restart-looping the dead bot.
 
-This test renders the shipped template, stubs `curl` (returns the real 503
-logged-out body) and `launchctl` (records every call), runs the whole script,
-and asserts the bot was NEVER kickstarted. It pins the body-capture wiring, not
-just the decision logic.
+This test renders the shipped template, stubs the bound health reader (returns
+the real 503 logged-out body) and `launchctl` (records every call), runs the
+whole script, and asserts the bot was NEVER kickstarted. It pins the
+body-capture wiring, not just the decision logic.
 
 Skipped where zsh is unavailable (the template is `#!/bin/zsh`); the decision
 logic itself is covered portably by test_watchdog_restart_policy.py.
@@ -19,6 +19,7 @@ logic itself is covered portably by test_watchdog_restart_policy.py.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import json
 import shlex
@@ -91,6 +92,35 @@ _UNKNOWN_PROVIDER_BODY = json.dumps({
 
 _REPO_EMITTER = Path(__file__).resolve().parents[1] / "bot-errors-emit.py"
 
+# Stand-in for deploy/scripts/lib/health_reader.py, bound into the rendered
+# script by digest exactly as render-watchdog.py binds the real reader. Its
+# bytes never change, so one render serves every cycle; each cycle's response
+# comes from the sidecar files _make_stubs writes beside the launchctl stub.
+# Every request is recorded so a test can prove the health read happened.
+_STUB_READER = '''import errno
+from pathlib import Path
+class HealthTransportError(Exception):
+    def __init__(self, stage, number): self.stage = stage; self.errno = number
+def fetch_loopback_health(port, path, headers, **kwargs):
+    stubs = Path(__file__).parent / ".local" / "bin"
+    with (stubs / "probe.argv").open("a", encoding="utf-8") as stream:
+        stream.write(f"{port}{path}\\n")
+    if port == 9999 and path == "/health":
+        if not headers.get("Authorization", "").startswith("Bearer "):
+            raise ValueError("diagnostic read without bearer")
+        return (int((stubs / "bot.http").read_text(encoding="utf-8")),
+                (stubs / "bot.body").read_text(encoding="utf-8"))
+    if port == 9998 and path == "/":
+        return 200, "ok"
+    raise HealthTransportError("connect", errno.ECONNREFUSED)
+'''
+
+
+def _write_stub_reader(home: Path) -> Path:
+    reader = home / "health_reader.py"
+    reader.write_text(_STUB_READER, encoding="utf-8")
+    return reader
+
 
 def _render(
     home: Path,
@@ -100,6 +130,7 @@ def _render(
     emitter: Path = _REPO_EMITTER,
 ) -> Path:
     text = _TEMPLATE.read_text(encoding="utf-8")
+    reader = _write_stub_reader(home)
     rendered = (
         text.replace("__BOT_ERRORS_EMIT__", str(emitter))
         .replace("__HOME__", str(home))
@@ -107,6 +138,8 @@ def _render(
         .replace("BOT_PORT", bot_port)
         .replace("BOT_NAME", bot_name)
         .replace("USERNAME", os.environ.get("USER", "tester"))
+        .replace("__HEALTH_READER_PATH__", str(reader))
+        .replace("__HEALTH_READER_SHA256__", hashlib.sha256(reader.read_bytes()).hexdigest())
     )
     # __HOME__ substitution already sets HOME_DIR (template: HOME_DIR="__HOME__").
     script = home / f"{bot_name}-watchdog"
@@ -118,28 +151,15 @@ def _render(
 def _make_stubs(home: Path, bot_body: str, bot_http: str = "503") -> Path:
     # The watchdog hardcodes its own PATH with $HOME_DIR/.local/bin FIRST (a
     # determinism guard), so injected stubs must live there — a tmp PATH entry
-    # would be ignored and the script would hit real curl/launchctl.
+    # would be ignored and the script would hit real launchctl.
     binroot = home / ".local" / "bin"
     binroot.mkdir(parents=True, exist_ok=True)
     calls = binroot / "launchctl.calls"
-    # Stub curl. The bot-health endpoint simulates HTTP 503-with-body. Crucially
-    # the stub HONORS --fail: real `curl --fail` discards a 503 body and exits 22,
-    # so if the watchdog ever regresses to --fail this stub reproduces that and the
-    # no-kickstart test fails (a true falsifier, not theater). Fleet -> 200.
-    curl = binroot / "curl"
-    curl.write_text(
-        "#!/bin/sh\n"
-        "has_fail=false\n"
-        'for a in "$@"; do [ "$a" = "--fail" ] && has_fail=true; done\n'
-        'for a in "$@"; do case "$a" in\n'
-        "  *9999/health) $has_fail && exit 22; "
-        f"printf '%s\\n{bot_http}' '{bot_body}'; exit 0;;\n"
-        "  *9998/*) printf 'ok\\n200'; exit 0;;\n"
-        "esac; done\n"
-        "printf '\\n000'; exit 7\n",
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
+    # The stub reader returns this HTTP status WITH this body, as the real
+    # reader does for every HTTP response (a logged-out bot answers 503 with a
+    # body the decision block must see). Fleet -> 200.
+    (binroot / "bot.body").write_text(bot_body, encoding="utf-8")
+    (binroot / "bot.http").write_text(bot_http, encoding="utf-8")
     # Stub launchctl: record every call; 'print' reports loaded (exit 0).
     lc = binroot / "launchctl"
     lc.write_text(
@@ -204,9 +224,9 @@ def _run(tmp_path: Path, bot_body: str, bot_name: str) -> str:
 
 def test_logged_out_503_does_not_kickstart_bot(tmp_path):
     calls = _run(tmp_path, _LOGGED_OUT_BODY, "term-bot")
-    # Prove the script reached the health check (ensure_loaded -> `launchctl print`)
-    # before concluding "no kickstart" — else an early exit passes vacuously.
-    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    # Prove the diagnostic reader ran before asserting no restart action — else
+    # an early exit passes vacuously.
+    assert "9999/health" in (tmp_path / "home/.local/bin/probe.argv").read_text()
     assert "kickstart" not in calls or "com.whatsoup.term-bot" not in calls, (
         f"logged-out bot must not be kickstarted; launchctl calls were:\n{calls}"
     )
@@ -218,7 +238,7 @@ def test_logged_out_503_multiline_body_does_not_kickstart(tmp_path):
     import json
     body = json.dumps(json.loads(_LOGGED_OUT_BODY), indent=2)
     calls = _run(tmp_path, body, "term-ml-bot")
-    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    assert "9999/health" in (tmp_path / "home/.local/bin/probe.argv").read_text()
     assert "kickstart" not in calls or "com.whatsoup.term-ml-bot" not in calls, (
         f"multiline logged-out body must not kickstart; calls:\n{calls}"
     )
@@ -844,15 +864,26 @@ def test_production_render_bakes_the_release_emitter_and_pages_without_env(tmp_p
     token_file.write_text(f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n", encoding="utf-8")
     token_file.chmod(0o600)
     script = home / "prod-bot-watchdog"
+    # The release's own reader would read real loopback ports on this machine,
+    # so bind the stub reader through its own reviewed manifest instead. The
+    # emitter still comes from the release tree the template is rendered from.
+    reader = _write_stub_reader(home)
+    reader_digest = hashlib.sha256(reader.read_bytes()).hexdigest()
+    manifest = tmp_path / "runtime-manifest.json"
+    manifest.write_text(json.dumps({"schemaVersion": 1, "files": [
+        {"path": "deploy/scripts/lib/health_reader.py", "sha256": reader_digest}]}), encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(render_tool), "render", "--template", str(_TEMPLATE),
          "--bot-name", "prod-bot", "--bot-port", "9999", "--fleet-port", "9998",
-         "--home", str(home), "--out", str(script)],
+         "--home", str(home), "--health-reader", str(reader),
+         "--runtime-manifest", str(manifest), "--out", str(script)],
         capture_output=True, text=True, timeout=20,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     rendered = script.read_text(encoding="utf-8")
     assert f'BOT_ERRORS_EMIT="{_REPO_EMITTER}"' in rendered
+    assert f'HEALTH_READER_PATH="{reader}"' in rendered
+    assert f'HEALTH_READER_SHA256="{reader_digest}"' in rendered
     assert "BOT_ERRORS_REPO_ROOT" not in rendered
     script.chmod(0o755)
     _make_stubs(home, _DEAD_PROVIDER_BODY, "200")

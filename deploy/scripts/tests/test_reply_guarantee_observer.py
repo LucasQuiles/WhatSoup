@@ -431,6 +431,24 @@ def test_open_inbound_with_exhausted_recovery_is_an_active_breach(db_path: Path)
     assert result["counts"]["blockedOrExhaustedRecoveryJobs"] == 1
 
 
+def test_active_breach_is_a_successful_observation_not_a_process_failure(
+    db_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(db, seq=1, received_at="2026-08-01 00:00:00", status="processing")
+
+    status = mod.main([
+        "--data-root", str(db_path.parents[1]),
+        "--instance", "agent-a",
+        "--json",
+    ])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "active-breach"
+
+
 def test_any_inconclusive_instance_makes_fleet_result_inconclusive(tmp_path: Path) -> None:
     mod = _load_module()
     data_root = tmp_path / "instances"
@@ -666,8 +684,8 @@ def test_wrapper_preserves_drain_failure(tmp_path: Path) -> None:
     assert _wrapper_status(tmp_path, 1, 0) == 1
 
 
-def test_wrapper_preserves_observer_active_breach(tmp_path: Path) -> None:
-    assert _wrapper_status(tmp_path, 0, 1) == 1
+def test_wrapper_accepts_a_completed_observer_lane(tmp_path: Path) -> None:
+    assert _wrapper_status(tmp_path, 0, 0) == 0
 
 
 def test_wrapper_gives_inconclusive_precedence_over_drain_failure(tmp_path: Path) -> None:

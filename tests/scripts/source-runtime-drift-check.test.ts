@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -30,8 +31,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// maintenance.auto=false: `git commit` otherwise starts a detached
+// `git maintenance run --auto` that deletes .git/objects/maintenance.lock after
+// commit returns. A fixture that then removes .git races that delete, and
+// Node's rmSync reports success while leaving the rest of .git behind.
 function execGit(cwd: string, args: string[]): void {
-  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-C', cwd, ...args], {
+  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-c', 'maintenance.auto=false', '-C', cwd, ...args], {
     env: cleanGitEnv(),
     stdio: 'pipe',
   });
@@ -117,6 +122,7 @@ function makeContainedSymlinkRepo(): {
 
 function convertRepoToRelease(root: string): void {
   rmSync(path.join(root, '.git'), { recursive: true, force: true });
+  if (existsSync(path.join(root, '.git'))) throw new Error(`fixture .git was not fully removed: ${root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -145,8 +151,8 @@ function convertRepoToRelease(root: string): void {
   }), 'utf8');
 }
 
-// A committed git repo that encloses the release fixture, reproducing a
-// fixture tree whose ancestor (e.g. a CI TMPDIR) happens to hold a .git.
+// A committed git repo that encloses the release fixture: a release root
+// nested under an unrelated ancestor .git must stay in release mode.
 function makeAncestorRepo(): string {
   const parent = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-ancestor-'));
   tmpRoot = parent;

@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "478a3144cee77a7da60e59c595cb54a9619d1f80185bcda6371c08850e2fba13",
+      "sha256": "e34c470139ce892527985dd1c2ef737fd4850407f5b47cc85cb413218846af4a",
       "mustContain": [
         "require_acceptance=True",
         "auditReceipt",
@@ -539,7 +539,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "d192a2a639b248a92dbb037dd313dedef9ddb46f4c984d04d5e83039d46e8991",
+      "sha256": "1d0aae38e1c95d9c9c3e7761113a8c295a8d10e9add499161335405f29b66231",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",
@@ -622,11 +622,13 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
+      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
-        "def instance_health_token(name: str) -> Optional[str]:"
+        "def instance_health_token(name: str) -> Optional[str]:",
+        "class HealthTransportError(RuntimeError):",
+        "def fetch_loopback_health("
       ]
     },
     {
@@ -735,7 +737,7 @@
     },
     {
       "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "ce15a87ea77ab5a15ca0bec8b6f8dcf8b02dbdddde2f2dae3abeddddc1e54f18",
+      "sha256": "38a294f401fd78ed997b0ee26e8d090753a1db419e7b41260b22da2d79ab6cce",
       "mustContain": [
         "PLACEHOLDER_TOKENS",
         "EXIT_UNSUBSTITUTED",
@@ -747,7 +749,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
+      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -800,7 +802,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "d0028239196d640cbde7cc79ffc358f44d5bf2b1deff56391f9b661040db00e6",
+      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -834,7 +836,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "09c6ece2986911562c4086874e6fe41fa70ced1cf3614d612faba2c5ef90a354",
+      "sha256": "375e35951097ac804d92166aa53c487760a6667900af1e6773387b8e7f8bbc04",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -852,7 +854,8 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
-        "autoCompactActiveBackoffScopes"
+        "autoCompactActiveBackoffScopes",
+        "agent_respawn_failed_clear_pending"
       ]
     },
     {

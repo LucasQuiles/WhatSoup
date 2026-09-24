@@ -271,8 +271,8 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-// An empty directory nested inside a committed git repo, reproducing a
-// release root whose ancestor (e.g. a CI TMPDIR) happens to hold a .git.
+// An empty directory nested inside a committed git repo: a release root under
+// an unrelated ancestor .git must stay in release mode.
 function makeDirInsideAncestorRepo(): string {
   const parent = makeTmpDir();
   gitFixture(parent, ['init', '-q']);
@@ -439,6 +439,7 @@ function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
 
 function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
   rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  if (existsSync(join(fixture.root, '.git'))) throw new Error(`fixture .git was not fully removed: ${fixture.root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

@@ -18,6 +18,7 @@ import type {
   DiagnosticProbeResult,
 } from './diagnostic-bundle.ts';
 import type { PrimaryModelUsabilityResult } from './providers/primary-model-usability.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import {
   makeAccountAuthStatusProbe,
   type AccountAuthStatusDeps,
@@ -64,26 +65,24 @@ function mapPrimaryModelUsability(r: PrimaryModelUsabilityResult): DiagnosticPro
   }
 }
 
-/** Model usability statuses that definitively indicate the primary model cannot serve turns. */
-const UNUSABLE_MODEL_STATUSES = new Set(['model-unavailable', 'credential-unavailable', 'provider-unavailable']);
-
 /**
- * Derive the health verdict from a curated snapshot's data fields.
- * Returns false (degraded) when the snapshot shows an active fallback window
- * (`fallbackReason` non-null) or a confirmed-unusable model status.
- * Returns true otherwise (no degraded signal present).
+ * Use the runtime's canonical readiness derivation, which owns freshness and
+ * in-flight probe handling. Raw model status is diagnostic context only.
  */
-function isSnapshotHealthy(data: Record<string, unknown>): boolean {
-  if (data['fallbackReason'] != null) return false;
-  if (typeof data['modelUsabilityStatus'] === 'string' && UNUSABLE_MODEL_STATUSES.has(data['modelUsabilityStatus'])) return false;
-  return true;
+function snapshotVerdict(data: Record<string, unknown>): Pick<DiagnosticProbeResult, 'ok' | 'confidence'> {
+  // getFallbackState only supplies a reason while its fallback window is active.
+  if (isNonEmptyString(data['fallbackReason'])) {
+    return { ok: false, confidence: 'confirmed' };
+  }
+  return typeof data['modelUsable'] === 'boolean' && data['modelUsableStale'] === false
+    ? { ok: data['modelUsable'], confidence: 'confirmed' }
+    : { ok: false, confidence: 'suspected' };
 }
 
 export function buildDiagnosticProbes(deps: DiagnosticProbeBuilderDeps): DiagnosticProbeMap {
   const healthSnapshot: DiagnosticProbe = async () => {
     const snap = deps.getHealthSnapshot();
-    const ok = isSnapshotHealthy(snap.data);
-    return { ok, confidence: 'confirmed', summary: snap.summary, data: snap.data };
+    return { ...snapshotVerdict(snap.data), summary: snap.summary, data: snap.data };
   };
 
   const usageLimitResetParse: DiagnosticProbe = async () => {

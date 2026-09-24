@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   appendPrivateJsonLineSync,
+  appendPrivateSerializedJsonLineSync,
   assertPrivateDirectorySync,
   assertWritablePrivateFileSync,
   deletePrivateFileSync,
@@ -211,6 +212,18 @@ describe('appendPrivateJsonLineSync', () => {
       { event: 'one', count: 1 },
       { event: 'two', count: 2 },
     ]);
+  });
+
+  it('appends a pre-serialized line only when it is exactly one newline-terminated record', () => {
+    const root = makeTmp();
+    const target = join(root, 'priv', 'events.ndjson');
+
+    appendPrivateSerializedJsonLineSync(target, '{"event":"one"}\n');
+    expect(() => appendPrivateSerializedJsonLineSync(target, '{"event":"two"}')).toThrow(/exactly one record/);
+    expect(() => appendPrivateSerializedJsonLineSync(target, '{"a":1}\n{"b":2}\n')).toThrow(/exactly one record/);
+
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    expect(readFileSync(target, 'utf-8')).toBe('{"event":"one"}\n');
   });
 
   it('refuses to append through a symlinked event file', () => {

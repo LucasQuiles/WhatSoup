@@ -211,7 +211,7 @@ function git(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): Git
 
 // Git probes that decide git mode vs release mode for a release root. The
 // ceiling stops upward discovery at the root's parent, so an unrelated
-// ancestor .git (e.g. a CI TMPDIR) cannot turn a non-git release into git mode.
+// ancestor .git cannot turn a non-git release into git mode.
 function releaseRootGit(cwd: string, args: string[]): GitCommandResult {
   return git(cwd, args, { GIT_CEILING_DIRECTORIES: path.dirname(realpathSync(cwd)) });
 }
