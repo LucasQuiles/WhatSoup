@@ -24,6 +24,7 @@ fleet-ground-truth.py so there is exactly one discriminator.
 from __future__ import annotations
 
 import json
+import http.client
 import os
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -31,6 +32,40 @@ from typing import Any, Callable, Optional
 PUBLIC_HEALTH_SCHEMA_PREFIX = "health.public."
 
 _DEFAULT_TIMEOUT_SECONDS = 5
+
+
+class HealthTransportError(RuntimeError):
+    """Content-free failure from one stage of the current loopback request."""
+
+    def __init__(self, stage: str, number: Optional[int]):
+        super().__init__("loopback health transport unavailable")
+        self.stage = stage
+        self.errno = number if type(number) is int else None
+
+
+def fetch_loopback_health(
+    port: int, request_path: str, headers: dict, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[int, str]:
+    """One direct loopback request; callers needing a wall deadline bound the process."""
+    if type(port) is not int or not 1 <= port <= 65535 or request_path not in ("/health", "/"):
+        raise ValueError("invalid loopback health target")
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    stage = "connect"
+    try:
+        connection.connect()
+        stage = "request"
+        connection.request("GET", request_path, headers=headers)
+        stage = "response"
+        response = connection.getresponse()
+        stage = "read"
+        raw = response.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("health response exceeds limit")
+        return response.status, raw.decode("utf-8")
+    except OSError as exc:
+        raise HealthTransportError(stage, exc.errno) from None
+    finally:
+        connection.close()
 
 
 def instance_health_token(name: str) -> Optional[str]:
@@ -106,15 +141,14 @@ def classify_projection(payload: Any, *, token_sent: bool) -> str:
 
 
 def _default_fetch(url: str, headers: dict) -> tuple[int, str]:
-    from urllib.error import HTTPError
-    from urllib.request import Request, urlopen
+    from urllib.parse import urlsplit
 
-    req = Request(url, method="GET", headers=headers)
-    try:
-        with urlopen(req, timeout=_DEFAULT_TIMEOUT_SECONDS) as response:
-            return int(response.status), response.read(64 * 1024).decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        return int(exc.code), exc.read(64 * 1024).decode("utf-8", errors="replace")
+    target = urlsplit(url)
+    if (target.scheme != "http" or target.hostname != "127.0.0.1"
+            or target.username is not None or target.password is not None
+            or target.query or target.fragment):
+        raise ValueError("invalid loopback health target")
+    return fetch_loopback_health(target.port, target.path, headers)
 
 
 def read_local_health(

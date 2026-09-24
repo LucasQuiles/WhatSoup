@@ -499,6 +499,50 @@ Those are wrong tiers. `.gitignore` covers `*.db` to prevent accidental commit.
 
 ## Restart Procedures
 
+### Watchdog health reader binding
+
+Render the watchdog from the release tree the host runs, the same way the BOT
+ERRORS emitter is baked. `deploy/scripts/render-watchdog.py` binds that tree's
+`deploy/scripts/lib/health_reader.py` and takes its digest from that tree's
+`deploy/bot-errors-runtime-manifest.json`; `--health-reader` and
+`--runtime-manifest` name others. The render refuses (`BAD_INPUT`, exit 4) when
+the reader is missing, is not listed exactly once in the manifest, or differs
+from its pinned digest. For example, from the release tree:
+
+```bash
+python3 deploy/scripts/render-watchdog.py render \
+  --template deploy/templates/watchdog-script.sh \
+  --bot-name example-agent --bot-port 9001 --fleet-port 9002 \
+  --home /opt/operator-home --out ./watchdog-rendered.sh --json
+```
+
+The render receipt reports `health_reader_path` and `health_reader_sha256`.
+Before its first health read, each watchdog cycle verifies the reader digest
+and executes those verified bytes. A missing, changed, or invalid reader
+produces `HEALTH-UNKNOWN` and exit 2 without authorizing any service action,
+and that cycle reaches no credential verdict, so credential paging state is
+left unchanged.
+
+The shared reader makes one direct IPv4 loopback connection, without proxies,
+redirects, or a separate connectivity probe. The watchdog keeps its private
+token-file validation and passes the token to the reader through an anonymous
+descriptor. Only a connect-stage `EADDRNOTAVAIL` (local ephemeral-port
+exhaustion) suppresses restart for that target: the bot or fleet console is
+logged `HEALTH-UNKNOWN` instead of being restarted, because restarting a healthy
+target cannot free local ports. It remains a diagnostic failure, not an auth
+verdict. Ordinary connection refusal keeps the restart policy. Bootstrap now
+happens only after a restart-worthy observation passes the existing restart
+gates, and a successful bootstrap does not also kickstart the newly loaded job.
+A mixed cycle can restart the refused target while leaving the target that saw
+`EADDRNOTAVAIL` untouched.
+
+Review the final watchdog status and the per-target log lines together. Reader
+invocations have an eight-second process deadline; incomplete or malformed
+reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
+the watchdog against the new manifest digest. Keep the previous script and its
+matching release tree available for rollback; installing either alone leaves
+diagnostics unknown. Rendering does not install or activate any job.
+
 Restart fleet only:
 
 ```bash

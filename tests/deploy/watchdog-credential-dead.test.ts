@@ -477,7 +477,7 @@ describe('watchdog shell wiring — authenticated health read (#2515 public enve
   // restarts a perfectly healthy bot every cooldown window, and the
   // CREDENTIAL-DEAD branch can never see turn_capability at all. Surfaced
   // live on mini11 (2026-07-29): the watchdog kicked a healthy bot two
-  // minutes after a green gate. The bot health curl must therefore send the
+  // minutes after a green gate. The bot health read must therefore send the
   // instance bearer from a strictly validated tokens.env.
   it('reads the bearer through a private descriptor with canonical validation', () => {
     expect(template).toMatch(/BOT_TOKENS_ENV="\$HOME_DIR\/\.config\/whatsoup\/instances\/BOT_NAME\/tokens\.env"/);
@@ -489,17 +489,20 @@ describe('watchdog shell wiring — authenticated health read (#2515 public enve
     expect(template).not.toMatch(/sed -n 's\/\^WHATSOUP_HEALTH_TOKEN=/);
   });
 
-  it('sends the bearer through curl config stdin, never curl argv', () => {
-    const botCurl = template.match(/bot_resp="\$\([^\n]*curl --config -[^\n]*/)?.[0];
-    expect(botCurl, 'bot health curl line missing').toBeTruthy();
-    expect(botCurl).toContain('header = \\"Authorization: Bearer $HEALTH_TOKEN\\"');
-    expect(botCurl).not.toContain(' -H ');
+  it('sends the bearer through the health reader stdin, never reader argv', () => {
+    const botRead = template.match(/bot_resp="\$\([^\n]*read_health_response[^\n]*/)?.[0];
+    expect(botRead, 'bot health reader line missing').toBeTruthy();
+    expect(botRead).toContain('print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health');
+    expect(botRead!.split('|')[1]).not.toContain('$HEALTH_TOKEN');
+    expect(template).toContain('3<&0');
+    expect(template).toContain('with os.fdopen(3, "rb") as token_pipe:');
+    expect(template).toContain('headers = {"Authorization": "Bearer " + token}');
     expect(template).not.toContain('AUTH_ARGS=');
   });
 
   it('never writes the token to the log', () => {
     expect(template).not.toMatch(/export[^\n]*HEALTH_TOKEN/);
     expect(template).not.toMatch(/log[^\n]*\$HEALTH_TOKEN/);
-    expect(template).toMatch(/curl_rc=\$\?\n\s*HEALTH_TOKEN=""/);
+    expect(template).toMatch(/probe_rc=\$\?\n\s*HEALTH_TOKEN=""/);
   });
 });
