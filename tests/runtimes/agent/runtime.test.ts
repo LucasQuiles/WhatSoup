@@ -139,7 +139,12 @@ const { mockKillSessionTree } = vi.hoisted(() => ({
 }));
 
 const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
-  mockEmitAlert: vi.fn(),
+  mockEmitAlert: vi.fn<typeof import('../../../src/lib/emit-alert.ts').emitAlert>(() => ({
+    ok: true,
+    channel: 'outbox',
+    status: 'durably_queued',
+    outbox: { eventId: 'fixture-event', path: '/tmp/fixture-event.json' },
+  })),
   mockClearAlertSource: vi.fn(),
 }));
 
@@ -171,7 +176,8 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
-  emitAlertChecked: mockEmitAlert,
+  emitAlertChecked: (...args: Parameters<typeof mockEmitAlert>) => mockEmitAlert(...args).ok,
+  observeAlertEmission: vi.fn(),
   emitObservationChecked: vi.fn(() => true),
   clearAlertSource: mockClearAlertSource,
   clearAlertSourceChecked: mockClearAlertSource,
@@ -7425,7 +7431,10 @@ describe('AgentRuntime', () => {
     expect(evidence).toContain('error_excerpt:');
   });
 
-  it('deduplicates repeated tool_result BOT ERRORS alerts in one runtime', async () => {
+  it.each([
+    ['an accepted first enqueue', true, 1],
+    ['a rejected first enqueue', false, 2],
+  ] as const)('deduplicates repeated tool_result BOT ERRORS alerts after %s', async (_label, firstAccepted, expectedAlerts) => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -7433,33 +7442,14 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-1',
-      toolName: 'Bash',
-      toolInput: { command: 'npm test' },
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_result',
-      isError: true,
-      toolId: 'tool-1',
-      content: 'ENOSPC: no space left on device',
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-2',
-      toolName: 'Bash',
-      toolInput: { command: 'npm test' },
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_result',
-      isError: true,
-      toolId: 'tool-2',
-      content: 'ENOSPC: no space left on device',
-    });
+    if (!firstAccepted) mockEmitAlert.mockReturnValueOnce({ ok: false, channel: 'none', status: 'failed', outboxError: 'ENOSPC' });
+    for (const toolId of ['tool-1', 'tool-2']) {
+      capturedOnEventRef.current!({ type: 'tool_use', toolId, toolName: 'Bash', toolInput: { command: 'npm test' } });
+      capturedOnEventRef.current!({ type: 'tool_result', isError: true, toolId, content: 'ENOSPC: no space left on device' });
+    }
 
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledTimes(4);
-    expect(mockEmitAlert).toHaveBeenCalledOnce();
+    expect(mockEmitAlert).toHaveBeenCalledTimes(expectedAlerts);
   });
 
   it('does NOT alert for benign agent-recoverable tool errors (noise gate)', async () => {
