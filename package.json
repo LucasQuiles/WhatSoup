@@ -27,6 +27,7 @@
     "token-window": "bash scripts/run-with-pinned-node.sh scripts/token-window.ts",
     "audit-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/audit-continuity-manifest.ts",
     "record-continuity-manifest": "bash scripts/run-with-pinned-node.sh scripts/record-continuity-manifest.ts",
+    "prepare-recovered-audio": "bash scripts/run-with-pinned-node.sh scripts/prepare-recovered-audio.ts",
     "close-recovery-catchup": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts",
     "turn-recovery-operator": "bash scripts/run-with-pinned-node.sh scripts/turn-recovery-operator.ts",
     "fleet-silence-reset": "bash scripts/run-with-pinned-node.sh scripts/fleet-silence-reset.ts",

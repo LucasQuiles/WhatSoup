@@ -1,10 +1,10 @@
 /**
  * Transcribe an audio message that is already stored in the messages table.
  *
- * Shared by the transcribe_audio MCP tool and agent context assembly. Rows
- * written by history sync carry no media file and no transcript; their
- * raw_message is the only way back to the audio. The transcriber is injected
- * because core may not import the runtimes layer that owns the provider chain.
+ * Used by the transcribe_audio MCP tool. Rows written by history sync carry
+ * no media file and no transcript; their raw_message is the only way back to
+ * the audio. The transcriber is injected because core may not import the
+ * runtimes layer that owns the provider chain.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import type { WAMessage } from '@whiskeysockets/baileys';
@@ -13,7 +13,7 @@ import { downloadMedia, writeTempFile } from './media-download.ts';
 import { extractRawMime } from './media-mime.ts';
 import { updateMediaPath, updateTranscription } from './messages.ts';
 import { errorMessage } from '../lib/error-message.ts';
-import { isNonEmptyString } from '../lib/type-guards.ts';
+import { isUsableTranscript as usable, storedAudioTranscript } from './audio-transcript-content.ts';
 
 export interface StoredAudioRow {
   message_id: string;
@@ -35,27 +35,6 @@ export type StoredAudioTranscriptResult =
   | { status: 'cached'; transcription: string }
   | { status: 'transcribed'; transcription: string }
   | { status: StoredAudioTranscriptFailure; message: string };
-
-const UNAVAILABLE_MARKER = 'transcription unavailable';
-
-function usable(text: unknown): text is string {
-  return isNonEmptyString(text) && !text.includes(UNAVAILABLE_MARKER);
-}
-
-/** The persisted transcript of an audio row, or null when there is none yet. */
-export function storedAudioTranscript(row: Pick<StoredAudioRow, 'content' | 'content_text'>): string | null {
-  if (usable(row.content_text)) return row.content_text;
-  if (row.content) {
-    try {
-      const parsed = JSON.parse(row.content) as { transcription?: unknown };
-      if (usable(parsed.transcription)) return parsed.transcription;
-    } catch {
-      // by design: legacy rows store plain text in content, and such a row has
-      // no transcript, which is what returning null below reports.
-    }
-  }
-  return null;
-}
 
 export async function ensureStoredAudioTranscript(
   db: Database,

@@ -7,7 +7,6 @@ import { storeDecryptionFailure } from './core/database.ts';
 import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-limits-db.ts';
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
-import { warmHistoryAudio } from './runtimes/agent/context-audio.ts';
 import { createConnection } from './transport/factory.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
@@ -776,12 +775,6 @@ connectionManager.on('historyMessages', (messages) => {
   }
   if (stats.failed) {
     log.warn({ failed: stats.failed }, 'historyMessages: some history messages failed to store');
-  }
-  // Voice notes recovered after a relink must be readable before the next
-  // catch-up turn; the live inbound path that normally transcribes them never
-  // ran for history rows.
-  if (instanceType === 'agent' && (stats.inserted || stats.upgraded)) {
-    warmHistoryAudio(db, messages as HistoryInput[]);
   }
 });
 

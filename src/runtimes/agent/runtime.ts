@@ -47,7 +47,7 @@ import {
 } from './handoff-notice-prefix.ts';
 import { providerPreview } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
-import { prepareContextAudio } from './context-audio.ts';
+import { renderVoiceNotes } from './context-audio.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
@@ -5843,7 +5843,7 @@ export class AgentRuntime implements Runtime {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
           if (recent.length > 0) {
-            const lines = formatContextLines(await prepareContextAudio(this.db, recent), this.isCrossProviderSession(session));
+            const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
@@ -11617,7 +11617,7 @@ export class AgentRuntime implements Runtime {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-      lines = formatContextLines(await prepareContextAudio(this.db, missed), this.isCrossProviderSession(session));
+      lines = formatContextLines(renderVoiceNotes(missed), this.isCrossProviderSession(session));
       messageCount = missed.length;
     } catch (err) {
       log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
@@ -11754,7 +11754,7 @@ export class AgentRuntime implements Runtime {
             const recent = contextMessagesForTurn(
               getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), pendingText, pendingActorJid);
             if (recent.length > 0) {
-              const lines = formatContextLines(await prepareContextAudio(this.db, recent), this.isCrossProviderSession(session));
+              const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise

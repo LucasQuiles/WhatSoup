@@ -1627,18 +1627,40 @@ Treat a repeated batch as successful only when the expected row already exists. 
 not an inbound admission: backfilled messages are never answered automatically, so use the
 continuity manifest audit below to decide on any catch-up.
 
-Recovered voice notes need a transcript before an agent can read them. On agent instances, a
-stored history batch starts transcribing inbound voice notes from the last 72 hours (up to 10 per
-batch; `transcribing recent history voice notes`, then `history voice note transcription finished`
-with a `status` per message). Context assembly also transcribes up to 3 untranscribed voice notes
-and waits at most 60 seconds for them. A voice note without a transcript appears in agent context
-as an explicit marker that names its message ID: `transcription still in progress`,
-`transcription failed: <reason>` or `not transcribed`. It never appears as raw JSON. Media that
-WhatsApp no longer serves shows as `transcription failed: no_audio_data`, because the download
-helper reports every failed download the same way. A failure is remembered until the process restarts, so it is not retried on every turn. To
-check a recovered voice note, read `content_text` for its message ID in the same snapshot: a
-non-empty value is the stored transcript. The `transcribe_audio` MCP tool retries one message on
-demand.
+#### Prepare recovered voice notes before catch-up
+
+History sync stores voice notes without media or a transcript, and nothing transcribes them
+automatically. In agent context an untranscribed voice note appears as
+`[Voice note — not transcribed (message <id>)]`, never as raw JSON; a stored transcript appears as
+`[Voice note transcription]: …`, truncated at the context-line cap with a pointer to the message.
+Before any catch-up that depends on recovered voice notes, prepare exactly the selected messages:
+
+```bash
+# 1. Preview against a consistent snapshot: validates the selection and budgets, writes only the manifest.
+npm run prepare-recovered-audio -- --db "$SNAPSHOT_DB" --out preview.json \
+  --message-id '<id-1>' --message-id '<id-2>'
+# 2. Apply on the live database with a deliberately chosen local provider.
+npm run prepare-recovered-audio -- --db "$DB" --out prepared.json --apply \
+  --provider whisper.cpp --media-dir "$MEDIA_DIR" \
+  --message-id '<id-1>' --message-id '<id-2>' [--exclude '<id>'] [--max-wall-seconds 900]
+```
+
+- Only the local providers `whisper.cpp` and `faster-whisper` are accepted: no paid API calls and
+  no provider alert markers. The provider must already be installed on the host.
+- Hard limits: 10 messages, 3600 seconds of audio, 100 MB declared size and 1800 seconds of wall
+  time per run. Any unusable selection (not found, not audio, deleted, unreadable raw message,
+  unknown duration, over budget) blocks the whole run before any work (exit 2).
+- Each item is downloaded from its stored `raw_message`, transcribed, and written with a
+  compare-and-set: if the row changed meanwhile, it is left alone and reported `row_changed`.
+  The transcription fallback text is never stored as a transcript.
+- After the wall budget is spent, no new item starts and a late result is discarded; the command
+  waits for an in-flight provider call (bounded by the provider's own timeout) before exiting.
+- The manifest (mode 0600, never overwritten) records per item the status and reason, row, audio
+  and transcript SHA-256, and the media path.
+- **Catch-up is blocked unless the apply run exits 0**: every selected item is `ready` or
+  explicitly `--exclude`d by the operator. Exit 3 means at least one item failed, was cancelled by
+  the budget or changed; fix or exclude it and run again. Already transcribed items report
+  `already_transcribed` without new work.
 
 #### Audit an independent continuity manifest (read-only)
 

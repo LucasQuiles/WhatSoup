@@ -3113,7 +3113,7 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     await state.sendTurnToSession(mockSession, chatJid, 'Continue');
 
     const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{ applicationContext: string[] }])[0];
-    expect(sent.applicationContext[0]).toContain('[Voice note — transcription failed: no_audio_data (message VOICE0001)]');
+    expect(sent.applicationContext[0]).toContain('[Voice note — not transcribed (message VOICE0001)]');
     expect(sent.applicationContext[0]).not.toContain('"transcription":null');
   });
 
