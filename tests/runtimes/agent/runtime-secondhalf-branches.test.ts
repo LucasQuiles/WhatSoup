@@ -3095,6 +3095,28 @@ describe('fresh-spawn context preamble (P4 — effect-free by construction)', ()
     expect(sent.userText).toBe('Continue');
   });
 
+  it('renders an untranscribed voice note in recent context as an explicit marker, not its JSON', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test');
+    const state = runtime as unknown as {
+      sendTurnToSession(session: typeof mockSession, chatJid: string, text: string): Promise<void>;
+    };
+    await runtime.start();
+    const audioJson = JSON.stringify({ type: 'audio', duration: 12, ptt: true, transcription: null });
+    vi.mocked(getRecentMessages).mockReturnValue([
+      ...recentRows(),
+      { timestamp: 1_784_300_500, senderName: 'Lucas', senderJid: chatJid, messageId: 'VOICE0001',
+        contentType: 'audio', content: audioJson, contentText: audioJson, isFromMe: false },
+    ] as unknown as ReturnType<typeof getRecentMessages>);
+
+    await state.sendTurnToSession(mockSession, chatJid, 'Continue');
+
+    const sent = (vi.mocked(mockSession.sendTurn).mock.calls[0] as unknown as [{ applicationContext: string[] }])[0];
+    expect(sent.applicationContext[0]).toContain('[Voice note — transcription failed: no_audio_data (message VOICE0001)]');
+    expect(sent.applicationContext[0]).not.toContain('"transcription":null');
+  });
+
   it('keeps the active inbound request out of recent context so it appears exactly once', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

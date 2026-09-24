@@ -1625,6 +1625,19 @@ Treat a repeated batch as successful only when the expected row already exists. 
 not an inbound admission: backfilled messages are never answered automatically, so use the
 continuity manifest audit below to decide on any catch-up.
 
+Recovered voice notes need a transcript before an agent can read them. On agent instances, a
+stored history batch starts transcribing inbound voice notes from the last 72 hours (up to 10 per
+batch; `transcribing recent history voice notes`, then `history voice note transcription finished`
+with a `status` per message). Context assembly also transcribes up to 3 untranscribed voice notes
+and waits at most 60 seconds for them. A voice note without a transcript appears in agent context
+as an explicit marker that names its message ID: `transcription still in progress`,
+`transcription failed: <reason>` or `not transcribed`. It never appears as raw JSON. Media that
+WhatsApp no longer serves shows as `transcription failed: no_audio_data`, because the download
+helper reports every failed download the same way. A failure is remembered until the process restarts, so it is not retried on every turn. To
+check a recovered voice note, read `content_text` for its message ID in the same snapshot: a
+non-empty value is the stored transcript. The `transcribe_audio` MCP tool retries one message on
+demand.
+
 #### Audit an independent continuity manifest (read-only)
 
 Receiver-local health and an empty durability queue cannot prove that a linked client received
