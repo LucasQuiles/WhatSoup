@@ -14,6 +14,9 @@ const healSeam = vi.hoisted(() => ({ ensureClaudeFileStoreCredential: vi.fn() })
 vi.mock('../../../src/runtimes/agent/providers/claude-filestore-heal.ts', () => ({
   ensureClaudeFileStoreCredential: healSeam.ensureClaudeFileStoreCredential,
 }));
+vi.mock('../../../src/runtimes/agent/providers/claude-account-identity.ts', () => ({
+  verifyClaudeAccountIdentity: vi.fn(() => { throw new Error('unexpected live identity probe'); }),
+}));
 
 import {
   AccountIdentityVerifier,
@@ -137,6 +140,121 @@ describe('AccountIdentityVerifier — outcome classes drive the alert surface', 
     expect(host.accountIdentity).toMatchObject({ status: 'match' });
     const clears = d.clearAlertSourceChecked.mock.calls.map((call) => call[1]);
     expect(clears).toContain('credential_identity_mismatch');
+  });
+
+  it.each([false, undefined])('retries a mismatch clear after an unaccepted %s result until durable acceptance', async (unaccepted) => {
+    const host = makeHost();
+    const d = makeDeps([
+      verification({}),
+      verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
+      verification({}),
+      verification({ checkedAt: NOW + 1 }),
+      verification({ checkedAt: NOW + 2 }),
+    ]);
+    const verifier = new AccountIdentityVerifier(host, d);
+    await verifier.run('startup');
+    d.clearAlertSourceChecked.mockClear();
+    await verifier.run('periodic');
+    // A legacy injected sink can return void despite the checked boolean port.
+    d.clearAlertSourceChecked.mockReturnValueOnce(unaccepted as boolean);
+    await verifier.run('periodic');
+    expect(host.accountIdentity).toMatchObject({ status: 'match' });
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(1);
+
+    await verifier.run('manual');
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(2);
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1]))
+      .toEqual(['credential_identity_mismatch', 'credential_identity_mismatch']);
+    expect(d.clearAlertSourceChecked.mock.calls[1]).toEqual([
+      host.instanceName, 'credential_identity_mismatch', expect.stringContaining('trigger=manual'),
+      undefined, { requireDurableOutbox: true },
+    ]);
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries failed carry-over clears after restart and requests durable acceptance for both sources', async () => {
+    const prior = makeDeps([verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' })]);
+    await new AccountIdentityVerifier(makeHost(), prior).run('startup');
+    expect(prior.emitAlertChecked).toHaveBeenCalledTimes(1);
+
+    const d = makeDeps([verification({}), verification({}), verification({})]);
+    d.clearAlertSourceChecked.mockReturnValueOnce(false).mockReturnValueOnce(false);
+    const restarted = new AccountIdentityVerifier(makeHost(), d);
+    await restarted.run('startup');
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(2);
+    await restarted.run('periodic');
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1]))
+      .toEqual([...CREDENTIAL_IDENTITY_ALERT_SOURCES, ...CREDENTIAL_IDENTITY_ALERT_SOURCES]);
+    expect(d.clearAlertSourceChecked.mock.calls.every((call) =>
+      (call[4] as { requireDurableOutbox?: boolean } | undefined)?.requireDurableOutbox === true))
+      .toBe(true);
+    await restarted.run('periodic');
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(CREDENTIAL_IDENTITY_ALERT_SOURCES)('partial clear acceptance retains only %s until its write succeeds', async (pendingSource) => {
+    const d = makeDeps([verification({}), verification({}), verification({})]);
+    let failPending = true;
+    d.clearAlertSourceChecked.mockImplementation((...args) => args[1] !== pendingSource || !failPending);
+    const verifier = new AccountIdentityVerifier(makeHost(), d);
+    await verifier.run('startup');
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1]))
+      .toEqual([...CREDENTIAL_IDENTITY_ALERT_SOURCES]);
+    d.clearAlertSourceChecked.mockClear();
+    failPending = false;
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1])).toEqual([pendingSource]);
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked).toHaveBeenCalledTimes(1);
+  });
+
+  it('a renewed mismatch reopens its accepted source while the other source still awaits a clear', async () => {
+    const d = makeDeps([
+      verification({}),
+      verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
+      verification({}),
+    ]);
+    d.clearAlertSourceChecked.mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const verifier = new AccountIdentityVerifier(makeHost(), d);
+    await verifier.run('startup');
+    d.clearAlertSourceChecked.mockClear();
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked).not.toHaveBeenCalled();
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1]).sort())
+      .toEqual([...CREDENTIAL_IDENTITY_ALERT_SOURCES].sort());
+  });
+
+  it('cached match evidence never retries a clear while a new probe is pending or unverifiable', async () => {
+    const host = makeHost();
+    const d = makeDeps([
+      verification({}),
+      verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
+      verification({}),
+      verification({ checkedAt: NOW + 86_400_000 }),
+    ]);
+    const verifier = new AccountIdentityVerifier(host, d);
+    await verifier.run('startup');
+    await verifier.run('periodic');
+    d.clearAlertSourceChecked.mockReturnValueOnce(false);
+    await verifier.run('periodic');
+    d.clearAlertSourceChecked.mockClear();
+
+    let resolve!: (value: AccountIdentityVerification) => void;
+    d.verify.mockImplementationOnce(() => new Promise<AccountIdentityVerification>((done) => { resolve = done; }));
+    const pending = verifier.run('manual');
+    const coalesced = verifier.run('periodic');
+    expect(host.accountIdentity).toMatchObject({ status: 'match', checkedAt: NOW });
+    expect(d.clearAlertSourceChecked).not.toHaveBeenCalled();
+    resolve(verification({ status: 'unverifiable', reason: 'probe-failed', checkedAt: NOW + 86_400_000 }));
+    expect(await pending).toEqual(await coalesced);
+    expect(host.accountIdentity).toMatchObject({ status: 'unverifiable' });
+    expect(d.clearAlertSourceChecked).not.toHaveBeenCalled();
+
+    await verifier.run('periodic');
+    expect(d.clearAlertSourceChecked.mock.calls.map((call) => call[1]).sort())
+      .toEqual([...CREDENTIAL_IDENTITY_ALERT_SOURCES].sort());
   });
 
   it('unverifiable: warning alert carrying the bounded reason', async () => {
