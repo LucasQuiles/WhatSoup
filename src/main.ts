@@ -764,11 +764,17 @@ connectionManager.on('historyMessages', (messages) => {
     return;
   }
   const stats = processHistoryBatch(db, messages as HistoryInput[], log);
-  // Deliberately silent for all-noop batches (row already existed at a real
-  // content_type): re-syncs on existing history would otherwise spam logs.
-  // If you need visibility into empty-batch cadence, move to log.debug.
-  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped) {
+  // All-noop batches (every row already existed at a real content_type) stay
+  // out of info: re-syncs of existing history would otherwise spam logs. This
+  // log line alone never proves recovery; see docs/runbook.md "Verify history
+  // backfill after a relink" for the per-message check.
+  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped || stats.failed) {
     log.info(stats, 'historyMessages: batch processed');
+  } else {
+    log.debug(stats, 'historyMessages: batch already stored');
+  }
+  if (stats.failed) {
+    log.warn({ failed: stats.failed }, 'historyMessages: some history messages failed to store');
   }
 });
 

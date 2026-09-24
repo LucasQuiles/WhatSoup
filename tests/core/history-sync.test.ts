@@ -303,10 +303,8 @@ describe('processHistoryBatch', () => {
     // abort the surrounding writes. This exercises the `noop` action inside a
     // batch rather than the catch-branch error path.
     //
-    // The error-catch branch (per-message exception → stats.skipped++) is not
-    // exercised here — it would require a truly failing per-message operation,
-    // which is hard to provoke in-transaction without corrupting the DB. The
-    // branch remains defensive-only code.
+    // The error-catch branch (per-message exception → stats.failed++) is
+    // exercised separately by the forced-trigger test below.
     storeMessageIfNew(db, {
       chatJid: 'group@g.us',
       conversationKey: 'group_at_g.us',
@@ -336,6 +334,8 @@ describe('processHistoryBatch', () => {
     expect(stats.upgraded).toBe(0);
     expect(stats.placeholders).toBe(0);
     expect(stats.skipped).toBe(0);   // UPSERT-noop is not a skip
+    expect(stats.noop).toBe(1);      // ...it is counted as a noop
+    expect(stats.failed).toBe(0);
 
     // Live row untouched
     const live = db.raw.prepare('SELECT content FROM messages WHERE message_id=?').get('PARTIAL_MID') as { content: string };
@@ -403,7 +403,7 @@ describe('processHistoryBatch', () => {
     );
   });
 
-  it('skips one message on statement failure while committing surrounding successes', () => {
+  it('counts a statement failure as failed (not skipped) while committing surrounding successes', () => {
     const log = { error: vi.fn() };
     db.raw.exec(`
       CREATE TRIGGER fail_one_history_insert
@@ -420,7 +420,7 @@ describe('processHistoryBatch', () => {
       envelopeOnlyMsg({ id: 'OK_AFTER_FAIL', chat: 'group@g.us', participant: 'bob@s.whatsapp.net' }),
     ], log as any);
 
-    expect(stats).toMatchObject({ inserted: 1, upgraded: 0, placeholders: 1, skipped: 1 });
+    expect(stats).toEqual({ inserted: 1, upgraded: 0, placeholders: 1, skipped: 0, noop: 0, failed: 1 });
     expect(log.error).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
       'historyMessages: failed to store message',
