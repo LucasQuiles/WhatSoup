@@ -518,7 +518,8 @@ transport and process liveness pass:
   `deploy/scripts/bot-errors-emit.py` of the release the watchdog was rendered
   from (`deploy/scripts/render-watchdog.py` bakes that absolute path into the
   script, or `--bot-errors-emit <path>`; it refuses to render when the emitter
-  is missing), and records `<instance>-credential-dead.paged`. The stamp is written only
+  is missing; it binds that release's loopback health reader the same way,
+  see `docs/runbooks/macos-launchd-deployment.md`), and records `<instance>-credential-dead.paged`. The stamp is written only
   after the emitter accepts the page, so a failed write logs
   `ERROR: CREDENTIAL-DEAD page failed …` and retries next cycle. With no
   emitter at the baked path (for example, the release tree was removed) every
@@ -584,7 +585,14 @@ window is active; a quiescent unknown (healthy idle bot past the 30-minute
 usability-probe TTL, or any non-agent instance) stays `ok`.
 `HEALTH-UNKNOWN` means the authenticated diagnostic body or its supporting
 token/timestamp evidence could not be trusted; it exits the watchdog invocation
-with status `2`, never restarts, and never changes the credential marker.
+with status `2`, never restarts, and never changes the credential marker. It
+also covers a loopback read that could not start: a connect-stage
+`EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
+read, or a bound health reader that is missing or fails its digest check.
+Ordinary connection refusal is still restart evidence, and so is a target that
+accepts the connection but does not answer within the read deadline. A job that is not loaded
+is bootstrapped only on the restart path, and a successful bootstrap is not
+followed by a kickstart.
 `ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
 path when no stronger credential, health-evidence, or restart outcome applies.
 

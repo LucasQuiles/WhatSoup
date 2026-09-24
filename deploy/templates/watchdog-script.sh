@@ -13,6 +13,10 @@
 #   __BOT_ERRORS_EMIT__ — absolute path of the BOT ERRORS emitter. Render with
 #                   deploy/scripts/render-watchdog.py, which bakes the emitter
 #                   of the release tree the template is rendered from.
+#   __HEALTH_READER_PATH__ / __HEALTH_READER_SHA256__ — the loopback health
+#                   reader (deploy/scripts/lib/health_reader.py) of that same
+#                   release tree and its runtime-manifest digest, baked by
+#                   render-watchdog.py. Every read re-verifies the digest.
 #
 # Install to: ~/.local/bin/BOT_NAME-watchdog
 # chmod +x that file after writing.
@@ -65,6 +69,8 @@ BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"
 CRED_ALERT_SOURCE="provider_credential_dead"
 WD_FINAL="ok"
 WD_EXIT=0
+typeset +x HEALTH_TOKEN
+HEALTH_TOKEN=""
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -73,6 +79,14 @@ FLEET_PLIST="$HOME_DIR/Library/LaunchAgents/$FLEET_LABEL.plist"
 
 BOT_HEALTH="http://127.0.0.1:BOT_PORT/health"
 FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
+HEALTH_READER_PATH="__HEALTH_READER_PATH__"
+HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
+# The reader's per-socket timeout must expire well before the wall deadline,
+# so a target that accepts TCP but never answers yields a typed transport
+# failure (restart) instead of a killed reader. The deadline is the backstop
+# for a read that still has not finished (e.g. a trickling response).
+HEALTH_READ_TIMEOUT_SECONDS=5
+HEALTH_READ_DEADLINE_SECONDS=8
 
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
@@ -334,10 +348,10 @@ run_with_timeout() {
   local cmd_pid exit_code killer_pid
   "$@" &
   cmd_pid=$!
-  (
-    sleep "$timeout_sec"
-    kill -9 "$cmd_pid" 2>/dev/null
-  ) < /dev/null > /dev/null 2>&1 &
+  # One timer process: cancelling a shell around external sleep would orphan
+  # the sleeper. Python is already required by every diagnostic read.
+  python3 -c 'import os, signal, sys, time; time.sleep(float(sys.argv[1])); os.kill(int(sys.argv[2]), signal.SIGKILL)' \
+    "$timeout_sec" "$cmd_pid" < /dev/null > /dev/null 2>&1 &
   killer_pid=$!
   wait "$cmd_pid" 2>/dev/null
   exit_code=$?
@@ -375,7 +389,8 @@ credential_page() {
   return 0
 }
 
-# Ensure a launchd job is loaded; bootstrap from its plist if not.
+# Called only after restart-worthy evidence. Exit 2 means bootstrap succeeded,
+# so the caller must not immediately kickstart that newly started process.
 ensure_loaded() {
   local job_label="$1" plist="$2"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
@@ -386,7 +401,9 @@ ensure_loaded() {
       WD_EXIT=1
       return 1
     fi
+    return 2
   fi
+  return 0
 }
 
 launchd_reports_permanent_stop() {
@@ -417,7 +434,7 @@ restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local rlock="$LOG_DIR/$job_label.restart.lock"
-  local now last
+  local now last load_rc action_rc
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
     wd_note RESTART-SUPPRESSED
@@ -466,8 +483,19 @@ restart_label() {
     release_mutex "$rlock"
     return 0
   fi
-  log "restarting $job_label: $reason"
-  if run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+  ensure_loaded "$job_label" "$HOME_DIR/Library/LaunchAgents/$job_label.plist"
+  load_rc=$?
+  if [ "$load_rc" -eq 1 ]; then
+    release_mutex "$rlock"
+    return 1
+  elif [ "$load_rc" -eq 2 ]; then
+    action_rc=0
+  else
+    log "restarting $job_label: $reason"
+    run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1
+    action_rc=$?
+  fi
+  if [ "$action_rc" -eq 0 ]; then
     wd_note RESTARTED
     # Arm the cooldown only for a restart that actually happened; a failed
     # kickstart must retry next cycle, not sit suppressed for 5 minutes.
@@ -483,14 +511,11 @@ restart_label() {
   release_mutex "$rlock"
 }
 
-ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
-ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
-
 # --- Bot health check ---
 # The diagnostic body is auth-gated. Read the transitional token file through
 # a verified descriptor using the same contract as src/fleet/health-token-file.ts.
-# The validated token remains in an unexported shell variable and is sent to
-# curl through config stdin, never argv, the environment, a new file, or logs.
+# The validated token remains in an unexported shell variable and reaches the
+# pinned health reader through a pipe, never argv, environment, files or logs.
 BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
 read_health_token() {
   python3 - "$BOT_TOKENS_ENV" <<'PY'
@@ -586,22 +611,102 @@ finally:
 PY
 }
 
+read_health_response() {
+  # FD 3 preserves the anonymous token pipe through the timeout's background
+  # command. Execute the bytes just hashed, avoiding a path reopen after check.
+  run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3 -c '
+import errno, hashlib, os, re, stat, sys
+try:
+    source_path, expected, port_text, request_path, timeout_text = sys.argv[1:]
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ValueError()
+    if re.fullmatch(r"[1-9][0-9]?", timeout_text) is None:
+        raise ValueError()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(source_path, flags)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError()
+        contents = source.read(262145)
+    if len(contents) > 262144 or hashlib.sha256(contents).hexdigest() != expected:
+        raise ValueError()
+    namespace = {"__name__": "watchdog_health_reader", "__file__": source_path}
+    exec(compile(contents, source_path, "exec"), namespace)
+    if request_path == "verify":
+        if not callable(namespace.get("fetch_loopback_health")) or not isinstance(namespace.get("HealthTransportError"), type):
+            raise ValueError()
+        print("VERIFIED")
+        raise SystemExit(0)
+    with os.fdopen(3, "rb") as token_pipe:
+        token = token_pipe.read(65).decode("ascii")
+    if request_path == "/health":
+        if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError()
+        headers = {"Authorization": "Bearer " + token}
+    elif request_path == "/" and not token:
+        headers = {}
+    else:
+        raise ValueError()
+    try:
+        code, body = namespace["fetch_loopback_health"](int(port_text), request_path, headers, timeout=int(timeout_text))
+    except namespace["HealthTransportError"] as error:
+        if (error.stage not in ("connect", "request", "response", "read")
+                or (error.errno is not None and type(error.errno) is not int)):
+            raise ValueError()
+        if error.stage == "connect" and error.errno == errno.EADDRNOTAVAIL:
+            print("EADDRNOTAVAIL")
+            raise SystemExit(2)
+        print("TRANSPORT_FAILURE")
+        raise SystemExit(7)
+    if type(code) is not int or not 100 <= code <= 599 or not isinstance(body, str):
+        raise ValueError()
+    if len(body.encode("utf-8")) > 65536:
+        raise ValueError()
+    print(body + "\n" + str(code), end="")
+except Exception:
+    print("watchdog: health reader unavailable or invalid", file=sys.stderr)
+    raise SystemExit(3)
+' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" 3<&0
+}
+
+# An unverifiable reader leaves this cycle without evidence: no restart, no
+# bootstrap, and no credential verdict (the paging state is left untouched).
+binding_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
+binding_rc=$?
+if [ "$binding_rc" -ne 0 ] || [ "$binding_resp" != VERIFIED ]; then
+  health_unknown "health reader binding unavailable or invalid"
+  log "$WD_FINAL"
+  exit "$WD_EXIT"
+fi
 # Capture the body EVEN on an HTTP error status. A logged-out / terminally
 # auth-failed bot returns HTTP 503 *with* a body carrying
-# whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
-# and send us down the "unreachable" restart path, restart-looping a bot a
-# restart cannot fix. So: no --fail; capture body + code; treat only a real
-# TRANSPORT failure (no HTTP response at all) as unreachable, and let the
-# decision block below act on the body (incl. the terminal-no-restart branch).
+# whatsapp.connection.auth_failure_class; discarding that body would send us
+# down the "unreachable" restart path, restart-looping a bot a restart cannot
+# fix. So the reader returns body + code for every HTTP response, and the
+# decision block below acts on the body (incl. the terminal-no-restart branch).
+# Only a typed transport failure with no HTTP response is unreachable, and only
+# a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
+# HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
+# Ordinary refusal retains the existing restart policy. A read killed at the
+# wall deadline (run_with_timeout 124, no output) is restart evidence too, as
+# `curl --max-time` was: the reader's own shorter socket timeout already turns
+# a silent target into a typed failure, so reaching the deadline means the
+# response did not complete in time (e.g. a trickling target).
 HEALTH_TOKEN=""
 if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
-  bot_resp="$(print -r -- "header = \"Authorization: Bearer $HEALTH_TOKEN\"" | curl --config - --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
-  curl_rc=$?
+  bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  probe_rc=$?
   HEALTH_TOKEN=""
   bot_code="${bot_resp##*$'\n'}"
   bot_json="${bot_resp%$'\n'*}"
-  if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
+  if [ "$probe_rc" -eq 2 ] && [ "$bot_resp" = EADDRNOTAVAIL ]; then
+    health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
+  elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
     restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
+    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
+  elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
+    health_unknown "bot health reader unavailable or invalid"
   elif [ -z "$bot_json" ]; then
     health_unknown "empty diagnostic health body"
   elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
@@ -1189,7 +1294,18 @@ else
 fi
 
 # --- Fleet console health check ---
-if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2>>"$LOG"; then
+fleet_resp="$(read_health_response FLEET_PORT / </dev/null 2>>"$LOG")"
+probe_rc=$?
+fleet_code="${fleet_resp##*$'\n'}"
+if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
+  health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
+elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
+  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
+elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
+  health_unknown "fleet health reader unavailable or invalid"
+elif [ "$fleet_code" -ge 400 ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable"
 fi
 
