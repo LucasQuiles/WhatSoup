@@ -29,6 +29,7 @@ import {
 } from '../../core/stored-audio-transcript.ts';
 import { CONTEXT_LINE_MAX_CHARS_PER_MESSAGE } from './context-lines.ts';
 import { createChildLogger } from '../../logger.ts';
+import { systemClock } from '../../lib/clock.ts';
 
 const log = createChildLogger('agent:context-audio');
 
@@ -122,7 +123,7 @@ export function warmHistoryAudio(
   options: { transcribe?: AudioTranscriber; nowSeconds?: number } = {},
 ): number {
   const transcribe = options.transcribe ?? defaultTranscriber;
-  const since = (options.nowSeconds ?? Math.floor(Date.now() / 1000)) - HISTORY_AUDIO_WARM_WINDOW_SECONDS;
+  const since = (options.nowSeconds ?? systemClock.nowUnixSec()) - HISTORY_AUDIO_WARM_WINDOW_SECONDS;
   const lookup = db.raw.prepare(
     `SELECT content, content_text FROM messages
       WHERE message_id = ? AND content_type = 'audio' AND is_from_me = 0
