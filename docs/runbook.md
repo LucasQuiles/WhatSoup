@@ -852,7 +852,11 @@ On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, 
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
 cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
-degraded so the exhausted episode is not hidden.
+degraded so the exhausted episode is not hidden. Each exhaustion episode is retained as an alert
+owner until the chat respawns successfully or one hour passes; only that episode's own timer can
+retire it, so a later re-exhaustion of the same chat is never retired early by an older timer.
+Retirement attempts the shared `agent_respawn_failed` clear under the same rule as abandonment
+below: only once no chat is either exhausted or abandoned, with a refused clear kept as retry debt.
 
 The same alert source has a second path, and the two behave differently, so read the body first.
 An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
@@ -868,9 +872,15 @@ The chat recovers on its own. The abandonment settles when the chat's next inbou
 it back into service, when a new owned session is indexed for it, or when the record ages out of
 the retention window. Which of the first two routes the turn takes depends on the shape: a session
 that had gone inactive is respawned in place and settled by that re-activation, while one that
-still reported active when it was abandoned is settled on the served-turn path. Settling clears
-this alert only when no chat is either exhausted or abandoned. Health reports
-`per_chat_respawn_abandoned` until it settles.
+still reported active when it was abandoned is settled at the provider-ready served-turn boundary,
+after the before-send hook, executing-actor publication, and typing indication. Settlement retires
+the chat's abandonment immediately. Once no chat is either exhausted or abandoned, the runtime
+attempts the shared alert clear. An accepted clear finishes the incident; a refused or throwing
+clear leaves the content-free `agentRespawnFailedClearPending: true` health field and the
+`runtime.agent_respawn_failed_clear_pending` / `agent_respawn_failed_clear_pending` reason/cause
+pair degraded. Later health polls and provider-ready settlement boundaries retry while both owner
+populations remain empty. A new abandonment or exhaustion blocks the retry without erasing the
+obligation. Health reports `per_chat_respawn_abandoned` only until the abandonment itself settles.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
