@@ -187,7 +187,10 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:grant-resolver'),
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
-  guard('guard:guard-test-coverage'),
+  step(
+    'guard:guard-test-coverage',
+    'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+  ),
   guard('guard:lint:src'),
   step('typecheck:all', 'npm run typecheck:all'),
   step('typecheck:scripts', 'npm run typecheck:scripts'),
@@ -234,7 +237,10 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:grant-resolver'),
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
-  guard('guard:guard-test-coverage'),
+  step(
+    'guard:guard-test-coverage',
+    'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+  ),
   guard('guard:lint:src'),
   step('test:tokenomics', 'npm run test:tokenomics'),
   step('test:deployment-qualification', 'npm run test:deployment-qualification'),
