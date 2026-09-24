@@ -1,7 +1,7 @@
 {
   "name": "whatsoup",
   "version": "0.1.0",
-  "description": "WhatSoup \u2014 consolidated WhatsApp platform with embedded MCP tools",
+  "description": "WhatSoup — consolidated WhatsApp platform with embedded MCP tools",
   "type": "module",
   "packageManager": "npm@11.12.1",
   "engines": {
@@ -160,7 +160,7 @@
     "@anthropic-ai/sdk": "0.39.0",
     "@mozilla/readability": "0.6.0",
     "@pinecone-database/pinecone": "8.1.0",
-    "@whiskeysockets/baileys": "7.0.0-rc12",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
     "cheerio": "1.2.0",
     "linkedom": "0.18.12",
     "openai": "5.23.2",
