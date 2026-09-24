@@ -108,6 +108,7 @@ const ALL_CONTROLS = [
   'config.validation',
   'privacy.publication',
   'repo.hygiene',
+  'test.guard-coverage',
   'test.integrity',
   'workflow.safeguard-diagnostics',
 ];

@@ -11,7 +11,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const GUARD = path.join(REPO_ROOT, 'scripts/fault-taxonomy-source-coverage-guard.ts');
 
 interface Fixture {
   registry?: Record<string, unknown>;
@@ -20,7 +19,10 @@ interface Fixture {
 }
 
 function run(cwd: string): { status: number | null; stdout: string; stderr: string } {
-  const res = spawnSync(process.execPath, ['--experimental-strip-types', GUARD], {
+  const res = spawnSync(process.execPath, [
+    '--experimental-strip-types',
+    path.join(REPO_ROOT, 'scripts/fault-taxonomy-source-coverage-guard.ts'),
+  ], {
     cwd,
     encoding: 'utf8',
     timeout: 60_000,
@@ -71,7 +73,17 @@ describe('fault-taxonomy source-coverage guard (#2147)', () => {
       },
     });
     try {
-      const res = run(dir);
+      // Keep one exact subprocess call in a live test body so the coverage
+      // meta-guard can prove this guard's failure path without trusting the
+      // helper call graph.
+      const res = spawnSync(process.execPath, [
+        '--experimental-strip-types',
+        path.join(REPO_ROOT, 'scripts/fault-taxonomy-source-coverage-guard.ts'),
+      ], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
       expect(res.status).toBe(1);
       expect(res.stderr).toContain("unregistered-source-growth: 'brand_new_source'");
       expect(res.stderr).toContain('src/foo.ts:1');
