@@ -104,7 +104,15 @@ RECOVERED_BEFORE_DELIVERY_REASON = (
     "alert and clear retained as audit-only"
 )
 TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json: logged out
+# with no transport retry left. The two auth_401_* classes are unconfirmed
+# removals that must still not be restarted or re-paged as recoverable.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 LOGGED_OUT_REASON_KEY = "loggedout"
 
 
@@ -3477,9 +3485,14 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
         return True
     source = str(event.get("source") or "")
     evidence = event_text(event, "evidence").lower()
+    # The raw 401 + loggedOut pair only decides for legacy evidence; evidence
+    # that names the transport's disconnect_classification is decided by the
+    # auth_failure_class it carries (an ambiguous 401 retry is not logged out).
     return source == "instance_logged_out" and (
         evidence_has_terminal_auth_failure_class(evidence) or (
-            "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
+            "disconnect_classification=" not in evidence
+            and "last_status_code=401" in evidence
+            and evidence_has_logged_out_reason(evidence)
         )
     )
 
