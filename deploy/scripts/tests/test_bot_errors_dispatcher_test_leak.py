@@ -166,7 +166,25 @@ class TestPhysicalInterventionSignals:
         assert _mod.TERMINAL_AUTH_FAILURE_CLASSES == {
             "pairing_required",
             "serverside_logout_irreversible",
+            "auth_401_ambiguous_parked",
+            "auth_401_uninspected_exit",
         }
+
+    def test_raw_401_evidence_only_decides_for_legacy_evidence(self):
+        # Evidence that names the transport's classification is decided by its
+        # auth_failure_class; an ambiguous 401 retry is not a logged-out signal.
+        legacy = {"source": "instance_logged_out",
+                  "evidence": "last_status_code=401 last_disconnect_reason=loggedOut"}
+        classified = {"source": "instance_logged_out",
+                      "evidence": "last_status_code=401 last_disconnect_reason=loggedOut "
+                                  "auth_failure_class=auth_401_ambiguous_retrying "
+                                  "disconnect_classification=ambiguous_401_reconnecting"}
+        parked = {"source": "instance_logged_out",
+                  "evidence": "auth_failure_class=auth_401_ambiguous_parked "
+                              "disconnect_classification=ambiguous_401_parked"}
+        assert _mod.is_logged_out_physical_signal(legacy)
+        assert not _mod.is_logged_out_physical_signal(classified)
+        assert _mod.is_logged_out_physical_signal(parked)
 
 
 # ===========================================================================
