@@ -67,15 +67,28 @@ completion evidence plus catalogue recency.
 3. Verbose output is shape-checked and bounded before metadata is trusted.
 4. Explicitly inactive, non-text-output, or non-tool-capable models are ineligible for the
    automatic agent ladder; with equal completion evidence, stable lifecycle outranks preview
-   lifecycle before release chronology is considered.
+   lifecycle before release chronology is considered. Within one reported lifecycle, an id
+   whose model segment carries a whole-word pre-release token (`exp`, `experimental`,
+   `preview`, `alpha`, `beta`) ranks below an id that does not. This applies with or without
+   metadata. An explicit gateway status still outranks the naming hint. A plain id of any age
+   therefore outranks a pre-release-named id within the same reported lifecycle; an operator
+   pin still overrides. The trade-off is deliberate: a provider whose whole current
+   generation is preview-named ranks behind its older plain model until the gateway reports a
+   lifecycle or the operator pins.
 5. Missing metadata remains compatible with older/custom gateways and uses the legacy
    conservative filter; it is never described as capability-proven.
 6. A configured operator preference wins when its exact ID is present.
 7. Recent successful completion evidence outranks unknown evidence; failed evidence excludes
    only the exact model, allowing another model from the same provider to become a candidate.
-8. With equal evidence and lifecycle, a valid later month- or day-precision release date wins;
-   equal dates preserve the established catalogue tie break so legacy gateways remain
-   deterministic.
+8. With equal evidence and lifecycle, a valid later month- or day-precision release date wins.
+   Among equal dates, the provider's rolling alias (an id equal to its models.dev `family`)
+   wins. The alias flag is per model, so it also ranks a same-day alias of one family above a
+   same-day versioned id of another family; the catalogue gives no basis for ranking families
+   against each other. Descending model id, compared by UTF-16 code unit rather than locale
+   collation, breaks any remaining tie. An id's position in the listing is never a ranking
+   input. OpenCode lists ids with a locale-aware sort, so for a provider whose ids share one
+   letter case this reproduces the former later-entry pick. Mixed-case ids, `~` or `_`
+   prefixes, and pre-release ids can resolve differently.
 9. A gateway entry can fill the reserved free-tier tail only when verbose metadata confirms
    that input, output, and every nested numeric price are zero; metadata-free legacy output
    retains the prior prefix assumption.
@@ -83,6 +96,8 @@ completion evidence plus catalogue recency.
    active-entry preservation remain unchanged.
 11. Health/log evidence reports the capture mode and selection basis without provider error
     prose or credentials.
+12. A provider's representative is invariant to catalogue listing order. Provider order in
+    the chain still follows each provider's first appearance in the catalogue.
 
 ### Constraints
 
@@ -103,7 +118,7 @@ completion evidence plus catalogue recency.
 | Evidence | OpenCode configured-provider output, verbose metadata, refresh behavior, runtime discovery logs, and the existing discovery tests/history. |
 | Operational impact | A provider can be represented by a stale or unsuitable rung, causing avoidable turn failure and misleading runtime claims. |
 | Root cause | Proven: metadata is discarded and output order is treated as chronology; refresh provenance is not carried. |
-| Required invariant | Automatic candidates are agent-capable when capability metadata exists; ranking is evidence-first, lifecycle-aware, then release-date-aware; the reserved free tail is zero-cost when cost metadata exists. |
+| Required invariant | Automatic candidates are agent-capable when capability metadata exists; ranking is evidence-first, lifecycle-aware, then release-date-aware, then alias-aware, and never depends on listing position; the reserved free tail is zero-cost when cost metadata exists. |
 | Existing control | Dynamic ID discovery, provider diversity, name-token non-chat filter, and real-completion canaries. |
 | Remaining gap | No metadata parser, no refresh/cached distinction, false list-order chronology, no lifecycle or cost classification, and no same-provider next candidate after exact-model failure. |
 | Proposed mechanism | Extend the existing lister result with bounded metadata and capture mode; extend the existing pure ranker to consume it. |
@@ -113,7 +128,7 @@ completion evidence plus catalogue recency.
 | Response | Prefer fresh data; fall back to explicitly cached/legacy data; exclude proven-ineligible or exact-model-dead candidates; retain the prior chain on total failure. |
 | Valid exception | An exact operator preference may select an otherwise automatically ineligible model; explicit intent is logged as the basis. |
 | Positive control | Newer active text/tool metadata wins within a provider and a fresh successful canary wins across providers. |
-| Negative control | Inactive, non-tool, non-text-output, paid-tail, unknown-cost-tail, malformed-metadata, beta-over-stable, and exact-model-dead cases do not become the automatic candidate. |
+| Negative control | Inactive, non-tool, non-text-output, paid-tail, unknown-cost-tail, malformed-metadata, beta-over-stable, same-lifecycle pre-release-named, and exact-model-dead cases do not become the automatic candidate, and listing position alone never changes the pick. |
 | Bypass analysis | Unknown metadata cannot be called capability-proven; cached fallback is labeled; a dead model cannot condemn every model under its provider. |
 | Proof | Parser fixtures, ranking falsifiers, refresh-to-cache degradation tests, existing discovery wiring/canary tests, typecheck, and live shadow comparison. |
 | SSOT | Existing catalogue lister and fallback discovery modules. |
@@ -134,7 +149,8 @@ status, output modality, or tool support.
 ### Always choose the newest catalogue entry
 
 Rejected. Recency is weaker evidence than a fresh successful completion. It is only the
-tie-breaker among candidates with the same completion status.
+tie-breaker among candidates with the same completion status and lifecycle. The newest
+*entry* in listing order is never a ranking input.
 
 ### Canary every model on every turn
 
@@ -185,6 +201,58 @@ These findings imply a thin adapter over the installed CLI, not a global static 
 10. Make a nested cache price non-zero or omit valid cost from a verbose record; the entry
     cannot claim or occupy the zero-cost tail.
 11. Run the existing discovery, canary, health, type, lint, and repository gates.
+12. Feed the live 2026-09-22 DeepSeek records in all 120 orders, both as parsed metadata and
+    as a permuted raw verbose stream through the real parser; every order selects
+    `deepseek/deepseek-flash`.
+13. Feed a metadata-free provider in every order; every order selects the greatest id.
+14. Give an experimental id the same status and a later date than a stable sibling; the stable
+    sibling wins. With the two same-day stable ids dead, the older stable model still beats the
+    experimental variant. An exact operator pin still selects the experimental id.
+15. Give an alias an earlier date than a versioned sibling in its family; the newer sibling
+    wins. Give an experimental alias the same date as a stable sibling; the stable sibling wins.
+
+## Order-invariance addendum (2026-09-21)
+
+A fleet host running discovery selected `deepseek/deepseek-v4-pro` as DeepSeek's rung while
+`deepseek/deepseek-flash` (V4.1 Flash, released 2026-09-10) was in its catalogue. The
+deployed release predated this record's ranker and still picked the last listed id; a
+replay of that function chose the last entry in all 120 orders of the five DeepSeek ids.
+
+The ranker in this record did not fully correct it. Three DeepSeek ids (`deepseek-flash`,
+`deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`) share status, capabilities, family and
+release date. models.dev publishes lifecycle only as absent, `beta`, or `deprecated`, and
+OpenCode reports an absent value as `active`, so none of the metadata separates them. The
+tie fell to the later-entry rule, and the lexicographic listing put the experimental vision
+variant last. Executed against the pre-addendum ranker, each of the three won 40 of the 120
+orders. The earlier lifecycle falsifier caught a vision experiment only while it carried an
+explicit `beta` status (see Live shadow result); the records observed on 2026-09-22 report
+`active` for every DeepSeek id.
+
+Controls added, all inside the existing ranker:
+
+| Control | Why it is needed |
+|---|---|
+| Within one reported lifecycle, a pre-release id token ranks the id below plain siblings | The id is the only lifecycle signal left when the gateway defaults status to active, or when a legacy capture carries no status at all. |
+| Rolling alias (id equals `family`) wins among same-day, same-lifecycle, same-evidence ids | Picks the provider's canonical current id. On the fleet host the legacy `deepseek-v4-flash` alias also carries a locally configured 128K context and 8K output limit, against 1M and 384K for `deepseek-flash`. |
+| Descending model id, by UTF-16 code unit, replaces listing position as the final tie break | Makes the pure function independent of input order. It matches the former pick only where locale-aware listing order and code-unit order agree, which holds for single-case ids; on both captures below it changed no pick except DeepSeek's. |
+
+Measured on two real verbose captures (125 records across 10 providers on a development host,
+30 records across 5 providers on the fleet host), comparing the pre-addendum ranker with this
+one, each run over the captured order and its reverse:
+
+| Measure | Development host | Fleet host |
+|---|---|---|
+| Providers whose pick changed | 1 (`deepseek`) | 1 (`deepseek`) |
+| Providers whose pick changed when the listing was reversed, before | 3 | 3 |
+| Providers whose pick changed when the listing was reversed, after | 0 | 0 |
+| Ids demoted by the pre-release token rule | 2 | 1 |
+
+The token rule is a naming heuristic, the same shape as the non-chat filter; it deliberately
+matches whole words only (`expert` and `betamax` do not match). Words split on `-`, `_`, `.`,
+`:` and `/`, so an aggregator routing suffix (`model-preview:free`) or a nested vendor path
+is tokenized too. An operator pin still selects
+an experimental id. Config-defined models with an empty `family` and `release_date` fall back
+to descending id, which is the documented degrade.
 
 ## Live shadow result
 
