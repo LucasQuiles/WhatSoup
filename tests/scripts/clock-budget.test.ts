@@ -64,6 +64,9 @@
  * time through a Clock injected at construction, defaulting to systemClock;
  * the snapshot classifiers take the reading as an argument.
  * CLOCK_BUDGET lowered 296 -> 284.
+ * Then fleet/db-reader.ts (2, constructor-injected Clock), fleet/group-resolver.ts
+ * (1, optional Clock argument) and fleet/routes/lines.ts (2, optional
+ * LinesDeps.clock threaded into the stat caches): CLOCK_BUDGET 284 -> 279.
  *
  * Companion: #2200 slice 1.
  */
@@ -78,7 +81,7 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 284;
+const CLOCK_BUDGET = 279;
 // Same debt, different syntax — each dodged the call-site count entirely.
 const DATE_NOW_REF_BUDGET = 9;
 const BARE_NEW_DATE_BUDGET = 104;
