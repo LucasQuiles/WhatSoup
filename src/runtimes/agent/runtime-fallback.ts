@@ -810,6 +810,7 @@ export class RuntimeFallbackCoordinator {
         model: string;
         evidence: CandidateEvidence;
         catalogStatus: string | null;
+        family: string | null;
         releaseDate: string | null;
         zeroCost: boolean | null;
         eligibilityBasis: DiscoveredCandidate['eligibilityBasis'];
@@ -875,6 +876,7 @@ export class RuntimeFallbackCoordinator {
               model: c.model,
               evidence: c.evidence,
               catalogStatus: c.catalogStatus,
+              family: c.family,
               releaseDate: c.releaseDate,
               zeroCost: c.zeroCost,
               eligibilityBasis: c.eligibilityBasis,
@@ -1403,6 +1405,7 @@ export class RuntimeFallbackCoordinator {
           model: c.model,
           evidence: c.evidence,
           catalogStatus: c.catalogStatus,
+          family: c.family,
           releaseDate: c.releaseDate,
           zeroCost: c.zeroCost,
           eligibilityBasis: c.eligibilityBasis,

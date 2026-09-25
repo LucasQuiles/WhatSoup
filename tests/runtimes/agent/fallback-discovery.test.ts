@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveFallbackChainFromCatalog,
+  isExperimentalCatalogModel,
   isNonChatCatalogModel,
   type CandidateEvidence,
 } from '../../../src/runtimes/agent/fallback-discovery.ts';
@@ -65,7 +66,7 @@ function derive(opts: {
 }
 
 describe('deriveFallbackChainFromCatalog', () => {
-  it('selects one model per keyed provider using the legacy later-entry tie break', () => {
+  it('selects one model per keyed provider using the metadata-free descending-id tie break', () => {
     const { entries } = derive({ policy: { maxEntries: 4, includeFreeTier: false } });
     expect(entries).toEqual([
       { provider: GATEWAY, model: 'deepseek/deepseek-v4-pro' },
@@ -250,7 +251,7 @@ describe('deriveFallbackChainFromCatalog', () => {
     expect(entries).toEqual([{ provider: GATEWAY, model: 'minimax/MiniMax-M2.7' }]);
   });
 
-  it('retains the established later-entry tie break for equal or missing release dates', () => {
+  it('breaks equal or missing release dates by descending model id, not catalogue position', () => {
     const catalogIds = ['glm/glm-a', 'glm/glm-b'];
     const catalogMetadata = {
       'glm/glm-a': {
@@ -268,6 +269,16 @@ describe('deriveFallbackChainFromCatalog', () => {
     }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
     expect(derive({
       catalogIds,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
+    // Position must not decide: the reversed listing picks the same id.
+    expect(derive({
+      catalogIds: [...catalogIds].reverse(),
+      catalogMetadata,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
+    expect(derive({
+      catalogIds: [...catalogIds].reverse(),
       policy: { maxEntries: 1, includeFreeTier: false },
     }).entries).toEqual([{ provider: GATEWAY, model: 'glm/glm-b' }]);
   });
@@ -485,5 +496,304 @@ describe('non-chat catalogue filtering', () => {
       policy: { maxEntries: 1, includeFreeTier: false, preferModels: { openai: 'openai/gpt-realtime-2.1' } },
     });
     expect(entries).toEqual([{ provider: GATEWAY, model: 'openai/gpt-realtime-2.1' }]);
+  });
+});
+
+// Live 2026-09-22 finding (fleet host `opencode models --pure --verbose`,
+// opencode 1.18.31): three DeepSeek ids share status, capabilities, family and
+// release date. The former later-entry tie break therefore let catalogue
+// position pick the experimental vision variant, and every one of the three
+// could win depending on listing order. Selection must depend on metadata and
+// the id itself, never on where an id appears in the listing.
+function permutations<T>(values: readonly T[]): T[][] {
+  if (values.length <= 1) return [[...values]];
+  return values.flatMap((value, index) =>
+    permutations([...values.slice(0, index), ...values.slice(index + 1)])
+      .map((rest) => [value, ...rest]));
+}
+
+const LIVE_DEEPSEEK_IDS = [
+  'deepseek/deepseek-chat',
+  'deepseek/deepseek-flash',
+  'deepseek/deepseek-v4-flash',
+  'deepseek/deepseek-v4-flash-vision-exp',
+  'deepseek/deepseek-v4-pro',
+] as const;
+
+// Parsed (post-capture) metadata of the live records. `deepseek-chat` is
+// config-defined: its verbose record carries an empty family and release date,
+// which the capture layer drops. `deepseek-flash` is the id that equals its
+// family: DeepSeek's rolling V4.1 alias.
+const LIVE_DEEPSEEK_METADATA = {
+  'deepseek/deepseek-chat': {
+    status: 'active', textOutput: true, toolCall: true, zeroCost: true,
+  },
+  'deepseek/deepseek-flash': {
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
+  },
+  'deepseek/deepseek-v4-flash': {
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
+  },
+  'deepseek/deepseek-v4-flash-vision-exp': {
+    status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10',
+    textOutput: true, toolCall: true, zeroCost: false,
+  },
+  'deepseek/deepseek-v4-pro': {
+    status: 'active', family: 'deepseek-thinking', releaseDate: '2026-08-12',
+    textOutput: true, toolCall: true, zeroCost: false,
+  },
+} satisfies Record<string, ModelCatalogMetadata>;
+
+function winnersAcrossOrders(
+  ids: readonly string[],
+  opts: {
+    catalogMetadata?: Readonly<Record<string, ModelCatalogMetadata>>;
+    evidenceFor?: (id: string) => CandidateEvidence;
+    preferModels?: Record<string, string>;
+  } = {},
+): { orders: number; winners: string[] } {
+  const orders = permutations(ids);
+  const winners = new Set(orders.map((order) => derive({
+    catalogIds: order,
+    ...(opts.catalogMetadata ? { catalogMetadata: opts.catalogMetadata } : {}),
+    ...(opts.evidenceFor ? { evidenceFor: opts.evidenceFor } : {}),
+    policy: {
+      maxEntries: 1,
+      includeFreeTier: false,
+      ...(opts.preferModels ? { preferModels: opts.preferModels } : {}),
+    },
+  }).entries[0]?.model ?? 'none'));
+  return { orders: orders.length, winners: [...winners].sort() };
+}
+
+describe('catalogue-order invariance', () => {
+  it('selects the canonical V4.1 alias under all 120 orders of the live catalogue', () => {
+    const result = winnersAcrossOrders(LIVE_DEEPSEEK_IDS, { catalogMetadata: LIVE_DEEPSEEK_METADATA });
+    expect(result).toEqual({ orders: 120, winners: ['deepseek/deepseek-flash'] });
+  });
+
+  it('reports the family of the selected representative in the basis', () => {
+    const { basis } = derive({
+      catalogIds: LIVE_DEEPSEEK_IDS,
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      policy: { maxEntries: 1, includeFreeTier: false },
+    });
+    expect(basis).toEqual([expect.objectContaining({
+      model: 'deepseek/deepseek-flash',
+      family: 'deepseek-flash',
+      releaseDate: '2026-09-10',
+      selected: true,
+    })]);
+  });
+
+  it('falls back to the next same-day id when the canonical alias is dead', () => {
+    const result = winnersAcrossOrders(LIVE_DEEPSEEK_IDS, {
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      evidenceFor: (id) => (id === 'deepseek/deepseek-flash' ? 'dead' : 'unknown'),
+    });
+    expect(result).toEqual({ orders: 120, winners: ['deepseek/deepseek-v4-flash'] });
+  });
+
+  it('uses descending id when family metadata is absent (documented degrade)', () => {
+    const metadata = {
+      'deepseek/deepseek-flash': {
+        status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+      },
+      'deepseek/deepseek-v4-flash': {
+        status: 'active', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['deepseek/deepseek-v4-flash'] });
+  });
+
+  it('never prefers an alias over a newer release in the same family', () => {
+    const metadata = {
+      'kimi/kimi-k3': {
+        status: 'active', family: 'kimi-k3', releaseDate: '2026-06-01', textOutput: true, toolCall: true,
+      },
+      'kimi/kimi-k3.1': {
+        status: 'active', family: 'kimi-k3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['kimi/kimi-k3.1'] });
+  });
+
+  it('never prefers an experimental alias over a stable sibling', () => {
+    const metadata = {
+      'acme/acme-preview': {
+        status: 'active', family: 'acme-preview', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+      'acme/acme-2': {
+        status: 'active', family: 'acme-preview', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['acme/acme-2'] });
+  });
+
+  it('matches the rolling alias against its family case-insensitively', () => {
+    // Descending code-unit order alone would pick the lowercase dated id
+    // (`m` sorts after `M`), so only a case-insensitive alias match selects
+    // the mixed-case rolling alias.
+    const metadata = {
+      'minimax/MiniMax-M3': {
+        status: 'active', family: 'minimax-m3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+      'minimax/minimax-m3-2609': {
+        status: 'active', family: 'minimax-m3', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(metadata), { catalogMetadata: metadata });
+    expect(result).toEqual({ orders: 2, winners: ['minimax/MiniMax-M3'] });
+  });
+
+  it('never lets listing order choose among metadata-free ids either', () => {
+    const result = winnersAcrossOrders(['glm/glm-5', 'glm/glm-5-turbo', 'glm/glm-5.1', 'glm/glm-5.2']);
+    expect(result).toEqual({ orders: 24, winners: ['glm/glm-5.2'] });
+  });
+
+  it('breaks the final tie by host-independent code-unit order, not locale collation', () => {
+    // A locale-aware sort (OpenCode's listing order) puts `~` and uppercase
+    // before lowercase letters; plain code-unit order puts `~` (0x7E) after
+    // `z` and uppercase before lowercase. The documented rule is the latter.
+    expect(winnersAcrossOrders(['openrouter/z-ai/glm-5v-turbo', 'openrouter/~z-ai/glm-latest']))
+      .toEqual({ orders: 2, winners: ['openrouter/~z-ai/glm-latest'] });
+    expect(winnersAcrossOrders(['acme/apple-2', 'acme/Zeta-2']))
+      .toEqual({ orders: 2, winners: ['acme/apple-2'] });
+  });
+
+  it('ranks an older stable sibling above a newer experimental id', () => {
+    const result = winnersAcrossOrders(
+      ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash-vision-exp'],
+      { catalogMetadata: LIVE_DEEPSEEK_METADATA },
+    );
+    expect(result).toEqual({ orders: 2, winners: ['deepseek/deepseek-v4-pro'] });
+  });
+
+  it('falls through dead same-day ids to the stable model, not the experimental variant', () => {
+    const dead = new Set(['deepseek/deepseek-flash', 'deepseek/deepseek-v4-flash']);
+    const result = winnersAcrossOrders(LIVE_DEEPSEEK_IDS, {
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      evidenceFor: (id) => (dead.has(id) ? 'dead' : 'unknown'),
+    });
+    expect(result).toEqual({ orders: 120, winners: ['deepseek/deepseek-v4-pro'] });
+  });
+
+  it('still lets an exact operator pin select an experimental id', () => {
+    const { entries, basis } = derive({
+      catalogIds: LIVE_DEEPSEEK_IDS,
+      catalogMetadata: LIVE_DEEPSEEK_METADATA,
+      policy: {
+        maxEntries: 1,
+        includeFreeTier: false,
+        preferModels: { deepseek: 'deepseek/deepseek-v4-flash-vision-exp' },
+      },
+    });
+    expect(entries).toEqual([{ provider: GATEWAY, model: 'deepseek/deepseek-v4-flash-vision-exp' }]);
+    expect(basis[0]).toMatchObject({ eligibilityBasis: 'operator-pin' });
+  });
+
+  it('ranks a pre-release id below a plain sibling even without any metadata', () => {
+    // Legacy capture: no status, no date, no family. Descending id alone would
+    // pick `model-3-preview`; the pre-release key must decide first.
+    const result = winnersAcrossOrders(['acme/model-2', 'acme/model-3-preview']);
+    expect(result).toEqual({ orders: 2, winners: ['acme/model-2'] });
+  });
+
+  it('applies pin, evidence, lifecycle and the naming hint in the documented precedence', () => {
+    // Each case sets two adjacent keys against each other, so swapping that
+    // pair in the comparator flips the winner.
+    const okFor = (winner: string) => (id: string): CandidateEvidence => (id === winner ? 'ok' : 'unknown');
+    const agentReady = { textOutput: true, toolCall: true } as const;
+
+    // A live pin outranks a sibling with better completion evidence.
+    expect(winnersAcrossOrders(['acme/a', 'acme/b'], {
+      evidenceFor: okFor('acme/a'),
+      preferModels: { acme: 'acme/b' },
+    })).toEqual({ orders: 2, winners: ['acme/b'] });
+
+    // Completion evidence outranks a better reported lifecycle.
+    expect(winnersAcrossOrders(['acme/a', 'acme/b'], {
+      catalogMetadata: {
+        'acme/a': { status: 'beta', ...agentReady },
+        'acme/b': { status: 'active', ...agentReady },
+      },
+      evidenceFor: okFor('acme/a'),
+    })).toEqual({ orders: 2, winners: ['acme/a'] });
+
+    // Completion evidence outranks the pre-release naming hint.
+    expect(winnersAcrossOrders(['acme/model-2', 'acme/model-3-exp'], {
+      evidenceFor: okFor('acme/model-3-exp'),
+    })).toEqual({ orders: 2, winners: ['acme/model-3-exp'] });
+  });
+
+  it('lets an explicit gateway status outrank a naming hint', () => {
+    // Metadata beats heuristic: an active id whose name says preview still
+    // outranks a plain id the gateway explicitly labels beta.
+    const catalogMetadata = {
+      'acme/model-2-preview': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+      'acme/model-3': {
+        status: 'beta', releaseDate: '2026-09-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+    const result = winnersAcrossOrders(Object.keys(catalogMetadata), { catalogMetadata });
+    expect(result).toEqual({ orders: 2, winners: ['acme/model-2-preview'] });
+  });
+
+  it('orders two pre-release-named ids by their explicit status tier', () => {
+    const catalogIds = ['glm/glm-next-alpha', 'glm/glm-5.2-preview'];
+    const catalogMetadata = {
+      'glm/glm-next-alpha': {
+        status: 'alpha', releaseDate: '2026-09-15', textOutput: true, toolCall: true,
+      },
+      'glm/glm-5.2-preview': {
+        status: 'active', releaseDate: '2026-08-01', textOutput: true, toolCall: true,
+      },
+    } satisfies Record<string, ModelCatalogMetadata>;
+
+    // Both ids carry a pre-release token, so the naming hint cannot separate
+    // them; the explicit status tier (active above alpha) decides before the
+    // newer release date is considered.
+    const result = winnersAcrossOrders(catalogIds, { catalogMetadata });
+    expect(result).toEqual({ orders: 2, winners: ['glm/glm-5.2-preview'] });
+  });
+});
+
+describe('isExperimentalCatalogModel', () => {
+  it('classifies lifecycle tokens carried in the model id', () => {
+    for (const id of [
+      'deepseek/deepseek-v4-flash-vision-exp',
+      'google/gemini-3.1-pro-preview',
+      'openai/o5-alpha',
+      'acme/model-beta-2',
+      'acme/model_experimental',
+      'acme/model.exp',
+      'Acme/Model-Preview',
+      // Aggregator shapes: a routing suffix and a nested vendor path.
+      'openrouter/dots-studio/dots-3-note-preview:free',
+      'openrouter/acme/beta/model-2',
+    ]) {
+      expect(isExperimentalCatalogModel(id), id).toBe(true);
+    }
+    for (const id of [
+      'deepseek/deepseek-flash',
+      'deepseek/deepseek-v4-pro',
+      'glm/glm-5-turbo',
+      'minimax/MiniMax-M2.1-highspeed',
+      'opencode/nemotron-3.5-lightning-free',
+      'openai/o3-pro',
+      'acme/expert-coder',
+      'acme/betamax',
+      'exp/stable-model',
+      'openrouter/acme/model-2:free',
+    ]) {
+      expect(isExperimentalCatalogModel(id), id).toBe(false);
+    }
   });
 });
