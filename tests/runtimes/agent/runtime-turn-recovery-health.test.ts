@@ -61,6 +61,7 @@ function recoveryCounts(
     orphanTransfers: 0,
     echoConflicts: 0,
     openRecoveries: 0,
+    blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     ...overrides,
   };
 }
@@ -169,6 +170,39 @@ describe('runtime turn finalization recovery health', () => {
           turnRecoveryOutstanding: 0,
           turnRecoveryBlockedUnsafe: 1,
           turnRecoveryOpenRecoveries: 0,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('projects each blocked-unsafe actionability bucket onto its own health field', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct per-bucket counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({
+          blockedUnsafe: 6,
+          blockedUnsafeSynthetic: 1,
+          blockedUnsafeSuperseded: 2,
+          blockedUnsafeStranded: 3,
+        }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'blocked-split-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryBlockedUnsafe: 6,
+          turnRecoveryBlockedUnsafeSynthetic: 1,
+          turnRecoveryBlockedUnsafeSuperseded: 2,
+          turnRecoveryBlockedUnsafeStranded: 3,
         },
       });
     } finally {
@@ -334,6 +368,7 @@ describe('runtime turn finalization recovery health', () => {
         orphanTransfers: 0,
         echoConflicts: 1,
         openRecoveries: 0,
+        blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
       });
       const runtime = new AgentRuntime(db, makeMessenger().messenger, 'echo-conflict-health', {
         sessionScope: 'per_chat',

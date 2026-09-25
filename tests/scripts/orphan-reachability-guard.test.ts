@@ -107,7 +107,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/status-reaction-controller.ts', issue: '#1823', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
   // auth-loss durability signal modules: the store now has a production writer —
   // HealthPoller records the durable row on a confirmed logged_out (#1786) — so it
   // graduated out of this list, and the recovery-owner wiring (#1786) graduated the
@@ -181,6 +180,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // CONSUMES attestations (findAdmissibleAttestation in the supervisor). No autonomous
   // production path mints one by design, so the producer has no src/ importer.
   { path: 'src/core/capability-attestation-producer.ts', issue: 'cap-obligation-replay/finding-1', reason: 'attestation producer is operator-CLI-only (scripts/capability-obligation-attest.ts); runtime only consumes attestations — no production importer by design' },
+  // The shadow gate is logged-only; its measurement statistics run offline in the
+  // operator report, never in the runtime.
+  { path: 'src/lib/clopper-pearson.ts', issue: 'shadow-gate-20260923/task-4', reason: 'statistics helper is operator-CLI-only (scripts/shadow-gate-report.ts); the logged-only shadow gate computes no rates at runtime — no production importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

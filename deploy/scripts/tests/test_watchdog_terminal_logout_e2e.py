@@ -7,10 +7,10 @@ only runs if the body actually REACHES it. A logged-out bot returns HTTP 503
 which discards the body on 503 and falls into the "health endpoint unreachable
 -> restart" path, restart-looping the dead bot.
 
-This test renders the shipped template, stubs `curl` (returns the real 503
-logged-out body) and `launchctl` (records every call), runs the whole script,
-and asserts the bot was NEVER kickstarted. It pins the body-capture wiring, not
-just the decision logic.
+This test renders the shipped template, stubs the bound health reader (returns
+the real 503 logged-out body) and `launchctl` (records every call), runs the
+whole script, and asserts the bot was NEVER kickstarted. It pins the
+body-capture wiring, not just the decision logic.
 
 Skipped where zsh is unavailable (the template is `#!/bin/zsh`); the decision
 logic itself is covered portably by test_watchdog_restart_policy.py.
@@ -19,11 +19,14 @@ logic itself is covered portably by test_watchdog_restart_policy.py.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import json
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,14 +90,56 @@ _UNKNOWN_PROVIDER_BODY = json.dumps({
 })
 
 
-def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str = "9998") -> Path:
+_REPO_EMITTER = Path(__file__).resolve().parents[1] / "bot-errors-emit.py"
+
+# Stand-in for deploy/scripts/lib/health_reader.py, bound into the rendered
+# script by digest exactly as render-watchdog.py binds the real reader. Its
+# bytes never change, so one render serves every cycle; each cycle's response
+# comes from the sidecar files _make_stubs writes beside the launchctl stub.
+# Every request is recorded so a test can prove the health read happened.
+_STUB_READER = '''import errno
+from pathlib import Path
+class HealthTransportError(Exception):
+    def __init__(self, stage, number): self.stage = stage; self.errno = number
+def fetch_loopback_health(port, path, headers, **kwargs):
+    stubs = Path(__file__).parent / ".local" / "bin"
+    with (stubs / "probe.argv").open("a", encoding="utf-8") as stream:
+        stream.write(f"{port}{path}\\n")
+    if port == 9999 and path == "/health":
+        if not headers.get("Authorization", "").startswith("Bearer "):
+            raise ValueError("diagnostic read without bearer")
+        return (int((stubs / "bot.http").read_text(encoding="utf-8")),
+                (stubs / "bot.body").read_text(encoding="utf-8"))
+    if port == 9998 and path == "/":
+        return 200, "ok"
+    raise HealthTransportError("connect", errno.ECONNREFUSED)
+'''
+
+
+def _write_stub_reader(home: Path) -> Path:
+    reader = home / "health_reader.py"
+    reader.write_text(_STUB_READER, encoding="utf-8")
+    return reader
+
+
+def _render(
+    home: Path,
+    bot_name: str,
+    bot_port: str = "9999",
+    fleet_port: str = "9998",
+    emitter: Path = _REPO_EMITTER,
+) -> Path:
     text = _TEMPLATE.read_text(encoding="utf-8")
+    reader = _write_stub_reader(home)
     rendered = (
-        text.replace("__HOME__", str(home))
+        text.replace("__BOT_ERRORS_EMIT__", str(emitter))
+        .replace("__HOME__", str(home))
         .replace("FLEET_PORT", fleet_port)
         .replace("BOT_PORT", bot_port)
         .replace("BOT_NAME", bot_name)
         .replace("USERNAME", os.environ.get("USER", "tester"))
+        .replace("__HEALTH_READER_PATH__", str(reader))
+        .replace("__HEALTH_READER_SHA256__", hashlib.sha256(reader.read_bytes()).hexdigest())
     )
     # __HOME__ substitution already sets HOME_DIR (template: HOME_DIR="__HOME__").
     script = home / f"{bot_name}-watchdog"
@@ -106,28 +151,15 @@ def _render(home: Path, bot_name: str, bot_port: str = "9999", fleet_port: str =
 def _make_stubs(home: Path, bot_body: str, bot_http: str = "503") -> Path:
     # The watchdog hardcodes its own PATH with $HOME_DIR/.local/bin FIRST (a
     # determinism guard), so injected stubs must live there — a tmp PATH entry
-    # would be ignored and the script would hit real curl/launchctl.
+    # would be ignored and the script would hit real launchctl.
     binroot = home / ".local" / "bin"
     binroot.mkdir(parents=True, exist_ok=True)
     calls = binroot / "launchctl.calls"
-    # Stub curl. The bot-health endpoint simulates HTTP 503-with-body. Crucially
-    # the stub HONORS --fail: real `curl --fail` discards a 503 body and exits 22,
-    # so if the watchdog ever regresses to --fail this stub reproduces that and the
-    # no-kickstart test fails (a true falsifier, not theater). Fleet -> 200.
-    curl = binroot / "curl"
-    curl.write_text(
-        "#!/bin/sh\n"
-        "has_fail=false\n"
-        'for a in "$@"; do [ "$a" = "--fail" ] && has_fail=true; done\n'
-        'for a in "$@"; do case "$a" in\n'
-        "  *9999/health) $has_fail && exit 22; "
-        f"printf '%s\\n{bot_http}' '{bot_body}'; exit 0;;\n"
-        "  *9998/*) printf 'ok\\n200'; exit 0;;\n"
-        "esac; done\n"
-        "printf '\\n000'; exit 7\n",
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
+    # The stub reader returns this HTTP status WITH this body, as the real
+    # reader does for every HTTP response (a logged-out bot answers 503 with a
+    # body the decision block must see). Fleet -> 200.
+    (binroot / "bot.body").write_text(bot_body, encoding="utf-8")
+    (binroot / "bot.http").write_text(bot_http, encoding="utf-8")
     # Stub launchctl: record every call; 'print' reports loaded (exit 0).
     lc = binroot / "launchctl"
     lc.write_text(
@@ -172,7 +204,8 @@ def _run_with_state(
         marker.symlink_to(home / "missing-parent" / "marker")
     elif marker_setup != "absent":
         raise AssertionError(f"unsupported marker setup: {marker_setup}")
-    env = dict(os.environ, HOME=str(home))
+    env = dict(os.environ, HOME=str(home), BOT_ERRORS_OUTBOX_DIR=str(tmp_path / "outbox"),
+               BOT_ERRORS_STATE_DIR=str(tmp_path / "bot-errors-state"))
     proc = subprocess.run(
         ["zsh", str(script)], env=env, capture_output=True, text=True, timeout=20
     )
@@ -191,9 +224,9 @@ def _run(tmp_path: Path, bot_body: str, bot_name: str) -> str:
 
 def test_logged_out_503_does_not_kickstart_bot(tmp_path):
     calls = _run(tmp_path, _LOGGED_OUT_BODY, "term-bot")
-    # Prove the script reached the health check (ensure_loaded -> `launchctl print`)
-    # before concluding "no kickstart" — else an early exit passes vacuously.
-    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    # Prove the diagnostic reader ran before asserting no restart action — else
+    # an early exit passes vacuously.
+    assert "9999/health" in (tmp_path / "home/.local/bin/probe.argv").read_text()
     assert "kickstart" not in calls or "com.whatsoup.term-bot" not in calls, (
         f"logged-out bot must not be kickstarted; launchctl calls were:\n{calls}"
     )
@@ -205,7 +238,7 @@ def test_logged_out_503_multiline_body_does_not_kickstart(tmp_path):
     import json
     body = json.dumps(json.loads(_LOGGED_OUT_BODY), indent=2)
     calls = _run(tmp_path, body, "term-ml-bot")
-    assert "print" in calls, f"watchdog never reached launchctl; calls:\n{calls!r}"
+    assert "9999/health" in (tmp_path / "home/.local/bin/probe.argv").read_text()
     assert "kickstart" not in calls or "com.whatsoup.term-ml-bot" not in calls, (
         f"multiline logged-out body must not kickstart; calls:\n{calls}"
     )
@@ -290,6 +323,580 @@ def test_marker_remove_failure_is_nonzero(tmp_path):
     assert rc != 0
     assert marker_present
     assert "kickstart" not in calls
+
+
+# --- CREDENTIAL-DEAD paging -------------------------------------------------
+# The watchdog used to only log CREDENTIAL-DEAD and touch a marker, so a dead
+# provider credential paged nobody for hours. It now writes ONE BOT ERRORS alert
+# per dead episode to the durable outbox through the shipped emitter
+# (deploy/scripts/bot-errors-emit.py) and ONE clear on recovery. A `.paged`
+# stamp, written only after the emitter accepted the page, carries the
+# transition state across runs; it also counts consecutive failed clears so a
+# clear that can never land is abandoned after a bound instead of logging ERROR
+# forever.
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REGISTRY = _REPO_ROOT / "src" / "lib" / "fault-taxonomy-registry.json"
+_PAGE_SOURCE = "provider_credential_dead"
+
+
+class _PagingHost:
+    def __init__(self, tmp_path: Path, bot_name: str) -> None:
+        self.bot = bot_name
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        token_file = self.home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
+        token_file.parent.mkdir(parents=True)
+        token_file.write_text(f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        # The emitter path is baked at render time (render-watchdog.py);
+        # tests swap what lives at that path instead of setting any env.
+        self.emitter = tmp_path / "release" / "deploy" / "scripts" / "bot-errors-emit.py"
+        self.emitter.parent.mkdir(parents=True)
+        self.stub_calls = tmp_path / "emit.calls"
+        self.script = _render(self.home, bot_name, emitter=self.emitter)
+        self.logs = self.home / "Library" / "Logs" / "whatsoup"
+        self.logs.mkdir(parents=True, exist_ok=True)
+        self.marker = self.logs / f"{bot_name}-credential-dead.marker"
+        self.stamp = self.logs / f"{bot_name}-credential-dead.paged"
+        self.recovered = self.logs / f"{bot_name}-credential-dead.recovered"
+        self.outbox = tmp_path / "bot-errors-state" / "outbox"
+        self.state = tmp_path / "bot-errors-state"
+
+    def use_real_emitter(self) -> None:
+        self.remove_emitter()
+        self.emitter.symlink_to(_REPO_EMITTER)
+
+    def use_stub_emitter(self, rc: int) -> None:
+        self.remove_emitter()
+        self.emitter.write_text(
+            "import sys\n"
+            f"with open({str(self.stub_calls)!r}, 'a', encoding='utf-8') as fh:\n"
+            "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            f"raise SystemExit({rc})\n",
+            encoding="utf-8",
+        )
+
+    def remove_emitter(self) -> None:
+        if self.emitter.exists() or self.emitter.is_symlink():
+            self.emitter.unlink()
+
+    def run(self, body: str, http: str = "200") -> subprocess.CompletedProcess:
+        _make_stubs(self.home, body, http)
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("BOT_ERRORS_", "WHATSOUP_"))
+        }
+        env.update(
+            HOME=str(self.home),
+            BOT_ERRORS_STATE_DIR=str(self.state),
+            BOT_ERRORS_OUTBOX_DIR=str(self.outbox),
+        )
+        return subprocess.run(
+            ["zsh", str(self.script)], env=env, capture_output=True, text=True, timeout=30
+        )
+
+    def events(self) -> list[dict]:
+        if not self.outbox.is_dir():
+            return []
+        found = [json.loads(p.read_text(encoding="utf-8")) for p in self.outbox.glob("*.json")]
+        return sorted(found, key=lambda event: (event["createdAt"], event["eventType"] != "alert"))
+
+    def stub_argv(self) -> list[str]:
+        if not self.stub_calls.exists():
+            return []
+        return [line for line in self.stub_calls.read_text(encoding="utf-8").splitlines() if line]
+
+    def log_text(self) -> str:
+        return (self.logs / f"{self.bot}-watchdog.log").read_text(encoding="utf-8")
+
+
+def test_credential_dead_pages_once_and_clears_once_through_the_durable_outbox(tmp_path):
+    host = _PagingHost(tmp_path, "page-bot")
+    host.use_real_emitter()
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    events = host.events()
+    assert len(events) == 1, events
+    alert = events[0]
+    assert alert["eventType"] == "alert"
+    assert alert["severity"] == "critical"
+    assert alert["instance"] == "page-bot"
+    assert alert["source"] == _PAGE_SOURCE
+    assert host.marker.exists() and host.stamp.exists()
+
+    assert host.run(_recovered_body()).returncode == 0
+    events = host.events()
+    assert len(events) == 2, events
+    clear = [event for event in events if event["eventType"] == "clear"]
+    assert len(clear) == 1, events
+    # The clear must key to the SAME incident: machine|instance|source.
+    assert clear[0]["instance"] == "page-bot"
+    assert clear[0]["source"] == _PAGE_SOURCE
+    assert clear[0]["machine"] == alert["machine"]
+    assert not host.marker.exists() and not host.stamp.exists()
+
+    assert host.run(_recovered_body()).returncode == 0
+    assert len(host.events()) == 2
+
+
+def test_credential_dead_before_upgrade_still_pages(tmp_path):
+    # A host that was already dead (marker present) when this shipped has no
+    # stamp; it must page on its next dead cycle, not stay silent forever.
+    host = _PagingHost(tmp_path, "predead-bot")
+    host.use_real_emitter()
+    host.marker.write_text("existing", encoding="utf-8")
+    host.marker.chmod(0o600)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert [event["eventType"] for event in host.events()] == ["alert"]
+    assert host.stamp.exists()
+
+
+def test_failed_page_leaves_no_stamp_and_retries_next_cycle(tmp_path):
+    host = _PagingHost(tmp_path, "pagefail-bot")
+    host.use_stub_emitter(rc=1)
+    proc = host.run(_DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert not host.stamp.exists()
+    assert "ERROR: CREDENTIAL-DEAD page failed" in host.log_text()
+    argv = host.stub_argv()
+    assert len(argv) == 1, argv
+    assert "--instance pagefail-bot" in argv[0]
+    assert f"--source {_PAGE_SOURCE}" in argv[0]
+    assert "--severity critical" in argv[0]
+
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(host.stub_argv()) == 2  # the failed attempt plus the retry
+    assert host.stamp.exists()
+
+
+def test_missing_emitter_is_an_error_detailed_once_per_episode_and_pages_when_it_appears(tmp_path):
+    host = _PagingHost(tmp_path, "noemitter-bot")
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
+    assert host.marker.exists()
+    assert not host.stamp.exists()
+    log_text = host.log_text()
+    assert log_text.count("ERROR: BOT ERRORS emitter") == 1
+    assert "WARN: BOT ERRORS emitter" not in log_text
+    assert log_text.count("CREDENTIAL-DEAD not paged") == 1
+
+    # The once-per-episode WARN must not suppress the page itself.
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.stamp.exists()
+    assert len(host.stub_argv()) == 1
+
+    # Recovery ends the episode; the next episode warns again.
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists()
+    host.remove_emitter()
+    assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
+    assert host.run(_DEAD_PROVIDER_BODY).returncode != 0
+    assert host.log_text().count("CREDENTIAL-DEAD not paged") == 2
+
+
+def test_failed_clear_is_retried_then_abandoned_after_three_attempts(tmp_path):
+    host = _PagingHost(tmp_path, "clearfail-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.stamp.exists()
+
+    host.use_stub_emitter(rc=1)
+    for attempt in (1, 2):
+        proc = host.run(_recovered_body())
+        assert proc.returncode != 0, attempt
+        assert host.stamp.exists(), attempt
+    assert host.log_text().count("ERROR: CREDENTIAL-RECOVERED clear failed") == 2
+
+    proc = host.run(_recovered_body())
+    assert proc.returncode == 0
+    assert not host.stamp.exists()
+    log_text = host.log_text()
+    assert "WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive times" in log_text
+    assert log_text.count("ERROR: CREDENTIAL-RECOVERED clear failed") == 2
+
+    clears = [line for line in host.stub_argv() if line.startswith("--clear")]
+    assert len(clears) == 3, host.stub_argv()
+    assert all("--instance clearfail-bot" in line for line in clears)
+    assert all(f"--source {_PAGE_SOURCE}" in line for line in clears)
+
+    # Abandoned means abandoned: no further clear attempts.
+    assert host.run(_recovered_body()).returncode == 0
+    assert len(host.stub_argv()) == 4
+
+
+def test_a_successful_clear_resets_the_failure_count(tmp_path):
+    host = _PagingHost(tmp_path, "clearreset-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.run(_recovered_body()).returncode != 0
+    host.use_stub_emitter(rc=0)
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists()
+
+    # A new episode starts from zero: two more failures still retry.
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.stamp.exists()
+
+
+def test_missing_emitter_on_recovery_abandons_the_clear_after_three_cycles(tmp_path):
+    host = _PagingHost(tmp_path, "clearmissing-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.remove_emitter()
+    for attempt in (1, 2):
+        assert host.run(_recovered_body()).returncode == 0, attempt
+        assert host.stamp.exists(), attempt
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists()
+    log_text = host.log_text()
+    assert "WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive times" in log_text
+    assert "ERROR: CREDENTIAL-RECOVERED" not in log_text
+
+
+def test_recovery_without_a_page_sends_no_clear(tmp_path):
+    host = _PagingHost(tmp_path, "quiet-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_recovered_body()).returncode == 0
+    assert host.stub_argv() == []
+
+
+def test_page_source_is_a_registered_bot_errors_source():
+    template = _TEMPLATE.read_text(encoding="utf-8")
+    assert f'CRED_ALERT_SOURCE="{_PAGE_SOURCE}"' in template
+    registry = json.loads(_REGISTRY.read_text(encoding="utf-8"))
+    entry = registry["sourceDispositions"][_PAGE_SOURCE]
+    assert entry["owner"] == "deploy/templates/watchdog-script.sh"
+    assert entry["test"] == "deploy/scripts/tests/test_watchdog_terminal_logout_e2e.py"
+    # Not a WhatsApp-health recovery source: a daily-health WhatsApp recovery
+    # must never close a provider-credential incident.
+    assert "whatsapp" not in entry["disposition"]
+
+
+def test_corrupt_clear_count_is_treated_as_the_cap(tmp_path):
+    host = _PagingHost(tmp_path, "corruptcount-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.stamp.write_text("not-a-number\n", encoding="utf-8")
+    host.use_stub_emitter(rc=1)
+    proc = host.run(_recovered_body())
+    assert proc.returncode == 0
+    assert not host.stamp.exists()
+    log_text = host.log_text()
+    assert "WARN: unreadable clear-failure count" in log_text
+    assert "ERROR: cannot count failed clears" not in log_text
+
+
+def test_negative_clear_count_is_treated_as_the_cap(tmp_path):
+    # A negative count would otherwise defer the three-attempt cap by up to
+    # a million failed clears.
+    host = _PagingHost(tmp_path, "negcount-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.stamp.write_text("-1000000\n", encoding="utf-8")
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists()
+    assert "WARN: unreadable clear-failure count" in host.log_text()
+
+
+def test_stamp_left_from_a_recovered_episode_does_not_suppress_the_next_page(tmp_path):
+    # Recovery removed the marker and its clear was accepted, but the stamp
+    # survived (its removal failed, or the process died first). The next
+    # episode must still page.
+    host = _PagingHost(tmp_path, "stalestamp-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.marker.exists() and not host.stamp.exists()
+    assert not host.recovered.exists()
+    # Recovery writes the flag before it clears; a stamp that then survives
+    # leaves both files behind.
+    for path in (host.stamp, host.recovered):
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o600)
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 2, host.stub_argv()
+    assert "left from a previous episode" in host.log_text()
+    assert host.marker.exists() and host.stamp.exists()
+    assert not host.recovered.exists()
+
+    # Within one episode the stamp still suppresses repeats.
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len([line for line in host.stub_argv() if not line.startswith("--clear")]) == 2
+
+
+def test_death_right_after_a_failed_clear_pages_the_new_episode(tmp_path):
+    host = _PagingHost(tmp_path, "redeath-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.stamp.exists() and not host.marker.exists()
+
+    assert host.recovered.exists()
+
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 2, host.stub_argv()
+    assert host.stamp.exists()
+    assert not host.recovered.exists()
+
+
+def test_a_current_episode_stamp_without_the_recovery_flag_still_suppresses(tmp_path):
+    # Control: with no recovery in between, the stamp is this episode's and
+    # repeated dead cycles must not page again, whatever the marker's state.
+    host = _PagingHost(tmp_path, "curstamp-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.marker.unlink()
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    alerts = [line for line in host.stub_argv() if not line.startswith("--clear")]
+    assert len(alerts) == 1, host.stub_argv()
+
+
+def test_recovery_flag_is_removed_once_the_stamp_is_gone(tmp_path):
+    host = _PagingHost(tmp_path, "flagclean-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.use_stub_emitter(rc=1)
+    assert host.run(_recovered_body()).returncode != 0
+    assert host.recovered.exists() and host.stamp.exists()
+    host.use_stub_emitter(rc=0)
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.stamp.exists() and not host.recovered.exists()
+
+
+def _alerts(host: _PagingHost) -> list[str]:
+    return [line for line in host.stub_argv() if not line.startswith("--clear")]
+
+
+def _run_with_failing_clear(host: _PagingHost, suffix: str, body: str) -> subprocess.CompletedProcess:
+    # The watchdog puts $HOME/.local/bin first on PATH, so this python3 wrapper
+    # intercepts the marker helper and fails only `clear` of files ending in
+    # `suffix`; every other python3 call runs normally.
+    wrapper = host.home / ".local" / "bin" / "python3"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = "clear" ]; then case "$3" in *{suffix}) exit 2;; esac; fi\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    try:
+        return host.run(body)
+    finally:
+        wrapper.unlink()
+
+
+# Invariant for the tests below: no failure of the stamp or the recovery flag
+# may silence a page. The watchdog pages anyway and logs ERROR; a repeat on a
+# later cycle is accepted, because BOT ERRORS folds it into the open incident.
+
+
+def test_failed_stale_stamp_removal_still_pages(tmp_path):
+    host = _PagingHost(tmp_path, "staleretry-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.marker.unlink()
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    proc = _run_with_failing_clear(host, ".paged", _DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "failed to drop stale credential page stamp" in host.log_text()
+    assert len(_alerts(host)) == 2, host.stub_argv()
+    # The flag stays, so the next cycle still recognises the old stamp.
+    assert host.stamp.exists() and host.recovered.exists()
+
+    # One accepted repeat while the old stamp is retired, then suppression.
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 3, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_recovery_that_cannot_record_its_flag_changes_nothing(tmp_path):
+    # The flag is written before the dead marker goes. When it cannot be
+    # written, the marker, the stamp and the open page all stay, so no state
+    # exists in which a stamp has lost both its marker and its flag.
+    host = _PagingHost(tmp_path, "flagfail-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.symlink_to(tmp_path / "missing" / "flag")
+
+    proc = host.run(_recovered_body())
+    assert proc.returncode != 0
+    assert "failed to record recovery flag" in host.log_text()
+    assert host.marker.exists() and host.stamp.exists()
+    assert [line for line in host.stub_argv() if line.startswith("--clear")] == []
+
+    host.recovered.unlink()
+    assert host.run(_recovered_body()).returncode == 0
+    assert not host.marker.exists() and not host.stamp.exists()
+    assert not host.recovered.exists()
+
+
+def test_crash_after_recording_the_flag_still_pages_the_next_episode(tmp_path):
+    # State consumption, not ordering: seeds the state a recovery leaves when
+    # it dies right after writing the flag (stamp, flag and marker) and checks
+    # that a new dead episode pages. The ordering that guarantees this state
+    # is covered by test_recovery_that_cannot_record_its_flag_changes_nothing.
+    host = _PagingHost(tmp_path, "flagcrash-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 2, host.stub_argv()
+    assert not host.recovered.exists()
+
+
+def test_leftover_flag_without_a_stamp_pages_once(tmp_path):
+    # Recovery died after removing the stamp but before removing the flag.
+    # The next episode pages once; the fresh stamp must not be read as stale.
+    host = _PagingHost(tmp_path, "flagonly-bot")
+    host.use_stub_emitter(rc=0)
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_failed_leftover_flag_removal_still_pages(tmp_path):
+    host = _PagingHost(tmp_path, "flagstuck-bot")
+    host.use_stub_emitter(rc=0)
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "failed to remove leftover recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 1, host.stub_argv()
+
+    # One accepted repeat while the flag is retired, then suppression.
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 2, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_failed_flag_removal_after_a_stale_stamp_still_pages(tmp_path):
+    host = _PagingHost(tmp_path, "stalestuck-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.write_text("", encoding="utf-8")
+    host.recovered.chmod(0o600)
+
+    proc = _run_with_failing_clear(host, ".recovered", _DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "failed to remove recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 2, host.stub_argv()
+
+    for _ in range(3):
+        assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    assert len(_alerts(host)) == 3, host.stub_argv()
+    assert host.stamp.exists() and not host.recovered.exists()
+
+
+def test_unsafe_recovery_flag_beside_a_stamp_still_pages(tmp_path):
+    # An unsafe flag cannot say whether the stamp is current, so the watchdog
+    # pages rather than trusting the stamp.
+    host = _PagingHost(tmp_path, "unsafeflag-bot")
+    host.use_stub_emitter(rc=0)
+    assert host.run(_DEAD_PROVIDER_BODY).returncode == 0
+    host.recovered.symlink_to(tmp_path / "elsewhere")
+
+    proc = host.run(_DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "ERROR: unsafe recovery flag" in host.log_text()
+    assert len(_alerts(host)) == 2, host.stub_argv()
+
+
+def test_unsafe_page_stamp_on_a_dead_cycle_still_pages(tmp_path):
+    host = _PagingHost(tmp_path, "unsafedead-bot")
+    host.use_stub_emitter(rc=0)
+    host.stamp.symlink_to(tmp_path / "elsewhere")
+
+    proc = host.run(_DEAD_PROVIDER_BODY)
+    assert proc.returncode != 0
+    assert "ERROR: unsafe credential page stamp" in host.log_text()
+    assert len(_alerts(host)) == 1, host.stub_argv()
+    assert not (tmp_path / "elsewhere").exists()
+
+
+def test_unsafe_page_stamp_on_recovery_is_an_error(tmp_path):
+    host = _PagingHost(tmp_path, "unsafestamp-bot")
+    host.use_stub_emitter(rc=0)
+    host.stamp.symlink_to(tmp_path / "elsewhere")
+    proc = host.run(_recovered_body())
+    assert proc.returncode != 0
+    assert "ERROR: unsafe credential page stamp" in host.log_text()
+    assert host.stub_argv() == []
+
+
+def test_production_render_bakes_the_release_emitter_and_pages_without_env(tmp_path):
+    # The production shape: render-watchdog.py renders from a release tree and
+    # bakes that release's emitter; launchd sets no BOT_ERRORS_* variables.
+    render_tool = Path(__file__).resolve().parents[1] / "render-watchdog.py"
+    home = tmp_path / "home"
+    home.mkdir()
+    token_file = home / ".config" / "whatsoup" / "instances" / "prod-bot" / "tokens.env"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text(f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    script = home / "prod-bot-watchdog"
+    # The release's own reader would read real loopback ports on this machine,
+    # so bind the stub reader through its own reviewed manifest instead. The
+    # emitter still comes from the release tree the template is rendered from.
+    reader = _write_stub_reader(home)
+    reader_digest = hashlib.sha256(reader.read_bytes()).hexdigest()
+    manifest = tmp_path / "runtime-manifest.json"
+    manifest.write_text(json.dumps({"schemaVersion": 1, "files": [
+        {"path": "deploy/scripts/lib/health_reader.py", "sha256": reader_digest}]}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(render_tool), "render", "--template", str(_TEMPLATE),
+         "--bot-name", "prod-bot", "--bot-port", "9999", "--fleet-port", "9998",
+         "--home", str(home), "--health-reader", str(reader),
+         "--runtime-manifest", str(manifest), "--out", str(script)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rendered = script.read_text(encoding="utf-8")
+    assert f'BOT_ERRORS_EMIT="{_REPO_EMITTER}"' in rendered
+    assert f'HEALTH_READER_PATH="{reader}"' in rendered
+    assert f'HEALTH_READER_SHA256="{reader_digest}"' in rendered
+    assert "BOT_ERRORS_REPO_ROOT" not in rendered
+    script.chmod(0o755)
+    _make_stubs(home, _DEAD_PROVIDER_BODY, "200")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("BOT_ERRORS_", "WHATSOUP_"))}
+    # Only the outbox location is redirected, so the test never writes a live
+    # outbox; nothing tells the watchdog where the emitter is.
+    env.update(HOME=str(home), BOT_ERRORS_OUTBOX_DIR=str(tmp_path / "outbox"))
+    run = subprocess.run(["zsh", str(script)], env=env, capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stderr
+    events = [json.loads(p.read_text(encoding="utf-8")) for p in (tmp_path / "outbox").glob("*.json")]
+    assert [(e["eventType"], e["instance"], e["source"]) for e in events] == [
+        ("alert", "prod-bot", _PAGE_SOURCE)
+    ]
 
 
 if __name__ == "__main__":

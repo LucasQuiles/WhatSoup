@@ -2,11 +2,38 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import {
+  GUARD_TEST_COVERAGE_USAGE,
+  MAX_GUARD_COVERAGE_GUARDS,
+  buildGuardTestCoverageReport,
+  buildInconclusiveGuardTestCoverageReport,
+  emitGuardTestCoverageReport,
+  parseGuardTestCoverageCliOptions,
+  type GuardCoverageGap,
+  type GuardCoverageResult,
+  type GuardAllowlistEntry,
+  type GuardTestCoverageCliOptions,
+  type GuardTestCoverageCliOutput,
+  type GuardTestCoverageReportV1,
+  type GuardTestCoverageSemanticMode,
+} from './lib/guard-test-coverage-report.ts';
 import { CURATED_TEST_PATHS } from './push-gate.ts';
+
+export {
+  MAX_GUARD_COVERAGE_FINDINGS,
+  parseGuardTestCoverageReportBytes,
+  validateGuardTestCoverageReport,
+} from './lib/guard-test-coverage-report.ts';
+export type {
+  GuardAllowlistEntry,
+  GuardCoverageGap,
+  GuardCoverageResult,
+  GuardTestCoverageReportV1,
+} from './lib/guard-test-coverage-report.ts';
 
 /**
  * Meta-guard: every guard-family script under `scripts/` must ship a companion
- * test that is actually wired into the `verify:push:branch` gate.
+ * test that is actually wired into the branch/release verification manifest.
  *
  * The public-surface-drift check already forces each `guard:*` npm script to
  * carry a row in `docs/public-surface.md`, but NOTHING forced the guard to ship
@@ -14,9 +41,8 @@ import { CURATED_TEST_PATHS } from './push-gate.ts';
  * untested. This guard closes that gap.
  *
  * A guard PASSES when EITHER:
- *   (a) its companion test file exists under `tests/scripts/` AND that test's
- *       path appears in the `verify:push:branch` script string in package.json
- *       (so the test actually runs in the gate); OR
+ *   (a) its companion test file exists under `tests/scripts/`, its path appears
+ *       in `CURATED_TEST_PATHS`, and its AST proves a linked failure path; OR
  *   (b) the guard carries a top-of-file `// meta-guard:no-test <reason>` comment
  *       opting out (for guards genuinely covered by a broader suite test).
  *
@@ -29,45 +55,27 @@ import { CURATED_TEST_PATHS } from './push-gate.ts';
 
 export interface GuardTestCoverageOptions {
   cwd?: string;
-  semanticMode?: 'shadow' | 'enforce';
-}
-
-export type GuardTestCoverageReason =
-  | 'no-test'
-  | 'test-not-wired'
-  | 'test-does-not-import-or-invoke-guard'
-  | 'test-does-not-exercise-failure';
-
-export interface GuardCoverageGap {
-  /** Guard script path relative to repo root, e.g. `scripts/repo-hygiene-guard.ts`. */
-  guard: string;
-  /** Why the guard failed coverage. */
-  reason: GuardTestCoverageReason;
-  /** Companion test path we looked for / found, relative to repo root. */
-  expectedTest: string;
-  /** Contextual correction detail for semantic proof gaps. */
-  detail?: string;
-}
-
-export interface GuardAllowlistEntry {
-  guard: string;
-  reason: string;
-}
-
-export interface GuardCoverageResult {
-  /** Guards that pass (have a wired companion test). */
-  covered: string[];
-  /** Guards opted out via `// meta-guard:no-test <reason>`. */
-  allowlisted: GuardAllowlistEntry[];
-  /** Guards missing a wired companion test (failures). */
-  gaps: GuardCoverageGap[];
-  /** Wired tests whose AST does not prove a guard failure path. */
-  semanticGaps: GuardCoverageGap[];
+  semanticMode?: GuardTestCoverageSemanticMode;
 }
 
 const SCRIPTS_DIR = 'scripts';
 const TESTS_DIR = 'tests/scripts';
 const ALLOWLIST_PATTERN = /^\s*\/\/\s*meta-guard:no-test\s+(.+?)\s*$/m;
+
+type GuardTestCoverageScanCode =
+  | 'test.guard-coverage.inventory-empty'
+  | 'test.guard-coverage.inventory-limit-exceeded'
+  | 'test.guard-coverage.scan-unavailable';
+
+class GuardTestCoverageScanError extends Error {
+  readonly code: GuardTestCoverageScanCode;
+
+  constructor(code: GuardTestCoverageScanCode, message: string) {
+    super(message);
+    this.name = 'GuardTestCoverageScanError';
+    this.code = code;
+  }
+}
 
 /**
  * Enumerate guard-family scripts: `scripts/*guard*.ts` plus `scripts/check-*.ts`.
@@ -82,7 +90,10 @@ export function enumerateGuardScripts(cwd: string): string[] {
     entries = readdirSync(dir);
   } catch (err) {
     const detail = err instanceof Error && err.message ? `: ${err.message}` : '';
-    throw new Error(`unable to scan guard scripts directory ${dir}${detail}`);
+    throw new GuardTestCoverageScanError(
+      'test.guard-coverage.scan-unavailable',
+      `unable to scan guard scripts directory ${dir}${detail}`,
+    );
   }
   const guards = entries.filter((name) => {
     if (!name.endsWith('.ts')) return false;
@@ -90,6 +101,18 @@ export function enumerateGuardScripts(cwd: string): string[] {
     return name.includes('guard') || name.startsWith('check-');
   });
   guards.sort();
+  if (guards.length === 0) {
+    throw new GuardTestCoverageScanError(
+      'test.guard-coverage.inventory-empty',
+      'guard script inventory is empty',
+    );
+  }
+  if (guards.length > MAX_GUARD_COVERAGE_GUARDS) {
+    throw new GuardTestCoverageScanError(
+      'test.guard-coverage.inventory-limit-exceeded',
+      'guard script inventory exceeds the admission bound',
+    );
+  }
   return guards.map((name) => `${SCRIPTS_DIR}/${name}`);
 }
 
@@ -629,7 +652,7 @@ function semanticCoverageGap(
   if (diagnostic) {
     return {
       guard: guardRelPath,
-      reason: 'test-does-not-import-or-invoke-guard',
+      reason: 'test-does-not-parse',
       expectedTest: testRelPath,
       detail: `${testRelPath}: could not parse companion test: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}`,
     };
@@ -706,41 +729,68 @@ export function findGuardsMissingTests(
   return { covered, allowlisted, gaps, semanticGaps };
 }
 
-function printResult(result: GuardCoverageResult): void {
-  for (const gap of result.gaps) {
-    if (gap.reason === 'no-test') {
-      console.error(
-        `  MISSING-TEST ${gap.guard}: no companion test found (expected ${gap.expectedTest}). ` +
-          `Add it under tests/scripts/ and wire its path into CURATED_TEST_PATHS in scripts/push-gate.ts, ` +
-          `or add a top-of-file '// meta-guard:no-test <reason>' comment.`,
-      );
-    } else if (gap.reason === 'test-not-wired') {
-      console.error(
-        `  TEST-NOT-WIRED ${gap.guard}: companion test ${gap.expectedTest} exists but is ` +
-          `not listed in CURATED_TEST_PATHS in scripts/push-gate.ts, so it never runs in the gate.`,
-      );
-    }
-  }
-  for (const gap of result.semanticGaps) {
-    console.error(
-      `  SEMANTIC-TEST-GAP ${gap.guard}: ${gap.reason}; ${gap.detail ?? gap.expectedTest}`,
-    );
+interface GuardTestCoverageEvaluation {
+  result: GuardCoverageResult | null;
+  report: GuardTestCoverageReportV1;
+}
+
+function evaluateGuardTestCoverage(
+  options: GuardTestCoverageCliOptions,
+  cwd: string,
+): GuardTestCoverageEvaluation {
+  try {
+    const result = findGuardsMissingTests({ cwd, semanticMode: options.semanticMode });
+    return {
+      result,
+      report: buildGuardTestCoverageReport(result, options.semanticMode),
+    };
+  } catch (error) {
+    return {
+      result: null,
+      report: buildInconclusiveGuardTestCoverageReport(
+        error instanceof GuardTestCoverageScanError
+          ? error.code
+          : 'test.guard-coverage.scan-unavailable',
+        options.semanticMode,
+      ),
+    };
   }
 }
 
-function parseSemanticMode(argv: string[]): 'shadow' | 'enforce' {
-  let mode: 'shadow' | 'enforce' = 'shadow';
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg !== '--semantic-mode') throw new Error(`unknown argument: ${String(arg)}`);
-    const value = argv[index + 1];
-    if (value !== 'shadow' && value !== 'enforce') {
-      throw new Error('--semantic-mode must be shadow or enforce');
-    }
-    mode = value;
-    index += 1;
+function defaultConsoleOutput(): GuardTestCoverageCliOutput {
+  return {
+    stdout: (text) => console.log(text.trimEnd()),
+    stderr: (text) => console.error(text.trimEnd()),
+  };
+}
+
+export function runGuardTestCoverageCli(
+  argv: readonly string[],
+  cwd: string,
+  output: GuardTestCoverageCliOutput,
+): 0 | 1 | 2 {
+  const parsed = parseGuardTestCoverageCliOptions(argv);
+  if (parsed.kind === 'help') {
+    output.stdout(GUARD_TEST_COVERAGE_USAGE);
+    return 0;
   }
-  return mode;
+  if (parsed.kind === 'error') {
+    const report = buildInconclusiveGuardTestCoverageReport(
+      parsed.code,
+      parsed.options.semanticMode,
+    );
+    emitGuardTestCoverageReport(report, null, parsed.options, output);
+    return report.exitCode;
+  }
+
+  const evaluation = evaluateGuardTestCoverage(parsed.options, cwd);
+  emitGuardTestCoverageReport(
+    evaluation.report,
+    evaluation.result,
+    parsed.options,
+    output,
+  );
+  return evaluation.report.exitCode;
 }
 
 export function run(
@@ -748,41 +798,39 @@ export function run(
   cwd: string = process.cwd(),
   _env: NodeJS.ProcessEnv = process.env,
 ): GuardCoverageResult {
-  const semanticMode = parseSemanticMode(argv);
-  const result = findGuardsMissingTests({ cwd, semanticMode });
-  if (result.gaps.length > 0) {
-    console.error(
-      `guard-test-coverage check failed: ${result.gaps.length} guard script(s) lack a wired companion test`,
-    );
-    printResult(result);
-    process.exitCode = 1;
-  } else {
-    if (result.semanticGaps.length > 0) {
-      console.error(
-        `guard-test-coverage semantic ${semanticMode}: ${result.semanticGaps.length} wired companion test(s) lack failure-path proof`,
-      );
-      printResult(result);
-      if (semanticMode === 'enforce') process.exitCode = 1;
-    }
-    const allowNote =
-      result.allowlisted.length > 0
-        ? ` (${result.allowlisted.length} allowlisted: ${result.allowlisted
-            .map((entry) => `${entry.guard} — ${entry.reason}`)
-            .join('; ')})`
-        : '';
-    console.log(
-      `guard-test-coverage check passed: ${result.covered.length} guard(s) have a wired companion test${allowNote}` +
-        (result.semanticGaps.length > 0 ? `; semantic gaps=${result.semanticGaps.length} (${semanticMode})` : ''),
-    );
+  const parsed = parseGuardTestCoverageCliOptions(argv);
+  if (parsed.kind === 'help') {
+    console.log(GUARD_TEST_COVERAGE_USAGE.trimEnd());
+    return { covered: [], allowlisted: [], gaps: [], semanticGaps: [] };
   }
-  return result;
+  if (parsed.kind === 'error') {
+    const report = buildInconclusiveGuardTestCoverageReport(
+      parsed.code,
+      parsed.options.semanticMode,
+    );
+    emitGuardTestCoverageReport(report, null, parsed.options, defaultConsoleOutput());
+    process.exitCode = report.exitCode;
+    return { covered: [], allowlisted: [], gaps: [], semanticGaps: [] };
+  }
+
+  const evaluation = evaluateGuardTestCoverage(parsed.options, cwd);
+  emitGuardTestCoverageReport(
+    evaluation.report,
+    evaluation.result,
+    parsed.options,
+    defaultConsoleOutput(),
+  );
+  if (evaluation.report.exitCode !== 0) process.exitCode = evaluation.report.exitCode;
+  return evaluation.result ?? { covered: [], allowlisted: [], gaps: [], semanticGaps: [] };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    run();
-  } catch (err) {
-    console.error((err as Error).message);
-    process.exitCode = 1;
-  }
+  process.exitCode = runGuardTestCoverageCli(
+    process.argv.slice(2),
+    process.cwd(),
+    {
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+    },
+  );
 }

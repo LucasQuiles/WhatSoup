@@ -135,7 +135,7 @@ describe('doc drift check', { timeout: 30_000 }, () => {
     writeFileSync(
       staleDoc,
       currentConfigDoc
-        .replace('`contacts`', 'contacts')
+        .replace('Full schema DDL — `messages`, `contacts`', 'Full schema DDL — `messages`, contacts')
         .replace(
           '`inbound_events`, `outbound_ops`, `tool_calls`, `session_checkpoints`, `recovery_runs`',
           '`durability_queue`, `recovery_log`',

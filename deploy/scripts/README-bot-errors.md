@@ -569,6 +569,83 @@ sidecar by design. No state migration is
 needed in either direction.
 
 
+## Root-cause inhibition and stronger-incident retirement
+
+While a root-cause ("stronger") incident is open for a `machine|instance`
+scope, the dispatcher suppresses that scope's downstream symptom incidents
+(`INHIBITION_MAP`, seeded from `SUPERSEDED_SOURCES_BY_ALERT_SOURCE` and
+extended by `BOT_ERRORS_INHIBITION_MAP`). A root in any status other than
+`closed`, `resolved` or `stale` suppresses, and that includes `awaiting_physical`.
+Setting `BOT_ERRORS_INHIBITION_ENABLED=0` turns the lookup off (fail-open: nothing
+is suppressed and nothing is retired).
+
+**Parent liveness comes only from the parent's own source.** A suppressed child
+increments the root's `suppressedCount` and writes `lastSuppressedSymptomAt`/`Iso`,
+`...Source`, `...Summary`, `...Evidence` and `...Reason`. It does not touch the root's
+`lastSeenAt`/`lastSeenIso`. The earlier behaviour did refresh them, so a root opened
+weeks earlier never looked quiet, never reached the stale digest, and went on
+masking every later child.
+
+**Contradiction retirement.** When a child that would be suppressed carries
+evidence that proves the root's condition false, the dispatcher closes the root
+instead of suppressing the child, then processes the child normally (so it may
+send). The rule is currently implemented for WhatsApp connectivity-loss roots:
+`instance_logged_out` and `whatsapp_device_bond_lost`, including a
+`daily-health:`-prefixed form that has been added to the map. Such a root is
+contradicted when all of these hold:
+
+- The child reports the instance connected, and **every** connectivity reading
+  it carries is unambiguously positive: a structured
+  `diagnostics.whatsappConnected` must be the boolean `true` (a string such as
+  `"false"` or `"unknown"`, or `null`, blocks retirement); every
+  `whatsapp_connected=` and bare `connected=` evidence token must be `true`
+  (`1`/`yes` also accepted); every `connection_state=` token must be
+  `connected`. An empty value (`connected=`) is ambiguous and blocks retirement.
+  At least one reading must be present. A structured `true` next to
+  a text `whatsapp_connected=false`, or the watchdog's
+  `connected=false connection_state=connected`, never retires a root. The
+  health poller's `health_body_degraded` evidence and the watchdog's
+  `local_health` evidence carry these tokens.
+- The child's `createdAt` is timezone-aware and later than the **latest
+  connectivity-loss observation** for that instance by more than the clock-skew
+  tolerance. For each open connectivity-loss root of the instance (not only the
+  root being tested), that is the latest of its first alert
+  (`eventCreatedAtEpoch`), its `lastSeenAt` (refreshed when a newer same-key
+  logout is folded in; children no longer refresh it), and its
+  `lastConnectivityLossObservedAt`. The last is stamped when a same-key logout
+  is folded in, and when a suppressed child does not prove the link up: a
+  logout suppressed under a bond-loss root, or any child whose connectivity
+  readings are negative or ambiguous (for example the watchdog's
+  `connected=false connection_state=disconnected`). The stamp is the later of
+  processing time and the event's own timezone-aware `createdAt`, so a producer
+  clock running ahead cannot place the loss earlier than a connected child
+  stamped by the same clock. The event's own stamp counts only up to one hour
+  ahead of processing time (`CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS`), so a clock
+  wrong by days or years delays retirement by at most an hour once corrected. So a child queued before any newer loss cannot
+  retire a root, and a timestamp with no zone, whose meaning depends on the
+  host clock, never does.
+
+Retirement uses the same removal as a matching clear (`close_open_incident`
+drops `openIncidents`, `lastSentAt` and transient bookkeeping for the key). The
+next genuine logout on that instance therefore opens a fresh incident and sends,
+with no fold and no cooldown. Every retirement is recorded in three places: a
+bounded `contradictionRetirements` list in incident state (key, prior status,
+`suppressedCount`, child event id and source, contradicting readings), the
+child event's `diagnostics.retiredStrongerIncidents` in the sent or suppressed
+archive, and a `retired stronger incident` line on the dispatcher's stderr.
+
+This path accepts a connected reading on its own. That is weaker than the
+daily-health recovery path, which also wants outbound proof or sustained
+stability before it closes these auto-close-protected sources. The reason: a
+connected socket with a bot JID cannot coexist with a logout or a lost device
+bond. A root whose condition still holds keeps suppressing its children.
+
+**Operator check.** `jq '.contradictionRetirements' incident-state.json` lists
+recent retirements. An `awaiting_physical` root with a large `suppressedCount`
+and an old `lastSeenIso` is now expected to show up in the stale digest instead
+of staying silent.
+
+
 ## NORMATIVE — Alert source and ownership index
 
 This table is the canonical index for the in-repository BOT ERRORS runtime.
@@ -636,15 +713,94 @@ field contract. Each registered field declares its evidence label, signal kind,
 and whether a positive value represents current risk or diagnostic evidence.
 The checker does not infer severity from numeric type.
 
-Cumulative totals, historical maxima, and terminal audit counts remain visible
-without independently adding `runtime_agent_at_risk`. Active episode counts and
-declared current gauges still add that marker. If the registry is missing,
+Every registered field with a non-zero value is rendered as a label. Only a
+field whose `currentHealthEffect` is `positive_is_risk` adds
+`runtime_agent_at_risk` when positive; `diagnostic_only` fields stay visible
+without adding it, whatever their signal kind. The signal kind describes what
+the number counts and does not change the marker. The registry loop labels only
+registered fields; the few agent fields the checker names in its own key list
+(for example `fallbackActiveUntil`) are rendered separately.
+`tests/core/failure-taxonomy-cross-contract.test.ts` fails when an idle
+`per_chat` or single-mode agent health snapshot projects a numeric field that
+is neither registered nor on its named exclusion list. Fields that are `null`
+while idle, such as fallback timestamps, are outside what that test can see.
+If the registry is missing,
 malformed, or uses an unsupported schema or disposition, the health line warns
 with a bounded registry error class and does not invent per-field severity.
 
 The registry is both deployer-managed and SHA-pinned in
 `deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
 shipping the matching registry fails the local manifest and deployer guards.
+
+## OPERATIONAL — Owner critical route
+
+The BOT ERRORS group is written by the owner's own line, so the owner's phone
+does not notify for it. The owner critical route copies selected critical
+alerts to the owner's direct chat, sent from a **different** instance so the
+phone notifies, plus an e-mail through the existing fallback script. Code:
+`deploy/scripts/lib/owner_route.py`. After a group send is archived,
+`route_to_owner()` only queues the copy; `drain_owner_route_queue()` sends the
+queued copies once the cycle has sent every group alert and recorded
+`cycleCompletedAt`, so an owner copy never delays a group send. The drain
+shares one time budget, enforced end to end: the socket call receives an
+absolute deadline, and every blocking step, the handshake and each read
+included, gets only the time left. The budget therefore bounds how late the
+next cycle can start. The queue holds at most 20 copies; a cycle that fails
+after its sends skips the drain, and a copy arriving at a full queue is
+logged as `skippedQueueFull` and dropped (its group copy exists).
+
+**Inert by default.** Nothing is read, parsed or logged unless both
+`BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
+invalid value in another owner-route variable has no effect while the route is
+off. Any failure is caught and logged as `owner_route_error`; it never fails or
+re-sends the group alert.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `BOT_ERRORS_OWNER_ROUTE_JID` | Owner's direct-chat JID (the send target) | unset: route off |
+| `BOT_ERRORS_OWNER_ROUTE_RESOLVED_JID` | Alias the send receipt reports, for example the `@lid` form | the JID |
+| `BOT_ERRORS_OWNER_ROUTE_SOCKET` | MCP socket of the sending instance (not the group writer) | unset: route off |
+| `BOT_ERRORS_OWNER_ROUTE_SOURCES` | Comma-separated `fnmatch` patterns of routed sources | see `DEFAULT_SOURCES` |
+| `BOT_ERRORS_OWNER_ROUTE_EMAIL` | Also send the e-mail copy | `1` |
+| `BOT_ERRORS_OWNER_ROUTE_MIN_INTERVAL_SECONDS` | At most one owner message per incident key per interval | `21600` (6 h) |
+| `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS` | Socket send timeout, clamped to the remaining budget | `8` |
+| `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` | Total time one cycle may spend on owner copies; the e-mail timeout (20 s) is clamped to what remains | `30` |
+
+**Policy.** A copy is sent only for a critical incident alert (never a clear)
+whose source matches a pattern, on first open or as an escalated still-open
+reminder; plain still-open renotifies are skipped. The per-key interval is
+recorded before the send, so a crash yields a missed copy, never a duplicate.
+The group copy exists either way. When deduplication cannot be established the
+copy is skipped rather than risked: an existing state file that cannot be read
+or parsed, or that holds any entry without a positive integer `lastAt`, the
+state lock (`owner-route.lock`) held by another caller, or a
+spent budget. A budget skip records no interval, so the next occurrence is sent.
+State entries are kept for at least the configured interval (seven days or the
+interval, whichever is longer). Stale-incident digests are info severity and
+are never routed. The default sources exclude the
+`…_primary_model_usable_unverified` fleet probe, which flaps every 15 minutes.
+
+**Log records.** `owner_route_sent` carries booleans only (`whatsappAccepted`,
+`emailEnabled`, `emailAccepted`, `emailSkippedBudget`); `owner_route_skipped`
+carries one of `skippedMinInterval`, `stateUnreadable`, `skippedLocked`,
+`skippedBudget` or `skippedQueueFull`. The controller log keeps a string only when it is on its fixed
+allowlist, so a free-text status would be dropped. A persistent
+`stateUnreadable` means every copy is being skipped: inspect or remove
+`owner-route-state.json` in the dispatcher state root.
+
+**Enable** with a systemd drop-in for the dispatcher (placeholder values):
+
+```ini
+# ~/.config/systemd/user/bot-errors-dispatcher.service.d/owner-route.conf
+[Service]
+Environment=BOT_ERRORS_OWNER_ROUTE_JID=<owner-number>@s.whatsapp.net
+Environment=BOT_ERRORS_OWNER_ROUTE_RESOLVED_JID=<owner-lid>@lid
+Environment=BOT_ERRORS_OWNER_ROUTE_SOCKET=<sending-instance-mcp-socket>
+```
+
+Then `systemctl --user daemon-reload` and restart the dispatcher. Verify with
+the `owner_route_selftest` source, which is routed by default. **Disable** by
+removing the drop-in, reloading and restarting; the code stays inert.
 
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 

@@ -324,6 +324,11 @@ const LIFECYCLE_DRIVER = String.raw`
 import fcntl, hashlib, json, os, pathlib, pty, select, signal, subprocess, sys, termios, time
 root, helper, bash, mode, terminal = sys.argv[1:]
 root = pathlib.Path(root)
+# Opening a FIFO O_WRONLY|O_NONBLOCK while no reader holds it fails with ENXIO,
+# so a release sent before the probe shell reaches its read would be lost as a
+# harness error. Hold each release FIFO open read-write for the whole run; a
+# release then waits in the pipe until the shell reads it.
+release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release')) if fifo.is_fifo()]
 def interrupted(signum, frame):
     raise TimeoutError('outer lifecycle watchdog interrupted the fixture')
 signal.signal(signal.SIGTERM, interrupted)
@@ -630,6 +635,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         sentinel.wait(timeout=3)
         if master is not None: os.close(master)
         if slave is not None: os.close(slave)
+        for holder in release_holders: os.close(holder)
 record['duration_ms'] = int((time.monotonic() - started) * 1000)
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
