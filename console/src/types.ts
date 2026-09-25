@@ -276,7 +276,7 @@ export type FeedDetail =
       serviceBlocking: boolean;
       attention: RecoveryDebtSummary['attention'];
       reasons: string[];
-      total: number;
+      gaugeTotal: number;
     }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
