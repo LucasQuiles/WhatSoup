@@ -169,6 +169,23 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(probed.every((pgid) => pgid > 0)).toBe(true); // the group id itself, never the negated kill target
   }, 30_000);
 
+  it('issue 3568: with the DEFAULT probe (real ps), an EPERM group kill whose group keeps a LIVE descendant stays INCONCLUSIVE (125)', async () => {
+    const dir = tmp.make('eperm-live-descendant');
+    const child = join(dir, 'child.cjs');
+    // The child starts a same-group grandchild that stays alive ~2s, then exits at once. The
+    // injected kill cannot touch the group, so at close the real `ps` probe must still see the
+    // grandchild as a live member of the child's process group.
+    writeFileSync(child, [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2000)"],{stdio:"ignore"}).unref();',
+      'process.exit(0);',
+    ].join(''));
+    const r = await runBoundedBattery({ command: NODE, args: [child], timeoutMs: 10_000, stdio: 'ignore', kill: eperm });
+    expect(r.outcome).toBe('inconclusive');
+    expect(r.wrappedExit).toBe(125);
+    expect(r.reapError).toMatch(/EPERM; group membership probe: live/);
+  }, 30_000);
+
   it('issue 3568: an EPERM group kill whose membership probe cannot answer stays INCONCLUSIVE (125) — fail closed', async () => {
     const r = await runBoundedBattery({
       command: NODE, args: ['-e', 'process.exit(0)'], timeoutMs: 10_000, stdio: 'ignore', kill: eperm, probeGroup: () => 'unknown',
