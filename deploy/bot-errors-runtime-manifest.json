@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b8cc6d6994b9519c9f74e8dd456fac5719002f4be4ac2d6fe0a43d317d2e159f",
+      "sha256": "7c9560246366e29274ca2a7afd684f2b21a1bba09d4824889b636fa8caa62ba3",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "3cc4962211703fbba0a301c0388b90620eafe8b380b4e882ac92435fff8b1849",
+      "sha256": "c8e9d83e4b6c19c5b3171651075c491279860f247c1d78dc8ab5d8c96536095f",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
