@@ -691,6 +691,29 @@ describe('deferred-turn admission (#3295 S2)', () => {
     expect(liveState().perChatInboundSeqQueue.get(conversationKey) ?? []).toEqual([]);
   });
 
+  it('#2445: a /stop that lands during the delivery-echo wait records operator_cancelled, not crash', async () => {
+    // Two owners can finalize a follower parked in the echo wait: the /stop
+    // kill path (operator class) and the wait loop itself, which finalizes as
+    // a crash once it sees the scope's teardown. The first owner's outcome is
+    // kept, so the operator class survives only if /stop owns the turn first.
+    makeRuntime({ sessionScope: 'per_chat' });
+    seedOutstandingRecoveryJob(true);
+    const seq = await arriveFollower('waiting-operator-stop', { contentType: 'document' });
+    const { queue } = await waitForLiveQueue(seq);
+    expect(engine.getTurnRecoveryAdmissionStateForScope('per_chat', conversationKey)).toBe('awaiting_delivery_echo');
+    expect(status(seq)).toBe('processing');
+
+    await runtime.handleMessage(makeMsg({ messageId: 'waiting-operator-stop-control', content: '/stop' }));
+    await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+    engine.matchEcho('wamid-original-answer');
+    await queue.idle();
+
+    expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'operator_cancelled' }]);
+    expect(db.raw.prepare('SELECT failure_class FROM inbound_events WHERE seq = ?').get(seq))
+      .toEqual({ failure_class: 'operator_cancelled' });
+    expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
+  });
+
   it('shutdown terminalizes a waiting head and queued followers before a late echo', async () => {
     makeRuntime({ sessionScope: 'per_chat' });
     seedOutstandingRecoveryJob(true);
