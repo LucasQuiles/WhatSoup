@@ -1530,15 +1530,51 @@ export class AuthBondGuard {
       if (tmp) rmSync(tmp, { recursive: true, force: true });
       if (publishedTarget) rmSync(publishedTarget, { recursive: true, force: true });
       const freshSnapshot = this.inspect();
+      const captureError = errorMessage(err);
+      if (this.isValidSameIdentityTreeChangeDuringCopy(captureError, snapshot, freshSnapshot)) {
+        return this.deferValidSameIdentityTreeChangeCapture(reason, freshSnapshot);
+      }
       const freshAgeMs = this.freshInvalidCredentialAgeMs(freshSnapshot);
       if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
         return this.deferFreshInvalidCapture(reason, freshAgeMs, 'auth bond changed during capture');
       }
       this.lastCaptureAt = this.now().toISOString();
       this.lastCaptureReason = reason;
-      this.lastCaptureError = errorMessage(err);
+      this.lastCaptureError = captureError;
       return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
+  }
+
+  private isValidSameIdentityTreeChangeDuringCopy(
+    captureError: string,
+    original: AuthBondSnapshot,
+    fresh: AuthBondSnapshot,
+  ): boolean {
+    return captureError === 'copied auth tree hash mismatch'
+      && original.status === 'present'
+      && original.treeHash !== null
+      && original.meHash !== null
+      && fresh.status === 'present'
+      && fresh.treeHash !== null
+      && fresh.meHash === original.meHash
+      && fresh.treeHash !== original.treeHash;
+  }
+
+  private deferValidSameIdentityTreeChangeCapture(
+    reason: string,
+    snapshot: AuthBondSnapshot,
+  ): AuthBondCaptureResult {
+    this.lastCaptureDeferredAt = this.now().toISOString();
+    this.lastCaptureDeferredReason = reason;
+    this.lastCaptureDeferredAgeMs = null;
+    return {
+      ok: false,
+      snapshot,
+      captured: false,
+      deferred: true,
+      path: null,
+      error: 'auth bond auth tree changed during capture with the same identity',
+    };
   }
 
   private freshInvalidCredentialAgeMs(snapshot: AuthBondSnapshot): number | null {

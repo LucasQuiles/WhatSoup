@@ -153,6 +153,7 @@
         "server-error",
         "transient-network",
         "crash",
+        "operator_cancelled",
         "processor_throw",
         "unknown_terminal",
         "provider_stream_corrupt"
@@ -168,6 +169,7 @@
         "timeout",
         "db_error",
         "session_crash",
+        "operator_cancelled",
         "session_spawn_failed",
         "crash_recovery",
         "stale_reclaim",
@@ -698,6 +700,7 @@
     "server-error": "provider_failure",
     "transient-network": "provider_failure",
     "crash": "session_crash",
+    "operator_cancelled": "operator_cancelled",
     "processor_throw": "processor_throw",
     "unknown_terminal": "unknown",
     "provider_stream_corrupt": "provider_failure"

@@ -2,7 +2,7 @@ import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/session.ts
 // SessionManager owns the Claude Code child process lifecycle.
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -65,6 +65,12 @@ import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/pro
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
+import {
+  isHostWorkAdmissionEnabled,
+  HostWorkAdmissionError,
+  HostWorkAdmissionCleanupError,
+  spawnHostWorkAdmitted,
+} from './host-work-admission.ts';
 import {
   buildOpenCodeRunArgs,
   opencodeUsesConfigModel,
@@ -239,6 +245,23 @@ export interface ActiveProviderTurn {
 interface ShutdownKillTimerEntry {
   readonly generation: SessionGenerationIdentity | null;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingHostWorkAdmission {
+  controller: AbortController;
+  promise: Promise<ReturnType<typeof spawn>>;
+  child: ReturnType<typeof spawn> | null;
+  cleanupProven: boolean;
+  executionLease: ProviderExecutionLease | null;
+}
+
+/**
+ * A persistent host-admitted provider has no idle process. This preserves the
+ * exact durable identity that its next real turn must resume.
+ */
+interface DeferredHostWorkAdmissionStart {
+  resumeSessionId: string | undefined;
+  existingRowId: number | undefined;
 }
 
 export interface SessionManagerOptions {
@@ -758,6 +781,7 @@ export class SessionManager {
    */
   private providerReadyPromise: Promise<void> | null = null;
   private providerReadyResolve: (() => void) | null = null;
+  private providerReadyReject: ((reason?: unknown) => void) | null = null;
   /** Session ID passed to --resume, cleared once the process exits. */
   private resumeAttemptId: string | null = null;
   /** Prevents cleanup shutdown from repainting an already-terminal durable lifecycle as resumable. */
@@ -814,6 +838,30 @@ export class SessionManager {
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
   private providerExecutionWaitAbort: AbortController | null = null;
+  /** Queued host wrapper, before it has admitted its scoped provider child. */
+  private pendingHostWorkAdmission: PendingHostWorkAdmission | null = null;
+  /** A prior admitted child could not be proved terminated; replacement stays closed. */
+  private hostWorkAdmissionCleanupUnproven = false;
+  /** Deferred persistent provider start; host admission happens at the turn boundary. */
+  private deferredHostWorkAdmissionStart: DeferredHostWorkAdmissionStart | null = null;
+  /** Exact teardown proof which every subsequent dispatch must await. */
+  private hostWorkAdmissionSuspension: Promise<void> | null = null;
+  /** Shared start reservation so concurrent dispatches cannot consume one resume receipt twice. */
+  private deferredHostWorkAdmissionStartPromise: Promise<void> | null = null;
+  /** One host-admission teardown owns a child/row at a time. */
+  private hostWorkAdmissionShutdownPromise: Promise<void> | null = null;
+  /** An explicit /new must win over any concurrent suspension. */
+  private hostWorkAdmissionEndRequested = false;
+  /** Exact identity being suspended until it is either deferred or explicitly ended. */
+  private hostWorkAdmissionSuspendingIdentity: DeferredHostWorkAdmissionStart | null = null;
+  /** The captured suspension row reached durable suspended state before its barrier published. */
+  private hostWorkAdmissionSuspensionPersisted = false;
+  /** Invalidates an in-flight suspension when /new explicitly ends its resume identity. */
+  private hostWorkAdmissionLifecycleEpoch = 0;
+  /** Epoch captured by the deferred admission that is currently crossing the wrapper boundary. */
+  private hostWorkAdmissionStartEpoch: number | null = null;
+  /** Allows spawnSession to consume a deferred start without recursively deferring it. */
+  private startingDeferredHostWorkAdmission = false;
   private readonly shutdownKillTimers = new Map<
     ReturnType<typeof spawn>,
     ShutdownKillTimerEntry
@@ -921,6 +969,151 @@ export class SessionManager {
 
   private get isManagedLoopProvider(): boolean {
     return executionModeForProvider(this.assertKnownProvider('isManagedLoopProvider')) === 'managed_loop';
+  }
+
+  private get isHostWorkAdmissionPersistentProvider(): boolean {
+    return isHostWorkAdmissionEnabled()
+      && executionModeForProvider(this.assertKnownProvider('isHostWorkAdmissionPersistentProvider')) === 'persistent_session';
+  }
+
+  /** True when a prior suspension (or initial arm) must be consumed at a real turn boundary. */
+  isHostWorkAdmissionStartDeferred(): boolean {
+    return this.deferredHostWorkAdmissionStart !== null || this.hostWorkAdmissionSuspension !== null;
+  }
+
+  /** Await exact shutdown proof before code inspects activity or starts replacement work. */
+  async waitForHostWorkAdmissionSuspension(): Promise<void> {
+    await this.hostWorkAdmissionSuspension;
+  }
+
+  /**
+   * Terminate an admitted persistent child after its terminal result has been
+   * fully serialized. The durable identity is retained only after shutdown
+   * proves cleanup and marks the exact row suspended.
+   */
+  suspendHostWorkAdmissionAfterTerminal(): Promise<void> {
+    if (!this.isHostWorkAdmissionPersistentProvider || !this.active) {
+      return Promise.resolve();
+    }
+    if (this.providerTurnInFlight) {
+      return Promise.reject(new Error('HOST_WORK_ADMISSION_SUSPEND_WITH_TURN_IN_FLIGHT'));
+    }
+    if (this.hostWorkAdmissionSuspension !== null) return this.hostWorkAdmissionSuspension;
+
+    const lifecycleEpoch = this.hostWorkAdmissionLifecycleEpoch;
+    const resumeSessionId = this.sessionId;
+    const existingRowId = this.dbRowId;
+    if (resumeSessionId === null || existingRowId === null) {
+      let barrier!: Promise<void>;
+      barrier = this.shutdown(false).then(() => {
+        throw new Error('HOST_WORK_ADMISSION_RESUME_IDENTITY_UNAVAILABLE');
+      }).finally(() => {
+        if (this.hostWorkAdmissionSuspension === barrier) {
+          this.hostWorkAdmissionSuspension = null;
+        }
+      });
+      this.hostWorkAdmissionSuspension = barrier;
+      return barrier;
+    }
+
+    const suspendingIdentity = { resumeSessionId, existingRowId };
+    this.hostWorkAdmissionSuspendingIdentity = suspendingIdentity;
+    this.hostWorkAdmissionSuspensionPersisted = false;
+    let barrier!: Promise<void>;
+    barrier = this.shutdown(true).then(() => {
+      if (this.hostWorkAdmissionLifecycleEpoch === lifecycleEpoch) {
+        this.deferredHostWorkAdmissionStart = suspendingIdentity;
+      }
+    }).finally(() => {
+      if (this.hostWorkAdmissionSuspendingIdentity === suspendingIdentity) {
+        this.hostWorkAdmissionSuspendingIdentity = null;
+        this.hostWorkAdmissionSuspensionPersisted = false;
+      }
+      if (this.hostWorkAdmissionSuspension === barrier) {
+        this.hostWorkAdmissionSuspension = null;
+      }
+    });
+    this.hostWorkAdmissionSuspension = barrier;
+    return barrier;
+  }
+
+  /**
+   * Existing terminal-failure paths need a tracked host teardown, while normal
+   * providers retain their historical direct shutdown behavior.
+   */
+  shutdownAfterTerminalResult(): Promise<void> {
+    return this.isHostWorkAdmissionPersistentProvider
+      ? this.suspendHostWorkAdmissionAfterTerminal()
+      : this.shutdown();
+  }
+
+  private endDeferredHostWorkAdmissionIdentity(
+    deferred: DeferredHostWorkAdmissionStart,
+  ): void {
+    if (this.durableFailureClosed) return;
+    if (deferred.resumeSessionId === undefined || deferred.existingRowId === undefined) return;
+    const resumeSessionId = deferred.resumeSessionId;
+    const existingRowId = deferred.existingRowId;
+    if (this.durability && typeof this.durability.closeSessionLifecycle === 'function') {
+      this.durability.closeSessionLifecycle({
+        agentSessionRowId: existingRowId,
+        providerSessionId: resumeSessionId,
+        provider: this.provider,
+        conversationKey: this.conversationKey,
+        status: 'ended',
+      });
+    } else {
+      updateResumedSessionStatus(
+        this.db,
+        existingRowId,
+        resumeSessionId,
+        this.provider,
+        'ended',
+      );
+      this.updateCheckpointStatus('ended', resumeSessionId);
+    }
+  }
+
+  private async startDeferredHostWorkAdmissionAtTurnBoundary(): Promise<void> {
+    if (this.deferredHostWorkAdmissionStartPromise !== null) {
+      return this.deferredHostWorkAdmissionStartPromise;
+    }
+    let start!: Promise<void>;
+    start = (async () => {
+      await this.waitForHostWorkAdmissionSuspension();
+      if (this.active) return;
+      const deferred = this.deferredHostWorkAdmissionStart;
+      if (deferred === null) return;
+      const lifecycleEpoch = this.hostWorkAdmissionLifecycleEpoch;
+      this.startingDeferredHostWorkAdmission = true;
+      this.hostWorkAdmissionStartEpoch = lifecycleEpoch;
+      try {
+        await this.spawnSession(deferred.resumeSessionId, deferred.existingRowId);
+        if (this.hostWorkAdmissionLifecycleEpoch !== lifecycleEpoch) {
+          throw new Error('HOST_WORK_ADMISSION_START_INVALIDATED');
+        }
+        if (this.deferredHostWorkAdmissionStart === deferred) {
+          this.deferredHostWorkAdmissionStart = null;
+        }
+      } catch (err) {
+        if (
+          this.hostWorkAdmissionLifecycleEpoch !== lifecycleEpoch
+          && err instanceof HostWorkAdmissionError
+        ) {
+          throw new Error('HOST_WORK_ADMISSION_START_INVALIDATED');
+        }
+        throw err;
+      } finally {
+        this.hostWorkAdmissionStartEpoch = null;
+        this.startingDeferredHostWorkAdmission = false;
+      }
+    })().finally(() => {
+      if (this.deferredHostWorkAdmissionStartPromise === start) {
+        this.deferredHostWorkAdmissionStartPromise = null;
+      }
+    });
+    this.deferredHostWorkAdmissionStartPromise = start;
+    return start;
   }
 
   getTurnControlCapabilities(): ProviderTurnControlCapabilities {
@@ -1158,6 +1351,123 @@ export class SessionManager {
     });
   }
 
+  private trackChildGeneration(
+    child: ReturnType<typeof spawn>,
+    generation: SessionGenerationIdentity | null = this.currentGenerationIdentity(),
+  ): SessionGenerationIdentity | null {
+    this.childGenerations.set(child, generation);
+    this.childTreeMarkers.set(
+      child,
+      generation === null
+        ? `unbound:${randomUUID()}`
+        : `${generation.managerId}:${generation.generation}:${randomUUID()}`,
+    );
+    return generation;
+  }
+
+  /**
+   * Preserve the direct provider spawn everywhere except the explicit systemd
+   * opt-in. The queued wrapper is tracked early so shutdown uses the same
+   * process-tree proof before a provider process is admitted.
+   */
+  private spawnProviderChild(
+    binary: string,
+    args: readonly string[],
+    cwd: string,
+    expectedExecutableSha256?: string,
+  ): ChildProcessWithoutNullStreams | Promise<ChildProcessWithoutNullStreams> {
+    // Security: explicit env allowlist prevents credential leakage to child processes.
+    // Without this, Node.js inherits process.env in full — meaning ALL secrets
+    // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
+    // Each provider only receives the credentials it actually needs.
+    const childEnv = buildChildEnv(
+      this.provider,
+      {
+        allowM365Mutations: this.allowM365Mutations,
+        whatsoupInstance: this.whatsoupInstance,
+        whatsoupMcpSocket: this.whatsoupMcpSocket,
+        configRoot: this.configRoot,
+        egressProxyPort: this.egressProxyPort,
+      },
+      this.model,
+      this.providerConfig,
+    );
+    const generation = this.currentGenerationIdentity();
+    if (!isHostWorkAdmissionEnabled()) {
+      const child = spawn(binary, args, {
+        cwd,
+        detached: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv,
+      });
+      this.trackChildGeneration(child, generation);
+      return child;
+    }
+
+    return this.spawnHostWorkProviderChild(binary, args, cwd, childEnv, generation, expectedExecutableSha256);
+  }
+
+  private async spawnHostWorkProviderChild(
+    binary: string,
+    args: readonly string[],
+    cwd: string,
+    env: NodeJS.ProcessEnv,
+    generation: SessionGenerationIdentity | null,
+    expectedExecutableSha256: string | undefined,
+  ): Promise<ChildProcessWithoutNullStreams> {
+    if (this.pendingHostWorkAdmission !== null || this.hostWorkAdmissionCleanupUnproven) {
+      throw new Error('Previous host work provider cleanup remains unproven');
+    }
+    const controller = new AbortController();
+    const pending: PendingHostWorkAdmission = {
+      controller,
+      promise: Promise.resolve(null as never),
+      child: null,
+      cleanupProven: false,
+      executionLease: null,
+    };
+    const admission = spawnHostWorkAdmitted({
+      binary,
+      args,
+      cwd,
+      env,
+      expectedExecutableSha256,
+      signal: controller.signal,
+      onSpawned: (child) => {
+        pending.child = child;
+        this.trackChildGeneration(child, generation);
+      },
+      onAbort: async (child) => {
+        await this.killChildTree(child, 'SIGTERM');
+        pending.cleanupProven = true;
+      },
+    });
+    pending.promise = admission;
+    this.pendingHostWorkAdmission = pending;
+    const trackedPending = this.pendingHostWorkAdmission;
+    let admitted = false;
+    try {
+      const child = await admission;
+      if (!this.isCurrentGeneration(generation)) {
+        await this.killChildTree(child, 'SIGTERM');
+        pending.cleanupProven = true;
+        throw new Error('Session generation invalidated during provider admission');
+      }
+      admitted = true;
+      // Both direct and admitted paths explicitly request pipe,pipe,pipe for
+      // the provider streams. The wrapper's additional fd3 is closed before
+      // this child is exposed to normal session output handling.
+      return child as ChildProcessWithoutNullStreams;
+    } finally {
+      if (
+        this.pendingHostWorkAdmission === trackedPending
+        && (admitted || pending.child === null || pending.cleanupProven)
+      ) {
+        this.pendingHostWorkAdmission = null;
+      }
+    }
+  }
+
   private materializeStdoutChunks(): void {
     if (this.stdoutChunks.length === 0) return;
     // #2290 M10: chunks are already correctly UTF-8 decoded by the stream's
@@ -1228,6 +1538,7 @@ export class SessionManager {
       if (this.providerReadyResolve) {
         this.providerReadyResolve();
         this.providerReadyResolve = null;
+        this.providerReadyReject = null;
       }
 
       if (this.provider === 'claude-cli') {
@@ -1973,6 +2284,7 @@ export class SessionManager {
     this.geminiRequestSeq = 0;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
+    this.providerReadyReject = null;
     this.resumeAttemptId = null;
     this.codexResumeThreadStartReqId = null;
   }
@@ -2192,6 +2504,23 @@ export class SessionManager {
     if (this.providerTransitionReady) await this.providerTransitionReady;
     this.assertDurableFailureReconciled();
     const provider = this.assertKnownProvider('spawnSession');
+    if (this.isHostWorkAdmissionPersistentProvider && !this.startingDeferredHostWorkAdmission) {
+      if (!providerSupportsResume(provider)) {
+        throw new Error(
+          `HOST_WORK_ADMISSION_UNSUPPORTED_PROVIDER: '${provider}' cannot preserve persistent conversation history`,
+        );
+      }
+      if (
+        this.deferredHostWorkAdmissionStart !== null
+        && resumeSessionId === undefined
+        && existingRowId === undefined
+      ) {
+        return;
+      }
+      this.hostWorkAdmissionEndRequested = false;
+      this.deferredHostWorkAdmissionStart = { resumeSessionId, existingRowId };
+      return;
+    }
     const existingCheckpoint = this.readCheckpointWatchdogState();
     this.assertNoPendingRoutePolicyAdmission(existingCheckpoint);
     const admissionWatchdogState = this.routePolicyAdmissionCheckpointState(existingCheckpoint);
@@ -2457,6 +2786,7 @@ export class SessionManager {
     }
     const admission = this.providerAdmission;
     const binary = admission?.resolvedPath ?? this.getProviderBinary();
+    let expectedExecutableSha256: string | undefined;
     if (admission?.required) {
       if (!admission.binarySha256) {
         throw new Error('admission record incomplete — refusing spawn');
@@ -2465,41 +2795,33 @@ export class SessionManager {
       if (actualSha !== admission.binarySha256) {
         throw new Error('provider binary content changed since admission — refusing spawn');
       }
+      expectedExecutableSha256 = admission.binarySha256;
     }
     cwd = this.admitConfiguredCwd();
     const args = this.getProviderArgs(systemPrompt, cwd, resumeSessionId);
     if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
 
-    const child = spawn(binary, args, {
-      cwd,
-      detached: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Security: explicit env allowlist prevents credential leakage to child processes.
-      // Without this, Node.js inherits process.env in full — meaning ALL secrets
-      // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
-      // Each provider only receives the credentials it actually needs.
-      env: buildChildEnv(
-        this.provider,
-        {
-          allowM365Mutations: this.allowM365Mutations,
-          whatsoupInstance: this.whatsoupInstance,
-          whatsoupMcpSocket: this.whatsoupMcpSocket,
-          configRoot: this.configRoot,
-          egressProxyPort: this.egressProxyPort,
-        },
-        this.model,
-        this.providerConfig,
-      ),
-    });
-
-    const childGeneration = this.currentGenerationIdentity();
-    this.childGenerations.set(child, childGeneration);
-    this.childTreeMarkers.set(
-      child,
-      childGeneration === null
-        ? `unbound:${randomUUID()}`
-        : `${childGeneration.managerId}:${childGeneration.generation}:${randomUUID()}`,
-    );
+    const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+    // Keep direct spawn synchronous: handlers below attach in the same turn.
+    const child = spawned instanceof Promise ? await spawned : spawned;
+    if (
+      this.isHostWorkAdmissionPersistentProvider
+      && this.hostWorkAdmissionStartEpoch !== null
+      && this.hostWorkAdmissionStartEpoch !== this.hostWorkAdmissionLifecycleEpoch
+    ) {
+      try {
+        await this.killChildTree(child, 'SIGKILL');
+      } catch (err) {
+        this.hostWorkAdmissionCleanupUnproven = true;
+        throw new AggregateError(
+          [err],
+          'HOST_WORK_ADMISSION_START_INVALIDATED: obsolete admitted child cleanup failed',
+        );
+      }
+      throw new Error('HOST_WORK_ADMISSION_START_INVALIDATED');
+    }
+    const childGeneration = this.childGenerations.get(child)
+      ?? this.trackChildGeneration(child);
     this.child = child;
     this.active = true;
     this.resetStdoutBuffers();
@@ -2547,8 +2869,9 @@ export class SessionManager {
 
     // Create deferred ready promise for providers that need async init
     if (this.provider === 'codex-cli' || this.provider === 'gemini-cli') {
-      this.providerReadyPromise = new Promise<void>((resolve) => {
+      this.providerReadyPromise = new Promise<void>((resolve, reject) => {
         this.providerReadyResolve = resolve;
+        this.providerReadyReject = reject;
       });
     }
 
@@ -2671,6 +2994,27 @@ export class SessionManager {
               const errorMsg = typeof errorObj === 'object' && errorObj !== null
                 ? String((errorObj as Record<string, unknown>)['message'] ?? 'unknown')
                 : String(errorObj);
+              if (isHostWorkAdmissionEnabled()) {
+                // A host-admitted child must resume its exact thread or close;
+                // a silent fresh thread would drop the conversation history.
+                const failedSessionId = this.resumeAttemptId ?? this.sessionId;
+                const failedRowId = this.dbRowId;
+                const resumeError = new Error('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+                this.codexResumeThreadStartReqId = null;
+                this.providerReadyReject?.(resumeError);
+                this.providerReadyResolve = null;
+                this.providerReadyReject = null;
+                try {
+                  this.closeDurableFailureLifecycle(failedSessionId, failedRowId, 'resume_failed');
+                } catch (closeErr) {
+                  log.error({ err: closeErr, chatJid: this.chatJid, reqId: msg['id'] }, 'codex: failed to close rejected host-admission resume');
+                }
+                void this.shutdown(false).catch((shutdownErr: unknown) => {
+                  log.error({ err: shutdownErr, chatJid: this.chatJid, reqId: msg['id'] }, 'codex: rejected host-admission resume cleanup failed');
+                });
+                log.warn({ chatJid: this.chatJid, reqId: msg['id'], error: errorMsg }, 'codex: host-admission thread resume rejected — session closed');
+                return;
+              }
               log.warn({ chatJid: this.chatJid, reqId: msg['id'], error: errorMsg }, 'codex: thread resume rejected — retrying with fresh thread');
               this.codexResumeThreadStartReqId = null;
               // Clear the stale thread ID so it won't be retried again
@@ -2910,7 +3254,28 @@ export class SessionManager {
     const lease = this.childExecutionLeases.get(child);
     if (!lease) return;
     this.childExecutionLeases.delete(child);
+    lease.setPhase('terminalizing');
+    lease.markProgress();
+    lease.setPhase('cleanup');
+    lease.markProgress();
     lease.release();
+  }
+
+  /**
+   * Progress is accepted only from the exact child that still owns this
+   * session generation. The lease's own generation fence then prevents a
+   * released holder from changing its FIFO successor.
+   */
+  private markProviderExecutionProgress(
+    child: ReturnType<typeof spawn>,
+    generation: SessionGenerationIdentity | null,
+    phase?: 'executing',
+  ): void {
+    if (!this.isCurrentPersistentChild(child, generation)) return;
+    const lease = this.childExecutionLeases.get(child);
+    if (!lease) return;
+    if (phase) lease.setPhase(phase);
+    lease.markProgress();
   }
 
   /**
@@ -3330,6 +3695,12 @@ export class SessionManager {
     onProviderBoundaryReady?: () => void,
   ): Promise<void> {
     this.db.assertWritableCompatibility();
+    // Preserve the existing synchronous turn-token boundary for every normal
+    // provider path. Only an inactive persistent host-admission session needs
+    // to await its deferred child start/cleanup proof.
+    if (this.isHostWorkAdmissionPersistentProvider && !this.active) {
+      await this.startDeferredHostWorkAdmissionAtTurnBoundary();
+    }
     if (!this.active) {
       throw new Error('No active session. Call spawnSession() first.');
     }
@@ -3506,6 +3877,7 @@ export class SessionManager {
 
       let args: string[];
       let binary: string;
+      let expectedExecutableSha256: string | undefined;
       let parse: ProviderEventParser;
       try {
         cwd = this.admitConfiguredCwd();
@@ -3520,6 +3892,7 @@ export class SessionManager {
           if (actualSha !== admission.binarySha256) {
             throw new Error('provider binary content changed since admission — refusing spawn');
           }
+          expectedExecutableSha256 = admission.binarySha256;
         } else {
           binary = this.getProviderBinary();
         }
@@ -3536,16 +3909,57 @@ export class SessionManager {
       let openCodeStopCandidateCount = 0;
       let openCodeStderrBufferStr = '';
 
+      // A queued host wrapper may wait arbitrarily long for its host lease, so
+      // the admitted path publishes the boundary after admission (below). The
+      // direct path keeps publishing it before any child exists.
+      const boundaryAfterAdmission = isHostWorkAdmissionEnabled();
+      if (!boundaryAfterAdmission) {
+        try {
+          onProviderBoundaryReady?.();
+        } catch (err) {
+          executionLease?.release();
+          this.completeProviderTurn(providerTurnToken);
+          throw err;
+        }
+      }
+
+      let child: ChildProcessWithoutNullStreams;
       try {
-        onProviderBoundaryReady?.();
+        cwd = this.admitConfiguredCwd();
+        args = this.buildSpawnPerTurnArgs(cwd, input);
+        const spawned = this.spawnProviderChild(binary, args, cwd, expectedExecutableSha256);
+        // Keep direct-spawn setup synchronous: existing callers and child error
+        // handlers rely on the process being attached in this same turn.
+        child = spawned instanceof Promise ? await spawned : spawned;
       } catch (err) {
+        if (
+          err instanceof HostWorkAdmissionCleanupError
+          && executionLease !== null
+          && this.pendingHostWorkAdmission !== null
+        ) {
+          // The wrapper may still own the provider. Keep the single-writer
+          // lease attached to its tracked pending admission until tree proof.
+          this.pendingHostWorkAdmission.executionLease = executionLease;
+          executionLease = null;
+        }
         executionLease?.release();
         this.completeProviderTurn(providerTurnToken);
         throw err;
       }
 
+      if (executionLease) {
+        this.childExecutionLeases.set(child, executionLease);
+        executionLease = null;
+      }
+
+      const childGeneration = this.childGenerations.get(child)
+        ?? this.trackChildGeneration(child);
+      this.child = child;
+      this.markProviderExecutionProgress(child, childGeneration, 'executing');
+
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
+        this.markProviderExecutionProgress(child, childGeneration);
         if (this.provider === 'opencode-cli') {
           if (pendingOpenCodeResult !== null && event.type !== 'result') {
             if (openCodeStopCandidateCount === 1) {
@@ -3577,48 +3991,26 @@ export class SessionManager {
         this.handleProviderEvent(event);
       };
 
-      const child = (() => {
+      // Publish the provider boundary only after its fd3 admission has resolved.
+      if (boundaryAfterAdmission) {
         try {
-          cwd = this.admitConfiguredCwd();
-          args = this.buildSpawnPerTurnArgs(cwd, input);
-          return spawn(binary, args, {
-            cwd,
-            detached: true,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: buildChildEnv(
-              this.provider,
-              {
-                allowM365Mutations: this.allowM365Mutations,
-                whatsoupInstance: this.whatsoupInstance,
-                whatsoupMcpSocket: this.whatsoupMcpSocket,
-                configRoot: this.configRoot,
-                egressProxyPort: this.egressProxyPort,
-              },
-              this.model,
-              this.providerConfig,
-            ),
-          });
+          onProviderBoundaryReady?.();
         } catch (err) {
-          executionLease?.release();
+          let cleanupError: unknown = null;
+          try {
+            await this.killChildTree(child, 'SIGTERM');
+          } catch (killErr) {
+            cleanupError = killErr;
+          }
+          this.releaseProviderExecutionLease(child);
+          if (this.child === child) this.child = null;
           this.completeProviderTurn(providerTurnToken);
+          if (cleanupError !== null) {
+            throw new AggregateError([err, cleanupError], 'Provider boundary callback and child cleanup both failed');
+          }
           throw err;
         }
-      })();
-
-      if (executionLease) {
-        this.childExecutionLeases.set(child, executionLease);
-        executionLease = null;
       }
-
-      const childGeneration = this.currentGenerationIdentity();
-      this.childGenerations.set(child, childGeneration);
-      this.childTreeMarkers.set(
-        child,
-        childGeneration === null
-          ? `unbound:${randomUUID()}`
-          : `${childGeneration.managerId}:${childGeneration.generation}:${randomUUID()}`,
-      );
-      this.child = child;
 
       // OpenCode reads a non-TTY stdin stream as its run message. Keep the
       // system prompt, continuity context, and user text out of process argv,
@@ -3681,6 +4073,7 @@ export class SessionManager {
             || this.activeProviderTurnToken !== providerTurnToken
           ) return;
           if (this.provider === 'opencode-cli' && isOpenCodeDiagnosticLogLine(line)) {
+            this.markProviderExecutionProgress(child, childGeneration);
             this.tickWatchdog();
             continue;
           }
@@ -3714,6 +4107,7 @@ export class SessionManager {
           openCodeStderrBufferStr = lines.pop() ?? '';
           for (const line of lines) {
             if (isOpenCodeDiagnosticLogLine(line)) {
+              this.markProviderExecutionProgress(child, childGeneration);
               this.tickWatchdog();
               continue;
             }
@@ -4065,7 +4459,17 @@ export class SessionManager {
 
   /** Kill the current session and spawn a fresh one. */
   async handleNew(): Promise<void> {
+    const deferredStart = this.deferredHostWorkAdmissionStartPromise;
     await this.shutdown(false); // user-initiated: mark ended, not suspended
+    if (deferredStart !== null) {
+      try {
+        await deferredStart;
+      } catch (err) {
+        if (!(err instanceof Error) || err.message !== 'HOST_WORK_ADMISSION_START_INVALIDATED') {
+          throw err;
+        }
+      }
+    }
     await this.spawnSession();
   }
 
@@ -4164,7 +4568,51 @@ export class SessionManager {
    * @param suspend - true (default) = suspended (bot shutdown, resumable);
    *                  false = ended (user chose /new, not resumable).
    */
-  async shutdown(suspend = true): Promise<void> {
+  // Deliberately not async: the default path returns shutdownInternal's own
+  // promise so callers observe the same settlement timing as before.
+  shutdown(suspend = true): Promise<void> {
+    if (!this.isHostWorkAdmissionPersistentProvider) {
+      return this.shutdownInternal(suspend);
+    }
+
+    if (!suspend) {
+      this.hostWorkAdmissionLifecycleEpoch += 1;
+      this.hostWorkAdmissionEndRequested = true;
+      const deferred = this.deferredHostWorkAdmissionStart;
+      const suspendedBeforeBarrierPublication = this.hostWorkAdmissionSuspendingIdentity;
+      this.deferredHostWorkAdmissionStart = null;
+      if (
+        deferred?.resumeSessionId !== undefined
+        && deferred.existingRowId !== undefined
+      ) {
+        this.endDeferredHostWorkAdmissionIdentity(deferred);
+      } else if (
+        this.hostWorkAdmissionSuspensionPersisted
+        && suspendedBeforeBarrierPublication !== null
+      ) {
+        this.endDeferredHostWorkAdmissionIdentity(suspendedBeforeBarrierPublication);
+      }
+    }
+
+    if (this.hostWorkAdmissionShutdownPromise !== null) {
+      return this.hostWorkAdmissionShutdownPromise;
+    }
+
+    let shutdown!: Promise<void>;
+    shutdown = this.shutdownInternal(suspend).finally(() => {
+      if (this.hostWorkAdmissionShutdownPromise === shutdown) {
+        this.hostWorkAdmissionShutdownPromise = null;
+      }
+    });
+    this.hostWorkAdmissionShutdownPromise = shutdown;
+    return shutdown;
+  }
+
+  private async shutdownInternal(suspend = true): Promise<void> {
+    if (!suspend && !this.isHostWorkAdmissionPersistentProvider) {
+      this.hostWorkAdmissionLifecycleEpoch += 1;
+      this.deferredHostWorkAdmissionStart = null;
+    }
     this.providerExecutionWaitAbort?.abort();
     this.providerExecutionWaitAbort = null;
     this.clearTurnWatchdog();
@@ -4172,8 +4620,56 @@ export class SessionManager {
     this.active = false; // Suppress crash notification for clean shutdown
     this.activeEvidenceGeneration = null;
 
-    const currentPid = this.child?.pid ?? null;
     const closingSessionId = this.sessionId ?? this.resumeAttemptId;
+    const closingRowId = this.dbRowId;
+
+    // A scoped wrapper can be queued before it becomes this.child. Abort it
+    // here and await the same tree cleanup used for an already admitted child.
+    const pendingAdmission = this.pendingHostWorkAdmission;
+    if (pendingAdmission !== null) {
+      if (
+        pendingAdmission.controller.signal.aborted
+        && !pendingAdmission.cleanupProven
+        && pendingAdmission.child !== null
+      ) {
+        try {
+          await this.killChildTree(pendingAdmission.child, 'SIGTERM');
+          pendingAdmission.cleanupProven = true;
+          pendingAdmission.executionLease?.release();
+          pendingAdmission.executionLease = null;
+          if (this.pendingHostWorkAdmission === pendingAdmission) this.pendingHostWorkAdmission = null;
+        } catch (err) {
+          try {
+            this.closeDurableFailureLifecycle(closingSessionId, closingRowId);
+          } catch (persistenceErr) {
+            throw new AggregateError(
+              [err, persistenceErr],
+              'Queued provider cleanup retry and durable failure closure both failed',
+            );
+          }
+          throw err;
+        }
+      } else {
+        pendingAdmission.controller.abort();
+        try {
+          await pendingAdmission.promise;
+        } catch (err) {
+          if (err instanceof HostWorkAdmissionCleanupError) {
+            try {
+              this.closeDurableFailureLifecycle(closingSessionId, closingRowId);
+            } catch (persistenceErr) {
+              throw new AggregateError(
+                [err, persistenceErr],
+                'Queued provider cleanup and durable failure closure both failed',
+              );
+            }
+            throw err;
+          }
+        }
+      }
+    }
+
+    const currentPid = this.child?.pid ?? null;
 
     // Kill the child only if one is running
     if (this.child !== null) {
@@ -4189,8 +4685,11 @@ export class SessionManager {
         this.armShutdownKillTimer(child);
         await treeCleanup;
       } catch (err) {
+        if (this.isHostWorkAdmissionPersistentProvider) {
+          this.hostWorkAdmissionCleanupUnproven = true;
+        }
         try {
-          this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
+          this.closeDurableFailureLifecycle(closingSessionId, closingRowId);
         } catch (persistenceErr) {
           throw new AggregateError(
             [err, persistenceErr],
@@ -4230,7 +4729,7 @@ export class SessionManager {
         }
       } catch (err) {
         try {
-          this.closeDurableFailureLifecycle(closingSessionId, this.dbRowId);
+          this.closeDurableFailureLifecycle(closingSessionId, closingRowId);
         } catch (persistenceErr) {
           throw new AggregateError(
             [err, persistenceErr],
@@ -4247,27 +4746,29 @@ export class SessionManager {
     // Persist graceful state only after provider/process termination succeeds.
     // A failed persistence leaves the row identity attached so shutdown can be retried.
     if (!this.durableFailureClosed) {
-      const lifecycleStatus = suspend ? 'suspended' : 'ended';
+      const lifecycleStatus = !suspend || this.hostWorkAdmissionEndRequested
+        ? 'ended'
+        : 'suspended';
       if (
-        this.dbRowId !== null
+        closingRowId !== null
         && this.durability
         && typeof this.durability.closeSessionLifecycle === 'function'
       ) {
         this.durability.closeSessionLifecycle({
-          agentSessionRowId: this.dbRowId,
+          agentSessionRowId: closingRowId,
           providerSessionId: closingSessionId,
           provider: this.provider,
           conversationKey: this.conversationKey,
           status: lifecycleStatus,
         });
       } else {
-        if (this.dbRowId !== null) {
+        if (closingRowId !== null) {
           if (closingSessionId === null) {
-            updateSessionStatus(this.db, this.dbRowId, lifecycleStatus);
+            updateSessionStatus(this.db, closingRowId, lifecycleStatus);
           } else {
             updateResumedSessionStatus(
               this.db,
-              this.dbRowId,
+              closingRowId,
               closingSessionId,
               this.provider,
               lifecycleStatus,
@@ -4277,11 +4778,18 @@ export class SessionManager {
         this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
       }
       log.info({
-        rowId: this.dbRowId,
+        rowId: closingRowId,
         chatJid: this.chatJid,
         sessionId: closingSessionId,
         pid: currentPid,
-      }, suspend ? 'session: suspended' : 'session: ended');
+      }, lifecycleStatus === 'suspended' ? 'session: suspended' : 'session: ended');
+      if (
+        lifecycleStatus === 'suspended'
+        && this.hostWorkAdmissionSuspendingIdentity?.existingRowId === closingRowId
+        && this.hostWorkAdmissionSuspendingIdentity.resumeSessionId === closingSessionId
+      ) {
+        this.hostWorkAdmissionSuspensionPersisted = true;
+      }
     }
 
     this.sessionId = null;
@@ -4293,6 +4801,7 @@ export class SessionManager {
     this.codexResumeThreadStartReqId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
+    this.hostWorkAdmissionCleanupUnproven = false;
     // Only a fully successful teardown (process proof plus lifecycle closure)
     // may reopen a lane closed by an ambiguous provider write.
     this.completeProviderTurn();
