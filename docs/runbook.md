@@ -425,7 +425,18 @@ for f in $(ls bond-events.ndjson.*.gz | sort); do gzip -dc "$f"; done; cat bond-
 
 ### Authentication
 
-The `GET /health` endpoint requires no authentication.
+`GET /health` is reachable without a token, but an unauthenticated caller gets only the public
+liveness envelope: `{ "schema_version": "health.public.v1", "status", "generated_at",
+"startupNotification" }`, with HTTP 503 when the transport is down and not recovering. Every
+other field in this section, including `whatsapp`, `sqlite`, `durability`, `runtime` and
+`shadowGate`, is in the diagnostic body. That body requires the same bearer token as the mutation
+routes:
+
+```
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health
+```
+
+The diagnostic examples in this runbook pass that header.
 
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
@@ -457,6 +468,8 @@ Optional fields:
 Request errors such as both targets, neither target, unknown alias, unknown profile, or invalid `link_preview` return HTTP 400 and do not send.
 
 ### Response Format
+
+The authenticated diagnostic body (excerpt):
 
 ```json
 {
@@ -494,6 +507,18 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
       }
     ]
   },
+  "shadowGate": {
+    "mode": "shadow",
+    "recorder": "ready",
+    "sinkState": "ready",
+    "sinkDegradedReason": null,
+    "counts": {
+      "evaluated": 42, "recorded": 42, "written": 43,
+      "droppedQueueFull": 0, "droppedOversize": 0, "droppedClosed": 0, "droppedDegraded": 0,
+      "droppedWriteFailed": 0, "droppedUnserializable": 0,
+      "invalid": 0, "writeErrors": 0, "journalFailures": 0
+    }
+  },
   "durability": {
     "pendingOutbound": 0,
     "quarantinedOutbound": 0,
@@ -501,6 +526,8 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
   }
 }
 ```
+
+`shadowGate` is `{ "mode": "off" }` unless the shadow gate is enabled; see [Shadow Gate](#shadow-gate) → "Live status" for every field and `recorder` value.
 
 `model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
@@ -795,7 +822,7 @@ exits 78; repair the directory boundary instead of restart-looping the service.
 # Check all instances
 for port in 9091 9092 9093 9094; do
   echo -n "Port $port: "
-  curl -s http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
+  curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
 done
 ```
 
@@ -814,7 +841,7 @@ done
 systemctl --user status whatsoup@q
 
 # 2. Check WhatsApp connection
-curl -s http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
 
 # 3. Check logs for the conversation
 journalctl --user -u whatsoup@q -n 50 | grep -E 'ingest|dispatch|session|error'
@@ -856,7 +883,7 @@ lifecycle (supported resume providers are Claude CLI, Codex CLI, and OpenCode CL
 
 ```bash
 # 1. Get the full health response
-curl -s http://127.0.0.1:9091/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -m json.tool
 
 # 2. Check enrichment last_run timestamp
 # If enrichment.last_run is > 10 minutes ago on a chat instance, this triggers degraded.
@@ -951,7 +978,7 @@ For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
 
 ```bash
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import json,sys; print(json.load(sys.stdin)['runtime']['agent']['providerExecution'])"
 pgrep -af opencode
 journalctl --user -u whatsoup@chat-bot --since '-15 min' --no-pager | \
@@ -1140,11 +1167,11 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
    ORDER BY count DESC, disposition;"
 
 # 3. Check health for durability stats
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantine dispositions:', d['outboundQuarantineDispositions'])"
 
 # 4. Check WhatsApp is connected
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print(d['whatsapp'])"
 ```
 
@@ -2178,7 +2205,7 @@ INSTANCES=( "primary-line:9094" "operator-agent:9092" "sandbox-agent:9091" "chat
 for entry in "${INSTANCES[@]}"; do
   name="${entry%%:*}"
   port="${entry##*:}"
-  result=$(curl -s --max-time 3 "http://127.0.0.1:$port/health" 2>/dev/null)
+  result=$(curl -s --max-time 3 -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null)
   if [ -z "$result" ]; then
     echo "[$name] UNREACHABLE (service may be down)"
     continue
@@ -2290,7 +2317,7 @@ grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<insta
 grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
 
 # Check current state followed by lifetime counters
-curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
 
 # Verify current threshold
 grep "autoCompactInputTokens" instances/<name>/instance.json
@@ -2329,7 +2356,7 @@ cd ~/LAB/WhatSoup && npm test
 
 ### Health checks
 ```
-curl -s localhost:<port>/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" localhost:<port>/health | python3 -m json.tool
 ```
 Instance ports: primary-line=9094, sandbox-agent=9091, operator-agent=9092, chat-bot=9093
 
@@ -2439,7 +2466,7 @@ docker compose logs -f whatsoup 2>&1 | grep fleet
 # Fleet health (from host)
 curl http://localhost:9099/api/lines
 
-# Instance health (if port exposed in compose)
+# Instance liveness (if port exposed in compose); add the bearer header for the diagnostic body
 curl http://localhost:9090/health
 ```
 
@@ -2552,3 +2579,158 @@ uses to call an open inbound stale) block the stop. Older open rows are reported
 stay restartable, since restart is how a wedge gets cleared.
 
 The verdict reports `liveTurns.windowSeconds`, so a deploy receipt can record the exact predicate applied.
+
+## Shadow Gate
+
+The shadow gate is a logged-only reply-worthiness classifier (`src/core/shadow-gate-adapter.ts`). For
+every message that passes the access policy and reaches dispatch it records an advisory SPAWN/SUPPRESS
+verdict. It is advisory only: it never changes dispatch, and there is no enforcing mode.
+
+**Enable.** Set `"shadowGate": { "mode": "shadow" }` in the instance's `config.json` (optionally
+`"eventsDir": "/abs/path"`; see [configuration](configuration.md)), then restart the instance. The
+restart is an owner action: run the `--mode stop` check above first. The section is read only at
+startup.
+
+**Where events live.** NDJSON segments `shadow-gate-events.NNNNNN.ndjson` (six-digit index) in
+`eventsDir`, by default `~/.config/whatsoup/instances/<name>/`. The segments sit next to a
+`shadow-gate-events.lock` file, which the report ignores. Records contain metadata and closed codes
+only, never message text. The id rules (below) rule out JIDs and standalone phone-number digit runs,
+but not digits glued to letters inside an id.
+
+**Measure.** Never read or `cp` the live database. Take a self-contained snapshot through the SQLite
+backup API, and copy the segment directory:
+
+```bash
+INSTANCE=operator-agent
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+SNAP=$(mktemp -d)
+sqlite3 "$DB" ".backup '$SNAP/bot.db'"
+cp -p ~/.config/whatsoup/instances/$INSTANCE/shadow-gate-events.*.ndjson "$SNAP/"
+npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
+  --instance "$INSTANCE" --since 1790000000 --until 1790086400 [--lineage <hash>] [--json]
+```
+
+- `--instance` is the recorded id: `botName` with characters outside `A-Za-z0-9._:-` replaced by `_`
+  (at most 128 characters). It is not necessarily the directory name.
+- `--since`/`--until` are required integer unix seconds (no fractions, no milliseconds); the window
+  is `[since, until)` over `inbound_events.received_at`.
+- The report opens the snapshot `immutable=1`, which creates no `-wal`/`-shm` sidecars. It refuses
+  a snapshot that has a non-empty `-wal` next to it, because that mode would ignore the rows inside it.
+- The database lineage is a hash of the live database path and inode, so it cannot be recomputed from
+  a snapshot. The report prints the lineages it sees, in verdicts and in coverage markers inside the
+  window. When more than one is present it exits `65`, naming how many; pick one with `--lineage`.
+
+Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
+error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
+an invalid interior NDJSON line (named by file, line number and the validator's closed problem code,
+never its content), more than 64 segments, more than
+200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage. The 4 KiB bound is
+checked before the torn-tail check, so a final line without a newline that is over 4 KiB also exits
+`65` rather than being counted as a torn tail.
+
+Events written by a newer release carry a newer `schemaVersion`. An older report counts them across
+all segments and exits `65` with `unsupported_schema_version`, the count and the first file and
+line. Run the report from the newest release that wrote the segments.
+
+**Reading the output.** Coverage prints first:
+
+- `eligible` counts `inbound_events` rows in the window whose `routed_to` is not
+  `none`/`admin`/`control`/`passive`.
+- Scheduled-job (`agentjob-…`) and obligation (`obl:…`) turns never pass ingest; neither does any
+  row journalled with `routed_to = 'agent'` (the route scheduled jobs and obligations use). They are
+  excluded and counted separately as synthetic.
+- Any other `routed_to` value that is not a known runtime is listed and counted as eligible.
+- `missing` counts eligible rows without exactly one valid joined verdict. Conflicting verdicts,
+  seq mismatches and a torn final line all leave a row missing.
+- The recorder counters (`invalid`, `written`, `recorderDropped`, `journalFailures`) are summed over
+  each boot's latest coverage marker. They are cumulative per boot up to that marker, not limited to
+  the window, and they exclude anything that happened after the boot's last marker.
+  - `recorded` (per boot) counts verdicts the recorder accepted into the sink queue, not verdicts
+    written to disk.
+  - `written` counts every record the sink wrote, verdicts and coverage markers together.
+  - `recorderDropped` sums the sink drop counters. Those also cover both verdicts and markers, so
+    they are not a count of lost verdicts.
+  - `invalid` counts records the validator rejected before queueing. A message id outside the id
+    rules is rejected this way and its row shows up as missing.
+- Each boot line also prints the sink state from its last written marker. A sink that degrades
+  (for example `segment_cap_reached` or `write_failed`) writes nothing further, not even a marker,
+  so its degraded state never appears in the segments. For the running process, read it from
+  `shadowGate` in the authenticated `/health` body (see "Live status" below). For a past boot, look
+  for `counts` markers that stop early and for the `shadow gate warning` log line carrying the
+  reason code.
+
+**Live status.** The authenticated (bearer-token) `/health` body carries a `shadowGate` object.
+It is advisory: it never changes `status`, `status_reasons` or `degradation_causes`. A degraded or
+disabled recorder leaves the instance `healthy`, so a monitor that needs to catch that must read
+`shadowGate.recorder`.
+
+- Mode `off` (or no `shadowGate` section): exactly `{ "mode": "off" }`.
+- Mode `shadow`: `{ mode, recorder, sinkState, sinkDegradedReason, counts }`, metadata only.
+  - `recorder` is `not_started` until the first message reaches dispatch, because the recorder is
+    created then. This is the normal state after a restart.
+  - `recorder` is `starting` while the sink is still creating its directory and taking its lock.
+    This normally lasts well under a second. `starting` for more than about 30 seconds is a fault,
+    usually a stalled `mkdir` or lock on the events directory's filesystem. Verdicts queue and then
+    drop as `droppedQueueFull` while it lasts.
+  - `recorder` is `ready` once the sink is ready.
+  - `recorder` is `disabled` if creating the recorder failed. This is latched until restart.
+  - `recorder` is `degraded` whenever the sink has a degraded reason, even if the sink has since
+    closed. `sinkDegradedReason` gives the closed reason code, for example `mkdir_failed`,
+    `competing_writer`, `segment_cap_reached` or `write_failed`. A reason outside the recorded id
+    charset is reported as `unknown`, so no free text or path reaches the body.
+  - `recorder` is `unavailable` if the sink is closed without a degraded reason, or its status
+    cannot be read. A running service never closes the sink, so `unavailable` is not expected in
+    production. If it appears, report it as a defect.
+  - `counts` carries the same counters the coverage markers carry, for the current process.
+
+The id rules: every id uses the charset `A-Za-z0-9._:-` (at most 128 characters), and `messageId` and
+`instance` also reject a standalone run of 7–15 digits, the length of a phone number. Digits glued to
+letters are not detected. Consequences:
+
+- Signal instances record no verdicts. Their message ids (`signal:` plus a JSON key) fail the
+  charset, so every Signal verdict is counted as `invalid`. The recorder logs each warning code at
+  most once per 60 s.
+- iMessage message ids are the Messages `guid`, normally a bare UUID. A UUID whose 8- or
+  12-character group happens to be all digits is rejected, which is roughly 3% of messages. Those
+  rows show up as `invalid` and missing. Twilio SIDs (`SM` plus hex) and WhatsApp hex ids are not
+  affected.
+- An instance whose recorded id contains a standalone 7–15 digit run (for example a name ending in
+  `-20260923`) records nothing at all. Every event is rejected, and `--instance` refuses the id.
+
+For the proxy rates, an ERROR verdict counts as SPAWN. The disagreement rate against `response_echoed`
+is printed four ways:
+
+- over echoed rows with an OK verdict;
+- over echoed rows with any verdict;
+- over all echoed rows;
+- conservatively, with every missing or ERROR echoed row counted as a disagreement.
+
+Each carries a one-sided 95% Clopper–Pearson upper bound. `response_echoed` is historical behaviour, not
+proof that a reply was required, so none of these is a gold false-suppress rate. The per-rule table
+counts SPAWN/SUPPRESS for OK results only, with ERROR in its own column. Latency is printed over every
+received row (OK and ERROR, including OVERRUN) and separately over OK rows. If more than one
+gate/rules/feature version is present, rates are printed per partition only, never pooled.
+
+**Disable / roll back.** Set `"mode": "off"` (or remove `shadowGate`) and restart. Existing segments
+are inert and can be archived.
+
+**Segment retention.** Segments never rotate out. The sink writes up to 32 segments of 5 MiB
+(160 MiB). When the next segment would exceed that, the sink degrades with `segment_cap_reached`
+and records nothing further, and every later restart degrades the same way, until an operator
+archives the segments. To archive, stop the instance (owner action), move the
+`shadow-gate-events.*.ndjson` files out of `eventsDir`, and start it again; numbering restarts at
+`000001`.
+
+**Known limits.**
+
+- Advisory only. Nothing reads verdicts at runtime.
+- There is no `disarmed` marker on process exit. The 10-minute `counts` markers bound the
+  unrecorded tail, and the report flags any boot that has no `armed` marker.
+- The pending-obligation feature (whether the bot's previous message asked a question) misses a bot
+  question stored in the same second as the inbound message. DMs skip the lookup entirely and record
+  it as unknown: `S02_DM` decides every DM before it matters.
+- Signal instances record no verdicts (see the id rules above).
+- In `shadow` mode the rules file is read and compiled once, when the ingest handler is created at
+  startup. Edits to the rules file take effect only after a restart.
+- The first read is final for the process: if the rules file is unreadable or invalid then, every
+  evaluation records `ERROR`/`E_THROW` until the process restarts, even after the file is fixed.

@@ -1,0 +1,12 @@
+{
+  "rulesVersion": 1,
+  "flags": "i",
+  "statusOnly": [
+    { "id": "ack_words", "pattern": "^(ok|okay|k|kk|ack|noted|done|thanks|thank you|thx|ty|got it|cool|nice|great)[.! ]*$" },
+    { "id": "ack_emoji", "pattern": "^(👍|👌|✅|🙏|👍🏻|👍🏼|👍🏽|👍🏾|👍🏿)+$" }
+  ],
+  "obligation": [
+    { "id": "request_lead", "pattern": "^(please|pls|can you|could you|would you|will you|send|check|run|fix|deploy|update|remind|tell|show|find|make|add|remove|schedule)\\b" }
+  ],
+  "noReplyKnown": []
+}
