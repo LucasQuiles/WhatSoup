@@ -461,6 +461,47 @@ describe('agent session-db', () => {
     expect(() => resolveResumableAgentSession(db, input)).toThrow(/admission|resumable|checkpoint/i);
   });
 
+  it('hides a lazy resume whose completed identity names an admission-rejected turn until a valid turn supersedes it (#3295 S4)', () => {
+    const workspaceKey = 'admission-rejected-identity';
+    const sessionId = 'admission-rejected-identity-session';
+    const deliveryJid = '15550100077@s.whatsapp.net';
+    const rowId = createSession(db, 60021, '/tmp/admission-rejected-identity', deliveryJid, workspaceKey, 'claude-cli');
+    updateSessionId(db, rowId, sessionId);
+    updateSessionStatus(db, rowId, 'suspended');
+    // Historical shape: before the contract fix, the rejected turn's terminal
+    // advanced the checkpoint's completed identity to itself.
+    db.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind, attempt_failure_class,
+        inbound_disposition, delivery_kind, delivery_op_id, reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, 7, 7, 's4-rejected-turn-7', 'manager-s4', 1,
+        'admission_rejected', 'pre_dispatch_error', 'failed_terminal', 'none', NULL, 0)
+    `).run(workspaceKey, deliveryJid);
+    db.raw.prepare(`
+      INSERT INTO session_checkpoints (
+        conversation_key, session_id, session_status, last_inbound_seq,
+        completed_inbound_seq, completed_delivery_jid, completed_delivery_namespace,
+        completed_scope, completed_logical_turn_id, completed_manager_id, completed_generation
+      ) VALUES (?, ?, 'suspended', 7, 7, ?, 's.whatsapp.net', 'per_chat', 's4-rejected-turn-7', 'manager-s4', 1)
+    `).run(workspaceKey, sessionId, deliveryJid);
+
+    expect(getResumableSessionForChat(db, workspaceKey, 'claude-cli')).toBeNull();
+
+    // A later provider-dispatched turn completes and supersedes the identity.
+    db.raw.prepare(`
+      UPDATE session_checkpoints
+      SET last_inbound_seq = 8, completed_inbound_seq = 8, completed_logical_turn_id = 's4-completed-turn-8'
+      WHERE conversation_key = ?
+    `).run(workspaceKey);
+
+    expect(getResumableSessionForChat(db, workspaceKey, 'claude-cli')).toEqual({
+      id: rowId,
+      session_id: sessionId,
+      chat_jid: deliveryJid,
+    });
+  });
+
   it('excludes an unscoped shared row when its provider session has checkpoint-targeted debt', () => {
     const sessionId = 'shared-checkpoint-admission-session';
     const rowId = createSession(db, 60013, '/tmp/shared-admission', undefined, undefined, 'claude-cli');

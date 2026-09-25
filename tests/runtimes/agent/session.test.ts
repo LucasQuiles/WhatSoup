@@ -696,6 +696,38 @@ describe('SessionManager', () => {
     expect(callArgs[1]).toContain('bypassPermissions');
   });
 
+  // #3421 step 1: the session's MCP helpers inherit its token from the child env,
+  // on both the persistent spawn and the spawn-per-turn path.
+  it('hands the session token to the persistent child and to each spawn-per-turn child', async () => {
+    const persistent = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionToken: 'session-token-persistent',
+    });
+    await persistent.spawnSession();
+    const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    vi.mocked(spawn).mockClear();
+    const perTurn = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSessionToken: 'session-token-per-turn',
+    });
+    await perTurn.spawnSession();
+    void perTurn.sendTurn('hello').catch(() => {});
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+    const perTurnEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',

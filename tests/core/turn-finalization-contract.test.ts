@@ -301,3 +301,47 @@ describe('checkpoint derivation for null-inbound and completed identity', () => 
     });
   });
 });
+
+describe('admission-rejected terminals and the completed checkpoint identity (#3295 S4)', () => {
+  // A turn rejected at admission never crossed the provider boundary, so it
+  // must not become the checkpoint's most recently completed resumable turn.
+  function admissionRejectedTerminal(): TurnTerminalPersistenceParams {
+    return terminal({
+      attemptKind: 'admission_rejected',
+      attemptFailureClass: 'pre_dispatch_error',
+      inboundDisposition: 'failed_terminal',
+    });
+  }
+
+  it('does not derive a completed identity from an admission-rejected terminal inbound mutation', () => {
+    const normalized = normalizeFinalizeTurnTerminalParams({
+      terminal: admissionRejectedTerminal(),
+      inbound: { kind: 'failed', seq: 41, failureClass: 'pre_dispatch_error' },
+      bookkeeping: {
+        checkpoint: {
+          conversationKey: CONVERSATION_KEY,
+          fields: { watchdogState: 'healthy' },
+        },
+      },
+    });
+
+    expect(normalized.bookkeeping?.checkpoint?.fields).toEqual({
+      watchdogState: 'healthy',
+      activeTurnId: null,
+      lastInboundSeq: 41,
+    });
+  });
+
+  it('rejects a caller-supplied completed identity on an admission-rejected terminal', () => {
+    expect(() => normalizeFinalizeTurnTerminalParams({
+      terminal: admissionRejectedTerminal(),
+      inbound: { kind: 'failed', seq: 41, failureClass: 'pre_dispatch_error' },
+      bookkeeping: {
+        checkpoint: {
+          conversationKey: CONVERSATION_KEY,
+          fields: completedBundle(),
+        },
+      },
+    })).toThrow('admission-rejected terminal cannot carry a completed checkpoint identity');
+  });
+});

@@ -113,7 +113,7 @@ export function parseCloseRecoveryArgs(argv: string[]): CliArgs {
   };
 }
 
-function assertExistingRegularDatabase(dbPath: string): FileIdentity {
+export function assertExistingRegularDatabase(dbPath: string): FileIdentity {
   try {
     const stat = statSync(dbPath);
     if (stat.isFile()) return { device: stat.dev, inode: stat.ino };
@@ -127,7 +127,7 @@ function sameFile(left: FileIdentity, right: FileIdentity): boolean {
   return left.device === right.device && left.inode === right.inode;
 }
 
-function assertSameDatabaseFile(
+export function assertSameDatabaseFile(
   expected: FileIdentity,
   observed: FileIdentity,
 ): void {
@@ -153,7 +153,7 @@ export function openExistingWritableDatabase(
   }
 }
 
-function assertSchema43Foundation(raw: DatabaseSync): void {
+export function assertSchema43Foundation(raw: DatabaseSync): void {
   const table = raw.prepare(`
     SELECT name
     FROM sqlite_master
