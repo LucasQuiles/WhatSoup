@@ -33,7 +33,7 @@ import {
 } from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
-import { getToolCallCallerEvidence } from './caller-attribution.ts';
+import { getToolCallCallerEvidence, isTurnOwned } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import {
@@ -831,6 +831,8 @@ export class ToolRegistry {
       action: `mcp_tool:${name}`,
       actorIdentity: session.actorJid ?? null,
       requestId: durabilityId === undefined ? null : `durability:${durabilityId}`,
+      // #3421 step 1: labels the receipt only; no attribution means outside.
+      turnOwned: session.callerAttribution ? isTurnOwned(session.callerAttribution) : false,
     };
     try {
       if (tool.bondEffect !== 'requests_device_removal') {
