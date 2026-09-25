@@ -3,6 +3,7 @@
 // converts MCP tool definitions to API function-calling formats for API providers.
 
 import type { ToolRegistry } from '../../../mcp/registry.ts';
+import { IN_PROCESS_CALLER } from '../../../mcp/caller-attribution.ts';
 import {
   resolveSessionContext,
   type ExecutingSessionContext,
@@ -158,7 +159,12 @@ export function createProviderMcpBridge(
   session: SessionContext,
   resolveExecutingSession: () => ExecutingSessionContext,
 ): ProviderMcpBridge {
-  const snapshotSession = () => resolveSessionContext(session, resolveExecutingSession());
+  // #3421: an in-process call is the turn's own by construction; the label is
+  // evidence on the tool_calls row and changes nothing else.
+  const snapshotSession = () => resolveSessionContext(
+    { ...session, callerAttribution: IN_PROCESS_CALLER },
+    resolveExecutingSession(),
+  );
   return {
     listTools(): ProviderMcpTool[] {
       return registry.listTools(snapshotSession());
