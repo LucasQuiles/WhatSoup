@@ -37,6 +37,12 @@ import * as processLocks from '../../src/lib/process-lock.ts';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
 const tmp = trackTmpDirs('');
+// #3488: the guard's default git budget (5 s) is tighter than vitest's 10 s
+// test timeout, so a git starved under host load failed as an exit-2
+// assertion. Give every guard subprocess a budget above the test timeout so
+// starvation surfaces as a runner timeout. Cases that need a tighter budget
+// still override it through `extraEnv`.
+const SUITE_GIT_TIMEOUT_MS = '20000';
 const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
 const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
   STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
@@ -169,7 +175,12 @@ function run(
     {
       cwd,
       encoding: 'utf8',
-      env: { ...process.env, NO_COLOR: '1', ...extraEnv },
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: SUITE_GIT_TIMEOUT_MS,
+        ...extraEnv,
+      },
       maxBuffer: 16 * 1024 * 1024,
     },
   );
@@ -274,7 +285,7 @@ describe('git-estate guard', () => {
     expect(linkedState?.status?.untracked).toEqual(['secret-payroll-plan.txt']);
 
     const human = run(repo, ['snapshot']);
-    expect(human.status).toBe(0);
+    expect(human.status, human.stderr).toBe(0);
     expect(human.stdout).toContain('dirty=2');
     expect(human.stdout).toContain('untracked=1');
     expect(human.stdout).not.toContain('secret-payroll-plan.txt');
@@ -833,7 +844,7 @@ describe('git-estate guard', () => {
     git(repo, ['stash', 'push', '-m', 'PRIVATE-STASH-SUBJECT']);
 
     const result = run(repo, ['snapshot', '--json']);
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).not.toContain('PRIVATE-STASH-SUBJECT');
     expect(result.stdout).not.toContain('PRIVATE-CONTENT');
     const doc = JSON.parse(result.stdout) as SnapshotDocument;
@@ -850,7 +861,7 @@ describe('git-estate guard', () => {
   it('warns in pre-commit but blocks pre-push when the baseline is missing or malformed', () => {
     const { repo } = initRepo();
     const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json']);
-    expect(preCommit.status).toBe(0);
+    expect(preCommit.status, preCommit.stderr).toBe(0);
     expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
       exitCode: 0,
       baseline: { state: 'missing' },
@@ -900,7 +911,7 @@ describe('git-estate guard', () => {
       ['guard', '--phase', 'pre-commit', '--json'],
       preCommitCalls.env,
     );
-    expect(preCommit.status).toBe(0);
+    expect(preCommit.status, preCommit.stderr).toBe(0);
     const preCommitLog = readGitCalls(preCommitCalls.log);
     expect(preCommitLog).toHaveLength(7);
     expect(preCommitLog.filter((call) =>
@@ -920,7 +931,7 @@ describe('git-estate guard', () => {
     );
 
     const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json'], env);
-    expect(preCommit.status).toBe(0);
+    expect(preCommit.status, preCommit.stderr).toBe(0);
     expect(preCommit.stderr).toContain('pre-commit warnings:');
     expect(preCommit.stderr).toContain('scan_incomplete');
     expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
@@ -1387,20 +1398,20 @@ describe('git-estate guard', () => {
 
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
     const sameConflict = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(sameConflict.status).toBe(0);
+    expect(sameConflict.status, sameConflict.stderr).toBe(0);
     expect((JSON.parse(sameConflict.stdout) as GuardDocument).decision.newConflictIds)
       .toEqual([]);
 
     writeFileSync(join(repo, 'tracked.txt'), 'unresolved working edit\n');
     const editedInherited = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(editedInherited.status).toBe(0);
+    expect(editedInherited.status, editedInherited.stderr).toBe(0);
     expect((JSON.parse(editedInherited.stdout) as GuardDocument).decision.newConflictIds)
       .toEqual([]);
 
     writeFileSync(join(repo, 'tracked.txt'), 'first resolution\n');
     git(repo, ['add', 'tracked.txt']);
     const resolved = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(resolved.status).toBe(0);
+    expect(resolved.status, resolved.stderr).toBe(0);
     expect((JSON.parse(resolved.stdout) as GuardDocument).decision.newConflictIds)
       .toEqual([]);
     git(repo, ['commit', '-m', 'resolve first conflict']);
@@ -1539,6 +1550,28 @@ describe('git-estate guard', () => {
     });
   });
 
+  // #3488: one starved status probe outlasts the guard's 5 s default git
+  // budget. The suite budget must exceed vitest's 10 s test timeout, so this
+  // snapshot completes instead of failing as an exit-code assertion.
+  it('completes a snapshot when one git status probe outlasts the default git budget', () => {
+    const { root, repo } = initRepo();
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+    expect(realGit.status, realGit.stderr).toBe(0);
+    const marker = join(root, 'slow-status-once');
+    const env = statusOutputEnvironment(root, [
+      `  if [ ! -e ${shellQuote(marker)} ]; then`,
+      `    : > ${shellQuote(marker)}`,
+      '    sleep 6',
+      '  fi',
+      `  exec ${shellQuote(realGit.stdout.trim())} "$@"`,
+    ].join('\n'));
+
+    const result = run(repo, ['snapshot', '--json'], env);
+
+    expect(existsSync(marker)).toBe(true);
+    expect(result.status, result.stderr).toBe(0);
+  }, 15_000);
+
   it('scans worktree statuses with a small bounded concurrency pool', () => {
     const { root, repo } = initRepo();
     for (let index = 0; index < 7; index++) {
@@ -1572,7 +1605,7 @@ describe('git-estate guard', () => {
     // IDENTITIES it records rather than on an exit code. The identity tracking
     // is the part worth keeping; blocking on it was the part that deadlocked.
     const growth = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(growth.status).toBe(0);
+    expect(growth.status, growth.stderr).toBe(0);
     expect(JSON.parse(growth.stdout) as GuardDocument).toMatchObject({
       decision: {
         blocked: false,
@@ -1655,7 +1688,7 @@ describe('git-estate guard', () => {
       'refs/heads/lane/other',
       '--json',
     ]);
-    expect(wrongRef.status).toBe(0);
+    expect(wrongRef.status, wrongRef.stderr).toBe(0);
     expect(JSON.parse(wrongRef.stdout) as GuardDocument).toMatchObject({
       decision: {
         blocked: false,
@@ -1808,7 +1841,7 @@ describe('git-estate guard', () => {
     expect(blockedDoc.decision.newCriticalFindingIds).toHaveLength(1);
 
     const advisory = run(repo, ['guard', '--phase', 'pre-commit', '--json']);
-    expect(advisory.status).toBe(0);
+    expect(advisory.status, advisory.stderr).toBe(0);
     expect(JSON.parse(advisory.stdout) as GuardDocument).toMatchObject({
       decision: {
         blocked: false,
@@ -1819,13 +1852,13 @@ describe('git-estate guard', () => {
 
     expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
     const inherited = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(inherited.status).toBe(0);
+    expect(inherited.status, inherited.stderr).toBe(0);
     expect((JSON.parse(inherited.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);
 
     git(repo, ['worktree', 'unlock', lane]);
     const resolved = run(repo, ['guard', '--phase', 'pre-push', '--json']);
-    expect(resolved.status).toBe(0);
+    expect(resolved.status, resolved.stderr).toBe(0);
     expect((JSON.parse(resolved.stdout) as GuardDocument).decision.newCriticalFindingIds)
       .toEqual([]);
   }, 60_000);
@@ -1847,7 +1880,7 @@ describe('git-estate guard', () => {
     });
 
     const preCommit = run(repo, ['guard', '--phase', 'pre-commit', '--json']);
-    expect(preCommit.status).toBe(0);
+    expect(preCommit.status, preCommit.stderr).toBe(0);
     expect(JSON.parse(preCommit.stdout) as GuardDocument).toMatchObject({
       exitCode: 0,
       decision: { blocked: false },
@@ -1888,7 +1921,7 @@ describe('git-estate guard', () => {
     expect(usage.stderr).toContain('pre-commit|pre-push');
 
     const help = run(repo, ['--help']);
-    expect(help.status).toBe(0);
+    expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('snapshot');
     expect(help.stdout).toContain('guard --phase');
     expect(help.stdout).not.toMatch(/\u001b\[/);
