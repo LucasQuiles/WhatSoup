@@ -5,7 +5,8 @@
 
 import { type Clock, systemClock } from '../../lib/clock.ts';
 
-const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
+/** Numeric Unix timestamps at or above this value are milliseconds; below it, seconds. */
+export const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
 
 /** Current time as Unix seconds. */
 export function nowUnixSec(): number {
