@@ -65,8 +65,9 @@ def fetch_loopback_health(
         if len(raw) > 65536:
             raise ValueError("health response exceeds limit")
         return response.status, raw.decode("utf-8")
-    except TimeoutError:
-        raise HealthTransportError(stage, None, timed_out=True) from None
+    except TimeoutError as exc:
+        # Python maps OSError(ETIMEDOUT) to TimeoutError too; keep its errno.
+        raise HealthTransportError(stage, exc.errno, timed_out=True) from None
     except OSError as exc:
         raise HealthTransportError(stage, exc.errno) from None
     finally:

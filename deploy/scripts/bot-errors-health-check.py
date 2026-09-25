@@ -7792,6 +7792,11 @@ def auth_failure_log_inventory(name: str, expectation: str, health_probe: str | 
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=device_removed log={path}"]
         if text_has_terminal_auth_failure_class(text):
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=terminal_auth_failure_class log={path}"]
+        # A probe whose body carried the transport's disconnect decision is
+        # authoritative: a 401 log line then belongs to an ambiguous bounded
+        # retry as often as to a real logout, so only legacy probes use it.
+        if "disconnect_classification=" in health_probe:
+            continue
         if '"statusCode":401' in text or '"reason":"loggedOut"' in text:
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=loggedOut log={path}"]
     return []

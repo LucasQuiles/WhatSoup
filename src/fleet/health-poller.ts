@@ -1538,12 +1538,16 @@ export class HealthPoller {
     existing: InstanceStatus | undefined,
     loggedOutWeak: boolean,
     loggedOutFailureCode: LoggedOutAlertFailureCode,
+    statusConfidence: StatusConfidence,
   ): boolean {
     if (prevStatus !== 'logged_out') return true;
     if (!this.hasConfirmedAlert(name, 'instance_logged_out')) return true;
+    // Re-emit only for an UPGRADE to a confirmed revocation. An unconfirmed
+    // 401 park stays inferred on every poll and must not re-page each time.
     return (
       existing?.status === 'logged_out'
       && existing.statusConfidence !== 'confirmed'
+      && statusConfidence === 'confirmed'
       && !loggedOutWeak
       && loggedOutFailureCode === 'WA_AUTH_BOND_SERVER_REVOKED'
     );
@@ -2193,7 +2197,7 @@ export class HealthPoller {
 
     if (
       newStatus === 'logged_out'
-      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode)
+      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode, statusConfidence)
     ) {
       const emitted = this.maybeEmitAlert(name, 'instance_logged_out',
         `whatsoup@${name} appears logged out`,

@@ -150,6 +150,21 @@ describe('HealthPoller — carried disconnect decision', () => {
     expect(alert?.[5]?.failure?.confidence).toBe('probable');
   });
 
+  it('a parked line pages once, not on every poll past the throttle window', async () => {
+    const body = loggedOutBody('unhealthy', 'auth_401_ambiguous_parked', decision('ambiguous_401_parked'));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, json: () => Promise.resolve(body) }));
+    const instances = new Map([['remote-1', makeInstance()]]);
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+    for (let i = 0; i < 3; i++) {
+      await poll();
+      vi.setSystemTime(new Date(Date.now() + 16 * 60 * 1_000));
+    }
+    const pages = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[])
+      .filter(([instance, source]) => instance === 'remote-1' && source === 'instance_logged_out');
+    expect(pages).toHaveLength(1);
+  });
+
   it('an ambiguous 401 inside its bounded retry is not a logout despite last_status_code=401', async () => {
     const poller = await pollOnce(
       loggedOutBody('degraded', 'auth_401_ambiguous_retrying', decision('ambiguous_401_reconnecting'), 'reconnecting', 1),

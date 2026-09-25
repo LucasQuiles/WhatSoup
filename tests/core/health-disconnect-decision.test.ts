@@ -202,6 +202,8 @@ describe('GET /health — carried disconnect decision', () => {
     })));
     expect(status).toBe(503);
     expect(json.status_reasons).toContain('auth_failure.auth_401_ambiguous_parked');
+    expect(json.degradation_causes).toContain('auth_bond_degraded');
+    expect(json.degradation_causes).not.toContain('unclassified');
     expect(json.whatsapp.connection.auth_failure_class).toBe('auth_401_ambiguous_parked');
   });
 
@@ -215,6 +217,8 @@ describe('GET /health — carried disconnect decision', () => {
       conflictInspected: false,
     })));
     expect(status).toBe(503);
+    expect(json.degradation_causes).toContain('auth_bond_degraded');
+    expect(json.degradation_causes).not.toContain('unclassified');
     expect(json.whatsapp.connection.auth_failure_class).toBe('auth_401_uninspected_exit');
     expect(json.whatsapp.connection.disconnect_decision.conflict_inspected).toBe(false);
   });

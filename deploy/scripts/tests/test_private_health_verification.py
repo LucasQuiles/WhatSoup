@@ -289,6 +289,17 @@ def test_health_check_legacy_body_keeps_the_conservative_401_rule(monkeypatch) -
     assert "disconnect_classification" not in details
 
 
+def test_recent_401_log_line_only_decides_for_a_legacy_probe(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(health_check.Path, "home", staticmethod(lambda: tmp_path))
+    log = tmp_path / ".config" / "whatsoup" / "instances" / "fab-bot" / "stdout.log"
+    log.parent.mkdir(parents=True)
+    log.write_text('{"msg":"WhatsApp connection closed","statusCode":401,"reason":"loggedOut"}\n', encoding="utf-8")
+    legacy_probe = "FAIL health fab-bot: health_degraded"
+    classified_probe = "FAIL health fab-bot: health_degraded disconnect_classification=ambiguous_401_reconnecting"
+    assert health_check.auth_failure_log_inventory("fab-bot", "always_on", legacy_probe) != []
+    assert health_check.auth_failure_log_inventory("fab-bot", "always_on", classified_probe) == []
+
+
 def _bond_verdicts(body: dict) -> list:
     verdicts: list = []
     ground_truth._bond_axis(body, NOW_MS, verdicts)
