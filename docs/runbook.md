@@ -1776,33 +1776,185 @@ Option A — continuity gaps no longer flip the top-level status). The `continui
   "recovery_debt": {
     "open": true,
     "reason": "continuity_gap_open",
-    "continuity": {
-      "readable": true,
-      "open": 3,
-      "unresolved": 2,
-      "ambiguous": 1
-    }
+    "continuity": { "...": "same object as the top-level continuity block" }
   },
   "continuity": {
     "readable": true,
+    "closure_ledger": "present",
+    "total": 4,
     "open": 3,
     "unresolved": 2,
-    "ambiguous": 1
+    "ambiguous": 1,
+    "ambiguous_total": 1,
+    "closed": 1,
+    "addressed": 1,
+    "declined": 0
   }
 }
 ```
 
-If the ledger cannot be parsed exactly, health reports `recovery_debt.reason: "continuity_gap_unreadable"`
-with `degradation_causes` still containing `continuity_gap_unreadable`.
-Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
-rows to force green health; controlled catch-up and terminal closure require a later proof-bound
-mechanism.
+The counts always reconcile: `total = open + closed`, `open = unresolved + ambiguous`, and
+`closed = addressed + declined`. `unresolved` and `ambiguous` count only open gaps; an originally
+ambiguous gap that was later closed leaves `ambiguous` but stays in `ambiguous_total`. Only
+`open > 0` raises `continuity_gap_open`; `turn_recovery_degraded` is derived separately and a closure
+never clears it. A database that has not applied migration 65 reports `closure_ledger: "absent"`
+with `total`, `closed`, `addressed`, and `declined` set to `null` (its open counts are real; its
+closure history is unknown).
 
-#### Close a proven operator catch-up recovery (exact schema 43 only)
+If the ledger or a closure row cannot be read exactly (malformed, orphaned, duplicated, conflicting
+with its plan, or missing its append-only guards), health reports
+`recovery_debt.reason: "continuity_gap_unreadable"`, every continuity count is `null` rather than zero,
+and `degradation_causes` contains `continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; close a gap only through `close-continuity-gap` below.
+
+#### Close a continuity gap (addressed or declined)
+
+`close-continuity-gap` appends one immutable row to `continuity_gap_closures` (migration 65) for one
+recorded gap. It never sends, replays, admits, or edits the recorded plan or run; a closure cannot be
+updated or deleted. One gap has at most one closure, so decide the final disposition before applying.
+Deployment of this command does not authorize closing any existing gap: each closure needs its own
+evidence and an operator decision.
+
+**Evidence root.** Put every evidence file under one protected directory (mode `0700`, not group- or
+world-writable). The command resolves each referenced path beneath that root and refuses absolute
+paths, `..` segments, and symlinks that resolve outside it. JSON files that carry private identifiers
+(the evidence manifest, the original continuity manifest, decision records) must be mode `0600`.
+Every referenced file is bound by its SHA-256; a digest alone is never authority.
+
+The version-1 evidence manifest (`continuity-closure-evidence.v1`) is strict JSON:
+
+```json
+{
+  "contract": "continuity-closure-evidence.v1",
+  "planId": "continuity-gap:v1:<64 hex>",
+  "original": {
+    "manifest": { "path": "original/continuity-manifest.json", "sha256": "<64 hex>" },
+    "ordinal": 1,
+    "receiptFingerprint": "<64 hex>",
+    "contentType": "audio",
+    "conversationFingerprint": "<64 hex>"
+  },
+  "disposition": "addressed",
+  "proofKind": "live_reissue",
+  "actor": "operator:IDENTITY",
+  "authority": "owner-request:REFERENCE",
+  "observedAt": "2026-01-01T00:10:00.000Z",
+  "decidedAt": "2026-01-01T00:05:00.000Z",
+  "liveInbound": { "seq": 123, "messageSha256": "<sha256 of the live message ID>" },
+  "proofs": [
+    { "role": "context_witness", "path": "witness/context.json", "sha256": "<64 hex>" },
+    { "role": "original_media", "path": "audio/original.ogg", "sha256": "<64 hex>" },
+    { "role": "transcript", "path": "audio/transcript.txt", "sha256": "<64 hex>" }
+  ],
+  "audio": { "mediaSha256": "<64 hex>", "transcriptSha256": "<64 hex>", "enrichmentComplete": true },
+  "ambiguityResolution": null,
+  "decision": null
+}
+```
+
+The original continuity manifest is the same file given to `record-continuity-manifest`. The command
+re-derives the receipt, destination, manifest and evidence fingerprints from it and requires them to
+reproduce the recorded plan exactly. The message type comes from that original receipt, never from the
+evidence manifest: a manifest that calls an audio receipt `text` is rejected.
+
+- **`addressed`** (`proofKind: live_reissue`) requires a later, completed, non-self inbound in the same
+  conversation (`liveInbound`), a terminal delivery proof for it (the existing
+  `operator_catchup_delivery_proofs` view: echoed or corroborated reply), and a `context_witness` file.
+  An audio receipt also requires `original_media` and `transcript` files whose digests equal the
+  `audio` hashes, with `enrichmentComplete: true`. A later reply, elapsed time, a generic recovery note,
+  or replaying the historical text is not proof.
+- **`declined`** (`proofKind: sender_declined` or `owner_declined`) requires `--policy` and a `decision`
+  referencing a real decision inbound plus a `continuity-closure-decision.v1` record that binds the plan,
+  receipt, inbound message hash and the SHA-256 of the inbound's exact text. `original_sender_inbound`
+  accepts only the original sender, in the same conversation; `owner_inbound` accepts only a sender
+  listed in the policy's owner fingerprints. `owner_session_export` is always Blocked: there is no
+  independent actor/session verifier for it yet. A decline carries no live reissue, transcript or
+  audio-ready claim. Alert acknowledgement, silence, or operator convenience is not a decision.
+- **Originally ambiguous gaps** also require `ambiguityResolution` (a file proving the one exact
+  candidate); without it the gap stays open.
+
+**Authority policy (`continuity-closure-authority.v1`).** `declined` is Blocked unless `--policy` names
+an owner-approved instance policy (mode `0600`, owned by the operating user, not a symlink) and
+`--instance` matches its `instanceId`:
+
+```json
+{
+  "contract": "continuity-closure-authority.v1",
+  "policyVersion": "OWNER-CHOSEN-VERSION",
+  "instanceId": "INSTANCE-NAME",
+  "ownerIdentityFingerprints": ["<sha256 of an owner sender JID>"],
+  "acceptedDecisionSources": [
+    { "verifierId": "original_sender_inbound", "version": 1 },
+    { "verifierId": "owner_inbound", "version": 1 }
+  ],
+  "effectiveFrom": "2026-01-01T00:00:00.000Z",
+  "effectiveUntil": null,
+  "approvedBy": "<one of ownerIdentityFingerprints>",
+  "approvedAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+Both now and `decidedAt` must fall inside `[effectiveFrom, effectiveUntil)`. Every declined closure
+stores the policy's exact SHA-256 and `policyVersion`. The repository ships no policy file; the owner
+places one per instance. The existing recorder actor and admin allowlists are not owner attestations.
+
+**Preview (default).** Preview reads only a static copy of the database, never the live file. Make the
+copy with SQLite's own snapshot, then preview against it:
+
+```bash
+install -d -m 700 "$SNAP_DIR"
+sqlite3 "$DB" "VACUUM INTO '$SNAP_DIR/bot.snapshot.db'"
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --snapshot "$SNAP_DIR/bot.snapshot.db" \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+The snapshot is opened `immutable=1` and must have no `-wal` or `-journal` sidecar (a plain read-only
+open of a WAL-mode file creates `-wal`/`-shm` files). The command rechecks the snapshot's identity, size
+and mtime afterwards. It writes no database row, schema, salt, lock, receipt, or sidecar.
+
+**Apply.** After the preview reports `decision: "ready"`, apply against the live database:
+
+```bash
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --db "$DB" --apply \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+Apply takes `BEGIN IMMEDIATE`, re-checks the schema ceiling, re-reads and re-hashes every evidence
+file, re-verifies every database link and that the gap is still open, then appends the row or nothing.
+The same evidence again returns `decision: "already_closed"` with the same `operationId`. A different
+closure for an already-closed gap, a stale fingerprint, a changed transcript or decision, or a wrong
+conversation fails with no write. The command never runs migrations: a database without migration 65
+reports `schema_not_migrated`.
+
+Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `already_closed`, `blocked`,
+`conflict`), `code` (`null`, `CLOSURE_BLOCKED`, `CLOSURE_PROOF_CONFLICT`), `condition`, `planId`,
+`operationId`, `disposition`, and the passed `checks`. Exit `0` means ready, applied or already closed;
+`2` Blocked (missing input, predecessor or authority); `3` `CLOSURE_PROOF_CONFLICT` (evidence
+contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
+message text, JIDs, or media.
+
+**Schema 65 rollback.** Migration 65 adds only the new table. After it is recorded, a binary whose
+ceiling is 64 refuses the database as `future_schema` and will not write, so a binary-only rollback is
+unavailable. Keep the 65-aware release for containment or forward repair. Restoring a pre-migration
+backup is an owner decision that requires a proven zero-new-writes window. Never restore an old
+database over messages received after the upgrade.
+
+#### Close a proven operator catch-up recovery (admitted inbound sequences)
 
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
-of pending source inbounds. It never sends or replays a message. The database must already be an
-existing canonical schema-43 file; the command neither creates a database nor runs migrations.
+of pending source inbounds. It never sends or replays a message. The database must already exist
+and its migration ledger must be contiguous from 1 through the current migration, with at least 43
+entries; any later schema, including 65, is accepted. The command neither creates a database nor runs
+migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
+links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
+those gaps.
 
 Run the read-only proof inspection first:
 
