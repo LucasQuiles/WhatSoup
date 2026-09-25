@@ -551,6 +551,15 @@ export class TurnRecoverySupervisor {
           catchupReconcileClosed: report.closed,
           catchupReconcileSkipped: report.skipped,
         };
+        // The timer path discards scan results, so a closure is logged here to
+        // stay observable. Logged only on closure: an unprovable group is
+        // re-skipped every cycle and would otherwise repeat forever.
+        if (report.closed > 0) {
+          log.info(
+            { attempted: report.attempted, closed: report.closed, linksClosed: report.linksClosed, skipped: report.skipped },
+            'turn recovery catch-up reconciler closed caught-up groups',
+          );
+        }
         const errored = report.skips.filter((skip) => skip.reason === 'error');
         if (errored.length > 0) {
           log.error({ errored }, 'turn recovery catch-up reconciler recorded unexpected-error skips');

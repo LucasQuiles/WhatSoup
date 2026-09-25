@@ -486,6 +486,7 @@ if (instanceType === 'agent') {
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
     autoCompactInputTokens?: number;
+    turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
@@ -512,6 +513,7 @@ if (instanceType === 'agent') {
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
+    turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),

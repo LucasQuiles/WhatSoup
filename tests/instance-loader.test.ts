@@ -786,6 +786,33 @@ describe('loadInstance — agentOptions: autoCompactInputTokens validation', () 
   });
 });
 
+describe('loadInstance — agentOptions: turnRecoveryCatchupReconcile validation', () => {
+  const catchupAgent = (name: string, block: unknown) => ({
+    name,
+    type: 'agent',
+    adminPhones: ['15551234567'],
+    accessMode: 'self_only',
+    agentOptions: { sessionScope: 'per_chat', turnRecoveryCatchupReconcile: block },
+  });
+
+  it('preserves a valid block', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'catchup-agent', catchupAgent('catchup-agent', { enabled: true, groupLimit: 25 }));
+
+    loadInstance('catchup-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions.turnRecoveryCatchupReconcile).toEqual({ enabled: true, groupLimit: 25 });
+  });
+
+  it.each([
+    ['string enabled', { enabled: 'true' }],
+    ['zero groupLimit', { enabled: true, groupLimit: 0 }],
+    ['misspelled key', { enabled: true, groupLimt: 5 }],
+  ])('rejects %s', (_label, block) => {
+    writeInstance(path.join(tmpDir, 'config'), 'catchup-agent-bad', catchupAgent('catchup-agent-bad', block));
+    expect(() => loadInstance('catchup-agent-bad')).toThrow(/agentOptions\.turnRecoveryCatchupReconcile/);
+  });
+});
+
 describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope', () => {
   it('rejects agent with sandboxPerChat:true and sessionScope:"shared"', () => {
     writeInstance(path.join(tmpDir, 'config'), 'sandbox-bad-scope', {
