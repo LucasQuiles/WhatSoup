@@ -1034,6 +1034,8 @@ export class HealthPoller {
   private operationalFallbackReclassified: Set<string> = new Set();
   private reclassifiedHealthAlerts: Set<string> = new Set();
   private recoveryDebtFingerprints: Map<string, string> = new Map();
+  /** Instances whose recovery-debt marker was read and found absent. */
+  private recoveryDebtMarkerSettled: Set<string> = new Set();
   private unreachableAlerted: Set<string> = new Set();
   /**
    * Open alert-suppression episodes, keyed by the same `name:source` key the
@@ -1590,6 +1592,7 @@ export class HealthPoller {
         this.endRecoveryClearWithholdingEpisodesForInstance(name);
         this.statuses.delete(name);
         this.recoveryDebtFingerprints.delete(name);
+        this.recoveryDebtMarkerSettled.delete(name);
         this.latestPollRequestIdByInstance.delete(name);
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
@@ -2932,8 +2935,13 @@ export class HealthPoller {
       return;
     }
 
+    // Proof of an open alert that the clear itself removes: this process's
+    // fingerprint or active source, or the recovery marker a prior process
+    // left behind. The persisted throttle is not proof: it deliberately
+    // survives clears, so reading it here would re-clear on every poll.
     const hadOpenDebt = this.recoveryDebtFingerprints.has(name)
-      || this.hasConfirmedAlert(name, source);
+      || this.statuses.get(name)?.activeAlertSources.includes(source) === true
+      || this.recoveryDebtMarkerLeftOpen(name, source);
     if (!hadOpenDebt) return;
     if (!clearAlertSourceChecked(name, source, 'recovery_debt_open=false')) return;
     clearRecoveryMarkerObserved(name, source);
@@ -2942,6 +2950,24 @@ export class HealthPoller {
     if (status) {
       status.activeAlertSources = status.activeAlertSources.filter((item) => item !== source);
     }
+  }
+
+  /**
+   * True while a recovery_debt_attention marker from a prior process is still
+   * on disk for this instance. The marker file is read until it is found
+   * absent once; after that the in-process fingerprint and active source
+   * carry the state, so a closed-debt poll does not re-read the file.
+   */
+  private recoveryDebtMarkerLeftOpen(name: string, source: string): boolean {
+    if (this.recoveryDebtMarkerSettled.has(name)) return false;
+    try {
+      if (loadRecoveryMarkers().has(`${name}:${source}`)) return true;
+    } catch (err) {
+      log.warn({ err, name, source }, 'recovery debt marker read failed');
+      return false;
+    }
+    this.recoveryDebtMarkerSettled.add(name);
+    return false;
   }
 
   private hasConfirmedAlert(name: string, source: string): boolean {
