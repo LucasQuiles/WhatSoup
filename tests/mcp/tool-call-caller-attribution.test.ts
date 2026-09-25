@@ -208,8 +208,10 @@ describe('tool-call caller attribution (#3421 step 1)', () => {
     ]);
 
     const [row] = callerRows(db);
-    expect(row?.caller_client_name).toBe(`evilclient${'x'.repeat(54)}`);
-    expect(row?.caller_client_version).toBeNull();
+    expect(row).toMatchObject({
+      caller_client_name: `evilclient${'x'.repeat(54)}`,
+      caller_client_version: null,
+    });
   });
 
   it('returns the same initialize reply whatever the client declares', async () => {
