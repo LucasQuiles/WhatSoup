@@ -3674,7 +3674,21 @@ class AmbiguousSendOutcome(RuntimeError):
         self.phase = phase
 
 
-def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def json_rpc_call(
+    socket_path: str,
+    method: str,
+    params: dict[str, Any],
+    timeout: float = 15.0,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """One JSON-RPC tool call over the instance socket.
+
+    ``timeout`` bounds each phase separately. ``deadline`` (a time.monotonic()
+    value, used by the owner route) additionally bounds the WHOLE call: every
+    blocking step gets only the time left, and a spent deadline raises. Without
+    it the behaviour is exactly the per-phase one the group send relies on.
+    """
     if not socket_path:
         raise RuntimeError("socket path missing")
     if not os.path.exists(socket_path):
@@ -3682,8 +3696,16 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
 
     init_id = int(time.time() * 1000)
     call_id = init_id + 1
+    def step_timeout() -> float:
+        if deadline is None:
+            return timeout
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("json-rpc deadline spent")
+        return min(timeout, left)
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
+        sock.settimeout(step_timeout())
         sock.connect(socket_path)
         reader = sock.makefile("r", encoding="utf-8", newline="\n")
         writer = sock.makefile("w", encoding="utf-8", newline="\n")
@@ -3701,7 +3723,10 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: everything up to and including this handshake wait happens
         # before the tool call is written, so nothing can have been accepted.
-        wait_for_response(reader, init_id, timeout, phase=JSON_RPC_HANDSHAKE_PHASE)
+        wait_for_response(
+            reader, init_id, step_timeout(), phase=JSON_RPC_HANDSHAKE_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -3712,11 +3737,14 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: past this flush the remote may already have acted on the
         # request, so a missing reply is an ambiguous outcome, not a failure.
-        return wait_for_response(reader, call_id, timeout, phase=JSON_RPC_POST_REQUEST_PHASE)
+        return wait_for_response(
+            reader, call_id, step_timeout(), phase=JSON_RPC_POST_REQUEST_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
 
 def wait_for_response(
-    reader: Any, expected_id: int, timeout: float, *, phase: str
+    reader: Any, expected_id: int, timeout: float, *, phase: str, sock: Any = None
 ) -> dict[str, Any]:
     """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
 
@@ -3740,7 +3768,11 @@ def wait_for_response(
         while time.monotonic() < deadline:
             # The socket carries the same timeout as this deadline, so readline
             # raises socket.timeout("timed out") first; that is the text an
-            # operator sees, not the deadline message below.
+            # operator sees, not the deadline message below. With ``sock``
+            # (deadline-bound callers) each read gets only the time left, so
+            # a late read cannot overrun the deadline by a full timeout.
+            if sock is not None:
+                sock.settimeout(max(0.001, deadline - time.monotonic()))
             line = reader.readline()
             if not line:
                 raise RuntimeError("socket closed before response")
@@ -3822,7 +3854,7 @@ def send_whatsapp(
         raise AmbiguousSendOutcome(str(exc), phase=JSON_RPC_POST_REQUEST_PHASE) from exc
 
 
-def email_fallback(subject: str, body: str) -> bool:
+def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     fallback = Path(EMAIL_FALLBACK)
     if not fallback.exists() or not os.access(fallback, os.X_OK):
         return False
@@ -3832,7 +3864,7 @@ def email_fallback(subject: str, body: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=20,
+            timeout=timeout,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -10115,7 +10147,100 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         "path": str(sent_path),
         "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
     })
+    route_to_owner(event, paths, text)
     return True, "sent"
+
+
+# Owner copies queued by process_one and sent by drain_owner_route_queue after
+# the cycle's group work. Module-level so an item queued by a cycle that raised
+# before its drain is sent by the next daemon cycle; a --once run that raises
+# loses it (a missed copy, never a duplicate: the group copy exists).
+_owner_route_queue: list[tuple[dict[str, Any], str, bool, str]] = []
+OWNER_ROUTE_DEFAULT_BUDGET_SECONDS = 30.0
+# A cycle that fails after its sends skips the drain; the cap stops a run of
+# such cycles from growing the queue without bound. Overflow is a logged
+# skip: the group copy of every alert exists regardless.
+OWNER_ROUTE_QUEUE_MAX = 20
+
+
+def owner_route_enabled() -> bool:
+    env = os.environ
+    return bool(
+        env.get("BOT_ERRORS_OWNER_ROUTE_JID", "").strip()
+        and env.get("BOT_ERRORS_OWNER_ROUTE_SOCKET", "").strip()
+    )
+
+
+def route_to_owner(event: dict[str, Any], paths: dict[str, Path], text: str) -> None:
+    """Queue a fail-open owner copy of a sent alert (lib/owner_route.py).
+
+    Called only after the group send is archived. Inert, with no parsing and no
+    log record, unless both BOT_ERRORS_OWNER_ROUTE_JID and
+    BOT_ERRORS_OWNER_ROUTE_SOCKET are set. Nothing is sent here: the owner
+    delivery waits for drain_owner_route_queue so it cannot delay a later group
+    send in the same cycle.
+    """
+    if not owner_route_enabled():
+        return
+    if len(_owner_route_queue) >= OWNER_ROUTE_QUEUE_MAX:
+        try:
+            append_dispatch_log(paths, {"type": "owner_route_skipped", "eventId": event.get("id"),
+                                        "skippedQueueFull": True})
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    try:
+        _owner_route_queue.append((
+            json.loads(json.dumps(event)),
+            incident_key(event),
+            is_incident_alert(event) and not is_incident_clear(event),
+            text,
+        ))
+    except Exception:  # noqa: BLE001 - must never affect group delivery
+        _log_owner_route_error(paths, event)
+
+
+def _log_owner_route_error(paths: dict[str, Path], event: dict[str, Any]) -> None:
+    try:
+        append_dispatch_log(paths, {"type": "owner_route_error", "eventId": event.get("id")})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def drain_owner_route_queue(paths: dict[str, Path]) -> None:
+    """Send the queued owner copies within one shared time budget.
+
+    Runs after the cycle has recorded completion, so neither a group send nor
+    the cycle-completion stamp waits for it. The budget
+    (BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS, default 30) bounds how long the next
+    cycle can start late. Every failure is logged and swallowed.
+    """
+    if not _owner_route_queue:
+        return
+    items = list(_owner_route_queue)
+    _owner_route_queue.clear()
+    try:
+        budget = float(os.environ.get("BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS", "") or OWNER_ROUTE_DEFAULT_BUDGET_SECONDS)
+    except ValueError:
+        budget = OWNER_ROUTE_DEFAULT_BUDGET_SECONDS
+    deadline = time.monotonic() + max(0.0, budget)
+    for event, key, is_alert, text in items:
+        try:
+            from lib.owner_route import route_owner_critical
+
+            route_owner_critical(
+                event,
+                key=key,
+                is_alert=is_alert,
+                group_text=text,
+                state_dir=paths["root"],
+                json_rpc_call=json_rpc_call,
+                email_fallback=email_fallback,
+                log=lambda record: append_dispatch_log(paths, record),
+                deadline=deadline,
+            )
+        except Exception:  # noqa: BLE001 - must never affect group delivery
+            _log_owner_route_error(paths, event)
 
 
 @controller_cycle(
@@ -10358,6 +10483,9 @@ def run_once(max_events: int) -> dict[str, Any]:
                 unrenderableMetaAlerted=unrenderable_meta_alerted,
                 lastError=last_error,
             )
+            # After the completion stamp and every group send of this cycle,
+            # still under the dispatcher lock that serialises the owner state.
+            drain_owner_route_queue(paths)
             return {
                 "processed": processed,
                 "sent": sent,
