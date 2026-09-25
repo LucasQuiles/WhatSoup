@@ -378,9 +378,9 @@ describe('substrate MCP tools', () => {
     expect(parseResult(await registry.call('extend_trigger', { id: res.trigger_id, until }, adminSession))).toEqual({ ok: true });
 
     const resumed = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
-    expect(resumed.triggers[0].status).toBe('active');
     expect(resumed.triggers[0].next_fire_at).toBeGreaterThan(0);
-    expect(resumed.triggers[0].terminal_at).toBe(until);
+    // The agent job has no deadline, so resuming keeps it open-ended and ignores `until` (#3609).
+    expect(resumed.triggers[0]).toMatchObject({ status: 'active', terminal_at: null });
   });
 
   it('create_agent_job supports one-shot at-time schedules', async () => {
