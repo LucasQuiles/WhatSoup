@@ -353,7 +353,11 @@ def test_dispatcher_launched_under_pytest_root_never_reaches_email_fallback(tmp_
     assert "eventId" not in suppressed[0]["details"], suppressed[0]
 
 
-@pytest.mark.parametrize("reason", ["test_provenance", "test_leak", "test_state_dir"])
+# #3458: the closed set of decision classes email_fallback_blocked_reason returns.
+_GATE_REASON_CLASSES = ("test_provenance", "test_leak", "test_state_dir")
+
+
+@pytest.mark.parametrize("reason", _GATE_REASON_CLASSES)
 def test_the_durable_suppression_record_keeps_each_reason_class(tmp_path: Path, reason: str):
     # #3458: every reason email_fallback_blocked_reason can return reaches the
     # durable dispatch log. test_leak is unreachable on the process_one route

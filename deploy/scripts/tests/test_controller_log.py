@@ -6,12 +6,15 @@ from pathlib import Path
 import sys
 import threading
 
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 import pytest
 
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_ROOT))
 
+from lib import controller_log as controller_log_module
 from lib.controller_log import (
     CONTROLLER_LOG_HEALTH_MAX_BYTES,
     ControllerLogContext,
@@ -657,7 +660,21 @@ def test_metadata_projection_allowlists_email_fallback_classification_enums(
     }
 
 
-@pytest.mark.parametrize("reason", ("test_provenance", "test_leak", "test_state_dir"))
+# #3458: the closed contract. These are exactly the decision classes the
+# dispatcher's email_fallback_blocked_reason returns; they are enum members, not
+# samples of an input space.
+PROVENANCE_GATE_REASONS = ("test_provenance", "test_leak", "test_state_dir")
+
+# Every value the projection admits under "reason". Anything outside this set
+# must drop, which the property test below samples.
+_ADMITTED_REASONS = (
+    frozenset(PROVENANCE_GATE_REASONS)
+    | controller_log_module._SAFE_DETAIL_STRING_VALUES
+    | controller_log_module._CONTROLLER_STATE_REASONS
+)
+
+
+@pytest.mark.parametrize("reason", PROVENANCE_GATE_REASONS)
 def test_metadata_projection_keeps_each_provenance_gate_reason(reason: str) -> None:
     # #3458: the email-fallback provenance gate logs its decision class as
     # "reason". The durable record must keep it.
@@ -667,22 +684,19 @@ def test_metadata_projection_keeps_each_provenance_gate_reason(reason: str) -> N
     }
 
 
-@pytest.mark.parametrize("reason", ("test_provenance", "test_leak", "test_state_dir"))
+@pytest.mark.parametrize("reason", PROVENANCE_GATE_REASONS)
 def test_provenance_gate_reasons_are_admitted_under_the_reason_key_only(reason: str) -> None:
     # The gate reasons are a closed set for one key, not general-purpose safe
     # strings: under any other key they still drop.
     assert metadata_only_controller_details({"gate": reason, "status": reason}) == {}
 
 
-@pytest.mark.parametrize(
-    "reason",
-    (
-        "test_leak /private/tmp/pytest-of-user/state",
-        "test_provenance_extra",
-        "TEST_LEAK",
-        "test",
-    ),
-)
+@given(reason=st.text(max_size=80).filter(lambda value: value not in _ADMITTED_REASONS))
+@example(reason="test_leak /private/tmp/pytest-of-user/state")
+@example(reason="test_provenance_extra")
+@example(reason="TEST_LEAK")
+@example(reason="test")
+@settings(max_examples=200, deadline=None)
 def test_metadata_projection_drops_unregistered_gate_reasons(reason: str) -> None:
     assert metadata_only_controller_details({"reason": reason, "attempts": 3}) == {
         "attempts": 3,
