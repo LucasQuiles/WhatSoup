@@ -8,8 +8,10 @@ import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
 import {
+  CONTINUITY_GAP_HEALTH_UNREADABLE,
   readContinuityGapHealth,
   type ContinuityGapHealth,
+  type ContinuityGapHealthUnreadable,
 } from './continuity-gap-ledger.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
@@ -2201,19 +2203,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
-      const continuity = safeDbQuery<ContinuityGapHealth | {
-        readable: false;
-        open: number;
-        unresolved: number;
-        ambiguous: number;
-      }>(
+      const continuity = safeDbQuery<ContinuityGapHealth | ContinuityGapHealthUnreadable>(
         () => readContinuityGapHealth(deps.db.raw),
-        {
-          readable: false as const,
-          open: 0,
-          unresolved: 0,
-          ambiguous: 0,
-        },
+        CONTINUITY_GAP_HEALTH_UNREADABLE,
         'failed to read continuity gap ledger',
       );
       const continuityIsDegraded = !continuity.readable || continuity.open > 0;

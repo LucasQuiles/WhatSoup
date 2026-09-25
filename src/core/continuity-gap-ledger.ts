@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { readContinuityGapClosureLedger } from './continuity-gap-closure-schema.ts';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const ACTOR = 'continuity_manifest_recorder';
@@ -31,11 +32,68 @@ export interface RecordContinuityGapsResult {
   ambiguous: number;
 }
 
-export interface ContinuityGapHealth {
+/**
+ * Content-free continuity counts. Identities that hold whenever
+ * `closure_ledger` is `present`: total = open + closed,
+ * open = unresolved + ambiguous, closed = addressed + declined.
+ * `ambiguous` counts only open, originally ambiguous gaps; `ambiguous_total`
+ * counts every originally ambiguous gap, closed or not. A database that never
+ * ran migration 65 reports `closure_ledger: 'absent'` with the closure buckets
+ * and total null: its open counts are real, its closure history is unknown.
+ */
+export type ContinuityGapHealth = {
   readable: true;
   open: number;
   unresolved: number;
   ambiguous: number;
+  ambiguous_total: number;
+} & (
+  | {
+    closure_ledger: 'present';
+    total: number;
+    closed: number;
+    addressed: number;
+    declined: number;
+  }
+  | {
+    closure_ledger: 'absent';
+    total: null;
+    closed: null;
+    addressed: null;
+    declined: null;
+  }
+);
+
+/** Health fallback when the ledger cannot be read exactly: no count is claimed. */
+export interface ContinuityGapHealthUnreadable {
+  readable: false;
+  closure_ledger: null;
+  total: null;
+  open: null;
+  unresolved: null;
+  ambiguous: null;
+  ambiguous_total: null;
+  closed: null;
+  addressed: null;
+  declined: null;
+}
+
+export const CONTINUITY_GAP_HEALTH_UNREADABLE: ContinuityGapHealthUnreadable = Object.freeze({
+  readable: false,
+  closure_ledger: null,
+  total: null,
+  open: null,
+  unresolved: null,
+  ambiguous: null,
+  ambiguous_total: null,
+  closed: null,
+  addressed: null,
+  declined: null,
+});
+
+export interface ContinuityGapLedgerEntry {
+  planId: string;
+  observation: ContinuityGapObservation;
 }
 
 interface StoredPlanRow {
@@ -112,6 +170,11 @@ function planId(observation: ContinuityGapObservation): string {
   return `continuity-gap:v1:${sha256(evidenceRef(observation))}`;
 }
 
+/** Deterministic plan ID of a recorded observation (shared with closure). */
+export function continuityGapPlanId(observation: ContinuityGapObservation): string {
+  return planId(normalizedObservation(observation));
+}
+
 function triggerFor(classification: PersistedContinuityGapClassification): string {
   return `continuity_gap_${classification}`;
 }
@@ -122,7 +185,7 @@ function classificationFromTrigger(trigger: string): PersistedContinuityGapClass
   return requireClassification(trigger.slice(prefix.length));
 }
 
-function parseEvidenceRef(value: string | null): ContinuityGapObservation {
+export function parseContinuityGapEvidenceRef(value: string | null): ContinuityGapObservation {
   if (value === null) throw new Error('continuity gap ledger contains malformed evidence');
   const match = /^continuity-gap:v1;receipt=([a-f0-9]{64});destination=([a-f0-9]{64});manifest=([a-f0-9]{64});evidence=([a-f0-9]{64});ordinal=([1-9][0-9]*);classification=(absent|observed_not_admitted|ambiguous)$/.exec(value);
   if (!match) throw new Error('continuity gap ledger contains malformed evidence');
@@ -262,7 +325,8 @@ export function recordContinuityGaps(
   }
 }
 
-export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth {
+/** Every recorded gap, validated exactly; throws on any malformed ledger state. */
+export function readContinuityGapLedger(raw: DatabaseSync): ContinuityGapLedgerEntry[] {
   const foreignReservedState = raw.prepare(`
     SELECT 1
     FROM recovery_runs runs
@@ -285,8 +349,7 @@ export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth 
     ORDER BY plans.plan_id, runs.id
   `).all(ACTOR) as unknown as HealthRow[];
   const seen = new Set<string>();
-  let unresolved = 0;
-  let ambiguous = 0;
+  const entries: ContinuityGapLedgerEntry[] = [];
   for (const row of rows) {
     if (seen.has(row.plan_id)) {
       throw new Error('continuity gap ledger contains duplicate durable state');
@@ -295,7 +358,7 @@ export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth 
     if (row.trigger === null || row.status !== 'started' || row.completed_at !== null) {
       throw new Error('continuity gap ledger contains malformed state');
     }
-    const evidence = parseEvidenceRef(row.evidence_ref);
+    const evidence = parseContinuityGapEvidenceRef(row.evidence_ref);
     if (planId(evidence) !== row.plan_id) {
       throw new Error('continuity gap ledger contains malformed evidence');
     }
@@ -310,13 +373,75 @@ export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth 
     if (classification !== evidence.classification) {
       throw new Error('continuity gap ledger contains conflicting taxonomy');
     }
-    if (classification === 'ambiguous') ambiguous += 1;
-    else unresolved += 1;
+    entries.push({ planId: row.plan_id, observation: evidence });
   }
+  return entries;
+}
+
+/**
+ * Continuity counts for health and every other reader. A closure must name a
+ * recorded gap and carry its receipt fingerprint and classification; anything
+ * else makes the whole reading unreadable rather than silently uncounted.
+ */
+export function readContinuityGapHealth(raw: DatabaseSync): ContinuityGapHealth {
+  const entries = readContinuityGapLedger(raw);
+  const closures = readContinuityGapClosureLedger(raw);
+  const byPlan = new Map(closures.state === 'present'
+    ? closures.rows.map((row) => [row.planId, row])
+    : []);
+  let unresolved = 0;
+  let ambiguous = 0;
+  let ambiguousTotal = 0;
+  let addressed = 0;
+  let declined = 0;
+  for (const { planId: id, observation } of entries) {
+    const originallyAmbiguous = observation.classification === 'ambiguous';
+    if (originallyAmbiguous) ambiguousTotal += 1;
+    const closure = byPlan.get(id);
+    if (!closure) {
+      if (originallyAmbiguous) ambiguous += 1;
+      else unresolved += 1;
+      continue;
+    }
+    byPlan.delete(id);
+    if (
+      closure.receiptFingerprint !== observation.receiptFingerprint
+      || closure.originalClassification !== observation.classification
+    ) {
+      throw new Error('continuity gap closure ledger contains a conflicting closure');
+    }
+    if (closure.disposition === 'addressed') addressed += 1;
+    else declined += 1;
+  }
+  if (byPlan.size > 0) {
+    throw new Error('continuity gap closure ledger contains an orphaned closure');
+  }
+  const open = unresolved + ambiguous;
+  if (closures.state === 'absent') {
+    return {
+      readable: true,
+      closure_ledger: 'absent',
+      total: null,
+      open,
+      unresolved,
+      ambiguous,
+      ambiguous_total: ambiguousTotal,
+      closed: null,
+      addressed: null,
+      declined: null,
+    };
+  }
+  const closed = addressed + declined;
   return {
     readable: true,
-    open: unresolved + ambiguous,
+    closure_ledger: 'present',
+    total: open + closed,
+    open,
     unresolved,
     ambiguous,
+    ambiguous_total: ambiguousTotal,
+    closed,
+    addressed,
+    declined,
   };
 }
