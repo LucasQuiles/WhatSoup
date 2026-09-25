@@ -1404,6 +1404,12 @@ export class HealthPoller {
             recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
           });
           this.observeRecoveryDebt(name, health);
+          // Sources raised while the self instance was degraded are carried
+          // forward above, so they must be cleared here exactly as the remote
+          // online path does; otherwise they stay active forever.
+          if (existing) {
+            this.clearRecoveredAlert(name, existing, health);
+          }
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
         }

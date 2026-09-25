@@ -882,6 +882,46 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it.each(['self', 'remote-1'])(
+    'clears a recovered health alert on the %s online path',
+    async (name) => {
+      const degradedBody = { status: 'degraded', reason: 'runtime_agent_at_risk' };
+      let body: Record<string, unknown> = degradedBody;
+      const getSelfHealth = vi.fn(() => body);
+      mockFetch.mockImplementation(() => Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(body),
+      }));
+      const instances = makeInstances(
+        [name, makeInstance({ name, healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 5_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      // The self path raises instance_degraded and the remote path raises
+      // health_body_degraded; both must be cleared once the body recovers.
+      const raised = [...(poller.getStatus(name)?.activeAlertSources ?? [])];
+      expect(raised.length).toBeGreaterThan(0);
+
+      body = makeOnlineHealth();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(poller.getStatus(name)?.status).toBe('online');
+      for (const source of raised) {
+        expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+          name,
+          source,
+          expect.any(String),
+          undefined,
+        );
+      }
+      expect(poller.getStatus(name)?.activeAlertSources).toEqual([]);
+      poller.stop();
+    },
+  );
+
   it('debounces a single degraded health body without alerting', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
