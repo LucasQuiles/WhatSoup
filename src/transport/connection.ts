@@ -60,7 +60,13 @@ import {
 import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
-import { decideDisconnectAction } from './auth-disconnect-policy.ts';
+import {
+  buildDisconnectDecisionRecord,
+  decideDisconnectAction,
+  formatDisconnectDecision,
+  type DisconnectContext,
+} from './auth-disconnect-policy.ts';
+import type { DisconnectClassification, DisconnectDecisionRecord } from '../lib/disconnect-classification.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
@@ -133,6 +139,13 @@ export interface ConnectionStateSnapshot {
   lastPongAt: string | null;
   lastDisconnectReason: string | null;
   lastStatusCode: number | null;
+  /**
+   * The transport policy's decision for the last close. Null means no close
+   * since process start or the last successful open. Absent (undefined) means
+   * the transport does not classify disconnects, and health falls back to its
+   * conservative status-code reading.
+   */
+  disconnectDecision?: DisconnectDecisionRecord | null;
   recentDisconnects: ConnectionRecentDisconnects;
   outboundFlood?: ConnectionOutboundFlood;
   authBond?: AuthBondSnapshot;
@@ -169,6 +182,7 @@ export interface CredentialLifecycleEvent {
   reason?: string;
   conflictType?: string | null;
   reconnectDecision?: string;
+  disconnectClassification?: DisconnectClassification;
   lastDisconnectDiagnostic?: unknown;
   baileysVersion?: string;
   authBondStatus?: AuthBondSnapshot['status'];
@@ -453,8 +467,19 @@ function extractStreamErrorConflictType(lastDisconnect: unknown): string | null 
   return sawStreamError ? null : undefined;
 }
 
-function formatReconnectDecision(action: ReturnType<typeof decideDisconnectAction>): string {
-  return `${action.type}:${action.reason}`;
+// The logged-out alert fires for three different exits; only one of them is a
+// server-confirmed removal, and the text must not claim more than that.
+function deviceBondLostFailureText(decision: DisconnectDecisionRecord | null): string {
+  switch (decision?.classification) {
+    case 'confirmed_device_removed':
+      return 'WhatsApp linked-device bond removed by server (stream:error conflict type=device_removed observed)';
+    case 'ambiguous_401_parked':
+      return 'WhatsApp 401 logout repeated after one bounded reconnect; device removal NOT confirmed (no device_removed conflict node)';
+    case 'uninspected_401_conservative_exit':
+      return 'WhatsApp 401 logout without an inspectable stream:error node; conservative exit, device removal NOT confirmed';
+    default:
+      return 'WhatsApp 401 logout; classification unavailable, device removal NOT confirmed';
+  }
 }
 
 type AuthBondClearCandidate = {
@@ -581,6 +606,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
   private unclassified401ReconnectSpent = false;
+  // Process-local by design: a restart begins with no decision and a fresh
+  // bounded retry. Persisting it would let a stale park outlive a relink.
+  private lastDisconnectDecision: DisconnectDecisionRecord | null = null;
   private localAuthAlertEmitted = false;
   // #2394 (connection_exhausted): restart-safe incident ownership + the
   // stability timer that converts a fresh socket into recovery proof.
@@ -1312,6 +1340,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reason?: string;
       conflictType?: string | null;
       reconnectDecision?: string;
+      disconnectClassification?: DisconnectClassification;
       lastDisconnectDiagnostic?: unknown;
       note?: string;
       baileysVersion?: string;
@@ -1331,6 +1360,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (options.reason !== undefined) entry.reason = options.reason;
     if ('conflictType' in options) entry.conflictType = options.conflictType ?? null;
     if (options.reconnectDecision !== undefined) entry.reconnectDecision = options.reconnectDecision;
+    if (options.disconnectClassification !== undefined) {
+      entry.disconnectClassification = options.disconnectClassification;
+    }
     if (options.lastDisconnectDiagnostic !== undefined) {
       entry.lastDisconnectDiagnostic = options.lastDisconnectDiagnostic;
     }
@@ -1378,6 +1410,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reason: event.reason ?? null,
       conflictType: event.conflictType ?? null,
       reconnectDecision: event.reconnectDecision ?? null,
+      disconnectClassification: event.disconnectClassification ?? null,
       baileysVersion: event.baileysVersion ?? null,
       authBondStatus: event.authBondStatus ?? null,
       authBondIssues: (event.authBondIssues ?? []).map(redactAuthBondIssue),
@@ -1506,6 +1539,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         reason: entry.reason ?? null,
         conflictType: entry.conflictType ?? null,
         reconnectDecision: entry.reconnectDecision ?? null,
+        // The full record for the close this event belongs to; null outside a
+        // disconnect (it resets on every open).
+        disconnectDecision: this.lastDisconnectDecision,
         rawDisconnect: {
           statusCode: entry.statusCode ?? null,
           reason: entry.reason ?? null,
@@ -1682,6 +1718,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastPongAt: toIso(this.lastPongAt),
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
+      disconnectDecision: this.lastDisconnectDecision,
       recentDisconnects: this.getRecentDisconnectStats(),
       outboundFlood: this.getOutboundFloodStats(),
       authBond,
@@ -1807,6 +1844,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         lastPongAt: toIso(this.lastPongAt),
         lastDisconnectReason: this.lastDisconnectReason,
         lastStatusCode: this.lastStatusCode,
+        disconnectDecision: this.lastDisconnectDecision,
         recentDisconnects: this.getRecentDisconnectStats(),
         connectStartedAt: toIso(this.connectStartedAt),
         lastOpenAt: toIso(this.lastOpenAt),
@@ -2288,6 +2326,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastDisconnectReason = null;
       this.loggedOutAlertEmitted = false;
       this.unclassified401ReconnectSpent = false;
+      this.lastDisconnectDecision = null;
       // #2394 (auth-bond): localAuthAlertEmitted deliberately NOT reset here.
       // Socket open is an observation, not recovery proof — resetting on every
       // reconnect stranded an accepted incident (the proof-gated clear path
@@ -2370,28 +2409,37 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         restartRequiredCount = this.restartRequiredTimestamps.length;
       }
 
-      const actionContext: {
-        restartRequiredCount: number;
-        conflictType?: string | null;
-        unclassified401Attempted?: boolean;
-      } = { restartRequiredCount };
+      const actionContext: DisconnectContext = { restartRequiredCount };
       if (conflictType !== undefined) actionContext.conflictType = conflictType;
       if (statusCode === DisconnectReason.loggedOut) {
         actionContext.unclassified401Attempted = this.unclassified401ReconnectSpent;
       }
       const action = decideDisconnectAction(statusCode, actionContext);
-      const reconnectDecision = formatReconnectDecision(action);
+      const reconnectDecision = formatDisconnectDecision(action);
+      this.lastDisconnectDecision = buildDisconnectDecisionRecord(
+        statusCode,
+        actionContext,
+        action,
+        this.lastCloseAt,
+      );
       this.recordCredentialLifecycle('connection_close', {
         statusCode,
         reason,
         conflictType,
         reconnectDecision,
+        disconnectClassification: this.lastDisconnectDecision.classification,
         lastDisconnectDiagnostic: this.lastDisconnectDiagnostic,
         authBond: this.authBond.inspect(),
       });
       this.persistConnectionRuntimeState('connection_close');
 
-      this.log.warn({ statusCode, reason, conflictType, reconnectDecision }, 'WhatsApp connection closed');
+      this.log.warn({
+        statusCode,
+        reason,
+        conflictType,
+        reconnectDecision,
+        disconnectClassification: this.lastDisconnectDecision.classification,
+      }, 'WhatsApp connection closed');
 
       if (action.type === 'exit') {
         this.setConnectionState('disconnected');
@@ -2439,12 +2487,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   ): void {
     if (this.loggedOutAlertEmitted) return;
 
+    const decision = this.lastDisconnectDecision;
+    const confirmedRemoval = decision?.classification === 'confirmed_device_removed';
     const authBond = this.authBond.inspect();
     this.recordCredentialLifecycle('device_bond_lost', {
       statusCode,
       reason,
       conflictType,
-      reconnectDecision: 'exit:logged-out',
+      reconnectDecision: decision?.decision ?? 'exit:logged-out',
+      ...(decision ? { disconnectClassification: decision.classification } : {}),
       lastDisconnectDiagnostic: this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect),
       authBond,
     });
@@ -2453,7 +2504,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const lockPath = config.lockPath ?? 'unknown';
     const evidence = [
       'classification: physical_intervention_required',
-      'failure: WhatsApp linked-device bond lost or removed by server',
+      `failure: ${deviceBondLostFailureText(decision)}`,
+      `disconnect_classification: ${decision?.classification ?? 'unknown'}`,
+      `disconnect_decision: ${decision?.decision ?? 'unknown'}`,
+      `conflict_inspected: ${decision ? String(decision.conflictInspected) : 'unknown'}`,
+      `conflict_type: ${decision?.conflictType ?? 'none'}`,
+      `decision_observed_at: ${decision?.observedAt ?? 'unknown'}`,
       `instance: ${config.botName}`,
       `host: ${lifecycle.environment.host}`,
       `pid: ${lifecycle.environment.pid}`,
@@ -2492,7 +2548,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       `lastDisconnectSanitized: ${compactJson(this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect))}`,
       `recentCredentialLifecycle: ${compactJson(lifecycle.recentEvents)}`,
       `redaction: ${lifecycle.redaction.policy}`,
-      'operator_note: local auth restore can repair disk/config loss only; a server-side 401 device_removed requires verified WhatsApp re-link approval.',
+      confirmedRemoval
+        ? 'operator_note: local auth restore can repair disk/config loss only; a server-side 401 device_removed requires verified WhatsApp re-link approval.'
+        : 'operator_note: device removal is NOT confirmed — no device_removed conflict node was observed. Check the primary phone Linked Devices list before approving any re-link; do not restore or delete auth material on this evidence alone.',
       'q_action: investigate duplicate auth material, recent restarts, auth directory mutation, launchd/service overlap, and preserve auth backups before any destructive auth cleanup.',
     ].join('\n');
 
@@ -2500,10 +2558,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.loggedOutAlertEmitted = emitAlertChecked(
         config.botName,
         'whatsapp_device_bond_lost',
-        `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} lost WhatsApp linked-device bond`,
+        confirmedRemoval
+          ? `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} lost WhatsApp linked-device bond`
+          : `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} parked after an unconfirmed WhatsApp 401 logout`,
         evidence,
         'critical',
-        this.deviceBondLostCriticalAsset(statusCode, reason),
+        this.deviceBondLostCriticalAsset(statusCode, reason, decision),
       );
     } catch (err) {
       this.log.error({ err }, 'failed to enqueue WhatsApp device bond lost alert');
@@ -2513,6 +2573,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private deviceBondLostCriticalAsset(
     statusCode: number | undefined,
     reason: string,
+    decision: DisconnectDecisionRecord | null,
   ): BotErrorsCriticalAssetDiagnostic {
     const lifecycle = this.getCredentialLifecycleSnapshot();
     return {
@@ -2526,7 +2587,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         code: 'WA_AUTH_BOND_SERVER_REVOKED',
         domain: 'account_linkage',
         recoverability: 'manual_relink_required',
-        confidence: statusCode === DisconnectReason.loggedOut || reason === 'loggedOut' ? 'confirmed' : 'probable',
+        // A 401 status alone is not confirmation; only an observed
+        // device_removed conflict node is.
+        confidence: decision?.classification === 'confirmed_device_removed' ? 'confirmed' : 'probable',
         operatorAction: 'Preserve auth material and backups, investigate duplicate sessions/service overlap, and use phone-side WhatsApp relink only after non-physical recovery evidence is exhausted.',
         clearRequirement: 'clear only after WhatsApp is connected with a non-empty auth bond and a successful outbound send after the relinked creds mtime and after the incident',
       },

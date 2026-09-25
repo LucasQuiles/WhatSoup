@@ -249,9 +249,12 @@ evidence pass over every agent bot:
    evidence.
 6. Fail the pass if any bot reports `model_usable=null` while claiming a recent
    successful turn without turn evidence.
-7. Fail the pass if any bot has `model_usable=false`, a logged-out/401 auth
-   state, fallback credential failure, missing fallback binary, unknown fallback
-   model, or drift-check failure without an assigned operator action.
+7. Fail the pass if any bot has `model_usable=false`, a logged-out auth state
+   (`auth_failure_class` `serverside_logout_irreversible`,
+   `auth_401_ambiguous_parked` or `auth_401_uninspected_exit` — only the first
+   is a confirmed device removal; see runbook §5.3), fallback credential
+   failure, missing fallback binary, unknown fallback model, or drift-check
+   failure without an assigned operator action.
 
 The source-side recurring gate is `npm run guard:fleet-bot-hardening-parity`.
 It validates the redacted parity manifest at
