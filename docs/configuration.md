@@ -1992,7 +1992,22 @@ Per-instance command-surface policy overlay (W1-T9b): `{ "disabled": ["<command>
 
 Optional per-conversation output policies for an agent instance. Only `type: "agent"` instances on the Baileys transport accept the field; any other instance type or transport fails validation. An absent field means no policies. An explicit `null` is rejected.
 
-> **Not enforced yet.** WhatSoup parses, validates, stores and redacts these policies, but no send path evaluates them. A configured policy does not block or change any outbound message today. Enforcement lands in a later change.
+**Enforcement.** The agent outbound queue checks each logical message against the conversation's policy before splitting it into chunks. This covers assistant replies, streamed text, tool-update batches and progress placeholders. A message that breaks the policy is dropped. It is never rewritten, and no outbound operation is recorded for it. Conversations without a policy are not affected.
+
+Each dropped message leaves one warn-level log line from the `outbound-queue` component. The line never contains the message text or blocked-term values. Its fields are:
+
+- `operation`: `client_output_policy`
+- `decision`: `rejected`
+- `conversationKey`: the canonical conversation key
+- `reason`: `client_output_policy`
+- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`
+- `messageKind`: `answer`, `lifecycle` or `status`
+
+If the evaluator throws for a conversation that has a policy, the message is also dropped. The error-level line has `decision: "error"` and `errorName` instead of `reason` and `violationCodes`.
+
+A dropped answer does not count as a reply for the turn. The internal-artifact check reads the text before redaction; the other checks read the final text.
+
+Not covered: the MCP messaging and media tools send outside the queue, and `authorization` is parsed but not yet checked.
 
 ```json
 "clientOutputPolicies": [

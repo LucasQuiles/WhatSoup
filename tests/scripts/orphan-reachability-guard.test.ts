@@ -130,8 +130,8 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // PR1b adds the registration write-path at the worker spawn sites and the
   // delivery daemon, and graduates this entry in the same PR.
   { path: 'src/core/background-work-store.ts', issue: '#2279', reason: 'PR1a lands schema+store unwired by design; registration write-path and delivery daemon land in PR1b (#2279)' },
-  // Client output policy evaluator: unwired by design until the enforcement change adds its send-path caller.
-  { path: 'src/core/client-output-policy.ts', issue: 'enforcement follow-up (no tracking issue yet; see the PR body)', reason: 'per-conversation client output policy evaluator; parsed and validated at startup, no send-path caller until the enforcement change lands (config and evaluator first, enforcement later, by owner ruling)' },
+  // src/core/client-output-policy.ts graduated out of this registry when the
+  // agent outbound queue started enforcing it on the send path (#3613).
   // FLOS Stage 1 (docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md §3):
   // the keyed-digest primitive lands DARK by design — plan §1.3 requires every
   // stage's code to ship behind `observability.fleetLifecycle` (off). The

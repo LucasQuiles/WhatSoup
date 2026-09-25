@@ -18,6 +18,11 @@ import {
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import { evaluateClientOutputPolicy } from '../../core/client-output-policy.ts';
+import {
+  selectClientOutputPolicy,
+  type ClientOutputPolicyRegistry,
+} from '../../core/client-output-policy-config.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
@@ -76,6 +81,11 @@ export interface OutboundQueueOptions {
   readonly peerIsAdmin?: (chatJid: string) => boolean;
   /** Exact authenticated internal-DM predicate injected by the runtime. */
   readonly peerIsTrustedInternal?: (chatJid: string) => boolean;
+  /**
+   * #3613: per-conversation client output policies, keyed by canonical
+   * conversation key. Defaults to the instance's `config.clientOutputPolicies`.
+   */
+  readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
 interface MutableTurnDeliveryEvidence {
@@ -544,6 +554,8 @@ export class OutboundQueue implements IOutboundQueue {
   /** T8-F1: injected admin-peer resolver (see OutboundQueueOptions). */
   private readonly peerIsAdminFn: ((chatJid: string) => boolean) | undefined;
   private readonly peerIsTrustedInternalFn: ((chatJid: string) => boolean) | undefined;
+  /** #3613: client output policies (see OutboundQueueOptions). */
+  private readonly clientOutputPolicies: ClientOutputPolicyRegistry | undefined;
 
   constructor(
     messenger: Messenger,
@@ -564,6 +576,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.fallbackActiveFn = options?.fallbackActive;
     this.peerIsAdminFn = options?.peerIsAdmin;
     this.peerIsTrustedInternalFn = options?.peerIsTrustedInternal;
+    this.clientOutputPolicies = options?.clientOutputPolicies ?? config.clientOutputPolicies;
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -795,10 +808,55 @@ export class OutboundQueue implements IOutboundQueue {
     this.enqueuePreparedText(text, attribution);
   }
 
+  /**
+   * #3613: enforce the conversation's client output policy on one logical
+   * message, before it is split into chunks. Returns false when the message
+   * must be dropped. A conversation without a policy is always admitted.
+   *
+   * Owner ruling: a rejected message is dropped with one structured audit log
+   * line and no database record. The line never carries the message text or
+   * blocked-term values. An evaluator error on a configured policy fails
+   * closed: the message is dropped and the error is logged.
+   */
+  private admitClientOutput(
+    sourceText: string,
+    finalText: string,
+    attribution: OutboundAttribution,
+  ): boolean {
+    if (!this.clientOutputPolicies) return true;
+    const selection = selectClientOutputPolicy(this.clientOutputPolicies, {
+      status: 'resolved',
+      canonicalConversationKey: attribution.conversationKey,
+    });
+    if (selection.status !== 'configured') return true;
+    try {
+      const decision = evaluateClientOutputPolicy(selection.policy, { sourceText, finalText });
+      if (decision.action === 'allow') return true;
+      log.warn({
+        operation: 'client_output_policy',
+        decision: 'rejected',
+        conversationKey: attribution.conversationKey,
+        reason: decision.reason,
+        violationCodes: [...decision.violationCodes],
+        messageKind: attribution.role,
+      }, 'client output policy rejected outbound message; dropped');
+    } catch (err) {
+      log.error({
+        operation: 'client_output_policy',
+        decision: 'error',
+        conversationKey: attribution.conversationKey,
+        messageKind: attribution.role,
+        errorName: err instanceof Error ? err.name : typeof err,
+      }, 'client output policy evaluation failed; outbound message dropped');
+    }
+    return false;
+  }
+
+  /** Returns false when the client output policy dropped the message. */
   private enqueuePreparedText(
     text: string,
     attribution: OutboundAttribution,
-  ): void {
+  ): boolean {
     // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
     // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
     // mirrors the chat runtime's redactInternalArtifacts on the response. Applied
@@ -824,10 +882,13 @@ export class OutboundQueue implements IOutboundQueue {
         }
       : undefined;
     const safe = redactInternalArtifacts(text, resolveOutboundAudience(attribution.chatJid, ctx)).text;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
+    const finalText = preprocessText(safe);
+    if (!this.admitClientOutput(text, finalText, attribution)) return false;
+    const chunks = repairChunkFormatting(splitMessage(finalText));
     for (const chunk of chunks) {
       this.enqueue(chunk, attribution);
     }
+    return true;
   }
 
   /**
@@ -870,8 +931,11 @@ export class OutboundQueue implements IOutboundQueue {
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
         this.markVisibleTextDelivered();
-        this.enqueuePreparedText(text, attribution);
-        for (const part of group) part.onCommit?.();
+        // A policy-dropped message did not reach the user, so its commit
+        // callbacks (reply-guarantee activity, turn text) must not fire.
+        if (this.enqueuePreparedText(text, attribution)) {
+          for (const part of group) part.onCommit?.();
+        }
       }
       group = [];
     };
@@ -1134,6 +1198,12 @@ export class OutboundQueue implements IOutboundQueue {
       // Identical placeholder already shown recently \u2014 keep the indicator alive, drop the duplicate.
       this.startTyping();
       log.info({ chatJid: this.deliveryJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
+      return;
+    }
+    // #3613: placeholders bypass enqueuePreparedText, so enforce the client
+    // output policy here. A dropped placeholder keeps the typing signal alive.
+    if (!this.admitClientOutput(text, text, attribution)) {
+      this.startTyping();
       return;
     }
     // PR-E: hard per-turn status-narration cap. The floor + text window above
