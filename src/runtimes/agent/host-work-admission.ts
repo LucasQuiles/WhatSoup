@@ -34,18 +34,22 @@ export interface HostWorkAdmissionOptions {
   onAbort: (child: ChildProcess) => Promise<void>;
 }
 
+/** The one host-env seam: both lookups below default to it and tests inject their own env. */
+function currentHostEnv(): NodeJS.ProcessEnv {
+  // env-allowed: single injectable host-env seam for the opt-in predicate and helper lookup
+  return process.env;
+}
+
 /** Admission is deliberately opt-in so non-systemd and non-Linux hosts retain direct spawn. */
 export function isHostWorkAdmissionEnabled(
-  // env-allowed: default param passes env into the pure opt-in predicate at the call boundary
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = currentHostEnv(),
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   return platform === 'linux' && env.WHATSOUP_WORK_ADMISSION === 'systemd';
 }
 
-function hostWorkAdmissionHelper(): string | null {
-  // env-allowed: host-owned helper path read late so the opt-in stays inert unless set
-  const helper = process.env.WHATSOUP_WORK_ADMISSION_HELPER;
+function hostWorkAdmissionHelper(env: NodeJS.ProcessEnv = currentHostEnv()): string | null {
+  const helper = env.WHATSOUP_WORK_ADMISSION_HELPER;
   if (!helper || !isAbsolute(helper)) return null;
   try {
     const metadata = statSync(helper);

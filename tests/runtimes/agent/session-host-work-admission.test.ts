@@ -73,11 +73,15 @@ function makeChild() {
   return child;
 }
 
+/** The database handle of the most recent makeSession call, for exact-argument assertions. */
+let sessionDb: Database | undefined;
+
 function makeSession(provider = 'claude-cli', extra: Partial<SessionManagerOptions> = {}) {
   const db = {
     assertWritableCompatibility: vi.fn(),
     raw: { prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(), all: vi.fn(() => []) })), exec: vi.fn() },
   } as unknown as Database;
+  sessionDb = db;
   const messenger = {
     sendMessage: vi.fn(async () => ({ waMessageId: null })),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
@@ -416,7 +420,7 @@ describe('SessionManager host work admission', () => {
     expect(killSessionTree).toHaveBeenCalledOnce();
     expect(updateResumedSessionStatus).toHaveBeenCalledTimes(1);
     expect(updateResumedSessionStatus).toHaveBeenCalledWith(
-      expect.anything(), 9, 'end-wins', 'claude-cli', 'ended',
+      sessionDb, 9, 'end-wins', 'claude-cli', 'ended',
     );
   });
 
@@ -432,7 +436,7 @@ describe('SessionManager host work admission', () => {
     await session.handleNew();
 
     expect(updateResumedSessionStatus).toHaveBeenLastCalledWith(
-      expect.anything(), 9, 'suspended-then-ended', 'claude-cli', 'ended',
+      sessionDb, 9, 'suspended-then-ended', 'claude-cli', 'ended',
     );
   });
 
@@ -512,7 +516,7 @@ describe('SessionManager host work admission', () => {
     expect(child.stdin.write).toHaveBeenCalledTimes(2);
     expect(child.stdin.write).not.toHaveBeenCalledWith(expect.stringContaining('"method":"turn/start"'));
     expect(updateResumedSessionStatus).toHaveBeenCalledWith(
-      expect.anything(), 9, 'codex-old-thread', 'codex-cli', 'resume_failed',
+      sessionDb, 9, 'codex-old-thread', 'codex-cli', 'resume_failed',
     );
     expect(session.getStatus()).toMatchObject({ active: false, providerTerminated: true });
   }, 1_000);
