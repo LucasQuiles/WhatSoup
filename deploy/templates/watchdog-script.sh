@@ -894,8 +894,10 @@ if "recovery_debt" in data:
         or recovery_counts[9] > 0
         or any(reason in recovery_blocking_reasons for reason in recovery_reasons)
     )
+    # Skip continuity unresolved/ambiguous (parts of continuity open) and
+    # delivery blocking_ambiguous (part of uncorroborated): count each once.
     recovery_gauge_total = sum(
-        value for index, value in enumerate(recovery_counts) if index != 9
+        value for index, value in enumerate(recovery_counts) if index not in (1, 2, 9)
     )
     if recovery_gauge_total > 9_007_199_254_740_991:
         print("untrusted recovery debt aggregate", file=sys.stderr)

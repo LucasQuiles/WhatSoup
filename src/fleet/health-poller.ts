@@ -420,8 +420,11 @@ export function parseRecoveryDebtHealth(health: Record<string, unknown>): Recove
     errors.push('recovery_debt.reason_contradiction');
   }
 
+  // continuity.open is unresolved + ambiguous (indices 1 and 2) and
+  // blocking_ambiguous (9) is a subset of uncorroborated_ambiguous (10), so
+  // those indices are skipped: each debt is counted once.
   const gaugeTotal = counts.reduce((sum, value, index) => (
-    index === 9 ? sum : sum + value
+    index === 1 || index === 2 || index === 9 ? sum : sum + value
   ), 0);
   if (!Number.isSafeInteger(gaugeTotal)) errors.push('recovery_debt.gauge_total');
   const blockingEvidence = !continuityReadable

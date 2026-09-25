@@ -18,6 +18,22 @@
       }
     },
     {
+      "name": "open continuity gaps with their unresolved and ambiguous split are valid",
+      "status": "healthy",
+      "expectedIssue": null,
+      "debt": {
+        "open": true,
+        "service_blocking": false,
+        "attention": "routine",
+        "reason": "continuity_gap_open",
+        "reasons": ["continuity_gap_open"],
+        "continuity": { "readable": true, "open": 3, "unresolved": 2, "ambiguous": 1 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
       "name": "fresh ambiguity is valid routine debt",
       "status": "healthy",
       "expectedIssue": null,

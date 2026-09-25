@@ -47,6 +47,10 @@ RECOVERY_DEBT_BLOCKING_REASONS = {
     "completed_delivery_identity_unclassified",
 }
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+# The aggregate gauge skips continuity unresolved (1) and ambiguous (2), the
+# components of continuity open (0), and delivery blocking_ambiguous (9), a
+# subset of uncorroborated_ambiguous (10); each debt is counted once.
+GAUGE_EXCLUDED_COUNT_INDEXES = (1, 2, 9)
 
 
 def _recovery_count(value: object) -> Optional[int]:
@@ -134,7 +138,9 @@ def recovery_debt_issue(d: object) -> Optional[str]:
         or counts[9] > 0
         or any(reason_value in RECOVERY_DEBT_BLOCKING_REASONS for reason_value in reasons)
     )
-    gauge_total = sum(value for index, value in enumerate(counts) if index != 9)
+    gauge_total = sum(
+        value for index, value in enumerate(counts) if index not in GAUGE_EXCLUDED_COUNT_INDEXES
+    )
     if gauge_total > MAX_SAFE_INTEGER:
         return "recovery_debt_invalid"
     expected_open = gauge_total > 0 or bool(reasons) or service_blocking

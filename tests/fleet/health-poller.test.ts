@@ -922,6 +922,42 @@ describe('HealthPoller', () => {
     },
   );
 
+  it('counts each continuity gap once in the recovery debt gauge total', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({
+        recovery_debt: makeRecoveryDebt({
+          reason: 'continuity_gap_open',
+          reasons: ['continuity_gap_open'],
+          continuity: { readable: true, open: 2, unresolved: 2, ambiguous: 0 },
+          turn_recovery: {
+            readable: true,
+            blocking_outstanding: 0,
+            retained_terminal: 0,
+            open_catchups: 0,
+            corroborated_retained: 0,
+          },
+        }),
+      })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: { open: true, gaugeTotal: 2 },
+    });
+    const debtAlert = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+      ([callName, callSource]) => callName === 'remote-1' && callSource === 'recovery_debt_attention',
+    );
+    expect(debtAlert?.[3]).toContain('aggregate_gauge_total=2');
+    poller.stop();
+  });
+
   it('debounces a single degraded health body without alerting', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

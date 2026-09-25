@@ -160,7 +160,12 @@ export function recoveryDebtIssue(health: Record<string, unknown>): string | nul
     || numericCounts[7]! > 0
     || numericCounts[9]! > 0
     || (reasons as string[]).some((reason) => RECOVERY_BLOCKING_REASONS.has(reason));
-  const gaugeTotal = numericCounts.reduce((sum, value, index) => index === 9 ? sum : sum + value, 0);
+  // Skip continuity unresolved/ambiguous (parts of continuity open) and
+  // delivery blocking_ambiguous (part of uncorroborated): count each once.
+  const gaugeTotal = numericCounts.reduce(
+    (sum, value, index) => (index === 1 || index === 2 || index === 9 ? sum : sum + value),
+    0,
+  );
   if (!Number.isSafeInteger(gaugeTotal)) return 'recovery_debt_invalid';
   const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking;
   const expectedAttention = serviceBlocking ? 'urgent' : open ? 'routine' : 'none';
