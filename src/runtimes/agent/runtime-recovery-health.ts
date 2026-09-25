@@ -77,9 +77,12 @@ export function classifyRuntimeRecoveryHealth(
     pushUnique(blockingReasons, 'turn_finalization_active');
   }
 
+  // Mirrors the store's blocking_outstanding: pending/claimed work plus orphan
+  // transfers (corroborated rows are not separable here, so none are assumed).
   const derivedBlockingOutstanding = recovery.turnRecoveryPending
     + recovery.turnRecoveryLiveClaimed
-    + recovery.turnRecoveryExpiredClaimed;
+    + recovery.turnRecoveryExpiredClaimed
+    + recovery.turnRecoveryOrphanTransfers;
   const blockingOutstanding = recovery.turnRecoveryBlockingOutstanding
     ?? derivedBlockingOutstanding;
   if (blockingOutstanding > 0) {
@@ -94,12 +97,14 @@ export function classifyRuntimeRecoveryHealth(
     pushUnique(blockingReasons, 'turn_recovery_integrity');
   }
 
+  // The store computes outstanding as blocking_outstanding plus
+  // corroborated_retained (both include orphan transfers once), so any
+  // imbalance in EITHER direction means the gauges disagree about the same
+  // rows. That is unexplained recovery evidence and fails closed.
   const corroboratedRetained = recovery.turnRecoveryCorroboratedRetained ?? 0;
-  const unexplainedOutstanding = Math.max(
-    0,
-    recovery.turnRecoveryOutstanding - blockingOutstanding - corroboratedRetained,
-  );
-  if (unexplainedOutstanding > 0) {
+  const unexplainedOutstanding =
+    recovery.turnRecoveryOutstanding - blockingOutstanding - corroboratedRetained;
+  if (unexplainedOutstanding !== 0) {
     pushUnique(blockingReasons, 'turn_recovery_unclassified');
   }
 

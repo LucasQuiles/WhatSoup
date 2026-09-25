@@ -12,7 +12,8 @@ function input(
   const blockingOutstanding = recovery.turnRecoveryBlockingOutstanding
     ?? (recovery.turnRecoveryPending ?? 0)
       + (recovery.turnRecoveryLiveClaimed ?? 0)
-      + (recovery.turnRecoveryExpiredClaimed ?? 0);
+      + (recovery.turnRecoveryExpiredClaimed ?? 0)
+      + (recovery.turnRecoveryOrphanTransfers ?? 0);
   const retainedTerminal = recovery.turnRecoveryRetainedTerminal
     ?? (recovery.turnRecoveryBlockedUnsafe ?? 0)
       + (recovery.turnRecoveryExhausted ?? 0);
@@ -120,7 +121,13 @@ describe('classifyRuntimeRecoveryHealth', () => {
     },
     {
       label: 'corroborated selected delivery',
-      value: input({ turnRecoveryCorroboratedRetained: 1 }),
+      // store shape: the corroborated pending job is outstanding, not blocking
+      value: input({
+        turnRecoveryOutstanding: 1,
+        turnRecoveryPending: 1,
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryCorroboratedRetained: 1,
+      }),
       blocking: false,
       blockingReasons: [],
       retainedReasons: ['corroborated_delivery_retained'],
@@ -168,10 +175,50 @@ describe('classifyRuntimeRecoveryHealth', () => {
     });
   });
 
+  it('flags recovery evidence whose explained counts exceed outstanding', () => {
+    // The store guarantees outstanding = blocking_outstanding +
+    // corroborated_retained. A surplus on either side is inconsistent
+    // evidence, never a clean reading.
+    expect(classifyRuntimeRecoveryHealth(input({
+      turnRecoveryOutstanding: 1,
+      turnRecoveryBlockingOutstanding: 1,
+      turnRecoveryCorroboratedRetained: 1,
+    })).blockingReasons).toContain('turn_recovery_unclassified');
+  });
+
+  it('reconciles a store-shaped mix of pending, orphan and corroborated work', () => {
+    // outstanding counts pending/claimed jobs (corroborated or not) plus
+    // orphan transfers, exactly as getTurnRecoverySupervisorCounts does.
+    const classification = classifyRuntimeRecoveryHealth(input({
+      turnRecoveryOutstanding: 4,
+      turnRecoveryPending: 3,
+      turnRecoveryOrphanTransfers: 1,
+      turnRecoveryBlockingOutstanding: 3,
+      turnRecoveryCorroboratedRetained: 1,
+    }));
+    expect(classification.blockingReasons).toEqual([
+      'turn_recovery_actionable',
+      'turn_recovery_integrity',
+    ]);
+  });
+
+  it('derives blocking outstanding with orphan transfers when the store gauge is absent', () => {
+    const base = input();
+    const { turnRecoveryBlockingOutstanding: _omitted, ...recovery } = {
+      ...base.recovery,
+      turnRecoveryOutstanding: 2,
+      turnRecoveryPending: 1,
+      turnRecoveryOrphanTransfers: 1,
+    };
+    const classification = classifyRuntimeRecoveryHealth({ ...base, recovery });
+    expect(classification.blockingOutstanding).toBe(2);
+    expect(classification.blockingReasons).not.toContain('turn_recovery_unclassified');
+  });
+
   it('deduplicates reasons and returns aggregate blocking and retained gauges', () => {
     expect(classifyRuntimeRecoveryHealth(input(
       {
-        turnRecoveryOutstanding: 3,
+        turnRecoveryOutstanding: 9,
         turnRecoveryPending: 1,
         turnRecoveryLiveClaimed: 1,
         turnRecoveryExpiredClaimed: 1,
