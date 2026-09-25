@@ -134,7 +134,10 @@ export function computeKpis(lines: LineInstance[]): {
     if (statusNeedsAttention(line.status) || line.error) {
       needAttention++;
     }
-    if (line.recoveryDebt?.open === true) recoveryDebtLines++;
+    // recoveryDebt is carried forward from the last good poll through
+    // failure paths, like the health body below, so a stale line's debt is
+    // not live evidence and is not counted.
+    if (!line.stale && line.recoveryDebt?.open === true) recoveryDebtLines++;
 
     // Freshness gate (#1762 remediation 2): when `stale`, `health` is carried
     // forward from an older successful poll (enrichInstance, src/fleet/routes/

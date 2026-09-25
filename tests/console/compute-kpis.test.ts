@@ -79,6 +79,23 @@ describe('computeKpis', () => {
     });
   });
 
+  it('does not count carried-forward recovery debt on a stale line', () => {
+    const result = computeKpis([makeLine({
+      status: 'unreachable',
+      stale: true,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    })]);
+
+    expect(result.recoveryDebtLines).toBe(0);
+    expect(result.staleExcluded).toBe(1);
+  });
+
   it('counts a degraded line as needAttention=1, not connected', () => {
     const result = computeKpis([makeLine({ status: 'degraded' })]);
     expect(result.connected).toBe(0);
