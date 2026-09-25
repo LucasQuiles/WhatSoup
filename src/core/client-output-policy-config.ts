@@ -59,7 +59,7 @@ export type ClientOutputPolicySelection =
 class ReadOnlyClientOutputPolicyRegistry implements ClientOutputPolicyRegistry {
   readonly #policies: Map<string, ConfiguredClientOutputPolicy>;
 
-  constructor(policies: readonly ConfiguredClientOutputPolicy[]) {
+  constructor(policies: ReadonlyArray<ConfiguredClientOutputPolicy>) {
     this.#policies = new Map(policies.map((policy) => [policy.conversationKey, policy]));
     Object.freeze(this);
   }
