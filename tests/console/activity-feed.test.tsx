@@ -297,6 +297,32 @@ describe('ActivityFeed actions', () => {
     })
   })
 
+  it('#2525: exposes one restart/stop per instance when two incidents share a timestamp', () => {
+    // Two connection incidents for one line at the SAME time and type produce
+    // the same eventKey string. The eligibility scan picks exactly one of them;
+    // that choice must follow event identity, not the colliding key string.
+    renderFeed([
+      event({
+        time: '2026-06-14T12:00:05.000Z',
+        instance: 'line-synthetic-sametime',
+        isError: true,
+        detail: { type: 'connection', statusCode: 428, reason: 'connectionLost' },
+      }),
+      event({
+        time: '2026-06-14T12:00:05.000Z',
+        instance: 'line-synthetic-sametime',
+        isError: true,
+        detail: { type: 'connection', statusCode: 500, reason: 'timedOut' },
+      }),
+    ])
+
+    // Both cards render, so the button count below measures eligibility only.
+    expect(screen.getByText('connection lost')).toBeDefined()
+    expect(screen.getByText('timed out')).toBeDefined()
+    expect(screen.getAllByRole('button', { name: 'Restart line-synthetic-sametime' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Stop line-synthetic-sametime instance' })).toHaveLength(1)
+  })
+
   it('reports restart failures', async () => {
     restartMock.mockRejectedValue(new Error('service manager unavailable'))
     const { toast } = renderFeed([
