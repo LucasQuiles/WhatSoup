@@ -592,9 +592,19 @@ describe('HealthPoller', () => {
     });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(poller.getStatus('remote-1')?.recoveryDebt?.gaugeTotal).toBe(2);
+    // A fingerprint change inside the 15-minute alert throttle is held back,
+    // then re-notified once the throttle window has passed.
     expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
       ([, source]) => source === 'recovery_debt_attention',
-    )).toHaveLength(2);
+    )).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const debtAlerts = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    );
+    expect(debtAlerts).toHaveLength(2);
+    expect(debtAlerts[1]![3]).toContain('aggregate_gauge_total=2');
+    expect(debtAlerts[1]![6]).toEqual({ renotify: true });
 
     debt = makeRecoveryDebt({
       turn_recovery: {
@@ -745,6 +755,8 @@ describe('HealthPoller', () => {
           corroborated_retained: 0,
         },
       });
+      // Each later change is observed past the 15-minute alert throttle.
+      vi.setSystemTime(Date.now() + 15 * 60 * 1000);
       await vi.advanceTimersByTimeAsync(1_000);
       expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
         ([, source]) => source === 'recovery_debt_attention',
@@ -763,6 +775,7 @@ describe('HealthPoller', () => {
           corroborated_retained: 0,
         },
       });
+      vi.setSystemTime(Date.now() + 15 * 60 * 1000);
       await vi.advanceTimersByTimeAsync(1_000);
       expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
         ([, source]) => source === 'recovery_debt_attention',
@@ -812,7 +825,60 @@ describe('HealthPoller', () => {
       expect.any(String),
       expect.stringContaining('attention=urgent'),
       'info',
+      undefined,
     );
+    poller.stop();
+  });
+
+  it('suppresses recovery debt attention on a silenced instance', async () => {
+    silenceManager.isInstanceSilenced.mockReturnValue(true);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: makeRecoveryDebt() })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.open).toBe(true);
+    expectNoAlertSource('remote-1', 'recovery_debt_attention');
+    poller.stop();
+  });
+
+  it('records the alert throttle for recovery debt attention and rate-limits fingerprint churn', async () => {
+    let debt = makeRecoveryDebt();
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      expect.stringMatching(/:remote-1:recovery_debt_attention$/),
+      expect.any(String),
+    );
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 2,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
     poller.stop();
   });
 

@@ -4,7 +4,6 @@ import {
   clearAlertSource,
   clearAlertSourceChecked,
   emitAlert,
-  emitAlertChecked,
   type AlertEmissionResult,
 } from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
@@ -2906,7 +2905,12 @@ export class HealthPoller {
         `reasons=${summary.reasons.join(',') || 'none'}`,
         `aggregate_gauge_total=${summary.gaugeTotal}`,
       ].join(' ');
-      const emitted = emitAlertChecked(
+      // Same governance as every other poller alert: silence, the 15-minute
+      // throttle, the renotify marker and the persisted throttle record that
+      // lets a restarted poller recognise and clear this source. The
+      // fingerprint is stored only after an emit, so a suppressed change is
+      // retried on a later poll rather than dropped.
+      const emitted = this.maybeEmitAlert(
         name,
         source,
         `whatsoup@${name} has retained recovery debt`,
@@ -2914,7 +2918,6 @@ export class HealthPoller {
         'info',
       );
       if (!emitted) return;
-      setRecoveryMarkerObserved(name, source);
       this.recoveryDebtFingerprints.set(name, fingerprint);
       this.trackActiveAlertSource(name, source, true);
       return;
