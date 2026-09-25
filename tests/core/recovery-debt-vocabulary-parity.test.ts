@@ -5,13 +5,16 @@
  * the rendered watchdog). The shared fixture exercises the consumers' logic but
  * not their vocabulary, so a reason added to the producer alone would make every
  * consumer reject valid bodies. This test reads each consumer's literal lists
- * straight from source and pins them to the producer's exported order.
+ * straight from source and pins them to the producer's exported order and
+ * blocking set. The release validator imports both lists from the producer
+ * instead of re-encoding them (see
+ * tests/scripts/startup-notification-release-validator-vocabulary.test.ts).
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { RECOVERY_REASON_ORDER } from '../../src/core/recovery-debt.ts';
+import { RECOVERY_BLOCKING_REASONS, RECOVERY_REASON_ORDER } from '../../src/core/recovery-debt.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 
@@ -62,6 +65,7 @@ describe('recovery_debt reason vocabulary parity', () => {
       literalsIn(read(file), markers.blocking[0], markers.blocking[1]).sort()
     ));
     expect(subsets[0]!.length).toBe(8);
+    expect(subsets[0]).toEqual([...RECOVERY_BLOCKING_REASONS].sort());
     expect(subsets[1]).toEqual(subsets[0]);
     expect(subsets[2]).toEqual(subsets[0]);
     for (const reason of subsets[0]!) {

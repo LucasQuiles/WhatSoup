@@ -1,5 +1,6 @@
 import { closeSync, constants, openSync, readSync } from 'node:fs';
 
+import { RECOVERY_BLOCKING_REASONS, RECOVERY_REASON_ORDER } from '../src/core/recovery-debt.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
 import { isFullyConnected } from '../src/transport/runtime-connection.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
@@ -74,37 +75,11 @@ function reject(issues: string[]): StartupNotificationReleaseValidationResult {
   return { exitCode: 1, outcome: 'rejected', issues };
 }
 
-const RECOVERY_DEBT_REASON_ORDER = [
-  'continuity_gap_unreadable',
-  'continuity_gap_open',
-  'recovery_evidence_unreadable',
-  'delivery_evidence_unreadable',
-  'turn_finalization_active',
-  'turn_recovery_actionable',
-  'turn_recovery_integrity',
-  'turn_recovery_unclassified',
-  'completed_delivery_identity_unclassified',
-  'uncorroborated_delivery_ambiguity',
-  'turn_recovery_terminal',
-  'turn_recovery_quarantined',
-  'historical_turn_catchup',
-  'corroborated_delivery_retained',
-  'completed_delivery_identity_fresh_inbound',
-  'completed_delivery_identity_operator',
-] as const;
+// The reason vocabulary comes from the producer, never a private copy: a
+// reason added there must not make this validator reject healthy bodies.
 const RECOVERY_DEBT_REASON_INDEX = new Map<string, number>(
-  RECOVERY_DEBT_REASON_ORDER.map((reason, index) => [reason, index]),
+  RECOVERY_REASON_ORDER.map((reason, index) => [reason, index]),
 );
-const RECOVERY_DEBT_BLOCKING_REASONS = new Set([
-  'continuity_gap_unreadable',
-  'recovery_evidence_unreadable',
-  'delivery_evidence_unreadable',
-  'turn_finalization_active',
-  'turn_recovery_actionable',
-  'turn_recovery_integrity',
-  'turn_recovery_unclassified',
-  'completed_delivery_identity_unclassified',
-]);
 
 function recoveryCount(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
@@ -184,7 +159,7 @@ export function recoveryDebtIssue(health: Record<string, unknown>): string | nul
     || numericCounts[3]! > 0
     || numericCounts[7]! > 0
     || numericCounts[9]! > 0
-    || (reasons as string[]).some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
+    || (reasons as string[]).some((reason) => RECOVERY_BLOCKING_REASONS.has(reason));
   const gaugeTotal = numericCounts.reduce((sum, value, index) => index === 9 ? sum : sum + value, 0);
   if (!Number.isSafeInteger(gaugeTotal)) return 'recovery_debt_invalid';
   const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking;

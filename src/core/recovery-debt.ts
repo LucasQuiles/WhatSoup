@@ -68,9 +68,10 @@ const RETAINED_RUNTIME_REASONS = [
 
 const BLOCKING_REASON_SET = new Set<string>(BLOCKING_RUNTIME_REASONS);
 const RETAINED_REASON_SET = new Set<string>(RETAINED_RUNTIME_REASONS);
-/** Canonical recovery_debt reason vocabulary and order. The three consumers
- * (fleet health poller, classify_health.py, the watchdog template) re-encode
- * it; tests/core/recovery-debt-vocabulary-parity.test.ts pins them to it. */
+/** Canonical recovery_debt reason vocabulary and order. The release validator
+ * (scripts/validate-startup-notification-release.ts) imports it. Three
+ * consumers (fleet health poller, classify_health.py, the watchdog template)
+ * re-encode it; tests/core/recovery-debt-vocabulary-parity.test.ts pins them. */
 export const RECOVERY_REASON_ORDER = [
   'continuity_gap_unreadable',
   'continuity_gap_open',
@@ -80,6 +81,14 @@ export const RECOVERY_REASON_ORDER = [
   'uncorroborated_delivery_ambiguity',
   ...RETAINED_RUNTIME_REASONS,
 ] as const;
+
+/** The reasons that make recovery_debt service-blocking. */
+export const RECOVERY_BLOCKING_REASONS: ReadonlySet<string> = new Set<string>([
+  'continuity_gap_unreadable',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  ...BLOCKING_RUNTIME_REASONS,
+]);
 
 function count(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
