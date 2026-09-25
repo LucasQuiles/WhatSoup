@@ -740,7 +740,17 @@ export class ToolRegistry {
           );
         }
         if (supportsAliasTarget) delete effectiveParams['to'];
-        effectiveParams['chatJid'] = session.binding!.deliveryJid;
+        const boundTarget = session.binding!.deliveryJid;
+        effectiveParams['chatJid'] = boundTarget;
+        // Cross-conversation guard, pre-handler point, on the injected target
+        // (issue 3585): most injected handlers never call the post-resolution
+        // callback, so without this check a bound session whose mirror has
+        // diverged from its binding would reach them unadjudicated. It can
+        // only deny: the target is the binding itself.
+        const verdict = this.evaluateTargetConversation(session, boundTarget, name, 'pre-handler');
+        if (verdict.kind === 'deny') {
+          return reject(verdict.text, verdict.failureCode, verdict.failureStage);
+        }
       } else if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {

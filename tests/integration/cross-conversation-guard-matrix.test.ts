@@ -8,7 +8,9 @@
  * the registry runs at two points:
  *
  *   pre-handler      the caller-supplied chatJid, in the global-and-unbound
- *                    arm of the registry's injected-target branch
+ *                    arm of the registry's injected-target branch, and the
+ *                    target the bound arm injects from the binding (issue
+ *                    3585, cells M9d and M11)
  *   post-resolution  the target send_message resolved from an alias or an
  *                    `@lid`, through the callback the registry hands the
  *                    handler (dry-run and beforeAudit call sites)
@@ -25,7 +27,7 @@
  *
  * NOT an axis: the resolved / unresolved turn shape. Every cell here imports
  * ToolRegistry from tests/helpers/resolved-tool-registry.ts, which forces
- * `resolved: true`, so all fourteen cells run resolution-normal. No cell
+ * `resolved: true`, so all eighteen cells run resolution-normal. No cell
  * outcome depends on it — `executingResolution` has one reader in src/,
  * scheduledAgentJobMaySee (src/mcp/registry.ts:104), reachable only for the
  * tools in SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS (src/mcp/registry.ts:75-82),
@@ -527,9 +529,10 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
   // =========================================================================
   // M9d — conversation-bound, top-level conversationKey mirror PRESENT,
   //       NO caller target.
-  //       The post-resolution point adjudicates the target the registry itself
-  //       injected from the binding; the pre-handler point is not reached (the
-  //       bound arm is taken). Both sub-cases live in this one cell: the
+  //       Since issue 3585 the pre-handler point adjudicates the target the
+  //       registry itself injected from the binding, in the bound arm, so a
+  //       diverged mirror is denied before send_message runs (before 3585 its
+  //       post-resolution callback denied it). Both sub-cases live in this one cell: the
   //       mirror AGREES with the binding, and the mirror has DIVERGED from it.
   //       Diverged = DENY on the `binding-mirror-divergence` branch, with an
   //       error-level log (owner decision 27, issue 3457).
@@ -637,6 +640,96 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
       status: 'complete',
       failure_code: null,
       failure_stage: null,
+    });
+  });
+
+  // =========================================================================
+  // M11 — conversation-bound, NO caller target, an injected tool whose
+  //       handler never calls the post-resolution callback (issue 3585).
+  //       `send_location` is a real production tool of that kind. The
+  //       registry adjudicates the target it injects from the binding at its
+  //       pre-handler point, so the M9d verdict holds for every injected
+  //       tool, not only for send_message.
+  // =========================================================================
+  const LOCATION = { latitude: 1.5, longitude: 2.5 };
+
+  it('M11a conversation-bound session with a diverged mirror: an injected tool that never calls the callback is denied before its handler as authorization_denied/authorization', async () => {
+    const result = await registry.call(
+      'send_location',
+      { ...LOCATION },
+      { tier: 'global', conversationKey: BOB_KEY, binding: makeConversationBinding(ALICE_KEY, ALICE_JID) },
+    );
+
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(() => JSON.parse(text)).toThrow();
+    expect(text).toContain('does not match the conversation binding');
+    expect(text).toContain(ALICE_JID);
+    expect(sent).toHaveLength(0);
+    expect(lastToolCall(db, BOB_KEY)).toEqual({
+      tool_name: 'send_location',
+      status: 'error',
+      failure_code: 'authorization_denied',
+      failure_stage: 'authorization',
+    });
+  });
+
+  it('M11b conversation-bound session with an agreeing mirror: the same injected tool is admitted and dispatched to the binding', async () => {
+    const result = await registry.call(
+      'send_location',
+      { ...LOCATION },
+      { tier: 'global', conversationKey: ALICE_KEY, binding: makeConversationBinding(ALICE_KEY, ALICE_JID) },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].jid).toBe(ALICE_JID);
+    expect(lastToolCall(db, ALICE_KEY)).toEqual({
+      tool_name: 'send_location',
+      status: 'complete',
+      failure_code: null,
+      failure_stage: null,
+    });
+  });
+
+  it('M11c conversation-bound session keyed by raw @lid digits with a phone-folded mirror of the same conversation: the injected tool is admitted through the armed fold', async () => {
+    seedLidMapping(db, PIN_LID, PIN_PHONE_JID);
+    const result = await registry.call(
+      'send_location',
+      { ...LOCATION },
+      {
+        tier: 'global',
+        conversationKey: PIN_PHONE,
+        binding: makeConversationBinding(toConversationKey(PIN_LID_JID), PIN_LID_JID),
+      },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].jid).toBe(PIN_LID_JID);
+    expect(lastToolCall(db, PIN_PHONE)).toEqual({
+      tool_name: 'send_location',
+      status: 'complete',
+      failure_code: null,
+      failure_stage: null,
+    });
+  });
+
+  it('M11d conversation-bound session whose binding deliveryJid does not fold: the injected tool is denied before its handler as validation_rejected/validation', async () => {
+    const result = await registry.call(
+      'send_location',
+      { ...LOCATION },
+      { tier: 'global', conversationKey: ALICE_KEY, binding: makeConversationBinding(ALICE_KEY, 'not-a-jid') },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Invalid chatJid "not-a-jid"');
+    expect(sent).toHaveLength(0);
+    expect(lastToolCall(db, ALICE_KEY)).toEqual({
+      tool_name: 'send_location',
+      status: 'error',
+      failure_code: 'validation_rejected',
+      failure_stage: 'validation',
     });
   });
 
