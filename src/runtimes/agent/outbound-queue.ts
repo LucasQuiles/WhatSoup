@@ -359,8 +359,9 @@ export interface IOutboundQueue {
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
    * of the runtime result handler that never reach flush(). Idempotent.
+   * `resultTextPending`: the handler will enqueue a result text, so skip path C.
    */
-  endTurn(): void;
+  endTurn(options?: { resultTextPending?: boolean }): void;
   /**
    * #3613: true once when the client output policy withheld an answer since
    * the last call or turn abort. The result handler uses it to keep withheld
@@ -1499,14 +1500,14 @@ export class OutboundQueue implements IOutboundQueue {
    * Then stop typing. The subsequent queue.flush() on the normal path is a no-op
    * for both (buffer already empty, typing already stopped).
    */
-  endTurn(): void {
+  endTurn(options?: { resultTextPending?: boolean }): void {
     this.flushStreamBuffer();
     // Path C recovery: the turn is ending. If it never delivered visible text
     // yet we deferred pre-tool buffered text, that text WAS the user-owed reply —
     // flush it now rather than dropping it into silence. Route it back through
     // the streaming buffer so grouping, attribution, evidence, and onCommit all
-    // apply exactly as a normal flush would.
-    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+    // apply exactly as a normal flush would. A pending result text is the reply (#3420).
+    if (options?.resultTextPending !== true && !this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
       const recovered = this.provisionalPreToolDiscard.flat();
       this.provisionalPreToolDiscard = [];
       const characterCount = recovered.reduce((total, part) => total + part.text.length, 0);

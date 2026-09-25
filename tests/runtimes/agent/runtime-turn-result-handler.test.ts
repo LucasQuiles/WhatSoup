@@ -52,7 +52,8 @@ vi.mock('../../../src/logger.ts', () => {
 });
 
 import { Database } from '../../../src/core/database.ts';
-import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { OutboundQueue, type IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type { Messenger } from '../../../src/core/types.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import {
   handleGlobalRuntimeResult,
@@ -247,12 +248,14 @@ function driveResult(
   path: ResultPath,
   harness: ReturnType<typeof makeHarness>,
   text: string,
+  overrides: { queue?: IOutboundQueue; isError?: boolean } = {},
 ): void {
-  const event = { type: 'result' as const, text, isError: true };
+  const event = { type: 'result' as const, text, isError: overrides.isError ?? true };
+  const queue = overrides.queue ?? harness.queue;
   if (path === 'scoped') {
     handleScopedRuntimeResult(harness.host, {
       event,
-      queue: harness.queue,
+      queue,
       session: harness.session as never,
       conversationKey: '15550190050',
       inboundSeq: 71,
@@ -265,7 +268,7 @@ function driveResult(
   }
   handleGlobalRuntimeResult(harness.host, {
     event,
-    queue: harness.queue,
+    queue,
     extractUsageLimitResetTime: () => null,
   });
 }
@@ -808,5 +811,39 @@ describe('client output policy withheld output never becomes a voice reply (#361
 
     expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
     expect(voiceOf(harness)?.responseText ?? '').toBe('');
+  });
+});
+
+describe('minimal-mode result text after narration held at a tool boundary (#3420)', () => {
+  // The managed API providers end an exhausted tool loop with this unclassified,
+  // non-error result text, right after tool calls.
+  const TOOL_LOOP_LIMIT_TEXT = '_Tool loop limit reached - please try again or send /new._';
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(['scoped', 'global'] as const)('%s path delivers the result text through the real endTurn, not the held narration', async (path) => {
+    vi.useFakeTimers();
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const sent: string[] = [];
+    const messenger: Messenger = {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        sent.push(text);
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      setTyping: vi.fn(async () => {}),
+    };
+    const queue = new OutboundQueue(messenger, '15550190050@s.whatsapp.net');
+    queue.setToolUpdateMode('minimal');
+    queue.enqueueStreamingText('Let me check the workbook first.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+
+    driveResult(path, harness, TOOL_LOOP_LIMIT_TEXT, { queue, isError: false });
+    await vi.runAllTimersAsync();
+
+    expect(sent).toEqual([TOOL_LOOP_LIMIT_TEXT]);
   });
 });

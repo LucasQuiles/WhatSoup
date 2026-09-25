@@ -2016,6 +2016,24 @@ describe('OutboundQueue', () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
+  it('minimal mode endTurn yields held narration to a pending result text in runtime order (#3420)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const onCommit = vi.fn();
+    queue.enqueueStreamingText('Let me inspect the workbook before I continue.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    queue.endTurn({ resultTextPending: true });
+    const accepted = queue.enqueueResultText('Workbook updated and verified.');
+    await vi.runAllTimersAsync();
+
+    expect(accepted).toBe(true);
+    expect(calls).toEqual(['Workbook updated and verified.']);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
   it('minimal mode keeps buffered terminal assistant text and suppresses a duplicate result summary', async () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
