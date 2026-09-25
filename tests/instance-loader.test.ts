@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { loadInstance } from '../src/instance-loader.ts';
+import {
+  _resetInstanceContext,
+  getLoadedInstanceConfigOrNull,
+} from '../src/lib/instance-context.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,6 +39,7 @@ const minimalAgent = {
 };
 
 beforeEach(() => {
+  _resetInstanceContext();
   // Save environment
   savedEnv = {
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
@@ -59,6 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _resetInstanceContext();
   // Restore environment
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) {
@@ -69,6 +75,42 @@ afterEach(() => {
   }
   // Clean up temp dir
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('loadInstance — client-output policy hydration', () => {
+  const clientOutputPolicies = [{
+    conversationKey: 'synthetic-conversation',
+    maxCodePoints: 500,
+    maxQuestionMarks: 1,
+    blockedTerms: [{ value: 'restricted', match: 'substring', caseSensitive: false }],
+    rejectInternalArtifacts: true,
+    rejectWhatsAppJids: true,
+  }];
+
+  it('preserves the validated JSON array in INSTANCE_CONFIG and the direct store', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
+      ...minimalAgent,
+      clientOutputPolicies,
+    });
+
+    loadInstance('test-agent');
+
+    expect(JSON.parse(process.env.INSTANCE_CONFIG!).clientOutputPolicies).toEqual(clientOutputPolicies);
+    const direct = getLoadedInstanceConfigOrNull();
+    expect(direct?.clientOutputPolicies).toEqual(clientOutputPolicies);
+    expect(Object.isFrozen(direct?.clientOutputPolicies)).toBe(true);
+  });
+
+  it('rejects invalid policy config before publishing either compatibility surface', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'test-agent', {
+      ...minimalAgent,
+      clientOutputPolicies: null,
+    });
+
+    expect(() => loadInstance('test-agent')).toThrow(/clientOutputPolicies/);
+    expect(process.env.INSTANCE_CONFIG).toBeUndefined();
+    expect(getLoadedInstanceConfigOrNull()).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
