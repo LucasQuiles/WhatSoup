@@ -1056,10 +1056,25 @@ Ages are whole days (`age_seconds // 86400`); thresholds are inclusive. The
 `PRIMARY_PHONE_EXPIRY_DAYS` (14) constant is reported but has no separate branch.
 `method` is recorded but not evaluated, so any recorder counts as a verification.
 
-A profile instance whose primary phone has no automated verifier should set
+An instance whose primary phone has no automated verifier should set
 `primaryPhoneUnknownSeverity: "critical"`, so a missing record raises a critical BOT
-ERRORS alert rather than a warning without a critical-asset code. At least one bot-host
-profile under `deploy/health-profiles/` does so; the policy test pins it.
+ERRORS alert rather than a warning without a critical-asset code. This is a site
+policy choice. Set it in the bot host's private profile, not in a tracked profile under
+`deploy/health-profiles/`:
+
+1. Copy the host's tracked profile to a private path on the bot host, for example
+   `~/.config/whatsoup/health-profile.json`, mode `0600`.
+2. In that copy, add `"primaryPhoneUnknownSeverity": "critical"` to the instance's
+   entry under `instances`. Setting it at the top level applies to every instance on
+   the host.
+3. Set `BOT_ERRORS_HEALTH_PROFILE=<that path>` in `~/.config/whatsoup/bot-errors.env`.
+   Then re-run the installer that bakes the daily job: `deploy/setup.sh` on Linux,
+   `deploy/scripts/install-bot-errors-health-launchd.sh` on macOS. Both prefer the env
+   file's value over the tracked `deploy/health-profiles/<host>.json`.
+
+`BOT_ERRORS_HEALTH_PROFILE` replaces the tracked profile; it does not overlay it. Keep
+the private copy in step with tracked profile changes. The daily evidence line
+`profile: role=… path=…` shows which profile file a run used.
 
 ## OPERATIONAL — Manual daily-health validation
 
