@@ -657,6 +657,38 @@ def test_metadata_projection_allowlists_email_fallback_classification_enums(
     }
 
 
+@pytest.mark.parametrize("reason", ("test_provenance", "test_leak", "test_state_dir"))
+def test_metadata_projection_keeps_each_provenance_gate_reason(reason: str) -> None:
+    # #3458: the email-fallback provenance gate logs its decision class as
+    # "reason". The durable record must keep it.
+    assert metadata_only_controller_details({"reason": reason, "attempts": 3}) == {
+        "attempts": 3,
+        "reason": reason,
+    }
+
+
+@pytest.mark.parametrize("reason", ("test_provenance", "test_leak", "test_state_dir"))
+def test_provenance_gate_reasons_are_admitted_under_the_reason_key_only(reason: str) -> None:
+    # The gate reasons are a closed set for one key, not general-purpose safe
+    # strings: under any other key they still drop.
+    assert metadata_only_controller_details({"gate": reason, "status": reason}) == {}
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "test_leak /private/tmp/pytest-of-user/state",
+        "test_provenance_extra",
+        "TEST_LEAK",
+        "test",
+    ),
+)
+def test_metadata_projection_drops_unregistered_gate_reasons(reason: str) -> None:
+    assert metadata_only_controller_details({"reason": reason, "attempts": 3}) == {
+        "attempts": 3,
+    }
+
+
 def test_metadata_projection_drops_unregistered_email_fallback_free_text() -> None:
     # Security property (must not weaken): the string allowlist is exact, not
     # prefix/substring matched, so registering the two email-fallback enums does
