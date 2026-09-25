@@ -923,7 +923,7 @@ describe('handleGetLogs', () => {
     expect(typeof body[0].component).toBe('string');
   });
 
-  it('increments existing repeated-message suffixes when log lines already contain them', () => {
+  it('treats a source message that already ends in a count suffix as ordinary text (#2526)', () => {
     const inst = fakeInstance({ logDir: tmpDir });
     const repeated = { level: 30, msg: 'heartbeat (×2)', name: 'system' };
     fs.writeFileSync(
@@ -940,9 +940,58 @@ describe('handleGetLogs', () => {
 
     expect(JSON.parse(res._body)).toEqual([
       expect.objectContaining({
-        msg: 'heartbeat (×3)',
+        msg: 'heartbeat (×2) (×2)',
         source: 'system',
       }),
+    ]);
+  });
+
+  it.each([
+    [1, 'heartbeat'],
+    [2, 'heartbeat (×2)'],
+    [3, 'heartbeat (×3)'],
+    [4, 'heartbeat (×4)'],
+    [7, 'heartbeat (×7)'],
+  ])('collapses a run of %i identical records into one row with the exact count (#2526)', (runLength, expectedMsg) => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    const record = { level: 30, msg: 'heartbeat', name: 'system' };
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      Array.from({ length: runLength }, () => JSON.stringify(record)).join('\n') + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(JSON.parse(res._body)).toEqual([
+      expect.objectContaining({ msg: expectedMsg, source: 'system', level: 'info' }),
+    ]);
+  });
+
+  it('starts a new row when a different record interrupts a run (#2526)', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    const beat = JSON.stringify({ level: 30, msg: 'heartbeat', name: 'system' });
+    const other = JSON.stringify({ level: 30, msg: 'reconnect', name: 'system' });
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      [beat, beat, beat, other, beat].join('\n') + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(JSON.parse(res._body).map((row: { msg: string }) => row.msg)).toEqual([
+      'heartbeat (×3)',
+      'reconnect',
+      'heartbeat',
     ]);
   });
 });
