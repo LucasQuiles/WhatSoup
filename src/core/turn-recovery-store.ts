@@ -225,11 +225,17 @@ export interface TurnRecoverySupervisorCounts {
   echoConflicts: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
-  /** Pending/claimed work that can still be acted on automatically. */
+  /**
+   * Pending/claimed work that can still be acted on automatically, plus
+   * orphan transfers without valid later-echo proof.
+   */
   blockingOutstanding?: number;
   /** Terminal blocked/exhausted rows retained for operator audit. */
   retainedTerminal?: number;
-  /** Pending/claimed rows made unclaimable by valid later-echo proof. */
+  /**
+   * Pending/claimed rows and orphan transfers made unclaimable by valid
+   * later-echo proof. outstanding = blockingOutstanding + corroboratedRetained.
+   */
   corroboratedRetained?: number;
   /**
    * Actionability split of `blockedUnsafe` (② of the continuity work,
