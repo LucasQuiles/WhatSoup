@@ -1035,6 +1035,32 @@ Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
   mismatch should write a temp-outbox `critical` event containing
   `git_head_sha_mismatch`.
 
+## OPERATIONAL — Primary-phone verification policy
+
+A linked WhatsApp device can be logged out when its primary phone goes unused, so daily
+health ages each always-on instance's last primary-phone verification. The source is
+`$BOT_ERRORS_STATE_DIR/primary-phone-verifications.json` (written only by
+`bot-errors-health-check.py --record-primary-phone-verification INSTANCE [--owner --method
+--note --verified-at]`), falling back to the profile's `primaryPhoneLastVerifiedAt`.
+Evaluation runs with daily health.
+
+| State | Evidence line | Daily-health event |
+|---|---|---|
+| age `>= primaryPhoneFailDays` (default 12) | `FAIL … reverify_required` | critical, `WA_AUTH_BOND_PRIMARY_PHONE_STALE` |
+| age `>= primaryPhoneWarnDays` (default 10) | `WARN … reverify_soon` | warning |
+| no verification recorded | `WARN … verification_unknown` | warning with no critical-asset code at the default `primaryPhoneUnknownSeverity: warning`; `FAIL`, critical, `WA_AUTH_BOND_PRIMARY_PHONE_UNVERIFIED` when the instance or profile sets `critical` |
+| unparseable timestamp | `FAIL … verification_invalid` (`WARN` if not required) | critical when `FAIL` |
+| more than 300 s in the future | `FAIL … verification_invalid reason=future_dated` (`WARN` if not required) | critical when `FAIL` — a future timestamp never reads as fresh |
+
+Ages are whole days (`age_seconds // 86400`); thresholds are inclusive. The
+`PRIMARY_PHONE_EXPIRY_DAYS` (14) constant is reported but has no separate branch.
+`method` is recorded but not evaluated, so any recorder counts as a verification.
+
+A profile instance whose primary phone has no automated verifier should set
+`primaryPhoneUnknownSeverity: "critical"`, so a missing record raises a critical BOT
+ERRORS alert rather than a warning without a critical-asset code. At least one bot-host
+profile under `deploy/health-profiles/` does so; the policy test pins it.
+
 ## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.

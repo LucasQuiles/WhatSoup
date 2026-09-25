@@ -20,7 +20,8 @@
       "expected": "always_on",
       "service": "com.whatsoup.mw-bot",
       "healthPort": 9090,
-      "primaryPhoneOwner": "instance:mw-bot"
+      "primaryPhoneOwner": "instance:mw-bot",
+      "primaryPhoneUnknownSeverity": "critical"
     },
     {
       "name": "personal",

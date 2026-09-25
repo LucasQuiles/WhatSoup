@@ -1,0 +1,131 @@
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+// Primary-phone verification policy: a missing record for the escalated
+// bot-host instance must alert, and a verification timestamp in the future
+// must never read as fresh.
+
+const NOW = '2026-06-11T00:00:00Z';
+const NOW_EPOCH = Math.floor(Date.parse(NOW) / 1000);
+
+let tmpRoot = '';
+
+afterEach(() => {
+  if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = '';
+});
+
+function writePrivate(path: string, payload: unknown): void {
+  writeFileSync(path, JSON.stringify(payload));
+  chmodSync(path, 0o600);
+}
+
+type OutboxEvent = {
+  severity: string;
+  evidence: string;
+  alertSource?: string;
+  criticalAsset?: { failure?: { code?: string } };
+};
+
+function runDaily(instance: Record<string, unknown>, stateLastVerifiedAt?: string): OutboxEvent {
+  tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-primary-phone-'));
+  chmodSync(tmpRoot, 0o700);
+  const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'bot-a');
+  const authDir = join(configDir, 'auth');
+  mkdirSync(authDir, { recursive: true });
+  chmodSync(authDir, 0o700);
+  writePrivate(join(configDir, 'config.json'), { type: 'agent', enabled: true });
+  writePrivate(join(authDir, 'creds.json'), {
+    me: { id: 'fixture-self', lid: 'fixture-self-lid' },
+    registrationId: 1,
+  });
+  if (stateLastVerifiedAt) {
+    writePrivate(join(tmpRoot, 'primary-phone-verifications.json'), {
+      version: 1,
+      instances: { 'bot-a': { lastVerifiedAt: stateLastVerifiedAt, owner: 'operator-a' } },
+    });
+  }
+  execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      HOME: tmpRoot,
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+      BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+      BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+      BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+      BOT_ERRORS_DRY_NOW_EPOCH: String(NOW_EPOCH),
+      BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+        role: 'bot-host',
+        expectDispatcher: false,
+        expectQLoop: false,
+        expectPersonalSocket: false,
+        expectPersonalTools: false,
+        expectPluginInventory: false,
+        expectPrimaryPhoneVerification: true,
+        instances: [{ name: 'bot-a', expected: 'always_on', primaryPhoneOwner: 'operator-a', ...instance }],
+      }),
+    },
+  });
+  const outbox = join(tmpRoot, 'outbox');
+  const files = readdirSync(outbox).filter((name) => name !== '.durable-json.lock');
+  expect(files).toHaveLength(1);
+  return JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as OutboxEvent;
+}
+
+function isoAt(offsetSeconds: number): string {
+  return new Date((NOW_EPOCH + offsetSeconds) * 1000).toISOString().replace('.000Z', 'Z');
+}
+
+describe('primary-phone verification policy', () => {
+  it('escalates missing verification to critical for exactly one tracked profile instance', () => {
+    const profilesDir = join(process.cwd(), 'deploy', 'health-profiles');
+    const overrides: Array<{ severity: unknown; siblings: number }> = [];
+    for (const file of readdirSync(profilesDir).filter((name) => name.endsWith('.json'))) {
+      const profile = JSON.parse(readFileSync(join(profilesDir, file), 'utf8')) as {
+        primaryPhoneUnknownSeverity?: unknown;
+        instances?: Array<Record<string, unknown>>;
+      };
+      expect(profile.primaryPhoneUnknownSeverity).toBeUndefined();
+      const instances = profile.instances ?? [];
+      for (const instance of instances) {
+        if ('primaryPhoneUnknownSeverity' in instance) {
+          overrides.push({
+            severity: instance.primaryPhoneUnknownSeverity,
+            siblings: instances.filter((other) => !('primaryPhoneUnknownSeverity' in other)).length,
+          });
+        }
+      }
+    }
+    // Instance-scoped, not profile-wide: the host's other instance keeps the default.
+    expect(overrides).toEqual([{ severity: 'critical', siblings: 1 }]);
+  });
+
+  it('rejects a state verification more than 300 s in the future instead of reading it as fresh', () => {
+    const event = runDaily({}, isoAt(2 * 3600));
+    expect(event.severity).toBe('critical');
+    expect(event.alertSource).toBe('primary_phone:bot-a');
+    expect(event.evidence).toContain('FAIL primary_phone bot-a: owner=operator-a');
+    expect(event.evidence).toContain('verification_invalid reason=future_dated');
+    expect(event.evidence).toContain('last_verified_source=state');
+    expect(event.evidence).not.toContain(' fresh ');
+  });
+
+  it('rejects a future-dated profile verification the same way', () => {
+    const event = runDaily({ primaryPhoneLastVerifiedAt: isoAt(301) });
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('verification_invalid reason=future_dated');
+    expect(event.evidence).toContain('last_verified_source=profile');
+  });
+
+  it('still accepts a verification within the 300 s clock-skew allowance', () => {
+    const event = runDaily({}, isoAt(300));
+    expect(event.evidence).toContain('OK primary_phone bot-a: owner=operator-a');
+    expect(event.evidence).toContain('fresh');
+    expect(event.evidence).not.toContain('future_dated');
+  });
+});
