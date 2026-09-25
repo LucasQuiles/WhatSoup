@@ -206,9 +206,10 @@ describe('triggers core', () => {
     const t0ms = 2_000_000_000_000;
     const clock = fakeClock(t0ms);
     const now = Math.floor(t0ms / 1000);
+    // A finite prior deadline: only an open-ended paused trigger keeps its lifetime (#3609).
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
-      reportChatJid: 'report-example-invalid@s.whatsapp.net', actor: 'u',
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: now + 3600, actor: 'u',
     }, clock);
     pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
     expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'paused', next_fire_at: null });
@@ -223,6 +224,30 @@ describe('triggers core', () => {
       `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
     ).get(bead.id) as { payload_json: string };
     expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: now + 72 * 3600 });
+  });
+
+  it('extendTrigger resumes a paused open-ended trigger without giving it a deadline (#3609)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume-open', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: null, actor: 'u',
+    }, clock);
+    expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBeNull();
+    pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
+
+    extendTrigger(db.raw, t.id, { until: now + 7 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
+
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+      status: 'active', next_fire_at: now, terminal_at: null,
+    });
+    expect(dueTriggers(db.raw, now, 10).map((row) => row.id)).toEqual([t.id]);
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: null });
   });
 
   it('extendTrigger on an active trigger leaves status and next_fire_at untouched (was_paused=false)', () => {
