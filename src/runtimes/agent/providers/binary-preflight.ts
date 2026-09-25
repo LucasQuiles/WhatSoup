@@ -357,6 +357,10 @@ export type ModelCatalogCaptureMode = 'refreshed' | 'cached' | 'legacy';
  *  discovery. Missing fields are UNKNOWN, never inferred. */
 export interface ModelCatalogMetadata {
   status?: string;
+  /** models.dev model family (e.g. `deepseek-flash`). A model whose id equals
+   *  its family is the provider's rolling alias for that line. Config-defined
+   *  models emit an empty string, which is treated as absent. */
+  family?: string;
   releaseDate?: string;
   textOutput?: boolean;
   toolCall?: boolean;
@@ -693,6 +697,9 @@ function parseVerboseModelCatalog(
     const normalized: ModelCatalogMetadata = {};
     if (isNonEmptyString(record['status'])) {
       normalized.status = record['status'].trim().toLowerCase();
+    }
+    if (isNonEmptyString(record['family'])) {
+      normalized.family = record['family'].trim();
     }
     const releaseDate = record['release_date'];
     if (typeof releaseDate === 'string' && modelCatalogReleaseDateSortKey(releaseDate) !== null) {
