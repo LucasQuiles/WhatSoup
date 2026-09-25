@@ -111,6 +111,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
@@ -208,6 +209,7 @@ import {
 } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
+import { OPERATOR_CANCELLATION_ATTEMPT_OUTCOME } from './turn-terminal.ts';
 import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import {
@@ -3975,7 +3977,10 @@ export class AgentRuntime implements Runtime {
       managerId: checkpoint.completed_manager_id,
       generation: checkpoint.completed_generation,
     });
-    return identity?.scope === expectedScope ? identity : null;
+    if (identity?.scope !== expectedScope) return null;
+    // #3295 S4: a well-formed identity naming an admission-rejected turn is not
+    // resumable; the caller quarantines it with reason 'invalid'.
+    return checkpointCompletedIdentityIsAdmissionRejected(this.db, checkpoint) ? null : identity;
   }
 
   private completedDeliveryIdentityAdmissionReason(
@@ -5221,8 +5226,13 @@ export class AgentRuntime implements Runtime {
               abortActiveQueue: () => this.getGlobalInterruptQueue()
                 ?.abortTurn({ preserveEvidence: true }),
               terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
-                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
-                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(
+                  perChatMapKey!,
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                )
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                ),
               retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
                 ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
                 : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
