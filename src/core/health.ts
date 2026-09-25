@@ -540,7 +540,7 @@ export interface HealthDegradationCauseRegistryEntry {
  * SAME condition pushes — /health reports degradation under two vocabularies
  * (ordered reasons supporting the aggregate status; typed causes that alerts
  * and flap detection key on) and several conditions reach the wire under
- * different names in the two, the clearest being runtimeTurnRecoveryIsDegraded:
+ * different names in the two, the clearest being blocking turn recovery (runtimeRecoveryDegradation):
  * `runtime.turn_finalization_debt` as a reason, `turn_recovery_degraded` as a
  * cause. `ensureStatusReasonFloor` (#3316) only guarantees a reason EXISTS;
  * this is the cross-reference that says which one. Live strings are never
@@ -589,7 +589,7 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   pending_polls_unreadable: { reasonTwins: ['pending_polls_unreadable'] },
   // agent runtime — each cause is keyed from a runtime detail counter whose
   // companion degradedReason reaches the reason vector as `runtime.<reason>`.
-  // runtimeTurnRecoveryIsDegraded pushes ONE reason for finalization debt AND
+  // Blocking turn recovery (runtimeRecoveryDegradation) pushes ONE reason for finalization debt AND
   // recovery debt; the cause vector splits the same predicate into two names.
   agent_recent_crashes: { reasonTwins: ['runtime.recent_crashes'] },
   agent_auto_compact_backoff: { reasonTwins: ['runtime.auto_compact_backoff'] },
