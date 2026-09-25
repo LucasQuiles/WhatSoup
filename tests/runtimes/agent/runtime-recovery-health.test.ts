@@ -203,6 +203,8 @@ describe('classifyRuntimeRecoveryHealth', () => {
   });
 
   it('derives blocking outstanding with orphan transfers when the store gauge is absent', () => {
+    // The typed projection always carries the gauge; this exercises the
+    // classifier's defensive fallback for an untyped caller that omits it.
     const base = input();
     const { turnRecoveryBlockingOutstanding: _omitted, ...recovery } = {
       ...base.recovery,
@@ -210,7 +212,10 @@ describe('classifyRuntimeRecoveryHealth', () => {
       turnRecoveryPending: 1,
       turnRecoveryOrphanTransfers: 1,
     };
-    const classification = classifyRuntimeRecoveryHealth({ ...base, recovery });
+    const classification = classifyRuntimeRecoveryHealth({
+      ...base,
+      recovery: recovery as unknown as RuntimeRecoveryHealthInput['recovery'],
+    });
     expect(classification.blockingOutstanding).toBe(2);
     expect(classification.blockingReasons).not.toContain('turn_recovery_unclassified');
   });
