@@ -368,7 +368,10 @@ export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerA
       at: now,
     });
     db.exec('COMMIT');
-  } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch { /* by design: ROLLBACK can fail when the transaction never opened; the original error is rethrown below */ }
+    throw err;
+  }
   return { resumed: true, status: 'active', next_fire_at: nextFireAt, terminal_at: terminalAt, paused_reason: pausedReason };
 }
 
