@@ -38,14 +38,49 @@ const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
  * unhandledRejection, which the global handler treats as fatal (#2698).
  * A failed cleanup must degrade that one turn, not the whole instance.
  */
+/**
+ * Host-admission hooks are optional on the session surface, mirroring the
+ * duck-typed helpers in runtime.ts: a session without them keeps the
+ * historical direct shutdown and has no post-terminal suspension.
+ */
+interface HostWorkAdmissionTerminalHooks {
+  shutdownAfterTerminalResult?: () => Promise<void>;
+  suspendHostWorkAdmissionAfterTerminal?: () => Promise<void>;
+}
+
+function terminalShutdown(session: SessionManager): Promise<void> | void {
+  const hooks = session as unknown as HostWorkAdmissionTerminalHooks;
+  return typeof hooks.shutdownAfterTerminalResult === 'function'
+    ? hooks.shutdownAfterTerminalResult.call(session)
+    : session.shutdown();
+}
+
+function suspendHostWorkAdmission(session: SessionManager): Promise<void> | void {
+  const hooks = session as unknown as HostWorkAdmissionTerminalHooks;
+  if (typeof hooks.suspendHostWorkAdmissionAfterTerminal !== 'function') return;
+  return hooks.suspendHostWorkAdmissionAfterTerminal.call(session);
+}
+
 function shutdownSessionQuietly(session: SessionManager | null | undefined): void {
   if (!session) return;
   try {
-    void Promise.resolve(session.shutdown()).catch((err: unknown) => {
+    void Promise.resolve(terminalShutdown(session)).catch((err: unknown) => {
       log.warn({ err }, 'session shutdown rejected after turn result — continuing');
     });
   } catch (err) {
     log.warn({ err }, 'session shutdown threw synchronously after turn result — continuing');
+  }
+}
+
+/** Publish the host-only post-terminal barrier without changing normal sessions. */
+function suspendHostWorkAdmissionQuietly(session: SessionManager | null | undefined): void {
+  if (!session) return;
+  try {
+    void Promise.resolve(suspendHostWorkAdmission(session)).catch((err: unknown) => {
+      log.warn({ err }, 'host-admission terminal suspension rejected');
+    });
+  } catch (err) {
+    log.warn({ err }, 'host-admission terminal suspension threw');
   }
 }
 
@@ -184,7 +219,7 @@ export interface RuntimeResultHandlerPort {
     inputTokens: number | undefined,
     consumeWhenNotOverThreshold?: boolean,
   ): void;
-  maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void;
+  maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean;
   flushRouteMarker(held: string | null, chatJid: string, actorJid: string | undefined): string | null;
   clearToolNames(toolScopeKey: string): void;
   recordTurnCostUsd(event: Extract<AgentEvent, { type: 'result' }>): void;
@@ -369,7 +404,10 @@ const terminalFailureDuringPoll = hasPendingPoll
   && event.text !== null
   && classifyProviderFailure(event.text) !== null;
 if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
-  if (host.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result')) return;
+  if (host.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result')) {
+    suspendHostWorkAdmissionQuietly(session);
+    return;
+  }
   if (responseRegistryDispatchEnabled() && dispatchProviderFailureResult(host, {
     queue,
     session,
@@ -380,6 +418,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
     cleanupArgs: { inboundSeq, conversationKey, mapKey },
     recordTurnFailure,
   }, extractUsageLimitResetTime)) {
+    suspendHostWorkAdmissionQuietly(session);
     return;
   }
   const providerFailureKind = classifyProviderFailure(event.text);
@@ -542,6 +581,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
       'warning',
     );
     queue.enqueueText(providerTransientRetryNotice());
+    suspendHostWorkAdmissionQuietly(session);
     return;
   }
   if (!wasSilentCompact) {
@@ -607,15 +647,39 @@ if (hadCompactBoundary && rowId !== null) {
   markSessionCompacted(host.db, rowId);
   host.recordAutoCompactSuccess(compactScopeKey);
 }
+const startCompactAfterTerminal = (): boolean => (wasSilentCompact || hadCompactBoundary
+  ? false
+  : host.maybeStartAutoCompact(session, mapKey));
+const suspendAfterTerminal = (compactStarted: boolean): Promise<void> | void => {
+  if (compactStarted || session === null) return;
+  return suspendHostWorkAdmission(session);
+};
 if (wasSilentCompact || hadCompactBoundary) {
   host.finishAutoCompact(compactScopeKey);
-} else if (runtimeContext) {
+}
+if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    () => host.maybeStartAutoCompact(session, mapKey),
+    () => suspendAfterTerminal(startCompactAfterTerminal()),
   );
 } else {
-  host.maybeStartAutoCompact(session, mapKey);
+  // Separate catches keep an auto-compact failure from being reported as a
+  // host-admission failure; a compact that threw leaves the session as it was.
+  let compactStarted: boolean | null = null;
+  try {
+    compactStarted = startCompactAfterTerminal();
+  } catch (err) {
+    log.warn({ err, mapKey }, 'auto-compact start threw after a terminal result with no runtime context');
+  }
+  if (compactStarted !== null) {
+    try {
+      void Promise.resolve(suspendAfterTerminal(compactStarted)).catch((err: unknown) => {
+        log.warn({ err, mapKey }, 'host-admission terminal suspension rejected');
+      });
+    } catch (err) {
+      log.warn({ err, mapKey }, 'host-admission terminal suspension threw');
+    }
+  }
 }
 {
   // Capture voice reply context before flush (SP4)
@@ -967,6 +1031,7 @@ const recordTurnFailure = (errorClass: TurnCapabilityErrorClass): void => {
 if (event.text) {
   if (host.enqueueAutoSwitchNotice(queue, event.text, host.shared ? host.currentTurnChatJid : host.activeChatJid, 'result')) {
     host.turnHadVisibleOutput = true;
+    suspendHostWorkAdmissionQuietly(host.session);
     return;
   }
   if (responseRegistryDispatchEnabled() && dispatchProviderFailureResult(host, {
@@ -982,6 +1047,7 @@ if (event.text) {
     },
     recordTurnFailure,
   }, extractUsageLimitResetTime)) {
+    suspendHostWorkAdmissionQuietly(host.session);
     return;
   }
   const providerFailureKind = classifyProviderFailure(event.text);
@@ -1139,6 +1205,7 @@ if (event.text) {
       'warning',
     );
     queue.enqueueText(providerTransientRetryNotice());
+    suspendHostWorkAdmissionQuietly(host.session);
     return;
   }
   if (!wasSilentCompact) {
@@ -1176,6 +1243,7 @@ if (event.text) {
       // (turnHadVisibleOutput true), the entry delivered output and must not be
       // advanced past — so no wasUnclassifiedError override here.
       host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session);
+      suspendHostWorkAdmissionQuietly(host.session);
       return;
     } else {
       const accepted = queue.enqueueResultText(
@@ -1252,15 +1320,39 @@ if (hadCompactBoundary && rowId !== null) {
   markSessionCompacted(host.db, rowId);
   host.recordAutoCompactSuccess(GLOBAL_TOOL_SCOPE_KEY);
 }
+const startGlobalCompactAfterTerminal = (): boolean => (wasSilentCompact || hadCompactBoundary
+  ? false
+  : host.maybeStartAutoCompact(host.session));
+const suspendAfterGlobalTerminal = (compactStarted: boolean): Promise<void> | void => {
+  if (compactStarted || host.session === null) return;
+  return suspendHostWorkAdmission(host.session);
+};
 if (wasSilentCompact || hadCompactBoundary) {
   host.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
-} else if (runtimeContext) {
+}
+if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    () => host.maybeStartAutoCompact(host.session),
+    () => suspendAfterGlobalTerminal(startGlobalCompactAfterTerminal()),
   );
 } else {
-  host.maybeStartAutoCompact(host.session);
+  // Separate catches keep an auto-compact failure from being reported as a
+  // host-admission failure; a compact that threw leaves the session as it was.
+  let compactStarted: boolean | null = null;
+  try {
+    compactStarted = startGlobalCompactAfterTerminal();
+  } catch (err) {
+    log.warn({ err }, 'auto-compact start threw after a global terminal result with no runtime context');
+  }
+  if (compactStarted !== null) {
+    try {
+      void Promise.resolve(suspendAfterGlobalTerminal(compactStarted)).catch((err: unknown) => {
+        log.warn({ err }, 'host-admission global terminal suspension rejected');
+      });
+    } catch (err) {
+      log.warn({ err }, 'host-admission global terminal suspension threw');
+    }
+  }
 }
 {
   // Capture voice reply context before flush (SP4)

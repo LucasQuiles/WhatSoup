@@ -164,11 +164,14 @@ function makeHarness(options: {
   const session = {
     clearTurnWatchdog: vi.fn(),
     completeProviderTurn: vi.fn(),
+    suspendHostWorkAdmissionAfterTerminal: vi.fn(async () => {}),
+    shutdownAfterTerminalResult: vi.fn(),
     shutdown: vi.fn(() => {
       timeline.push('shutdown');
     }),
     getDbRowId: vi.fn(() => null),
   };
+  (session.shutdownAfterTerminalResult as ReturnType<typeof vi.fn>).mockImplementation(() => session.shutdown());
   const notifyProviderFallbackActivated = vi.fn(() => {
     timeline.push('fallback-notice');
   });
@@ -218,6 +221,7 @@ function makeHarness(options: {
     recordTurnCapabilityFailure: vi.fn(),
     recordFallbackTurnOutcome: vi.fn(),
     maybeArmFallbackAfterEmptyPrimaryTurn: vi.fn(() => false),
+    maybeArmFallbackAfterUnknownTerminal: vi.fn(() => false),
     enqueueAutoSwitchNotice: vi.fn(() => false),
     withHandoffPrefix: vi.fn((_chatJid: string, text: string) => text),
     flushPendingHandoffNotice: vi.fn(),
@@ -321,6 +325,104 @@ describe('runtime result terminal provider notices', () => {
       });
     }
   }
+});
+
+describe('host-admission terminal suspension', () => {
+  it('runs the suspension barrier after a terminal result when no compact successor starts', async () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'done', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    const append = harness.host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction as ReturnType<typeof vi.fn>;
+    expect(append).toHaveBeenCalledOnce();
+    const action = append.mock.calls[0]?.[1] as (() => Promise<void>) | undefined;
+    await action?.();
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the child owned by an immediate compact successor', async () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    (harness.host.maybeStartAutoCompact as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'done', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    const append = harness.host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction as ReturnType<typeof vi.fn>;
+    const action = append.mock.calls[0]?.[1] as (() => Promise<void>) | undefined;
+    await action?.();
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+  });
+
+  it.each(['scoped', 'global'] as const)('publishes host suspension for a %s transient terminal before returning', async (path) => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+    driveResult(path, harness, 'Error: ECONNRESET — read ECONNRESET');
+
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).toHaveBeenCalledOnce();
+  });
+
+  it.each(['scoped', 'global'] as const)('uses the tracked terminal teardown for a %s policy terminal', async (path) => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+    driveResult(path, harness, 'Request blocked by policy.');
+
+    expect(harness.session.shutdownAfterTerminalResult).toHaveBeenCalledOnce();
+  });
+
+  it('publishes host suspension for a global unknown terminal before its early return', async () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+    driveResult('global', harness, 'terminal condition without a registered failure class');
+
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).toHaveBeenCalledOnce();
+  });
+});
+
+describe('auto-compact start failure without runtime turn context', () => {
+  it('logs the throw under its own message and skips host suspension', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as { runtimeTurnContext: ReturnType<typeof vi.fn> };
+    coordinator.runtimeTurnContext.mockReturnValue(null);
+    (harness.host.maybeStartAutoCompact as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('snapshot read failed');
+    });
+    logSink.length = 0;
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'done', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(logSink.map((entry) => entry.msg)).toContain('auto-compact start threw after a terminal result with no runtime context');
+    expect(logSink.map((entry) => entry.msg)).not.toContain('host-admission terminal suspension threw');
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+  });
 });
 
 describe('journaled result without runtime turn context (invariant-violation path)', () => {
