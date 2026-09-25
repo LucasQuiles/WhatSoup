@@ -40,6 +40,7 @@ const MAX_PROOF_BYTES = 64 * 1024 * 1024;
 const MAX_PROOFS = 16;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const SUPPORTED_PROOF_KINDS = ['live_reissue', 'sender_declined', 'owner_declined'] as const;
 const PROOF_ROLES = new Set(['context_witness', 'original_media', 'transcript', 'supporting']);
 
 interface FileReference {
@@ -178,8 +179,14 @@ export function parseClosureEvidenceManifest(value: unknown): ClosureEvidenceMan
   if (root.disposition !== 'addressed' && root.disposition !== 'declined') {
     throw invalid('disposition must be addressed or declined');
   }
-  if (!['live_reissue', 'sender_declined', 'owner_declined'].includes(root.proofKind as string)) {
-    throw invalid('proofKind is not supported');
+  const proofKind = bounded(root.proofKind, 'proofKind', 64);
+  if (!(SUPPORTED_PROOF_KINDS as readonly string[]).includes(proofKind)) {
+    // Fail closed on anything not implemented, including external-action
+    // outcomes and owner-session decisions: there is no verifier for them.
+    throw blocked(
+      'proof_kind_unsupported',
+      `proofKind ${proofKind} is not supported; supported: ${SUPPORTED_PROOF_KINDS.join(', ')}`,
+    );
   }
   if (!Array.isArray(root.proofs) || root.proofs.length > MAX_PROOFS) {
     throw invalid(`proofs must be an array of at most ${MAX_PROOFS}`);
@@ -198,7 +205,7 @@ export function parseClosureEvidenceManifest(value: unknown): ClosureEvidenceMan
       ),
     },
     disposition: root.disposition,
-    proofKind: root.proofKind as ClosureEvidenceManifest['proofKind'],
+    proofKind: proofKind as ClosureEvidenceManifest['proofKind'],
     actor: bounded(root.actor, 'actor', 256),
     authority: bounded(root.authority, 'authority', 512),
     observedAt: instant(root.observedAt, 'observedAt'),

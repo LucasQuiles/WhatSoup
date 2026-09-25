@@ -588,6 +588,16 @@ describe('close-continuity-gap apply: addressed', () => {
     expect(closures(fx)).toBe(0);
   });
 
+  it.each(['external_action', 'owner_session_declined', 'anything_else'])(
+    'rejects unsupported proof kind %s as Blocked with a named condition',
+    (proofKind) => {
+      const fx = buildFixture();
+      expectRejected(apply(fx, `kind-${proofKind}`, addressed(fx, 1, { proofKind })),
+        'blocked', 'proof_kind_unsupported');
+      expect(closures(fx)).toBe(0);
+    },
+  );
+
   it('rejects a live inbound whose message hash does not match', () => {
     const fx = buildFixture();
     const manifest = addressed(fx, 1, {

@@ -1899,6 +1899,21 @@ Both now and `decidedAt` must fall inside `[effectiveFrom, effectiveUntil)`. Eve
 stores the policy's exact SHA-256 and `policyVersion`. The repository ships no policy file; the owner
 places one per instance. The existing recorder actor and admin allowlists are not owner attestations.
 
+**Trust anchor, stated plainly.** The only trust anchor for `declined` is the protected placement of
+the policy file: a regular, non-symlink file, owned by the operating user, with no group or other
+permission bits. `approvedBy` is checked only against the same file's `ownerIdentityFingerprints`, so
+it is self-consistent, not independently attested. No signature or out-of-band approval record is
+verified. Whoever can write that file as the operating user can authorize declines. Without a policy
+file, `declined` is Blocked.
+
+**Not supported yet (fail closed).**
+- Any `proofKind` other than `live_reissue`, `sender_declined`, or `owner_declined` is Blocked with
+  `proof_kind_unsupported`. That includes external-action outcomes: `addressed` accepts only a live
+  reissue with a terminal delivery proof.
+- `owner_session_export` decisions are Blocked (`decision_source_unverified`): no verifier binds an
+  owner-session export to an actor and session.
+- One closure per gap. There is no supersession or correction path; a wrong closure cannot be edited.
+
 **Preview (default).** Preview reads only a static copy of the database, never the live file. Make the
 copy with SQLite's own snapshot, then preview against it:
 
@@ -1942,10 +1957,25 @@ contradicts the recorded gap or an existing closure); `1` usage or I/O error. Ou
 message text, JIDs, or media.
 
 **Schema 65 rollback.** Migration 65 adds only the new table. After it is recorded, a binary whose
-ceiling is 64 refuses the database as `future_schema` and will not write, so a binary-only rollback is
-unavailable. Keep the 65-aware release for containment or forward repair. Restoring a pre-migration
-backup is an owner decision that requires a proven zero-new-writes window. Never restore an old
-database over messages received after the upgrade.
+ceiling is 64 refuses the database and will not write, so **binary-only rollback is unavailable**.
+Keep the 65-aware release for containment or forward repair. Restoring a pre-migration backup is an
+owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
+an older backup**: messages received after the upgrade would be lost.
+
+The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
+exist; the harness creates its own database there:
+
+```bash
+git clone --no-checkout <repository> "$OLD" && git -C "$OLD" checkout --detach <previous release sha>
+ln -s "$PWD/node_modules" "$OLD/node_modules"   # only when both lockfiles are identical
+bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
+  --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
+```
+
+The old binary creates the database at 64, this release migrates it to 65, and the old binary reopens
+it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
+("Database schema migration 65 exceeds binary ceiling 64; refusing writes") and every file in the
+work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 

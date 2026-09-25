@@ -27,7 +27,13 @@
 - Schema migration 65 adds the append-only `continuity_gap_closures` table.
   After it is recorded, a schema-64 binary refuses the database as
   `future_schema`. A binary-only rollback is therefore unavailable; keep the
-  65-aware release for containment or forward repair.
+  65-aware release for containment or forward repair, and never overwrite a
+  newer database with an older backup. `scripts/schema-rollback-rehearsal.ts`
+  reproduces the refusal with two real checkouts on disposable files.
+- `declined` trusts only the protected placement of the per-instance policy
+  file; `approvedBy` is not independently attested. Unsupported proof kinds
+  (including external-action outcomes) are Blocked as `proof_kind_unsupported`,
+  and owner-session-export decisions are Blocked as `decision_source_unverified`.
 - The bump changes `schema_version` inside D5 capability attestation bindings.
   Previously recorded attestation digests stop admitting on this binary, and the
   AS-01 rehearsal must be re-run at rollout.

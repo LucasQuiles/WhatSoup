@@ -86,7 +86,7 @@ export function parseClosureAuthorityPolicy(value: unknown): ClosureAuthorityPol
   if (root.contract !== CLOSURE_AUTHORITY_CONTRACT) throw invalidPolicy('unsupported contract');
   const owners = root.ownerIdentityFingerprints;
   if (!Array.isArray(owners) || owners.length < 1 || owners.length > 16
-    || !owners.every((owner) => typeof owner === 'string' && HASH_PATTERN.test(owner))) {
+    || !owners.every((owner) => isNonEmptyString(owner) && HASH_PATTERN.test(owner))) {
     throw invalidPolicy('ownerIdentityFingerprints must list 1-16 SHA-256 digests');
   }
   const sources = root.acceptedDecisionSources;
