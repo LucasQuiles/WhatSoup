@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
+import { COMPLETED_IDENTITY_IS_ADMISSION_REJECTED_SQL } from './admission-rejected-checkpoint.ts';
 
 const log = createChildLogger('agent-session-db');
 
@@ -560,6 +561,13 @@ export function getResumableSessionForChat(
              AND admission.state = 'quarantined'
              AND checkpoint.conversation_key = candidate.workspace_key
              AND checkpoint.session_id = candidate.session_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM session_checkpoints AS checkpoint
+           WHERE checkpoint.conversation_key = candidate.workspace_key
+             AND checkpoint.session_id = candidate.session_id
+             AND ${COMPLETED_IDENTITY_IS_ADMISSION_REJECTED_SQL}
          )
          AND NOT EXISTS (
            SELECT 1

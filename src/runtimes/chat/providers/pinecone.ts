@@ -36,6 +36,9 @@ const logger = createChildLogger('pinecone-provider');
 const FAILURE_ALERT_THRESHOLD = 3;
 const RETRY_DELAY_MS = 500;
 const PROJECT_GUARD_TIMEOUT_MS = 30_000;
+// Startup awaits the readiness probe, so its index listing gets the same bound
+// as the project guard's listing (#2572).
+const READINESS_TIMEOUT_MS = PROJECT_GUARD_TIMEOUT_MS;
 const pineconeOperationSignal = new AsyncLocalStorage<AbortSignal | undefined>();
 
 function combinedSignal(
@@ -310,9 +313,28 @@ export async function getPineconeReadinessObservation(
     return readinessObservation('project_mismatch', targetIndex, 'project_guard_failed', false, 'local_guard');
   }
 
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
-    const client = new Pinecone({ apiKey });
-    const found = findPineconeIndex(await client.listIndexes(), targetIndex);
+    const client = new Pinecone({
+      apiKey,
+      fetchApi: (input, init) => {
+        const signal = combinedSignal(init?.signal, controller.signal);
+        return globalThis.fetch(input, { ...init, ...(signal ? { signal } : {}) });
+      },
+    });
+    // Named AbortError so the existing classifiers report it as a retryable
+    // timeout (network_error / timeout), the not-ready outcome startup handles.
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        const error = new DOMException('Pinecone readiness deadline exceeded', 'AbortError');
+        logger.warn({ operation: 'readiness', deadline_ms: READINESS_TIMEOUT_MS }, 'pinecone readiness deadline exceeded');
+        controller.abort(error);
+        reject(error);
+      }, READINESS_TIMEOUT_MS);
+      timeout.unref?.();
+    });
+    const found = findPineconeIndex(await Promise.race([client.listIndexes(), deadline]), targetIndex);
 
     if (found) {
       if (!matchesPineconeProjectGuard(found.host, guard)) {
@@ -366,6 +388,8 @@ export async function getPineconeReadinessObservation(
       evidenceCoverage: 'provider_error',
     });
     return readinessObservation(state, targetIndex, failure.code, failure.retryable, 'provider_error');
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
