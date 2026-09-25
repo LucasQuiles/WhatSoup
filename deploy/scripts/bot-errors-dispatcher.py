@@ -6048,6 +6048,11 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
     }
 
 
+# The storm-lifecycle fields flap_evaluate writes. flap_scan_outbox restores
+# exactly these when a storm send raises; the trip fields are left advanced.
+FLAP_STORM_LIFECYCLE_FIELDS = ("stormAt", "stormSeverity", "lastStormEmitAt", "cadenceStep")
+
+
 def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
     event currently in the outbox, keyed by incident_key, and emit consolidated
@@ -6102,9 +6107,25 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
                 continue
             entry = record_flap_trip(flap_state, key, now)
             changed = True
+            # #3479: flap_evaluate advances the storm lifecycle before the
+            # send. If the send itself raises, undo that advance so the emit
+            # watermark never records an alert that did not go out (and no
+            # member event is suppressed on its behalf). The trip recorded
+            # above still counts. A send that succeeded keeps its lifecycle
+            # even if the dispatch-log append after it fails; rolling back
+            # then would re-emit a delivered alert.
+            storm_before = {field: entry[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in entry}
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
-                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                try:
+                    send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                except Exception:
+                    for field in FLAP_STORM_LIFECYCLE_FIELDS:
+                        if field in storm_before:
+                            entry[field] = storm_before[field]
+                        else:
+                            entry.pop(field, None)
+                    raise
                 emitted += 1
                 append_dispatch_log(paths, {
                     "type": "flap_storm",
