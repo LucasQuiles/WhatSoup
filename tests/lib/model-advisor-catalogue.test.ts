@@ -226,4 +226,31 @@ describe('fetchAnthropicApiModelIdsWithStatus — managed API credential path', 
       .toStrictEqual({ status: 'no-key' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  // The adapter catalogue is resolved while a request waits, so it makes one
+  // attempt. Only the background currency monitor retries transient failures;
+  // its 2 s + 8 s backoff must never reach this path.
+  it('makes a single attempt on a transient 503 and never waits out a retry backoff', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+    vi.stubGlobal('fetch', fetchSpy);
+    const realSetTimeout = globalThis.setTimeout;
+    const backoffDelays: number[] = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      cb: (...a: unknown[]) => void,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms === 2_000 || ms === 8_000) {
+        backoffDelays.push(ms);
+        cb();
+        return { unref: () => {} } as unknown as NodeJS.Timeout;
+      }
+      return realSetTimeout(cb, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => 'managed-key-fixture' }))
+      .toStrictEqual({ status: 'failed', category: 'lookup-failed' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(backoffDelays).toEqual([]);
+  });
 });

@@ -25,6 +25,8 @@ import type { LaunchdPlistRenderOptions } from './lib/launchd-service-config.ts'
 import type { TurnRecoveryCatchupReconcileOptions } from './core/turn-recovery-catchup-config.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { setLoadedInstanceConfig } from './lib/instance-context.ts';
+import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
+import type { ConfiguredClientOutputPolicy } from './core/client-output-policy-contract.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,6 +139,7 @@ interface InstanceConfig {
   // validateServiceIdentityConfig (core/agent-config-validator.ts); CREATE
   // passes it through PASSTHROUGH_FIELDS (#3401).
   service?: LaunchdPlistRenderOptions & { expectedAccountDigest?: string };
+  clientOutputPolicies?: readonly ConfiguredClientOutputPolicy[];
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }
@@ -207,9 +210,22 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   const paths = instancePaths(name);
   pinProcessTmpDir(paths);
 
+  const parsedPolicies = parseClientOutputPoliciesForInstance(parsed);
+  if (!parsedPolicies.ok) {
+    throw new ConfigValidationError(
+      `${parsedPolicies.error.field} ${parsedPolicies.error.reason}`,
+    );
+  }
+
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>
-  const config = { ...parsed, paths } as InstanceConfig;
+  const config = {
+    ...parsed,
+    ...(Object.prototype.hasOwnProperty.call(parsed, 'clientOutputPolicies')
+      ? { clientOutputPolicies: parsedPolicies.policies }
+      : {}),
+    paths,
+  } as InstanceConfig;
 
   // 7. Publish the validated config: typed store is the in-process SSOT
   // (#2206); the env var stays for the remaining compat consumers.
