@@ -13,13 +13,20 @@ from __future__ import annotations
 import importlib.util
 import json
 import socket
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+
+from bot_errors_property_support import properties  # noqa: E402
 
 
 def _load(name: str, path: Path):
@@ -116,7 +123,27 @@ def test_public_only_200_is_rejected_as_public_fallback() -> None:
     assert verdict["service_status"] is None
 
 
-@pytest.mark.parametrize("raw", ["", "{not json", "<html>502</html>", "[1, 2]", "null", "\"healthy\""])
+def _not_a_json_object(raw: str) -> bool:
+    try:
+        return not isinstance(json.loads(raw), dict)
+    except ValueError:
+        return True
+
+
+# Any body that is not a JSON object — unparseable text, or valid JSON of another
+# type — must be malformed_json, never a verdict.
+@properties
+@given(raw=st.one_of(
+    st.text(max_size=64),
+    st.recursive(st.none() | st.booleans() | st.integers() | st.text(max_size=8),
+                 lambda inner: st.lists(inner, max_size=3), max_leaves=6).map(json.dumps),
+).filter(_not_a_json_object))
+@example("")
+@example("{not json")
+@example("<html>502</html>")
+@example("[1, 2]")
+@example("null")
+@example("\"healthy\"")
 def test_malformed_json_is_rejected(raw: str) -> None:
     verdict = _verify(200, raw)
     assert verdict["verified"] is False
@@ -303,20 +330,26 @@ def test_recent_401_log_line_only_decides_for_a_legacy_probe(monkeypatch, tmp_pa
 heartbeat = _load("bot_errors_heartbeat_watchdog_private_verification", _SCRIPTS / "bot-errors-heartbeat-watchdog.py")
 
 
-@pytest.mark.parametrize(
-    ("auth_class", "classification", "physical"),
-    [
-        ("serverside_logout_irreversible", "confirmed_device_removed", True),
-        ("auth_401_ambiguous_parked", "ambiguous_401_parked", True),
-        ("auth_401_uninspected_exit", "uninspected_401_conservative_exit", True),
-        ("auth_401_ambiguous_retrying", "ambiguous_401_reconnecting", False),
-    ],
-)
-def test_heartbeat_watchdog_names_each_401_class_and_flags_only_stopped_ones(auth_class, classification, physical):
-    body = _disconnected(auth_class, {"version": 1, "classification": classification})
-    reasons, _ctx = heartbeat.health_reasons_from_payload(body, "fab-bot")
-    assert f"auth_failure_class={auth_class}" in reasons
-    assert ("physical_intervention_required=terminal_auth_failure_class" in reasons) is physical
+# Mirrors AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION; the test below proves it
+# covers every 401 classification in the shared vocabulary.
+_AUTH_CLASS_BY_401_CLASSIFICATION = {
+    "confirmed_device_removed": "serverside_logout_irreversible",
+    "ambiguous_401_reconnecting": "auth_401_ambiguous_retrying",
+    "ambiguous_401_parked": "auth_401_ambiguous_parked",
+    "uninspected_401_conservative_exit": "auth_401_uninspected_exit",
+}
+
+
+def test_heartbeat_watchdog_names_each_401_class_and_flags_only_stopped_ones() -> None:
+    assert set(_AUTH_CLASS_BY_401_CLASSIFICATION) == health_reader.DISCONNECT_CLASSIFICATIONS - {"other"}
+    for classification, auth_class in _AUTH_CLASS_BY_401_CLASSIFICATION.items():
+        body = _disconnected(auth_class, {"version": 1, "classification": classification})
+        reasons, _ctx = heartbeat.health_reasons_from_payload(body, "fab-bot")
+        assert f"auth_failure_class={auth_class}" in reasons
+        # Only the transport-stopped classes (the registry terminal set) need a human.
+        stopped = auth_class in heartbeat.TERMINAL_AUTH_FAILURE_CLASSES
+        assert stopped is (classification != "ambiguous_401_reconnecting")
+        assert ("physical_intervention_required=terminal_auth_failure_class" in reasons) is stopped
 
 
 def _bond_verdicts(body: dict) -> list:
