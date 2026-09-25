@@ -202,12 +202,28 @@ async function probeCliModel(
       work: { kind: 'probe', scopeHash: shortHash(`${provider}\0${model ?? ''}`) },
     });
   }
+  const terminalizeExecutionLease = (): void => {
+    executionLease?.setPhase('terminalizing');
+    executionLease?.markProgress();
+  };
+  const abortListener = (): void => terminalizeExecutionLease();
+  if (executionLease && signal) {
+    signal.addEventListener('abort', abortListener, { once: true });
+    if (signal.aborted) abortListener();
+  }
   const releaseExecutionLease = (): void => {
+    if (signal) signal.removeEventListener('abort', abortListener);
+    executionLease?.setPhase('cleanup');
+    executionLease?.markProgress();
     executionLease?.release();
     executionLease = null;
   };
   let result: BinaryAuthStatusResult;
   try {
+    if (!signal?.aborted) {
+      executionLease?.setPhase('executing');
+      executionLease?.markProgress();
+    }
     result = await probe(
       binary,
       args,
@@ -216,13 +232,20 @@ async function probeCliModel(
         ...(deps.cwd ? { cwd: deps.cwd } : {}),
         timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS,
         ...(signal ? { signal } : {}),
-        ...(executionLease ? { onProcessClosed: releaseExecutionLease } : {}),
+        ...(executionLease ? {
+          onProcessClosed: () => {
+            terminalizeExecutionLease();
+            releaseExecutionLease();
+          },
+        } : {}),
       },
     );
     // Injected test/probe adapters predate onProcessClosed and may not invoke
     // it. Their returned promise is their complete process-lifetime contract.
+    terminalizeExecutionLease();
     if (deps.probeBinaryCommand || deps.probeBinaryAuthStatus) releaseExecutionLease();
   } catch (err) {
+    terminalizeExecutionLease();
     releaseExecutionLease();
     throw err;
   }
