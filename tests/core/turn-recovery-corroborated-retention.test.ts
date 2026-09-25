@@ -112,6 +112,12 @@ describe('corroborated turn recovery retention', () => {
     });
     expect(durability.getRecoverableTurnRecoveryJobs(OWNER).jobs).toEqual([]);
     expect(durability.getOutstandingTurnRecoveryJobsForSupervisor().jobs).toEqual([]);
+    // The three-state admission probe shares the outstanding-for-scope
+    // subquery, so corroborated work must not block admission there either.
+    expect(durability.getTurnRecoveryAdmissionStateForScope(
+      'per_chat',
+      conversationKey,
+    )).toBe('clear');
     expect(durability.hasOutstandingTurnRecoveryForScope(
       'per_chat',
       conversationKey,
