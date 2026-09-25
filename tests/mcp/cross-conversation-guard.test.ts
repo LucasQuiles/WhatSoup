@@ -174,9 +174,12 @@ describe('ToolRegistry cross-conversation guard wiring (3457)', () => {
     expect(mockError).toHaveBeenCalledTimes(1);
     const [fields, message] = mockError.mock.calls[0]!;
     expect(message).toMatch(/binding and its session mirror disagree/);
+    // Issue 3585: the registry adjudicates the target it injects from the
+    // binding before the handler runs, so the divergence is caught at the
+    // pre-handler point and the handler's own callback is never reached.
     expect(fields).toMatchObject({
       tool: 'self_resolving_send',
-      point: 'post-resolution',
+      point: 'pre-handler',
       branch: 'binding-mirror-divergence',
       bindingConversationKey: ALICE_KEY,
       mirrorConversationKey: BOB_KEY,
