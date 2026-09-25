@@ -541,9 +541,11 @@ describe('runtime turn chronology integration', () => {
       const { state } = makeRuntimeState<RuntimeState & {
         sessionEventToolScopes: WeakMap<object, string>;
         perChatRuntimeTurnCompletions: Map<string, { promise: Promise<void>; resolve(): void }>;
+        perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
         recreatePerChatSessionForFallback(chatJid: string, mapKey: string, actorJid?: string): void;
         runtimeTurnCoordinator: RuntimeState['runtimeTurnCoordinator'] & {
           beginRuntimeTurnContinuation(context: RuntimeTurnContext): boolean;
+          createRuntimeTurnCompletion(context: RuntimeTurnContext): { promise: Promise<void>; resolve(): void };
         };
       }>(db, { sessionScope: 'per_chat' });
       const mapKey = '15550190047';
@@ -561,6 +563,12 @@ describe('runtime turn chronology integration', () => {
       state.chatQueues.set(mapKey, queueStub(captured.identity.deliveryJid));
       state.sessionEventToolScopes.set(oldSession, `${mapKey}#primary`);
       state.perChatRuntimeTurnContexts.set(mapKey, [captured]);
+      // The primary admission already registered a scope ref and a completion for
+      // this turn; the fallback failure path and the original awaiter hold them.
+      const originalScopeRef = { value: mapKey };
+      state.perChatRuntimeTurnScopeRefs.set(captured.identity.logicalTurnId, originalScopeRef);
+      const originalCompletion = state.runtimeTurnCoordinator.createRuntimeTurnCompletion(captured);
+      state.perChatRuntimeTurnCompletions.set(mapKey, originalCompletion);
       expect(state.runtimeTurnCoordinator.beginRuntimeTurnContinuation(captured)).toBe(true);
       state.recreatePerChatSessionForFallback = vi.fn(() => {
         state.chatSessions.set(mapKey, replacementSession);
@@ -604,8 +612,13 @@ describe('runtime turn chronology integration', () => {
       expect(state.perChatRuntimeTurnContexts.get(mapKey)).toHaveLength(1);
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId)
         .toBe(captured.identity.logicalTurnId);
+      // Re-binding keeps the objects other holders already reference: the scope ref
+      // the fallback failure callback captured (a later rekey must reach it) and
+      // the completion the original caller awaits.
+      expect(state.perChatRuntimeTurnScopeRefs.get(captured.identity.logicalTurnId)).toBe(originalScopeRef);
+      expect(state.perChatRuntimeTurnCompletions.get(mapKey)).toBe(originalCompletion);
 
-      state.perChatRuntimeTurnCompletions.get(mapKey)?.resolve();
+      originalCompletion.resolve();
       expect(await settled).toBeNull();
     } finally {
       db.close();
@@ -661,6 +674,55 @@ describe('runtime turn chronology integration', () => {
       })).rejects.toThrow(PerChatTurnFifoOwnerConflictError);
       expect(replacementSession.sendTurn).not.toHaveBeenCalled();
       expect(state.perChatRuntimeTurnContexts.get(mapKey)).toEqual([otherHead]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still refuses when the SAME turn heads the FIFO but was never marked a continuation', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState & {
+        sessionEventToolScopes: WeakMap<object, string>;
+        recreatePerChatSessionForFallback(chatJid: string, mapKey: string, actorJid?: string): void;
+      }>(db, { sessionScope: 'per_chat' });
+      const mapKey = '15550190049';
+      const captured = context('per_chat', mapKey, 92, 'turn-same-id-not-continuation');
+      const oldSession = sessionStub();
+      const replacementSession = sessionStub();
+      state.sessionOwnership.claim(mapKey, state.managerIdFor(oldSession));
+      state.chatSessions.set(mapKey, oldSession);
+      state.chatQueues.set(mapKey, queueStub(captured.identity.deliveryJid));
+      state.sessionEventToolScopes.set(oldSession, `${mapKey}#primary`);
+      state.perChatRuntimeTurnContexts.set(mapKey, [captured]);
+      state.recreatePerChatSessionForFallback = vi.fn(() => {
+        state.chatSessions.set(mapKey, replacementSession);
+        state.sessionOwnership.claim(mapKey, state.managerIdFor(replacementSession));
+        state.sessionEventToolScopes.set(replacementSession, `${mapKey}#fallback`);
+      });
+
+      await expect((
+        state.runtimeTurnCoordinator as unknown as {
+          replayTurnOnFallback(args: {
+            chatJid: string;
+            mapKey: string;
+            replayText: string;
+            actorJid: string;
+            oldSession: ReturnType<typeof sessionStub>;
+            runtimeContext: RuntimeTurnContext;
+          }): Promise<void>;
+        }
+      ).replayTurnOnFallback({
+        chatJid: captured.identity.deliveryJid,
+        mapKey,
+        replayText: captured.replay.text,
+        actorJid: captured.replay.senderJid,
+        oldSession,
+        runtimeContext: captured,
+      })).rejects.toThrow(PerChatTurnFifoOwnerConflictError);
+      expect(replacementSession.sendTurn).not.toHaveBeenCalled();
+      expect(state.perChatRuntimeTurnContexts.get(mapKey)).toEqual([captured]);
     } finally {
       db.close();
     }

@@ -6396,10 +6396,17 @@ export class AgentRuntime implements Runtime {
       contexts.push(context);
     }
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
-    this.perChatRuntimeTurnScopeRefs.set(
-      context.identity.logicalTurnId,
-      scopeRef ?? { value: mapKey },
-    );
+    // A held continuation keeps its registered scope ref: the fallback failure
+    // path captured that object, so a later rekey must keep reaching it.
+    const registeredScopeRef = heldContinuation
+      ? this.perChatRuntimeTurnScopeRefs.get(context.identity.logicalTurnId)
+      : undefined;
+    if (registeredScopeRef === undefined) {
+      this.perChatRuntimeTurnScopeRefs.set(
+        context.identity.logicalTurnId,
+        scopeRef ?? { value: mapKey },
+      );
+    }
     const existing = heldContinuation ? this.perChatRuntimeTurnCompletions.get(mapKey) : undefined;
     if (existing) return existing;
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
