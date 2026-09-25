@@ -17,7 +17,9 @@
   ],
   "authFailureClasses": [
     "pairing_required",
-    "serverside_logout_irreversible"
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit"
   ],
   "failureDomains": {
     "agentFailureClasses": {

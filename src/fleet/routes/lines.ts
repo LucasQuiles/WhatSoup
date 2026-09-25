@@ -14,6 +14,7 @@ import type { FleetDbReader } from '../db-reader.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { hasExplicitAuthLossSignal } from '../auth-loss-signals.ts';
 import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
+import { readHealthDisconnectDecision } from '../../lib/disconnect-classification.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
@@ -213,8 +214,14 @@ function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedS
     : isNonEmptyString(accountJid)
       ? 'present'
       : 'unknown';
-  const explicitAuthLossSignal =
-    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
+  const explicitAuthLossSignal = hasExplicitAuthLossSignal({
+    lastStatusCode,
+    lastDisconnectReason,
+    authFailureClass,
+    disconnectDecision: readHealthDisconnectDecision(
+      dig(health, 'whatsapp', 'connection') ?? dig(health, 'connection'),
+    ),
+  });
   const evidence = [
     linkedEvidenceField('link_source', 'health'),
     linkedEvidenceField('health_status', healthStatus),

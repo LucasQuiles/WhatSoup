@@ -38,7 +38,13 @@ from lib.target_provenance import (
     safe_release_divergence,
     safe_target_provenance,
 )
-from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
+from lib.health_reader import (
+    classify_projection,
+    disconnect_decision_reading,
+    health_body_is_disclosed,
+    instance_health_token,
+    is_public_envelope,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -140,7 +146,16 @@ SERVICE_ENV_MAP = {
     "whatsoup-health-token": "WHATSOUP_HEALTH_TOKEN",
     "whatsoup_health": "WHATSOUP_HEALTH_TOKEN",
 }
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json. The
+# auth_401_* classes are logged out without confirmed server removal; they
+# still need a human, but evidence carries the class so nobody reads them as a
+# confirmed device_removed.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 LOGGED_OUT_STATUS_CODE = 401
 LOGGED_OUT_REASON_KEY = "loggedout"
 
@@ -265,6 +280,9 @@ HEALTH_PROBE_TIMEOUT_SECONDS = positive_env_float("BOT_ERRORS_HEALTH_PROBE_TIMEO
 PRIMARY_PHONE_EXPIRY_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_EXPIRY_DAYS", 14)
 PRIMARY_PHONE_WARN_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_WARN_DAYS", 10)
 PRIMARY_PHONE_FAIL_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_FAIL_DAYS", 12)
+# Clock-skew allowance for a verification timestamp; the recorder refuses and
+# the evaluator rejects anything later than now plus this.
+PRIMARY_PHONE_FUTURE_SKEW_SECONDS = 300
 
 
 def kernel_release() -> str:
@@ -3581,7 +3599,18 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             append_evidence_field(details, "credential_lifecycle_last_event_at", latest_event.get("at"))
             append_evidence_field(details, "credential_lifecycle_last_event_status_code", latest_event.get("statusCode"))
             append_evidence_field(details, "credential_lifecycle_last_event_reason", latest_event.get("reason"))
-    if (
+    # A body carrying the transport's disconnect decision is judged by the
+    # auth_failure_class above; the raw 401 / loggedOut fallback applies only
+    # to a legacy body without it (an ambiguous 401 inside its bounded retry
+    # also reports last_status_code=401 and is not a physical intervention).
+    decision_kind, decision_classification = disconnect_decision_reading(connection)
+    if decision_kind != "absent":
+        append_evidence_field(
+            details,
+            "disconnect_classification",
+            decision_classification if decision_kind == "classified" else decision_kind,
+        )
+    if decision_kind == "absent" and (
         is_logged_out_status_code(connection.get("last_status_code"))
         or is_logged_out_disconnect_reason(connection.get("last_disconnect_reason"))
     ):
@@ -7766,6 +7795,11 @@ def auth_failure_log_inventory(name: str, expectation: str, health_probe: str | 
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=device_removed log={path}"]
         if text_has_terminal_auth_failure_class(text):
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=terminal_auth_failure_class log={path}"]
+        # A probe whose body carried the transport's disconnect decision is
+        # authoritative: a 401 log line then belongs to an ambiguous bounded
+        # retry as often as to a real logout, so only legacy probes use it.
+        if "disconnect_classification=" in health_probe:
+            continue
         if '"statusCode":401' in text or '"reason":"loggedOut"' in text:
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=loggedOut log={path}"]
     return []
@@ -7855,7 +7889,7 @@ def write_primary_phone_verification(
     verified_epoch = parse_iso_epoch(verified_at)
     if verified_epoch is None:
         raise ValueError("verified-at must be an ISO timestamp or YYYY-MM-DD")
-    if verified_epoch > current_epoch() + 300:
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
         raise ValueError("verified-at cannot be more than 5 minutes in the future")
 
     path = primary_phone_verifications_path()
@@ -7962,6 +7996,14 @@ def primary_phone_verification_inventory(profile: dict[str, Any], item: dict[str
         prefix = "FAIL " if required else "WARN "
         return [
             f"{prefix}{line_base} verification_invalid "
+            f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
+        ]
+
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
+        # Without this, a future timestamp clamps to age 0 below and reads "fresh".
+        prefix = "FAIL " if required else "WARN "
+        return [
+            f"{prefix}{line_base} verification_invalid reason=future_dated "
             f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
         ]
 
