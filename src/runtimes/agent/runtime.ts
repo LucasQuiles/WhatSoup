@@ -111,6 +111,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
   ensureFallbackStateSchema,
@@ -3988,7 +3989,10 @@ export class AgentRuntime implements Runtime {
       managerId: checkpoint.completed_manager_id,
       generation: checkpoint.completed_generation,
     });
-    return identity?.scope === expectedScope ? identity : null;
+    if (identity?.scope !== expectedScope) return null;
+    // #3295 S4: a well-formed identity naming an admission-rejected turn is not
+    // resumable; the caller quarantines it with reason 'invalid'.
+    return checkpointCompletedIdentityIsAdmissionRejected(this.db, checkpoint) ? null : identity;
   }
 
   private completedDeliveryIdentityAdmissionReason(
