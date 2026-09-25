@@ -7,7 +7,7 @@ import { writeBeadEvent } from './events.ts';
 import type { TriggerKind, TriggerRow, TriggerStatus, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
-import { queryAll } from '../../lib/db-query.ts';
+import { queryAll, queryOne } from '../../lib/db-query.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -305,12 +305,14 @@ export interface ResumeTriggerResult {
 }
 
 function latestPauseReason(db: DatabaseSync, beadId: number, triggerId: number): string | null {
-  const row = db.prepare(
+  const row = queryOne<{ reason: string | null }>(
+    db,
     `SELECT json_extract(payload_json, '$.reason') AS reason FROM bead_events
      WHERE bead_id = ? AND event_type = 'trigger_paused'
        AND json_extract(payload_json, '$.trigger_id') = ?
      ORDER BY id DESC LIMIT 1`,
-  ).get(beadId, triggerId) as { reason: string | null } | undefined;
+    beadId, triggerId,
+  );
   return typeof row?.reason === 'string' ? row.reason : null;
 }
 
@@ -324,7 +326,7 @@ function latestPauseReason(db: DatabaseSync, beadId: number, triggerId: number):
  */
 export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerArgs, clock: Clock = systemClock): ResumeTriggerResult {
   const now = clock.nowUnixSec();
-  const t = db.prepare(`SELECT * FROM bead_triggers WHERE id = ?`).get(id) as unknown as TriggerRow | undefined;
+  const t = queryOne<TriggerRow>(db, `SELECT * FROM bead_triggers WHERE id = ?`, id);
   if (!t) throw new Error(`trigger ${id} not found`);
   if (t.status === 'active') {
     return { resumed: false, status: 'active', next_fire_at: t.next_fire_at, terminal_at: t.terminal_at, paused_reason: null };

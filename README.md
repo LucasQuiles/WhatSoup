@@ -163,7 +163,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, reply-guarantee, JID handling
   transport/      Baileys v7 (default) — auth, reconnection, parsing, event routing; optional Twilio SMS transport (webhook + voicemail)
-  mcp/            Tool registry (166 documented tools; 163 always registered + 3 conditional), Unix socket server, 21 tool modules
+  mcp/            Tool registry (169 documented tools; 166 always registered + 3 conditional), Unix socket server, 21 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
