@@ -732,6 +732,76 @@ The registry is both deployer-managed and SHA-pinned in
 `deploy/bot-errors-runtime-manifest.json`; changing the checker contract without
 shipping the matching registry fails the local manifest and deployer guards.
 
+## OPERATIONAL — Owner critical route
+
+The BOT ERRORS group is written by the owner's own line, so the owner's phone
+does not notify for it. The owner critical route copies selected critical
+alerts to the owner's direct chat, sent from a **different** instance so the
+phone notifies, plus an e-mail through the existing fallback script. Code:
+`deploy/scripts/lib/owner_route.py`. After a group send is archived,
+`route_to_owner()` only queues the copy; `drain_owner_route_queue()` sends the
+queued copies once the cycle has sent every group alert and recorded
+`cycleCompletedAt`, so an owner copy never delays a group send. The drain
+shares one time budget, enforced end to end: the socket call receives an
+absolute deadline, and every blocking step, the handshake and each read
+included, gets only the time left. The budget therefore bounds how late the
+next cycle can start. The queue holds at most 20 copies; a cycle that fails
+after its sends skips the drain, and a copy arriving at a full queue is
+logged as `skippedQueueFull` and dropped (its group copy exists).
+
+**Inert by default.** Nothing is read, parsed or logged unless both
+`BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
+invalid value in another owner-route variable has no effect while the route is
+off. Any failure is caught and logged as `owner_route_error`; it never fails or
+re-sends the group alert.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `BOT_ERRORS_OWNER_ROUTE_JID` | Owner's direct-chat JID (the send target) | unset: route off |
+| `BOT_ERRORS_OWNER_ROUTE_RESOLVED_JID` | Alias the send receipt reports, for example the `@lid` form | the JID |
+| `BOT_ERRORS_OWNER_ROUTE_SOCKET` | MCP socket of the sending instance (not the group writer) | unset: route off |
+| `BOT_ERRORS_OWNER_ROUTE_SOURCES` | Comma-separated `fnmatch` patterns of routed sources | see `DEFAULT_SOURCES` |
+| `BOT_ERRORS_OWNER_ROUTE_EMAIL` | Also send the e-mail copy | `1` |
+| `BOT_ERRORS_OWNER_ROUTE_MIN_INTERVAL_SECONDS` | At most one owner message per incident key per interval | `21600` (6 h) |
+| `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS` | Socket send timeout, clamped to the remaining budget | `8` |
+| `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` | Total time one cycle may spend on owner copies; the e-mail timeout (20 s) is clamped to what remains | `30` |
+
+**Policy.** A copy is sent only for a critical incident alert (never a clear)
+whose source matches a pattern, on first open or as an escalated still-open
+reminder; plain still-open renotifies are skipped. The per-key interval is
+recorded before the send, so a crash yields a missed copy, never a duplicate.
+The group copy exists either way. When deduplication cannot be established the
+copy is skipped rather than risked: an existing state file that cannot be read
+or parsed, or that holds any entry without a positive integer `lastAt`, the
+state lock (`owner-route.lock`) held by another caller, or a
+spent budget. A budget skip records no interval, so the next occurrence is sent.
+State entries are kept for at least the configured interval (seven days or the
+interval, whichever is longer). Stale-incident digests are info severity and
+are never routed. The default sources exclude the
+`…_primary_model_usable_unverified` fleet probe, which flaps every 15 minutes.
+
+**Log records.** `owner_route_sent` carries booleans only (`whatsappAccepted`,
+`emailEnabled`, `emailAccepted`, `emailSkippedBudget`); `owner_route_skipped`
+carries one of `skippedMinInterval`, `stateUnreadable`, `skippedLocked`,
+`skippedBudget` or `skippedQueueFull`. The controller log keeps a string only when it is on its fixed
+allowlist, so a free-text status would be dropped. A persistent
+`stateUnreadable` means every copy is being skipped: inspect or remove
+`owner-route-state.json` in the dispatcher state root.
+
+**Enable** with a systemd drop-in for the dispatcher (placeholder values):
+
+```ini
+# ~/.config/systemd/user/bot-errors-dispatcher.service.d/owner-route.conf
+[Service]
+Environment=BOT_ERRORS_OWNER_ROUTE_JID=<owner-number>@s.whatsapp.net
+Environment=BOT_ERRORS_OWNER_ROUTE_RESOLVED_JID=<owner-lid>@lid
+Environment=BOT_ERRORS_OWNER_ROUTE_SOCKET=<sending-instance-mcp-socket>
+```
+
+Then `systemctl --user daemon-reload` and restart the dispatcher. Verify with
+the `owner_route_selftest` source, which is routed by default. **Disable** by
+removing the drop-in, reloading and restarting; the code stays inert.
+
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 
 The dispatcher sends to the chat transport before it can record that the send
