@@ -11,6 +11,7 @@ import { userInfo } from 'node:os';
 import {
   isHostWorkAdmissionEnabled,
   HostWorkAdmissionCleanupError,
+  HostWorkAdmissionError,
   spawnHostWorkAdmitted,
 } from '../../../src/runtimes/agent/host-work-admission.ts';
 
@@ -25,11 +26,17 @@ function makeQueuedChild() {
 }
 
 describe('host work admission', () => {
+  // The helper path is Linux-only; pin Linux per test so results do not
+  // depend on the host OS, and restore the real descriptor afterwards.
+  const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(process, 'platform', { ...realPlatform, value: 'linux' });
   });
 
   afterEach(() => {
+    Object.defineProperty(process, 'platform', realPlatform);
     vi.unstubAllEnvs();
   });
 
@@ -109,6 +116,23 @@ describe('host work admission', () => {
     child.stdio[3]!.emit('data', Buffer.from('{"state":"admitted","unit":"scope-1"}\n'));
     child.stdio[3]!.emit('end');
     await expect(admitted).resolves.toBe(child);
+  });
+
+  it('rejects with the typed error instead of building a Linux runtime path on another platform', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...original, value: 'darwin' });
+    try {
+      (statSync as ReturnType<typeof vi.fn>).mockReturnValue({ isFile: () => true, mode: 0o755 });
+      (userInfo as ReturnType<typeof vi.fn>).mockReturnValue({ uid: 1000 });
+      vi.stubEnv('WHATSOUP_WORK_ADMISSION_HELPER', '/host/bin/work-admission');
+
+      await expect(spawnHostWorkAdmitted({
+        binary: '/verified/provider', args: [], cwd: '/work', env: {}, onAbort: vi.fn(async () => {}),
+      })).rejects.toBeInstanceOf(HostWorkAdmissionError);
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', original);
+    }
   });
 
   it('fails closed when the configured helper is missing, relative, or not executable', async () => {

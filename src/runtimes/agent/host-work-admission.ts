@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, posix } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 
@@ -56,10 +56,13 @@ function hostWorkAdmissionHelper(): string | null {
 }
 
 function hostRuntimeEnvironment(): { runtimeDir: string; sessionBus: string } | null {
+  // The per-user runtime directory is Linux-only. The opt-in predicate already
+  // requires Linux; this keeps any other caller from building the path at all.
+  if (process.platform !== 'linux') return null;
   try {
     const uid = userInfo().uid;
     if (typeof uid !== 'number' || !Number.isSafeInteger(uid) || uid < 0) return null;
-    const runtimeDir = `/run/user/${uid}`;
+    const runtimeDir = posix.join('/', 'run', 'user', String(uid));
     return { runtimeDir, sessionBus: `unix:path=${runtimeDir}/bus` };
   } catch {
     return null;
