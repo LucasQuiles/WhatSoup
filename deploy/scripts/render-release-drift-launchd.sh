@@ -8,6 +8,7 @@ repo_root="${WHATSOUP_REPO_ROOT:-$default_repo_root}"
 home_dir="${HOME:?}"
 instance=""
 output=""
+preserve_from=""
 target_url="${WHATSOUP_RELEASE_TARGET_URL:-https://github.com/LucasQuiles/WhatSoup.git}"
 target_ref="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
 max_log_bytes="${WHATSOUP_RELEASE_DRIFT_MAX_LOG_BYTES:-5242880}"
@@ -25,6 +26,9 @@ Options:
   --repo-root <path>   Absolute WhatSoup repo path (default: script repo)
   --home <path>        Absolute home directory (default: $HOME)
   --output <path>      Absolute non-live path to write instead of stdout
+  --preserve-from <path>  Installed plist whose CLAUDE_CONFIG_DIR is kept when
+                       the instance config sets none (pass the live plist when
+                       re-rendering so a hand-added key is not stripped)
   --target-url <url>   Explicit HTTPS/SSH Git remote used for currency observation
   --target-ref <ref>   Full refs/heads/... target (default: refs/heads/main)
   --max-log-bytes <n>  Rotation cap per log file in bytes (default: 5242880)
@@ -63,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output)
       output="$(take_value "$1" "${2:-}")"
+      shift 2
+      ;;
+    --preserve-from)
+      preserve_from="$(take_value "$1" "${2:-}")"
       shift 2
       ;;
     --target-url)
@@ -159,6 +167,19 @@ rendered="$(
 
 if grep -Eq '__WHATSOUP_REPO_ROOT__|__HOME__|__INSTANCE__|__TARGET_URL__|__TARGET_REF__|__MAX_LOG_BYTES__|__KEEP_ROTATED_LOGS__' <<<"$rendered"; then
   fail "rendered plist still contains unresolved placeholders"
+fi
+
+# Carry the instance's service.claudeConfigDir (if any) so the job's provider
+# CLI uses the bot's credential store; with none configured, --preserve-from
+# keeps the installed plist's value. The tool runs from THIS script's repo; no
+# value anywhere leaves the render byte-identical.
+config_env_args=(--home "$home_dir" --instance "$instance")
+if [[ -n "$preserve_from" ]]; then
+  config_env_args+=(--preserve-from "$preserve_from")
+fi
+if ! rendered="$(printf '%s\n' "$rendered" | bash "$default_repo_root/scripts/run-with-pinned-node.sh" \
+  "$default_repo_root/scripts/launchd-claude-config-env.ts" "${config_env_args[@]}")"; then
+  fail "cannot resolve service.claudeConfigDir for instance $instance"
 fi
 
 if [[ -n "$output" ]]; then

@@ -478,6 +478,7 @@ into place during deployment.
 | `name` | string | yes | — | Instance name. Must match the directory name. Validated by the loader. |
 | `type` | string | yes | — | Instance type: `chat`, `agent`, or `passive`. |
 | `adminPhones` | string[] | yes | — | Non-empty array of configured administrator identities. Canonical form depends on `transport`: phone digits for Baileys/Twilio, lowercase Signal UUID or E.164 wire identity for Signal, and AppleID email or E.164 wire identity for iMessage. All elements must be non-empty strings. |
+| `contactRecallScopes` | object | no | `{}` | Memory recall scope per direct-chat contact: phone number (any spelling; compared as E.164 digits) → `chat` or `instance`. A contact who is not an `adminPhones` identity recalls only that direct chat's memories plus untagged records unless set to `instance`, which gives the whole instance (this chat, then other chats, then untagged). Unset means `chat`. Only a sender on an authenticated transport is matched, and other values are dropped. `adminPhones` identities and the `q` instance always get the whole instance. See [Memory recall scope](#memory-recall-scope). |
 | `internalPeerJids` | string[] | no | `[]` | Exact authenticated direct-chat JIDs whose outbound messages are internal operator coordination. Ordinary paths and operator vocabulary are preserved, while secrets and credential paths remain masked. This does not grant inbound admin access. Group JIDs, duplicate entries, whitespace, and spoofable transports such as `@sms` are rejected. |
 | `accessMode` | string | yes | — | Who can interact with the bot. See [Access Modes](#access-modes). |
 | `systemPrompt` | string | see rules | — | LLM system prompt. **Required** for `chat`. **Forbidden** for `passive`. Optional for `agent` (falls back to `DEFAULT_SYSTEM_PROMPT` in `config.ts`). |
@@ -497,6 +498,7 @@ into place during deployment.
 | `siblingPhones` | string[] | no | `[]` | Phone numbers of other WhatSoup instances that share groups with this instance. Messages from siblings are silently ignored in groups to prevent infinite echo loops between co-located bots. Normalized to E.164 on load. |
 | `chatAliases` | object | no | `{}` | Per-instance alias map used by send surfaces. Keys are aliases such as `ops` or `support`; values are raw WhatsApp JIDs. Seeded into the instance's `chat_aliases` table at startup. |
 | `autoRespondGroups` | string[] | no | `[]` | Group JIDs (e.g. `120363...@g.us`) the bot auto-responds to without an `@mention`. At startup each JID is seeded into `access_list` as `allowed` (insert-only-when-absent: a group that already has any `allowed`/`blocked`/`pending` row is left untouched, so an explicit decision is never overridden). Non-string and blank entries are dropped. Skipped entirely when `accessMode` is `self_only`, which rejects all group messages at the policy layer. The durable, source-reproducible equivalent of a hand-inserted group access grant. |
+| `sharedWorkflowGroups` | string[] | no | `[]` | Group JIDs (`120363...@g.us`, or the `_at_g.us` conversation key) run as shared workflows: `knowledge_search` gives every member all of that group's memories, instead of the group's shared records plus the sender's own. It never adds other chats, direct-chat records or untagged records. Non-string and blank entries are dropped. See [Memory recall scope](#memory-recall-scope). |
 | `profiles` | object | no | `{}` | Per-instance send decoration policies. Keys are profile names; values can define `prefix`, `tag`, and `linkPreview`. Loaded from private instance config at startup. |
 | `toolUpdateMode` | string | no | `full` | Controls what the user sees during agent tool execution. `full`: elapsed time and technical details. `friendly`: plain-language status, one-time per tool. `minimal`: typing indicator only during tools; pre-tool assistant narration is suppressed and the terminal answer is preserved. |
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
@@ -529,6 +531,7 @@ into place during deployment.
 | `generateHighQualityLinkPreview` | boolean | `false` | When `true`, Baileys generates high-quality link-preview thumbnails for outbound messages (`src/transport/connection.ts:704`). Default `false` keeps the lighter-weight preview behaviour. |
 | `mediaRetention` | object | `{ tempHours: 72, cacheHours: 168, intervalHours: 6 }` | Media-sweep retention policy (`src/main.ts:679`). `tempHours` is the max age for temp media, `cacheHours` for cached media (default 7 days), and `intervalHours` is how often the retention timer runs. |
 | `ingest` | object | `{ maxConcurrent: 20, maxQueueDepth: 500 }` | Inbound ingest backpressure (`src/core/ingest.ts:60`). `maxConcurrent` caps simultaneous in-flight ingests; `maxQueueDepth` caps the waiting queue before new inbound work is shed. |
+| `shadowGate` | object | `{ mode: 'off', eventsDir: null }` | Logged-only reply-worthiness gate (`src/core/shadow-gate-adapter.ts`). `mode` is `off` or `shadow`; there is no enforcing mode. In `shadow`, each message that passes the access policy and reaches dispatch gets an advisory SPAWN/SUPPRESS verdict appended as NDJSON (`shadow-gate-events.*.ndjson`, metadata and closed codes only — no message text; ids that look like a JID or a standalone phone number are rejected) under `eventsDir` (an absolute path; a relative or empty value fails startup with a config error), default `~/.config/whatsoup/instances/<name>/`. Each record carries the recorded instance id (`botName` with characters outside `A-Za-z0-9._:-` replaced by `_`), a database-lineage hash, a boot id, the message id and inbound seq, the verdict, rule id, status/reason code, evaluation time and the gate/rules/feature versions; `armed` and 10-minute `counts` coverage markers carry recorder counters. Dispatch is never changed. Both fields are read once at startup, so a change takes effect only after a restart. The authenticated `/health` body reports live recorder and sink status as an advisory `shadowGate` object. Measure with `npm run report:shadow-gate` — see [runbook §Shadow Gate](runbook.md#shadow-gate). |
 | `maxExhaustionCycles` | integer | `2` | Number of full reconnect-window exhaustion cycles the transport tolerates before writing an `exhausted.marker` and exiting so the service manager restarts the process (`src/transport/connection.ts:2645`). |
 | `agentMaxQueueDepth` | integer | `25` | Maximum depth of the agent turn queue (`src/runtimes/agent/runtime.ts:1477`); inbound turns beyond this are shed rather than queued without bound. |
 | `adminReplayMax` | integer | `5` | Cap on how many queued DMs are replayed to a user when an admin grants them access (`src/core/admin.ts:124`). Group messages are excluded from replay. |
@@ -1128,6 +1131,70 @@ without one of those guards so same-name indexes cannot silently route to the
 wrong project. Existing load/discovery configs are not hard-failed for this
 guard; runtime Pinecone calls still fail closed when the guard is missing.
 
+The operator instance `q` is project-checked too. When its config sets neither
+guard, the runtime holds it to the operator project slug
+`OPERATOR_PINECONE_PROJECT_ID` (`src/lib/pinecone-project-guard.ts`); a
+configured `projectId` or `expectedHostSuffix` takes precedence. If `q`'s key
+resolves its memory index in any other project, readiness reports
+`project_mismatch`, memory reads and `memory_write` are refused, and the
+provider logs `Pinecone project guard refused the configured key` at error
+level.
+
+`memory_write` writes to the SDK default namespace (`__default__`) of
+`memory.pinecone.index`. When `knowledge_search` searches that same index
+without an explicit `namespace` argument, it always includes `__default__`
+alongside the profile's namespaces, so an instance can find what it wrote. A
+profile that already lists the default namespace is searched as configured.
+
+##### Memory recall scope
+
+Every `knowledge_search` of `memory.pinecone.index`, with or without a
+`namespace` argument, scopes its chat memories to the calling conversation
+(`src/core/memory-scope.ts`). Recall ranks memories; it does not lock them out,
+except in groups other people can read and in direct chats with contacts who
+are not instance admins:
+
+| Calling context | How it is recognised | Memories returned, in order |
+|---|---|---|
+| Direct chat, contact scope `chat` (default) | a non-admin contact with no `contactRecallScopes` entry, or one set to `chat` | this chat, then untagged records |
+| Direct chat, contact scope `instance` | a contact set to `instance` in `contactRecallScopes`, sending over an authenticated transport | this chat, then other chats, then untagged records |
+| DM-lane group | every group member is an `adminPhones` identity, this bot, or a `siblingPhones` bot (membership read live and re-read on any participant change) | this chat, then other chats, then untagged records |
+| Operator or admin | the instance is `q`, or the sender is an `adminPhones` identity on an authenticated transport (WhatsApp's per-group admin role does not count) | this chat, then other chats, then untagged records |
+| Configurable group | any other group, including one whose membership cannot be read or contains an unmapped LID | this group's shared records, and records of the verified sender in this group |
+| Global session, no conversation | tier `global` with no pinned conversation | other chats, then untagged records |
+| Chat session, no conversation | tier `chat-scoped` with no pinned conversation | nothing |
+
+- **Chat memories and documents.** The scope applies only to the memory
+  namespaces: the default namespace `memory_write` writes to, and the WhatsApp
+  conversation roles in `memory.pinecone.namespaces` (`facts`, `chunks`,
+  `summaries`, `legacy`). Every other namespace of the index (for example the
+  `namespaces.contacts`, `namespaces.localDocs` and `namespaces.oneDrive`
+  roles) is a document namespace: it is
+  searched unfiltered in every context, as before scoping, and its hits are
+  merged into the memory order by relevance score (after rerank when the
+  profile reranks), so a relevant document can sit above a weakly relevant
+  memory.
+- **Untagged** records have no `chat_jid`. They predate per-chat attribution,
+  so direct chats rank them last and configurable groups never see them.
+- **Shared** group records are facts about the group (`memory_type:
+  group_context`) or records attributed to no member (`sender_jid` empty).
+- **Verified sender** is the message sender (`actorJid`) on an authenticated
+  transport; LIDs fold to phones through `lid_mappings`. For enrichment records
+  `sender_jid` is the person the fact is about; for `memory_write` records it is
+  the speaker.
+- A group listed in `sharedWorkflowGroups` gives every member all of that
+  group's records. It never adds other chats or untagged records.
+- Stored `chat_jid` spellings (`<id>@g.us` and `<id>_at_g.us`, a phone JID and
+  its bare digits, a mapped `@lid`) all count as the same chat.
+
+The chat runtime applies the same rules to its recall (`chatRecallBoundary`).
+Unless the instance is `q` or the sender is a verified admin: in a direct chat
+with a contact whose scope is `chat`, and in a shared-workflow group, recall of
+the sender's records is held to this chat; in any other group it is held to the
+group, and the group's own records are limited to shared records and the
+sender's own. It has no membership reader, so it does not detect DM-lane groups
+and treats them as configurable groups.
+
 #### Legacy Migration
 
 Dry-run all local instance configs:
@@ -1261,6 +1328,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. A compact still unfinished after 4 minutes releases the following dispatch and applies a 5-minute retry backoff, but retains its FIFO result-classification slot: a late compact result is still consumed as a system result and cannot steal the next user's inbound identity. `GET /health` exposes current aggregate state through `runtime.agent.autoCompactState`, `autoCompactActiveBackoffScopes`, and `autoCompactWorstCurrentBackoffTier`. It also preserves the process-lifetime diagnostics `autoCompactIneffective`, `autoCompactConsecutiveRapidRearmsMax`, and `autoCompactNextTurnOverThreshold`; those totals/maxima do not independently degrade current health. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
 | `capabilityObligations` | object | no | — (inert) | Capability-obligation replay activation — all-or-inert, default OFF. Absent, or anything not exactly `enabled: true`, activates nothing. `enabled: true` requires a fully valid body — `contract` (versioned rule list: exact leading token, exact URL-host allowlist, declared prepared-media class), `mediaRoot`, `retentionPolicyVersion` (must name the owner-approved `policy/media-retention.json` artifact's `policyVersion` verbatim — #3221 Debt 3), `retentionHorizonDays` (finite 1–365 media-retention horizon; A-08 — additionally must not EXCEED the owner-approved horizon in `policy/media-retention.json` (90 days, ruled 2026-08-28); both policy checks are verified fail-closed at load, upstream of every DM/group media drain), `execution` (the TYPED resolver execution struct — #3221 Debt 4, owner-ratified: `interpreter` (an explicit interpreter PATH, or `null` for a directly executable artifact — the KEY is required, so the mode is DECLARED, never guessed; a bare `$PATH` name like `node` is unpinnable and refused at load), `resolverArtifactPath` (the code file whose content is hashed and executed — ALWAYS the executing token by construction), `args` (the data argv tail: at least one arg MUST embed the `{source}` placeholder, and with `interpreter: null` EVERY arg must embed `{source}` and must not be a flag — round-21 finding 2 made structural, so `["-c","{source}"]` and `["--eval={source}"]` are unrepresentable), plus `timeoutMs` and `minOutputBytes`. The schema DERIVES `command` = `[interpreter?, resolverArtifactPath, ...args]` and `interpreted` = `interpreter !== null` for the executor and the canonicalizer (an equivalent declaration canonicalizes byte-identically — no attested composite-digest drift); the legacy free-form `command`/`interpreted` body is refused loudly at load — spawned shell-lessly by the trusted `execute_capability` tool, which re-verifies the artifact by realpath, refuses an `interpreted:false` mislabel of an interpreter (and in direct mode any token after the artifact that is a flag or does not embed `{source}` — round-21 finding 2, so `["-c","{source}"]` cannot run the source as code), requires an EXPLICIT interpreter PATH when `interpreted:true` (a bare `$PATH` name like `node` is unpinnable and refused at config LOAD) that is NOT writable by a different untrusted actor (world/group-writable, non-sticky — round-21 finding 1, since the interpreter is executed from its realpath not staged), and CONTENT-ADDRESSED STAGES the artifact's whole directory into a private root — re-hashing and executing the immutable COPY (round-20), so a post-attest rename or in-place write cannot substitute unverified bytes; the substituted source is refused if it begins with `-`. **The resolver artifact MUST live in an ISOLATED, symlink-free directory containing ONLY itself and its intentional siblings** — nothing else may be written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media) or the whole-directory manifest drifts and every drain fails closed with `resolver_digest_mismatch`), and `attestation` (expected skill name/version/digest, resolver digest — a COMPOSITE binding the artifact content, the whole-DIRECTORY manifest (artifact + every sibling), the INTERPRETER content, AND the canonical execution shape + envelope (`timeoutMs`/`minOutputBytes`), re-derived and re-compared at the drain seam so a post-attest content swap, sibling swap, interpreter swap, or shape/envelope change is refused — dependency versions, probe version, canary id) — validated at config load by `parseCapabilityObligationsOptions` (`src/core/capability-contract.ts`); a malformed enabled body is a startup `ConfigValidationError` (exit `EX_CONFIG`), never a partial activation. `per_chat` session scope only. |
+| `turnRecoveryCatchupReconcile` | object | no | — (off) | Turns on the turn-recovery supervisor's automatic operator catch-up reconciler for this instance: `{ "enabled": true, "groupLimit": 50 }`. Each scan cycle closes up to `groupLimit` recovery groups whose conversation already got a delivered catch-up reply (closure rows carry `actor = 'auto_reconciler'`). `enabled` is a required boolean inside the block; `groupLimit` is an optional integer 1–1000 (default 50). Closed shape: an unknown inner key or an invalid value is a load-time `ConfigValidationError`. Absent or `enabled: false` = the pre-reconciler behavior. Read once at startup, so a change needs an instance restart. Enablement and observation steps: [Enabling per instance](turn-recovery-continuity-reconciler.md#enabling-per-instance). |
 | `observability` | object | no | — (phase `off`) | Fleet Lifecycle Observability Standard dark flag. Closed shape with one key, `fleetLifecycle`: the promotion phase `off` \| `shadow` \| `alerting` \| `default` (design §11; `off` when the block or key is absent). Anything else — a boolean, a case variant, an unknown key inside the block — is a load-time `ConfigValidationError` (fail-closed, never a partial enable). Code behind the flag ships dark; every phase transition is a separate owner act per cohort with single-step rollback (one phase back). |
 | `nlRouting` | boolean | no | `false` | Flag-gates the NL-first routing aliases (`/model`, `/why`, `/reset`) and the per-sender route-preference store. Off = byte-identical base behavior: the three commands keep forwarding to the agent session and no preference table is created. Routing preference and visibility only — never tool or authority changes (capability-preserved routing). |
 | `nlRoutingTiers` | object | no | — | Intent→provider map for NL routing: `{ "strongest": "<provider-id>", "fastest": "<provider-id>" }`. Unset tiers resolve to the default route honestly (`/model strongest` records the preference and routing reports it as unmapped). |
@@ -2147,6 +2215,9 @@ $XDG_CONFIG_HOME/whatsoup/instances/<name>/   (default: ~/.config/...)
 $XDG_DATA_HOME/whatsoup/instances/<name>/     (default: ~/.local/share/...)
   bot.db            — SQLite database (messages, contacts, access list, sessions, outbound_sends audit)
   logs/             — Pino log files (daily rotation via pino-roll)
+  bond-events.ndjson — redacted bond lifecycle records; rotated at 50 MiB into
+                      bond-events.ndjson.<id>.gz, newest 10 archives kept
+                      (see runbook §3 "Bond Event Log")
   media/tmp/        — Temporary media files for agent Read access
 
 $XDG_DATA_HOME/whatsoup/tmp/<name>/           (default: ~/.local/share/...)

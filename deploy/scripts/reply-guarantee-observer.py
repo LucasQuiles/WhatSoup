@@ -641,8 +641,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reply-guarantee-observer state={result['state']} instances={len(result['instances'])}")
     if not emitted:
         return 2
-    if result["state"] == "active-breach":
-        return 1
+    # An active breach is an observed workload condition.  It is already
+    # preserved in the JSON artifact and routed through the existing alert
+    # outbox; the observer completed successfully, so do not make systemd
+    # classify the oneshot as a crashed process.
     if result["state"] == "inconclusive":
         return 2
     return 0

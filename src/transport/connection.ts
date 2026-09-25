@@ -29,7 +29,8 @@ import { decideConnectActivation, readTerminalLatchJournal, type ConnectActivati
 import { observeActiveTree, resolveAuthGenerationEvidenceV2 } from './auth-generation-v2.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
-import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { appendBondEventSync, scheduleBondEventMaintenance } from './bond-event-log.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 
 import { config } from '../config.ts';
@@ -67,6 +68,7 @@ import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-par
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
+import { HistorySyncWatch } from './history-sync-watch.ts';
 import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
@@ -730,6 +732,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     getBotLid: () => this.botLid,
   });
 
+  private readonly historySyncWatch = new HistorySyncWatch(this.log);
+
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
     return this.sock;
@@ -779,6 +783,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.on('exhausted', () => {
       void this.handleExhausted();
     });
+    // Startup recovery of an interrupted bond-event rotation or compression.
+    // One directory read when there is nothing to do; never blocks connect.
+    this.scheduleBondEventLogMaintenance('startup');
+  }
+
+  private scheduleBondEventLogMaintenance(trigger: 'startup' | 'rotation'): void {
+    if (!config.dataRoot) return;
+    try {
+      scheduleBondEventMaintenance(config.dataRoot).then(
+        (report) => {
+          if (report.anomalies.length > 0 || report.pendingSegments > 0) {
+            this.log.warn(
+              { trigger, anomalies: report.anomalies, pendingSegments: report.pendingSegments },
+              'bond event log maintenance kept segments for operator review',
+            );
+          }
+        },
+        (err: unknown) => {
+          this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+        },
+      );
+    } catch (err) {
+      this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+    }
   }
 
   /**
@@ -981,6 +1009,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // is a false positive in the one direction that matters: a bond event would
       // then name a client that never existed.
       const sock = makeWASocket(socketConfig);
+      this.historySyncWatch.reset();
       effectiveClientRegistry.record(
         buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'connection'),
       );
@@ -1263,6 +1292,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
+    this.historySyncWatch.reset();
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -1425,7 +1455,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     try {
       const authBond = this.authBond.inspect();
-      const eventPath = join(config.dataRoot, 'bond-events.ndjson');
       const payload = {
         version: 1,
         eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
@@ -1507,7 +1536,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // `no_receipt_written`, which is the honest answer, not a bug.
         authGeneration: resolveAuthGenerationEvidence(config.stateRoot),
       };
-      appendPrivateJsonLineSync(eventPath, payload);
+      // Bounded by size rotation (see bond-event-log.ts). A rotation failure
+      // still appends the record; only the append itself can throw here.
+      const appended = appendBondEventSync(config.dataRoot, payload);
+      if (appended.rotationError) {
+        this.log.warn({ err: appended.rotationError }, 'failed to rotate WhatsApp bond event log');
+      }
+      if (appended.rotated) this.scheduleBondEventLogMaintenance('rotation');
     } catch (err) {
       this.log.warn({ err }, 'failed to persist WhatsApp bond event');
     }
@@ -2070,6 +2105,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             chats?: Array<{ id: string; [key: string]: unknown }>;
             isLatest?: boolean;
           };
+          this.historySyncWatch.observeBatch();
           this.log.info(
             { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
             'history sync received',
@@ -3084,6 +3120,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages as WAMessage[]) {
+      this.historySyncWatch.observeUpsert(msg);
       if (msg.key.id && msg.key.fromMe === true) {
         this.confirmLocalAuthBondSendProof(msg.key.id, 'own_message_echo', msg.key.remoteJid ?? undefined);
       }

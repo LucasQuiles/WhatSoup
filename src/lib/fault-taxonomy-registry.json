@@ -127,6 +127,7 @@
         "delivery_identity_debt",
         "provider_execution_pressure",
         "agent_outbound_queue_poisoned",
+        "agent_respawn_failed_clear_pending",
         "credential_identity_mismatch",
         "credential_identity_unverifiable",
         "agent_runtime_degraded_unclassified",
@@ -449,6 +450,30 @@
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
+      "field": "turnRecoveryBlockedUnsafeSynthetic",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_synthetic",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockedUnsafeSuperseded",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_superseded",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockedUnsafeStranded",
+      "label": "runtime_agent_turn_recovery_blocked_unsafe_stranded",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
       "field": "turnRecoveryExhausted",
       "label": "runtime_agent_turn_recovery_exhausted",
       "kind": "active_episode_count",
@@ -535,6 +560,78 @@
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "perChatSessionsWithoutOwner",
+      "label": "runtime_agent_per_chat_sessions_without_owner",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "perChatRespawnAbandoned",
+      "label": "runtime_agent_per_chat_respawn_abandoned",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "turnQueueHaltedScopes",
+      "label": "runtime_agent_turn_queue_halted_scopes",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-queue-halt-latch.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "proactiveResumeIdentityRejects",
+      "label": "runtime_agent_proactive_resume_identity_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "unownedProviderEventRejects",
+      "label": "runtime_agent_unowned_provider_event_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "suppressedSystemTurnEffectRejects",
+      "label": "runtime_agent_suppressed_system_turn_effect_rejects",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyDelayedDispatches",
+      "label": "runtime_agent_chronology_delayed_dispatches",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyRecoveryReplayDispatches",
+      "label": "runtime_agent_chronology_recovery_replay_dispatches",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "chronologyMaxQueueAgeSeconds",
+      "label": "runtime_agent_chronology_max_queue_age_seconds",
+      "kind": "historical_maximum",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
     }
   ],
   "terminalAttemptToInboundFailureClass": {
@@ -880,6 +977,14 @@
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
+      "agent_respawn_failed_clear_pending": {
+        "family": "agent_runtime",
+        "impactTier": "page",
+        "notification": "critical",
+        "rootOwner": "agent_runtime_supervisor",
+        "clearPredicate": "the content-free obligation persists through a refused or throwing clear and retires only after the shared agent_respawn_failed clear is accepted while no chat is exhausted or abandoned",
+        "requiresCorroborationBeforePaging": false
+      },
       "credential_identity_mismatch": {
         "family": "credential_identity",
         "impactTier": "page",
@@ -997,7 +1102,7 @@
         "impactTier": "page",
         "notification": "critical",
         "rootOwner": "agent_runtime_supervisor",
-        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it settles as soon as the chat serves again by either route \u2014 the next inbound message respawns an inactive session in place, or is served by a session that never went inactive \u2014 or when a new owned session is indexed for it, or when the record ages out; the shared agent_respawn_failed source clears only once no chat is either exhausted or abandoned, including on the age-out path",
+        "clearPredicate": "a durable retention record of a terminal event, not a live probe: it settles as soon as the chat serves again by either route \u2014 the next inbound message respawns an inactive session in place, or is served by a session that never went inactive \u2014 or when a new owned session is indexed for it, or when the record ages out; the shared agent_respawn_failed source is cleared only once no chat is either exhausted or abandoned, and a refused or throwing clear is retained and retried as content-free clear debt",
         "requiresCorroborationBeforePaging": false
       }
     }
@@ -1383,6 +1488,11 @@
       "disposition": "auth_teardown_without_fallback_notice_cadence_until_reauth",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "provider_credential_dead": {
+      "disposition": "watchdog_pages_once_per_dead_episode_cleared_by_fresh_primary_recovery",
+      "owner": "deploy/templates/watchdog-script.sh",
+      "test": "deploy/scripts/tests/test_watchdog_terminal_logout_e2e.py"
     },
     "provider_context_overflow": {
       "disposition": "one_shot_observation_session_killed_recovers_on_next_message_no_incident",

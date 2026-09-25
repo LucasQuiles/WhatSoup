@@ -4,6 +4,7 @@ import { withTransaction } from './db-tx.ts';
 import type { ContentType } from './types.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
+import { mergeTranscriptionContent } from './audio-transcript-content.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -386,15 +387,7 @@ export function updateTranscription(db: Database, messageId: string, transcripti
   // Read existing content to merge transcription into structured JSON
   const row = db.raw.prepare('SELECT content FROM messages WHERE message_id = ?')
     .get(messageId) as { content: string | null } | undefined;
-
-  let updatedContent: string;
-  try {
-    const parsed = JSON.parse(row?.content || '{}');
-    parsed.transcription = transcription;
-    updatedContent = JSON.stringify(parsed);
-  } catch {
-    updatedContent = JSON.stringify({ transcription });
-  }
+  const updatedContent = mergeTranscriptionContent(row?.content ?? null, transcription);
 
   db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?')
     .run(updatedContent, transcription, messageId);

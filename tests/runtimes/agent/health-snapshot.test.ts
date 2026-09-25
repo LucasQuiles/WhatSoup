@@ -341,6 +341,9 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
     turnRecoveryEchoConflicts: 0,
+    turnRecoveryBlockedUnsafeSynthetic: 0,
+    turnRecoveryBlockedUnsafeSuperseded: 0,
+    turnRecoveryBlockedUnsafeStranded: 0,
   };
 }
 
@@ -485,6 +488,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -536,6 +540,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -553,6 +558,45 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('activeSessions is 0 when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(snapshot.details['activeSessions']).toBe(0);
+  });
+
+  it('projects each registered diagnostic counter onto its own health field', () => {
+    // Distinct value per field so a swapped mapping cannot pass.
+    const internals = runtime as unknown as {
+      proactiveResumeIdentityRejects: number;
+      unownedProviderEventRejects: number;
+      suppressedSystemTurnEffectRejects: number;
+      perChatSessionsWithoutOwner(): string[];
+      perChatRespawnAbandonedCount(): number;
+      turnChronology: { healthDetails(): Record<string, number> };
+      runtimeTurnCoordinator: {
+        turnQueueHaltHealth(scope: string): { turnQueueHalted: boolean; turnQueueHaltedScopes: number };
+      };
+    };
+    internals.proactiveResumeIdentityRejects = 11;
+    internals.unownedProviderEventRejects = 12;
+    internals.suppressedSystemTurnEffectRejects = 13;
+    vi.spyOn(internals, 'perChatSessionsWithoutOwner').mockReturnValue(['chat-a', 'chat-b']);
+    vi.spyOn(internals, 'perChatRespawnAbandonedCount').mockReturnValue(3);
+    vi.spyOn(internals.runtimeTurnCoordinator, 'turnQueueHaltHealth')
+      .mockReturnValue({ turnQueueHalted: true, turnQueueHaltedScopes: 4 });
+    vi.spyOn(internals.turnChronology, 'healthDetails').mockReturnValue({
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
+
+    expect(runtime.getHealthSnapshot().details).toMatchObject({
+      perChatSessionsWithoutOwner: 2,
+      perChatRespawnAbandoned: 3,
+      turnQueueHaltedScopes: 4,
+      proactiveResumeIdentityRejects: 11,
+      unownedProviderEventRejects: 12,
+      suppressedSystemTurnEffectRejects: 13,
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
   });
 
   it('degrades only while provider execution pressure is active', async () => {
@@ -837,6 +881,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,

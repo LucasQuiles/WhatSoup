@@ -200,7 +200,10 @@ def test_malformed_attempts_does_not_wedge_later_valid_event(tmp_path):
 
     sent_paths: list[str] = []
 
-    def _fake_send(text: str, socket_path: str = "") -> None:
+    def _fake_send(text: str, socket_path: str = "", **_kwargs) -> None:
+        # send_whatsapp gained a keyword-only ``require_acceptance`` (send-acceptance
+        # hardening #2460); the delivery path calls it with require_acceptance=True.
+        # Absorb the new kwargs so the stub matches the production signature.
         sent_paths.append(text)
 
     with (

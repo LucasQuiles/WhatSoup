@@ -1,19 +1,23 @@
 /**
  * Integration: cross-conversation guard call-site matrix (issue 3457, C1).
  *
- * Pins the CURRENT behaviour of the two cross-conversation guards named by
- * issue 3457, one named test per matrix cell:
+ * Pins the behaviour of the ONE cross-conversation guard, one named test per
+ * matrix cell. Issue 3457 combined the two former guards (the registry's
+ * pre-handler check and send_message's in-handler check) into
+ * `evaluateTargetConversation` (src/mcp/cross-conversation-guard.ts), which
+ * the registry runs at two points:
  *
- *   registry guard   src/mcp/registry.ts:688  injected-target branch
- *                    src/mcp/registry.ts:718  global-and-unbound arm
- *                    src/mcp/registry.ts:741  guard predicate
- *                    src/mcp/registry.ts:756  authorization_denied / authorization
+ *   pre-handler      the caller-supplied chatJid, in the global-and-unbound
+ *                    arm of the registry's injected-target branch
+ *   post-resolution  the target send_message resolved from an alias or an
+ *                    `@lid`, through the callback the registry hands the
+ *                    handler (dry-run and beforeAudit call sites)
  *
- *   messaging guard  src/mcp/tools/messaging.ts:275  predicate (global + key)
- *                    src/mcp/tools/messaging.ts:283  throw
- *                    src/mcp/tools/messaging.ts:302  dry-run call site
- *                    src/mcp/tools/messaging.ts:375  beforeAudit call site
- *                    src/mcp/registry.ts:858         returned_error / handler
+ * Both points deny on one channel: plain text, authorization_denied /
+ * authorization (validation_rejected / validation for an invalid JID).
+ * Cells M3, M4 and the diverged half of M9d changed on purpose in 3457: they
+ * were JSON envelopes on returned_error / handler before it. M9e was added
+ * with 3457 and passed unchanged on the base before it.
  *
  * Axes: session tier (global-unbound / chat-scoped / conversation-bound)
  *     x alias target `to` (present / absent)
@@ -21,7 +25,7 @@
  *
  * NOT an axis: the resolved / unresolved turn shape. Every cell here imports
  * ToolRegistry from tests/helpers/resolved-tool-registry.ts, which forces
- * `resolved: true`, so all thirteen cells run resolution-normal. No cell
+ * `resolved: true`, so all fourteen cells run resolution-normal. No cell
  * outcome depends on it — `executingResolution` has one reader in src/,
  * scheduledAgentJobMaySee (src/mcp/registry.ts:104), reachable only for the
  * tools in SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS (src/mcp/registry.ts:75-82),
@@ -107,7 +111,7 @@ function makeCapturingConnection(sent: SentMessage[]): ConnectionManager {
 
 /**
  * A registry with the real messaging module registered (so the canonical fold
- * IS armed, exactly as production arms it at messaging.ts:221) and durability
+ * IS armed, exactly as production arms it in registerMessagingTools) and durability
  * attached (so every cell can read its recorded failure channel).
  */
 function makeArmedRegistry(db: Database, sent: SentMessage[]): ToolRegistry {
@@ -182,7 +186,7 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M1 — global-unbound, key present, chatJid foreign, no alias target
-  //      REGISTRY guard adjudicates (registry.ts:741) and denies.
+  //      The guard's PRE-HANDLER point adjudicates and denies.
   // =========================================================================
   it('M1 global pinned session, foreign chatJid, no alias: registry guard denies as authorization_denied/authorization', async () => {
     const result = await registry.call(
@@ -212,7 +216,7 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M2 — global-unbound, key present, own conversation by mapped @lid, no alias
-  //      REGISTRY guard adjudicates and ADMITS through the armed fold.
+  //      The PRE-HANDLER point adjudicates and ADMITS through the armed fold.
   // =========================================================================
   it('M2 global pinned session, own conversation addressed by a mapped @lid: registry guard admits through the armed fold', async () => {
     seedLidMapping(db, PIN_LID, PIN_PHONE_JID);
@@ -244,10 +248,10 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M3 — global-unbound, key present, alias target present, live send
-  //      REGISTRY guard SUPPRESSED by `to`; MESSAGING guard denies at
-  //      beforeAudit (messaging.ts:375).
+  //      The pre-handler point skips an alias target; the POST-RESOLUTION
+  //      point denies at send_message's beforeAudit call site.
   // =========================================================================
-  it('M3 global pinned session, foreign alias target, live send: messaging guard denies as returned_error/handler', async () => {
+  it('M3 global pinned session, foreign alias target, live send: the post-resolution guard denies as authorization_denied/authorization', async () => {
     seedAlias(db, BOB_ALIAS, BOB_JID);
 
     const result = await registry.call(
@@ -256,30 +260,30 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
       { tier: 'global', conversationKey: ALICE_KEY },
     );
 
-    // Caller-visible shape: a JSON error envelope returned BY THE HANDLER,
-    // not the registry's plain-text denial. Same violation, different shape.
+    // Caller-visible shape: the SAME plain-text denial as M1. Before 3457 this
+    // was a JSON error envelope returned by the handler.
     expect(result.isError).toBe(true);
-    expect(errorEnvelope(result).error).toMatch(/does not match session conversation/);
-    expect(errorEnvelope(result).error).toContain(BOB_JID);
+    expect(result.content[0].text).toMatch(/does not match session conversation/);
+    expect(result.content[0].text).toContain(BOB_JID);
+    expect(() => JSON.parse(result.content[0].text)).toThrow();
 
     // No dispatch: the guard runs before the audit-intent write and the send.
     expect(sent).toHaveLength(0);
 
-    // Durable failure channel: UNTYPED, because a handler-returned errorResult
-    // carries no typed evidence (registry.ts:858-859 defaults).
+    // Durable failure channel: the typed authorization denial, as in M1.
     expect(lastToolCall(db, ALICE_KEY)).toEqual({
       tool_name: 'send_message',
       status: 'error',
-      failure_code: 'returned_error',
-      failure_stage: 'handler',
+      failure_code: 'authorization_denied',
+      failure_stage: 'authorization',
     });
   });
 
   // =========================================================================
   // M4 — global-unbound, key present, alias target present, dryRun
-  //      MESSAGING guard denies at the dry-run call site (messaging.ts:302).
+  //      The POST-RESOLUTION point denies at send_message's dry-run call site.
   // =========================================================================
-  it('M4 global pinned session, foreign alias target, dryRun: messaging guard denies as returned_error/handler', async () => {
+  it('M4 global pinned session, foreign alias target, dryRun: the post-resolution guard denies as authorization_denied/authorization', async () => {
     seedAlias(db, BOB_ALIAS, BOB_JID);
 
     const result = await registry.call(
@@ -289,7 +293,8 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(errorEnvelope(result).error).toMatch(/does not match session conversation/);
+    expect(result.content[0].text).toMatch(/does not match session conversation/);
+    expect(() => JSON.parse(result.content[0].text)).toThrow();
     expect(sent).toHaveLength(0);
 
     // The dry-run path reports the SAME channel as the live path (M3): the
@@ -297,15 +302,16 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
     expect(lastToolCall(db, ALICE_KEY)).toEqual({
       tool_name: 'send_message',
       status: 'error',
-      failure_code: 'returned_error',
-      failure_stage: 'handler',
+      failure_code: 'authorization_denied',
+      failure_stage: 'authorization',
     });
   });
 
   // =========================================================================
   // M5 — global-unbound, key ABSENT, chatJid foreign
-  //      BOTH guards skipped (fail-open). registry.ts:741 requires a truthy
-  //      conversationKey; messaging.ts:275 early-returns on a falsy one.
+  //      Admitted at BOTH guard points (fail-open, kept on purpose per the
+  //      #3435 owner comment): the guard's named `unconfined-global-session`
+  //      early return fires on a falsy conversationKey.
   // =========================================================================
   it('M5 global session with no conversationKey: both guards are skipped and the send is admitted', async () => {
     const result = await registry.call(
@@ -385,9 +391,10 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M8 — global-unbound, key present, BOTH chatJid and `to` supplied
-  //      REGISTRY guard SUPPRESSED by a caller-controlled parameter. The
-  //      rejection that follows is a TARGET-EXCLUSIVITY fault raised inside
-  //      the handler, proving the guard never adjudicated the foreign JID.
+  //      The PRE-HANDLER point is skipped because a caller-controlled `to` is
+  //      present, and the handler's target-exclusivity fault fires before the
+  //      post-resolution point, proving the guard never adjudicated the
+  //      foreign JID.
   // =========================================================================
   it('M8 global pinned session supplying both chatJid and to: the registry guard is suppressed and a target-exclusivity fault answers instead', async () => {
     seedAlias(db, BOB_ALIAS, BOB_JID);
@@ -402,8 +409,8 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
     // The load-bearing assertion: the answer is the mutual-exclusion fault,
     // NOT the cross-conversation denial. A caller-supplied `to` sets
-    // hasAliasTarget and switches the registry guard off (registry.ts:741),
-    // and the handler rejects on target shape before any conversation check.
+    // hasAliasTarget and skips the guard's pre-handler point, and the handler
+    // rejects on target shape before its post-resolution point runs.
     expect(errorEnvelope(result).error).toBe('chatJid and to are mutually exclusive; provide exactly one');
     expect(errorEnvelope(result).error).not.toMatch(/does not match session conversation/);
     expect(sent).toHaveLength(0);
@@ -453,9 +460,9 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M9b — conversation-bound, top-level conversationKey mirror ABSENT
-  //       Confinement comes from the BINDING via the registry's bound arm
-  //       (registry.ts:691-702), not from either 3457 guard: both read only
-  //       session.conversationKey, which is absent here.
+  //       Confinement comes from the BINDING via the registry's bound arm,
+  //       which rejects the caller target before the handler runs, so the
+  //       cross-conversation guard is reached at neither point.
   // =========================================================================
   it('M9b conversation-bound session with no conversationKey mirror: a caller-supplied target is rejected as validation_rejected/validation', async () => {
     const boundNoMirror: SessionContext = {
@@ -489,8 +496,9 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
 
   // =========================================================================
   // M9c — conversation-bound, mirror absent, NO caller target
-  //       The binding still supplies the target, so the send is confined
-  //       without either 3457 guard participating.
+  //       The binding supplies the target. The post-resolution point runs and
+  //       admits: with no mirror there is nothing to diverge, and the target
+  //       folds to the binding's own conversation.
   // =========================================================================
   it('M9c conversation-bound session with no conversationKey mirror and no caller target: the binding supplies the target', async () => {
     const boundNoMirror: SessionContext = {
@@ -519,15 +527,14 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
   // =========================================================================
   // M9d — conversation-bound, top-level conversationKey mirror PRESENT,
   //       NO caller target.
-  //       The only cell in which the MESSAGING guard adjudicates a target the
-  //       registry itself injected from the binding (registry.ts:704). The
-  //       registry guard is unreachable here (the bound arm at registry.ts:691
-  //       is taken), but messaging.ts:275 does NOT early-return, because a
-  //       conversation-bound session carries tier 'global' and the mirror is
-  //       truthy. Both sub-cases live in this one cell: the mirror AGREES with
-  //       the binding, and the mirror has DIVERGED from it.
+  //       The post-resolution point adjudicates the target the registry itself
+  //       injected from the binding; the pre-handler point is not reached (the
+  //       bound arm is taken). Both sub-cases live in this one cell: the
+  //       mirror AGREES with the binding, and the mirror has DIVERGED from it.
+  //       Diverged = DENY on the `binding-mirror-divergence` branch, with an
+  //       error-level log (owner decision 27, issue 3457).
   // =========================================================================
-  it('M9d conversation-bound session with the conversationKey mirror present and no caller target: an agreeing mirror is admitted and a diverged mirror is denied by the messaging guard as returned_error/handler', async () => {
+  it('M9d conversation-bound session with the conversationKey mirror present and no caller target: an agreeing mirror is admitted and a diverged mirror is denied as authorization_denied/authorization', async () => {
     // Sub-case 1 — mirror AGREES with the binding.
     const boundAgreeingMirror: SessionContext = {
       tier: 'global',
@@ -564,17 +571,19 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
       boundDivergedMirror,
     );
 
-    // The MESSAGING guard denies. The JSON envelope shape is what separates it
-    // from the registry guard, which denies in PLAIN TEXT (see M1 and M10).
+    // Owner decision 27 (3457): a binding and its mirror that disagree stay
+    // DENIED, on the combined guard's binding-mirror-divergence branch, in the
+    // same plain-text shape as every other cross-conversation denial.
     expect(diverged.isError).toBe(true);
-    const envelope = errorEnvelope(diverged);
-    expect(envelope.error).toContain('does not match session conversation');
+    const text = diverged.content[0].text;
+    expect(() => JSON.parse(text)).toThrow();
+    expect(text).toContain('does not match the conversation binding');
     // The denied target is the one the registry ITSELF injected from the
-    // binding at registry.ts:704, and the key it is compared against is the
-    // diverged mirror. So this is a false deny of the session's OWN bound
-    // conversation, not a cross-conversation escape.
-    expect(envelope.error).toContain(ALICE_JID);
-    expect(envelope.error).toContain(BOB_KEY);
+    // binding, so this is a deny of the session's OWN bound conversation
+    // because its state is inconsistent, not a cross-conversation escape.
+    expect(text).toContain(ALICE_JID);
+    expect(text).toContain(BOB_KEY);
+    expect(text).toContain(ALICE_KEY);
     // No second dispatch: sub-case 1 sent one message, this sub-case sent none.
     expect(sent).toHaveLength(1);
 
@@ -582,8 +591,8 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
     expect(lastToolCall(db, BOB_KEY)).toEqual({
       tool_name: 'send_message',
       status: 'error',
-      failure_code: 'returned_error',
-      failure_stage: 'handler',
+      failure_code: 'authorization_denied',
+      failure_stage: 'authorization',
     });
     // and NOT under the binding key: the newest row there is still sub-case 1,
     // unchanged by this denial.
@@ -594,13 +603,107 @@ describe('cross-conversation guard call-site matrix (3457)', () => {
       failure_stage: null,
     });
   });
+
+  // =========================================================================
+  // M9e — conversation-bound, binding keyed by the RAW @lid digits
+  //       (toConversationKey, as socket-server.ts updateConversationBinding and
+  //       per-chat-actor-session.ts build it), mirror carrying the PHONE-folded
+  //       key (canonicalConversationKey, as the executing-turn register pushes
+  //       it). The two strings differ but name the SAME conversation through
+  //       lid_mappings, so this is NOT a binding/mirror disagreement.
+  // =========================================================================
+  it('M9e conversation-bound session keyed by raw @lid digits with a phone-folded mirror of the same conversation: admitted', async () => {
+    seedLidMapping(db, PIN_LID, PIN_PHONE_JID);
+    const boundLidKeyed: SessionContext = {
+      tier: 'global',
+      conversationKey: PIN_PHONE,
+      binding: makeConversationBinding(toConversationKey(PIN_LID_JID), PIN_LID_JID),
+    };
+    // Precondition: the raw key and the mirror really are different strings.
+    expect(boundLidKeyed.binding!.conversationKey).toBe(PIN_LID);
+    expect(boundLidKeyed.binding!.conversationKey).not.toBe(PIN_PHONE);
+
+    const result = await registry.call(
+      'send_message',
+      { text: 'matrix cell M9e' },
+      boundLidKeyed,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].jid).toBe(PIN_LID_JID);
+    expect(lastToolCall(db, PIN_PHONE)).toEqual({
+      tool_name: 'send_message',
+      status: 'complete',
+      failure_code: null,
+      failure_stage: null,
+    });
+  });
+
+  // =========================================================================
+  // Beyond the cells: properties issue 3457 must hold across them.
+  // =========================================================================
+  it('M9a variant: a conversation-bound session supplying an alias target is rejected by the bound arm as validation_rejected/validation', async () => {
+    seedAlias(db, BOB_ALIAS, BOB_JID);
+    const result = await registry.call(
+      'send_message',
+      { to: BOB_ALIAS, text: 'bound alias attempt' },
+      { tier: 'global', conversationKey: ALICE_KEY, binding: makeConversationBinding(ALICE_KEY, ALICE_JID) },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('fills its target from the conversation binding');
+    expect(sent).toHaveLength(0);
+    expect(lastToolCall(db, ALICE_KEY)).toEqual({
+      tool_name: 'send_message',
+      status: 'error',
+      failure_code: 'validation_rejected',
+      failure_stage: 'validation',
+    });
+  });
+
+  it('both guard points answer the same foreign target identically: M1 (pre-handler) and M3 (post-resolution) share text and channel', async () => {
+    seedAlias(db, BOB_ALIAS, BOB_JID);
+    const session: SessionContext = { tier: 'global', conversationKey: ALICE_KEY };
+
+    const preHandler = await registry.call('send_message', { chatJid: BOB_JID, text: 'point 1' }, session);
+    const preHandlerRow = lastToolCall(db, ALICE_KEY);
+    const postResolution = await registry.call('send_message', { to: BOB_ALIAS, text: 'point 2' }, session);
+    const postResolutionRow = lastToolCall(db, ALICE_KEY);
+
+    expect(preHandler.isError).toBe(true);
+    expect(postResolution.isError).toBe(true);
+    expect(postResolution.content[0].text).toBe(preHandler.content[0].text);
+    expect(postResolutionRow).toEqual(preHandlerRow);
+    expect(preHandlerRow).toMatchObject({ failure_code: 'authorization_denied', failure_stage: 'authorization' });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('send_message run without the registry guard callback fails closed and sends nothing', async () => {
+    let captured: ToolDeclaration | undefined;
+    const capturingRegistry = {
+      register: (tool: ToolDeclaration) => { if (tool.name === 'send_message') captured = tool; },
+      setCanonicalConversationKeyResolver: () => {},
+    } as unknown as ToolRegistry;
+    registerMessagingTools(capturingRegistry, {
+      connection: makeCapturingConnection(sent),
+      db: db.raw,
+      dbWrapper: db,
+      adminPhones: new Set<string>(),
+    });
+
+    await expect(
+      captured!.handler({ chatJid: ALICE_JID, text: 'no guard' }, { tier: 'global', conversationKey: ALICE_KEY }),
+    ).rejects.toThrow(/without the registry cross-conversation guard/);
+    expect(sent).toHaveLength(0);
+  });
 });
 
 // ===========================================================================
 // M10 — the registry guard with NO canonical fold armed.
 //       Its own describe block: this cell must NOT register the messaging
 //       module, because registerMessagingTools is the sole production arming
-//       site (messaging.ts:221). A fixture injected tool with no `to`
+//       site (src/mcp/tools/messaging.ts). A fixture injected tool with no `to`
 //       property stands in for the injected-target surface.
 // ===========================================================================
 

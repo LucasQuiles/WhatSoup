@@ -25,6 +25,12 @@ import {
   type ResolvedSessionContext,
   type SessionContext,
 } from './types.ts';
+import {
+  CrossConversationDenied,
+  evaluateTargetConversation,
+  type AssertTargetConversation,
+  type CrossConversationVerdict,
+} from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -320,9 +326,10 @@ export class ToolRegistry {
     | ((conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null)
     | null = null;
   // Issue 3150 registry layer: canonical conversation-key fold for the
-  // pre-handler cross-conversation guard. Null until installed (see
+  // cross-conversation guard (issue 3457: both its pre-handler and its
+  // post-resolution point). Null until installed (see
   // setCanonicalConversationKeyResolver); the guard then falls back to bare
-  // toConversationKey, which can only err toward rejection.
+  // toConversationKey (matrix cell M10).
   private canonicalConversationKeyResolver: ((jid: string) => string) | null = null;
   // QR-017 / #1976: transient group tag applied by withModule() to any tool
   // registered inside the bracket. Set only for the synchronous span of a
@@ -494,17 +501,49 @@ export class ToolRegistry {
 
   /**
    * Issue 3150 registry layer: install the canonical conversation-key fold
-   * used by the pre-handler cross-conversation guard. Session conversation
-   * keys are stored PHONE-folded at ingest (QR-050), so a pinned global
-   * session addressing its OWN conversation by its mapped `@lid` JID must
-   * fold the same way — a bare `toConversationKey` yields the raw LID digits
-   * and falsely rejects the pin one layer above the handler's own fold.
+   * used by the cross-conversation guard at both of its points (issue 3457).
+   * Session conversation keys are stored PHONE-folded at ingest (QR-050), so
+   * a pinned global session addressing its OWN conversation by its mapped
+   * `@lid` JID must fold the same way — a bare `toConversationKey` yields the
+   * raw LID digits and falsely rejects the pin.
    * Installed by `registerMessagingTools`, which holds the db the fold needs;
-   * until then the guard falls back to `toConversationKey`, which can only
-   * err toward rejection — never toward admitting a foreign conversation.
+   * until then the guard falls back to `toConversationKey`. That fallback
+   * rejects a mapped own `@lid` (matrix cell M10) but is not strictly more
+   * conservative: see the M10 notes in
+   * tests/integration/cross-conversation-guard-matrix.test.ts.
    */
   setCanonicalConversationKeyResolver(resolver: (jid: string) => string): void {
     this.canonicalConversationKeyResolver = resolver;
+  }
+
+  /**
+   * Issue 3457: run the one cross-conversation guard with this registry's
+   * fold, and log every denial. A binding/mirror divergence is logged at
+   * error level with both keys, because it means the session state itself is
+   * inconsistent, not that a caller asked for a foreign chat.
+   */
+  private evaluateTargetConversation(
+    session: SessionContext,
+    targetJid: string,
+    tool: string,
+    point: 'pre-handler' | 'post-resolution',
+  ): CrossConversationVerdict {
+    const fold = this.canonicalConversationKeyResolver ?? toConversationKey;
+    const verdict = evaluateTargetConversation(session, targetJid, fold);
+    if (verdict.kind === 'deny') {
+      if (verdict.divergence) {
+        log.error(
+          { tool, point, branch: verdict.branch, targetJid, ...verdict.divergence },
+          'cross-conversation guard: conversation binding and its session mirror disagree - denied (fail-closed)',
+        );
+      } else {
+        log.warn(
+          { tool, point, branch: verdict.branch, targetJid, sessionConversationKey: session.conversationKey ?? null },
+          'cross-conversation guard denied tool target',
+        );
+      }
+    }
+    return verdict;
   }
 
   /** AS-04: any tool-durability write loss at or after `sinceMs`? */
@@ -731,33 +770,14 @@ export class ToolRegistry {
           );
         }
 
-        // Cross-conversation guard: only enforced when session has a bound conversationKey
-        // Alias targets are resolved inside the tool handler, then checked there.
-        // The caller JID is folded through the installed canonical resolver
-        // (issue 3150: `@lid` -> phone, matching ingest QR-050 keying) so a
-        // session addressing its own conversation by its `@lid` JID is not
-        // falsely rejected; foreign `@lid` JIDs fold to a different phone and
-        // still fail the comparison.
-        if (session.conversationKey && hasCallerJid && !hasAliasTarget) {
-          let resolved: string;
-          try {
-            resolved = this.canonicalConversationKeyResolver
-              ? this.canonicalConversationKeyResolver(callerJid)
-              : toConversationKey(callerJid);
-          } catch {
-            return reject(
-              `Invalid chatJid "${callerJid}": must be a valid JID`,
-              'validation_rejected',
-              'validation',
-            );
-          }
-
-          if (resolved !== session.conversationKey) {
-            return reject(
-              `chatJid "${callerJid}" resolves to conversation "${resolved}" which does not match session conversation "${session.conversationKey}"`,
-              'authorization_denied',
-              'authorization',
-            );
+        // Cross-conversation guard, pre-handler point (issue 3457): adjudicates
+        // the caller-supplied chatJid. An alias target is not resolved yet, so
+        // it is adjudicated at the post-resolution point instead, through the
+        // callback handed to the handler below.
+        if (hasCallerJid && !hasAliasTarget) {
+          const verdict = this.evaluateTargetConversation(session, callerJid, name, 'pre-handler');
+          if (verdict.kind === 'deny') {
+            return reject(verdict.text, verdict.failureCode, verdict.failureStage);
           }
         }
       }
@@ -840,7 +860,15 @@ export class ToolRegistry {
               }
             }
           : undefined;
-        const result = await tool.handler(effectiveParams, session, recordBondEffectDispatch);
+        // Cross-conversation guard, post-resolution point (issue 3457): the
+        // handler calls this on the JID it is about to act on, after alias
+        // and `@lid` resolution. A denial throws CrossConversationDenied,
+        // which the catch below maps onto the verdict's failure channel.
+        const assertTargetConversation: AssertTargetConversation = (targetJid) => {
+          const verdict = this.evaluateTargetConversation(session, targetJid, name, 'post-resolution');
+          if (verdict.kind === 'deny') throw new CrossConversationDenied(verdict);
+        };
+        const result = await tool.handler(effectiveParams, session, recordBondEffectDispatch, assertTargetConversation);
         const isError = isToolErrorPayload(result);
         const returnedErrorEvidence = getToolErrorEvidence(result);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
@@ -874,6 +902,11 @@ export class ToolRegistry {
           ...(isError ? { isError: true } : {}),
         };
       } catch (err) {
+        if (err instanceof CrossConversationDenied) {
+          // Same channel and same plain-text shape as a pre-handler denial.
+          finishFailure(err.verdict.failureCode, err.verdict.failureStage, 'complete');
+          return { content: [{ type: 'text', text: err.verdict.text }], isError: true };
+        }
         const message = errorMessage(err);
         const durationMs = this.clock.now() - start;
         log.error({ tool: name, durationMs }, 'tool handler threw');

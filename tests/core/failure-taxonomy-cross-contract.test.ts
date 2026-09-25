@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import registry from '../../src/lib/fault-taxonomy-registry.json' with { type: 'json' };
+import { Database } from '../../src/core/database.ts';
+import { AgentRuntime } from '../../src/runtimes/agent/runtime.ts';
+import { makeMessenger } from '../runtimes/agent/lib/session-harness.ts';
 import {
   ADMISSION_REJECT_CLASSES,
   INBOUND_FAILURE_CLASSES,
@@ -44,6 +47,56 @@ import {
   RUNTIME_AGENT_HEALTH_SIGNALS,
   RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS,
 } from '../../src/lib/fault-classifier.ts';
+import { getTurnRecoveryHealthDetails } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
+
+vi.mock('../../src/lib/emit-alert.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/lib/emit-alert.ts')>(),
+  emitAlert: vi.fn(),
+}));
+
+vi.mock('../../src/logger.ts', async () => {
+  const { loggerMock } = await import('../helpers/logger-mock.ts');
+  const mock = loggerMock();
+  const logger = mock.createChildLogger();
+  return {
+    ...mock,
+    default: { ...logger, child: () => logger },
+    flushLogger: vi.fn(),
+  };
+});
+
+// Top-level numeric agent health fields that are deliberately NOT in
+// runtimeAgentHealthSignals. Every other numeric key the runtime projects must
+// be registered, or the bot-errors health check drops it from its evidence.
+const UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS = new Set([
+  // Provider-fallback telemetry spread from getFallbackState(). Registering it
+  // is a separate decision, outside the X21 scope.
+  'fallbackTurnsServed',
+  'fallbackTurnsEmpty',
+  'probeAttempts',
+  'fallbackActivations',
+  'fallbackReverts',
+  'fallbackReplays',
+  'failedEntryCount',
+  // A USD float; the checker's read_int drops non-integral values.
+  'fallbackWindowCostUsd',
+]);
+
+function projectedNumericAgentHealthFields(sessionScope: 'single' | 'per_chat'): string[] {
+  const db = new Database(':memory:');
+  db.open();
+  try {
+    const runtime = new AgentRuntime(db, makeMessenger().messenger, `registry-${sessionScope}`, {
+      sessionScope,
+    });
+    const { details } = runtime.getHealthSnapshot();
+    return Object.entries(details)
+      .filter(([, value]) => typeof value === 'number')
+      .map(([field]) => field);
+  } finally {
+    db.close();
+  }
+}
 
 // if an extra key is present (excess-property checking on the literal),
 // so this map's keys are exhaustively bound to the union at compile time.
@@ -110,6 +163,9 @@ describe('failure taxonomy cross-contract', () => {
       'turnRecoveryPending',
       'turnRecoveryExpiredClaimed',
       'turnRecoveryBlockedUnsafe',
+      'turnRecoveryBlockedUnsafeSynthetic',
+      'turnRecoveryBlockedUnsafeSuperseded',
+      'turnRecoveryBlockedUnsafeStranded',
       'turnRecoveryExhausted',
       'turnRecoveryOpenRecoveries',
       'turnRecoveryQuarantinedDelivery',
@@ -121,6 +177,15 @@ describe('failure taxonomy cross-contract', () => {
       'turnFinalizationRetryRecoveries',
       'turnFinalizationRetryExhaustions',
       'turnRecoveryLiveClaimed',
+      'perChatSessionsWithoutOwner',
+      'perChatRespawnAbandoned',
+      'turnQueueHaltedScopes',
+      'proactiveResumeIdentityRejects',
+      'unownedProviderEventRejects',
+      'suppressedSystemTurnEffectRejects',
+      'chronologyDelayedDispatches',
+      'chronologyRecoveryReplayDispatches',
+      'chronologyMaxQueueAgeSeconds',
     ] as const;
 
     expect(registry.schema).toBe('whatsoup-fault-taxonomy-registry-v3');
@@ -140,6 +205,47 @@ describe('failure taxonomy cross-contract', () => {
       ]));
     expect(new Set(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => entry.currentHealthEffect)))
       .toEqual(new Set(['positive_is_risk', 'diagnostic_only']));
+  });
+
+  it('registers every numeric turn-recovery health field the runtime projects', () => {
+    // The bot-errors health check only labels registered fields, so a
+    // projected gauge missing here is silently dropped from its evidence (#3572).
+    const projected = Object.keys(getTurnRecoveryHealthDetails(null));
+    const unregistered = projected.filter(
+      (field) => !RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS.includes(field),
+    );
+    expect(projected.length).toBeGreaterThan(0);
+    expect(unregistered).toEqual([]);
+  });
+
+  it.each(['per_chat', 'single'] as const)(
+    'registers every numeric field the %s agent health snapshot projects',
+    (sessionScope) => {
+      // Reads an idle runtime's real getHealthSnapshot() output, not a
+      // sub-projection, so a counter spread from any source (runtime state,
+      // turn queue, chronology) fails here until it is registered or explicitly
+      // excluded (#3572 follow-up). Fields null while idle are not visible here.
+      const projected = projectedNumericAgentHealthFields(sessionScope);
+      const unregistered = projected.filter(
+        (field) => !RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS.includes(field)
+          && !UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS.has(field),
+      );
+      expect(projected.length).toBeGreaterThan(0);
+      expect(unregistered).toEqual([]);
+    },
+  );
+
+  it('keeps the unregistered numeric exclusions disjoint from the registry and still projected', () => {
+    const overlap = RUNTIME_AGENT_HEALTH_SIGNAL_FIELDS.filter(
+      (field) => UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS.has(field),
+    );
+    expect(overlap).toEqual([]);
+    // A stale exclusion would silently widen the allowance for a future field.
+    const projected = new Set(projectedNumericAgentHealthFields('per_chat'));
+    const stale = [...UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS].filter(
+      (field) => !projected.has(field),
+    );
+    expect(stale).toEqual([]);
   });
 
   it('matches every registered failure domain to its runtime owner', () => {

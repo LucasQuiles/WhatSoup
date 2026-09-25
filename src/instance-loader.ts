@@ -22,6 +22,7 @@ import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
 import type { LaunchdPlistRenderOptions } from './lib/launchd-service-config.ts';
+import type { TurnRecoveryCatchupReconcileOptions } from './core/turn-recovery-catchup-config.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { setLoadedInstanceConfig } from './lib/instance-context.ts';
 
@@ -85,6 +86,12 @@ interface AgentOptions {
    * body is a startup ConfigValidationError. See `docs/configuration.md`.
    */
   capabilityObligations?: Record<string, unknown>;
+  /**
+   * Automatic operator catch-up reconciler gate (default OFF). Closed shape,
+   * validated by `validateTurnRecoveryCatchupReconcileConfig`
+   * (src/core/turn-recovery-catchup-config.ts). See `docs/configuration.md`.
+   */
+  turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
 }
 
 interface InstanceConfig {

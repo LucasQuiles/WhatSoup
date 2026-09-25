@@ -10,6 +10,13 @@
 #                   some hosts run the fleet API on a non-default port — see the host port map)
 #   NODE_BIN      — absolute path to pinned node binary, e.g.
 #                   __HOME__/.nvm/versions/node/v24.15.0/bin/node
+#   __BOT_ERRORS_EMIT__ — absolute path of the BOT ERRORS emitter. Render with
+#                   deploy/scripts/render-watchdog.py, which bakes the emitter
+#                   of the release tree the template is rendered from.
+#   __HEALTH_READER_PATH__ / __HEALTH_READER_SHA256__ — the loopback health
+#                   reader (deploy/scripts/lib/health_reader.py) of that same
+#                   release tree and its runtime-manifest digest, baked by
+#                   render-watchdog.py. Every read re-verifies the digest.
 #
 # Install to: ~/.local/bin/BOT_NAME-watchdog
 # chmod +x that file after writing.
@@ -35,8 +42,35 @@ LOCK="$LOG_DIR/BOT_NAME-watchdog.lock"
 # "dead until proven recovered", not "dead as of the last cycle". External
 # alert paths may stat this file; no in-repo consumer exists.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
+# Present while a CREDENTIAL-DEAD page is outstanding. Written only AFTER the
+# emitter accepted the page, so a failed send retries next cycle and a host
+# that was already dead (marker, no stamp) when paging shipped still pages.
+# Its content counts consecutive failed recovery clears (empty = 0); it is
+# removed after the clear is accepted, or abandoned after
+# CRED_CLEAR_MAX_ATTEMPTS failures so an unreachable outbox cannot keep the
+# watchdog in ERROR forever.
+CRED_PAGED="$LOG_DIR/BOT_NAME-credential-dead.paged"
+# Present once this dead episode has logged the "no emitter" detail line, so
+# it is written once per episode, not every two minutes (the ERROR state and
+# nonzero exit still repeat every cycle). Removed on recovery and after a page
+# lands.
+CRED_UNPAGED="$LOG_DIR/BOT_NAME-credential-dead.unpaged"
+# Present while a recovery has happened but its page stamp is still on disk (the
+# clear is being retried, or the stamp could not be removed). A dead cycle that
+# finds both files knows the stamp belongs to the previous episode and pages
+# again. Written by recovery, removed with the stamp.
+CRED_RECOVERED="$LOG_DIR/BOT_NAME-credential-dead.recovered"
+CRED_CLEAR_MAX_ATTEMPTS=3
+# The shipped BOT ERRORS emitter writes to the host's durable outbox. Hosts run
+# from per-release trees, so the path is baked at render time by
+# render-watchdog.py (the emitter of the release this was rendered from) rather
+# than guessed from a checkout location at run time.
+BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"
+CRED_ALERT_SOURCE="provider_credential_dead"
 WD_FINAL="ok"
 WD_EXIT=0
+typeset +x HEALTH_TOKEN
+HEALTH_TOKEN=""
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -45,6 +79,14 @@ FLEET_PLIST="$HOME_DIR/Library/LaunchAgents/$FLEET_LABEL.plist"
 
 BOT_HEALTH="http://127.0.0.1:BOT_PORT/health"
 FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
+HEALTH_READER_PATH="__HEALTH_READER_PATH__"
+HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
+# The reader's per-socket timeout must expire well before the wall deadline,
+# so a target that accepts TCP but never answers yields a typed transport
+# failure (restart) instead of a killed reader. The deadline is the backstop
+# for a read that still has not finished (e.g. a trickling response).
+HEALTH_READ_TIMEOUT_SECONDS=5
+HEALTH_READ_DEADLINE_SECONDS=8
 
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
@@ -181,9 +223,14 @@ health_unknown() {
 # for the state operation, and exit 2 means unsafe or otherwise unusable.
 # Existing owned 0644 markers remain valid for upgrade compatibility; newly
 # created markers are 0600. Symlinks and non-regular paths are never followed,
-# cleared, or treated as evidence of prior credential death.
+# cleared, or treated as evidence of prior credential death. The optional
+# second argument selects another state file under the same rules (the
+# CRED_PAGED / CRED_UNPAGED stamps); the default is CRED_MARKER. `bump`
+# increments the integer an EXISTING file holds (empty = 0), prints the new
+# value, exits 1 when the file is absent, and exits 3 when its content is not a
+# count (so the caller can stop retrying instead of failing forever).
 credential_marker() {
-  python3 - "$1" "$CRED_MARKER" 2>>"$LOG" <<'MARKER_PY'
+  python3 - "$1" "${2:-$CRED_MARKER}" 2>>"$LOG" <<'MARKER_PY'
 import os
 import stat
 import sys
@@ -242,6 +289,26 @@ try:
         if marker is not None:
             os.unlink(name, dir_fd=directory_fd)
         raise SystemExit(0)
+    if operation == "bump":
+        if marker is None:
+            raise SystemExit(1)
+        marker_fd = os.open(name, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        opened = os.fstat(marker_fd)
+        if (opened.st_dev, opened.st_ino) != (marker.st_dev, marker.st_ino):
+            reject()
+        try:
+            raw = os.read(marker_fd, 64).decode("ascii").strip()
+            count = (int(raw) if raw else 0) + 1
+        except ValueError:
+            raise SystemExit(3)
+        # A negative stored count is corrupt too: it would defer the cap.
+        if count < 1:
+            raise SystemExit(3)
+        os.lseek(marker_fd, 0, os.SEEK_SET)
+        os.ftruncate(marker_fd, 0)
+        os.write(marker_fd, f"{count}\n".encode("ascii"))
+        print(count)
+        raise SystemExit(0)
     reject()
 except SystemExit:
     raise
@@ -281,10 +348,10 @@ run_with_timeout() {
   local cmd_pid exit_code killer_pid
   "$@" &
   cmd_pid=$!
-  (
-    sleep "$timeout_sec"
-    kill -9 "$cmd_pid" 2>/dev/null
-  ) < /dev/null > /dev/null 2>&1 &
+  # One timer process: cancelling a shell around external sleep would orphan
+  # the sleeper. Python is already required by every diagnostic read.
+  python3 -c 'import os, signal, sys, time; time.sleep(float(sys.argv[1])); os.kill(int(sys.argv[2]), signal.SIGKILL)' \
+    "$timeout_sec" "$cmd_pid" < /dev/null > /dev/null 2>&1 &
   killer_pid=$!
   wait "$cmd_pid" 2>/dev/null
   exit_code=$?
@@ -296,7 +363,34 @@ run_with_timeout() {
   return $exit_code
 }
 
-# Ensure a launchd job is loaded; bootstrap from its plist if not.
+# credential_page alert|clear — one BOT ERRORS event for a CREDENTIAL-DEAD
+# episode, written to the durable outbox by the shipped emitter. Both events
+# carry --instance and --source, so the clear keys to the same
+# machine|instance|source incident the alert opened. Returns 0 when the
+# emitter accepted it, 1 when it failed or timed out, 2 when this host has no
+# emitter at BOT_ERRORS_EMIT.
+credential_page() {
+  if [ ! -r "$BOT_ERRORS_EMIT" ]; then
+    return 2
+  fi
+  if [ "$1" = "alert" ]; then
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --severity critical \
+      --summary "BOT_NAME provider credential is dead; reauth required (restart suppressed)" \
+      --evidence "watchdog=BOT_NAME-watchdog marker=$CRED_MARKER log=$LOG" >> "$LOG" 2>&1 || return 1
+  else
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" --clear \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --summary "BOT_NAME provider credential recovered" >> "$LOG" 2>&1 || return 1
+  fi
+  return 0
+}
+
+# Called only after restart-worthy evidence. Exit 2 means bootstrap succeeded,
+# so the caller must not immediately kickstart that newly started process.
 ensure_loaded() {
   local job_label="$1" plist="$2"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
@@ -307,7 +401,9 @@ ensure_loaded() {
       WD_EXIT=1
       return 1
     fi
+    return 2
   fi
+  return 0
 }
 
 launchd_reports_permanent_stop() {
@@ -338,7 +434,7 @@ restart_label() {
   local job_label="$1" reason="$2"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local rlock="$LOG_DIR/$job_label.restart.lock"
-  local now last
+  local now last load_rc action_rc
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
     wd_note RESTART-SUPPRESSED
@@ -387,8 +483,19 @@ restart_label() {
     release_mutex "$rlock"
     return 0
   fi
-  log "restarting $job_label: $reason"
-  if run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+  ensure_loaded "$job_label" "$HOME_DIR/Library/LaunchAgents/$job_label.plist"
+  load_rc=$?
+  if [ "$load_rc" -eq 1 ]; then
+    release_mutex "$rlock"
+    return 1
+  elif [ "$load_rc" -eq 2 ]; then
+    action_rc=0
+  else
+    log "restarting $job_label: $reason"
+    run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1
+    action_rc=$?
+  fi
+  if [ "$action_rc" -eq 0 ]; then
     wd_note RESTARTED
     # Arm the cooldown only for a restart that actually happened; a failed
     # kickstart must retry next cycle, not sit suppressed for 5 minutes.
@@ -404,14 +511,11 @@ restart_label() {
   release_mutex "$rlock"
 }
 
-ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
-ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
-
 # --- Bot health check ---
 # The diagnostic body is auth-gated. Read the transitional token file through
 # a verified descriptor using the same contract as src/fleet/health-token-file.ts.
-# The validated token remains in an unexported shell variable and is sent to
-# curl through config stdin, never argv, the environment, a new file, or logs.
+# The validated token remains in an unexported shell variable and reaches the
+# pinned health reader through a pipe, never argv, environment, files or logs.
 BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
 read_health_token() {
   python3 - "$BOT_TOKENS_ENV" <<'PY'
@@ -507,22 +611,102 @@ finally:
 PY
 }
 
+read_health_response() {
+  # FD 3 preserves the anonymous token pipe through the timeout's background
+  # command. Execute the bytes just hashed, avoiding a path reopen after check.
+  run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3 -c '
+import errno, hashlib, os, re, stat, sys
+try:
+    source_path, expected, port_text, request_path, timeout_text = sys.argv[1:]
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ValueError()
+    if re.fullmatch(r"[1-9][0-9]?", timeout_text) is None:
+        raise ValueError()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(source_path, flags)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError()
+        contents = source.read(262145)
+    if len(contents) > 262144 or hashlib.sha256(contents).hexdigest() != expected:
+        raise ValueError()
+    namespace = {"__name__": "watchdog_health_reader", "__file__": source_path}
+    exec(compile(contents, source_path, "exec"), namespace)
+    if request_path == "verify":
+        if not callable(namespace.get("fetch_loopback_health")) or not isinstance(namespace.get("HealthTransportError"), type):
+            raise ValueError()
+        print("VERIFIED")
+        raise SystemExit(0)
+    with os.fdopen(3, "rb") as token_pipe:
+        token = token_pipe.read(65).decode("ascii")
+    if request_path == "/health":
+        if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError()
+        headers = {"Authorization": "Bearer " + token}
+    elif request_path == "/" and not token:
+        headers = {}
+    else:
+        raise ValueError()
+    try:
+        code, body = namespace["fetch_loopback_health"](int(port_text), request_path, headers, timeout=int(timeout_text))
+    except namespace["HealthTransportError"] as error:
+        if (error.stage not in ("connect", "request", "response", "read")
+                or (error.errno is not None and type(error.errno) is not int)):
+            raise ValueError()
+        if error.stage == "connect" and error.errno == errno.EADDRNOTAVAIL:
+            print("EADDRNOTAVAIL")
+            raise SystemExit(2)
+        print("TRANSPORT_FAILURE")
+        raise SystemExit(7)
+    if type(code) is not int or not 100 <= code <= 599 or not isinstance(body, str):
+        raise ValueError()
+    if len(body.encode("utf-8")) > 65536:
+        raise ValueError()
+    print(body + "\n" + str(code), end="")
+except Exception:
+    print("watchdog: health reader unavailable or invalid", file=sys.stderr)
+    raise SystemExit(3)
+' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" 3<&0
+}
+
+# An unverifiable reader leaves this cycle without evidence: no restart, no
+# bootstrap, and no credential verdict (the paging state is left untouched).
+binding_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
+binding_rc=$?
+if [ "$binding_rc" -ne 0 ] || [ "$binding_resp" != VERIFIED ]; then
+  health_unknown "health reader binding unavailable or invalid"
+  log "$WD_FINAL"
+  exit "$WD_EXIT"
+fi
 # Capture the body EVEN on an HTTP error status. A logged-out / terminally
 # auth-failed bot returns HTTP 503 *with* a body carrying
-# whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
-# and send us down the "unreachable" restart path, restart-looping a bot a
-# restart cannot fix. So: no --fail; capture body + code; treat only a real
-# TRANSPORT failure (no HTTP response at all) as unreachable, and let the
-# decision block below act on the body (incl. the terminal-no-restart branch).
+# whatsapp.connection.auth_failure_class; discarding that body would send us
+# down the "unreachable" restart path, restart-looping a bot a restart cannot
+# fix. So the reader returns body + code for every HTTP response, and the
+# decision block below acts on the body (incl. the terminal-no-restart branch).
+# Only a typed transport failure with no HTTP response is unreachable, and only
+# a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
+# HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
+# Ordinary refusal retains the existing restart policy. A read killed at the
+# wall deadline (run_with_timeout 124, no output) is restart evidence too, as
+# `curl --max-time` was: the reader's own shorter socket timeout already turns
+# a silent target into a typed failure, so reaching the deadline means the
+# response did not complete in time (e.g. a trickling target).
 HEALTH_TOKEN=""
 if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
-  bot_resp="$(print -r -- "header = \"Authorization: Bearer $HEALTH_TOKEN\"" | curl --config - --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
-  curl_rc=$?
+  bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  probe_rc=$?
   HEALTH_TOKEN=""
   bot_code="${bot_resp##*$'\n'}"
   bot_json="${bot_resp%$'\n'*}"
-  if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
+  if [ "$probe_rc" -eq 2 ] && [ "$bot_resp" = EADDRNOTAVAIL ]; then
+    health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
+  elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
     restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
+    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
+  elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
+    health_unknown "bot health reader unavailable or invalid"
   elif [ -z "$bot_json" ]; then
     health_unknown "empty diagnostic health body"
   elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
@@ -921,6 +1105,86 @@ PY
       wd_note ERROR
       WD_EXIT=1
     fi
+    # Page once per transition: only while no page is outstanding.
+    #
+    # Invariant: no failure of these state files may silence a page. When the
+    # stamp or the recovery flag cannot be read safely or removed, the watchdog
+    # pages anyway and logs ERROR. The worst case is a repeated page on a later
+    # cycle, which BOT ERRORS folds into the open machine|instance|source
+    # incident. (A stamp suppresses only an incident that is still open: the
+    # recovery flag is written before any clear is sent, so a stamp whose clear
+    # went out always has its flag.)
+    credential_marker state "$CRED_PAGED"
+    paged_rc=$?
+    if [ "$paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; paging without it (repeats are possible)"
+      wd_note ERROR
+      WD_EXIT=1
+      paged_rc=1
+    elif [ "$paged_rc" -eq 0 ]; then
+      # A stamp that outlived a recovery (its clear is still being retried, or
+      # it could not be removed) must not suppress this new episode's page. The
+      # recovery flag, not marker history, identifies it: a failed marker
+      # create never makes the current episode's stamp look stale.
+      credential_marker state "$CRED_RECOVERED"
+      flag_rc=$?
+      if [ "$flag_rc" -eq 2 ]; then
+        log "ERROR: unsafe recovery flag $CRED_RECOVERED; cannot tell whether $CRED_PAGED is current, paging (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+        paged_rc=1
+      elif [ "$flag_rc" -eq 0 ]; then
+        log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
+        paged_rc=1
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        elif ! credential_marker clear "$CRED_RECOVERED"; then
+          log "ERROR: failed to remove recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    else
+      # A flag with no stamp is left from a recovery that died after removing
+      # the stamp. Drop it before this episode's stamp exists, or the next
+      # cycle would read the new stamp as stale and page again.
+      credential_marker state "$CRED_RECOVERED"
+      if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
+    if [ "$paged_rc" -eq 1 ]; then
+      credential_page alert
+      page_rc=$?
+      if [ "$page_rc" -eq 0 ]; then
+        log "CREDENTIAL-DEAD: paged BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker create "$CRED_PAGED"; then
+          log "ERROR: failed to record credential page stamp $CRED_PAGED; the page may repeat next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+        credential_marker clear "$CRED_UNPAGED" || true
+      elif [ "$page_rc" -eq 2 ]; then
+        # A dead credential nobody is told about is an error, every cycle. The
+        # page is retried each cycle (the emitter may reappear); the detail
+        # line is written once per episode.
+        wd_note ERROR
+        WD_EXIT=1
+        credential_marker state "$CRED_UNPAGED"
+        if [ $? -eq 1 ]; then
+          log "ERROR: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-DEAD not paged (re-render this watchdog from the running release with render-watchdog.py; retried each cycle, logged once per episode)"
+          credential_marker create "$CRED_UNPAGED" || true
+        fi
+      else
+        log "ERROR: CREDENTIAL-DEAD page failed via $BOT_ERRORS_EMIT; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
     wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
     # Inconclusive credential evidence: never restart, never touch the marker.
@@ -943,12 +1207,84 @@ PY
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    if ! credential_marker clear; then
-      # Recovery evidence remains valid, but the watchdog invocation is not
-      # healthy while an unsafe or unusable marker path persists.
-      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+    # Recovery closes an outstanding page exactly once. The stamp is removed
+    # after the clear was accepted, so a failed clear retries; after
+    # CRED_CLEAR_MAX_ATTEMPTS consecutive failures (a missing emitter counts)
+    # it is dropped with a WARN instead of holding the watchdog in ERROR.
+    credential_marker state "$CRED_PAGED"
+    recovered_paged_rc=$?
+    # The recovery flag is written before anything else changes, so a process
+    # that dies at any later step still leaves the stamp marked as belonging to
+    # a recovered episode. If it cannot be written, nothing else changes: the
+    # page stays open and the next healthy cycle retries the whole recovery.
+    recovery_recorded=1
+    if [ "$recovered_paged_rc" -eq 0 ] && ! credential_marker create "$CRED_RECOVERED"; then
+      log "ERROR: failed to record recovery flag $CRED_RECOVERED; recovery not applied, retrying next cycle"
       wd_note ERROR
       WD_EXIT=1
+      recovery_recorded=0
+    fi
+    if [ "$recovery_recorded" -eq 1 ]; then
+      if ! credential_marker clear; then
+        # Recovery evidence remains valid, but the watchdog invocation is not
+        # healthy while an unsafe or unusable marker path persists.
+        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+      # Recovery ends the episode: the next dead episode may warn again.
+      credential_marker clear "$CRED_UNPAGED" || true
+    fi
+    if [ "$recovered_paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; not clearing"
+      wd_note ERROR
+      WD_EXIT=1
+    elif [ "$recovered_paged_rc" -eq 0 ] && [ "$recovery_recorded" -eq 1 ]; then
+      credential_page clear
+      clear_rc=$?
+      if [ "$clear_rc" -eq 0 ]; then
+        log "CREDENTIAL-RECOVERED: cleared BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to clear credential page stamp $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      else
+        clear_failures="$(credential_marker bump "$CRED_PAGED")"
+        bump_rc=$?
+        if [ "$bump_rc" -eq 3 ]; then
+          # A corrupt count cannot be trusted to ever reach the cap: treat it
+          # as the cap rather than retrying without bound.
+          log "WARN: unreadable clear-failure count in $CRED_PAGED; dropping it — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$bump_rc" -ne 0 ] || [ -z "$clear_failures" ]; then
+          log "ERROR: cannot count failed clears in $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        elif [ "$clear_failures" -ge "$CRED_CLEAR_MAX_ATTEMPTS" ]; then
+          log "WARN: CREDENTIAL-RECOVERED clear failed $clear_failures consecutive times via $BOT_ERRORS_EMIT; dropping $CRED_PAGED — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$clear_rc" -eq 2 ]; then
+          log "WARN: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-RECOVERED clear not sent (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS)"
+        else
+          log "ERROR: CREDENTIAL-RECOVERED clear failed via $BOT_ERRORS_EMIT (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS); retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    fi
+    # Once no page stamp remains, the recovery flag has nothing to mark.
+    credential_marker state "$CRED_PAGED"
+    if [ $? -eq 1 ]; then
+      credential_marker clear "$CRED_RECOVERED" || true
     fi
   fi
   fi
@@ -958,7 +1294,18 @@ else
 fi
 
 # --- Fleet console health check ---
-if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2>>"$LOG"; then
+fleet_resp="$(read_health_response FLEET_PORT / </dev/null 2>>"$LOG")"
+probe_rc=$?
+fleet_code="${fleet_resp##*$'\n'}"
+if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
+  health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
+elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
+  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
+elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
+  health_unknown "fleet health reader unavailable or invalid"
+elif [ "$fleet_code" -ge 400 ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable"
 fi
 

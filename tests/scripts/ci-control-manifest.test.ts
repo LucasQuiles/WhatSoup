@@ -154,6 +154,7 @@ describe('canonical CI control manifest', () => {
       'ci.outgoing-ref-policy': 'report-only',
       'privacy.publication': 'report-only',
       'repo.hygiene': 'report-only',
+      'test.guard-coverage': 'report-only',
       'test.integrity': 'planned',
       'workflow.safeguard-diagnostics': 'planned',
     });
@@ -244,6 +245,32 @@ describe('canonical CI control manifest', () => {
       },
       mode: 'block',
     });
+    expect(loaded.controls.find(({ id }) => id === 'test.guard-coverage')).toMatchObject({
+      policyCategory: 'test-integrity',
+      domain: 'test-integrity',
+      decisionOwner: 'test-integrity-decision-owner',
+      availability: 'report-only',
+      mode: 'block',
+      implementation: {
+        commandId: 'guard:guard-test-coverage',
+        detectorId: 'guard-test-coverage-check',
+        nativeSchemaVersion: 1,
+      },
+      evidence: {
+        schemaVersion: null,
+        digestBinding: 'none',
+        freshness: 'same-process',
+      },
+    });
+    expect(loaded.canonicalCommands['guard:guard-test-coverage']).toEqual([
+      'bash',
+      'scripts/run-with-pinned-node.sh',
+      'scripts/guard-test-coverage-check.ts',
+      '--semantic-mode',
+      'enforce',
+      '--format',
+      'json',
+    ]);
     expect(loaded.canonicalCommands['agent:lease']).toEqual([
       'bash',
       'scripts/run-with-pinned-node.sh',

@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
+AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization(?:\\*[\"'])?\s*[:=]\s*(?:\\*[\"'])?(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
 AUTHORIZATION_KEYED_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
     r"([\"']?authorization[\"']?\s*[:=]\s*[\"']?)"
