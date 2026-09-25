@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { TurnRecoverySupervisor } from '../../../src/runtimes/agent/turn-recovery-supervisor.ts';
+import type { AgentRuntime, AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
+import { makeRuntimeState, type RuntimeState } from './lib/runtime-terminal-coordinator-harness.ts';
 
 /**
  * PR2 wiring: the supervisor's runScan() must invoke the (PR1) catch-up
@@ -204,5 +206,66 @@ describe('turn-recovery supervisor catch-up reconciliation wiring', () => {
     const health = supervisor.health();
     expect(health.lastScanFailureReason).toBe('catchup_reconcile_failed');
     expect(health.consecutiveScanFailures).toBe(1);
+  });
+
+  /**
+   * Config gate: `agentOptions.turnRecoveryCatchupReconcile` reaches the
+   * supervisor AgentRuntime actually constructs. Drives the runtime's own
+   * supervisor instance (not a test-built one) and asserts on database state,
+   * because setDurability also arms the background scan timer.
+   */
+  describe('AgentRuntime option turnRecoveryCatchupReconcile', () => {
+    let runtime: AgentRuntime | null = null;
+
+    afterEach(async () => {
+      await runtime?.shutdown().catch(() => {});
+      runtime = null;
+    });
+
+    function runtimeSupervisor(options: AgentRuntimeOptions): { scanOnce(): Promise<unknown> } {
+      const built = makeRuntimeState<RuntimeState & {
+        turnRecoverySupervisor: { scanOnce(): Promise<unknown> };
+      }>(db, { sessionScope: 'per_chat', ...options });
+      runtime = built.runtime;
+      runtime.setDurability(durability);
+      return built.state.turnRecoverySupervisor;
+    }
+
+    it('closes a caught-up group when enabled', async () => {
+      const fixture = installCaughtUpGroup({ planId: 'runtime-gate-on' });
+      const supervisor = runtimeSupervisor({ turnRecoveryCatchupReconcile: { enabled: true } });
+
+      await supervisor.scanOnce();
+
+      expect(pendingSeqs()).toEqual([]);
+      expect(closedLinks().map((link) => link.inbound_seq)).toEqual(fixture.sourceSeqs);
+      expect(new Set(closedLinks().map((link) => link.actor))).toEqual(new Set(['auto_reconciler']));
+    });
+
+    it.each([
+      ['absent', {}],
+      ['enabled: false', { turnRecoveryCatchupReconcile: { enabled: false } }],
+    ])('leaves the group pending when the option is %s', async (_label, options) => {
+      const fixture = installCaughtUpGroup({ planId: 'runtime-gate-off' });
+      const supervisor = runtimeSupervisor(options);
+
+      await supervisor.scanOnce();
+
+      expect(pendingSeqs()).toEqual(fixture.sourceSeqs);
+      expect(closedLinks()).toEqual([]);
+    });
+
+    it('forwards groupLimit to the reconciler', async () => {
+      installCaughtUpGroup({ planId: 'runtime-gate-lim-a' });
+      installCaughtUpGroup({ planId: 'runtime-gate-lim-b' });
+      const supervisor = runtimeSupervisor({
+        turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 1 },
+      });
+
+      const first = await supervisor.scanOnce() as { catchupReconcileClosed: number };
+
+      expect(first.catchupReconcileClosed).toBe(1);
+      expect(pendingSeqs().length).toBe(2);
+    });
   });
 });
