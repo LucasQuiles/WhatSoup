@@ -33,6 +33,7 @@ import {
 } from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
+import { getToolCallCallerEvidence } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import {
@@ -627,6 +628,9 @@ export class ToolRegistry {
           replayPolicy,
           undefined,
           this.turnCorrelationResolver?.(durabilityKey) ?? null,
+          // #3421 step 1: evidence only. It is computed from values already on
+          // the session and never feeds any gate below.
+          getToolCallCallerEvidence(session, tool.sensitive === true),
         );
       } catch {
         this.recordDurabilityWriteLoss('record', name);

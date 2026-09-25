@@ -1,5 +1,6 @@
 import { createServer, connect } from 'node:net';
 import type { Server, Socket } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -7,6 +8,7 @@ import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
+import { initialSocketAttribution, withDeclaredClient } from './caller-attribution.ts';
 import {
   makeConversationBinding,
   resolveSessionContext,
@@ -82,6 +84,11 @@ export class WhatSoupSocketServer {
 
   /** Dynamic authorization context for the turn executing this request. */
   private readonly executingSessionResolver: () => ExecutingSessionContext;
+  /**
+   * #3421: makes connection ids unique across restarts and servers, because the
+   * per-connection counter below starts at 1 in every process.
+   */
+  private readonly connectionIdPrefix = randomBytes(6).toString('hex');
 
   constructor(
     socketPath: string,
@@ -151,7 +158,11 @@ export class WhatSoupSocketServer {
       const clientId = ++clientCounter;
       // SP11: Clone base session for this connection
       const abortController = new AbortController();
-      const connSession: SessionContext = { ...this.baseSession, abortSignal: abortController.signal };
+      const connSession: SessionContext = {
+        ...this.baseSession,
+        abortSignal: abortController.signal,
+        callerAttribution: initialSocketAttribution(`${this.connectionIdPrefix}:${clientId}`),
+      };
       this.connectionSessions.set(clientId, connSession);
       this.activeSockets.set(clientId, socket);
 
@@ -226,6 +237,12 @@ export class WhatSoupSocketServer {
           // Notifications have no id — silently ignore them
           if (req.id === undefined) {
             continue;
+          }
+
+          // #3421: remember what the client says it is. A label only; the reply
+          // below is unchanged and nothing authorizes on it.
+          if (req.method === 'initialize' && connSession.callerAttribution) {
+            connSession.callerAttribution = withDeclaredClient(connSession.callerAttribution, req.params);
           }
 
           // QR-042: snapshot the session per request. connSession.actorJid /
