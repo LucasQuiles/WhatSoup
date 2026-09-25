@@ -86,6 +86,10 @@ function runDaily(
       BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
       BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
       BOT_ERRORS_DRY_NOW_EPOCH: String(NOW_EPOCH),
+      // Declared service inventory: without it the check asks the host's
+      // service manager, and a host with no user systemd session adds an
+      // unrelated critical profile-coverage failure to the event.
+      BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: '',
       ...profileEnv,
     },
   });
@@ -95,6 +99,12 @@ function runDaily(
   return JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as OutboxEvent;
 }
 
+function primaryPhoneLine(event: OutboxEvent): string {
+  const lines = event.evidence.split('\n').filter((line) => line.includes('primary_phone bot-a:'));
+  expect(lines).toHaveLength(1);
+  return lines[0]!;
+}
+
 function isoAt(offsetSeconds: number): string {
   return new Date((NOW_EPOCH + offsetSeconds) * 1000).toISOString().replace('.000Z', 'Z');
 }
@@ -102,19 +112,19 @@ function isoAt(offsetSeconds: number): string {
 describe('primary-phone verification policy', () => {
   it('keeps a missing verification at warning by default', () => {
     const event = runDaily({}, undefined, { profileFile: true });
+    const line = primaryPhoneLine(event);
+    expect(line).toMatch(/^WARN primary_phone bot-a: owner=operator-a .*verification_unknown/);
     expect(event.criticalAsset?.failure?.code).toBeUndefined();
-    expect(event.evidence).toContain('WARN primary_phone bot-a: owner=operator-a');
-    expect(event.evidence).toContain('verification_unknown');
     expect(event.severity).toBe('warning');
   });
 
   it('escalates a missing verification to critical when a private profile sets it for the instance', () => {
     const event = runDaily({ primaryPhoneUnknownSeverity: 'critical' }, undefined, { profileFile: true });
-    expect(event.severity).toBe('critical');
+    const line = primaryPhoneLine(event);
+    expect(line).toMatch(/^FAIL primary_phone bot-a: owner=operator-a .*verification_unknown/);
     expect(event.alertSource).toBe('primary_phone:bot-a');
-    expect(event.evidence).toContain('FAIL primary_phone bot-a: owner=operator-a');
-    expect(event.evidence).toContain('verification_unknown');
     expect(event.criticalAsset?.failure?.code).toBe('WA_AUTH_BOND_PRIMARY_PHONE_UNVERIFIED');
+    expect(event.severity).toBe('critical');
   });
 
   it('rejects a state verification more than 300 s in the future instead of reading it as fresh', () => {
