@@ -18,6 +18,7 @@ import type {
   TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
+import { resolveCatchupReconcileDep, type TurnRecoveryCatchupReconcileOptions } from '../../core/turn-recovery-catchup-config.ts';
 import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
@@ -508,6 +509,8 @@ export interface AgentRuntimeOptions {
    * S3; until it lands an obligation only accumulates.
    */
   deferredTurnAdmission?: { enabled: boolean };
+  /** Catch-up reconciler gate (default OFF); see turn-recovery-catchup-config.ts. */
+  turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
   /**
    * Systemd restart capability, injected from the composition root. The runtimes
    * layer cannot import the fleet layer, so main.ts constructs the concrete
@@ -2774,6 +2777,7 @@ export class AgentRuntime implements Runtime {
       ),
       recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
       resolveDispatchTarget: (job) => this.resolveTurnRecoveryDispatchTarget(job),
+      catchupReconcile: resolveCatchupReconcileDep(options?.turnRecoveryCatchupReconcile),
     });
     this.turnRecoveryDeadman = new TurnRecoveryDeadman({
       instanceName: this.instanceName,

@@ -128,10 +128,10 @@ alert on it rather than treat it as benign.
 before job enumeration (so the cycle's totals include its outcome):
 
 - **Gate:** a new optional supervisor dep, `catchupReconcile: { groupLimit? }`.
-  Absent/null — the default everywhere today, including
-  `createTurnRecoverySupervisorForRuntime` — keeps exactly the pre-PR2
-  behavior. Enabling it is a separately-gated cutover decision, forwarded
-  verbatim through `turn-recovery-dispatch.ts`.
+  Absent/null keeps exactly the pre-PR2 behavior. `AgentRuntime` derives it
+  from the per-instance config block `agentOptions.turnRecoveryCatchupReconcile`
+  (default OFF; see "Enabling per instance" below) and forwards it verbatim
+  through `turn-recovery-dispatch.ts`.
 - **Surface:** `DurabilityEngine.reconcileOperatorCatchupRecoveries(params?)`
   delegates to the core selector on the engine's own raw handle; the
   supervisor's narrow `TurnRecoverySupervisorDurability` interface carries it
@@ -141,14 +141,69 @@ before job enumeration (so the cycle's totals include its outcome):
   (storage/schema drift) records `catchup_reconcile_failed` as the scan
   failure reason and logs a warning **without aborting the rest of the scan**
   (same contract as the stale-claim sweep). Unexpected-error skips inside a
-  successful report are logged at error level for alert wiring.
+  successful report are logged at error level for alert wiring. A pass that
+  closes at least one group logs `turn recovery catch-up reconciler closed
+  caught-up groups` at info level with `{ attempted, closed, linksClosed,
+  skipped }`; the periodic timer discards the scan result, so this log line
+  and the database rows are the live observation surfaces.
 - **Tests:** `tests/runtimes/agent/turn-recovery-catchup-reconcile-wiring.test.ts`
   drives a REAL `Database` + `DurabilityEngine` + `TurnRecoverySupervisor`
   end-to-end (only the socket is absent): gate-on closes a caught-up group
   with `auto_reconciler` actors and is idempotent; gate-off (default) leaves
   everything pending; `groupLimit` bounds a cycle and the next cycle drains
   the remainder; a throwing reconciler resolves the scan, keeps everything
-  pending, and lands `catchup_reconcile_failed` in health.
+  pending, and lands `catchup_reconcile_failed` in health. The same file
+  proves the config gate on the supervisor `AgentRuntime` actually builds:
+  enabled closes the group, absent or `enabled: false` leaves it pending, and
+  `groupLimit` is forwarded.
+
+### Enabling per instance
+
+The reconciler is off unless the instance's `config.json` opts in:
+
+```json
+{
+  "agentOptions": {
+    "turnRecoveryCatchupReconcile": { "enabled": true, "groupLimit": 50 }
+  }
+}
+```
+
+- `enabled` (boolean, required inside the block): `true` turns the
+  reconciler on; `false`, or no block at all, keeps it off.
+- `groupLimit` (integer 1–1000, optional): the most caught-up groups closed
+  per scan cycle. Defaults to the reconciler's own
+  `RECONCILE_DEFAULT_GROUP_LIMIT` (50). The reconciler examines at most
+  `groupLimit × 20` groups per pass.
+- The block is a closed shape validated at config load
+  (`src/core/turn-recovery-catchup-config.ts`): an unknown inner key, a
+  non-boolean `enabled`, or an out-of-range `groupLimit` is a load-time
+  `ConfigValidationError`, never a silent fallback.
+- The value is read once when `AgentRuntime` is constructed. A change takes
+  effect on the next instance restart. There is no live kill switch;
+  rollback is `enabled: false` (or remove the block) and restart.
+- The code must also be live on the host: see the Deploy note below.
+
+**Observing it.** After a restart with the gate on:
+
+1. Logs: an info line `turn recovery catch-up reconciler closed caught-up
+   groups` for each pass that closed something. Warnings `turn recovery
+   supervisor catch-up reconciliation failed`, or errors `... recorded
+   unexpected-error skips`, mean something is wrong.
+2. Supervisor health: a whole-call failure sets the supervisor's
+   `lastScanFailureReason` to `catchup_reconcile_failed`. The turn-recovery
+   deadman carries that value in its alert text as `last_failure=`.
+3. Database: the reconciler's closures are
+   `inbound_disposition_links` rows with
+   `disposition = 'superseded_by_operator_catchup' AND actor = 'auto_reconciler'`.
+   The still-open backlog is every `recovery_pending_operator_catchup` link
+   without a matching `superseded_by_operator_catchup` row for the same
+   `(inbound_seq, recovery_plan_id)`. The wiring test's `pendingSeqs()` is
+   that selector.
+
+The per-scan counters `catchupReconcileAttempted / Closed / Skipped` are part
+of `TurnRecoverySupervisor.scanOnce()`'s result. They are visible to a direct
+`scanOnce()` caller (tests, a harness), not in `/health`.
 
 ## ② — blocked-unsafe actionability split (gauge)
 
@@ -196,4 +251,8 @@ makes the residue visible and non-paging in the meantime.
 
 This subsystem ships as a source-bytes release export and is cut over via the
 two-pointer procedure; **nothing here changes the running service until a
-separately-gated cutover.** Editing the repo has zero live impact.
+separately-gated cutover.** Editing the repo has zero live impact. Once a
+release carrying the config gate is live on a host, turning the reconciler on
+for an instance is a separate per-instance act: set
+`agentOptions.turnRecoveryCatchupReconcile.enabled: true` and restart that
+instance.
