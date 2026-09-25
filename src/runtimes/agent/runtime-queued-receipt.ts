@@ -27,7 +27,10 @@
 // send is attempted, so a failing transport is not retried in a loop.
 
 import { createChildLogger } from '../../logger.ts';
-import type { SessionScope } from '../../instance-loader.ts';
+import { systemClock, type Clock } from '../../lib/clock.ts';
+// Type-only, from the runtime ring (erased at load, so no import cycle);
+// the composition-ring twin in instance-loader.ts is off-limits here.
+import type { SessionScope } from './runtime.ts';
 import type { QueuedTurn, TurnQueue } from './turn-queue.ts';
 
 const log = createChildLogger('runtime-queued-receipt');
@@ -63,7 +66,8 @@ export interface QueuedTurnReceiptNotifierOpts {
   readonly enabled: () => boolean;
   /** Out-of-band send. Must not route through the active turn's outbound queue. */
   readonly send: (chatJid: string, text: string) => Promise<void>;
-  readonly now?: () => number;
+  /** Time source for the cooldown; defaults to the system clock. */
+  readonly clock?: Clock;
   readonly cooldownMs?: number;
 }
 
@@ -71,13 +75,13 @@ export class QueuedTurnReceiptNotifier {
   private readonly lastSentAt = new Map<string, number>();
   private readonly enabled: () => boolean;
   private readonly send: (chatJid: string, text: string) => Promise<void>;
-  private readonly now: () => number;
+  private readonly clock: Clock;
   private readonly cooldownMs: number;
 
   constructor(opts: QueuedTurnReceiptNotifierOpts) {
     this.enabled = opts.enabled;
     this.send = opts.send;
-    this.now = opts.now ?? Date.now;
+    this.clock = opts.clock ?? systemClock;
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS;
   }
 
@@ -90,7 +94,7 @@ export class QueuedTurnReceiptNotifier {
       const decision = this.decide(admission);
       if (decision !== 'sent') return decision;
       const { mapKey, turn } = admission;
-      this.lastSentAt.set(mapKey, this.now());
+      this.lastSentAt.set(mapKey, this.clock.now());
       this.pruneExpired();
       void this.send(turn.chatJid, QUEUED_TURN_RECEIPT_TEXT).catch((err: unknown) => {
         log.warn({ err, mapKey, inboundSeq: turn.inboundSeq }, 'queued-turn receipt send failed');
@@ -112,13 +116,13 @@ export class QueuedTurnReceiptNotifier {
     // A scheduled job has no human waiting on the chat for an answer.
     if (admission.turn.purpose === 'scheduled-agent-job') return 'scheduled_job';
     const last = this.lastSentAt.get(admission.mapKey);
-    if (last !== undefined && this.now() - last < this.cooldownMs) return 'cooldown';
+    if (last !== undefined && this.clock.now() - last < this.cooldownMs) return 'cooldown';
     return 'sent';
   }
 
   private pruneExpired(): void {
     if (this.lastSentAt.size <= COOLDOWN_PRUNE_THRESHOLD) return;
-    const now = this.now();
+    const now = this.clock.now();
     for (const [key, at] of this.lastSentAt) {
       if (now - at >= this.cooldownMs) this.lastSentAt.delete(key);
     }

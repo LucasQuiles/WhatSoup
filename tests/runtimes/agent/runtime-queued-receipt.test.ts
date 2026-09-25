@@ -7,6 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
+import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 import {
   DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS,
   QUEUED_TURN_RECEIPT_TEXT,
@@ -46,12 +47,12 @@ function makeBlockingQueue(): { queue: TurnQueue; releaseActive: () => void } {
   };
 }
 
-function makeNotifier(opts: { enabled?: boolean; now?: () => number } = {}) {
+function makeNotifier(opts: { enabled?: boolean; clock?: Clock } = {}) {
   const send = vi.fn(async (_chatJid: string, _text: string) => {});
   const notifier = new QueuedTurnReceiptNotifier({
     enabled: () => opts.enabled ?? true,
     send,
-    ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.clock ? { clock: opts.clock } : {}),
   });
   return { notifier, send };
 }
@@ -103,17 +104,17 @@ describe('#2949 queued receipt: fires only for a turn waiting behind an active t
   });
 
   it('the cooldown suppresses a second receipt for the same chat, and it re-arms after the window', () => {
-    let now = 1_000_000;
+    const clock = fakeClock(1_000_000);
     const { queue } = makeBlockingQueue();
-    const { notifier, send } = makeNotifier({ now: () => now });
+    const { notifier, send } = makeNotifier({ clock });
 
     admit(notifier, queue, makeTurn('first'));
     expect(admit(notifier, queue, makeTurn('second'))).toBe('sent');
-    now += DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS - 1;
+    clock.advance(DEFAULT_QUEUED_TURN_RECEIPT_COOLDOWN_MS - 1);
     expect(admit(notifier, queue, makeTurn('third'))).toBe('cooldown');
     expect(send).toHaveBeenCalledTimes(1);
 
-    now += 1;
+    clock.advance(1);
     expect(admit(notifier, queue, makeTurn('fourth'))).toBe('sent');
     expect(send).toHaveBeenCalledTimes(2);
   });

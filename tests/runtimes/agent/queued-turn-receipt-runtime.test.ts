@@ -377,10 +377,9 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     expect(receiptSends()[0]).toEqual([chatJid, QUEUED_TURN_RECEIPT_TEXT]);
     expect(String(receiptSends()[0]?.[1])).not.toContain('invoice');
     // Out of band: the receipt never entered any per-turn outbound queue.
-    for (const queue of queueDoubles) {
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(QUEUED_TURN_RECEIPT_TEXT);
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(QUEUED_TURN_RECEIPT_TEXT, expect.anything());
-    }
+    // Every enqueueText call's text, whatever role argument rode with it.
+    const queuedTexts = queueDoubles.flatMap((queue) => queue.enqueueText.mock.calls.map((call) => call[0]));
+    expect(queuedTexts).not.toContain(QUEUED_TURN_RECEIPT_TEXT);
   });
 
   it('the per-chat cooldown suppresses a second receipt behind the same task', async () => {
