@@ -4,9 +4,10 @@
 // protected the same property with different triggers, folds and failure
 // channels: the registry's pre-handler check and send_message's in-handler
 // check. The registry owns the guard and runs it at two points: before the
-// handler, on a caller-supplied `chatJid`, and after alias and `@lid`
-// resolution, through the callback it hands the handler. Both points use this
-// function, so they share one trigger, one fold and one failure channel.
+// handler, on a caller-supplied `chatJid` or (issue 3585) on the target a
+// conversation-bound session injects from its binding, and after alias and
+// `@lid` resolution, through the callback it hands the handler. Both points use
+// this function, so they share one trigger, one fold and one failure channel.
 //
 // Behaviour is kept cell for cell (docs/mcp/cross-conversation-guard-call-site-matrix.md).
 // No branch admits a target that either old guard denied.

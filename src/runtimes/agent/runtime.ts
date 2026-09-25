@@ -209,6 +209,7 @@ import {
 } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
+import { OPERATOR_CANCELLATION_ATTEMPT_OUTCOME } from './turn-terminal.ts';
 import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import {
@@ -5225,8 +5226,13 @@ export class AgentRuntime implements Runtime {
               abortActiveQueue: () => this.getGlobalInterruptQueue()
                 ?.abortTurn({ preserveEvidence: true }),
               terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
-                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(perChatMapKey!)
-                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(),
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(
+                  perChatMapKey!,
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                )
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                ),
               retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
                 ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
                 : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),

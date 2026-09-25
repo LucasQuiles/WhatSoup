@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import {
   clearInitialDatabaseCreateMarker,
   initialDatabaseCreateMarkerPath,
@@ -53,7 +53,10 @@ describe('initial database create marker', () => {
     expect(clearInitialDatabaseCreateMarker(dataRoot, 'new-bot')).toBe(false);
   });
 
-  it('does not remove a marker with mismatched content, permissive mode, or symlink identity', () => {
+  // #3551: the permissive fixture sets its mode explicitly, so the case holds under any umask.
+  it.each(['077', '022'])('does not remove a marker with mismatched content, permissive mode, or symlink identity (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     for (const variant of ['mismatch', 'permissive', 'symlink']) {
       const dataRoot = tempRoot();
       const markerPath = initialDatabaseCreateMarkerPath(dataRoot);
@@ -61,6 +64,8 @@ describe('initial database create marker', () => {
         writeFileSync(markerPath, 'another-bot\n', { mode: 0o600 });
       } else if (variant === 'permissive') {
         writeFileSync(markerPath, 'new-bot\n', { mode: 0o644 });
+        chmodSync(markerPath, 0o644);
+        expect(lstatSync(markerPath).mode & 0o777).toBe(0o644);
       } else {
         const target = path.join(dataRoot, 'marker-target');
         writeFileSync(target, 'new-bot\n', { mode: 0o600 });
