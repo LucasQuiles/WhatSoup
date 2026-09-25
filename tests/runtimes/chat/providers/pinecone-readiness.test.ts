@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockListIndexes = vi.fn();
 const { mockReadinessLogger } = vi.hoisted(() => ({ mockReadinessLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
@@ -194,5 +194,57 @@ describe('getPineconeReadiness', () => {
     expect(JSON.stringify(mockReadinessLogger.error.mock.calls)).not.toContain(
       'SYNTHETIC_PRIVATE_UNKNOWN_ERROR_MARKER',
     );
+  });
+
+  // #2572: bootstrap awaits this probe, so an index listing that never answers
+  // must end in a not-ready observation at the deadline instead of hanging.
+  describe('readiness deadline', () => {
+    const READINESS_DEADLINE_MS = 30_000;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      process.env.PINECONE_API_KEY = 'pcsk-test';
+      vi.mocked(Pinecone).mockImplementation(function (this: Record<string, unknown>) {
+        this.listIndexes = mockListIndexes;
+      } as unknown as () => Pinecone);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('returns a retryable timeout observation when listing indexes never resolves', async () => {
+      mockListIndexes.mockReturnValueOnce(new Promise(() => {}));
+      const pending = Symbol('pending');
+
+      const probe = getPineconeReadinessObservation('mw-mind');
+      await vi.advanceTimersByTimeAsync(READINESS_DEADLINE_MS);
+      const settled = await Promise.race([probe, Promise.resolve(pending)]);
+
+      expect(settled).not.toBe(pending);
+      expect(settled).toMatchObject({
+        state: 'network_error',
+        index: 'mw-mind',
+        failureCode: 'timeout',
+        retryable: true,
+        evidenceCoverage: 'provider_error',
+      });
+      expect(mockReadinessLogger.warn).toHaveBeenCalledWith(
+        { operation: 'readiness', deadline_ms: READINESS_DEADLINE_MS },
+        'pinecone readiness deadline exceeded',
+      );
+    });
+
+    it('still returns ready when listing indexes answers before the deadline', async () => {
+      mockListIndexes.mockResolvedValueOnce({ indexes: [{ name: 'mw-mind' }] });
+
+      const observation = await getPineconeReadinessObservation('mw-mind');
+      await vi.advanceTimersByTimeAsync(READINESS_DEADLINE_MS);
+
+      expect(observation).toMatchObject({ state: 'ready', index: 'mw-mind', failureCode: 'none' });
+      const deadlineWarnings = mockReadinessLogger.warn.mock.calls
+        .filter(([, message]) => message === 'pinecone readiness deadline exceeded');
+      expect(deadlineWarnings).toEqual([]);
+    });
   });
 });
