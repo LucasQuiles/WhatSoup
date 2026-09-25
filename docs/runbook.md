@@ -1904,7 +1904,8 @@ copy with SQLite's own snapshot, then preview against it:
 
 ```bash
 install -d -m 700 "$SNAP_DIR"
-sqlite3 "$DB" "VACUUM INTO '$SNAP_DIR/bot.snapshot.db'"
+# -readonly: never open the live file for writing; the destination must not exist yet.
+sqlite3 -readonly "$DB" "VACUUM INTO '$SNAP_DIR/bot.snapshot.db'"
 npm run close-continuity-gap -- \
   --evidence-root "$EVIDENCE_ROOT" \
   --evidence closures/receipt-1.json \

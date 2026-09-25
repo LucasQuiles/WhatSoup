@@ -3,6 +3,7 @@
 // reader the same way instead of being counted as zero debt.
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { queryAll } from '../lib/db-query.ts';
 
 export const CONTINUITY_GAP_CLOSURE_CONTRACT = 'continuity-gap-closure.v1';
 export const CONTINUITY_GAP_CLOSURE_MIGRATION = 65;
@@ -254,7 +255,7 @@ export function readContinuityGapClosureLedger(raw: DatabaseSync): ContinuityGap
   if (!GUARD_TRIGGERS.every((name) => triggers.has(name))) {
     throw new Error('continuity gap closure ledger guards are missing');
   }
-  const rows = raw.prepare(`
+  const rows = queryAll<ClosureRow>(raw, `
     SELECT plan_id, contract_version, operation_id, receipt_fingerprint,
            original_classification, original_content_type, disposition, proof_kind,
            evidence_manifest_sha256, original_manifest_sha256, proof_set_sha256,
@@ -264,7 +265,7 @@ export function readContinuityGapClosureLedger(raw: DatabaseSync): ContinuityGap
            actor, authority, observed_at, decided_at
     FROM continuity_gap_closures
     ORDER BY rowid
-  `).all() as unknown as ClosureRow[];
+  `);
   const records = rows.map(closureRecordFromRow);
   const plans = new Set<string>();
   const operations = new Set<string>();

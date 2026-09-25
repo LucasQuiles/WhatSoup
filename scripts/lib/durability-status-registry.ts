@@ -458,6 +458,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'chat_aliases',
   'chats',
   'contacts',
+  'continuity_gap_closures',
   'control_messages',
   'entities',
   'entity_aliases',

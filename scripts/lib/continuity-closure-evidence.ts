@@ -20,6 +20,7 @@ import {
   readContinuityGapLedger,
   type ContinuityGapLedgerEntry,
 } from '../../src/core/continuity-gap-ledger.ts';
+import { isRecord } from '../../src/lib/type-guards.ts';
 import {
   acceptedVerifier,
   loadClosureAuthorityPolicy,
@@ -116,15 +117,13 @@ function invalid(detail: string): ContinuityGapClosureError {
   return conflict('evidence_manifest_invalid', `Evidence manifest is invalid: ${detail}`);
 }
 
-function record(value: unknown, label: string, keys: readonly string[]): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw invalid(`${label} must be an object`);
-  }
+function exactObject(value: unknown, label: string, keys: readonly string[]): Record<string, unknown> {
+  if (!isRecord(value)) throw invalid(`${label} must be an object`);
   const found = Object.keys(value);
   if (found.length !== keys.length || !keys.every((key) => found.includes(key))) {
     throw invalid(`${label} must contain exactly: ${keys.join(', ')}`);
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 function digest(value: unknown, label: string): string {
@@ -157,7 +156,7 @@ function instant(value: unknown, label: string): string {
 }
 
 function fileReference(value: unknown, label: string): FileReference {
-  const ref = record(value, label, ['path', 'sha256']);
+  const ref = exactObject(value, label, ['path', 'sha256']);
   return { path: bounded(ref.path, `${label}.path`, 1024), sha256: digest(ref.sha256, `${label}.sha256`) };
 }
 
@@ -166,14 +165,14 @@ function nullable<T>(value: unknown, parse: (value: unknown) => T): T | null {
 }
 
 export function parseClosureEvidenceManifest(value: unknown): ClosureEvidenceManifest {
-  const root = record(value, 'manifest', [
+  const root = exactObject(value, 'manifest', [
     'contract', 'planId', 'original', 'disposition', 'proofKind', 'actor', 'authority',
     'observedAt', 'decidedAt', 'liveInbound', 'proofs', 'audio', 'ambiguityResolution', 'decision',
   ]);
   if (root.contract !== CLOSURE_EVIDENCE_CONTRACT) throw invalid('unsupported contract');
   const planId = bounded(root.planId, 'planId', 82);
   if (!/^continuity-gap:v1:[a-f0-9]{64}$/.test(planId)) throw invalid('planId is not a continuity plan');
-  const original = record(root.original, 'original', [
+  const original = exactObject(root.original, 'original', [
     'manifest', 'ordinal', 'receiptFingerprint', 'contentType', 'conversationFingerprint',
   ]);
   if (root.disposition !== 'addressed' && root.disposition !== 'declined') {
@@ -205,21 +204,21 @@ export function parseClosureEvidenceManifest(value: unknown): ClosureEvidenceMan
     observedAt: instant(root.observedAt, 'observedAt'),
     decidedAt: instant(root.decidedAt, 'decidedAt'),
     liveInbound: nullable(root.liveInbound, (value) => {
-      const live = record(value, 'liveInbound', ['seq', 'messageSha256']);
+      const live = exactObject(value, 'liveInbound', ['seq', 'messageSha256']);
       return {
         seq: positive(live.seq, 'liveInbound.seq'),
         messageSha256: digest(live.messageSha256, 'liveInbound.messageSha256'),
       };
     }),
     proofs: root.proofs.map((value, index) => {
-      const proof = record(value, `proofs[${index}]`, ['role', 'path', 'sha256']);
+      const proof = exactObject(value, `proofs[${index}]`, ['role', 'path', 'sha256']);
       if (typeof proof.role !== 'string' || !PROOF_ROLES.has(proof.role)) {
         throw invalid(`proofs[${index}].role is not supported`);
       }
       return { role: proof.role, ...fileReference({ path: proof.path, sha256: proof.sha256 }, `proofs[${index}]`) };
     }),
     audio: nullable(root.audio, (value) => {
-      const audio = record(value, 'audio', ['mediaSha256', 'transcriptSha256', 'enrichmentComplete']);
+      const audio = exactObject(value, 'audio', ['mediaSha256', 'transcriptSha256', 'enrichmentComplete']);
       if (typeof audio.enrichmentComplete !== 'boolean') {
         throw invalid('audio.enrichmentComplete must be a boolean');
       }
@@ -232,7 +231,7 @@ export function parseClosureEvidenceManifest(value: unknown): ClosureEvidenceMan
     ambiguityResolution: nullable(root.ambiguityResolution, (value) =>
       fileReference(value, 'ambiguityResolution')),
     decision: nullable(root.decision, (value) => {
-      const decision = record(value, 'decision', [
+      const decision = exactObject(value, 'decision', [
         'source', 'verifierVersion', 'inboundSeq', 'messageSha256', 'record',
       ]);
       return {

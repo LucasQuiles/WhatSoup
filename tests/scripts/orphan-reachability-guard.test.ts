@@ -185,6 +185,10 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // The shadow gate is logged-only; its measurement statistics run offline in the
   // operator report, never in the runtime.
   { path: 'src/lib/clopper-pearson.ts', issue: 'shadow-gate-20260923/task-4', reason: 'statistics helper is operator-CLI-only (scripts/shadow-gate-report.ts); the logged-only shadow gate computes no rates at runtime — no production importer by design' },
+  // The continuity-gap closure WRITE side is an operator action; its only caller is
+  // scripts/close-continuity-gap.ts. The runtime reads closures through
+  // continuity-gap-closure-schema.ts (health), which IS production-reachable.
+  { path: 'src/core/continuity-gap-closure.ts', issue: 'continuity-gap-closure/stage-2', reason: 'closure writer is operator-CLI-only (scripts/close-continuity-gap.ts); runtime health only reads closures via continuity-gap-closure-schema.ts — no production importer by design' },
 ];
 
 // ---------------------------------------------------------------------------
