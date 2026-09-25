@@ -1987,6 +1987,37 @@ Per-instance command-surface policy overlay (W1-T9b): `{ "disabled": ["<command>
 
 > **Note:** `agentOptions.commandSurface` is accepted but not yet enforced (enforcement lands with T9c) — the block validates and persists, but no runtime path consumes it yet, and the validator emits a startup warning saying so.
 
+### `clientOutputPolicies`
+
+Optional per-conversation output policies for an agent instance. Only `type: "agent"` instances on the Baileys transport accept the field; any other instance type or transport fails validation. An absent field means no policies. An explicit `null` is rejected.
+
+> **Not enforced yet.** WhatSoup parses, validates, stores and redacts these policies, but no send path evaluates them. A configured policy does not block or change any outbound message today. Enforcement lands in a later change.
+
+```json
+"clientOutputPolicies": [
+  {
+    "conversationKey": "15550000000",
+    "maxCodePoints": 1000,
+    "maxQuestionMarks": 1,
+    "blockedTerms": [{ "value": "internal", "match": "whole_word", "caseSensitive": false }],
+    "rejectInternalArtifacts": true,
+    "rejectWhatsAppJids": true
+  }
+]
+```
+
+Fields (every object is closed; unknown keys are rejected):
+
+- The array holds at most 32 policies.
+- `conversationKey`: the canonical conversation key, not a raw JID. It must be trimmed, contain no `@`, and be unique across policies.
+- `maxCodePoints`: an integer from 1 to 4000.
+- `maxQuestionMarks`: an integer from 0 to 20. ASCII, fullwidth and Arabic question marks all count.
+- `blockedTerms`: up to 64 terms. Each term has a `value` (NFC, no surrounding whitespace, 1 to 128 code points), a `match` of `whole_word` or `substring`, and a boolean `caseSensitive`.
+- `rejectInternalArtifacts` and `rejectWhatsAppJids`: booleans.
+- `authorization` (optional): `keyId`, `publicKey` (an unpadded base64url Ed25519 SPKI key) and `requiredActions`, drawn from `assistant_text`, `send_message`, `reply_message`, `edit_message`, `send_poll` and `send_media`.
+
+The fleet API returns blocked-term values and public keys as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
+
 ### `chatOptions`
 
 Chat-specific settings. Currently the only field is `openaiProviderConfig`,

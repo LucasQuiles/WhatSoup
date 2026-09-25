@@ -146,7 +146,7 @@ describe('parseClientOutputPolicies', () => {
   it('enforces term closure, count, NFC, whitespace, code-point bounds, enums, and booleans', () => {
     expectIssue([policy({ blockedTerms: Array.from({ length: 65 }, () => ({ value: 'x', match: 'substring', caseSensitive: true })) })], 'clientOutputPolicies[0].blockedTerms');
     expectIssue([policy({ blockedTerms: [{ value: 'x', match: 'substring', caseSensitive: true, extra: true }] })], 'clientOutputPolicies[0].blockedTerms[0]');
-    expectIssue([policy({ blockedTerms: [{ value: 'résumé', match: 'substring', caseSensitive: false }] })], 'clientOutputPolicies[0].blockedTerms[0].value');
+    expectIssue([policy({ blockedTerms: [{ value: 're\u0301sume\u0301', match: 'substring', caseSensitive: false }] })], 'clientOutputPolicies[0].blockedTerms[0].value');
     expectIssue([policy({ blockedTerms: [{ value: ' x', match: 'substring', caseSensitive: true }] })], 'clientOutputPolicies[0].blockedTerms[0].value');
     expectIssue([policy({ blockedTerms: [{ value: '😀'.repeat(129), match: 'substring', caseSensitive: true }] })], 'clientOutputPolicies[0].blockedTerms[0].value');
     expectIssue([policy({ blockedTerms: [{ value: 'x', match: 'regex', caseSensitive: true }] })], 'clientOutputPolicies[0].blockedTerms[0].match');

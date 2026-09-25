@@ -60,7 +60,7 @@ describe('evaluateClientOutputPolicy', () => {
   });
 
   it('uses literal NFC substring matching with explicit case sensitivity', () => {
-    const decomposedLowercase = `Please send the résumé.`;
+    const decomposedLowercase = `Please send the re\u0301sume\u0301.`;
     const insensitive = policy({
       blockedTerms: [{ value: 'Résumé', match: 'substring', caseSensitive: false }],
     });
@@ -122,7 +122,7 @@ describe('evaluateClientOutputPolicy', () => {
     const safeAdjacentForms = [
       'éhold',
       'hold9',
-      `hold⃝`,
+      `hold\u20dd`,
       '_hold',
       'household',
       'holdover',

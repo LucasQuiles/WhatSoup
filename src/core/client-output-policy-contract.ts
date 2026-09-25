@@ -64,12 +64,12 @@ const CHEROKEE_CODE_POINT = /^\p{Script=Cherokee}$/u;
  */
 function clientOutputCaselessKey(value: string): string {
   return Array.from(value, (codePoint) => {
-    if (codePoint === 'ı') return codePoint;
+    if (codePoint === '\u0131') return codePoint;
     if (CHEROKEE_CODE_POINT.test(codePoint)) return codePoint.toUpperCase();
     return codePoint.toUpperCase().toLowerCase();
   })
     .join('')
-    .replace(/ß/gu, 'ss')
+    .replace(/\u00df/gu, 'ss')
     .normalize('NFC');
 }
 
