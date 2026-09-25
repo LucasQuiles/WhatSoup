@@ -268,6 +268,8 @@ export interface SessionManagerOptions {
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
+  /** #3421 step 1: this session's MCP token, passed to its child env only. */
+  whatsoupMcpSessionToken?: string;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   /**
@@ -678,6 +680,7 @@ export class SessionManager {
   private readonly mcpSessionContext: SessionContext | undefined;
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
+  private readonly whatsoupMcpSessionToken: string | undefined;
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
@@ -871,6 +874,7 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
+    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionToken;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
@@ -2484,6 +2488,7 @@ export class SessionManager {
           allowM365Mutations: this.allowM365Mutations,
           whatsoupInstance: this.whatsoupInstance,
           whatsoupMcpSocket: this.whatsoupMcpSocket,
+          whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
           configRoot: this.configRoot,
           egressProxyPort: this.egressProxyPort,
         },
@@ -3591,6 +3596,7 @@ export class SessionManager {
                 allowM365Mutations: this.allowM365Mutations,
                 whatsoupInstance: this.whatsoupInstance,
                 whatsoupMcpSocket: this.whatsoupMcpSocket,
+                whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
                 configRoot: this.configRoot,
                 egressProxyPort: this.egressProxyPort,
               },

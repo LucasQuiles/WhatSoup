@@ -1515,7 +1515,10 @@ OpenCode children use a fresh positive environment allowlist. The non-secret
 base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
 `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `TMPDIR`, plus the
 instance/socket context `WHATSOUP_INSTANCE` and `WHATSOUP_MCP_SOCKET` when
-configured. Config-root isolation may rewrite `HOME` and the XDG config/data
+configured, and the per-session `WHATSOUP_MCP_SESSION_TOKEN`. That token is
+minted in memory for each agent session, never written to disk, and presented
+by the session's MCP proxy and hooks only so each tool call records whether it
+came from the session's own helper (#3421). It grants nothing. Config-root isolation may rewrite `HOME` and the XDG config/data
 roots, but its controlling flag is not forwarded. The child does not receive
 `SUDO_ASKPASS`, `ALLOW_M365_MUTATIONS`, `CLAUDE_CONFIG_DIR`, unrelated
 connector/provider mutation flags, non-selected provider credentials, or

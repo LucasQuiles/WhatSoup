@@ -8,7 +8,13 @@ import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
-import { initialSocketAttribution, withDeclaredClient } from './caller-attribution.ts';
+import {
+  initialSocketAttribution,
+  SESSION_TOKEN_NOTIFICATION,
+  withDeclaredClient,
+  withPresentedToken,
+  type SessionTokenVerifier,
+} from './caller-attribution.ts';
 import {
   makeConversationBinding,
   resolveSessionContext,
@@ -89,6 +95,8 @@ export class WhatSoupSocketServer {
    * per-connection counter below starts at 1 in every process.
    */
   private readonly connectionIdPrefix = randomBytes(6).toString('hex');
+  /** #3421: verifies the token a session's own helper presents; absent = none can match. */
+  private readonly sessionTokens: SessionTokenVerifier | undefined;
 
   constructor(
     socketPath: string,
@@ -99,11 +107,15 @@ export class WhatSoupSocketServer {
     // (#2200). Optional and defaulted, so this slice changes no existing call
     // site.
     clock: Clock = systemClock,
+    // #3421 step 1: attribution evidence only. Optional so existing call sites
+    // and servers with no agent sessions record every caller as outside.
+    options: { sessionTokens?: SessionTokenVerifier } = {},
   ) {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
     this.clock = clock;
+    this.sessionTokens = options.sessionTokens;
     // Binding objects are immutable by contract (types.ts): enforce it at the
     // trust boundary so every per-request shallow snapshot below can safely
     // share the reference — a rekey REPLACES the object, never mutates it.
@@ -231,6 +243,14 @@ export class WhatSoupSocketServer {
               error: { code: -32700, message: 'Parse error' },
             };
             writeResponse(response, 'failed to write parse error response');
+            continue;
+          }
+
+          // #3421: a session's own helper presents its token as a notification.
+          // Record the result and send nothing back, exactly like any other
+          // notification.
+          if (req.id === undefined && req.method === SESSION_TOKEN_NOTIFICATION && connSession.callerAttribution) {
+            connSession.callerAttribution = withPresentedToken(connSession.callerAttribution, req.params, this.sessionTokens);
             continue;
           }
 
