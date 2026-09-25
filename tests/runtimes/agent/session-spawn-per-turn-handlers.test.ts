@@ -336,6 +336,48 @@ describe('SessionManager spawn-per-turn child handlers (opencode-cli)', () => {
     expect(info.signal).toBe('SIGTERM');
   });
 
+  // #3391: a provider that catches the teardown SIGTERM self-exits
+  // `code=143, signal=null`. That numeric form must classify exactly like the
+  // signal form above; neither may read as a clean non-zero close.
+  it('a graceful 143 self-exit after a stop candidate is a crash, like its SIGTERM twin (#3391)', async () => {
+    const events: AgentEvent[] = [];
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession({
+      onEvent: (event: AgentEvent) => events.push(event),
+    });
+    await sm.sendTurn('hello');
+    events.length = 0;
+
+    child.stdout.emit('data', Buffer.from(JSON.stringify({
+      type: 'step_finish',
+      part: { reason: 'stop', tokens: { input: 11, output: 13 }, cost: 0.001 },
+    })));
+
+    child._exitCb?.(143, null);
+    child._closeCb?.(143, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(events.filter((event) => event.type === 'result')).toHaveLength(0);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: 143, signal: null }));
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('exited with code 143'));
+    expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
+  it('a graceful 143 self-exit with no terminal result is still a crash (#3391 control)', async () => {
+    const { sm, notifyUser, onCrash } = await makeOpencodeSession();
+    await sm.sendTurn('hello');
+
+    child._exitCb?.(143, null);
+    child._closeCb?.(143, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: 143, signal: null }));
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('exited with code 143'));
+    expect(sm.getStatus().turnInFlight).toBe(false);
+  });
+
   it('a clean spawn-per-turn exit clears the child so the next turn does not reap the dead one (#1861)', async () => {
     const spawnMock = spawn as ReturnType<typeof vi.fn>;
     const { sm } = await makeOpencodeSession();

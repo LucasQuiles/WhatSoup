@@ -261,9 +261,12 @@ export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string
 export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }, clock: Clock = systemClock): void {
   const now = clock.nowUnixSec();
   if (args.until <= now) throw new Error(`extendTrigger: until must be in the future`);
-  const t = db.prepare(`SELECT bead_id, status FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status?: string } | undefined;
+  const t = db.prepare(`SELECT bead_id, status, terminal_at FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status?: string; terminal_at: number | null } | undefined;
   if (!t) throw new Error(`trigger ${id} not found`);
-  const clamped = clampTtl(now, args.until, args.maxTtlHours);
+  // #3609: resuming a paused trigger that had no deadline must not give it one;
+  // `until` is ignored in that case. Every other extend clamps as before.
+  const keepOpenEnded = t.status === 'paused' && t.terminal_at === null;
+  const clamped = keepOpenEnded ? null : clampTtl(now, args.until, args.maxTtlHours);
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE bead_triggers SET terminal_at=?, updated_at=? WHERE id=?`).run(clamped, now, id);
