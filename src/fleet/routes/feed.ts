@@ -493,10 +493,12 @@ function synthesizeHealthEvents(
         }
       }
       // Establish or advance the request-time baseline. Debt that predates
-      // this process is retained without being stamped as opened now.
+      // this process is retained without being stamped as opened now. A null
+      // summary is unknown debt, not closed debt, so it never establishes
+      // the baseline.
       previousRecoveryDebt.set(inst.name, currentDebt);
+      observedRecoveryDebtInstances.add(inst.name);
     }
-    observedRecoveryDebtInstances.add(inst.name);
 
     previousStatuses.set(inst.name, currStatus);
   }

@@ -516,16 +516,59 @@ describe('health transition events via handleGetFeed', () => {
       .toHaveLength(0);
   });
 
+  it('does not stamp debt as opened when the first observation carried no recovery debt', () => {
+    const inst = fakeInstance({ name: 'unknown-then-debt', type: 'agent' });
+    const instances = new Map([['unknown-then-debt', inst]]);
+    type FeedPoll = Pick<InstanceStatus, 'status' | 'error'> & {
+      recoveryDebt: FleetRecoveryDebtSummary | null;
+    };
+    const getStatus = vi.fn<() => FeedPoll>(() => ({
+      status: 'unreachable',
+      error: 'connect ECONNREFUSED',
+      recoveryDebt: null,
+    }));
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus } as any,
+    });
+
+    handleGetFeed(mockReq(), mockRes(), deps);
+
+    getStatus.mockReturnValue({
+      status: 'online',
+      error: null,
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    });
+    const second = mockRes();
+    handleGetFeed(mockReq(), second, deps);
+    expect(JSON.parse(second._body).filter((event: any) => event.detail?.type === 'recovery_debt'))
+      .toHaveLength(0);
+  });
+
   it('emits recovery debt open, change, and clear independently from health status', () => {
     const inst = fakeInstance({ name: 'debt-feed', type: 'agent' });
     const instances = new Map([['debt-feed', inst]]);
     type FeedPoll = Pick<InstanceStatus, 'status' | 'error'> & {
       recoveryDebt: FleetRecoveryDebtSummary | null;
     };
+    // The baseline is a known-closed summary: null debt is unknown and never
+    // establishes one (see the unknown-then-debt case above).
     const getStatus = vi.fn<() => FeedPoll>(() => ({
       status: 'online',
       error: null,
-      recoveryDebt: null,
+      recoveryDebt: {
+        open: false,
+        serviceBlocking: false,
+        attention: 'none',
+        reasons: [],
+        gaugeTotal: 0,
+      },
     }));
     const deps = makeDeps({
       discovery: { getInstances: vi.fn(() => instances) } as any,
@@ -622,7 +665,13 @@ describe('health transition events via handleGetFeed', () => {
     const getStatus = vi.fn<() => FeedPoll>(() => ({
       status: 'degraded',
       error: 'active blocker',
-      recoveryDebt: null,
+      recoveryDebt: {
+        open: false,
+        serviceBlocking: false,
+        attention: 'none',
+        reasons: [],
+        gaugeTotal: 0,
+      },
     }));
     const deps = makeDeps({
       discovery: { getInstances: vi.fn(() => instances) } as any,
