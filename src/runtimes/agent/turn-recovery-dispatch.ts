@@ -51,10 +51,10 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly resolveDispatchTarget: (job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null;
   /**
    * PR2 deploy gate for automatic catch-up reconciliation, forwarded
-   * verbatim to the supervisor. Deliberately NOT wired from AgentRuntime
-   * yet: enabling it is a separately-gated cutover decision (see
-   * docs/turn-recovery-continuity-reconciler.md), so the default here is
-   * off until that cutover passes it explicitly.
+   * verbatim to the supervisor. AgentRuntime passes it from the per-instance
+   * `agentOptions.turnRecoveryCatchupReconcile` config block (default OFF;
+   * see src/core/turn-recovery-catchup-config.ts and
+   * docs/turn-recovery-continuity-reconciler.md). Absent/null = off.
    */
   readonly catchupReconcile?: { readonly groupLimit?: number } | null;
 }): TurnRecoverySupervisor {
