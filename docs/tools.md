@@ -714,7 +714,7 @@ Pause a trigger. Admin only.
 
 ### extend_trigger
 
-Push a trigger terminal timestamp forward, clamped to policy max. Admin only.
+Push a trigger terminal timestamp forward, clamped to policy max. A paused trigger is also reactivated and becomes due immediately. Admin only.
 
 | | |
 |---|---|
