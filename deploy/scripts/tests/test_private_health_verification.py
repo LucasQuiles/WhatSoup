@@ -300,6 +300,25 @@ def test_recent_401_log_line_only_decides_for_a_legacy_probe(monkeypatch, tmp_pa
     assert health_check.auth_failure_log_inventory("fab-bot", "always_on", classified_probe) == []
 
 
+heartbeat = _load("bot_errors_heartbeat_watchdog_private_verification", _SCRIPTS / "bot-errors-heartbeat-watchdog.py")
+
+
+@pytest.mark.parametrize(
+    ("auth_class", "classification", "physical"),
+    [
+        ("serverside_logout_irreversible", "confirmed_device_removed", True),
+        ("auth_401_ambiguous_parked", "ambiguous_401_parked", True),
+        ("auth_401_uninspected_exit", "uninspected_401_conservative_exit", True),
+        ("auth_401_ambiguous_retrying", "ambiguous_401_reconnecting", False),
+    ],
+)
+def test_heartbeat_watchdog_names_each_401_class_and_flags_only_stopped_ones(auth_class, classification, physical):
+    body = _disconnected(auth_class, {"version": 1, "classification": classification})
+    reasons, _ctx = heartbeat.health_reasons_from_payload(body, "fab-bot")
+    assert f"auth_failure_class={auth_class}" in reasons
+    assert ("physical_intervention_required=terminal_auth_failure_class" in reasons) is physical
+
+
 def _bond_verdicts(body: dict) -> list:
     verdicts: list = []
     ground_truth._bond_axis(body, NOW_MS, verdicts)
