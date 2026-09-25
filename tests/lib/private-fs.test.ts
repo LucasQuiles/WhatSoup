@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   appendPrivateJsonLineSync,
   appendPrivateSerializedJsonLineSync,
@@ -121,12 +121,17 @@ describe('writePrivateFileSync', () => {
     expect(() => writePrivateFileSync(target, '{"x":1}')).toThrow(/non-regular path/);
   });
 
-  it('overwrites a pre-existing regular file and preserves mode 0600', () => {
+  // #3551: the permissive fixtures below set their mode explicitly, so each case holds under any umask.
+  it.each(['077', '022'])('overwrites a pre-existing regular file and preserves mode 0600 (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     const target = join(dir, 'secret.json');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'old', { mode: 0o644 });
+    chmodSync(target, 0o644);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
 
     writePrivateFileSync(target, 'new');
 
@@ -481,12 +486,16 @@ describe('writePrivateJsonMarkerSync', () => {
     expect(JSON.parse(raw)).toEqual(value);
   });
 
-  it('overwrites an existing regular marker file', () => {
+  it.each(['077', '022'])('overwrites an existing regular marker file (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const markerPath = join(dir, 'state.marker');
     writeFileSync(markerPath, 'old', { mode: 0o644 });
+    chmodSync(markerPath, 0o644);
+    expect(statSync(markerPath).mode & 0o777).toBe(0o644);
 
     writePrivateJsonMarkerSync(markerPath, { ok: true });
 
@@ -742,12 +751,16 @@ describe('atomic private-file primitives', () => {
     expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/maximum size/);
   });
 
-  it('rejects a non-private file read', () => {
+  it.each(['077', '022'])('rejects a non-private file read (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     const target = join(dir, 'public.key');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'credential', { mode: 0o644 });
+    chmodSync(target, 0o644);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
 
     expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
   });

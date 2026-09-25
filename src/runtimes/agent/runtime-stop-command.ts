@@ -78,8 +78,10 @@
 //     coordinator and session-manager change. Reported, follow-up on #2949.
 //
 // TURN RECOVERY (#2949 N1 review item D, report-only): the cancelled turn is
-// finalized `{ kind: 'failed', class: 'crash' }` by the SAME coordinator
-// methods /new's interrupt branch binds. When that turn already had answer
+// finalized `{ kind: 'failed', class: 'operator_cancelled' }` by the SAME
+// coordinator teardown methods /new's interrupt branch binds. `/new` retains
+// its existing default outcome; only this control passes the explicit class.
+// When that turn already had answer
 // delivery evidence in a non-terminal state, `deriveInboundDisposition`
 // (`deriveInboundDisposition`, turn-finalizer.ts:180-196 at b65984f0) returns
 // 'transferred_to_recovery_owner', which enqueues a replay-safe turn-recovery
@@ -87,8 +89,8 @@
 // src/core/turn-recovery-store.ts:975) that the recovery supervisor can replay
 // with the ORIGINAL user text. /stop cannot narrow that without changing /new:
 // both bind the same `terminalizeTurnForInterrupt` /
-// `retireTurnQueueAfterInterrupt` closures (runtime.ts:4637-4642 for /new and
-// :4704-4709 for /stop, both at b65984f0). Left as-is deliberately.
+// `retireTurnQueueAfterInterrupt` closures. The durable terminal class is the
+// scoped difference; recovery ownership remains unchanged.
 //
 // ACKNOWLEDGEMENT DELIVERY, RECORDED LIMIT: every acknowledgement here goes
 // through `runtime.sendDirect`, which passes `bypassEchoGuard = false` and
