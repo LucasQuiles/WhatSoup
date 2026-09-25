@@ -172,6 +172,24 @@ describe('host work admission', () => {
     expect(terminateAborted).toHaveBeenCalledWith(aborted);
   });
 
+  it.each(['refused', 'queued', 'Admitted'])('rejects a well-formed %s record that is not an admission', async (state) => {
+    const child = makeQueuedChild();
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValueOnce(child);
+    (statSync as ReturnType<typeof vi.fn>).mockReturnValue({ isFile: () => true, mode: 0o755 });
+    (userInfo as ReturnType<typeof vi.fn>).mockReturnValue({ uid: 1000 });
+    vi.stubEnv('WHATSOUP_WORK_ADMISSION_HELPER', '/host/bin/work-admission');
+    const terminate = vi.fn(async () => {});
+
+    const start = spawnHostWorkAdmitted({
+      binary: '/verified/provider', args: [], cwd: '/work', env: {}, onAbort: terminate,
+    });
+    child.stdio[3]!.emit('data', Buffer.from(`${JSON.stringify({ state, unit: 'scope-1' })}\n`));
+    child.stdio[3]!.emit('end');
+
+    await expect(start).rejects.toThrow('Host work admission rejected');
+    expect(terminate).toHaveBeenCalledWith(child);
+  });
+
   it('requires fd3 EOF without trailing bytes and surfaces an unproven cleanup', async () => {
     const trailing = makeQueuedChild();
     const incomplete = makeQueuedChild();
