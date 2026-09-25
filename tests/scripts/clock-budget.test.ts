@@ -67,6 +67,10 @@
  * Then fleet/db-reader.ts (2, constructor-injected Clock), fleet/group-resolver.ts
  * (1, optional Clock argument) and fleet/routes/lines.ts (2, optional
  * LinesDeps.clock threaded into the stat caches): CLOCK_BUDGET 284 -> 279.
+ * Then fleet/index.ts (1, FleetDeps.clock for the start time), fleet/livez.ts
+ * (1, LivenessOptions.clock), fleet/realtime-publisher.ts (1, optional Clock
+ * argument) and fleet/websocket-server.ts (1, FleetWsLifecycleOptions.clock):
+ * CLOCK_BUDGET 279 -> 275.
  *
  * Companion: #2200 slice 1.
  */
@@ -81,7 +85,7 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 279;
+const CLOCK_BUDGET = 275;
 // Same debt, different syntax — each dodged the call-site count entirely.
 const DATE_NOW_REF_BUDGET = 9;
 const BARE_NEW_DATE_BUDGET = 104;
