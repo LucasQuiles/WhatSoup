@@ -57,6 +57,7 @@ import { errorMessage } from '../../lib/error-message.ts';
 import { projectError, validationError, mutationError, serviceActionError, configValidationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 import { writeInitialDatabaseCreateMarker } from '../../core/initial-database-marker.ts';
+import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
 
 function deepMergeRecords(
   base: Record<string, unknown>,
@@ -618,7 +619,7 @@ export async function handleConfigUpdate(
 
   publishInstanceStatus(deps.realtime, params.name);
   publishFeedEvent(deps.realtime, params.name);
-  jsonResponse(res, 200, mergedClean);
+  jsonResponse(res, 200, projectClientOutputPolicyConfig(mergedClean));
 }
 
 /** DELETE /api/lines/:name — tear down and remove an instance completely.
@@ -1257,6 +1258,9 @@ export async function handleCreateLine(
   ];
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'clientOutputPolicies')) {
+    config['clientOutputPolicies'] = body['clientOutputPolicies'];
   }
   // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
   // type 'chat' so an agent/passive config can never carry an unvalidated

@@ -2516,3 +2516,84 @@ describe('config — mergeKnowledgeProfile non-default index base creation', () 
     expect(profile.description).toBe('custom-idx');
   });
 });
+
+describe('config — client-output policy registry', () => {
+  const policy = (conversationKey: string) => ({
+    conversationKey,
+    maxCodePoints: 500,
+    maxQuestionMarks: 1,
+    blockedTerms: [{ value: 'restricted', match: 'substring', caseSensitive: false }],
+    rejectInternalArtifacts: true,
+    rejectWhatsAppJids: true,
+  });
+
+  it('hydrates a read-only exact-key registry from the INSTANCE_CONFIG fallback', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: [policy('fallback-key')],
+    }));
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.clientOutputPolicies.get('fallback-key')).toBeDefined();
+    expect(config.clientOutputPolicies.get('FALLBACK-KEY')).toBeUndefined();
+    expect(config.clientOutputPolicies).not.toHaveProperty('set');
+  });
+
+  it('prefers the typed direct store over the environment compatibility copy', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: [policy('environment-key')],
+    }));
+    const { setLoadedInstanceConfig } = await import('../src/lib/instance-context.ts');
+    setLoadedInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: [policy('direct-key')],
+    });
+
+    const { config } = await import('../src/config.ts');
+
+    expect(config.clientOutputPolicies.get('direct-key')).toBeDefined();
+    expect(config.clientOutputPolicies.get('environment-key')).toBeUndefined();
+  });
+
+  it('fails closed when a direct INSTANCE_CONFIG consumer receives malformed policy data', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: null,
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(/clientOutputPolicies/);
+  });
+
+  it.each([
+    { type: 'chat', transport: undefined },
+    { type: 'agent', transport: 'signal' },
+  ])('does not activate environment policies for an incompatible $type/$transport runtime', async ({ type, transport }) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type,
+      ...(transport === undefined ? {} : { transport }),
+      clientOutputPolicies: [policy('incompatible-environment-key')],
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /clientOutputPolicies is only valid for agent instances using the Baileys transport/,
+    );
+  });
+
+  it('does not trust an incompatible direct-store policy source over a valid environment source', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      clientOutputPolicies: [policy('environment-key')],
+    }));
+    const { setLoadedInstanceConfig } = await import('../src/lib/instance-context.ts');
+    setLoadedInstanceConfig({
+      type: 'chat',
+      clientOutputPolicies: [policy('incompatible-direct-key')],
+    });
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /clientOutputPolicies is only valid for agent instances using the Baileys transport/,
+    );
+  });
+});

@@ -364,6 +364,25 @@ describe('substrate MCP tools', () => {
     expect(after.triggers[0].status).toBe('paused');
   });
 
+  it('extend_trigger reactivates a paused cron agent job through the registry', async () => {
+    const res = parseResult(await registry.call('create_agent_job', {
+      prompt: 'daily digest',
+      schedule: { kind: 'schedule.cron', expr: '30 8 * * *' },
+      report_chat: 'digest-report@s.whatsapp.net',
+    }, adminSession));
+    expect(parseResult(await registry.call('pause_trigger', { id: res.trigger_id }, adminSession))).toEqual({ ok: true });
+    const paused = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(paused.triggers[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+
+    const until = Math.floor(Date.now() / 1000) + 48 * 3600;
+    expect(parseResult(await registry.call('extend_trigger', { id: res.trigger_id, until }, adminSession))).toEqual({ ok: true });
+
+    const resumed = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(resumed.triggers[0].status).toBe('active');
+    expect(resumed.triggers[0].next_fire_at).toBeGreaterThan(0);
+    expect(resumed.triggers[0].terminal_at).toBe(until);
+  });
+
   it('create_agent_job supports one-shot at-time schedules', async () => {
     const fireAt = Math.floor(Date.now() / 1000) + 3600;
 
