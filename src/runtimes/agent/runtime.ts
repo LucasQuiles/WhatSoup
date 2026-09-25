@@ -10123,11 +10123,20 @@ export class AgentRuntime implements Runtime {
         }, 'refusing fallback replay with mismatched captured turn context');
         return false;
       }
-      const scopeRef = args.mapKey === undefined
-        ? undefined
-        : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
-          ?? { value: args.mapKey };
       if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      let scopeRef: PerChatRuntimeScopeRef | undefined;
+      if (args.mapKey !== undefined) {
+        scopeRef = this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId);
+        if (scopeRef === undefined) {
+          // Register the ref this replay's failure path will read, so replay
+          // admission of the held turn keeps THIS object and a rekey during the
+          // replay is visible to the failure path (a fresh, unregistered ref
+          // would keep the retired key and strand the turn). Finalization of the
+          // held turn deletes it by logical turn id, as for any registered ref.
+          scopeRef = { value: args.mapKey };
+          this.perChatRuntimeTurnScopeRefs.set(runtimeContext.identity.logicalTurnId, scopeRef);
+        }
+      }
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(runtimeContext, (result) => {
         if (result.terminal.attemptOutcome.kind !== 'completed') return;
         this.fallbackMetrics.recordReplay();
