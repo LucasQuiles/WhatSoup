@@ -28,7 +28,7 @@ it (`ToolRegistry.evaluateTargetConversation`, `src/mcp/registry.ts`).
 | --- | --- |
 | Owner | the registry; `send_message` only calls the callback it is handed |
 | Fold | the resolver installed by `setCanonicalConversationKeyResolver` (armed in production by `registerMessagingTools`), else bare `toConversationKey` (cell M10) |
-| Pre-handler point | the caller-supplied `chatJid`, in the global-and-unbound arm of the injected-target branch, when no alias `to` is present |
+| Pre-handler point | the caller-supplied `chatJid`, in the global-and-unbound arm of the injected-target branch, when no alias `to` is present; and, since issue 3585, the target the conversation-bound arm injects from `binding.deliveryJid`, for every injected tool |
 | Post-resolution point | the `assertTargetConversation` callback the registry passes every handler as its fourth argument; `send_message` calls it on `prepared.chatJid` at its dry-run and `beforeAudit` sites, after alias and `@lid` resolution |
 | Denial transport | pre-handler: `reject(...)`. Post-resolution: the callback throws `CrossConversationDenied`, `send_message` re-throws it past its own catch blocks, and the registry's handler catch maps it |
 | Denial shape | plain text at both points |
@@ -59,7 +59,9 @@ leaves to a separate investigation.
 
 Both points fail before any external effect and before the audit-intent write,
 so no denial admits a send. A post-resolution denial still writes the S1 actor
-receipt, because the handler has already started.
+receipt, because the handler has already started. A pre-handler denial writes
+neither the S1 receipt nor the executing mark; since issue 3585 that includes a
+bound session's binding/mirror divergence (M9d diverged half, M11a).
 
 ## Failure channels used by the matrix
 
@@ -94,6 +96,27 @@ classify it as 422. What changes for a fleet caller of M3 or M4 is the proxy's
 `scripts/` or `tools/` parses the old JSON envelope; the send-acceptance
 parsers key on `isError`.
 
+## What issue 3585 changed
+
+Before 3585 the conversation-bound arm filled `chatJid` from
+`binding.deliveryJid` and ran no guard. Only `send_message` adjudicated that
+target, through the post-resolution callback, so every other injected tool on a
+bound session with a diverged mirror was admitted. The bound arm now runs the
+guard's pre-handler point on the injected target, before schema validation and
+before any handler. The target is the binding itself, so the check can only deny.
+
+| Cell | Before 3585 | After 3585 |
+| --- | --- | --- |
+| M11a, any injected tool other than `send_message`, diverged mirror | admitted, dispatched to the binding | denied, plain text, `authorization_denied` / `authorization`, `error`-level log, no dispatch |
+| M11d, a binding whose `deliveryJid` does not fold | admitted by the registry; the handler received the unfoldable JID | denied, plain text, `validation_rejected` / `validation`, no dispatch |
+| M9d diverged half, `send_message` | denied at the post-resolution point; S1 receipt and executing mark written | denied at the pre-handler point with the same text, channel and evidence key; no S1 receipt, no executing mark |
+
+No cell that admitted before 3585 is admitted differently, except that M9c,
+M9e, M11b and M11c now pass through one more admitting check. Production arms
+the canonical fold in every registry that serves calls (`registerAllTools`
+registers the messaging module as a core module), so a mapped `@lid` binding
+with a phone-folded mirror (M9e, M11c) is still admitted.
+
 ## The matrix
 
 Axes: session tier, alias target `to` present or absent, session
@@ -115,9 +138,13 @@ column as `global + binding`, which is what the tests construct.
 | M8 | global, unbound | present **and** `chatJid` present | present | pre-handler skipped by the caller-supplied `to`; the handler's target-exclusivity fault fires before the post-resolution point | denied as a target-exclusivity fault, not a conversation fault | `returned_error` / `handler` |
 | M9a | global + binding | absent, `chatJid` supplied | present | the bound arm rejects any caller target before the handler; neither guard point is reached | denied, plain text | `validation_rejected` / `validation` |
 | M9b | global + binding | absent, `chatJid` supplied | absent | same bound arm | denied, plain text | `validation_rejected` / `validation`, filed under `__global__` |
-| M9c | global + binding | absent, no caller target | absent | bound arm fills the target from the binding; post-resolution `target-matches-conversation` | admitted, dispatched to the binding | none, filed under `__global__` |
-| M9d | global + binding | absent, no caller target | present | bound arm fills the target from the binding; post-resolution adjudicates it | mirror agrees: admitted, dispatched to the binding. Mirror diverged: `binding-mirror-divergence`, denied, plain text, `error` log, no dispatch | agreeing: none. Diverged: `authorization_denied` / `authorization`, filed under the diverged MIRROR key |
-| M9e | global + binding keyed by raw `@lid` digits | absent, no caller target | present, phone-folded, same conversation | post-resolution compares folds, `target-matches-conversation` | admitted, dispatched to the `@lid` binding | none |
+| M9c | global + binding | absent, no caller target | absent | bound arm fills the target from the binding; pre-handler and post-resolution `target-matches-conversation` | admitted, dispatched to the binding | none, filed under `__global__` |
+| M9d | global + binding | absent, no caller target | present | bound arm fills the target from the binding; pre-handler adjudicates it (issue 3585) | mirror agrees: admitted, dispatched to the binding. Mirror diverged: `binding-mirror-divergence` at the pre-handler point, denied, plain text, `error` log, no dispatch | agreeing: none. Diverged: `authorization_denied` / `authorization`, filed under the diverged MIRROR key |
+| M9e | global + binding keyed by raw `@lid` digits | absent, no caller target | present, phone-folded, same conversation | pre-handler and post-resolution compare folds, `target-matches-conversation` | admitted, dispatched to the `@lid` binding | none |
+| M11a | global + binding, `send_location` | absent, no caller target | present, diverged | pre-handler on the injected target, `binding-mirror-divergence` | denied, plain text, `error` log, handler never runs | `authorization_denied` / `authorization`, filed under the diverged MIRROR key |
+| M11b | global + binding, `send_location` | absent, no caller target | present, agrees | pre-handler on the injected target, `target-matches-conversation` | admitted, dispatched to the binding | none |
+| M11c | global + binding keyed by raw `@lid` digits, `send_location` | absent, no caller target | present, phone-folded, same conversation | pre-handler through the armed fold, `target-matches-conversation` | admitted, dispatched to the `@lid` binding | none |
+| M11d | global + binding whose `deliveryJid` does not fold, `send_location` | absent, no caller target | present | pre-handler on the injected target, `invalid-target-jid` | denied, plain text, handler never runs | `validation_rejected` / `validation` |
 | M10 | global, unbound, no fold armed | absent | present, addressed by its own mapped `@lid` | pre-handler on the bare `toConversationKey` fallback, `foreign-conversation` | denied, plain text, the session's OWN conversation | `authorization_denied` / `authorization` |
 
 Notes the rows above do not carry in a column:
@@ -130,6 +157,8 @@ Notes the rows above do not carry in a column:
   site for the canonical fold, so a registry holding a real `send_message`
   always has the fold armed and the un-armed cell is unreachable with a
   production tool.
+- M11a to M11d run against `send_location`, a production injected tool whose
+  handler never calls the post-resolution callback, on the armed registry.
 - The test file also pins, beyond the cells: M1 and M3 answer the same foreign
   target with identical text and an identical evidence row, and `send_message`
   run without the guard callback throws before sending.
@@ -151,6 +180,10 @@ Notes the rows above do not carry in a column:
 | M9c | `M9c conversation-bound session with no conversationKey mirror and no caller target: the binding supplies the target` |
 | M9d | `M9d conversation-bound session with the conversationKey mirror present and no caller target: an agreeing mirror is admitted and a diverged mirror is denied as authorization_denied/authorization` |
 | M9e | `M9e conversation-bound session keyed by raw @lid digits with a phone-folded mirror of the same conversation: admitted` |
+| M11a | `M11a conversation-bound session with a diverged mirror: an injected tool that never calls the callback is denied before its handler as authorization_denied/authorization` |
+| M11b | `M11b conversation-bound session with an agreeing mirror: the same injected tool is admitted and dispatched to the binding` |
+| M11c | `M11c conversation-bound session keyed by raw @lid digits with a phone-folded mirror of the same conversation: the injected tool is admitted through the armed fold` |
+| M11d | `M11d conversation-bound session whose binding deliveryJid does not fold: the injected tool is denied before its handler as validation_rejected/validation` |
 | M10 | `M10 registry guard with no fold armed: a pinned session addressing its OWN conversation by a mapped @lid is denied as authorization_denied/authorization` |
 | M10 control | `M10 control: the SAME call is admitted once the canonical fold is armed` |
 
@@ -183,8 +216,9 @@ live here; the issue body is not edited.
 
 **Correction 1. The registry guard was not "any tier". It was global-and-unbound
 only.** It sat in the final `else` arm of the injected-target branch, behind the
-bound arm and the chat-scoped arm. The combined guard's pre-handler point keeps
-that position. The post-resolution point is reachable from any session whose
+bound arm and the chat-scoped arm. The combined guard's pre-handler point kept
+that position in 3457; issue 3585 added a second pre-handler call in the bound
+arm, on the target that arm injects. The post-resolution point is reachable from any session whose
 handler calls the callback; the guard admits chat-scoped sessions there by its
 first branch.
 
@@ -211,10 +245,11 @@ None of the following is pinned by this matrix.
   is gated on `tool.targetMode === 'injected'`, so it never runs for a
   caller-supplied tool such as `forward_message`.
 - **The post-resolution point runs only for `send_message`.** Other injected
-  tools on a bound session (`react_message`, `send_poll` and the rest) receive
-  the binding's target and do not call the callback, so a diverged mirror is not
-  adjudicated for them. That is unchanged from before 3457, when only
-  `send_message` carried the in-handler guard.
+  tools (`react_message`, `send_poll` and the rest) do not call the callback.
+  On a bound session that no longer leaves a diverged mirror unadjudicated:
+  since issue 3585 the bound arm runs the pre-handler point on the target it
+  injects, for every injected tool (cells M11a to M11d). Only a handler that
+  resolves a target of its own still needs the callback.
 - **An outbound suppression can mask a cross-conversation violation.** On the
   live send path `transformPrepared` runs before `beforeAudit`
   (`src/core/send-pipeline.ts`), so a cross-conversation send whose text also

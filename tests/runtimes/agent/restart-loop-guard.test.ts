@@ -12,8 +12,8 @@
  *  - T1 characterization: a 'suspended' checkpoint stays resumable across an
  *    aborted resume (the store-level window the guard closes)
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -137,9 +137,14 @@ describe('restart-loop guard', () => {
       ['malformed', '{not json\n'],
       ['future v2', '{"v":2,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
       ['unreadable', '{"v":1,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
-    ])('preserves an existing %s state and fails open without reinitializing it', (kind, source) => {
+    // #3551: the unreadable fixture sets its permissive mode explicitly, and
+    // every row runs under a restrictive and a conventional umask.
+    ].flatMap((row) => [['077', ...row], ['022', ...row]]))('(umask %s) preserves an existing %s state and fails open without reinitializing it', (umask, kind, source) => {
+      const previousUmask = process.umask(umask);
+      onTestFinished(() => { process.umask(previousUmask); });
       writeFileSync(statePath, source, 'utf8');
-      if (kind !== 'unreadable') chmodSync(statePath, 0o600);
+      chmodSync(statePath, kind === 'unreadable' ? 0o644 : 0o600);
+      expect(statSync(statePath).mode & 0o777).toBe(kind === 'unreadable' ? 0o644 : 0o600);
 
       const interrupted = markBootInProgress(statePath, 1_000);
       expect(interrupted).toBe(false);
