@@ -939,6 +939,7 @@ describe('main bootstrap', () => {
           enabledPlugins: { test: true },
           allowM365Mutations: false,
           autoCompactInputTokens: 123,
+          turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 7 },
         },
       },
     });
@@ -958,6 +959,7 @@ describe('main bootstrap', () => {
         enabledPlugins: { test: true },
         allowM365Mutations: false,
         autoCompactInputTokens: 123,
+        turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 7 },
       }),
     );
     expect(h.resolveLatestPluginDir).toHaveBeenCalledWith(expect.stringMatching(/\/plugins\/one$/));
