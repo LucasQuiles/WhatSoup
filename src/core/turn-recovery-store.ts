@@ -895,7 +895,14 @@ export class TurnRecoveryStore {
       `),
       getTurnRecoverySupervisorCounts: prepare(`
         WITH orphan_transfers AS (
-          SELECT COUNT(*) AS count
+          -- corroborated: a later echoed op proves delivery, so the orphan is
+          -- retained audit debt that OUTSTANDING_RECOVERY_FOR_SCOPE_FROM also
+          -- excludes from admission; it stays integrity debt (corrupt_links).
+          SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN ${validDeliveryCorroborationForTerminalSql('terminal')} THEN 1 ELSE 0
+            END), 0) AS corroborated
           FROM turn_terminal_records terminal
           LEFT JOIN turn_recovery_jobs linked
             ON linked.terminal_record_id = terminal.id
@@ -970,7 +977,8 @@ export class TurnRecoveryStore {
             WHEN j.state IN ('pending', 'claimed')
               AND NOT ${validDeliveryCorroborationForJobSql('j')}
             THEN 1 ELSE 0
-          END), 0) + (SELECT count FROM orphan_transfers) AS blocking_outstanding,
+          END), 0)
+            + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
           COALESCE(SUM(CASE
             WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
           END), 0) AS retained_terminal,
@@ -978,7 +986,8 @@ export class TurnRecoveryStore {
             WHEN j.state IN ('pending', 'claimed')
               AND ${validDeliveryCorroborationForJobSql('j')}
             THEN 1 ELSE 0
-          END), 0) AS corroborated_retained,
+          END), 0)
+            + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
             ELSE 0
