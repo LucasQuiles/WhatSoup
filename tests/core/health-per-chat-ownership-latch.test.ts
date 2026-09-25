@@ -230,9 +230,12 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     // reason that does NOT self-clear on repair would be a real silence hole.
     // Test-owned literals, compared for equality rather than containment.
     expect([...DIRECTLY_REPROBED_STATUS_REASONS].sort()).toEqual([
+      'recovery_debt_blocking',
       'runtime.agent_respawn_failed_clear_pending',
+      'runtime.completed_delivery_identity_debt',
       'runtime.per_chat_respawn_abandoned',
       'runtime.per_chat_session_without_owner',
+      'runtime.turn_finalization_debt',
     ]);
     // And the two sets must stay disjoint: a turn-provable reason has a release
     // channel and does not need the exemption.

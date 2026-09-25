@@ -340,6 +340,9 @@ export interface RecoveryDebtSnapshot {
 ```
 
 - Produces `evaluateRecoveryProof(...)` that distinguishes `clear`, `retain`, and `degrade`.
+  (Superseded in the #3224 rework, 2026-09-25: the proof functions were not
+  merged; the recovery-debt reasons joined main's
+  `DIRECTLY_REPROBED_STATUS_REASONS` instead.)
 
 - [x] **Step 1: Write pure aggregate and contradiction tests**
 

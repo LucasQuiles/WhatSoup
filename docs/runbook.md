@@ -553,6 +553,14 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   reasons and its final verdict is `degraded`. Unhealthy verdicts and
   late-computed-only reasons (schema/durability/retention/pending-polls/fact
   export/late runtime status — all directly probed each poll) never arm.
+- **Never latched.** The directly re-probed reasons
+  (`DIRECTLY_REPROBED_STATUS_REASONS`) never arm and never enter a latched set:
+  the per-chat ownership reasons, `runtime.agent_respawn_failed_clear_pending`,
+  `recovery_debt_blocking`, `runtime.turn_finalization_debt`, and
+  `runtime.completed_delivery_identity_debt`. Each is recomputed from live or
+  durable state on every evaluation and fails closed while unreadable, so it
+  stays visible for as long as the condition lasts and clears on the first
+  poll after repair.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -1768,10 +1776,12 @@ contains only audit counts plus created/existing/unresolved/ambiguous ledger cou
 
 After recording, authenticated `/health` reports the normalized recovery-debt projection separately
 from current service status. A readable retained continuity gap does not flip an otherwise healthy
-service to degraded. Retained debt does not release the silence latch, though: after a blocking
-episode (`recovery_debt_blocking`, `runtime.turn_finalization_debt`), status stays `degraded` with
-`degradation_silence_unproven` while `recovery_debt` already reads non-blocking; see "Degradation
-silence latch" above. The compatibility `continuity` block remains available:
+service to degraded. A blocking episode (`recovery_debt_blocking`,
+`runtime.turn_finalization_debt`, `runtime.completed_delivery_identity_debt`) does not arm the
+silence latch: those reasons are recomputed from durable state on every poll, so status returns to
+`healthy` on the first poll whose evidence reads non-blocking, without a restart, while unreadable
+evidence keeps `recovery_debt_blocking` present on every poll. See "Degradation silence latch"
+above. The compatibility `continuity` block remains available:
 
 ```json
 {

@@ -68,7 +68,10 @@ const RETAINED_RUNTIME_REASONS = [
 
 const BLOCKING_REASON_SET = new Set<string>(BLOCKING_RUNTIME_REASONS);
 const RETAINED_REASON_SET = new Set<string>(RETAINED_RUNTIME_REASONS);
-const RECOVERY_REASON_ORDER = [
+/** Canonical recovery_debt reason vocabulary and order. The three consumers
+ * (fleet health poller, classify_health.py, the watchdog template) re-encode
+ * it; tests/core/recovery-debt-vocabulary-parity.test.ts pins them to it. */
+export const RECOVERY_REASON_ORDER = [
   'continuity_gap_unreadable',
   'continuity_gap_open',
   'recovery_evidence_unreadable',

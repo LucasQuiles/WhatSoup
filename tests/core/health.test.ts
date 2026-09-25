@@ -2834,11 +2834,11 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  it('reports retained-only debt as non-blocking while the #2280 latch holds a prior blocking episode', async () => {
-    // The #2280 latch releases only on an exact-primary-route turn receipt
-    // newer than the latch point, and neither runtime.turn_finalization_debt
-    // nor recovery_debt_blocking is turn-provable. Retained-only evidence is
-    // therefore reported as non-blocking debt while silence stays unproven.
+  it('returns healthy on the next poll after a blocking recovery episode clears, without restart', async () => {
+    // runtime.turn_finalization_debt and recovery_debt_blocking are recomputed
+    // from durable state on every poll (DIRECTLY_REPROBED_STATUS_REASONS), so
+    // they never arm the #2280 latch: once the evidence reads non-blocking the
+    // same server process reports healthy, with retained debt still visible.
     db.close();
     const db2 = makeDb();
     const turnCapability = {
@@ -2903,8 +2903,8 @@ describe('GET /health', () => {
       expect.arrayContaining(['runtime.turn_finalization_debt', 'recovery_debt_blocking']),
     );
     expect(retained).toMatchObject({
-      status: 'degraded',
-      status_reasons: ['degradation_silence_unproven'],
+      status: 'healthy',
+      status_reasons: [],
       recovery_debt: {
         open: true,
         service_blocking: false,
@@ -2913,13 +2913,172 @@ describe('GET /health', () => {
     });
     expect(retained.degradation_causes).not.toContain('turn_recovery_degraded');
     expect(retained.degradation_causes).not.toContain('recovery_debt_blocking');
+    expect(retained.degradation_causes).not.toContain('degradation_silence_unproven');
     expect(clear).toMatchObject({
-      status: 'degraded',
-      status_reasons: ['degradation_silence_unproven'],
+      status: 'healthy',
+      status_reasons: [],
       recovery_debt: { open: false, service_blocking: false },
     });
     expect(getHealthSnapshot).toHaveBeenCalledTimes(3);
     db2.close();
+  });
+
+  describe('recovery-debt reasons are directly re-probed, never latched (#2280)', () => {
+    const cleanTurnCapability = {
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: Date.now(),
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+
+    /** One long-lived server whose runtime snapshot and delivery evidence can
+     * change between polls: the latch is scoped to the server instance, so a
+     * fresh server per poll would reset exactly the state under test. */
+    async function openMutableAgent(): Promise<{
+      poll: () => Promise<Record<string, any>>;
+      setRuntime: (snapshot: { status: string; details: Record<string, unknown> }) => void;
+      setDeliveryReadable: (readable: boolean) => void;
+      close: () => void;
+    }> {
+      db.close();
+      const db2 = makeDb();
+      let runtimeSnapshot: { status: string; details: Record<string, unknown> } = {
+        status: 'healthy',
+        details: { turnCapability: cleanTurnCapability },
+      };
+      let deliveryReadable = true;
+      const deps = makeDeps(db2, {
+        instanceType: 'agent',
+        runtime: { getHealthSnapshot: () => runtimeSnapshot } as unknown as HealthDeps['runtime'],
+        durability: {
+          getHealthStats: () => ({
+            oldestMaybeSentAt: null,
+            deliveryAmbiguity: deliveryReadable
+              ? { readable: true, uncorroboratedAmbiguous: 0, corroboratedRetained: 0, oldestUncorroboratedAt: null }
+              : { readable: false },
+          }),
+        } as unknown as NonNullable<HealthDeps['durability']>,
+      });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(deps));
+      return {
+        poll: async () => JSON.parse((await healthReq(port)).body),
+        setRuntime: (snapshot) => { runtimeSnapshot = snapshot; },
+        setDeliveryReadable: (readable) => { deliveryReadable = readable; },
+        close: () => db2.close(),
+      };
+    }
+
+    it('returns healthy after a blocking completed-delivery identity episode clears', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'degraded',
+        details: {
+          turnCapability: cleanTurnCapability,
+          degradedReasons: ['completed_delivery_identity_debt'],
+          recoveryBlockingReasons: ['completed_delivery_identity_unclassified'],
+          completedDeliveryIdentityBlocking: 2,
+          completedDeliveryIdentityAdmissions: { unresolvedCount: 2, nextAction: null },
+        },
+      });
+      const blocked = await agent.poll();
+      expect(blocked.status).toBe('degraded');
+      expect(blocked.status_reasons).toEqual(expect.arrayContaining([
+        'runtime.completed_delivery_identity_debt',
+        'recovery_debt_blocking',
+      ]));
+
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      const repaired = await agent.poll();
+      expect(repaired.status, 'a repaired instance must not stay latched degraded').toBe('healthy');
+      expect(repaired.status_reasons).toEqual([]);
+      agent.close();
+    });
+
+    it('keeps unreadable recovery evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'healthy',
+        // A malformed gauge makes the runtime recovery evidence unreadable.
+        details: { turnCapability: cleanTurnCapability, recoveryBlockingReasons: null },
+      });
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = await agent.poll();
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reasons).toContain('recovery_evidence_unreadable');
+      }
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      expect((await agent.poll()).status).toBe('healthy');
+      agent.close();
+    });
+
+    it('keeps unreadable delivery evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      const agent = await openMutableAgent();
+      agent.setDeliveryReadable(false);
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = await agent.poll();
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reasons).toContain('delivery_evidence_unreadable');
+      }
+      agent.setDeliveryReadable(true);
+      expect((await agent.poll()).status).toBe('healthy');
+      agent.close();
+    });
+
+    it('keeps unreadable continuity evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      db.raw.prepare(`
+        INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+        VALUES ('foreign-continuity-reprobe', 'operator', 'other_recovery_owner', 'Unrelated recovery work')
+      `).run();
+      db.raw.prepare(`
+        INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+        VALUES ('continuity_gap_absent', 'foreign-continuity-reprobe', 'started')
+      `).run();
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = JSON.parse((await healthReq(port)).body);
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reason).toBe('continuity_gap_unreadable');
+      }
+      // recovery_plans is append-only; removing the foreign continuity run is
+      // what ends the foreign reservation the ledger reader refuses.
+      db.raw.prepare(`DELETE FROM recovery_runs WHERE recovery_plan_id = 'foreign-continuity-reprobe'`).run();
+      const repaired = JSON.parse((await healthReq(port)).body);
+      expect(repaired.status, 'a repaired ledger must not stay latched degraded').toBe('healthy');
+      expect(repaired.status_reasons).toEqual([]);
+    });
+
+    it('a silence-prone reason alongside the recovery reasons still arms, so the change removes no protection', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'degraded',
+        details: {
+          turnCapability: cleanTurnCapability,
+          degradedReasons: ['turn_finalization_debt', 'turn_queue_halted'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
+        },
+      });
+      const degraded = await agent.poll();
+      expect(degraded.status_reasons).toEqual(expect.arrayContaining([
+        'runtime.turn_finalization_debt',
+        'runtime.turn_queue_halted',
+        'recovery_debt_blocking',
+      ]));
+
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      const afterRepair = await agent.poll();
+      expect(afterRepair.status, 'turn_queue_halted must still latch').toBe('degraded');
+      expect(afterRepair.status_reasons).toEqual(['degradation_silence_unproven']);
+      agent.close();
+    });
   });
 
   it('surfaces turn_recovery_degraded and provider_execution_pressure causes from runtime counters', async () => {

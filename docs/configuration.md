@@ -1415,9 +1415,10 @@ debt. `status` and `status_reasons` answer whether the instance can safely serve
 delivery-ambiguity obligations. Readable retained history, including corroborated ambiguous delivery,
 can therefore produce `status: "healthy"` with `recovery_debt.open: true`,
 `service_blocking: false`, and routine attention. Unreadable evidence or an active blocking gauge
-fails closed as degraded/urgent with the `recovery_debt_blocking` reason/cause pair. A blocking
-episode arms the degradation silence latch, and retained debt alone does not release it; see
-`docs/runbook.md` "Degradation silence latch". In the delivery category, `blocking_ambiguous` is the stale subset of
+fails closed as degraded/urgent with the `recovery_debt_blocking` reason/cause pair on every poll
+until a fresh read proves it non-blocking. The recovery-debt reasons are directly re-probed and never
+arm the degradation silence latch, so a repaired instance reads healthy on the next poll without a
+restart; see `docs/runbook.md` "Degradation silence latch". In the delivery category, `blocking_ambiguous` is the stale subset of
 `uncorroborated_ambiguous`; fresh ambiguity is visible but does not become a service outage before the
 dwell threshold. Operators must close obligations through their proof-bound workflows, never by
 editing or deleting durable rows to make health green.

@@ -289,16 +289,36 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     runtime reason disappears only after the shared alert clear is accepted.
  *     Health itself re-attempts that clear while no abandonment or exhaustion
  *     owns the source, so an accepted retry is immediately re-probed as clean.
+ *   - `recovery_debt_blocking` is the normalized recovery_debt verdict,
+ *     recomputed on every evaluation from the continuity ledger, the durable
+ *     turn-recovery and completed-delivery-identity gauges, and the delivery
+ *     ambiguity aggregate. Unreadable or contradictory evidence of any of the
+ *     three is itself service-blocking, so the reason stays present on every
+ *     poll while evidence is unreadable and disappears only when a fresh read
+ *     proves the debt non-blocking.
+ *   - `runtime.turn_finalization_debt` is recomputed on every snapshot from
+ *     the supervisor's live retained finalizations and the durable
+ *     turn-recovery counts (runtimeRecoveryDegradation); missing or malformed
+ *     counts surface as recovery_evidence_unreadable under
+ *     recovery_debt_blocking, never as silence.
+ *   - `runtime.completed_delivery_identity_debt` is recomputed on every
+ *     snapshot from the durable completed-delivery identity admissions; it
+ *     clears when the blocking count reaches zero, and an unreadable count
+ *     fails closed under recovery_debt_blocking the same way.
  *
  * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
- * in an unrelated chat proves nothing about a per-chat ownership map — so a
- * latch carrying one could never be released by the only release channel that
- * exists, and the instance would report degraded until process restart even
- * after the runtime had repaired itself and its own snapshot read healthy. */
+ * in an unrelated chat proves nothing about a per-chat ownership map or a
+ * durable recovery ledger — so a latch carrying one could never be released
+ * by the only release channel that exists, and the instance would report
+ * degraded until process restart even after the runtime had repaired itself
+ * and its own snapshot read healthy. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',
+  'recovery_debt_blocking',
+  'runtime.turn_finalization_debt',
+  'runtime.completed_delivery_identity_debt',
 ]);
 
 /** The primary route the latch release compares a receipt against: the

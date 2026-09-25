@@ -222,6 +222,13 @@ aggregation, but it must preserve these invariants:
 
 ### Explicit recovery proof for the silence latch
 
+> Superseded (#3224 rework, 2026-09-25): main's #2280 latch landed first and was
+> kept. Instead of the state machine below, `recovery_debt_blocking`,
+> `runtime.turn_finalization_debt` and `runtime.completed_delivery_identity_debt`
+> joined `DIRECTLY_REPROBED_STATUS_REASONS`, so they never arm the latch and a
+> repaired instance reads healthy on the next poll without restart.
+> `evaluateRecoveryProof` / `applyRecoveryProof` were not merged.
+
 The current set-only `recentlyDegraded` behavior is replaced with a small state
 machine:
 
