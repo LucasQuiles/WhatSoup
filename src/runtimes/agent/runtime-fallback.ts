@@ -1209,6 +1209,15 @@ export class RuntimeFallbackCoordinator {
   private readonly chainCanary = new Map<string, ChainEntryCanaryResult & { checkedAt: number }>();
   private chainCanaryTimer: ReturnType<typeof setInterval> | null = null;
   private chainCanarySweepInFlight = false;
+  /**
+   * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
+   * incident per instance+source, not per entry, so one field covers every
+   * entry. Starts 'unknown': a previous process may have left the incident
+   * open and nothing in-process can read the dispatcher's state, so the first
+   * sweep that finds no failing entry emits one reconciliation clear (the
+   * dispatcher drops a clear with no open incident as a stale recovery).
+   */
+  private chainCanaryAlert: 'unknown' | 'open' | 'closed' = 'unknown';
 
   /** Arm the periodic canary. No-op unless WHATSOUP_FALLBACK_CANARY_MS > 0. */
   startChainCanary(): void {
@@ -1234,6 +1243,8 @@ export class RuntimeFallbackCoordinator {
   async runChainCanarySweep(trigger: string): Promise<void> {
     if (this.chainCanarySweepInFlight) return;
     this.chainCanarySweepInFlight = true;
+    const newlyFailed: Array<{ entry: AgentFallbackEntry; result: ChainEntryCanaryResult }> = [];
+    let recovered: AgentFallbackEntry | null = null;
     try {
       for (const entry of this.chainCanarySweepEntries()) {
         const key = this.host.fallbackChain.entryKey(entry);
@@ -1266,6 +1277,9 @@ export class RuntimeFallbackCoordinator {
         }
         const args = buildOpenCodeRunArgs({ providerConfig, model: entry.model });
         const previous = this.chainCanary.get(key);
+        // Same freshness rule reconcile uses: an expired failure record must
+        // not suppress the alert for a fresh failure after the incident closed.
+        const wasHealthy = !this.chainCanaryDead(key);
         const result = await probeChainEntryCompletion(
           binary,
           args,
@@ -1274,34 +1288,76 @@ export class RuntimeFallbackCoordinator {
           this.chainCanaryConfig.timeoutMs,
         );
         this.chainCanary.set(key, { ...result, checkedAt: systemClock.now() });
-        const wasHealthy = previous === undefined || previous.status === 'ok' || previous.status === 'unknown';
         if (result.status !== 'ok' && wasHealthy) {
-          emitAlertChecked(
-            this.host.instanceName,
-            'fallback_chain_entry_unhealthy',
-            'Fallback chain entry failed its real-completion canary',
-            `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
-              + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
-          );
-          log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
-          log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
+          newlyFailed.push({ entry, result });
         } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
-          clearAlertSourceChecked(
-            this.host.instanceName,
-            'fallback_chain_entry_unhealthy',
-            `recoveryProof=canary_completion provider=${entry.provider} model=${entry.model ?? 'default'}`,
-          );
+          recovered = entry;
           log.info({ provider: entry.provider, model: entry.model }, 'fallback chain entry canary recovered');
         }
+      }
+      // Emitted after the loop so severity sees the whole sweep's evidence,
+      // not only the entries probed before the failing one.
+      for (const { entry, result } of newlyFailed) {
+        emitAlertChecked(
+          this.host.instanceName,
+          'fallback_chain_entry_unhealthy',
+          'Fallback chain entry failed its real-completion canary',
+          `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
+            + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
+          this.chainCanaryAlertSeverity(this.host.fallbackChain.entryKey(entry)),
+        );
+        this.chainCanaryAlert = 'open';
+        log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
+        log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
       }
       // Discovery mode: sweep evidence just changed — re-rank the chain on it
       // (mid-window this re-orders only the not-yet-tried remainder).
       if (this.host.agentFallbackDiscovery) {
         await this.refreshDiscoveredFallbackChain('canary-sweep');
       }
+      this.reconcileChainCanaryAlert(recovered);
     } finally {
       this.chainCanarySweepInFlight = false;
     }
+  }
+
+  /**
+   * `warning` while the chain can still serve: another chain entry holds fresh
+   * canary-ok evidence and the window has not exhausted the chain. `critical`
+   * otherwise.
+   */
+  private chainCanaryAlertSeverity(failingKey: string): 'warning' | 'critical' {
+    const chain = this.host.fallbackChain;
+    if (chain.isExhausted(this.host.agentFallbacks)) return 'critical';
+    const healthyPeer = this.host.agentFallbacks.some((entry) => {
+      const key = chain.entryKey(entry);
+      return key !== failingKey && this.chainCanaryEvidence(key) === 'ok';
+    });
+    return healthyPeer ? 'warning' : 'critical';
+  }
+
+  /**
+   * Close the incident once no entry in the CURRENT sweep set (read after the
+   * discovery refresh) has fresh failure evidence. Clearing only on the same
+   * entry's recovery strands the incident when discovery replaces a failed
+   * candidate: the replaced entry is never swept again. Fresh evidence (trust
+   * TTL) is used so an entry whose probe is always skipped cannot hold the
+   * incident open on a stale record.
+   */
+  private reconcileChainCanaryAlert(recovered: AgentFallbackEntry | null): void {
+    if (this.chainCanaryAlert === 'closed') return;
+    const sweepSet = this.chainCanarySweepEntries();
+    if (sweepSet.some((entry) => this.chainCanaryDead(this.host.fallbackChain.entryKey(entry)))) return;
+    let proof: string;
+    if (this.chainCanaryAlert === 'unknown') proof = 'boot_reconcile';
+    else if (recovered) proof = `canary_completion provider=${recovered.provider} model=${recovered.model ?? 'default'}`;
+    else proof = 'failing_entry_left_sweep_set';
+    clearAlertSourceChecked(
+      this.host.instanceName,
+      'fallback_chain_entry_unhealthy',
+      `recoveryProof=${proof} sweepSet=${sweepSet.length}`,
+    );
+    this.chainCanaryAlert = 'closed';
   }
 
   /**
