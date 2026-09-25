@@ -56,6 +56,7 @@ import {
   WHATSOUP_HEADLESS_EXECUTION_PROFILE,
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
+import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -229,6 +230,11 @@ function validateAgentModelConsistency(raw: Record<string, unknown>): Validation
   }
 
   return null;
+}
+
+function validateClientOutputPolicyConfig(raw: Record<string, unknown>): ValidationError | null {
+  const parsed = parseClientOutputPoliciesForInstance(raw);
+  return parsed.ok ? null : err(parsed.error.field, `${parsed.error.field} ${parsed.error.reason}`);
 }
 
 /**
@@ -435,6 +441,9 @@ export function validateInstanceConfig(
 
   const transportErr = validateTransportConfig(raw);
   if (transportErr) return transportErr;
+
+  const clientOutputPolicyErr = validateClientOutputPolicyConfig(raw);
+  if (clientOutputPolicyErr) return clientOutputPolicyErr;
 
   // --- service block (launchd render options) ---
   // Shape rules live in lib/launchd-service-config.ts, the same source of
