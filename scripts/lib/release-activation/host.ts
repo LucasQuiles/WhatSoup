@@ -13,6 +13,7 @@ import http from 'node:http';
 import path from 'node:path';
 
 import { configRoot } from '../../../src/fleet/paths.ts';
+import { isRecord } from '../../../src/lib/type-guards.ts';
 
 export interface ExecResult {
   code: number;
@@ -149,10 +150,6 @@ export interface HealthObservation {
 }
 
 const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * Classify a health body the way `health_reader.classify_projection` does for
