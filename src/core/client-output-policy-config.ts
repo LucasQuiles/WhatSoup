@@ -1,5 +1,5 @@
 import { createPublicKey } from 'node:crypto';
-import { isNonEmptyString } from '../lib/type-guards.ts';
+import { asRecord, isNonEmptyString } from '../lib/type-guards.ts';
 import { conversationKeyToJid, toConversationKey } from './conversation-key.ts';
 import { DEFAULT_TRANSPORT_ID } from './transport-refs.ts';
 import {
@@ -110,12 +110,6 @@ function issue(field: string, reason: string): ClientOutputPolicyParseResult {
   return Object.freeze({ ok: false, error: Object.freeze({ field, reason }) });
 }
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 function hasUnknownKey(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
   return Object.keys(value).some((key) => !allowed.has(key));
 }
@@ -167,7 +161,7 @@ function parseTerm(
   field: string,
   identities: Set<string>,
 ): ClientOutputBlockedTerm | ClientOutputPolicyParseResult {
-  const term = record(value);
+  const term = asRecord(value);
   if (!term) return issue(field, 'must be an object');
   if (hasUnknownKey(term, TERM_KEYS)) return issue(field, 'contains an unsupported field');
 
@@ -201,7 +195,7 @@ function parseAuthorization(
   value: unknown,
   field: string,
 ): ClientOutputPolicyAuthorization | ClientOutputPolicyParseResult {
-  const authorization = record(value);
+  const authorization = asRecord(value);
   if (!authorization) return issue(field, 'must be an object');
   if (hasUnknownKey(authorization, AUTHORIZATION_KEYS)) {
     return issue(field, 'contains an unsupported field');
@@ -256,7 +250,7 @@ export function parseClientOutputPolicies(value: unknown): ClientOutputPolicyPar
   const conversationKeys = new Set<string>();
   for (let policyIndex = 0; policyIndex < value.length; policyIndex += 1) {
     const field = `clientOutputPolicies[${policyIndex}]`;
-    const rawPolicy = record(value[policyIndex]);
+    const rawPolicy = asRecord(value[policyIndex]);
     if (!rawPolicy) return issue(field, 'must be an object');
     if (hasUnknownKey(rawPolicy, POLICY_KEYS)) return issue(field, 'contains an unsupported field');
 
