@@ -269,8 +269,9 @@ export function extendTrigger(db: DatabaseSync, id: number, args: { until: numbe
     db.prepare(`UPDATE bead_triggers SET terminal_at=?, updated_at=? WHERE id=?`).run(clamped, now, id);
     // #2417: if the trigger was paused (e.g. trigger_forbidden_target retirement),
     // reactivate it so the user's extend command also serves as a resume gesture.
+    // bead_triggers has no failure counter to reset (see schema.ts).
     if (t.status === 'paused') {
-      db.prepare(`UPDATE bead_triggers SET status='active', next_fire_at=?, crash_count=0, updated_at=? WHERE id=?`).run(now, now, id);
+      db.prepare(`UPDATE bead_triggers SET status='active', next_fire_at=?, updated_at=? WHERE id=?`).run(now, now, id);
     }
     writeBeadEvent(db, { beadId: t.bead_id, eventType: 'trigger_extended', actor: args.actor, payload: { trigger_id: id, terminal_at: clamped, was_paused: t.status === 'paused' }, at: now });
     db.exec('COMMIT');
