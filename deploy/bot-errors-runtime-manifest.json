@@ -284,7 +284,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "fa46d8b0649b579e0f20c0a1fc9aeec38f0553d94bf2752349b9e7e800cdaad8",
+      "sha256": "5d154486c67270f587a2265761bb60e3e7d30f10c6de847cfaf39996f2a524f2",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -416,7 +416,7 @@
     },
     {
       "path": "deploy/scripts/fleet-ground-truth.py",
-      "sha256": "95754b92081bed28f73b2ab3411e2343e94d396b73cf7e3410fef09c5f0d3035",
+      "sha256": "6c0ea2252c1de4505c61d8a7fd26de80f78820bbaad2515aefaabfb5cd253c42",
       "mustContain": [
         "needs_physical_repair",
         "restart_will_not_fix",
@@ -623,7 +623,7 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
+      "sha256": "63e809da27708f80ce19974b33d32671c6f29fde57c27c5dd942d05c829a1708",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
