@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b8cc6d6994b9519c9f74e8dd456fac5719002f4be4ac2d6fe0a43d317d2e159f",
+      "sha256": "057dd1e02e9cb0ed3ee667cc2c1fbcfbdbf4441022ecf21ed972a88162dd1677",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "da857900770094d256a5f0a35a936a61faf1b302d287ffcfe8686668ef923f97",
+      "sha256": "9a35bea63e1422fb438c37d963b8c57e121bd30c6bc4cbf4ff762a4edf54db24",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -837,7 +837,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "375e35951097ac804d92166aa53c487760a6667900af1e6773387b8e7f8bbc04",
+      "sha256": "5a3fb2d24c27166e66984c099460e5f0121dbed467dd158b1522ff55cb0abe73",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
