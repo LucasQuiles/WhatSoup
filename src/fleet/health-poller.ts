@@ -12,6 +12,7 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
 import * as silenceManager from './silence-manager.ts';
@@ -340,6 +341,7 @@ function classifyDatabaseInspectionHealth(
   health: Record<string, unknown>,
   httpStatus: number | undefined,
   expectedInstanceName: string,
+  nowMs: number,
 ): HealthSnapshotClassification | null {
   if (health.service_mode !== 'inspection_only') return null;
 
@@ -354,7 +356,7 @@ function classifyDatabaseInspectionHealth(
   const code = stringValue(startupBlock?.code);
   const generatedAt = stringValue(health.generated_at);
   const generatedAtMs = generatedAt === null ? Number.NaN : Date.parse(generatedAt);
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   const latest = sqlite?.schema_migration_latest;
   const required = positiveIntegerValue(sqlite?.schema_migration_required);
   const futureLatest = nonNegativeIntegerValue(latest);
@@ -420,15 +422,19 @@ function classifyDatabaseInspectionHealth(
   };
 }
 
+// `nowMs` is the poller's injected clock reading (#2200): snapshot freshness
+// is judged against it, never against a raw wall-clock read.
 function classifyHealthSnapshot(
   health: Record<string, unknown>,
   expectedInstanceName: string,
-  httpStatus?: number,
+  httpStatus: number | undefined,
+  nowMs: number,
 ): HealthSnapshotClassification {
   const databaseInspection = classifyDatabaseInspectionHealth(
     health,
     httpStatus,
     expectedInstanceName,
+    nowMs,
   );
   if (databaseInspection !== null) return databaseInspection;
 
@@ -725,7 +731,7 @@ function classifyHealthSnapshot(
     };
   }
 
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   if (
     generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS ||
     generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
@@ -819,6 +825,8 @@ export class HealthPoller {
   // dbReader is null (no durable rows can exist to resolve).
   private readonly authLossTransition: AuthLossSignalTransitionController | null;
   private readonly authLossObserveWarned = new Set<string>();
+  /** #2200: every time read in the poller goes through this clock. */
+  private readonly clock: Clock;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -830,7 +838,9 @@ export class HealthPoller {
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
     hostName: string = hostname(),
     authLossQuietDwellSeconds = 300,
+    clock: Clock = systemClock,
   ) {
+    this.clock = clock;
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
@@ -976,7 +986,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endAlertSuppressionEpisode(key);
-    this.alertSuppressionEpisodes.set(key, { reason, since: Date.now(), count: 1, name, source });
+    this.alertSuppressionEpisodes.set(key, { reason, since: this.clock.now(), count: 1, name, source });
     log.info({ name, source, ...extra }, reason);
   }
 
@@ -996,7 +1006,7 @@ export class HealthPoller {
       name: open.name,
       source: open.source,
       suppressedObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
       reason: open.reason,
     }, 'alert suppression episode ended');
   }
@@ -1132,7 +1142,7 @@ export class HealthPoller {
         // itself.
         try {
           const health = this.getSelfHealth();
-          const classification = classifyHealthSnapshot(health, name);
+          const classification = classifyHealthSnapshot(health, name, undefined, this.clock.now());
           this.observeAuthRecoverySample(name, health);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
@@ -1205,7 +1215,7 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
-              const classification = classifyHealthSnapshot(failureHealth, name, res.status);
+              const classification = classifyHealthSnapshot(failureHealth, name, res.status, this.clock.now());
               this.observeAuthRecoverySample(name, failureHealth);
               if (
                 isNonOnlineClassification(classification) &&
@@ -1228,7 +1238,7 @@ export class HealthPoller {
         }
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
-        const classification = classifyHealthSnapshot(health, name, responseStatus);
+        const classification = classifyHealthSnapshot(health, name, responseStatus, this.clock.now());
         this.observeAuthRecoverySample(name, health);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
@@ -1794,7 +1804,7 @@ export class HealthPoller {
     health: Record<string, unknown>,
     baseEvidence: string,
   ): { shouldAlert: boolean; evidence: string; operationalFallback: boolean; providerCapacity: boolean } {
-    const now = Date.now();
+    const now = this.clock.now();
     const startedAt = this.healthBodyDegradedStartedAt.get(name) ?? now;
     this.healthBodyDegradedStartedAt.set(name, startedAt);
     const polls = (this.healthBodyDegradedPolls.get(name) ?? 0) + 1;
@@ -1967,7 +1977,7 @@ export class HealthPoller {
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
     const everReachable = existing?.everReachable === true || reached;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
     this.resetHealthBodyDegradedDebounce(name);
 
@@ -2009,7 +2019,7 @@ export class HealthPoller {
     }
 
     if (newStatus === 'unreachable' && everReachable && !this.unreachableAlerted.has(name)) {
-      const failureAgeMs = Date.now() - firstFailureAt;
+      const failureAgeMs = this.clock.now() - firstFailureAt;
       if (failureAgeMs < INSTANCE_UNREACHABLE_ALERT_DWELL_MS) {
         log.info({ name, failures, failureAgeMs, dwellMs: INSTANCE_UNREACHABLE_ALERT_DWELL_MS }, 'instance unreachable; waiting for sustained dwell before alert');
         return;
@@ -2054,9 +2064,9 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
-    const failureAgeMs = Date.now() - firstFailureAt;
+    const failureAgeMs = this.clock.now() - firstFailureAt;
     const staysUnreachable = existing?.status === 'unreachable';
     const evidence = [
       'reason=probe_aborted_before_connect',
@@ -2420,7 +2430,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endRecoveryClearWithholdingEpisode(key);
-    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: Date.now(), count: 1 });
+    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: this.clock.now(), count: 1 });
     log.info({ name, source, recoveryProofReason: reason }, RECOVERY_CLEAR_WITHHELD_MSG);
   }
 
@@ -2433,7 +2443,7 @@ export class HealthPoller {
       source: open.source,
       recoveryProofReason: open.reason,
       withheldObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
     }, RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG);
   }
 
@@ -2654,7 +2664,7 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassThrottle && lastAlertAt !== null) {
-      const elapsed = Date.now() - new Date(lastAlertAt).getTime();
+      const elapsed = this.clock.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
         this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
         return false;

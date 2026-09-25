@@ -60,6 +60,11 @@
  * the whole src/mcp/ subtree: it now has zero raw sites of all three patterns.
  * CLOCK_BUDGET lowered 308 -> 296; BARE_NEW_DATE_BUDGET lowered 105 -> 104.
  *
+ * Slice (2026-09-25, #2200, src/fleet): fleet/health-poller.ts (12) now reads
+ * time through a Clock injected at construction, defaulting to systemClock;
+ * the snapshot classifiers take the reading as an argument.
+ * CLOCK_BUDGET lowered 296 -> 284.
+ *
  * Companion: #2200 slice 1.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -73,7 +78,7 @@ const srcRoot = resolve(repoRoot, 'src');
 
 // Ratchet ceiling: the count may only stay the same or decrease.
 // Lower this constant when a migration slice removes Date.now() call sites.
-const CLOCK_BUDGET = 296;
+const CLOCK_BUDGET = 284;
 // Same debt, different syntax — each dodged the call-site count entirely.
 const DATE_NOW_REF_BUDGET = 9;
 const BARE_NEW_DATE_BUDGET = 104;
