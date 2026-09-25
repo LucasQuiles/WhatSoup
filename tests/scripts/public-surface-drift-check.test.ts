@@ -113,7 +113,7 @@ describe('public surface drift check', () => {
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:1950`');
+    expect(healthStatusRow).toContain('`src/core/health.ts:1959`');
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
@@ -126,8 +126,10 @@ describe('public surface drift check', () => {
     // name the members, so adding another one silently fails here.
     expect(healthStatusRow).toContain('`perChatSessionsWithoutOwner`');
     expect(healthStatusRow).toContain('`perChatRespawnAbandoned`');
+    expect(healthStatusRow).toContain('`agentRespawnFailedClearPending`');
     expect(healthStatusRow).toContain('`runtime.per_chat_session_without_owner`');
     expect(healthStatusRow).toContain('`runtime.per_chat_respawn_abandoned`');
+    expect(healthStatusRow).toContain('`runtime.agent_respawn_failed_clear_pending`');
     expect(normalizedRelease).toContain(
       'Every running runtime reports a schema newer than the binary as unhealthy',
     );

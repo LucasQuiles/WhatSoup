@@ -337,8 +337,13 @@ bash deploy/scripts/render-release-drift-launchd.sh \
   --instance <instance> \
   --repo-root "$PWD" \
   --home "$HOME" \
+  --preserve-from "$HOME/Library/LaunchAgents/com.whatsoup.release-drift-check.plist" \
   --output /tmp/com.whatsoup.release-drift-check.plist
 ```
+
+`--preserve-from` keeps a `CLAUDE_CONFIG_DIR` the installed job already carries
+when the instance config sets none; a missing installed plist preserves
+nothing, so the flag is safe on a first install too.
 
 The rendered job invokes `deploy/scripts/run-release-drift-schedule.sh`, which
 rotates the launchd log sink (`~/Library/Logs/whatsoup/release-drift-check.log`
@@ -415,6 +420,7 @@ bash deploy/scripts/render-release-drift-launchd.sh \
   --home "$HOME" \
   --target-url https://github.com/<owner>/<repo>.git \
   --target-ref refs/heads/<approved-branch> \
+  --preserve-from "$HOME/Library/LaunchAgents/com.whatsoup.release-drift-check.plist" \
   --output /tmp/com.whatsoup.release-drift-check.plist
 ```
 

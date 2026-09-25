@@ -57,6 +57,7 @@ from lib.durable_json import (
 )
 from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE, TOOL_INVENTORY_STATE
 from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
+from lib.queue_age import scan_directory
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -8790,10 +8791,18 @@ def queue_inventory() -> list[str]:
     ))
     writefail_count = 0
     oldest_writefail = 0
+    writefail_failed = False
     for path in writefail_paths:
-        count, oldest = directory_stats(path, "*.writefail")
+        try:
+            count, oldest = directory_stats(path, "*.writefail")
+        except OSError as exc:
+            writefail_failed = True
+            lines.append(queue_observation_failure_line("writefail", path, "*.writefail", exc))
+            continue
         writefail_count += count
         oldest_writefail = max(oldest_writefail, oldest)
+    if writefail_failed:
+        return lines
     prefix = queue_prefix(
         writefail_count,
         oldest_writefail,
@@ -8809,57 +8818,8 @@ def queue_inventory() -> list[str]:
     return lines
 
 
-def _event_file_age_seconds(path: Path, now: float) -> float:
-    """Return the age in seconds for a JSON event file.
-
-    For *.json event files, reads the event's createdAt ISO8601 field as the
-    true creation time (age = now - createdAt).  Falls back to st_mtime on
-    any error (missing field, unparseable timestamp, unreadable file).
-    Non-JSON callers already pass non-matching patterns; this path is only
-    reached for *.json glob results.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            created_at = data.get("createdAt")
-            if isinstance(created_at, str) and created_at.strip():
-                parsed = datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
-                return max(0.0, now - parsed.timestamp())
-    except Exception:  # noqa: BLE001 - health path must never crash on malformed files
-        pass
-    try:
-        return max(0.0, now - path.stat().st_mtime)
-    except OSError:
-        return 0.0
-
-
-def _is_durable_internal_entry(path: Path) -> bool:
-    """Return True for durable_json internal artifacts (e.g. ``.durable-json.lock``).
-
-    These are never data entries and must be excluded from queue-depth counts
-    and age calculations. See #2727.
-    """
-    return path.name == ".durable-json.lock"
-
-
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [
-        item
-        for item in path.glob(pattern)
-        if item.is_file() and not _is_durable_internal_entry(item)
-    ]
-    if not files:
-        return 0, 0
-    now = time.time()
-    is_json_pattern = pattern.endswith(".json") or pattern == "*.json"
-    if is_json_pattern:
-        oldest = max(_event_file_age_seconds(item, now) for item in files)
-    else:
-        oldest = now - min(item.stat().st_mtime for item in files)
-    return len(files), max(0, int(oldest))
+    return scan_directory(path, pattern, time.time())
 
 
 def queue_prefix(
@@ -8881,6 +8841,14 @@ def queue_prefix(
     return ""
 
 
+def queue_observation_failure_line(label: str, path: Path, pattern: str, exc: OSError) -> str:
+    return (
+        f"FAIL {label}: observation=failed count=unknown oldest_seconds=unknown "
+        f"path={path} pattern={pattern} error_class={type(exc).__name__} "
+        f"errno={exc.errno if exc.errno is not None else 'unknown'}"
+    )
+
+
 def queue_directory_line(
     label: str,
     path: Path,
@@ -8890,7 +8858,10 @@ def queue_directory_line(
     warn_oldest_seconds: int,
     critical_oldest_seconds: int,
 ) -> str:
-    count, oldest = directory_stats(path, pattern)
+    try:
+        count, oldest = directory_stats(path, pattern)
+    except OSError as exc:
+        return queue_observation_failure_line(label, path, pattern, exc)
     exists = path.exists()
     prefix = queue_prefix(count, oldest, warn_count, critical_count, warn_oldest_seconds, critical_oldest_seconds)
     return (

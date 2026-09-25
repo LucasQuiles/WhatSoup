@@ -80,6 +80,7 @@ from lib.state_files import (
     MAINTENANCE,
 )
 from lib.state_root import state_root
+from lib.send_acceptance import SendAcceptanceUnknown, SendNotAccepted, validate_send_acceptance
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -1347,12 +1348,16 @@ def append_dispatch_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(details),
+        # The dispatch log is diagnostic: it keeps the shared lock, bound and
+        # rejection policy but skips per-record fsyncs. The outbox, state and
+        # claim publications stay on the default durable path.
         append_record=lambda record: require_bounded_jsonl_commit(
             append_bounded_jsonl(
                 log_path,
                 record,
                 component="dispatcher.dispatch_log",
                 max_bytes=MAX_DISPATCH_JSONL_BYTES,
+                durability="best_effort",
             )
         ),
         persist_health=lambda record: persist_controller_log_health(paths, record),
@@ -2563,6 +2568,36 @@ def _truthy_token(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+_WHATSAPP_CONNECTED_EVIDENCE_RE = re.compile(r"(?:^|\s)whatsapp_connected=([^\s]+)")
+_CONNECTION_STATE_EVIDENCE_RE = re.compile(r"(?:^|\s)connection_state=([^\s]+)")
+
+
+def whatsapp_connected_reading(event: dict[str, Any]) -> bool | None:
+    """The event's own WhatsApp-connected reading, or None when it carries none.
+
+    Structured ``diagnostics.whatsappConnected`` outranks evidence text. In
+    evidence the LAST ``whatsapp_connected=`` token wins: a multi-poll evidence
+    block may carry several readings and a later =false must not be masked by an
+    earlier =true. A non-truthy token (``false``, ``unknown``) reads as False.
+    """
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    connected = diagnostics.get("whatsappConnected")
+    if connected is not None:
+        return bool(connected)
+    tokens = _WHATSAPP_CONNECTED_EVIDENCE_RE.findall(event_text(event, "evidence"))
+    if not tokens:
+        return None
+    return _truthy_token(tokens[-1])
+
+
+def connection_state_reading(event: dict[str, Any]) -> str | None:
+    """Last ``connection_state=`` evidence token (lower-cased), or None."""
+    tokens = _CONNECTION_STATE_EVIDENCE_RE.findall(event_text(event, "evidence"))
+    if not tokens:
+        return None
+    return tokens[-1].strip().lower()
+
+
 def classify_failure_mode(event: dict[str, Any]) -> str:
     """Classify an alert as ``"transient"`` (recoverable soft-fault) or ``"outage"``.
 
@@ -2573,7 +2608,6 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     """
     source = str(event.get("source") or "")
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    evidence = event_text(event, "evidence")
 
     # SSH timeout to a peer Tailscale still reports online: host is up, the probe
     # timed out — transient.
@@ -2591,16 +2625,9 @@ def classify_failure_mode(event: dict[str, Any]) -> str:
     # source unconditionally, so the BOT_ERRORS_TRANSIENT_SOURCES escape below
     # deliberately cannot re-hold a disconnected or page-class degradation.
     if source == "health_body_degraded":
-        connected = diagnostics.get("whatsappConnected")
-        if connected is None:
-            # Last-wins: a multi-poll evidence block may carry several
-            # whatsapp_connected= readings; the most recent one decides. A later
-            # =false must not be masked by an earlier =true (would mis-hold a real
-            # disconnect as transient).
-            tokens = re.findall(r"(?:^|\s)whatsapp_connected=([^\s]+)", evidence)
-            connected = _truthy_token(tokens[-1]) if tokens else False
-        else:
-            connected = bool(connected)
+        # Last-wins reading (see whatsapp_connected_reading); an absent reading
+        # counts as disconnected so it can never mis-hold a real disconnect.
+        connected = whatsapp_connected_reading(event)
         if not connected:
             return "outage"
         causes = degradation_causes_from_event(event)
@@ -3647,7 +3674,21 @@ class AmbiguousSendOutcome(RuntimeError):
         self.phase = phase
 
 
-def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def json_rpc_call(
+    socket_path: str,
+    method: str,
+    params: dict[str, Any],
+    timeout: float = 15.0,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """One JSON-RPC tool call over the instance socket.
+
+    ``timeout`` bounds each phase separately. ``deadline`` (a time.monotonic()
+    value, used by the owner route) additionally bounds the WHOLE call: every
+    blocking step gets only the time left, and a spent deadline raises. Without
+    it the behaviour is exactly the per-phase one the group send relies on.
+    """
     if not socket_path:
         raise RuntimeError("socket path missing")
     if not os.path.exists(socket_path):
@@ -3655,8 +3696,16 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
 
     init_id = int(time.time() * 1000)
     call_id = init_id + 1
+    def step_timeout() -> float:
+        if deadline is None:
+            return timeout
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("json-rpc deadline spent")
+        return min(timeout, left)
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
+        sock.settimeout(step_timeout())
         sock.connect(socket_path)
         reader = sock.makefile("r", encoding="utf-8", newline="\n")
         writer = sock.makefile("w", encoding="utf-8", newline="\n")
@@ -3674,7 +3723,10 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: everything up to and including this handshake wait happens
         # before the tool call is written, so nothing can have been accepted.
-        wait_for_response(reader, init_id, timeout, phase=JSON_RPC_HANDSHAKE_PHASE)
+        wait_for_response(
+            reader, init_id, step_timeout(), phase=JSON_RPC_HANDSHAKE_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -3685,11 +3737,14 @@ def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout
         writer.flush()
         # #2424: past this flush the remote may already have acted on the
         # request, so a missing reply is an ambiguous outcome, not a failure.
-        return wait_for_response(reader, call_id, timeout, phase=JSON_RPC_POST_REQUEST_PHASE)
+        return wait_for_response(
+            reader, call_id, step_timeout(), phase=JSON_RPC_POST_REQUEST_PHASE,
+            sock=sock if deadline is not None else None,
+        )
 
 
 def wait_for_response(
-    reader: Any, expected_id: int, timeout: float, *, phase: str
+    reader: Any, expected_id: int, timeout: float, *, phase: str, sock: Any = None
 ) -> dict[str, Any]:
     """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
 
@@ -3713,7 +3768,11 @@ def wait_for_response(
         while time.monotonic() < deadline:
             # The socket carries the same timeout as this deadline, so readline
             # raises socket.timeout("timed out") first; that is the text an
-            # operator sees, not the deadline message below.
+            # operator sees, not the deadline message below. With ``sock``
+            # (deadline-bound callers) each read gets only the time left, so
+            # a late read cannot overrun the deadline by a full timeout.
+            if sock is not None:
+                sock.settimeout(max(0.001, deadline - time.monotonic()))
             line = reader.readline()
             if not line:
                 raise RuntimeError("socket closed before response")
@@ -3748,7 +3807,9 @@ def validate_bot_errors_target() -> None:
         raise RuntimeError("BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID for live dispatch")
 
 
-def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
+def send_whatsapp(
+    text: str, socket_path: str = DEFAULT_SOCKET, *, require_acceptance: bool = False,
+) -> dict[str, str] | None:
     # Test seam: force a delivery failure with a caller-supplied error string so
     # subprocess tests can drive the transient-vs-permanent failure routing
     # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
@@ -3781,11 +3842,19 @@ def send_whatsapp(text: str, socket_path: str = DEFAULT_SOCKET) -> None:
         "tools/call",
         {"name": "send_message", "arguments": {"chatJid": BOT_ERRORS_JID, "text": text}},
     )
-    if result.get("isError") is True:
-        raise RuntimeError(f"send_message returned error: {result}")
+    if not require_acceptance:
+        if result.get("isError") is True:
+            raise RuntimeError(f"send_message returned error: {result}")
+        return None
+    try:
+        return validate_send_acceptance(result, BOT_ERRORS_JID)
+    except SendNotAccepted as exc:
+        raise ProvenRemoteRejection(str(exc)) from exc
+    except SendAcceptanceUnknown as exc:
+        raise AmbiguousSendOutcome(str(exc), phase=JSON_RPC_POST_REQUEST_PHASE) from exc
 
 
-def email_fallback(subject: str, body: str) -> bool:
+def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     fallback = Path(EMAIL_FALLBACK)
     if not fallback.exists() or not os.access(fallback, os.X_OK):
         return False
@@ -3795,7 +3864,7 @@ def email_fallback(subject: str, body: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=20,
+            timeout=timeout,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -4537,6 +4606,22 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                     return f"flap_storm_member: {key} consolidated into open flap storm"
                 return None
     stronger = stronger_open_incident_for(event, incident_state)
+    # Contradiction retirement: a child whose own evidence proves the stronger
+    # incident false (e.g. reports the instance connected under an open logout)
+    # closes that incident instead of being suppressed by it, then is processed
+    # normally. Loop because one scope can hold several roots (bond loss AND
+    # logout) and stronger_open_incident_for returns only the first match. Each
+    # pass removes one open record, so the loop is bounded by the map size.
+    while stronger is not None:
+        contradiction = stronger_incident_contradiction(
+            event, stronger[0], stronger[1], incident_state.get("openIncidents")
+        )
+        if contradiction is None:
+            break
+        retire_contradicted_stronger_incident(
+            event, incident_state, stronger[0], stronger[1], contradiction, current
+        )
+        stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)
@@ -4585,6 +4670,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 open_record["unstaleIso"] = now_iso()
             open_record["lastSeenAt"] = current
             open_record["lastSeenIso"] = now_iso()
+            if _bare_root_source(key) in CONNECTIVITY_LOSS_ROOT_SOURCES:
+                note_connectivity_loss(open_record, event, current)
             open_record["lastEventId"] = event.get("id")
             open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
             open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
@@ -5007,15 +5094,25 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
                 incident_state.setdefault("openIncidents", {}).pop(legacy_key, None)
                 incident_state.setdefault("lastSentAt", {}).pop(legacy_key, None)
     elif is_incident_clear(event):
-        incident_state.setdefault("openIncidents", {}).pop(key, None)
-        incident_state.setdefault("lastSentAt", {}).pop(key, None)
-        # Pattern D — retire any transient bookkeeping for this key on close, so a
-        # promoted record cannot persist and collapse the promote window for a
-        # future re-opened incident on the same key.
-        transient_state = incident_state.get("transientState")
-        if isinstance(transient_state, dict):
-            transient_state.pop(key, None)
+        close_open_incident(incident_state, key)
         close_recovered_daily_health_incidents(event, incident_state)
+
+
+def close_open_incident(incident_state: dict[str, Any], key: str) -> None:
+    """Remove one incident from open state exactly as a matching clear does.
+
+    Shared by the clear path in mark_incident_sent and by contradiction
+    retirement, so a retired incident leaves no cooldown (lastSentAt) or
+    transient bookkeeping behind: the next alert on the key opens fresh.
+    """
+    incident_state.setdefault("openIncidents", {}).pop(key, None)
+    incident_state.setdefault("lastSentAt", {}).pop(key, None)
+    # Pattern D — retire any transient bookkeeping for this key on close, so a
+    # promoted record cannot persist and collapse the promote window for a
+    # future re-opened incident on the same key.
+    transient_state = incident_state.get("transientState")
+    if isinstance(transient_state, dict):
+        transient_state.pop(key, None)
 
 
 def close_superseded_incidents(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
@@ -5078,6 +5175,230 @@ def stronger_open_incident_for(
     return None
 
 
+# Stronger (root) sources whose condition is "this instance's WhatsApp link is
+# down". A child event that itself reports the instance connected proves such a
+# root false. Matched after stripping a "daily-health:" prefix, so an
+# env-extended INHIBITION_MAP that names the daily-health form is covered too.
+CONNECTIVITY_LOSS_ROOT_SOURCES = frozenset({
+    "instance_logged_out",
+    "whatsapp_device_bond_lost",
+})
+MAX_CONTRADICTION_RETIREMENT_HISTORY = 20
+
+
+def _bare_root_source(stronger_key: str) -> str:
+    root_source = stronger_key.rsplit("|", 1)[-1]
+    if root_source.startswith("daily-health:"):
+        root_source = root_source.split(":", 1)[1]
+    return root_source
+
+
+def latest_connectivity_loss_observation(record: dict[str, Any]) -> int:
+    """Newest epoch at which ``record`` saw this instance's link down: its own
+    first alert, a later folded same-key alert (lastSeenAt), or a loss reported
+    by a child suppressed under it (lastConnectivityLossObservedAt)."""
+    return max(
+        int_field(record, "eventCreatedAtEpoch"),
+        int_field(record, "lastSeenAt"),
+        int_field(record, "lastConnectivityLossObservedAt"),
+    )
+
+
+def stronger_incident_contradiction(
+    event: dict[str, Any],
+    stronger_key: str,
+    stronger_record: dict[str, Any],
+    open_incidents: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Evidence that ``event`` proves the stronger incident's condition false.
+
+    Returns a bounded description of the contradicting readings, or None when
+    the root is not contradicted. Conservative: every connectivity reading the
+    child carries must be unambiguously positive (positive_connectivity_readings),
+    at least one must be present, and the child's timezone-aware createdAt must
+    follow the LATEST connectivity-loss observation in the root's scope beyond
+    clock-skew tolerance: the root's own first or folded alert, a loss child
+    suppressed under it, or any other open connectivity-loss root of the same
+    instance. A child queued before that observation, or one with no usable
+    timestamp, never retires the root, so a genuine logout keeps suppressing its
+    symptoms.
+    """
+    if _bare_root_source(stronger_key) not in CONNECTIVITY_LOSS_ROOT_SOURCES:
+        return None
+    readings = positive_connectivity_readings(event)
+    if not readings:
+        return None
+    opened = int_field(stronger_record, "eventCreatedAtEpoch")
+    if opened <= 0:
+        return None
+    # Compare against the LATEST loss observation, not the root's first: a
+    # newer same-key logout is folded into the open record (refreshing
+    # lastSeenAt), a newer logout suppressed under a bond-loss root is recorded
+    # as lastConnectivityLossObservedAt, and a sibling root of the same instance
+    # keeps its own record. An older connected child must not retire any of
+    # them.
+    last_observed = latest_connectivity_loss_observation(stronger_record)
+    scope = stronger_key.rsplit("|", 1)[0]
+    for other_key, other in (open_incidents or {}).items():
+        if (
+            isinstance(other, dict)
+            and str(other_key).rsplit("|", 1)[0] == scope
+            and _bare_root_source(str(other_key)) in CONNECTIVITY_LOSS_ROOT_SOURCES
+        ):
+            last_observed = max(last_observed, latest_connectivity_loss_observation(other))
+    order = event_created_order(event)
+    if order is None:
+        # Missing, unparseable or timezone-less createdAt: ordering unknown.
+        return None
+    created = order // 1_000_000
+    if created <= last_observed + CLOCK_SKEW_TOLERANCE_SECONDS:
+        return None
+    return {
+        "readings": readings,
+        "childCreatedAtEpoch": created,
+        "rootOpenedAtEpoch": opened,
+        "rootLastObservedAtEpoch": last_observed,
+    }
+
+
+# \S* rather than the lenient readers' [^\s]+: an EMPTY value is a reading
+# too, and an ambiguous one, so it must block retirement rather than vanish.
+_STRICT_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)connected=(\S*)")
+_STRICT_WHATSAPP_CONNECTED_TOKEN_RE = re.compile(r"(?:^|\s)whatsapp_connected=(\S*)")
+_STRICT_CONNECTION_STATE_TOKEN_RE = re.compile(r"(?:^|\s)connection_state=(\S*)")
+_POSITIVE_TOKENS = frozenset({"true", "1", "yes"})
+
+
+def positive_connectivity_readings(event: dict[str, Any]) -> list[str] | None:
+    """Every connectivity reading the event carries, if ALL are positive.
+
+    Used only for destructive retirement, so it is stricter than
+    whatsapp_connected_reading: a structured ``diagnostics.whatsappConnected``
+    must be the boolean True (a string, None or False blocks retirement); every
+    ``whatsapp_connected=`` and bare ``connected=`` evidence token must be
+    positive; every ``connection_state=`` token must be ``connected``. An empty
+    value counts as ambiguous. Returns None when any reading is negative or
+    ambiguous, or when there is none.
+    """
+    readings: list[str] = []
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    if "whatsappConnected" in diagnostics:
+        if diagnostics.get("whatsappConnected") is not True:
+            return None
+        readings.append("diagnostics.whatsappConnected=true")
+    evidence = event_text(event, "evidence")
+    for label, pattern in (
+        ("whatsapp_connected", _STRICT_WHATSAPP_CONNECTED_TOKEN_RE),
+        ("connected", _STRICT_CONNECTED_TOKEN_RE),
+    ):
+        tokens = pattern.findall(evidence)
+        if any(token.strip().lower() not in _POSITIVE_TOKENS for token in tokens):
+            return None
+        if tokens:
+            readings.append(f"{label}=true")
+    states = [token.strip().lower() for token in _STRICT_CONNECTION_STATE_TOKEN_RE.findall(evidence)]
+    if any(state != "connected" for state in states):
+        return None
+    if states:
+        readings.append("connection_state=connected")
+    return readings or None
+
+
+def reports_connectivity_not_proven_up(event: dict[str, Any]) -> bool:
+    """True when the event carries a connectivity reading that is not
+    unambiguously positive: structured ``diagnostics.whatsappConnected`` other
+    than True, or any ``whatsapp_connected=``, bare ``connected=`` or
+    ``connection_state=`` evidence token (empty values included) that
+    positive_connectivity_readings would reject."""
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    evidence = event_text(event, "evidence")
+    present = "whatsappConnected" in diagnostics or any(
+        pattern.search(evidence)
+        for pattern in (
+            _STRICT_WHATSAPP_CONNECTED_TOKEN_RE,
+            _STRICT_CONNECTED_TOKEN_RE,
+            _STRICT_CONNECTION_STATE_TOKEN_RE,
+        )
+    )
+    return present and positive_connectivity_readings(event) is None
+
+
+# A producer clock can run ahead; honour that for up to an hour, which covers
+# ordinary drift. A stamp further out (a clock wrong by days or years) is
+# capped, so a later correction can retire the root within the hour instead of
+# never.
+CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS = 3600
+
+
+def note_connectivity_loss(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+    """Advance ``lastConnectivityLossObservedAt`` for a loss seen in ``event``.
+
+    Uses the later of processing time and the event's own timezone-aware
+    createdAt: a producer clock running ahead stamps the loss later than it is
+    processed, and a connected child stamped by the same clock must still be
+    compared against that stamp. The event's stamp is capped at
+    CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS ahead of processing time.
+    """
+    observed = current
+    order = event_created_order(event)
+    if order is not None:
+        observed = max(observed, min(order // 1_000_000, current + CONNECTIVITY_LOSS_MAX_FUTURE_SECONDS))
+    record["lastConnectivityLossObservedAt"] = max(
+        int_field(record, "lastConnectivityLossObservedAt"), observed
+    )
+
+
+def retire_contradicted_stronger_incident(
+    event: dict[str, Any],
+    incident_state: dict[str, Any],
+    stronger_key: str,
+    stronger_record: dict[str, Any],
+    contradiction: dict[str, Any],
+    current: int,
+) -> None:
+    """Close a stronger incident the child's own evidence proves false.
+
+    Uses close_open_incident (the same removal a matching clear performs) and
+    records why: on the incident state, on the child event's diagnostics (kept
+    in the sent/suppressed archive), and on stderr.
+    """
+    audit = {
+        "incidentKey": stronger_key,
+        "retiredAt": current,
+        "retiredIso": now_iso(),
+        "reason": "contradicted_by_child_evidence",
+        "status": str(stronger_record.get("status") or "open"),
+        "openedIso": stronger_record.get("openedIso"),
+        "suppressedCount": int_field(stronger_record, "suppressedCount"),
+        "childEventId": event.get("id"),
+        "childSource": incident_source(event),
+        "contradictingEvidence": " ".join(contradiction["readings"]),
+        "childCreatedAtEpoch": contradiction["childCreatedAtEpoch"],
+        "rootOpenedAtEpoch": contradiction["rootOpenedAtEpoch"],
+        "rootLastObservedAtEpoch": contradiction["rootLastObservedAtEpoch"],
+    }
+    close_open_incident(incident_state, stronger_key)
+    history = incident_state.get("contradictionRetirements")
+    if not isinstance(history, list):
+        history = []
+    history.append(audit)
+    incident_state["contradictionRetirements"] = history[-MAX_CONTRADICTION_RETIREMENT_HISTORY:]
+    diagnostics = event.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        retired = diagnostics.get("retiredStrongerIncidents")
+        if not isinstance(retired, list):
+            retired = []
+        retired.append(dict(audit))
+        diagnostics["retiredStrongerIncidents"] = retired
+    print(
+        f"[bot-errors-dispatcher] retired stronger incident {stronger_key} "
+        f"(status={audit['status']} suppressed={audit['suppressedCount']}): "
+        f"child {audit['childSource']} event={audit['childEventId']} reports "
+        f"{audit['contradictingEvidence']}",
+        file=sys.stderr,
+    )
+
+
 def mark_suppressed_by_stronger(
     event: dict[str, Any],
     stronger_key: str,
@@ -5093,8 +5414,12 @@ def mark_suppressed_by_stronger(
         stronger_record["lastSuppressedClearReason"] = f"clear suppressed by stronger open incident {stronger_key}"
         return
 
-    stronger_record["lastSeenAt"] = current
-    stronger_record["lastSeenIso"] = now_iso()
+    # lastSeenAt/lastSeenIso are the stronger incident's OWN liveness (only its
+    # own source refreshes them, via the same-key path in should_suppress_send).
+    # A suppressed child must not touch them: doing so kept weeks-old parents
+    # looking fresh, so they never aged out and swallowed every later child.
+    stronger_record["lastSuppressedSymptomAt"] = current
+    stronger_record["lastSuppressedSymptomIso"] = now_iso()
     stronger_record["lastSuppressedSymptomSource"] = incident_source(event)
     stronger_record["lastSuppressedSymptomSummary"] = redacted_state_text(event_text(event, "summary"), 500)
     stronger_record["lastSuppressedSymptomEvidence"] = redacted_state_text(event_text(event, "evidence"), 1000, tail=True)
@@ -5108,6 +5433,14 @@ def mark_suppressed_by_stronger(
     # state, so it disappears once the root incident clears (NO persistent flag).
     root_source = stronger_key.rsplit("|", 1)[-1]
     stronger_record["lastSuppressedSymptomReason"] = f"inhibited_by:{root_source}"
+    # A suppressed child that does not prove the link up (a logout folded
+    # under a bond loss, or any child whose connectivity readings are negative
+    # or ambiguous) is a newer loss observation for the retirement cutoff.
+    if (
+        _bare_root_source(str(incident_source(event))) in CONNECTIVITY_LOSS_ROOT_SOURCES
+        or reports_connectivity_not_proven_up(event)
+    ):
+        note_connectivity_loss(stronger_record, event, current)
 
 
 def incident_event_fields_from_key(key: str) -> dict[str, str]:
@@ -9569,7 +9902,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # never left. Routing the refusal through mark_failure below requeues it
         # with the marker cleared, so the next pass retries the send instead.
         require_all_advance([issued_publication])
-        send_whatsapp(text)
+        send_receipt = send_whatsapp(text, require_acceptance=True)
     except Exception as exc:
         # #2424: an outcome with no proof must never be re-sent. This runs
         # BEFORE mark_failure and before the transient carve-out below, which
@@ -9781,6 +10114,8 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
     mark_incident_sent(event, incident_state)
     event = mark_sent(event)
+    if send_receipt:
+        event["delivery"]["auditReceipt"] = send_receipt["audit_receipt"]
     sent_target = _durable_target(claimed)
     sent_observation = observe_json(sent_target)
     sent_generation = (sent_observation.version.generation or 0) + 1
@@ -9812,7 +10147,100 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         "path": str(sent_path),
         "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
     })
+    route_to_owner(event, paths, text)
     return True, "sent"
+
+
+# Owner copies queued by process_one and sent by drain_owner_route_queue after
+# the cycle's group work. Module-level so an item queued by a cycle that raised
+# before its drain is sent by the next daemon cycle; a --once run that raises
+# loses it (a missed copy, never a duplicate: the group copy exists).
+_owner_route_queue: list[tuple[dict[str, Any], str, bool, str]] = []
+OWNER_ROUTE_DEFAULT_BUDGET_SECONDS = 30.0
+# A cycle that fails after its sends skips the drain; the cap stops a run of
+# such cycles from growing the queue without bound. Overflow is a logged
+# skip: the group copy of every alert exists regardless.
+OWNER_ROUTE_QUEUE_MAX = 20
+
+
+def owner_route_enabled() -> bool:
+    env = os.environ
+    return bool(
+        env.get("BOT_ERRORS_OWNER_ROUTE_JID", "").strip()
+        and env.get("BOT_ERRORS_OWNER_ROUTE_SOCKET", "").strip()
+    )
+
+
+def route_to_owner(event: dict[str, Any], paths: dict[str, Path], text: str) -> None:
+    """Queue a fail-open owner copy of a sent alert (lib/owner_route.py).
+
+    Called only after the group send is archived. Inert, with no parsing and no
+    log record, unless both BOT_ERRORS_OWNER_ROUTE_JID and
+    BOT_ERRORS_OWNER_ROUTE_SOCKET are set. Nothing is sent here: the owner
+    delivery waits for drain_owner_route_queue so it cannot delay a later group
+    send in the same cycle.
+    """
+    if not owner_route_enabled():
+        return
+    if len(_owner_route_queue) >= OWNER_ROUTE_QUEUE_MAX:
+        try:
+            append_dispatch_log(paths, {"type": "owner_route_skipped", "eventId": event.get("id"),
+                                        "skippedQueueFull": True})
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    try:
+        _owner_route_queue.append((
+            json.loads(json.dumps(event)),
+            incident_key(event),
+            is_incident_alert(event) and not is_incident_clear(event),
+            text,
+        ))
+    except Exception:  # noqa: BLE001 - must never affect group delivery
+        _log_owner_route_error(paths, event)
+
+
+def _log_owner_route_error(paths: dict[str, Path], event: dict[str, Any]) -> None:
+    try:
+        append_dispatch_log(paths, {"type": "owner_route_error", "eventId": event.get("id")})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def drain_owner_route_queue(paths: dict[str, Path]) -> None:
+    """Send the queued owner copies within one shared time budget.
+
+    Runs after the cycle has recorded completion, so neither a group send nor
+    the cycle-completion stamp waits for it. The budget
+    (BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS, default 30) bounds how long the next
+    cycle can start late. Every failure is logged and swallowed.
+    """
+    if not _owner_route_queue:
+        return
+    items = list(_owner_route_queue)
+    _owner_route_queue.clear()
+    try:
+        budget = float(os.environ.get("BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS", "") or OWNER_ROUTE_DEFAULT_BUDGET_SECONDS)
+    except ValueError:
+        budget = OWNER_ROUTE_DEFAULT_BUDGET_SECONDS
+    deadline = time.monotonic() + max(0.0, budget)
+    for event, key, is_alert, text in items:
+        try:
+            from lib.owner_route import route_owner_critical
+
+            route_owner_critical(
+                event,
+                key=key,
+                is_alert=is_alert,
+                group_text=text,
+                state_dir=paths["root"],
+                json_rpc_call=json_rpc_call,
+                email_fallback=email_fallback,
+                log=lambda record: append_dispatch_log(paths, record),
+                deadline=deadline,
+            )
+        except Exception:  # noqa: BLE001 - must never affect group delivery
+            _log_owner_route_error(paths, event)
 
 
 @controller_cycle(
@@ -10055,6 +10483,9 @@ def run_once(max_events: int) -> dict[str, Any]:
                 unrenderableMetaAlerted=unrenderable_meta_alerted,
                 lastError=last_error,
             )
+            # After the completion stamp and every group send of this cycle,
+            # still under the dispatcher lock that serialises the owner state.
+            drain_owner_route_queue(paths)
             return {
                 "processed": processed,
                 "sent": sent,

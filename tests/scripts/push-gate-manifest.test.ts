@@ -164,6 +164,14 @@ describe('push-gate manifest registry (#2224)', () => {
     expect(RELEASE_STEPS[releaseShadowIndex + 1].name).toBe('guard:test-integrity:required');
   });
 
+  it('promotes guard-test coverage semantic proof explicitly in both blocking lanes', () => {
+    for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
+      expect(steps.find(({ name }) => name === 'guard:guard-test-coverage')?.cmd).toBe(
+        'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+      );
+    }
+  });
+
   it('step names are unique within each lane (attribution is unambiguous)', () => {
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
       const names = steps.map((step) => step.name);

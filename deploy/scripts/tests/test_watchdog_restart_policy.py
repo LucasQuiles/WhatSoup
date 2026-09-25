@@ -17,7 +17,7 @@ failures still do.
 
 The decision tests exercise the *shipped* heredoc by extracting it from the
 template and running it under python3. Launchd exit-policy tests render and run
-the complete shell script with deterministic curl and launchctl stubs.
+the complete shell script with deterministic health-reader and launchctl stubs.
 """
 
 from __future__ import annotations
@@ -27,12 +27,16 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+# The launchd exit-policy tests share the rendered-watchdog harness.
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
 
 
 def _iso_ago(seconds: float) -> str:
@@ -408,91 +412,17 @@ def _run_rendered_unreachable_watchdog(
     bot_http_code: int = 503,
     credential_marker_present: bool = False,
 ) -> str:
-    home = tmp_path / "home"
-    home.mkdir(parents=True)
-    binroot = home / ".local" / "bin"
-    binroot.mkdir(parents=True)
-    calls = binroot / "launchctl.calls"
-    token_file = home / ".config" / "whatsoup" / "instances" / bot_name / "tokens.env"
-    token_file.parent.mkdir(parents=True)
-    token_file.write_text(
-        f"WHATSOUP_HEALTH_TOKEN={'a' * 64}\n",
-        encoding="utf-8",
-    )
-    token_file.chmod(0o600)
-
-    rendered = (
-        _TEMPLATE.read_text(encoding="utf-8")
-        .replace("__HOME__", str(home))
-        .replace("FLEET_PORT", "9998")
-        .replace("BOT_PORT", "9999")
-        .replace("BOT_NAME", bot_name)
-        .replace("USERNAME", os.environ.get("USER", "tester"))
-    )
-    script = home / f"{bot_name}-watchdog"
-    script.write_text(rendered, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    from test_watchdog_credential_tiering import Harness
+    body = json.dumps(bot_health) if bot_health is not None else ""
+    harness = Harness(tmp_path, bot_name, body)
+    harness.write_health_stub(body, bot_unreachable=bot_health is None, bot_status=bot_http_code)
+    harness.write_launchctl_stub(print_body=launchd_snapshot)
     if credential_marker_present:
-        marker = (
-            home / "Library" / "Logs" / "whatsoup"
-            / f"{bot_name}-credential-dead.marker"
-        )
-        marker.parent.mkdir(parents=True)
-        marker.write_text("", encoding="utf-8")
-        marker.chmod(0o600)
-
-    curl = binroot / "curl"
-    bot_response = ""
-    if bot_health is not None:
-        encoded_health = json.dumps(bot_health, separators=(",", ":"))
-        bot_response = (
-            "    printf '%s\\n%s' \"$BOT_HEALTH_JSON\" \"$BOT_HTTP_CODE\"; exit 0;;\n"
-        )
-    else:
-        bot_response = "    exit 7;;\n"
-        encoded_health = ""
-    curl.write_text(
-        "#!/bin/sh\n"
-        'for arg in "$@"; do case "$arg" in\n'
-        "  *9999/health)\n"
-        + bot_response
-        + "  *9998/*) printf 'ok'; exit 0;;\n"
-        "esac; done\n"
-        "exit 7\n",
-        encoding="utf-8",
-    )
-    curl.chmod(0o755)
-
-    launchctl = binroot / "launchctl"
-    launchctl.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> '{calls}'\n"
-        "if [ \"$1\" = print ]; then\n"
-        "  printf '%s\\n' \"$LAUNCHD_SNAPSHOT\"\n"
-        "fi\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    launchctl.chmod(0o755)
-
-    lock = Path(f"/tmp/com.whatsoup.{bot_name}-watchdog.lock")
-    if lock.exists():
-        shutil.rmtree(lock, ignore_errors=True)
-    proc = subprocess.run(
-        ["zsh", str(script)],
-        env=dict(
-            os.environ,
-            HOME=str(home),
-            LAUNCHD_SNAPSHOT=launchd_snapshot,
-            BOT_HEALTH_JSON=encoded_health,
-            BOT_HTTP_CODE=str(bot_http_code),
-        ),
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
+        harness.marker.write_text("")
+        harness.marker.chmod(0o600)
+    proc = harness.run()
     assert proc.returncode == 0, proc.stderr
-    return calls.read_text(encoding="utf-8")
+    return harness.launchctl_calls()
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not available")
@@ -600,7 +530,7 @@ class TestRenderedWatchdogLaunchdExitPolicy:
             call for call in calls.splitlines()
             if call.startswith("print ") and "com.whatsoup.permanent-config-bot" in call
         ]
-        assert len(bot_prints) == 2, (
+        assert len(bot_prints) == 1, (
             f"watchdog must inspect bot launchd state before restart policy: {calls!r}"
         )
         assert "kickstart" not in calls, (

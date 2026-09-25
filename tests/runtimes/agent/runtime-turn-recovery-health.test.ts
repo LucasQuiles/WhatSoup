@@ -177,6 +177,39 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
+  it('projects each blocked-unsafe actionability bucket onto its own health field', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct per-bucket counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({
+          blockedUnsafe: 6,
+          blockedUnsafeSynthetic: 1,
+          blockedUnsafeSuperseded: 2,
+          blockedUnsafeStranded: 3,
+        }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'blocked-split-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryBlockedUnsafe: 6,
+          turnRecoveryBlockedUnsafeSynthetic: 1,
+          turnRecoveryBlockedUnsafeSuperseded: 2,
+          turnRecoveryBlockedUnsafeStranded: 3,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('keeps blocked-unsafe informational while open catch-up independently degrades health', () => {
     const db = new Database(':memory:');
     db.open();

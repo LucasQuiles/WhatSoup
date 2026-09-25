@@ -47,6 +47,7 @@ import {
 } from './handoff-notice-prefix.ts';
 import { providerPreview } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
+import { renderVoiceNotes } from './context-audio.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
@@ -268,7 +269,7 @@ import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
+import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
   checkAndRecordInterruptedBoot,
   markBootInProgress,
@@ -557,9 +558,11 @@ export function deriveModelUsable(
   if (!usability || usability.probeInFlight) {
     return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
   }
+  // A future-dated or non-finite proof time, clock or window is not current evidence.
+  const ageMs = typeof modelUsableCheckedAt === 'number' ? nowMs - modelUsableCheckedAt : NaN;
+  const fresh = Number.isFinite(ageMs) && Number.isFinite(freshnessMs)
+    && ageMs >= 0 && ageMs <= freshnessMs;
   if (usability.status === 'usable') {
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
@@ -569,8 +572,6 @@ export function deriveModelUsable(
     // than freshnessMs (e.g. a credential-unavailable cached at startup) is
     // stale evidence, not an authoritative red — report null (unknown) +
     // modelUsableStale=true so it re-probes rather than caching a stale false.
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
@@ -783,7 +784,7 @@ export class AgentRuntime implements Runtime {
   /** #3295 S2: live-read flag object for deferred-turn admission (null = feature absent). */
   private readonly deferredTurnAdmissionOptions: { enabled: boolean } | null;
   /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
-  private readonly exhaustedRespawnOwners = new Set<string>();
+  private readonly exhaustedRespawnOwners = new Map<string, symbol>();
   /**
    * mapKey -> the epoch ms at which its auto-respawn was abandoned because
    * provider termination was never proved.
@@ -799,6 +800,8 @@ export class AgentRuntime implements Runtime {
    * decides, and a re-abandonment refreshes it.
    */
   private readonly abandonedRespawnOwners = new Map<string, number>();
+  /** A content-free obligation to retry the shared alert clear until accepted. */
+  private agentRespawnFailedClearPending = false;
   /** How long an abandonment stays visible to health and alerting. */
   private static readonly ABANDONED_RESPAWN_RETENTION_MS = MS_PER_HOUR;
   private readonly shared: boolean;
@@ -2193,6 +2196,11 @@ export class AgentRuntime implements Runtime {
 
   // Startup events are deferred until main's strict-readiness controller runs.
   private pendingStartupEvent: StartupNotificationEvent | null = null;
+  // #3570: expired-session notices raised before the transport connects, at
+  // most one per chat. Kept apart from the single slot above so that several
+  // failing chats, or a restart-loop alert, can never displace each other.
+  private readonly pendingStartupChatNotices = new Map<string, StartupChatNotice>();
+  private startupChatNoticesDrained = false;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -3771,6 +3779,7 @@ export class AgentRuntime implements Runtime {
           // Migrate session
           const session = this.chatSessions.get(lidKey)!;
           this.rekeyOwnedPerChatSession(lidKey, canonical, session);
+          this.rekeyAbandonedRespawnOwner(lidKey, canonical);
 
           // Migrate queue
           const chatQueue = this.chatQueues.get(lidKey);
@@ -4313,6 +4322,14 @@ export class AgentRuntime implements Runtime {
             notifyUser: (msg) => {
               this.handleCrashNotify(msg, chatJid);
             },
+            // #3570: the provider can refuse the resumed session after spawn
+            // (exit 1, no init). Tell this chat and rebuild its context.
+            onResumeFailed: () => {
+              this.handleResumeFailed(chatJid, {
+                mapKey: resolveSessionMapKey() ?? initialMapKey,
+                session,
+              });
+            },
             eventToolScopeKey: toolScopeKey,
           });
         } catch (err) {
@@ -4395,6 +4412,15 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
+        }, (err: unknown) => {
+          // #3570: the resume itself was refused (for example, the checkpoint
+          // names a session this chat does not own). The chat's prior context
+          // is gone, so tell it and rebuild context in a fresh session.
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume refused — notifying chat and starting fresh');
+          this.handleResumeFailed(chatJid, {
+            mapKey: resolveSessionMapKey() ?? initialMapKey,
+            session,
+          });
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
         });
@@ -5764,16 +5790,6 @@ export class AgentRuntime implements Runtime {
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
-    // A chat can be abandoned while its session still reports active: the
-    // abandon path fires when termination is not PROVED, and `status.active`
-    // being true is itself one of the conjuncts that blocks the proof. On that
-    // shape the turn below is served without a respawn, so the re-activation
-    // route never runs and the abandonment would sit raised while the chat is
-    // demonstrably serving. Serving IS the recovery, so settle it here. Cheap:
-    // the size check short-circuits on every ordinary turn.
-    if (!wasInactive && effectiveMapKey !== undefined && this.abandonedRespawnOwners.size > 0) {
-      this.settleAbandonedRespawn(effectiveMapKey);
-    }
     if (wasInactive) {
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
@@ -5827,7 +5843,7 @@ export class AgentRuntime implements Runtime {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
           if (recent.length > 0) {
-            const lines = formatContextLines(recent, this.isCrossProviderSession(session));
+            const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
@@ -5921,6 +5937,19 @@ export class AgentRuntime implements Runtime {
       }
       const queue = this.getQueueForChat(chatJid, effectiveMapKey);
       if (queue) queue.indicateTyping();
+      // A chat can be abandoned while its session still reports active: the
+      // abandon path fires when termination is not PROVED, and `status.active`
+      // is itself one of the conjuncts that blocks the proof. `status.active`
+      // alone cannot prove recovery; reaching this provider-ready boundary
+      // proves the chat served again, so settle here and not before the
+      // dispatch barriers, where a cancelled or refused turn would settle it.
+      if (
+        !wasInactive
+        && effectiveMapKey !== undefined
+        && (this.abandonedRespawnOwners.size > 0 || this.agentRespawnFailedClearPending)
+      ) {
+        this.settleAbandonedRespawn(effectiveMapKey);
+      }
     };
     try {
       const userTurnText = renderUserTurnForProvider(
@@ -7415,6 +7444,17 @@ export class AgentRuntime implements Runtime {
     return event;
   }
 
+  /**
+   * Drain the per-chat startup notices (#3570). Main calls this once the
+   * transport is connected; later notices go straight to the chat's queue.
+   */
+  popStartupChatNotifications(): StartupChatNotice[] {
+    this.startupChatNoticesDrained = true;
+    const notices = [...this.pendingStartupChatNotices.values()];
+    this.pendingStartupChatNotices.clear();
+    return notices;
+  }
+
   getHealthSnapshot(): RuntimeHealth {
     const fallbackState = this.getFallbackState();
     const autoCompactHealth = this.autoCompact.healthSnapshot();
@@ -7428,6 +7468,7 @@ export class AgentRuntime implements Runtime {
     // here: this snapshot is polled, so the warning sweep stays on the tick.
     const perChatSessionsWithoutOwner = this.perChatSessionsWithoutOwner();
     const perChatRespawnAbandoned = this.perChatRespawnAbandonedCount();
+    const agentRespawnFailedClearPending = this.agentRespawnFailedClearPending;
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
     const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
     const publicPoisonHealth = {
@@ -7470,6 +7511,7 @@ export class AgentRuntime implements Runtime {
       providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
       perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length,
       perChatRespawnAbandoned,
+      agentRespawnFailedClearPending,
       ...this.turnChronology.healthDetails(),
       providerExecution,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -7520,6 +7562,9 @@ export class AgentRuntime implements Runtime {
       if (perChatRespawnAbandoned > 0) {
         degradedReasons.push('per_chat_respawn_abandoned');
       }
+      if (agentRespawnFailedClearPending) {
+        degradedReasons.push('agent_respawn_failed_clear_pending');
+      }
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
       if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
@@ -7555,6 +7600,9 @@ export class AgentRuntime implements Runtime {
     if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
     if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+    if (agentRespawnFailedClearPending) {
+      degradedReasons.push('agent_respawn_failed_clear_pending');
+    }
     degradedReasons.push(...accountIdentityReasons);
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
@@ -8632,28 +8680,70 @@ export class AgentRuntime implements Runtime {
         expired = true;
       }
     }
-    // An age-out that empties both populations must clear the page too, or the
-    // gauge reads zero while `agent_respawn_failed` stays raised — the source is
-    // explicit-clear, and nothing else would retract it for a chat that never
-    // came back.
-    //
-    // Gated on `expired` because this runs on EVERY health poll and clearing
-    // writes a durable outbox event each time: without the flag a permanently
-    // empty map would emit one write per poll. One expiry, one write.
-    if (expired && this.abandonedRespawnOwners.size === 0 && this.exhaustedRespawnOwners.size === 0) {
-      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
-      return true;
+    // Reports the expiry only. The shared-alert clear an age-out may owe is
+    // decided by `reconcileAgentRespawnFailedClear`, so every caller turns the
+    // same verdict into at most one clear attempt.
+    return expired;
+  }
+
+  /**
+   * Clear the shared respawn alert only after its final owner retires. A clear
+   * is an obligation, not a best-effort side effect: refusal or transport
+   * failure stays visible and is retried by later health or provider-ready
+   * boundaries. A new abandonment or exhaustion blocks that debt without
+   * erasing it.
+   *
+   * `requestClear` is true only when an owner was just retired (settled or
+   * aged out). This runs on EVERY health poll, and a clear writes a durable
+   * outbox event, so an empty population with no debt must never write: one
+   * retirement, one accepted clear.
+   */
+  private reconcileAgentRespawnFailedClear(requestClear: boolean): void {
+    const sourceOwned = this.abandonedRespawnOwners.size > 0
+      || this.exhaustedRespawnOwners.size > 0;
+    if (requestClear && !sourceOwned) this.agentRespawnFailedClearPending = true;
+    if (!this.agentRespawnFailedClearPending || sourceOwned) return;
+
+    try {
+      if (clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed')) {
+        this.agentRespawnFailedClearPending = false;
+      }
+    } catch (err) {
+      log.warn({ err }, 'agent respawn failure alert clear threw — retaining retry obligation');
     }
-    return false;
+  }
+
+  /** Mark one crash-exhaustion episode and give only that episode's timer retirement authority. */
+  private markExhaustedRespawnOwner(mapKey: string): void {
+    const token = Symbol();
+    this.exhaustedRespawnOwners.set(mapKey, token);
+    // #3052: retire after the retention window so a never-recovered chat does
+    // not leak. Unref so the timer does not prevent process shutdown.
+    setTimeout(() => {
+      this.retireExhaustedRespawnOwner(mapKey, token);
+    }, AgentRuntime.ABANDONED_RESPAWN_RETENTION_MS).unref();
+  }
+
+  /** Retire the current exhaustion episode, ignoring absent or superseded timer owners. */
+  private retireExhaustedRespawnOwner(mapKey: string, expectedToken?: symbol): boolean {
+    const currentToken = this.exhaustedRespawnOwners.get(mapKey);
+    if (currentToken === undefined) return false;
+    if (expectedToken !== undefined && currentToken !== expectedToken) return false;
+    this.exhaustedRespawnOwners.delete(mapKey);
+    this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(true);
+    return true;
   }
 
   /**
    * Chats whose auto-respawn was abandoned with provider termination unproved.
    * Counts only — the chat identities stay out of the health surface. Prunes
-   * first, so the count reflects live retention rather than history.
+   * first, so the count reflects live retention rather than history, and
+   * retries any pending shared-alert clear.
    */
   private perChatRespawnAbandonedCount(): number {
-    this.pruneAbandonedRespawnOwners();
+    const expired = this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(expired);
     return this.abandonedRespawnOwners.size;
   }
 
@@ -8688,6 +8778,19 @@ export class AgentRuntime implements Runtime {
     this.sessionOwnership.rekey(fromMapKey, toMapKey, managerId);
     this.chatSessions.delete(fromMapKey);
     this.chatSessions.set(toMapKey, session);
+  }
+
+  /** Move a co-keyed abandonment with latest-wins collision semantics. */
+  private rekeyAbandonedRespawnOwner(fromMapKey: string, toMapKey: string): void {
+    if (fromMapKey === toMapKey) return;
+    const fromTimestamp = this.abandonedRespawnOwners.get(fromMapKey);
+    if (fromTimestamp === undefined) return;
+    const toTimestamp = this.abandonedRespawnOwners.get(toMapKey);
+    this.abandonedRespawnOwners.delete(fromMapKey);
+    this.abandonedRespawnOwners.set(
+      toMapKey,
+      toTimestamp === undefined ? fromTimestamp : Math.max(fromTimestamp, toTimestamp),
+    );
   }
 
   private captureOwnedPerChatGeneration(
@@ -8745,18 +8848,14 @@ export class AgentRuntime implements Runtime {
    *
    * The clear is gated on BOTH populations because the alert source is shared
    * with crash exhaustion, and it is explicit-clear rather than self-expiring,
-   * so clearing early retracts a page that is still true. Guarded on an actual
-   * removal, so ordinary activation costs nothing.
+   * so clearing early retracts a page that is still true. A removal or expiry
+   * creates the obligation; later calls do work only while a failed clear is
+   * still pending, so an accepted clear is never duplicated.
    */
   private settleAbandonedRespawn(mapKey: string): void {
-    if (!this.abandonedRespawnOwners.delete(mapKey)) return;
-    // Prune first and read its verdict. Going through the counter instead would
-    // run the same prune and hide whether it already cleared, so one logical
-    // settle could emit TWO durable outbox events: the prune's, then this one's.
-    if (this.pruneAbandonedRespawnOwners()) return;
-    if (this.exhaustedRespawnOwners.size === 0 && this.abandonedRespawnOwners.size === 0) {
-      clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
-    }
+    const settled = this.abandonedRespawnOwners.delete(mapKey);
+    const expired = this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(settled || expired);
   }
 
   private async activateSpawnedOwnedPerChatSession(
@@ -9567,6 +9666,9 @@ export class AgentRuntime implements Runtime {
               fallbackReason: s.fallbackReason,
               fallbackActiveUntil: s.fallbackActiveUntil,
               modelUsabilityStatus: s.turnCapability.modelUsabilityStatus,
+              modelUsable: s.turnCapability.modelUsable,
+              modelUsableStale: s.turnCapability.modelUsableStale,
+              modelUsableCheckedAt: s.turnCapability.modelUsableCheckedAt,
             },
           };
         },
@@ -10970,10 +11072,7 @@ export class AgentRuntime implements Runtime {
         clearTimeout(timer);
       }
     } else if (exhausted) {
-      this.exhaustedRespawnOwners.add(currentMapKey);
-      // #3052: prune after 1h so a never-recovered conversation does not leak.
-      // Unref so the timer does not prevent process shutdown.
-      setTimeout(() => { this.exhaustedRespawnOwners.delete(currentMapKey); }, 3600_000).unref();
+      this.markExhaustedRespawnOwner(currentMapKey);
       log.error({ mapKey: currentMapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlertChecked(
         this.instanceName,
@@ -11204,13 +11303,21 @@ export class AgentRuntime implements Runtime {
       const publishRespawnRecovery = (): void => {
         if (respawnRecoveryPublished) return;
         respawnRecoveryPublished = true;
-        // Remove this conversation from the exhausted set (#2397).
-        this.exhaustedRespawnOwners.delete(mapKey);
+        // Retire this conversation from the exhausted owner collection (#2397).
         // The alert source is shared with the abandonment path, and clearing is
         // explicit rather than self-expiring, so a clear here would retract a
         // page that is still true for an abandoned chat. Both populations must
-        // be empty before the source is cleared.
-        const abandonedRemaining = this.perChatRespawnAbandonedCount();
+        // be empty before the source is cleared; the reconcile enforces that
+        // and turns a refused or throwing clear into retry debt.
+        const retiredExhaustedOwner = this.retireExhaustedRespawnOwner(mapKey);
+        if (!retiredExhaustedOwner) {
+          this.pruneAbandonedRespawnOwners();
+          // A successful respawn is itself a recovery event even when this
+          // attempt was never marked in the crash-exhausted owner collection.
+          // Preserve the pre-existing unconditional clear contract.
+          this.reconcileAgentRespawnFailedClear(true);
+        }
+        const abandonedRemaining = this.abandonedRespawnOwners.size;
         if (this.exhaustedRespawnOwners.size > 0 || abandonedRemaining > 0) {
           log.info(
             {
@@ -11219,9 +11326,7 @@ export class AgentRuntime implements Runtime {
             },
             'respawn recovery: not clearing — other conversations still exhausted or abandoned',
           );
-          return;
         }
-        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
       };
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
@@ -11512,7 +11617,7 @@ export class AgentRuntime implements Runtime {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-      lines = formatContextLines(missed, this.isCrossProviderSession(session));
+      lines = formatContextLines(renderVoiceNotes(missed), this.isCrossProviderSession(session));
       messageCount = missed.length;
     } catch (err) {
       log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
@@ -11531,21 +11636,71 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Called by SessionManager when a --resume attempt is rejected by Claude
-   * (exit code 1, no init event). Sends a clear status message and spawns a
-   * fresh session so the user can continue without manual intervention.
+   * Tell a chat that its prior session could not be restored (#3570).
+   * - A pending startup `resume` event for the same chat is replaced, because
+   *   that chat would otherwise be told its session resumed.
+   * - Until main drains startup notices, the notice waits in a per-chat list,
+   *   because the transport may not be connected yet. Any other occupant of
+   *   the single startup slot, such as a restart-loop alert, stays in place.
+   * - After that, the notice goes to the chat's queue immediately.
    */
-  private handleResumeFailed(chatJid: string): void {
+  private noticeExpiredSession(chatJid: string, opts: { deferDuringStartup: boolean }): void {
+    const text = '_Previous session expired_ — starting fresh. Send a message to begin.';
+    const pending = this.pendingStartupEvent;
+    if (pending?.kind === 'resume' && pending.chatJid === chatJid) {
+      this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text };
+      return;
+    }
+    if (!this.startupChatNoticesDrained && (opts.deferDuringStartup || pending !== null)) {
+      this.pendingStartupChatNotices.set(chatJid, { kind: 'expired_session_notice', chatJid, text });
+      return;
+    }
+    this.sendDirect(chatJid, text);
+  }
+
+  /**
+   * Called by SessionManager when a --resume attempt is rejected by Claude
+   * (exit code 1, no init event), and by the non-sandbox per_chat startup
+   * resume when the resume itself is refused. Sends a clear status message
+   * and spawns a fresh session so the user can continue without manual
+   * intervention.
+   */
+  private handleResumeFailed(
+    chatJid: string,
+    perChatTarget?: { mapKey: string; session: SessionManager },
+  ): void {
     log.warn({ chatJid }, 'resume failed — spawning fresh session');
 
     // Resolve the correct session and mapKey — sandboxPerChat uses the per-chat map,
-    // single/shared mode uses the shared this.session field.
+    // non-sandbox per_chat names its exact manager (#3570), and single/shared
+    // mode uses the shared this.session field.
     let session: SessionManager | undefined;
     let mapKey: string | undefined;
     if (this.sandboxPerChat) {
       const ws = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
       mapKey = ws.workspaceKey;
       session = this.chatSessions.get(mapKey);
+    } else if (perChatTarget) {
+      mapKey = perChatTarget.mapKey;
+      if (isScheduledAgentJobMapKey(mapKey)) {
+        // A scheduled job has no conversation of its own to restore or notify.
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: scheduled agent job scope — skipping');
+        return;
+      }
+      if (this.shutdownRequested) {
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: runtime shutting down — skipping recovery');
+        return;
+      }
+      session = this.chatSessions.get(mapKey) === perChatTarget.session
+        ? perChatTarget.session
+        : undefined;
+      if (!session) {
+        // Another manager now owns the chat, so it must not be respawned from
+        // here. The user still learns the prior context was not restored.
+        this.noticeExpiredSession(chatJid, { deferDuringStartup: true });
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: chat ownership moved — notice only');
+        return;
+      }
     } else {
       session = this.session ?? undefined;
     }
@@ -11566,12 +11721,7 @@ export class AgentRuntime implements Runtime {
 
     if (!pendingText) {
       // No pending message — notify user to resend
-      const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
-      if (this.pendingStartupEvent !== null) {
-        this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text: msg };
-      } else {
-        this.sendDirect(chatJid, msg);
-      }
+      this.noticeExpiredSession(chatJid, { deferDuringStartup: perChatTarget !== undefined });
     }
 
     // Mark this mapKey as owned by handleResumeFailed before spawning
@@ -11604,7 +11754,7 @@ export class AgentRuntime implements Runtime {
             const recent = contextMessagesForTurn(
               getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), pendingText, pendingActorJid);
             if (recent.length > 0) {
-              const lines = formatContextLines(recent, this.isCrossProviderSession(session));
+              const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise

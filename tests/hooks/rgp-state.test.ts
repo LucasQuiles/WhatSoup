@@ -11,11 +11,13 @@ const {
   appendQueueEntry,
   checkAndRecordRateLimit,
   defaultSocketPath,
+  expiredRepliesQueuePath,
   instanceStateDir,
   logLine,
   queueLockPath,
   rateLimitPath,
   readQueueEntries,
+  rewriteQueueEntries,
   resolveInstanceName,
   sessionStateDir,
   stuckRepliesQueuePath,
@@ -99,6 +101,48 @@ describe('rgp-state JSONL queue helpers', () => {
     expect(JSON.parse(lines[1])).toMatchObject({ id: 'b', text: 'two' });
   });
 
+  it('repairs permissive existing queue directories and files before appending', () => {
+    const path = stuckRepliesQueuePath('queue-permissions');
+    const expiredPath = expiredRepliesQueuePath('queue-permissions');
+    const dir = dirname(path);
+    writeFileSync(path, '{"id":"before"}\n', { mode: 0o644 });
+    writeFileSync(expiredPath, '{"id":"receipt"}\n', { mode: 0o644 });
+    chmodSync(dir, 0o755);
+    chmodSync(path, 0o644);
+    chmodSync(expiredPath, 0o644);
+
+    expect(appendQueueEntry(path, { id: 'after' })).toBe(true);
+    expect(appendQueueEntry(expiredPath, { id: 'after-receipt' })).toBe(true);
+
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(expiredPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('reports an oversized queue as unreadable without treating it as empty', () => {
+    const path = stuckRepliesQueuePath('queue-oversized');
+    writeFileSync(path, 'x'.repeat(16 * 1024 * 1024 + 1));
+
+    const result = readQueueEntries(path);
+
+    expect(result.error).toMatch(/exceed|size|large|bound/i);
+    expect(result.entries).toEqual([]);
+    expect(readFileSync(path).length).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it('refuses to replace existing queue state owned by another user', () => {
+    const path = stuckRepliesQueuePath('queue-owner');
+    const original = '{"id":"retain"}\n';
+    writeFileSync(path, original);
+    const user = vi.spyOn(process, 'getuid').mockReturnValue(statSync(path).uid + 1);
+    try {
+      expect(rewriteQueueEntries(path, [])).toBe(false);
+      expect(readFileSync(path, 'utf8')).toBe(original);
+    } finally {
+      user.mockRestore();
+    }
+  });
+
   it('readQueueEntries tolerates malformed lines while returning valid entries', () => {
     const path = stuckRepliesQueuePath('queue-b');
     writeFileSync(path, '{"id":"a"}\nnot-json\n{"id":"b"}\n');
@@ -107,6 +151,18 @@ describe('rgp-state JSONL queue helpers', () => {
 
     expect(result.malformedLines).toBe(1);
     expect(result.entries.map((entry: { id?: string }) => entry.id)).toEqual(['a', 'b']);
+  });
+
+  it('treats valid JSON scalars as malformed queue records and preserves them', () => {
+    const path = stuckRepliesQueuePath('queue-scalars');
+    writeFileSync(path, 'null\n[]\n{"id":"ok"}\n');
+
+    const result = readQueueEntries(path);
+
+    expect(result.malformedLines).toBe(2);
+    expect(result.entries).toEqual([{ id: 'ok' }]);
+    expect(ackQueueEntries(path, () => false).kept).toBe(3);
+    expect(readFileSync(path, 'utf8')).toContain('null');
   });
 
   it('ackQueueEntries removes successful entries and keeps failed entries queued', () => {
@@ -133,13 +189,13 @@ describe('rgp-state JSONL queue helpers', () => {
     expect(text).not.toContain('"sent"');
   });
 
-  it('returns false when appendQueueEntry cannot write', () => {
-    if (process.geteuid?.() === 0) return;
+  it('repairs a restrictive existing directory before appending', () => {
     const path = stuckRepliesQueuePath('queue-readonly');
     const dir = dirname(path);
     chmodSync(dir, 0o500);
     try {
-      expect(appendQueueEntry(path, { id: 'x' })).toBe(false);
+      expect(appendQueueEntry(path, { id: 'x' })).toBe(true);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
     } finally {
       chmodSync(dir, 0o700);
     }
@@ -165,20 +221,41 @@ describe('rgp-state lock and rate-limit helpers', () => {
 
     const result = await withQueueLock('lock-b', callback, { staleMs: 60_000 });
 
-    expect(result).toMatchObject({ ok: false, locked: true });
+    expect(result.ok).toBe(false);
+    expect(result).not.toHaveProperty('locked', true);
     expect(callback).not.toHaveBeenCalled();
     expect(existsSync(lockPath)).toBe(true);
   });
 
-  it('withQueueLock recovers stale locks before running the callback', async () => {
+  it('fails closed on an invalid stale-looking lock instead of stealing it', async () => {
     const lockPath = queueLockPath('lock-c');
     writeFileSync(lockPath, 'stale');
-    const stale = new Date(Date.now() - 120_000);
-    utimesSync(lockPath, stale, stale);
 
-    const result = await withQueueLock('lock-c', async () => 'recovered', { staleMs: 1_000 });
+    const result = await withQueueLock('lock-c', async () => 'stolen', { staleMs: 1 });
 
-    expect(result).toEqual({ ok: true, result: 'recovered' });
+    expect(result.ok).toBe(false);
+    expect(result).not.toHaveProperty('result', 'stolen');
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('does not steal a live owner after the legacy stale interval', async () => {
+    let releaseOwner!: () => void;
+    const ownerDone = new Promise<string>((resolve) => {
+      releaseOwner = () => resolve('owner-done');
+    });
+    const owner = withQueueLock('lock-long', async () => ownerDone, { staleMs: 20 });
+    // Age the live owner's lock far past the legacy stale interval instead of
+    // sleeping: only holder liveness may keep the lock, never its mtime.
+    const lockPath = queueLockPath('lock-long');
+    expect(existsSync(lockPath)).toBe(true);
+    const longAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    utimesSync(lockPath, longAgo, longAgo);
+
+    const contender = await withQueueLock('lock-long', async () => 'stolen', { staleMs: 20 });
+
+    expect(contender).toMatchObject({ ok: false, locked: true });
+    releaseOwner();
+    await expect(owner).resolves.toMatchObject({ ok: true, result: 'owner-done' });
   });
 
   it('checkAndRecordRateLimit allows three sends per chat per window and blocks the fourth', () => {
@@ -212,5 +289,26 @@ describe('rgp-state lock and rate-limit helpers', () => {
 
     expect(readFileSync(path, 'utf8')).toMatch(/^\[20\d\d-/);
     expect(() => logLine('/no/such/dir/events.log', { event: 'ignored' })).not.toThrow();
+  });
+
+  it('keeps diagnostics bounded and excludes reply content', () => {
+    const path = join(instanceStateDir('bounded-log'), 'events.log');
+
+    logLine(path, {
+      event: 'send-failed',
+      text: 'private reply content',
+      error: 'socket failed with private reply content',
+      detail: 'x'.repeat(100_000),
+    });
+
+    const body = readFileSync(path, 'utf8');
+    expect(body.length).toBeLessThanOrEqual(64 * 1024);
+    expect(body).not.toContain('private reply content');
+    expect(body).toContain('send-failed');
+  });
+
+  it('derives a private durable expiry-obligation path per instance', () => {
+    const home = useTmpHome();
+    expect(expiredRepliesQueuePath('queue-a')).toBe(join(home, '.claude', 'rgp', 'queue-a', 'expired-replies.jsonl'));
   });
 });

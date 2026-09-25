@@ -57,8 +57,11 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "ac54cd2fd8a565a159f16b02620ac053dfd7c7fe71a05c29035b74e05abf6b64",
+      "sha256": "b8cc6d6994b9519c9f74e8dd456fac5719002f4be4ac2d6fe0a43d317d2e159f",
       "mustContain": [
+        "require_acceptance=True",
+        "drain_owner_route_queue(paths)",
+        "auditReceipt",
         "append_bounded_jsonl",
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -161,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "b24f9a373e018d3cb4d693b22a1df6159904c177e5129554ed29be617aec9a27",
+      "sha256": "3cc4962211703fbba0a301c0388b90620eafe8b380b4e882ac92435fff8b1849",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -281,7 +284,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "957ed72e1ae06ce638b003a9139c0bcf820fd8c1b6491cb161bda624d1fc6265",
+      "sha256": "fa46d8b0649b579e0f20c0a1fc9aeec38f0553d94bf2752349b9e7e800cdaad8",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -326,7 +329,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "223e1964611637e5da6c481f10eeb74f184c6bd94cef05251d95d995d71c1f9e",
+      "sha256": "3485c2866d32dae6c433dd3ee160e400a8c26ed9a701d7dc3b30c1eb8348f1c4",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -537,7 +540,7 @@
     },
     {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
-      "sha256": "d192a2a639b248a92dbb037dd313dedef9ddb46f4c984d04d5e83039d46e8991",
+      "sha256": "1d0aae38e1c95d9c9c3e7761113a8c295a8d10e9add499161335405f29b66231",
       "mustContain": [
         "append_bounded_jsonl",
         "require_bounded_jsonl_commit",
@@ -620,11 +623,13 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "dd3350e5bcea11bc7ecc405dd9bdba957cb4d5bc70bc94f519f114c4508be59d",
+      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
-        "def instance_health_token(name: str) -> Optional[str]:"
+        "def instance_health_token(name: str) -> Optional[str]:",
+        "class HealthTransportError(RuntimeError):",
+        "def fetch_loopback_health("
       ]
     },
     {
@@ -653,7 +658,7 @@
     },
     {
       "path": "deploy/scripts/lib/queue_age.py",
-      "sha256": "cc96f2b9738a27a570f03415129360df86e88ac8ef4f7456164958713b30631a",
+      "sha256": "b05e5b20dca140867f7f12355b7c894f73c5768eb1b4923d63df9a124ae42cb0",
       "mustContain": [
         "event_file_age_seconds",
         "scan_directory",
@@ -733,7 +738,7 @@
     },
     {
       "path": "deploy/scripts/render-watchdog.py",
-      "sha256": "b7c684bd207e166b0459d61a400b301602fbff8f0d8704ad879a4f2d4c8601ed",
+      "sha256": "38a294f401fd78ed997b0ee26e8d090753a1db419e7b41260b22da2d79ab6cce",
       "mustContain": [
         "PLACEHOLDER_TOKENS",
         "EXIT_UNSUBSTITUTED",
@@ -745,7 +750,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cd4d10c51bb85c0ccf083764cdd8f4a9a2c2cba1c413f5ca3fe77a065221cb09",
+      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -756,7 +761,7 @@
     },
     {
       "path": "deploy/scripts/whatsoup-db-snapshot.py",
-      "sha256": "e7d0cf49032deddc3fb29314f207b592eca6263bb0eb7ec6ea1cfe137940b657",
+      "sha256": "d73f87f3db5a4ac1f9eb7829ac89b46f76bd5d93e2a9f53a7d404a16da79d924",
       "mustContain": [
         "integrity_check",
         "mode=ro",
@@ -798,7 +803,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "d0028239196d640cbde7cc79ffc358f44d5bf2b1deff56391f9b661040db00e6",
+      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -832,12 +837,55 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "c337522837ae0cf72d69a4eac4a0af1bc6373801a422b68cf0abe4e847db94b9",
+      "sha256": "375e35951097ac804d92166aa53c487760a6667900af1e6773387b8e7f8bbc04",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
-        "turnRecoveryBlockedUnsafe",
-        "autoCompactActiveBackoffScopes"
+        "\"turnRecoveryBlockedUnsafe\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_synthetic\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_superseded\"",
+        "\"runtime_agent_turn_recovery_blocked_unsafe_stranded\"",
+        "\"runtime_agent_per_chat_sessions_without_owner\"",
+        "\"runtime_agent_per_chat_respawn_abandoned\"",
+        "\"runtime_agent_turn_queue_halted_scopes\"",
+        "\"runtime_agent_proactive_resume_identity_rejects\"",
+        "\"runtime_agent_unowned_provider_event_rejects\"",
+        "\"runtime_agent_suppressed_system_turn_effect_rejects\"",
+        "\"runtime_agent_chronology_delayed_dispatches\"",
+        "\"runtime_agent_chronology_recovery_replay_dispatches\"",
+        "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "autoCompactActiveBackoffScopes",
+        "agent_respawn_failed_clear_pending"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/send_acceptance.py",
+      "sha256": "129445a01a685824339db972d3047aec11284decf62f05b5bef7ac80e798c2db",
+      "mustContain": [
+        "validate_send_acceptance",
+        "SendAcceptanceUnknown",
+        "RecursionError"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/dm_roundtrip.py",
+      "sha256": "5d0c822cc06046c26d9c772a5e9c5cdc71a247ee31b991f63e1b2bc67e48fe33",
+      "mustContain": [
+        "RoundtripConfigError",
+        "parse_roster",
+        "evaluate_target"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/owner_route.py",
+      "sha256": "4394afd1e35a4eaa6fc666aa7ee3f384fb48404464aa09d516311b7d179119b1",
+      "mustContain": [
+        "def route_owner_critical(",
+        "def qualifies(",
+        "BOT_ERRORS_OWNER_ROUTE_JID",
+        "whatsappAccepted",
+        "class _StateUnreadable("
       ]
     }
   ]
