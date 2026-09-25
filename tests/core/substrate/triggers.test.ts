@@ -201,6 +201,52 @@ describe('triggers core', () => {
     expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBe(before.terminal_at);
   });
 
+  it('extendTrigger reactivates a paused trigger: status active, next_fire_at = now, event was_paused=true, terminal_at clamped', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', actor: 'u',
+    }, clock);
+    pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+
+    extendTrigger(db.raw, t.id, { until: now + 10 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
+
+    const after = listTriggers(db.raw, { beadId: bead.id })[0];
+    expect(after.status).toBe('active');
+    expect(after.next_fire_at).toBe(now);
+    expect(after.terminal_at).toBe(now + 72 * 3600);
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: now + 72 * 3600 });
+  });
+
+  it('extendTrigger on an active trigger leaves status and next_fire_at untouched (was_paused=false)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'active', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', actor: 'u',
+    }, clock);
+    const before = listTriggers(db.raw, { beadId: bead.id })[0];
+
+    extendTrigger(db.raw, t.id, { until: now + 3600, maxTtlHours: 72, actor: 'u' }, clock);
+
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+      status: 'active', next_fire_at: before.next_fire_at, terminal_at: now + 3600,
+    });
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ was_paused: false });
+  });
+
   it('event.message persists with next_fire_at NULL (reserved scaffold, not polled)', () => {
     // event.message is a RESERVED SCAFFOLD: accepted + persisted but never
     // executed by the interval poller (pending a future ingest-path
