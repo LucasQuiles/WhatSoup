@@ -1768,7 +1768,10 @@ contains only audit counts plus created/existing/unresolved/ambiguous ledger cou
 
 After recording, authenticated `/health` reports the normalized recovery-debt projection separately
 from current service status. A readable retained continuity gap does not flip an otherwise healthy
-service to degraded. The compatibility `continuity` block remains available:
+service to degraded. Retained debt does not release the silence latch, though: after a blocking
+episode (`recovery_debt_blocking`, `runtime.turn_finalization_debt`), status stays `degraded` with
+`degradation_silence_unproven` while `recovery_debt` already reads non-blocking; see "Degradation
+silence latch" above. The compatibility `continuity` block remains available:
 
 ```json
 {
