@@ -1293,6 +1293,33 @@ export class AgentRuntime implements Runtime {
     throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`);
   }
 
+  /**
+   * Returns the session's suspension barrier only while host admission has one
+   * (or a deferred start) outstanding. Callers await it conditionally, so the
+   * default dispatch path gains no extra microtask turns.
+   */
+  private hostWorkAdmissionSuspensionBarrier(session: SessionManager): Promise<void> | null {
+    if (!this.hasDeferredHostWorkAdmissionStart(session)) return null;
+    const wait = (session as unknown as {
+      waitForHostWorkAdmissionSuspension?: () => Promise<void>;
+    }).waitForHostWorkAdmissionSuspension;
+    return typeof wait === 'function' ? wait.call(session) : null;
+  }
+
+  private hasDeferredHostWorkAdmissionStart(session: SessionManager): boolean {
+    const deferred = (session as unknown as {
+      isHostWorkAdmissionStartDeferred?: () => boolean;
+    }).isHostWorkAdmissionStartDeferred;
+    return typeof deferred === 'function' && deferred.call(session);
+  }
+
+  private async suspendHostWorkAdmissionAfterTerminal(session: SessionManager): Promise<void> {
+    const suspend = (session as unknown as {
+      suspendHostWorkAdmissionAfterTerminal?: () => Promise<void>;
+    }).suspendHostWorkAdmissionAfterTerminal;
+    if (typeof suspend === 'function') await suspend.call(session);
+  }
+
   private async settleFailedSystemTurnDispatch(
     session: SessionManager,
     scopeKey: string,
@@ -1319,8 +1346,9 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
-    if (this.autoCompactInputTokens === undefined || session === null) return;
+  /** Returns true when a successor (a compact turn or a hard reset) now owns the session. */
+  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean {
+    if (this.autoCompactInputTokens === undefined || session === null) return false;
     // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
     // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
     // plain user message that never emits a compact_boundary — so markSessionCompacted
@@ -1333,15 +1361,15 @@ export class AgentRuntime implements Runtime {
     // indeterminate provider fails safe (skip the claude-only command).
     const sessionProvider =
       typeof session.getProviderId === 'function' ? session.getProviderId() : null;
-    if (sessionProvider !== 'claude-cli') return;
-    if (this.sessionScope === 'shared') return;
-    if (!session.getStatus().active) return;
+    if (sessionProvider !== 'claude-cli') return false;
+    if (this.sessionScope === 'shared') return false;
+    if (!session.getStatus().active) return false;
 
     const rowId = session.getDbRowId();
-    if (rowId === null) return;
+    if (rowId === null) return false;
 
     const snapshot = getSessionTokenSnapshot(this.db, rowId);
-    if (!snapshot) return;
+    if (!snapshot) return false;
 
     // #1774: total_input_tokens no longer includes cache_read (it is
     // genuinely-new input only — see the schema note above ensureAgentSchema
@@ -1372,7 +1400,7 @@ export class AgentRuntime implements Runtime {
     if (compactedAt !== undefined && !this.autoCompact.waiters.has(scopeKey)) {
       this.autoCompact.recordCompactionOutcome(scopeKey, compactedAt, overAutoCompactThreshold);
     }
-    if (!overAutoCompactThreshold) return;
+    if (!overAutoCompactThreshold) return false;
 
     // Rollout bootstrap: existing sessions that already accumulated past the
     // threshold before this knob was enabled would otherwise fire /compact
@@ -1395,10 +1423,10 @@ export class AgentRuntime implements Runtime {
         lastCompactInputTokens: snapshot.lastCompactInputTokens,
         threshold: this.autoCompactInputTokens,
       }, 'auto compact baseline initialised for existing session');
-      return;
+      return false;
     }
 
-    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
+    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return false;
 
     const now = Date.now();
     const lastSuccessAt = this.autoCompact.lastSuccessAt.get(scopeKey);
@@ -1408,7 +1436,7 @@ export class AgentRuntime implements Runtime {
         this.autoCompact.rapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
       if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
         this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
-        return;
+        return false;
       }
       if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
         this.autoCompact.consecutiveRapidRearms.delete(scopeKey);
@@ -1452,12 +1480,13 @@ export class AgentRuntime implements Runtime {
         // livelock guard could take the whole runtime down. Contained and logged.
         log.error({ err, scopeKey, rowId }, 'compaction livelock escalation failed');
       });
-      return;
+      // The serialized hard reset owns this session's lifecycle from here.
+      return true;
     }
 
     const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
     if (cooldownUntil !== undefined) {
-      if (now < cooldownUntil) return;
+      if (now < cooldownUntil) return false;
       this.autoCompact.cooldownUntil.delete(scopeKey);
     }
 
@@ -1510,9 +1539,11 @@ export class AgentRuntime implements Runtime {
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       await this.settleFailedSystemTurnDispatch(session, scopeKey, compactLease, err);
+      await this.suspendHostWorkAdmissionAfterTerminal(session);
     }).catch((err) => {
       log.error({ err, scopeKey, rowId }, 'auto compact failed to quarantine ambiguous dispatch');
     });
+    return true;
   }
 
   /**
@@ -5689,7 +5720,12 @@ export class AgentRuntime implements Runtime {
     }
 
     await this.waitForRejectedTerminalTeardown(this.session!);
-    if (!this.session!.getStatus().active) {
+    const globalSuspension = this.hostWorkAdmissionSuspensionBarrier(this.session!);
+    if (globalSuspension !== null) await globalSuspension;
+    if (
+      !this.session!.getStatus().active
+      && !this.hasDeferredHostWorkAdmissionStart(this.session!)
+    ) {
       await this.session!.spawnSession();
     }
 
@@ -5795,12 +5831,14 @@ export class AgentRuntime implements Runtime {
     await this.waitForRejectedTerminalTeardown(session);
     await this.waitForSystemTurnQuarantine(systemScopeKey);
     await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
+    const suspension = this.hostWorkAdmissionSuspensionBarrier(session);
+    if (suspension !== null) await suspension;
     if (dispatchCancelled()) return;
 
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
-    if (wasInactive) {
+    if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -6772,6 +6810,16 @@ export class AgentRuntime implements Runtime {
     if (scopeKey === GLOBAL_TOOL_SCOPE_KEY) {
       this.currentTurnChatJid = null;
     }
+    // Restricted system results bypass the regular result handler, so start
+    // the same post-terminal suspension barrier here. Later poll/user/system
+    // dispatches await it in sendTurnToSession before observing activity.
+    try {
+      void this.suspendHostWorkAdmissionAfterTerminal(sourceSession).catch((err) => {
+        log.warn({ err, scopeKey, purpose: systemTurn.purpose }, 'host-admission restricted terminal suspension rejected');
+      });
+    } catch (err) {
+      log.warn({ err, scopeKey, purpose: systemTurn.purpose }, 'host-admission restricted terminal suspension threw');
+    }
   }
 
   /**
@@ -7634,6 +7682,39 @@ export class AgentRuntime implements Runtime {
     };
   }
 
+  private armControlSessionTimeout(reportId: string, sourceSession: SessionManager): void {
+    if (this.controlSessionTimeout !== null) clearTimeout(this.controlSessionTimeout);
+    this.controlSessionTimeout = setTimeout(() => {
+      if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+      log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
+
+      // Send HEAL_ESCALATE to Loops so its heal state is updated
+      const controlQueue = this.getControlQueue();
+      const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+      if (controlQueue && loopsPhone) {
+        const loopsJid = toPersonalJid(loopsPhone);
+        controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+          reportId,
+          errorClass: 'timeout',
+          diagnosis: 'Repair session timed out after 15 minutes without resolution',
+        }, this.durability ?? undefined).catch(err =>
+          log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
+      }
+
+      // DM admin
+      const adminPhone = [...config.adminPhones][0];
+      if (adminPhone) {
+        const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
+        sendTracked(this.messenger, adminJid,
+          `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
+          this.durability ?? undefined, { replayPolicy: 'safe' })
+          .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
+      }
+
+      void this.finishTimedOutControlReport(reportId, sourceSession);
+    }, CONTROL_SESSION_TIMEOUT_MS);
+  }
+
   /**
    * Inject a repair turn into the control session for self-healing.
    * Single-flight: if a repair is already in-flight the call returns immediately;
@@ -7642,6 +7723,7 @@ export class AgentRuntime implements Runtime {
   async handleControlTurn(reportId: string, payload: string): Promise<void> {
     this.db.assertWritableCompatibility();
     const syntheticJid = 'control@heal.internal';
+    let sourceSession: SessionManager | null = null;
     try {
       // Only non-sandboxed instances (Q) can run repairs
       if (this.sandboxPerChat || this.sandbox) {
@@ -7697,59 +7779,51 @@ export class AgentRuntime implements Runtime {
         if (controlTracker) this.operationTrackers.set(syntheticJid, controlTracker);
       }
 
+      sourceSession = this.controlSession;
+      if (!sourceSession) throw new Error('control session was not created');
+      // Admission can wait in the host wrapper, so the control deadline starts
+      // with control-slot ownership before provider dispatch and is bound to
+      // this session rather than a later report's mutable runtime field.
+      this.armControlSessionTimeout(reportId, sourceSession);
+
       // Spawn session if not active
-      if (!this.controlSession.getStatus().active) {
-        await this.controlSession.spawnSession();
+      if (!sourceSession.getStatus().active) {
+        await sourceSession.spawnSession();
       }
+
+      if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
 
       // Format the turn
       const turn = `[REPAIR REQUEST — report_id: ${reportId}]\n${payload}`;
 
-      await this.controlSession.sendTurn(turn);
-      // Start hard timeout — if the control session doesn't resolve within 15 minutes,
-      // force-escalate and shut it down to prevent resource exhaustion.
-      this.controlSessionTimeout = setTimeout(() => {
-        log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
-
-        // Send HEAL_ESCALATE to Loops so its heal state is updated
-        const controlQueue = this.getControlQueue();
-        const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
-        if (controlQueue && loopsPhone) {
-          const loopsJid = toPersonalJid(loopsPhone);
-          controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
-            reportId,
-            errorClass: 'timeout',
-            diagnosis: 'Repair session timed out after 15 minutes without resolution',
-          }, this.durability ?? undefined).catch(err =>
-            log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
-        }
-
-        // DM admin
-        const adminPhone = [...config.adminPhones][0];
-        if (adminPhone) {
-          const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
-          sendTracked(this.messenger, adminJid,
-            `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
-            this.durability ?? undefined, { replayPolicy: 'safe' })
-            .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
-        }
-
-        const timedOutSession = this.controlSession;
-        if (timedOutSession) {
-          void this.finishTimedOutControlReport(reportId, timedOutSession);
-        }
-      }, CONTROL_SESSION_TIMEOUT_MS);
+      await sourceSession.sendTurn(turn);
     } catch (err) {
-      log.error({ err, reportId }, 'control session failed to start — releasing slot');
+      if (sourceSession && (this.activeControlReportId !== reportId || this.controlSession !== sourceSession)) {
+        log.info({ reportId }, 'control startup continuation no longer owns the repair slot');
+        return;
+      }
+      log.error({ err, reportId }, 'control session failed to start — attempting teardown');
       if (this.controlSessionTimeout) {
         clearTimeout(this.controlSessionTimeout);
         this.controlSessionTimeout = null;
       }
 
+      if (sourceSession) {
+        try {
+          await sourceSession.shutdown();
+        } catch (shutdownErr) {
+          log.error({ shutdownErr, reportId }, 'control startup teardown failed — repair lane remains closed');
+          return;
+        }
+        if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+        this.releaseControlSession(reportId, sourceSession);
+        return;
+      }
+
+      if (this.activeControlReportId !== reportId || this.controlSession !== null) return;
       this.activeControlReportId = null;
       this.controlProtocolCompletedReportId = null;
       this.controlTerminalizingReportId = null;
-      const controlSession = this.controlSession;
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
       this.chatQueues.delete(syntheticJid);
@@ -7763,13 +7837,6 @@ export class AgentRuntime implements Runtime {
       if (controlTracker) {
         controlTracker.shutdown();
         this.operationTrackers.delete(syntheticJid);
-      }
-      if (controlSession) {
-        try {
-          await controlSession.shutdown();
-        } catch (shutdownErr) {
-          log.warn({ shutdownErr, reportId }, 'failed to shutdown control session during error cleanup');
-        }
       }
     }
   }
