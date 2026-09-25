@@ -2726,16 +2726,30 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       ) {
         addDegradationCause('turn_finalization_degraded');
       }
-      if (
-        agentRuntimeStatus === 'degraded'
-        && (
-          positiveRuntimeCounter('turnRecoveryOutstanding')
-          || positiveRuntimeCounter('turnRecoveryExhausted')
-          || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
-          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
-          || positiveRuntimeCounter('turnRecoveryEchoConflicts')
+      // turn_recovery_degraded names BLOCKING turn recovery only: the same
+      // classification (runtimeRecoveryDegradation) that pushes its
+      // runtime.turn_finalization_debt twin. Retained debt (exhausted,
+      // corroborated or historical catch-up rows) stays in recovery_debt and
+      // never names this cause. A runtime without the classification falls
+      // back to the blocking gauge plus the integrity counters.
+      const turnRecoveryBlockingReasons = new Set([
+        'turn_recovery_actionable',
+        'turn_recovery_integrity',
+        'turn_recovery_unclassified',
+      ]);
+      const runtimeRecoveryBlockingReasons = runtimeDetails?.['recoveryBlockingReasons'];
+      const turnRecoveryBlocking = Array.isArray(runtimeRecoveryBlockingReasons)
+        ? runtimeRecoveryBlockingReasons.some(
+          (reason) => turnRecoveryBlockingReasons.has(reason as string),
         )
-      ) {
+        : (
+          typeof runtimeDetails?.['turnRecoveryBlockingOutstanding'] === 'number'
+            ? positiveRuntimeCounter('turnRecoveryBlockingOutstanding')
+            : positiveRuntimeCounter('turnRecoveryOutstanding')
+        )
+          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+          || positiveRuntimeCounter('turnRecoveryEchoConflicts');
+      if (agentRuntimeStatus === 'degraded' && turnRecoveryBlocking) {
         addDegradationCause('turn_recovery_degraded');
       }
       if (runtimeProviderExecution?.['pressureActive'] === true) {

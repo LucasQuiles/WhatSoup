@@ -2156,6 +2156,8 @@ describe('GET /health', () => {
         status: 'degraded',
         details: {
           degradedReasons: ['turn_finalization_debt'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
           recentCrashes: 0,
           autoCompactActiveBackoffScopes: 0,
           turnFinalizationRetainedRetries: 0,
@@ -3081,10 +3083,71 @@ describe('GET /health', () => {
     });
   });
 
+  it.each([
+    ['an exhausted retained job', { turnRecoveryExhausted: 1, turnRecoveryRetainedTerminal: 1, recoveryDebtReasons: ['turn_recovery_terminal'] }],
+    ['a corroborated pending job', { turnRecoveryOutstanding: 1, turnRecoveryPending: 1, turnRecoveryCorroboratedRetained: 1, recoveryDebtReasons: ['corroborated_delivery_retained'] }],
+    ['an open historical catch-up', { turnRecoveryOpenRecoveries: 1, recoveryDebtReasons: ['historical_turn_catchup'] }],
+  ])('does not name turn_recovery_degraded for retained-only debt (%s) on a runtime degraded for another reason', async (_label, retained) => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['recent_crashes'],
+          recentCrashes: 1,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryPending: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          turnRecoveryOrphanTransfers: 0,
+          turnRecoveryBlockingOutstanding: 0,
+          turnRecoveryRetainedTerminal: 0,
+          turnRecoveryCorroboratedRetained: 0,
+          recoveryBlockingReasons: [],
+          completedDeliveryIdentityBlocking: 0,
+          completedDeliveryIdentityRetained: 0,
+          completedDeliveryIdentityAdmissions: { nextAction: null },
+          providerExecution: { pressureActive: false },
+          ...retained,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const json = JSON.parse((await healthReq(port)).body);
+    expect(json.status).toBe('degraded');
+    expect(json.recovery_debt).toMatchObject({ open: true, service_blocking: false });
+    expect(json.status_reasons).not.toContain('runtime.turn_finalization_debt');
+    expect(json.degradation_causes).toContain('agent_recent_crashes');
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
+    // Every emitted cause with a registered reason twin carries that twin.
+    for (const cause of json.degradation_causes as string[]) {
+      const twins = HEALTH_DEGRADATION_CAUSE_REASON_TWINS[
+        cause as keyof typeof HEALTH_DEGRADATION_CAUSE_REASON_TWINS
+      ];
+      if (twins === undefined || twins === NO_REASON_TWIN) continue;
+      expect((twins as readonly string[]).some((reason) => json.status_reasons.includes(reason))).toBe(true);
+    }
+    db2.close();
+  });
+
   it('surfaces turn_recovery_degraded and provider_execution_pressure causes from runtime counters', async () => {
     const db2 = makeDb();
     let outstanding = 1;
     let exhausted = 0;
+    let corruptLinks = 0;
     let pressureActive = false;
     const fakeAgentRuntime = {
       getHealthSnapshot: () => ({
@@ -3095,10 +3158,18 @@ describe('GET /health', () => {
           turnFinalizationRetainedRetries: 0,
           turnFinalizationDegradedScopes: 0,
           turnRecoveryOutstanding: outstanding,
+          turnRecoveryBlockingOutstanding: outstanding,
           turnRecoveryExhausted: exhausted,
+          turnRecoveryRetainedTerminal: exhausted,
           turnRecoveryOpenRecoveries: 0,
-          turnRecoveryCorruptLinks: 0,
+          turnRecoveryCorruptLinks: corruptLinks,
           turnRecoveryEchoConflicts: 0,
+          // The runtime's own classification of the counters above.
+          recoveryBlockingReasons: [
+            ...(outstanding > 0 ? ['turn_recovery_actionable'] : []),
+            ...(corruptLinks > 0 ? ['turn_recovery_integrity'] : []),
+          ],
+          recoveryDebtReasons: exhausted > 0 ? ['turn_recovery_terminal'] : [],
           providerExecution: { pressureActive },
           turnCapability: {
             modelUsable: false,
@@ -3123,11 +3194,17 @@ describe('GET /health', () => {
     expect(json.degradation_causes).toContain('turn_recovery_degraded');
     expect(json.degradation_causes).not.toContain('provider_execution_pressure');
 
-    // Leg 2: a different positive counter (exhausted) flags the same cause.
+    // Leg 2: a different blocking counter (corrupt links) flags the same cause.
     outstanding = 0;
-    exhausted = 1;
+    corruptLinks = 1;
     json = JSON.parse((await healthReq(port)).body);
     expect(json.degradation_causes).toContain('turn_recovery_degraded');
+
+    // Leg 2b: exhausted jobs are retained terminal debt and never name it.
+    corruptLinks = 0;
+    exhausted = 1;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
 
     // Leg 3: counters clear, provider execution pressure flags its own cause.
     exhausted = 0;
