@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OutboundDeliverySnapshot } from '../../../src/core/durability.ts';
-import { finalizeQueuedRuntimeTurn } from '../../../src/runtimes/agent/runtime-turn-finalization.ts';
+import {
+  collectRuntimeTurnAnswerEvidence,
+  finalizeQueuedRuntimeTurn,
+} from '../../../src/runtimes/agent/runtime-turn-finalization.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn());
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true),
   emitAlert,
 }));
 
@@ -128,5 +131,19 @@ describe('queued runtime turn finalization', () => {
     expect(durability.getOutboundDeliverySnapshot).not.toHaveBeenCalled();
     expect(durability.finalizeTurnTerminal).not.toHaveBeenCalled();
     expect(emitAlert).toHaveBeenCalledOnce();
+  });
+
+  it('reports a swallowed evidence flush failure to the runtime observer', async () => {
+    const failure = new Error('sticky evidence drain failure');
+    const observer = vi.fn();
+    const queue = {
+      flushTurnEvidence: vi.fn(async () => { throw failure; }),
+    };
+
+    await expect(collectRuntimeTurnAnswerEvidence(queue, 'turn-73', observer))
+      .resolves.toEqual({ kind: 'failed' });
+
+    expect(observer).toHaveBeenCalledOnce();
+    expect(observer).toHaveBeenCalledWith(failure);
   });
 });

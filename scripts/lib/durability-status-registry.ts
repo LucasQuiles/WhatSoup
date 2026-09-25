@@ -198,6 +198,21 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     writerSites: ['src/core/turn-recovery-store.ts'],
   },
   {
+    // #3295 S1: deferred_by_recovery_scope obligations. Quarantine/operator
+    // terminals are written by the store's fenced transitions; exhaustion is
+    // represented as pending with attempts spent (head-of-line block), not a
+    // distinct terminal value.
+    table: 'deferred_turn_obligations',
+    statusColumn: 'status',
+    vocabulary: [
+      'pending', 'claimed', 'dispatched_commit',
+      'terminal_completed', 'terminal_quarantined', 'terminal_operator',
+    ],
+    vocabularySource: 'sql-check',
+    terminalFailureValues: ['terminal_quarantined'],
+    writerSites: ['src/core/deferred-turn-store.ts'],
+  },
+  {
     table: 'agent_sessions',
     statusColumn: 'status',
     vocabulary: ['active', 'suspended', 'ended', 'completed', 'crashed', 'resume_failed', 'orphaned'],
@@ -570,6 +585,20 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     reason: 'one-pending-notice-per-conversation stash for standby-provider handoff; self-managed schema (ensureStandbyNoticeSchema), not a numbered global migration.',
   },
   {
+    table: 'lifecycle_events',
+    module: 'src/core/observability/lifecycle-event-store.ts',
+    reason: 'FLOS Stage 1 private per-instance event store (Contract B); dedicated observability SQLite file, self-provisioned schema, not the instance message DB migration ledger.',
+    justification:
+      'phase is an immutable historical value on append-only evidence rows (the transitions pattern): a row is INSERTed once and never updated, settlement is computed by the Stage 2 predicates over JOINED evidence rather than any mutable status column, and retention/compaction deletes are counted in lifecycle_drop_counters — never silent.',
+  },
+  {
+    table: 'lifecycle_drop_counters',
+    module: 'src/core/observability/lifecycle-event-store.ts',
+    reason: 'FLOS Stage 1 saturating drop counters (kind/value) beside lifecycle_events in the dedicated observability database.',
+    justification:
+      'two-column saturating counter store with no lifecycle semantics; matches the discovery scan only as CREATE TABLE text in the same module.',
+  },
+  {
     table: 'transitions',
     module: 'src/fleet/incidents/schema.ts',
     reason: 'incident control plane append-only lifecycle transitions; same dedicated fleet incident database as the events ledger.',
@@ -607,6 +636,10 @@ export const DISCOVERY_EXCLUSIONS: DiscoveryExclusionEntry[] = [
   {
     table: 'capability_obligations_v60',
     reason: 'migration-60 transient create-copy-drop-rename artifact (src/core/database-migration-60.ts): the creation_reason CHECK rebuild copies into capability_obligations_v60, drops the old table, then renames v60 to capability_obligations — it never persists under its own name, so it never appears in migratedSchemaSnapshot().',
+  },
+  {
+    table: 'completed_delivery_identity_admissions_v61',
+    reason: "migration-61 transient create-copy-drop-rename artifact (src/core/database-migration-61.ts): the state-CHECK widening (adds the terminal 'expired' state, reliability 4.1) copies into completed_delivery_identity_admissions_v61, drops the old table, then renames v61 back — it never persists under its own name.",
   },
 ];
 

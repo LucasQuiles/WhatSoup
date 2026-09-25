@@ -232,29 +232,30 @@ function signalOwned(
   owned: readonly OwnedProcessIdentity[],
   signal: NodeJS.Signals,
   generationMarker: string,
-  ambiguous: readonly OwnedProcessIdentity[] = [],
 ): void {
   const root = uniqueRowForPid(rows, rootPid);
   const ownedRoot = owned.find((identity) => identity.pid === rootPid) ?? null;
   const self = uniqueRowForPid(rows, process.pid);
   // #1755: the process-group broadcast below is indiscriminate over root.pgid.
-  // Never let it reach an AMBIGUOUS owned PID that happens to share the root's
-  // group — that would signal a PID we could not confirm as `sameProcess`. When
-  // any ambiguous member sits in the root group, fall back to per-PID signaling
-  // of the confirmed survivors only, preserving the never-signal-an-ambiguous-PID
-  // invariant (and still avoiding the old throw-and-burn-grace behaviour).
-  const ambiguousInRootGroup =
+  // Never let it reach a process that is not a confirmed owned identity.
+  // A process-group signal reaches every current member, including processes
+  // that are not descendants of this provider root. Broadcast only when the
+  // same full-system census proves every member of the root group is one of the
+  // confirmed PPID-owned identities. Otherwise signal those identities by PID.
+  const rootGroupFullyOwned =
     root !== null &&
-    ambiguous.some((identity) =>
-      rows.some((row) => row.pid === identity.pid && row.pgid === root.pgid),
-    );
+    rows
+      .filter((row) => row.pgid === root.pgid)
+      .every((row) =>
+        owned.some((identity) => sameProcess(row, identity, generationMarker)),
+      );
   const safeGroup = root !== null &&
     ownedRoot !== null &&
     sameProcess(root, ownedRoot, generationMarker) &&
     self !== null &&
     root.pgid === root.pid &&
     root.pgid !== self.pgid &&
-    !ambiguousInRootGroup;
+    rootGroupFullyOwned;
   let groupSignalled = false;
 
   if (safeGroup) {
@@ -374,7 +375,7 @@ async function runTermination(
     );
   }
   if (first.survivors.length > 0) {
-    signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker, first.ambiguous);
+    signalOwned(target, rootPid, first.rows, first.survivors, signal, generationMarker);
   }
 
   if (signal === SIGNAL.TERM) {
@@ -398,7 +399,7 @@ async function runTermination(
       }
       if (kill.survivors.length > 0) {
         escalated = true;
-        signalOwned(target, rootPid, kill.rows, kill.survivors, SIGNAL.KILL, generationMarker, kill.ambiguous);
+        signalOwned(target, rootPid, kill.rows, kill.survivors, SIGNAL.KILL, generationMarker);
       }
     }
   }
@@ -506,8 +507,10 @@ function readServiceCgroupMemberPids(): readonly number[] | null {
 
 /**
  * #1869: best-effort emit of the cgroup-vs-PPID divergence gauge. Fully isolated
- * so any failure is swallowed and can NEVER affect termination. No-op unless a
- * sink is provided and cgroup membership is readable.
+ * so any failure is logged and can NEVER affect termination. No-op unless a
+ * sink is provided and cgroup membership is readable. A readable census emits
+ * zero as well as non-zero divergence so callers receive the documented gauge
+ * at each teardown.
  */
 export function emitCgroupDivergence(
   owned: readonly { readonly pid: number }[],
@@ -520,9 +523,11 @@ export function emitCgroupDivergence(
     const reader = options.readCgroupMemberPids ?? readServiceCgroupMemberPids;
     const cgroupPids = reader();
     if (cgroupPids === null) return;
-    sink(computeCgroupDivergence(cgroupPids, owned, rootPid));
-  } catch {
-    // best-effort telemetry; never affect termination
+    const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
+    sink(divergence);
+  } catch (err) {
+    // Best-effort telemetry must never affect termination, but failures stay visible.
+    log.warn({ err }, 'cgroup divergence telemetry failed');
   }
 }
 
@@ -554,32 +559,15 @@ export function killSessionTree(
   let owned: OwnedProcessIdentity[];
   let preCensusAvailable = false;
   try {
-    const rows = readProcessCensus();
-    owned = snapshotOwnedTree(rows, rootPid, options.generationMarker);
+    owned = snapshotOwnedTree(readProcessCensus(), rootPid, options.generationMarker);
     preCensusAvailable = true;
-
-    // Cgroup membership proves only that a PID shares the WhatSoup service unit;
-    // it does not prove ownership by this provider session. A per-chat service
-    // hosts multiple sibling provider trees, so extending `owned` from the cgroup
-    // would let suspending one idle chat terminate every other resident chat.
-    // Keep cgroup divergence observational until an independently attributable
-    // session marker exists for reparented descendants.
-    const cgroupPids = (options.readCgroupMemberPids ?? readServiceCgroupMemberPids)();
-    if (cgroupPids !== null) {
-      const divergence = computeCgroupDivergence(cgroupPids, owned, rootPid);
-      if (divergence.offTreeCount > 0) {
-        try {
-          options.onCgroupDivergence?.(divergence);
-        } catch (err) {
-          // Best-effort telemetry: a throwing sink must never affect
-          // termination, but its failure is surfaced rather than swallowed.
-          log.warn({ err }, 'cgroup divergence telemetry sink threw');
-        }
-      }
-    }
   } catch (error) {
     owned = [];
   }
+
+  // Cgroup membership proves only service-unit co-location, not ownership by
+  // this provider session. Keep it observational until per-session attribution exists.
+  emitCgroupDivergence(owned, rootPid, options);
 
   let context: TerminationContext;
   const promise = runTermination(target, rootPid, owned, preCensusAvailable, signal, options)

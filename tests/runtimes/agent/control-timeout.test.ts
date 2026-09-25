@@ -5,6 +5,7 @@
 // 3. Timeout fires and calls shutdown + clearControlReport after the timeout period.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -12,7 +13,7 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 
 // ─── Hoisted mocks ─────────────────────────────────────────────────────────
 
-const { mockSession, mockQueue } = vi.hoisted(() => {
+const { mockSession, mockSessionFactory, mockQueue } = vi.hoisted(() => {
   const mockSession = {
     spawnSession: vi.fn(async () => {}),
     sendTurn: vi.fn(async () => {}),
@@ -38,11 +39,14 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
@@ -64,7 +68,9 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
     endTurn: vi.fn(),
   };
 
-  return { mockSession, mockQueue };
+  const mockSessionFactory = vi.fn(() => mockSession);
+
+  return { mockSession, mockSessionFactory, mockQueue };
 });
 
 // ─── Module mocks ──────────────────────────────────────────────────────────
@@ -96,7 +102,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   SessionManager: vi.fn().mockImplementation(function (
     _opts: { onEvent: (event: AgentEvent) => void; onResumeFailed?: () => void },
   ) {
-    return mockSession;
+    return mockSessionFactory();
   }),
   formatAge: vi.fn(() => '0s ago'),
 }));
@@ -115,6 +121,8 @@ vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
       enqueueText: vi.fn(),
       getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
       enqueueToolUpdate: vi.fn(),
       indicateTyping: vi.fn(),
       flush: vi.fn(async () => {}),
@@ -261,7 +269,8 @@ function getControlState(runtime: AgentRuntime): {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('control session hard timeout', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.useFakeTimers();
     vi.clearAllMocks();
     mockDequeueNextReport.mockReturnValue(null);
@@ -289,6 +298,84 @@ describe('control session hard timeout', () => {
     await runtime.handleControlTurn('r-001', JSON.stringify({ reportId: 'r-001', errorClass: 'crash__x' }));
 
     // Timeout should be set (non-null) after a successful turn
+    expect(getTimeout(runtime)).not.toBeNull();
+  });
+
+  it('starts the 15-minute deadline while control session admission is pending', async () => {
+    let admit!: () => void;
+    mockSession.spawnSession.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      admit = resolve;
+    }));
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+
+    const starting = runtime.handleControlTurn('r-ADMISSION-WAIT', JSON.stringify({ reportId: 'r-ADMISSION-WAIT' }));
+    await vi.waitFor(() => expect(mockSession.spawnSession).toHaveBeenCalledOnce());
+    expect(getTimeout(runtime)).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    expect(mockSession.shutdown).toHaveBeenCalledOnce();
+
+    admit();
+    await starting;
+  });
+
+  it('keeps a timed-out admission continuation bound to its original control session', async () => {
+    let admitA!: () => void;
+    const sessionB = {
+      spawnSession: vi.fn(async () => {}),
+      sendTurn: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('A must never dispatch through B')),
+      handleNew: vi.fn(async () => {}),
+      getStatus: vi.fn(() => ({
+        active: false,
+        pid: null as number | null,
+        sessionId: null as string | null,
+        startedAt: null as string | null,
+        messageCount: 0,
+        lastMessageAt: null as string | null,
+      })),
+      shutdown: vi.fn(async () => {}),
+      clearTurnWatchdog: vi.fn(() => {}),
+      completeProviderTurn: vi.fn(() => {}),
+      tickWatchdog: vi.fn(() => {}),
+      trackToolStart: vi.fn((_toolId: string) => {}),
+      trackToolEnd: vi.fn((_toolId: string) => {}),
+      getDbRowId: vi.fn(() => null),
+    };
+    mockSessionFactory.mockImplementationOnce(() => mockSession).mockImplementationOnce(() => sessionB);
+    mockSession.spawnSession.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      admitA = resolve;
+    }));
+    mockDequeueNextReport.mockReturnValueOnce({
+      report_id: 'r-B',
+      error_class: 'crash__next',
+      error_type: 'crash',
+      state: 'queued',
+      attempt_count: 1,
+      cooldown_until: null,
+      context: null,
+      created_at: new Date().toISOString(),
+    });
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+    const startingA = runtime.handleControlTurn('r-A', JSON.stringify({ reportId: 'r-A' }));
+    await vi.waitFor(() => expect(mockSession.spawnSession).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    await vi.waitFor(() => expect(sessionB.sendTurn).toHaveBeenCalledOnce());
+    expect(runtime.currentControlReportId).toBe('r-B');
+
+    admitA();
+    await startingA;
+
+    expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    expect(sessionB.sendTurn).toHaveBeenCalledOnce();
+    expect(sessionB.shutdown).not.toHaveBeenCalled();
+    expect(runtime.currentControlReportId).toBe('r-B');
+    expect(getControlState(runtime).controlSession).toBe(sessionB);
     expect(getTimeout(runtime)).not.toBeNull();
   });
 
@@ -453,6 +540,21 @@ describe('control session hard timeout', () => {
     expect(state.chatQueues.has('control@heal.internal')).toBe(false);
     expect(runtime.getControlQueue()).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains the control slot when startup cleanup cannot prove termination', async () => {
+    mockSession.spawnSession.mockRejectedValueOnce(new Error('spawn failed'));
+    mockSession.shutdown.mockRejectedValueOnce(new Error('cleanup unproven'));
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger());
+    await runtime.start();
+    await runtime.handleControlTurn('r-CLEANUP-UNPROVEN', JSON.stringify({ reportId: 'r-CLEANUP-UNPROVEN' }));
+
+    const state = getControlState(runtime);
+    expect(runtime.currentControlReportId).toBe('r-CLEANUP-UNPROVEN');
+    expect(state.controlSession).toBe(mockSession);
+    expect(state.chatSessions.has('control@heal.internal')).toBe(true);
+    expect(state.chatQueues.has('control@heal.internal')).toBe(true);
   });
 
   // QR-094: the control OperationTracker is wired alongside the session/queue.

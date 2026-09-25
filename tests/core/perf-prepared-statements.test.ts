@@ -71,9 +71,31 @@ describe('prepared statement caching', () => {
     // ForFreshLifecycle — the bounded content-free admission/quarantine
     // statements that keep unprovable resume identities resumable while
     // health stays green. Merge union with main's +5 (#2560) on the rebased tree (136); verified by running this suite.)
-    // (+1 vs 137: the corroboration-aware delivery ambiguity health aggregate
+    // (+1 vs 136, #2155: getNewestInboundSeqForConversation — the operator
+    // promotion workflow's read-only newer-activity probe.)
+    // (+1 vs 137, #3374 ask 2: selectInboundReclaimState — the finalizer's
+    // sweep-owned-terminal recognition probe.)
+    // (+10 vs 138, #3295 S2: DeferredTurnStore is now constructed by the
+    // engine — its ten fenced obligation statements (enqueue, getBySource,
+    // claim/requeue/commit/terminalize family, expiry, listings) prepare
+    // once here.)
+    // (+4 vs 148, continuity-consumer (migration 64): the continuity-candidate
+    // consumed_at reconciliation statements — selectUnconsumedContinuityCandidates,
+    // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
+    // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
+    // for reconcileContinuityCandidates() reuse.)
+    // (+1 vs 152, #3523 layer 3: resumableCheckpointForConversation — the
+    // same-namespace RESUMABLE checkpoint existence probe that distinguishes a
+    // real row/checkpoint divergence from a clean cross-namespace no-op on close —
+    // prepared once in the constructor and reused per close.)
+    // (+1 vs 153, document admission: getTurnRecoveryAdmissionStateForScope — the
+    // three-state scope probe that separates a scope merely awaiting a completed
+    // answer's delivery echo from one truly blocked by outstanding recovery. It
+    // shares its FROM/WHERE text with hasOutstandingTurnRecoveryForScope, which
+    // stays a distinct statement, so the store prepares one more, not two.)
+    // (+1 vs 154: the corroboration-aware delivery ambiguity health aggregate
     // is prepared once and reused with the rest of the durability statements.)
-    expect(prepareSpy).toHaveBeenCalledTimes(138);
+    expect(prepareSpy).toHaveBeenCalledTimes(155);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

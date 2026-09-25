@@ -1,0 +1,25 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-fixture-0004",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini8/ml-bot",
+    "binding": { "authority": "alias_map", "confidence": "mapped" },
+    "raw": { "host_label": "Mini8", "instance_label": "ml-bot" }
+  },
+  "claim_id": "auth_bond.status",
+  "adapter_id": "auth-health",
+  "outcome": "inconclusive",
+  "unobserved_reason": "source_unavailable",
+  "projection": { "scope": "public", "authorization": "no_token" },
+  "times": { "observed_at": "2026-08-20T22:03:00Z", "source_at": "2026-08-20T21:58:00Z" },
+  "authority": { "tier": "authenticated_diagnostic", "confidence": "ambiguous" },
+  "legacy": {
+    "surface": "health_poller_classification",
+    "raw_value": "degraded|confirmed",
+    "raw_detail": "reason=health_body_degraded",
+    "lossy": true
+  },
+  "limitations": ["projected from a legacy poller verdict emitted on a PUBLIC body; demoted to inconclusive per min_projection"]
+}

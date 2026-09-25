@@ -12,9 +12,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   appendPrivateJsonLineSync,
+  appendPrivateSerializedJsonLineSync,
   assertPrivateDirectorySync,
   assertWritablePrivateFileSync,
   deletePrivateFileSync,
@@ -120,12 +121,17 @@ describe('writePrivateFileSync', () => {
     expect(() => writePrivateFileSync(target, '{"x":1}')).toThrow(/non-regular path/);
   });
 
-  it('overwrites a pre-existing regular file and preserves mode 0600', () => {
+  // #3551: the permissive fixtures below set their mode explicitly, so each case holds under any umask.
+  it.each(['077', '022'])('overwrites a pre-existing regular file and preserves mode 0600 (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     const target = join(dir, 'secret.json');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'old', { mode: 0o644 });
+    chmodSync(target, 0o644);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
 
     writePrivateFileSync(target, 'new');
 
@@ -213,6 +219,18 @@ describe('appendPrivateJsonLineSync', () => {
     ]);
   });
 
+  it('appends a pre-serialized line only when it is exactly one newline-terminated record', () => {
+    const root = makeTmp();
+    const target = join(root, 'priv', 'events.ndjson');
+
+    appendPrivateSerializedJsonLineSync(target, '{"event":"one"}\n');
+    expect(() => appendPrivateSerializedJsonLineSync(target, '{"event":"two"}')).toThrow(/exactly one record/);
+    expect(() => appendPrivateSerializedJsonLineSync(target, '{"a":1}\n{"b":2}\n')).toThrow(/exactly one record/);
+
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    expect(readFileSync(target, 'utf-8')).toBe('{"event":"one"}\n');
+  });
+
   it('refuses to append through a symlinked event file', () => {
     const root = makeTmp();
     const dir = join(root, 'priv');
@@ -224,6 +242,49 @@ describe('appendPrivateJsonLineSync', () => {
 
     expect(() => appendPrivateJsonLineSync(target, { event: 'blocked' })).toThrow(/symlink/);
     expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
+  });
+
+  it('fsyncs the parent directory on first creation but not on a later append', async () => {
+    // Durability: on create, the file fsync flushes the data, but the directory
+    // entry linking the filename to the inode is separate metadata — a crash
+    // between the two can leave a named-but-unlinked inode and lose the whole
+    // forensic file. fsyncDirectory opens the directory path and fsyncs its
+    // descriptor. A plain append to an existing file does not touch the
+    // directory entry, so that extra work must be skipped there. Falsifier:
+    // deleting `if (willCreate) fsyncDirectory(dir)` makes the create assertion
+    // fail (0 dir opens).
+    const root = makeTmp();
+    const dir = join(root, 'priv');
+    const target = join(dir, 'events.ndjson');
+
+    const dirOpens: string[] = [];
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        openSync: vi.fn((path: string, ...rest: unknown[]) => {
+          if (path === dir) dirOpens.push(path);
+          return (actual.openSync as (...a: unknown[]) => number)(path, ...rest);
+        }),
+      };
+    });
+    const { appendPrivateJsonLineSync: appendMocked } = await import('../../src/lib/private-fs.ts');
+
+    appendMocked(target, { event: 'create', count: 1 });
+    expect(dirOpens.length).toBeGreaterThanOrEqual(1); // parent dir fsynced on create
+
+    dirOpens.length = 0;
+    appendMocked(target, { event: 'extend', count: 2 });
+    expect(dirOpens.length).toBe(0); // no dir fsync on a plain append
+
+    // Regression: both lines present, file stays 0600.
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(target, 'utf-8').trimEnd().split('\n').map((line) => JSON.parse(line));
+    expect(lines).toEqual([
+      { event: 'create', count: 1 },
+      { event: 'extend', count: 2 },
+    ]);
   });
 });
 
@@ -425,12 +486,16 @@ describe('writePrivateJsonMarkerSync', () => {
     expect(JSON.parse(raw)).toEqual(value);
   });
 
-  it('overwrites an existing regular marker file', () => {
+  it.each(['077', '022'])('overwrites an existing regular marker file (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const markerPath = join(dir, 'state.marker');
     writeFileSync(markerPath, 'old', { mode: 0o644 });
+    chmodSync(markerPath, 0o644);
+    expect(statSync(markerPath).mode & 0o777).toBe(0o644);
 
     writePrivateJsonMarkerSync(markerPath, { ok: true });
 
@@ -686,12 +751,16 @@ describe('atomic private-file primitives', () => {
     expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/maximum size/);
   });
 
-  it('rejects a non-private file read', () => {
+  it.each(['077', '022'])('rejects a non-private file read (umask %s)', (umask) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const root = makeTmp();
     const dir = join(root, 'priv');
     const target = join(dir, 'public.key');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'credential', { mode: 0o644 });
+    chmodSync(target, 0o644);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
 
     expect(() => readPrivateFileSync(target, { label: 'credential', maxBytes: 32 })).toThrow(/non-private permissions/);
   });

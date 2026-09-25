@@ -5,9 +5,18 @@ const alertFns = vi.hoisted(() => ({
   clearAlertSource: vi.fn(() => true),
 }));
 
+const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<typeof vi.fn>> }));
+
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(logger);
+  return { createChildLogger };
+});
+
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: alertFns.clearAlertSource,
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
@@ -49,7 +58,25 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
+
+// Two code paths now defer on setTimeout: the retry backoff in fetchModelIds and
+// the startup delay in startModelCurrencyMonitor. Fire those callbacks inline so
+// tests exercise the logic without waiting out the real delays.
+function runTimersInline(): void {
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((cb: () => void) => {
+    cb();
+    return { unref: () => {} } as unknown as NodeJS.Timeout;
+  }) as unknown as typeof globalThis.setTimeout);
+}
+
+// Every child logger shares one mock, so other modules' warnings land on it too
+// (the API-key resolver warns when its keyring lookup falls back to the env var).
+// Degradation assertions read only this module's "models API …" warnings.
+function modelsApiWarnings(): unknown[][] {
+  return logger.warn.mock.calls.filter(([, msg]) => typeof msg === 'string' && msg.startsWith('models API '));
+}
 
 describe('fetchLiveModelIds', () => {
   it('skips vendors with no API key (no network calls)', async () => {
@@ -74,7 +101,9 @@ describe('fetchLiveModelIds', () => {
   it('keeps ids empty but records degraded status on network errors', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline sk-ant-secretvalue')));
+    runTimersInline();
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('offline sk-ant-secretvalue'));
+    vi.stubGlobal('fetch', fetchSpy);
     expect(await fetchLiveModelIds()).toEqual([]);
     const result = await fetchLiveModelIdsWithStatus();
     expect(result.ids).toEqual([]);
@@ -84,6 +113,7 @@ describe('fetchLiveModelIds', () => {
       fetchedCount: 0,
       degradedVendors: [{ vendor: 'anthropic', reason: 'offline [redacted-key]' }],
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(2); // one attempt for each explicit point-of-use call
   });
 
   it('keeps ids empty but records degraded status on non-OK responses', async () => {
@@ -96,6 +126,143 @@ describe('fetchLiveModelIds', () => {
       mode: 'degraded',
       degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
     });
+  });
+
+  // A single transient timeout used to degrade the scan and page immediately —
+  // the alert this retry exists to stop (bead-model-currency-scan-startup-timeout).
+  it('retries a transient failure and succeeds without degrading the scan', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.ids).toEqual(['claude-opus-4-9']);
+    expect(result.liveScan).toMatchObject({ mode: 'live', degradedVendors: [] });
+    expect(modelsApiWarnings()).toEqual([]);
+  });
+
+  it('degrades only after the retries are exhausted', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('The operation was aborted due to timeout'));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // initial attempt + 2 retries
+    expect(result.liveScan).toMatchObject({ mode: 'degraded' });
+    expect(modelsApiWarnings()).toEqual([[
+      { vendor: 'anthropic', err: 'The operation was aborted due to timeout' },
+      'models API unreachable; retries exhausted or disabled; using static catalog',
+    ]]);
+  });
+
+  it('does not retry a non-retryable auth failure', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // 401 is a config fault; retrying cannot fix it
+    expect(result.liveScan).toMatchObject({ mode: 'degraded' });
+  });
+
+  it('retries a 429 rate-limit response', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.liveScan).toMatchObject({ mode: 'live' });
+  });
+
+  it('retries a 408 request-timeout response', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 408 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.liveScan).toMatchObject({ mode: 'live' });
+  });
+
+  // A body that does not parse, or parses to the wrong shape, fails the same way
+  // on every attempt; retrying it only adds 10 s of backoff and two requests.
+  it('does not retry a body that is not valid JSON', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected token < in JSON at position 0'); },
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.liveScan).toMatchObject({
+      mode: 'degraded',
+      degradedVendors: [{ vendor: 'anthropic', reason: 'Unexpected token < in JSON at position 0' }],
+    });
+  });
+
+  it('does not retry a parsed body whose data is not a list', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { id: 'claude-opus-4-9' } }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.liveScan).toMatchObject({ mode: 'degraded', degradedVendors: [{ vendor: 'anthropic' }] });
+  });
+
+  it('retries when reading the body times out', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    runTimersInline();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-9' }] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await fetchLiveModelIdsWithStatus({ retryTransient: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.ids).toEqual(['claude-opus-4-9']);
+    expect(result.liveScan).toMatchObject({ mode: 'live' });
+  });
+});
+
+describe('startModelCurrencyMonitor startup deferral', () => {
+  it('does not scan during the cold-start window', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      .mockReturnValue({ unref: () => {} } as unknown as NodeJS.Timeout);
+
+    startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+    // The scan is armed behind a startup delay, not fired inline at boot.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
   });
 });
 
@@ -142,6 +309,7 @@ describe('checkModelCurrency', () => {
 
   it('returns static advisories with degraded live-scan metadata when vendor discovery fails', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    runTimersInline();
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     const result = await checkModelCurrencyStatus({ conversation: 'claude-opus-4-6' });
     expect(result.advisories[0]).toMatchObject({
@@ -350,6 +518,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', '');
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockReturnValue(fakeIntervalHandle());
+    runTimersInline();
     startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
     await flushImmediateRun();
     expect(getModelAdvisories()).toMatchObject({
@@ -372,6 +541,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
     const fetchSpy = vi.fn().mockRejectedValue(new Error('boom from fetch'));
     vi.stubGlobal('fetch', fetchSpy);
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockReturnValue(fakeIntervalHandle());
+    runTimersInline();
     startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
     await flushImmediateRun();
     const snapshot = getModelAdvisories();
@@ -382,6 +552,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
       ],
       liveScan: { mode: 'degraded' },
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // monitor policy: initial attempt + two retries
     expect(setIntervalSpy).toHaveBeenCalled();
     setIntervalSpy.mockRestore();
   });
@@ -399,6 +570,7 @@ describe('model-advisor.ts uncovered-branch coverage', () => {
     const setIntervalSpy = vi
       .spyOn(globalThis, 'setInterval')
       .mockImplementation(() => fakeIntervalHandle());
+    runTimersInline();
     startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-6' });
     await flushImmediateRun();
     // run()'s catch block fired: no throw escaped the void run(), and the throw
@@ -448,6 +620,7 @@ describe('resolveModelRole (symbolic model resolution)', () => {
   it('resolves to the static catalog current when the vendor live-scan is degraded (never throws)', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
+    runTimersInline();
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     expect(await resolveModelRole('openai:gpt:latest-stable')).toBe('gpt-5.4');
   });
@@ -552,14 +725,14 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  /** Read the marker file as a Set of present-keys (empty if file absent). */
+  /**
+   * Read present marker keys through the store's own API. The store owns its
+   * on-disk layout (the legacy single-file read-modify-write was replaced by
+   * per-key files); asserting through loadRecoveryMarkers keeps these tests
+   * pinned to BEHAVIOR (marker present/absent) rather than to a storage shape.
+   */
   function readMarkers(): Set<string> {
-    try {
-      const raw = JSON.parse(readFileSync(join(tmpRoot, 'recovery-authority.json'), 'utf-8'));
-      return new Set(Object.keys(raw).filter((k) => raw[k] === true));
-    } catch {
-      return new Set();
-    }
+    return loadRecoveryMarkers();
   }
 
   // T1 — model-currency restart-recovery (RED on main: zero clears emitted).
@@ -662,6 +835,8 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     // Prior process left a marker; the configured model is current, so the
     // first check result is clean (positive proof) and the reconcile clears.
     setRecoveryMarker('model-currency:test-bot');
+    // The first run() is armed behind the startup delay; fire it inline.
+    runTimersInline();
     startModelCurrencyMonitor('test-bot', { conversation: 'claude-opus-4-8' });
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
     // The clean path through notifyModelAdvisories cannot emit this clear

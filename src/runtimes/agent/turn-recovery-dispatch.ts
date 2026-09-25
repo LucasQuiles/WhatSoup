@@ -20,6 +20,8 @@ import type {
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
 import type { SessionManager } from './session.ts';
 import type { QueuedTurn } from './turn-queue.ts';
+import { classifyTurnLane } from '../../core/observability/lifecycle-emission.ts';
+import type { SessionContext } from '../../mcp/types.ts';
 import {
   TurnRecoverySupervisor,
   type TurnRecoveryDispatchTarget,
@@ -28,6 +30,12 @@ import {
 } from './turn-recovery-supervisor.ts';
 
 const log = createChildLogger('turn-recovery-dispatch');
+
+function recoveryPurpose(sourceMessageId: string): SessionContext['purpose'] {
+  return classifyTurnLane(sourceMessageId).lane === 'L-SCH'
+    ? 'scheduled-agent-job'
+    : undefined;
+}
 
 export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly instanceName: string;
@@ -41,6 +49,14 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
   readonly recoveryManagerId: string;
   readonly nextRecoveryGeneration: () => number;
   readonly resolveDispatchTarget: (job: TurnRecoveryJobRow) => TurnRecoveryDispatchTarget | null;
+  /**
+   * PR2 deploy gate for automatic catch-up reconciliation, forwarded
+   * verbatim to the supervisor. AgentRuntime passes it from the per-instance
+   * `agentOptions.turnRecoveryCatchupReconcile` config block (default OFF;
+   * see src/core/turn-recovery-catchup-config.ts and
+   * docs/turn-recovery-continuity-reconciler.md). Absent/null = off.
+   */
+  readonly catchupReconcile?: { readonly groupLimit?: number } | null;
 }): TurnRecoverySupervisor {
   // #2170: all three scopes are dispatchable — per_chat through the per-chat
   // replay pipeline, shared/singleton through the global-turn pipeline
@@ -59,6 +75,7 @@ export function createTurnRecoverySupervisorForRuntime(deps: {
     }),
     supportedScopes: new Set(['per_chat', 'shared', 'singleton']),
     resolveDispatchTarget: deps.resolveDispatchTarget,
+    catchupReconcile: deps.catchupReconcile ?? null,
   });
 }
 
@@ -213,6 +230,7 @@ export async function dispatchTurnRecoveryReplayForJob(
     isGroup: source.isGroup,
     groupName: source.groupName,
     contentType: 'text',
+    purpose: recoveryPurpose(job.source_message_id),
     runtimeContext,
     inboundSeq: job.source_inbound_seq,
   };
@@ -312,6 +330,7 @@ async function dispatchGlobalScopeReplay(
     isGroup: source.isGroup,
     groupName: source.groupName,
     contentType: 'text',
+    purpose: recoveryPurpose(job.source_message_id),
     runtimeContext,
     inboundSeq: job.source_inbound_seq,
   };
@@ -356,6 +375,10 @@ export interface TurnRecoveryHealthDetails {
   readonly turnRecoveryBlockingOutstanding: number;
   readonly turnRecoveryRetainedTerminal: number;
   readonly turnRecoveryCorroboratedRetained: number;
+  /** blockedUnsafe split — see TurnRecoverySupervisorCounts.blockedUnsafeSynthetic. */
+  readonly turnRecoveryBlockedUnsafeSynthetic: number;
+  readonly turnRecoveryBlockedUnsafeSuperseded: number;
+  readonly turnRecoveryBlockedUnsafeStranded: number;
 }
 
 /** Pure projection of durability's supervisor counts (arch.file-size extraction). */
@@ -368,6 +391,7 @@ export function getTurnRecoveryHealthDetails(
       outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
       blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
       orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+      blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     };
   return {
     turnRecoveryOutstanding: counts.outstanding,
@@ -385,5 +409,8 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryRetainedTerminal: counts.retainedTerminal
       ?? counts.blockedUnsafe + counts.exhausted,
     turnRecoveryCorroboratedRetained: counts.corroboratedRetained ?? 0,
+    turnRecoveryBlockedUnsafeSynthetic: counts.blockedUnsafeSynthetic ?? 0,
+    turnRecoveryBlockedUnsafeSuperseded: counts.blockedUnsafeSuperseded ?? 0,
+    turnRecoveryBlockedUnsafeStranded: counts.blockedUnsafeStranded ?? 0,
   };
 }

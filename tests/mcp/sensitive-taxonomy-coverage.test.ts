@@ -110,7 +110,11 @@ const REVIEWED_GRANDFATHERED: string[] = [
   'list_trigger_runs',           // reviewed 2026-08-14 (#2566): read-only redacted projection — bounded fields only, no content/prose/transport ids cross; filter required
   'list_fact_export_queue',      // reviewed 2026-08-14 (#2567): read-only redacted queue evidence — counts/ages/attempts + opaque fact_uid rows; fact text, payload, identities, legacy fact_id, lease owners never cross
   'list_triggers',               // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
-  'logout',                      // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
+  // 'logout' — REVIEWED 2026-08-17 and flagged sensitive: true at the
+  // declaration (src/mcp/tools/advanced.ts). It is the only tool that
+  // intentionally requests removal of this instance's companion device, and
+  // recovery from it requires a physical relink. Removed from this allowlist
+  // deliberately: the R1 gate now enforces it. See tests/mcp/logout-gate.test.ts.
   'manage_labels',               // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'mark_messages_read',          // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)
   'mute_chat',                   // grandfathered 2026-08-04 pending per-tool review (#2773 P2 residual)

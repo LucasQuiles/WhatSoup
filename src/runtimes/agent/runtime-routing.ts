@@ -393,7 +393,18 @@ export class RuntimeRoutingCoordinator {
       // true for a full window after the user re-asserts it. Sticky rows
       // (expiresAt null) are never demoted to ephemeral by a repeat.
       if (existing.expiresAt !== null) {
-        setPreference(this.host.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+        // A3 (#2121 follow-up): the spread carries the captured
+        // `keepReceiptMessageId`, so this refresh used to preserve a receipt
+        // id whose message no longer describes a live invitation. Cleared
+        // here for the same reason as the model-level refresh site in
+        // model-pin.ts, which keeps setPreference's "a pin write always
+        // supersedes the previous receipt" true as written.
+        setPreference(this.host.db, {
+          ...existing,
+          updatedAt: now,
+          expiresAt: now + PREFERENCE_TTL_MS,
+          keepReceiptMessageId: null,
+        });
         return 'refreshed';
       }
       return 'sticky_kept';

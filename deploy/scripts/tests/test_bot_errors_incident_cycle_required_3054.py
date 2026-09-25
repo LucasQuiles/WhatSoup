@@ -69,6 +69,13 @@ def _make_dirs(paths: dict[str, Path]) -> None:
         "locks",
     ):
         paths[key].mkdir(parents=True, exist_ok=True)
+    # Production parity: the controller-state anchor's parent must not carry
+    # group/other-write bits — controller_state rejects ``0o022`` as
+    # ``unsafe_file`` at session open (returning recovery_required /
+    # capability=None). systemd ``StateDirectory`` gives production 0700;
+    # under a lax umask ``mkdir`` would leave the root group-writable and the
+    # adoption path would fault before the guard is ever exercised.
+    os.chmod(paths["incident_state"].parent, 0o700)
 
 
 def _adopt(root: Path) -> dict[str, Path]:

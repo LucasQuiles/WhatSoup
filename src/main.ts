@@ -15,6 +15,7 @@ import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
+import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from './lib/time-units.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
@@ -33,6 +34,7 @@ import { startHealthServer } from './core/health.ts';
 import { createStartupNotificationJournalPort, startupNotifyPath } from './core/startup-notify.ts';
 import { StartupNotificationController } from './core/startup-notification-controller.ts';
 import { openDatabaseForStartup } from './core/database-compatibility-health.ts';
+import { clearInitialDatabaseCreateMarker } from './core/initial-database-marker.ts';
 import {
   closeDatabaseCompatibilityHealthServer,
   waitForDatabaseCompatibilityDrain,
@@ -75,12 +77,13 @@ import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
-import { shutdownExitCode } from './main-shutdown-policy.ts';
+import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
+import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
 import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 import { createServiceManager } from './fleet/platform.ts';
-import { xdgDir } from './fleet/paths.ts';
+import { dataRoot, xdgDir } from './fleet/paths.ts';
 
 // The restart-safety probe must link the complete static import graph without
 // executing this module's database, network, transport, health, or timer body.
@@ -133,8 +136,13 @@ function acquireLock(): void {
     if (err.reason === 'active') {
       log.fatal({ pid: err.existingPid, path: err.lockPath }, 'another instance is already running');
     } else {
+      // Print the reclaim-decision inputs: a fail-closed `stale` under a
+      // supervisor is diagnosable ONLY from these (which boot id was missing/
+      // mismatched, whether the opt-in was armed, whether a reclaim already
+      // ran). The 2026-08-16 q crash-loop lacked them and could only be
+      // resolved by manually deleting the lock, unexplained.
       log.fatal(
-        { pid: err.existingPid, path: err.lockPath, reason: err.reason },
+        { pid: err.existingPid, path: err.lockPath, reason: err.reason, decision: err.decision ?? null },
         'lock file requires manual removal before startup',
       );
     }
@@ -142,7 +150,40 @@ function acquireLock(): void {
   }
 }
 
+// --- Account-scope coordination lease (q-canary lane, T4) ---
+//
+// When an account scope is configured, the runtime owns the fenced scope
+// lease for its process lifetime: a pairing coordinator racing this startup
+// acquires the same lease and exactly one wins. Without a configured scope
+// the lease machinery is inert (legacy instances). The heartbeat renewal is
+// best-effort; a live verified owner is never evicted on a stale heartbeat.
+//
+// Acquisition happens after the database compatibility gate: the lease only
+// needs to precede auth/socket activity, and an incompatible database must
+// fail fast without claiming the account scope. Only the state and release
+// path live here — release must be safe from the gate's drain path, before
+// acquisition is ever reachable.
+
+let scopeLease: import('./transport/auth-custody-contracts.ts').CoordinationLeaseV1 | null = null;
+let scopeLeaseRenewTimer: NodeJS.Timeout | null = null;
+const SCOPE_LEASE_TTL_MS = 5 * 60_000;
+
+function releaseAccountScopeLease(): void {
+  if (scopeLeaseRenewTimer !== null) {
+    clearInterval(scopeLeaseRenewTimer);
+    scopeLeaseRenewTimer = null;
+  }
+  if (scopeLease === null || config.accountScopeId === undefined) return;
+  releaseCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId: config.accountScopeId,
+    lease: scopeLease,
+  });
+  scopeLease = null;
+}
+
 function releaseLock(): void {
+  releaseAccountScopeLease();
   if (!lockHandle) return;
   const released = releaseProcessLock(lockHandle);
   if (!released) {
@@ -243,6 +284,64 @@ if (databaseStartup.mode === 'drained') {
   }
   process.exit(shutdownExitCode(drainSignal));
 }
+clearInitialDatabaseCreateMarker(dataRoot(config.botName), config.botName);
+
+// Defined below the compatibility gate on purpose: the ordering contract in
+// tests/core/database-compatibility-health.test.ts pins that no timer starts
+// before the gate, and the renewal interval here is the first one.
+function acquireAccountScopeLease(): void {
+  if (config.accountScopeId === undefined) return;
+  const scopeId = config.accountScopeId;
+  const probes = defaultLeaseProbes();
+  const result = acquireCoordinationLease({
+    stateRoot: config.stateRoot,
+    scopeId,
+    operationId: `runtime-start-${probes.pid}-${probes.nowMs()}`,
+    mode: 'runtime_start',
+    ttlMs: SCOPE_LEASE_TTL_MS,
+    probes,
+  });
+  if (!result.ok) {
+    log.fatal(
+      { refusal: result.refusal, scopeId },
+      'account-scope lease unavailable at startup; another owner (runtime or pairing) holds this scope',
+    );
+    process.exit(1);
+  }
+  scopeLease = result.lease;
+  if (result.takeover !== null) {
+    log.warn({ takeover: result.takeover }, 'account-scope lease reclaimed at startup');
+  }
+  scopeLeaseRenewTimer = setInterval(() => {
+    if (scopeLease === null) return;
+    const renewed = renewCoordinationLease({
+      stateRoot: config.stateRoot,
+      scopeId,
+      lease: scopeLease,
+      ttlMs: SCOPE_LEASE_TTL_MS,
+      probes: defaultLeaseProbes(),
+    });
+    if (renewed.ok) {
+      scopeLease = renewed.lease;
+    } else if (renewed.refusal === 'fencing_token_mismatch' || renewed.refusal === 'lease_missing') {
+      // Another actor provably owns (or released) the scope. A fence that
+      // only logs does not fence: continuing to run means a dual writer on
+      // the account's auth tree. Shut down through the normal signal path so
+      // locks release cleanly; our stale lease token cannot clobber the
+      // successor's on release (release compares fencing tokens).
+      log.fatal({ refusal: renewed.refusal }, 'account-scope lease lost to a fenced successor; shutting down');
+      process.kill(process.pid, 'SIGTERM');
+    } else {
+      // A corrupt lease file proves nothing about ownership either way; keep
+      // running and keep reporting rather than tearing down mid-flight work.
+      log.error({ refusal: renewed.refusal }, 'account-scope lease renewal failed');
+    }
+  }, Math.floor(SCOPE_LEASE_TTL_MS / 3));
+  scopeLeaseRenewTimer.unref();
+  log.info({ scopeId, fencingToken: scopeLease.fencingToken }, 'account-scope lease acquired');
+}
+acquireAccountScopeLease();
+
 const db = databaseStartup.db;
 const memoryConsolidationRunStore = new ConsolidationRunStore(db);
 try {
@@ -387,6 +486,7 @@ if (instanceType === 'agent') {
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
     autoCompactInputTokens?: number;
+    turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
@@ -413,9 +513,14 @@ if (instanceType === 'agent') {
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
+    turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
+    // task-21: ratified account identity (service.expectedAccountDigest);
+    // validated at load, so a malformed value throws here rather than starting
+    // with a half-valid expectation.
+    expectedAccountDigest: extractExpectedAccountDigest(instanceConfig),
   });
   // Wire the capability-grant manager over this agent's .claude/settings.json.
   // Groups are config-driven (empty by default → /grant reports "unknown group").
@@ -661,11 +766,17 @@ connectionManager.on('historyMessages', (messages) => {
     return;
   }
   const stats = processHistoryBatch(db, messages as HistoryInput[], log);
-  // Deliberately silent for all-noop batches (row already existed at a real
-  // content_type): re-syncs on existing history would otherwise spam logs.
-  // If you need visibility into empty-batch cadence, move to log.debug.
-  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped) {
+  // All-noop batches (every row already existed at a real content_type) stay
+  // out of info: re-syncs of existing history would otherwise spam logs. This
+  // log line alone never proves recovery; see docs/runbook.md "Verify history
+  // backfill after a relink" for the per-message check.
+  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped || stats.failed) {
     log.info(stats, 'historyMessages: batch processed');
+  } else {
+    log.debug(stats, 'historyMessages: batch already stored');
+  }
+  if (stats.failed) {
+    log.warn({ failed: stats.failed }, 'historyMessages: some history messages failed to store');
   }
 });
 
@@ -1028,6 +1139,25 @@ const stuckInboundInterval = setInterval(() => {
   } catch (err) { log.error({ err }, 'stuck-inbound sweep failed'); }
 }, 15 * MS_PER_MINUTE);
 
+// 13c. Continuity-candidate reconciler — settle the consumed_at lifecycle for
+// dropped admitted turns (reply guarantee armed, NO terminal outbound; owner
+// messages have died this way). The out-of-process observer
+// (deploy/scripts/reply-guarantee-observer.py) owns the operator alert; this
+// pass only stamps marks whose drop was already resolved by another path so the
+// reader stops re-scanning them. Unresolved drops are left surfaced — never
+// auto-consumed — because re-delivery is deferred to the recovery follow-up.
+// Zero delivery blast radius. Runs once at startup then on the same slow cadence
+// as the stuck-inbound sweep; failure-isolated so a sweep error never breaks the
+// process.
+try {
+  durability.reconcileContinuityCandidates();
+} catch (err) { log.error({ err }, 'startup continuity-candidate reconcile failed'); }
+const continuityConsumerInterval = setInterval(() => {
+  try {
+    durability.reconcileContinuityCandidates();
+  } catch (err) { log.error({ err }, 'continuity-candidate reconcile failed'); }
+}, 15 * MS_PER_MINUTE);
+
 // 14. Degradation signal check — detect persistent decryption failures (Type 2)
 // Only run on instances that have Q as a control peer (i.e., heal targets like Loops).
 // Q itself has controlPeers but no 'q' entry — running the timer on Q would accumulate
@@ -1204,6 +1334,11 @@ async function start(): Promise<void> {
       ? runtime.popStartupNotificationEvent?.() ?? null
       : null,
     intentionalRestartReceipt: selfRestartBackOnline,
+    // #3570: each notice goes to its own chat, not the admin, so it is not
+    // gated on an admin phone or the intro.
+    chatNotices: instanceType === 'agent'
+      ? runtime.popStartupChatNotifications?.() ?? []
+      : [],
   });
 }
 
@@ -1219,31 +1354,46 @@ async function shutdown(signal: string): Promise<void> {
     process.exit(1);
   }, 10_000);
 
+  // Default to INCOMPLETE so an unexpected throw out of the sequence itself can
+  // never be reported as a clean exit.
+  let outcome: ShutdownSequenceOutcome = { complete: false, failedPhase: null, cause: null, blockers: null };
   try {
-    clearTimeout(metricsBackfillTimeout);
-    clearInterval(metricsInterval);
-    clearInterval(retentionInterval);
-    mediaRetentionTimer.stop();
-    processTmpRetentionTimer.stop();
-    databaseRetentionTimer.stop();
-    await memoryConsolidationScheduler?.stop();
-    clearInterval(echoTimeoutInterval);
-    clearInterval(stuckInboundInterval);
-    clearInterval(lidReconcileInterval);
-    if (degradationInterval) clearInterval(degradationInterval);
-    startupNotificationController?.stop();
-    messageScheduler.stop();
-    triggerPoller.stop();
-    healthServer.close();
-    // Flush runtime queue before closing transport so queued messages can be delivered
-    // runtime.shutdown() stops enrichment poller internally
-    await runtime.shutdown();
-    connectionManager.shutdown();
-    log.info('shutdown complete');
-    // C5 restart-loop guard: a completed graceful shutdown clears the crash
-    // marker — the next boot will not count as crash-interrupted. No-op for
-    // runtimes without a guard journal (chat/passive instances).
-    markCleanExit(restartLoopGuardPath(config.stateRoot));
+    // Every phase is attempted even when an earlier one fails: a runtime-phase
+    // rejection (e.g. message handlers still pending at the drain deadline)
+    // must not skip the transport teardown or turn into exit 0 — the sequence
+    // records the failure, the clean-exit mark is withheld, and the exit code
+    // below goes nonzero. See runShutdownSequence for the receipt contract.
+    outcome = await runShutdownSequence({
+      // Each auxiliary stop is isolated by the sequence: one throwing stop
+      // skips none of the rest (round-3 finding 3).
+      auxiliaries: [
+        { name: 'metrics-backfill-timeout', stop: () => clearTimeout(metricsBackfillTimeout) },
+        { name: 'metrics-interval', stop: () => clearInterval(metricsInterval) },
+        { name: 'retention-interval', stop: () => clearInterval(retentionInterval) },
+        { name: 'media-retention-timer', stop: () => mediaRetentionTimer.stop() },
+        { name: 'process-tmp-retention-timer', stop: () => processTmpRetentionTimer.stop() },
+        { name: 'database-retention-timer', stop: () => databaseRetentionTimer.stop() },
+        { name: 'memory-consolidation-scheduler', stop: async () => { await memoryConsolidationScheduler?.stop(); } },
+        { name: 'echo-timeout-interval', stop: () => clearInterval(echoTimeoutInterval) },
+        { name: 'stuck-inbound-interval', stop: () => clearInterval(stuckInboundInterval) },
+        { name: 'continuity-consumer-interval', stop: () => clearInterval(continuityConsumerInterval) },
+        { name: 'lid-reconcile-interval', stop: () => clearInterval(lidReconcileInterval) },
+        { name: 'degradation-interval', stop: () => { if (degradationInterval) clearInterval(degradationInterval); } },
+        { name: 'startup-notification-controller', stop: () => startupNotificationController?.stop() },
+        { name: 'message-scheduler', stop: () => messageScheduler.stop() },
+        { name: 'trigger-poller', stop: () => triggerPoller.stop() },
+        { name: 'health-server', stop: () => { healthServer.close(); } },
+      ],
+      // Flush runtime queue before closing transport so queued messages can be delivered
+      // runtime.shutdown() stops enrichment poller internally
+      shutdownRuntime: () => runtime.shutdown(),
+      shutdownTransport: () => connectionManager.shutdown(),
+      // C5 restart-loop guard: a completed graceful shutdown clears the crash
+      // marker — the next boot will not count as crash-interrupted. No-op for
+      // runtimes without a guard journal (chat/passive instances).
+      markCleanExit: () => markCleanExit(restartLoopGuardPath(config.stateRoot)),
+      log,
+    });
   } catch (err) {
     log.error({ err }, 'error during shutdown');
   } finally {
@@ -1253,7 +1403,7 @@ async function shutdown(signal: string): Promise<void> {
     clearTimeout(timeout);
     // Flush pino-roll transport before exit (async — waits up to 2s)
     await flushLogger();
-    process.exit(shutdownExitCode(signal));
+    process.exit(shutdownExitCode(signal, outcome));
   }
 }
 

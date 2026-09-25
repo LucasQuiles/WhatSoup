@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { Database } from '../../../../src/core/database.ts';
 import type { Messenger } from '../../../../src/core/types.ts';
 import { Database as SqliteDatabase } from '../../../../src/core/database.ts';
-import { ToolRegistry } from '../../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../../helpers/resolved-tool-registry.ts';
 import { registerAllTools } from '../../../../src/mcp/register-all.ts';
 import { PresenceCache } from '../../../../src/transport/presence-cache.ts';
 import {

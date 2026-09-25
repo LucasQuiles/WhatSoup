@@ -133,6 +133,45 @@ describe('platform', () => {
         else process.env.WHATSOUP_NODE = origNode;
       }
     });
+
+    it('renders CLAUDE_CONFIG_DIR into EnvironmentVariables from typed render options', () => {
+      const plist = buildPlist('phbot', { claudeConfigDir: '/opt/claude-roots/phbot' });
+      expect(plist).toContain('<key>CLAUDE_CONFIG_DIR</key>');
+      expect(plist).toContain('<string>/opt/claude-roots/phbot</string>');
+    });
+
+    it('omits CLAUDE_CONFIG_DIR entirely when the option is not configured', () => {
+      expect(buildPlist('phbot')).not.toContain('CLAUDE_CONFIG_DIR');
+    });
+
+    it('prepends configured service PATH entries ahead of the ambient PATH, preserving order', () => {
+      const origPath = process.env.PATH;
+      process.env.PATH = '/usr/bin:/bin';
+      try {
+        const plist = buildPlist('phbot', {
+          pathPrepend: ['/opt/service-bin', '/opt/tools/bin'],
+        });
+        expect(plist).toContain('<string>/opt/service-bin:/opt/tools/bin:/usr/bin:/bin</string>');
+      } finally {
+        process.env.PATH = origPath;
+      }
+    });
+
+    it('XML-escapes render option values like every other interpolated plist value', () => {
+      const plist = buildPlist('phbot', {
+        claudeConfigDir: '/weird &<>/dir',
+        pathPrepend: ['/pre &<>/bin'],
+      });
+      expect(plist).toContain('/weird &amp;&lt;&gt;/dir');
+      expect(plist).toContain('/pre &amp;&lt;&gt;/bin');
+      expect(plist).not.toContain('&<>');
+    });
+
+    it('renders byte-identical output for absent, empty, and empty-list render options', () => {
+      const base = buildPlist('phbot');
+      expect(buildPlist('phbot', {})).toBe(base);
+      expect(buildPlist('phbot', { pathPrepend: [] })).toBe(base);
+    });
   });
 });
 

@@ -5,6 +5,7 @@
 // process and its watchdog timers.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -40,11 +41,14 @@ const { mockSession, mockQueue, callOrder } = vi.hoisted(() => {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
@@ -165,6 +169,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     call = vi.fn();
     getChatScopedToolNames = vi.fn(() => []);
     setSensitiveToolAuthorizer = vi.fn();
+    setCanonicalConversationKeyResolver = vi.fn();
     withModule = vi.fn((_name: string, fn: () => void) => fn());
   },
 }));
@@ -226,7 +231,8 @@ async function sendAndDrain(runtime: AgentRuntime, msg: IncomingMessage): Promis
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe('zombie session fix — sendTurnToSession', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.clearAllMocks();
     callOrder.length = 0;
     // Default: inactive session (triggers the spawn path)

@@ -74,7 +74,21 @@ export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
 // Runtime files that must be pinned but are not covered by the deploy/scripts python glob.
 export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'deploy/lib/runtime-path.sh',
+  // The qualification command reads these profiles directly. Keep both with its
+  // helper and command hash entries so profile drift cannot alter the observer.
+  'deploy/scripts/deployment-qualification-profile.json',
+  'deploy/scripts/health-deployment-qualification-profile.json',
   'src/lib/bot-errors-outbox.ts',
+  // Imported for value by bot-errors-outbox.ts at module scope, and TypeScript
+  // runs from source here, so these load in production exactly like the outbox
+  // itself. The bot-errors deployer ships all five; an entry it ships without a
+  // manifest hash is a hard exit-3 in resolve_managed_files, so requiring them
+  // keeps the two lists from drifting apart in either direction.
+  'src/lib/alert-evidence.ts',
+  'src/lib/private-fs.ts',
+  'src/lib/redaction-patterns.ts',
+  'src/lib/redaction-text.ts',
+  'src/lib/type-guards.ts',
   'src/lib/fault-taxonomy-registry.json',
   'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
   'deploy/scripts/bot-errors-release-proof-run.sh',

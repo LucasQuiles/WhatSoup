@@ -7,6 +7,25 @@ const OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const WHATSOUP_SSH_URL_PATTERN =
   /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)LucasQuiles\/WhatSoup(?:\.git)?$/;
+// The preserve mirror is the same account's archival remote (refs/preserve/* only).
+// It shares the SSH-push invariant but NOT candidate alignment: preserved content
+// is, by definition, not aligned with live main (that is what preservation is for).
+const PRESERVE_MIRROR_SSH_URL_PATTERN =
+  /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)LucasQuiles\/WhatSoup-preserve(?:\.git)?$/;
+
+export type PushRemoteClass = 'whatsoup' | 'preserve-mirror';
+
+export interface RemoteClassOptions {
+  cwd: string;
+  remoteName: string;
+  remoteUrl: string;
+  runGit?: GitProbe;
+}
+
+/** Cheap textual pre-check on the hook-supplied URL; never a verdict on its own. */
+export function isPreserveMirrorUrl(url: string): boolean {
+  return PRESERVE_MIRROR_SSH_URL_PATTERN.test(url);
+}
 
 export interface GitProbeResult {
   status: number | null;
@@ -245,19 +264,47 @@ function assertContainsMain(
   inconclusive(`candidate ancestry against live ${remoteName}/main`, result);
 }
 
-export function verifyAlignmentBefore(
-  options: AlignmentBeforeOptions,
-): AlignmentReceipt {
-  const runGit = options.runGit ?? defaultGitProbe;
+function resolveRemoteClass(
+  options: RemoteClassOptions,
+  runGit: GitProbe,
+): { remoteClass: PushRemoteClass; configuredUrl: string } {
   const configuredUrl = configuredRemoteUrl(options.cwd, options.remoteName, runGit);
-  if (!WHATSOUP_SSH_URL_PATTERN.test(configuredUrl)) {
+  const remoteClass: PushRemoteClass | null = WHATSOUP_SSH_URL_PATTERN.test(configuredUrl)
+    ? 'whatsoup'
+    : PRESERVE_MIRROR_SSH_URL_PATTERN.test(configuredUrl)
+      ? 'preserve-mirror'
+      : null;
+  if (remoteClass === null) {
     throw new PushAlignmentError(
-      'pre-push alignment: WhatSoup requires an SSH push URL for LucasQuiles/WhatSoup',
+      'pre-push alignment: WhatSoup requires an SSH push URL for LucasQuiles/WhatSoup (or its preserve mirror, LucasQuiles/WhatSoup-preserve)',
     );
   }
   if (options.remoteUrl === '' || options.remoteUrl !== configuredUrl) {
     throw new PushAlignmentError(
       'pre-push alignment: hook remote URL does not match the configured push URL',
+    );
+  }
+  return { remoteClass, configuredUrl };
+}
+
+/**
+ * Prove which governed remote a push targets: the configured push URL (not the
+ * hook argument alone) must be an SSH URL for LucasQuiles/WhatSoup or its
+ * preserve mirror, and the hook-supplied URL must equal it. Anything else refuses.
+ */
+export function classifyPushRemote(options: RemoteClassOptions): PushRemoteClass {
+  const runGit = options.runGit ?? defaultGitProbe;
+  return resolveRemoteClass(options, runGit).remoteClass;
+}
+
+export function verifyAlignmentBefore(
+  options: AlignmentBeforeOptions,
+): AlignmentReceipt {
+  const runGit = options.runGit ?? defaultGitProbe;
+  const { remoteClass, configuredUrl } = resolveRemoteClass(options, runGit);
+  if (remoteClass !== 'whatsoup') {
+    throw new PushAlignmentError(
+      'pre-push alignment: candidate alignment applies only to LucasQuiles/WhatSoup; preservation pushes take the preserve-mirror path (refs/preserve/* only)',
     );
   }
   const headOid = readHead(options.cwd, runGit);

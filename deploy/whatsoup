@@ -14,6 +14,17 @@ INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 # keyring/file resolution below or leak into startup probes. The launcher's own
 # post-scrub resolution (chat API keys, instance health token) is intentional
 # and remains the single supplier of these variables to the child process.
+#
+# Handoff-distiller exception: the distiller calls its cheap summarizer model
+# out-of-band from the WhatSoup process and resolves its key from the
+# provider's conventional env var (src/runtimes/agent/handoff-distill-model.ts).
+# Those vars arrive via the service EnvironmentFile and would die in this scrub,
+# so capture the three distill-capable provider keys into private variables
+# first; the agent branch below re-exports exactly the one the configured
+# distill model needs, only when the distiller is enabled.
+_DISTILL_CAPTURE_DEEPSEEK="${DEEPSEEK_API_KEY:-}"
+_DISTILL_CAPTURE_MINIMAX="${MINIMAX_API_KEY:-}"
+_DISTILL_CAPTURE_ZAI="${ZAI_API_KEY:-}"
 unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
 
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
@@ -131,15 +142,21 @@ DATABASE_BOOTSTRAP_TRUST_CHECKER="scripts/source-runtime-drift-check.ts"
 DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "$DATABASE_BOOTSTRAP_TRUST_CHECKER"
   "scripts/lib/guard-core.ts"
+  "scripts/lib/cli-args.ts"
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
 )
+# Git probes that decide git mode vs release mode stop upward discovery at the
+# physical parent of REPO_ROOT, so an unrelated ancestor .git cannot turn a
+# non-git release into git mode.
+_repo_root_git_ceiling="$(dirname "$(cd "$REPO_ROOT" && pwd -P)")"
 _database_bootstrap_trust_git() (
   while IFS='=' read -r git_env_name _; do
     case "$git_env_name" in
       GIT_*) unset "$git_env_name" ;;
     esac
   done < <(env)
+  export GIT_CEILING_DIRECTORIES="$_repo_root_git_ceiling"
   exec git -C "$REPO_ROOT" "$@"
 )
 # Verify one closure file against the release manifest: entry must exist and
@@ -277,9 +294,34 @@ else
   fi
 fi
 
+# --- restart-safety ledger preflight (begin)
+if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" != "1" ]; then
+  RESTART_SAFETY_PREFLIGHT_TS="$REPO_ROOT/scripts/restart-safety-preflight.ts"
+  if [ -L "$RESTART_SAFETY_PREFLIGHT_TS" ] || [ ! -f "$RESTART_SAFETY_PREFLIGHT_TS" ]; then
+    echo "FATAL: unsafe or missing restart-safety ledger preflight: $RESTART_SAFETY_PREFLIGHT_TS" >&2
+    exit 78
+  fi
+  RESTART_SAFETY_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/instances/$INSTANCE"
+  if ! "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$RESTART_SAFETY_PREFLIGHT_TS" \
+    --db "$RESTART_SAFETY_DATA_ROOT/bot.db" \
+    --instance "$INSTANCE" \
+    --initial-marker "$RESTART_SAFETY_DATA_ROOT/.initial-database-create-approved" \
+    --json; then
+    echo "FATAL: restart-safety ledger preflight blocked instance '$INSTANCE'" >&2
+    exit 78
+  fi
+  unset RESTART_SAFETY_PREFLIGHT_TS RESTART_SAFETY_DATA_ROOT
+fi
+# --- restart-safety ledger preflight (end)
+
 # Expose checkout version metadata to the running instance so /health can report
 # the code that was launched. Best-effort only: git failure must not block startup.
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# The ceiling keeps an unrelated ancestor .git from claiming a non-git release.
+if GIT_CEILING_DIRECTORIES="$(dirname "$(cd "$REPO_ROOT" && pwd -P)")" \
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   WHATSOUP_GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
   _branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   WHATSOUP_GIT_BRANCH="${_branch:-HEAD-detached}"
@@ -373,6 +415,29 @@ else
   if [ -n "$PINECONE_API_KEY" ]; then
     export PINECONE_API_KEY
   fi
+
+  # Handoff distiller (WHATSOUP_HANDOFF_DISTILL_MODEL): restore exactly the ONE
+  # provider key the configured distill model resolves against, from the value
+  # captured before the credential scrub above. Keyring first (consistent with
+  # every other restore here), captured EnvironmentFile value as the fallback.
+  # No distill model configured → nothing is restored and the scrub stands.
+  case "${WHATSOUP_HANDOFF_DISTILL_MODEL:-}" in
+    deepseek*)
+      DEEPSEEK_API_KEY="$(keyring_lookup deepseek DEEPSEEK_API_KEY)"
+      [ -z "$DEEPSEEK_API_KEY" ] && DEEPSEEK_API_KEY="$_DISTILL_CAPTURE_DEEPSEEK"
+      [ -n "$DEEPSEEK_API_KEY" ] && export DEEPSEEK_API_KEY
+      ;;
+    minimax*|MiniMax*)
+      MINIMAX_API_KEY="$(keyring_lookup minimax MINIMAX_API_KEY)"
+      [ -z "$MINIMAX_API_KEY" ] && MINIMAX_API_KEY="$_DISTILL_CAPTURE_MINIMAX"
+      [ -n "$MINIMAX_API_KEY" ] && export MINIMAX_API_KEY
+      ;;
+    glm*|zai*|z.ai*)
+      ZAI_API_KEY="$(keyring_lookup zai ZAI_API_KEY)"
+      [ -z "$ZAI_API_KEY" ] && ZAI_API_KEY="$_DISTILL_CAPTURE_ZAI"
+      [ -n "$ZAI_API_KEY" ] && export ZAI_API_KEY
+      ;;
+  esac
 fi
 
 # Health server auth token — used by POST /heal and POST /send on all instances.

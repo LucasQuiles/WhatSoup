@@ -7,7 +7,7 @@ hub-32 anti-pattern -- 32 commits accumulated directly on production ``main``
 on the nucles hub, never pushed, invisible to everyone, lost if the host died --
 and for dirty/ahead-of-origin bot trees with no detection (mini1).
 
-The five checks (see ``CHECK_*`` constants):
+The six checks (see ``CHECK_*`` constants):
 
   1. DIRTY            -- ``git status --porcelain`` count above a threshold:
                          uncommitted runtime changes are a latent landmine and
@@ -23,6 +23,15 @@ The five checks (see ``CHECK_*`` constants):
                          forked history).  severity: critical.
   5. PHANTOM-SRC      -- (advisory) untracked ``.ts`` under ``src/`` that could
                          be phantom-import targets or abandoned WIP.  info.
+  6. FETCH-FAILED     -- (#2503) an explicitly requested ``--fetch`` refresh
+                         did not succeed.  The refresh outcome is a required
+                         dimension SEPARATE from the ancestry comparison: a
+                         cached tracking ref that still compares "same" is
+                         last-known state, not current upstream proof, so a
+                         failed refresh can never yield a clean verdict or a
+                         clear event.  severity: warning.  Offline mode (no
+                         fetch requested) is an explicit, valid observation
+                         mode (``offline_cached_ref``), not a failure.
 
 Design constraints:
   * FAST -- git plumbing only.  No network unless ``--fetch`` is passed (default
@@ -73,13 +82,24 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_envelope import new_event_fields
-from lib.state_root import DEFAULT_STATE_ROOT
+from lib.state_root import state_root
 from lib.durable_json import (
     JsonVersion,
     durable_json_target,
     operation_id,
     publish_event_json,
     require_advance,
+)
+from lib.producer_cadence_receipt import (
+    CadenceMode,
+    CadenceOutcome,
+    CadenceStage,
+    DurableWrite,
+    FetchStatus,
+    ProducerIdentity,
+    record_cycle_attempt,
+    record_cycle_failure,
+    record_cycle_success,
 )
 
 
@@ -128,6 +148,7 @@ CHECK_AHEAD = "ahead_of_upstream"
 CHECK_DIRECT_TO_PROTECTED = "direct_to_protected_branch"
 CHECK_DIVERGED = "diverged"
 CHECK_PHANTOM_SRC = "phantom_src"
+CHECK_FETCH = "fetch_failed"
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 
@@ -332,6 +353,30 @@ def gather_tree_provenance(repo: Path, *, do_fetch: bool = False) -> dict[str, A
 # ---------------------------------------------------------------------------
 # Findings: snapshot -> list of (check, severity, evidence-line).
 # ---------------------------------------------------------------------------
+def comparison_mode(snap: dict[str, Any]) -> str:
+    """#2503: how the upstream comparison was obtained.
+
+    One of ``offline_cached_ref`` (no refresh requested -- explicit, valid
+    observation mode), ``refreshed`` (refresh requested and succeeded), or
+    ``fetch_failed`` (refresh requested, did not succeed -- provenance
+    unproven for this run).
+    """
+    if not snap.get("fetch_attempted"):
+        return "offline_cached_ref"
+    return "refreshed" if not snap.get("fetch_error") else "fetch_failed"
+
+
+def fetch_verdict(snap: dict[str, Any]) -> str:
+    """#2503: bounded, content-free refresh outcome for event receipts.
+
+    ``not_attempted`` | ``success`` | the bounded ``fetch_failed:<class|rc=N>``
+    token produced by :func:`fetch_upstream` (never URL, ref, path, or stderr).
+    """
+    if not snap.get("fetch_attempted"):
+        return "not_attempted"
+    return snap.get("fetch_error") or "success"
+
+
 def provenance_findings(snap: dict[str, Any]) -> list[dict[str, str]]:
     """Map a provenance snapshot to structured findings.
 
@@ -341,9 +386,27 @@ def provenance_findings(snap: dict[str, Any]) -> list[dict[str, str]]:
       * direct-to-protected+ahead -> critical (PR-bypass on production main)
       * diverged / detached     -> critical (rewritten/forked history)
       * phantom src .ts         -> info (advisory)
+      * fetch-failed            -> warning (#2503 false-clear guard)
     """
     findings: list[dict[str, str]] = []
     branch = snap.get("branch_redacted") or "DETACHED"
+
+    # 6. FETCH-FAILED (#2503): a requested refresh that did not succeed means
+    #    upstream provenance is UNPROVEN for this run.  Without this finding
+    #    the run below can compare the cached tracking ref, find it clean, and
+    #    emit clear/exit-0 -- a false clear built on last-known state.  A
+    #    warning (not info) so the interactive exit contract reports the
+    #    evidence insufficiency and the event is an alert, never a clear.
+    fetch_error = snap.get("fetch_error")
+    if fetch_error:
+        findings.append({
+            "check": CHECK_FETCH,
+            "severity": "warning",
+            "evidence": f"branch={branch} fetch_attempted=true "
+                        f"fetch_outcome={fetch_error} "
+                        f"comparison_mode={comparison_mode(snap)} "
+                        "upstream_refresh_failed_provenance_unproven",
+        })
 
     # 4. DIVERGED / DETACHED / unknown HEAD (critical).
     if snap["detached"]:
@@ -495,10 +558,16 @@ def tree_provenance_inventory(profile: dict[str, Any] | None = None, *, do_fetch
 # Standalone outbox emission (format mirrors health-check outbox_event()).
 # ---------------------------------------------------------------------------
 def _state_root() -> Path:
-    explicit = os.environ.get("BOT_ERRORS_STATE_DIR", "").strip()
-    if explicit:
-        return Path(explicit)
-    return DEFAULT_STATE_ROOT
+    """Resolve the state root through the one function that owns it.
+
+    This was a local copy of the plain variant, which honours the state-dir
+    variable but not the per-worker test isolation the shared resolver adds.
+    The cadence receipt resolves through the shared function, so keeping the
+    copy left one process writing its outbox and its receipt to two different
+    roots whenever a test signal was set without the variable -- the
+    writer-reader desync class #3050 and #3051 exist to close.
+    """
+    return state_root()
 
 
 def _resolve_outbox_dir() -> Path:
@@ -561,6 +630,11 @@ def build_outbox_event(
             "ancestry": snapshot.get("ancestry"),
             "protected_branch": snapshot.get("protected_branch"),
             "repo_fingerprint": snapshot.get("repo_fingerprint"),
+            # #2503: refresh execution is a required dimension of the verdict.
+            # comparison_mode: offline_cached_ref | refreshed | fetch_failed.
+            "comparison_mode": comparison_mode(snapshot),
+            "fetch_attempted": bool(snapshot.get("fetch_attempted")),
+            "fetch_verdict": fetch_verdict(snapshot),
         }
     return event
 
@@ -593,6 +667,41 @@ def emit_outbox_event(event: dict[str, Any]) -> Path:
     return path
 
 
+def _cadence_fetch_status(snapshot: dict[str, Any] | None) -> FetchStatus:
+    """Map this cycle's refresh outcome onto the receipt's bounded vocabulary.
+
+    Derived from the snapshot rather than from the ``--fetch`` flag so a
+    refresh that was asked for and did not land is recorded as such: the
+    scheduled path is offline by contract, and a cycle whose comparison rested
+    on an unproven ref must not read as full proof.
+    """
+    if not snapshot or not snapshot.get("fetch_attempted"):
+        return FetchStatus.NOT_ATTEMPTED
+    return FetchStatus.REFUSED if snapshot.get("fetch_error") else FetchStatus.REQUESTED
+
+
+def _record_cadence(recorder, *, mode, snapshot: dict[str, Any] | None = None, **fields) -> None:
+    """Stamp one cadence receipt, absorbing any failure.
+
+    The receipt is dark liveness evidence for a later evaluator; the guard's own
+    verdict is the thing operators depend on today. A receipt that cannot be
+    written must therefore degrade to a stderr line and let the cycle finish,
+    never abort it.
+    """
+    try:
+        recorder(
+            ProducerIdentity.TREE_PROVENANCE,
+            mode=mode,
+            fetch_status=_cadence_fetch_status(snapshot),
+            **fields,
+        )
+    except Exception as exc:  # defensive: never fail the guard for its receipt
+        print(
+            f"tree_provenance cadence_receipt_error {type(exc).__name__}",
+            file=sys.stderr,
+        )
+
+
 def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     """Inspect the tree and (unless dry) emit one outbox event summarising
     provenance.  Returns 0 on info/clean, 1 on warning, 2 on critical.
@@ -601,10 +710,37 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
     observed state (clean/warning/critical), 2 for an inspection failure, 1
     for an event-write failure. The default exit contract above is unchanged
     when ``reporter`` is False.
+
+    Every exit path also stamps a cadence receipt (#2341, schema pinned by
+    CADENCE_RECEIPT_SCHEMA_VERSION): ``lastAttemptAt`` at entry, and
+    ``lastSuccessfulObservationAt`` only once the inspection completed and the
+    durable write landed.
+
+    In observe mode nothing durable lands at all: emitting the outbox event is
+    this producer's only durable write and ``dry`` skips it, so an
+    observe-mode success clock means "the inspection completed" and the
+    receipt records ``durableWrite: not_owed`` to say so. The sibling
+    runtime-staleness producer is NOT symmetric here -- it still writes its
+    per-instance high-water mark in observe mode -- so an evaluator must read
+    ``durableWrite`` rather than weighting ``mode`` alike across the two.
+
+    Receipt failures are swallowed: the cycle prints a bounded
+    ``tree_provenance cadence_receipt_error <ExceptionClassName>`` line on
+    stderr and continues, because a dark liveness receipt must never break the
+    domain guard it observes.
     """
+    mode = CadenceMode.OBSERVE if dry else CadenceMode.EMIT
+    _record_cadence(record_cycle_attempt, mode=mode)
     try:
         snap = gather_tree_provenance(REPO_ROOT, do_fetch=do_fetch)
     except GitError as exc:
+        _record_cadence(
+            record_cycle_failure,
+            mode=mode,
+            outcome=CadenceOutcome.PROBE_ERROR,
+            stage=CadenceStage.OBSERVATION,
+            durable_write=DurableWrite.NOT_REACHED,
+        )
         evidence = f"tree_provenance inspection_error {str(exc)[:200]}"
         if reporter:
             print(evidence, file=sys.stderr)
@@ -645,8 +781,27 @@ def run_once(*, do_fetch: bool, dry: bool, reporter: bool = False) -> int:
                 event_type=event_type, alert_source=alert_source, snapshot=snap,
             ))
         except OSError as exc:
+            _record_cadence(
+                record_cycle_failure,
+                mode=mode,
+                snapshot=snap,
+                outcome=CadenceOutcome.EMIT_FAILURE,
+                stage=CadenceStage.DURABLE_WRITE,
+                durable_write=DurableWrite.FAILED,
+            )
             print(f"tree_provenance event_write_error {str(exc)[:200]}", file=sys.stderr)
             return 1
+    # The durable write has landed, or in observe mode was never owed: the
+    # `if not dry` gate above is this producer's ONLY durable write, so an
+    # observe-mode cycle persists nothing at all. The receipt records which of
+    # the two this was, because the success clock cannot distinguish them and
+    # the installer admits only observe mode.
+    _record_cadence(
+        record_cycle_success,
+        mode=mode,
+        snapshot=snap,
+        durable_write=DurableWrite.NOT_OWED if dry else DurableWrite.WRITTEN,
+    )
     print(summary)
     print(evidence)
     if reporter:

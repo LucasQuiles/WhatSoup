@@ -12,8 +12,8 @@
  *  - T1 characterization: a 'suspended' checkpoint stays resumable across an
  *    aborted resume (the store-level window the guard closes)
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -23,8 +23,11 @@ import {
   readRestartLoopGuardHealth,
   restartLoopGuardPath,
   RESTART_LOOP_GUARD_DEFAULTS,
+  RESTART_THRASH_DEFAULTS,
+  RELAUNCH_TRACK_HARD_CAP,
 } from '../../../src/runtimes/agent/restart-loop-guard.ts';
 import { Database } from '../../../src/core/database.ts';
+import * as privateJournal from '../../../src/lib/private-journal.ts';
 
 const { maxRestarts: DEFAULT_MAX, windowMs: DEFAULT_WINDOW } = RESTART_LOOP_GUARD_DEFAULTS;
 
@@ -134,9 +137,14 @@ describe('restart-loop guard', () => {
       ['malformed', '{not json\n'],
       ['future v2', '{"v":2,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
       ['unreadable', '{"v":1,"bootInProgress":false,"boots":[],"lastTripAt":null}\n'],
-    ])('preserves an existing %s state and fails open without reinitializing it', (kind, source) => {
+    // #3551: the unreadable fixture sets its permissive mode explicitly, and
+    // every row runs under a restrictive and a conventional umask.
+    ].flatMap((row) => [['077', ...row], ['022', ...row]]))('(umask %s) preserves an existing %s state and fails open without reinitializing it', (umask, kind, source) => {
+      const previousUmask = process.umask(umask);
+      onTestFinished(() => { process.umask(previousUmask); });
       writeFileSync(statePath, source, 'utf8');
-      if (kind !== 'unreadable') chmodSync(statePath, 0o600);
+      chmodSync(statePath, kind === 'unreadable' ? 0o644 : 0o600);
+      expect(statSync(statePath).mode & 0o777).toBe(kind === 'unreadable' ? 0o644 : 0o600);
 
       const interrupted = markBootInProgress(statePath, 1_000);
       expect(interrupted).toBe(false);
@@ -192,6 +200,9 @@ describe('restart-loop guard', () => {
           bootsTotal: 0,
           checksPerformed: 0,
           lastCheckAt: null,
+          relaunchesInWindow: 0,
+          cleanRestartThrash: false,
+          thrashWindowMs: RESTART_THRASH_DEFAULTS.windowMs,
         });
     });
 
@@ -282,6 +293,97 @@ describe('restart-loop guard', () => {
       expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 2_100).bootsTotal).toBe(1);
     });
   });
+
+  describe('clean-restart thrash detector (detect + surface, does not trip the breaker)', () => {
+    /** One clean restart cycle: boot marker + graceful clean exit. This is what an
+     *  external supervisor's `kickstart -k` produces — and what the crash breaker,
+     *  by design, is blind to (markCleanExit wipes boots[] every cycle). */
+    function cleanRestart(now: number) {
+      markBootInProgress(statePath, now);
+      markCleanExit(statePath);
+    }
+
+    it('ana-bot cadence (~69s clean-SIGTERM loop) surfaces as thrash while the breaker stays blind', () => {
+      let t = 10_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 69_000; } // ~52/h cadence
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      // The resume-replay breaker is BLIND to clean restarts — this is the bug the
+      // detector exists to cover (ana-bot/mini1: ~1900 clean boots, bootsInWindow:0).
+      expect(h.bootsInWindow).toBe(0);
+      expect(h.tripped).toBe(false);
+      // ...but the thrash detector makes the loop VISIBLE.
+      expect(h.relaunchesInWindow).toBeGreaterThanOrEqual(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(true);
+    });
+
+    it('rb-bot cadence (~361s cooldown-throttled loop) surfaces as thrash', () => {
+      let t = 30_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 361_000; } // ~10/h cadence
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t - 361_000);
+      expect(h.relaunchesInWindow).toBeGreaterThanOrEqual(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(true);
+    });
+
+    it('q cadence (~50min restart) is NOT thrash', () => {
+      const t = 20_000_000;
+      cleanRestart(t);
+      cleanRestart(t + 3_000_000); // ~50 min later — at most 2 land in the 1h window
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + 3_000_000);
+      expect(h.relaunchesInWindow).toBeLessThan(RESTART_THRASH_DEFAULTS.threshold);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('a normal deploy bounce (a few quick restarts, then quiet) is NOT thrash', () => {
+      let t = 40_000_000;
+      for (let i = 0; i < 4; i++) { cleanRestart(t); t += 20_000; } // rollout settles after 4
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      expect(h.relaunchesInWindow).toBe(4);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('clean exits do NOT wipe the relaunch track (unlike boots[]) — the core invariant', () => {
+      let t = 50_000_000;
+      for (let i = 0; i < 5; i++) { cleanRestart(t); t += 1_000; }
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t);
+      expect(h.bootsInWindow).toBe(0);      // boots[] wiped on every clean exit
+      expect(h.relaunchesInWindow).toBe(5); // relaunches[] survived all 5 clean exits
+    });
+
+    it('relaunches age out of the thrash window', () => {
+      let t = 70_000_000;
+      for (let i = 0; i < 10; i++) { cleanRestart(t); t += 60_000; }
+      const h = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t + RESTART_THRASH_DEFAULTS.windowMs + 1);
+      expect(h.relaunchesInWindow).toBe(0);
+      expect(h.cleanRestartThrash).toBe(false);
+    });
+
+    it('back-compat: a legacy v1 file without `relaunches` loads as [] and then accrues', () => {
+      writeFileSync(statePath, JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null }));
+      chmodSync(statePath, 0o600);
+      const h0 = readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 1_000);
+      expect(h0.relaunchesInWindow).toBe(0);
+      expect(h0.cleanRestartThrash).toBe(false);
+      markBootInProgress(statePath, 2_000);
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, 2_100).relaunchesInWindow).toBe(1);
+    });
+
+    it('a present-but-malformed `relaunches` fails closed (state preserved, not reinitialized)', () => {
+      const source = JSON.stringify({ v: 1, bootInProgress: false, boots: [], lastTripAt: null, relaunches: [1_000, 'bad'] }) + '\n';
+      writeFileSync(statePath, source, 'utf8');
+      chmodSync(statePath, 0o600);
+      expect(markBootInProgress(statePath, 2_000)).toBe(false);
+      expect(readFileSync(statePath, 'utf8')).toBe(source); // untouched — fail-open preserve
+    });
+
+    it('the relaunch track is hard-capped (bounds growth even with all boots in-window)', () => {
+      let t = 60_000_000;
+      const boots = RELAUNCH_TRACK_HARD_CAP + 40;
+      for (let i = 0; i < boots; i++) { markBootInProgress(statePath, t); t += 1_000; } // all within 1h
+      const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(onDisk.relaunches.length).toBeLessThanOrEqual(RELAUNCH_TRACK_HARD_CAP);
+      expect(readRestartLoopGuardHealth(statePath, DEFAULT_WINDOW, t).cleanRestartThrash).toBe(true);
+    });
+  });
 });
 
 describe('T1 — characterization: suspended checkpoint stays resumable across an aborted resume', () => {
@@ -338,5 +440,50 @@ describe('T1 — characterization: suspended checkpoint stays resumable across a
       `UPDATE session_checkpoints SET session_status = 'ended' WHERE conversation_key = 'conv-1'`,
     ).run();
     expect(resumableKeys()).not.toContain('conv-1');
+  });
+});
+
+describe('markCleanExit persistence contract (round 3)', () => {
+  let dir: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ws-restart-loop-guard-mce-'));
+    statePath = restartLoopGuardPath(dir);
+  });
+
+  afterEach(() => {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports persisted: true after clearing a real journal', () => {
+    markBootInProgress(statePath, 1_000);
+    expect(markCleanExit(statePath)).toEqual({ persisted: true });
+  });
+
+  it('a missing journal is a designed no-op, not a persistence failure (chat/passive instances)', () => {
+    expect(markCleanExit(statePath)).toEqual({ persisted: true, reason: 'no_journal' });
+  });
+
+  it('an unreadable journal cannot prove the crash marker was cleared', () => {
+    writeFileSync(statePath, 'not json{', 'utf8');
+    chmodSync(statePath, 0o600);
+    expect(markCleanExit(statePath)).toEqual({ persisted: false, reason: 'journal_unreadable' });
+  });
+
+  it('a failed write reports persisted: false with the typed reason', () => {
+    // Permission fixtures cannot fail the atomic writer as the owner (it
+    // force-repairs directory modes and replaces the file by rename), so the
+    // persistence boundary itself is stubbed to throw.
+    markBootInProgress(statePath, 1_000);
+    const write = vi.spyOn(privateJournal, 'writePrivateJournalSync').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    try {
+      expect(markCleanExit(statePath)).toEqual({ persisted: false, reason: 'write_failed' });
+    } finally {
+      write.mockRestore();
+    }
   });
 });

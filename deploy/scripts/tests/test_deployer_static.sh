@@ -2,6 +2,8 @@
 set -euo pipefail
 D=deploy/scripts/whatsoup-bot-errors-deploy.sh
 bash -n "$D" || { echo "STATIC_FAIL: syntax"; exit 1; }
+bounded_jsonl_count=$(sed -n '/^FILES=(/,/^)/p' "$D" | grep -c '"deploy/scripts/lib/bounded_jsonl.py"' || true)
+[ "$bounded_jsonl_count" = "1" ] || { echo "STATIC_FAIL: bounded_jsonl.py must appear exactly once in FILES"; exit 1; }
 # `local` may appear only inside function bodies. The deployer defines functions sha(), do_verify(),
 # smoke_redaction(); flag any `local ` that is NOT within a function (heuristic: none expected at all
 # in case-arms — assert zero `local` usage outside the helper functions by checking the case block).

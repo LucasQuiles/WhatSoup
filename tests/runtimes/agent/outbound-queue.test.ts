@@ -13,6 +13,8 @@ import {
   MAX_CHUNKS,
   MAX_STATUS_MESSAGES_PER_TURN,
   STATUS_CAP_NOTICE,
+  SALVAGED_REPLY_NOTICE,
+  MAX_SALVAGE_RETENTION_CHARS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -653,6 +655,34 @@ describe('OutboundQueue', () => {
     expect(calls[0]).toContain('🔧 Running:');
     expect(calls[0]).toContain('  • update 1');
     expect(calls[0]).toContain('  • update 2');
+  });
+
+  it('flush interleaved with a concurrent producer waits for quiescence instead of poisoning the queue', async () => {
+    // Live 2026-08-16: the managed-handoff replay's pre-spawn flush ran while
+    // the advance notice was still pacing out; a concurrent enqueue between
+    // the chain settling and the single-shot assert flipped `sending`, the
+    // assert threw, and the sticky drainFailure killed every later send in
+    // the chat until a service restart. flush() must re-await until quiescent.
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    // The exact window: flush() on an idle queue parks on the already-settled
+    // chain, so its continuation (the assert) is queued as a microtask; the
+    // producer's enqueue in the same tick flips `sending` synchronously via
+    // drainQueue() before that continuation runs.
+    const flushPromise = queue.flush();
+    queue.enqueueText('replacement turn output');
+
+    await vi.runAllTimersAsync();
+    await expect(flushPromise).resolves.toBeUndefined();
+
+    expect(calls).toEqual(['replacement turn output']);
+    // The queue stays healthy: a later enqueue+flush still delivers.
+    queue.enqueueText('later turn');
+    const flush2 = queue.flush();
+    await vi.runAllTimersAsync();
+    await expect(flush2).resolves.toBeUndefined();
+    expect(calls).toEqual(['replacement turn output', 'later turn']);
   });
 
   // ─── Grouped flush logic ───────────────────────────────────────────────────
@@ -1970,6 +2000,301 @@ describe('OutboundQueue', () => {
     expect(calls).toHaveLength(callCountBefore); // no new message added
   });
 
+  it('minimal mode drops buffered pre-tool narration and still delivers the terminal result', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const onCommit = vi.fn();
+    queue.enqueueStreamingText('Let me inspect the workbook before I continue.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    queue.enqueueResultText('Workbook updated and verified.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it('minimal mode keeps buffered terminal assistant text and suppresses a duplicate result summary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const onCommit = vi.fn();
+    queue.enqueueStreamingText('Workbook updated and verified.', 'answer', onCommit);
+    expect(queue.enqueueResultText('Internal duplicate result summary.')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(0);
+
+    const flushPromise = queue.flush();
+    await vi.runAllTimersAsync();
+    await flushPromise;
+
+    expect(calls).toEqual(['Workbook updated and verified.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode preserves buffered assistant text across a tool-error status update', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('The requested file is unavailable.', 'answer', onCommit);
+    queue.enqueueToolUpdate({ category: 'error', detail: 'read failed' });
+    await queue.flush();
+
+    expect(calls).toEqual(['The requested file is unavailable.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('drops provisional minimal-mode text without committing runtime state on crash abort', () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('I am still inspecting the files.', 'answer', onCommit);
+    queue.abortTurn();
+
+    expect(calls).toEqual([]);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(queue.hasPendingWork()).toBe(false);
+  });
+
+  it('minimal mode discards each narration cycle but commits the final answer once', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const firstCommit = vi.fn();
+    const secondCommit = vi.fn();
+    const finalCommit = vi.fn();
+
+    queue.enqueueStreamingText('I will inspect the files.', 'answer', firstCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'files' });
+    queue.enqueueStreamingText('I will compare the results.', 'answer', secondCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'searching', detail: 'results' });
+    queue.enqueueStreamingText('The comparison is complete.', 'answer', finalCommit);
+    queue.commitStreamingText();
+    await queue.flush();
+
+    expect(calls).toEqual(['The comparison is complete.']);
+    expect(firstCommit).not.toHaveBeenCalled();
+    expect(secondCommit).not.toHaveBeenCalled();
+    expect(finalCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode recovers deferred pre-tool text as the reply when the turn ends with no other output', async () => {
+    // Path C: the model streamed its actual ANSWER, then made a trailing tool
+    // call — minimal mode would discard it as "narration". The turn then ends
+    // (endTurn) with no further visible output. Without recovery the user gets
+    // silence; with it, the deferred answer is delivered.
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('The self-direction budget renews every 12 months.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'policy.pdf' });
+    queue.endTurn();
+    await queue.flush();
+
+    expect(calls).toEqual(['The self-direction budget renews every 12 months.']);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it('minimal mode does not resurrect deferred narration when the turn delivered a real answer', async () => {
+    // Regression guard for over-delivery: once real output reaches the user the
+    // deferred pre-tool narration must be dropped, not double-sent by endTurn().
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const narrationCommit = vi.fn();
+    const answerCommit = vi.fn();
+
+    queue.enqueueStreamingText('Let me check the policy.', 'answer', narrationCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'policy.pdf' });
+    queue.enqueueStreamingText('It renews every 12 months.', 'answer', answerCommit);
+    queue.commitStreamingText();
+    queue.endTurn();
+    await queue.flush();
+
+    expect(calls).toEqual(['It renews every 12 months.']);
+    expect(narrationCommit).not.toHaveBeenCalled();
+    expect(answerCommit).toHaveBeenCalledOnce();
+  });
+
+  // #3398: an owed reply on a turn that dies without a terminal result must
+  // deliver (crash salvage) or fail loudly — never vanish silently.
+  it('crash abort with salvageOwedReply delivers narration discarded at a tool boundary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+    const onCommit = vi.fn();
+
+    queue.enqueueStreamingText('I will check the workbook now.', 'answer', onCommit);
+    queue.discardPreToolAssistantText();
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    // Provider dies before any result event — crash finalization salvages.
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain(SALVAGED_REPLY_NOTICE);
+    expect(calls[0]).toContain('I will check the workbook now.');
+    // Salvage is uncommitted: runtime bookkeeping must keep seeing an
+    // undelivered crash so recovery replay still runs.
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it('crash salvage joins discarded batches with the live buffer tail in order', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('First: reading the files.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText('Second: comparing results.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText('Third: almost done.');
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    const first = calls[0].indexOf('First: reading the files.');
+    const second = calls[0].indexOf('Second: comparing results.');
+    const third = calls[0].indexOf('Third: almost done.');
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    expect(third).toBeGreaterThan(second);
+  });
+
+  it('crash salvage records status delivery evidence, never answer evidence', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(makeDurabilityStub());
+    queue.setToolUpdateMode('minimal');
+    queue.beginTurnEvidence('turn-3398rc');
+
+    queue.enqueueStreamingText('Narration before the tool call.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    const evidencePromise = queue.flushTurnEvidence('turn-3398rc');
+    await vi.runAllTimersAsync();
+    const evidence = await evidencePromise;
+
+    expect(calls).toHaveLength(1);
+    // Crash finalization derives the inbound disposition from answerOpIds; a
+    // salvage op there would flip failed_terminal to recovery-owner transfer.
+    expect(evidence.answerOpIds).toHaveLength(0);
+    expect(evidence.statusOpIds.length).toBeGreaterThan(0);
+  });
+
+  it('plain abortTurn destroys the owed reply loudly instead of silently', async () => {
+    mockLog.warn.mockClear();
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Doomed narration.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn();
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual([]);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ chatJid: CHAT_JID, batchCount: 1 }),
+      'turn abort destroyed undelivered assistant text with no visible reply this turn',
+    );
+  });
+
+  it('crash salvage is skipped when the turn already delivered visible text', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueText('Early partial answer.');
+    await vi.runAllTimersAsync();
+    expect(calls).toEqual(['Early partial answer.']);
+
+    queue.enqueueStreamingText('Later narration.');
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Early partial answer.']);
+  });
+
+  it('endTurn settles the retained narration so a later crash cannot replay the finished turn', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Stale narration from the finished turn.');
+    queue.discardPreToolAssistantText();
+    // #3415 path C delivers the deferred text as the terminal reply and
+    // empties the pen — the crash abort below must find nothing to salvage.
+    queue.endTurn();
+    await vi.runAllTimersAsync();
+    expect(calls).toEqual(['Stale narration from the finished turn.']);
+
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Stale narration from the finished turn.']);
+  });
+
+  it('crash salvage retention drops oldest whole batches past the cap', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    const oldest = `OLDEST-${'a'.repeat(MAX_SALVAGE_RETENTION_CHARS - 500)}`;
+    const newest = `NEWEST-${'b'.repeat(1000)}`;
+    queue.enqueueStreamingText(oldest);
+    queue.discardPreToolAssistantText();
+    queue.enqueueStreamingText(newest);
+    queue.discardPreToolAssistantText();
+    queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+    await vi.runAllTimersAsync();
+
+    const delivered = calls.join('\n');
+    expect(delivered).toContain('NEWEST-');
+    expect(delivered).not.toContain('OLDEST-');
+  });
+
+  it('minimal mode flushes a buffered decision prompt before its poll', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Which workbook should I update?');
+    await queue.enqueuePoll(async () => {
+      calls.push('POLL');
+    });
+
+    expect(calls).toEqual(['Which workbook should I update?', 'POLL']);
+    await queue.flush();
+  });
+
+  it('friendly mode preserves buffered assistant text across a tool boundary', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueStreamingText('I am checking the workbook now.');
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
+    await vi.runAllTimersAsync();
+
+    expect(calls).toContain('I am checking the workbook now.');
+  });
+
   // ─── minimal mode category suppression ───────────────────────────────────
 
   it('shouldShowMinimal: friendly knowledge search is suppressed in minimal mode', async () => {
@@ -2877,8 +3202,8 @@ describe('OutboundQueue', () => {
       expect(calls[0]).toBe('z'.repeat(4000));
     });
 
-    it('shutdown clears a toolTimer that was re-armed while flush was awaiting the send chain', async () => {      const { messenger, calls } = makeMessenger();
-      const queue = new OutboundQueue(messenger, CHAT_JID);
+    it('shutdown rejects a tool update that arrives after closure begins', async () => {
+      const { calls } = makeMessenger();
 
       // Block the first (and only) send so the chain stays pending while we
       // re-arm a tool timer mid-flush.
@@ -2898,13 +3223,9 @@ describe('OutboundQueue', () => {
       // Let the send start (chain becomes pending).
       await vi.advanceTimersByTimeAsync(0);
 
-      // Begin shutdown — flush() runs flushToolBuffer() synchronously (no tool
-      // buffer yet) then awaits the still-pending chain. While it is awaiting,
-      // arm a fresh tool timer. The defensive clear at shutdown line 562 is the
-      // only thing that cleans it up.
+      // Begin shutdown while the accepted text is still in flight. Output that
+      // arrives after this boundary belongs to a retired queue epoch.
       const shutdownPromise = blockingQueue.shutdown();
-      // Re-arm the tool timer AFTER flushToolBuffer ran but BEFORE the chain
-      // resolves — i.e. while flush() is in its `await this.chain`.
       blockingQueue.enqueueToolUpdate({ category: 'running', detail: 'late update' });
       await vi.advanceTimersByTimeAsync(0);
 
@@ -2914,22 +3235,13 @@ describe('OutboundQueue', () => {
       await vi.advanceTimersByTimeAsync(0);
       await shutdownPromise;
 
-      // The in-flight text send was delivered; the late tool update was NOT
-      // re-flushed by shutdown (shutdown's defensive clear only clears the
-      // toolTimer, it does not re-flush). Exactly one message reached the
-      // messenger from the send chain.
+      // The in-flight text send is delivered; post-closure tool output is not.
       expect(calls).toEqual(['in-flight send that holds the chain open']);
       expect(blockingMessenger.sendMessage).toHaveBeenCalledTimes(1);
 
-      // The late enqueueToolUpdate also armed the 30s max-age timer, which
-      // shutdown's defensive clear does NOT touch. Drain it so no timer leaks
-      // (this also confirms shutdown's toolTimer clear left no duplicate work).
       await vi.advanceTimersByTimeAsync(TOOL_BATCH_MAX_AGE_MS);
-      // The max-age flush now delivers the late tool-status update.
-      expect(calls).toEqual([
-        'in-flight send that holds the chain open',
-        '🔧 Running:\n  • late update',
-      ]);
+      expect(calls).toEqual(['in-flight send that holds the chain open']);
+      expect(blockingQueue.hasPendingWork()).toBe(false);
     });
   });
 

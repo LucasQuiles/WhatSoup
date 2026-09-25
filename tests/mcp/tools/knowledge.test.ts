@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ToolDeclaration } from '../../../src/mcp/types.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 
 const {
   PineconeMock,

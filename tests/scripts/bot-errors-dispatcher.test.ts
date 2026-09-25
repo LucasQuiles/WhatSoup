@@ -213,6 +213,55 @@ afterEach(() => {
 });
 
 describe('bot-errors-dispatcher', () => {
+  it('keeps bounded dispatch diagnostics best-effort while durable JSONL stays synced', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatch-log-'));
+    const probe = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import importlib.util, os, sys',
+          'from pathlib import Path',
+          "sys.path.insert(0, 'deploy/scripts')",
+          "spec = importlib.util.spec_from_file_location('dispatch_log_probe', 'deploy/scripts/bot-errors-dispatcher.py')",
+          'disp = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(disp)',
+          `root = Path(${JSON.stringify(tmpRoot)})`,
+          "paths = {'root': root, 'logs': root / 'logs'}",
+          "paths['logs'].mkdir(parents=True, mode=0o700)",
+          'syncs = []',
+          'real_fsync = disp.os.fsync',
+          'disp.os.fsync = lambda fd: syncs.append(fd)',
+          'try:',
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_probe', 'detail': 'normal'}) == 'written'",
+          "    assert syncs == [], f'diagnostic append unexpectedly synced: {syncs}'",
+          "    disp.append_private_jsonl(root / 'durable.jsonl', {'type': 'durable_probe'})",
+          "    assert len(syncs) >= 2, f'durable JSONL lost syncs: {syncs}'",
+          'finally:',
+          '    disp.os.fsync = real_fsync',
+          "log = paths['logs'] / 'dispatch.jsonl'",
+          "assert oct(log.stat().st_mode & 0o777) == '0o600'",
+          "assert oct(paths['logs'].stat().st_mode & 0o777) == '0o700'",
+          'disp.MAX_DISPATCH_JSONL_BYTES = 512',
+          'for index in range(8):',
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_probe', 'detail': 'x' * 80, 'index': index}) == 'written'",
+          'assert log.stat().st_size <= disp.MAX_DISPATCH_JSONL_BYTES',
+          'real_append = disp.append_bounded_jsonl',
+          'try:',
+          "    disp.append_bounded_jsonl = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('expected diagnostic failure'))",
+          "    assert disp.append_dispatch_log(paths, {'type': 'diagnostic_failure'}) == 'diagnostic_degraded'",
+          'finally:',
+          '    disp.append_bounded_jsonl = real_append',
+          "assert (root / 'controller-log-health' / 'dispatcher.json').is_file()",
+          "print('OK')",
+        ].join('\n'),
+      ],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    );
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(probe.stdout).toContain('OK');
+  });
+
   it('increments attempts before a successful send and persists the sent event', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
@@ -606,11 +655,11 @@ describe('bot-errors-dispatcher', () => {
     expect(duplicate!.eventKind).toBe('incident_recovery');
   });
 
-  it('closes daily-health-fail incidents from a later healthy daily-health summary', () => {
+  it.each(['line-a', 'bot-errors-health'])('closes %s daily-health-fail incidents from a later healthy daily-health summary', (incidentInstance) => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
     const suppressed = join(tmpRoot, 'suppressed');
-    const incidentKey = 'test-machine|line-a|daily-health-fail:line-a';
+    const incidentKey = `test-machine|${incidentInstance}|daily-health-fail:line-a`;
     execFileSync('python3', ['deploy/scripts/patch-incident-state.py', tmpRoot, JSON.stringify({
       version: 1,
       openIncidents: {
@@ -730,7 +779,11 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain('affected_hosts: 13');
     expect(rendered).toContain('affected_host_list:');
     hosts.forEach((host) => expect(rendered).toContain(host));
-    expect(rendered).toContain('storm_manifest:');
+    // #2387: the digest text no longer names the manifest path. The path is
+    // private topology and nothing reads it programmatically, so it must not
+    // reach the operator page. What ties the page to its window is the window
+    // identity, asserted below against the manifest the same window wrote.
+    expect(rendered).not.toContain('storm_manifest:');
     expect(rendered).toContain('requested_action: Q investigate');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_queued"');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_collapsed"');
@@ -742,12 +795,23 @@ describe('bot-errors-dispatcher', () => {
       entries: unknown[];
       entriesCollapsed: unknown[];
       hosts: string[];
+      fingerprint: string;
+      windowStartEpoch: number;
     };
     expect(manifest.affectedHosts).toBe(13);
     expect(manifest.entries).toHaveLength(13);
     expect(manifest.entriesCollapsed).toHaveLength(13);
     expect(manifest.hosts).toHaveLength(13);
     hosts.forEach((host) => expect(manifest.hosts).toContain(host));
+    // The window identity the dispatcher mints is fingerprint plus window start,
+    // and it qualifies the digest's incident key so two windows of one storm
+    // cannot collapse onto a single incident record. Built from the manifest's
+    // own parts rather than from its digest id, because a superseded window's
+    // digest id gains a revision suffix while the key qualifier never does.
+    expect(manifest.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+    expect(Number.isInteger(manifest.windowStartEpoch)).toBe(true);
+    const windowIdentity = `storm-${manifest.fingerprint}-${manifest.windowStartEpoch}`;
+    expect(rendered).toContain(`incident_key: fleet|storm-collapse|storm-collapse.${windowIdentity}`);
   });
 
   it('does not merge distinct storm fingerprints', () => {

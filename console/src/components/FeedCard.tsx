@@ -4,23 +4,17 @@ import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 import { getProvider } from "../lib/providers";
-import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
+import { statusColorToken, statusSeverity } from "../lib/status-severity";
+import {
+  connectionReasonLabel,
+  healthPresentation as healthPresentationFor,
+} from "../lib/health-presentation";
 import { isNonEmptyString } from "../lib/type-guards";
 import { Button } from "./primitives/Button";
 
 // ---------------------------------------------------------------------------
 //  Constants
 // ---------------------------------------------------------------------------
-
-const reasonLabel: Record<string, string> = {
-  unavailableService: "channel unavailable",
-  connectionClosed: "connection closed",
-  connectionLost: "connection lost",
-  connectionReplaced: "replaced by another session",
-  timedOut: "timed out",
-  loggedOut: "logged out",
-  Unknown: "disconnected",
-};
 
 const modeClass: Record<Mode, string> = {
   passive: "fc-inst--passive",
@@ -67,11 +61,6 @@ function healthTone(d: HealthDetail): BadgeTone {
 
 function healthEdgeColor(d: HealthDetail): string {
   return statusColorToken(statusSeverity(d.status));
-}
-
-function healthHeadline(d: HealthDetail): string {
-  if (d.status === "online") return "came online";
-  return statusAlertMessage(d.status);
 }
 
 function edgeColor(event: FeedEvent): string {
@@ -147,7 +136,7 @@ interface CardPresentation {
 }
 
 function connectionPresentation(event: FeedEvent, d: ConnectionDetail): CardPresentation {
-  const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : undefined;
+  const reason = d.reason ? connectionReasonLabel(d.reason) : undefined;
   let headline = "connection";
   let context = reason;
 
@@ -224,14 +213,21 @@ function sessionPresentation(event: FeedEvent, d: SessionDetail): CardPresentati
   };
 }
 
+/**
+ * Health card text comes entirely from the canonical health-presentation
+ * registry (#2523). The raw `error` and `evidence` are deliberately NOT read:
+ * a registered cause is the safe projection, and an unregistered code fails
+ * closed rather than promoting arbitrary producer text into the UI.
+ */
 function healthPresentation(d: HealthDetail): CardPresentation {
   const tone = healthTone(d);
+  const presented = healthPresentationFor(d);
   return {
     badge: "health",
     badgeTone: tone,
-    headline: healthHeadline(d),
+    headline: presented.headline,
     headlineTone: tone,
-    context: d.error,
+    context: presented.summary,
   };
 }
 
@@ -417,17 +413,17 @@ function copyContent(event: FeedEvent): string {
     case "session": return `${d.action}${d.reason ? ` — ${d.reason}` : ""}`;
     case "connection": {
       const code = d.statusCode ? `${d.statusCode} ` : "";
-      const reason = d.reason ? (reasonLabel[d.reason] ?? d.reason) : "";
+      const reason = d.reason ? connectionReasonLabel(d.reason) : "";
       let text = `${code}${reason}`.trim();
       if (d.reconnecting) text += " \u2192 reconnecting";
       if (d.state === "connected" && d.statusCode) text += " \u2192 reconnected";
       return text || displayText(event.text);
     }
-    case "health": {
-      if (d.status === "online") return "came online";
-      if (statusSeverity(d.status) === "crit") return statusAlertMessage(d.status);
-      return `degraded \u2014 ${d.error ?? "unknown"}`;
-    }
+    // Clipboard parity (#2523): the copied text is built from the same
+    // registry projection the card renders, so an incident note carries the
+    // reason code, its human label, the confidence, and the freshness verdict
+    // that were on screen \u2014 and never the raw error the card suppressed.
+    case "health": return healthPresentationFor(d).clipboardText;
     default: return displayText(event.text);
   }
 }

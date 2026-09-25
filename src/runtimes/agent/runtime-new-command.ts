@@ -32,6 +32,7 @@ export interface NewCommandHost<TSession, TTeardown extends TeardownWithDisposit
   scopeKey: string;
   perChatMapKey: string | null;
   isTurnInFlight(): boolean;
+  isOutboundQueuePoisoned(): boolean;
   // per_chat scope surface
   getPerChatSession(): TSession | undefined;
   abortPerChatQueue(): void;
@@ -152,8 +153,11 @@ export async function runNewCommand<TSession, TTeardown extends TeardownWithDisp
   // Reset turn flag — stale value from the old session must not suppress the
   // _(no response)_ fallback if the first new-session turn has no visible text.
   host.clearTurnHadVisibleOutput();
+  const outboundQueuePoisoned = host.isOutboundQueuePoisoned();
   host.sendDirect(
-    interruptingTurn
+    outboundQueuePoisoned
+      ? '*Session reset, but delivery remains blocked — recovery pending; operator reconciliation required*'
+      : interruptingTurn
       ? teardownDisposition === 'kill'
         ? '*Interrupted the running task — recovery pending, use /new again* ✓'
         : '*Interrupted the running task — starting new session* ✓'

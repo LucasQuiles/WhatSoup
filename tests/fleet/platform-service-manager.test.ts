@@ -76,22 +76,112 @@ function launchdAbsentError(message = 'no service'): Error & { code: number } {
   return Object.assign(new Error(message), { code: 3 });
 }
 
-function generatedPlistIdentity(name = 'agent'): string {
+/**
+ * A plist carrying the generated identity — and, by default, an
+ * EnvironmentVariables dict, because every repo-generated plist has one:
+ * buildPlist emits the key, its dict and PATH as UNCONDITIONAL array literals.
+ * A fixture without one is not a shape this repo produces.
+ *
+ * That matters here because the governed-env reader refuses an installed plist
+ * whose EnvironmentVariables element it cannot find: an env-less fixture would
+ * make every apply-path test below refuse for a reason none of them is about.
+ * `environment: null` builds that shape deliberately, for the one test that
+ * needs a plist the reader cannot enumerate.
+ *
+ * The block goes AFTER </array>: the identity predicate requires Label to be
+ * followed directly by ProgramArguments.
+ */
+function generatedPlistIdentity(
+  name = 'agent',
+  options: { environment?: Record<string, string> | null } = {},
+): string {
+  const environment = options.environment === undefined
+    ? { PATH: '/usr/bin' }
+    : options.environment;
+  const envBlock = environment === null
+    ? []
+    : [
+        '<key>EnvironmentVariables</key>',
+        '<dict>',
+        ...Object.entries(environment).flatMap(([key, value]) => [
+          `<key>${key}</key>`,
+          `<string>${value}</string>`,
+        ]),
+        '</dict>',
+      ];
   return [
     '<plist>',
     '<key>Label</key>',
     `<string>com.whatsoup.${name}</string>`,
     '<key>ProgramArguments</key>',
     '<array>',
-    '<string>/tmp/whatsoup-home/.local/bin/whatsoup</string>',
+    `<string>${SERVICE_HOME}/.local/bin/whatsoup</string>`,
     `<string>${name}</string>`,
     '</array>',
+    ...envBlock,
     '</plist>',
   ].join('\n');
 }
 
+/**
+ * Path-aware readFileSync fake: render paths read both the installed plist
+ * (*.plist) and the instance config (config.json), so route by basename
+ * instead of returning one value for every read. Undefined surfaces raise
+ * ENOENT like the default absentFile mock.
+ */
+function mockReads({ plist, config }: { plist?: string; config?: unknown } = {}): void {
+  fsMocks.readFileSync.mockImplementation((target: unknown) => {
+    const file = String(target);
+    if (file.endsWith('.plist') && plist !== undefined) return plist;
+    if (file.endsWith('config.json') && config !== undefined) {
+      return typeof config === 'string' ? config : JSON.stringify(config);
+    }
+    absentFile();
+  });
+}
+
+/**
+ * The mocked home must EXIST on disk: render admission resolves service paths
+ * physically, so an imaginary home cannot be confined against.
+ *
+ * Created per test with `mkdtempSync` rather than at a fixed path. A fixed path
+ * under the shared temp directory is raced by concurrent runs - the gate runs
+ * lanes in parallel and CI runs two Node majors on one runner image - and it is
+ * pre-creatable by another user as a symlink, which would silently relocate
+ * "home" and make every confinement assertion here pass vacuously.
+ * `mkdtempSync` creates atomically under a name nothing else holds, so there is
+ * no shared path to race on and no guard to get wrong.
+ *
+ * Canonicalised, because on macOS the temp root is itself a symlink
+ * (/var/... -> /private/var/...) and this suite compares rendered plist strings
+ * against paths derived from this same value, so both sides must be physical.
+ */
+let SERVICE_HOME: string;
+const realFsPromise = vi.importActual<typeof import('node:fs')>('node:fs');
+const realPathPromise = vi.importActual<typeof import('node:path')>('node:path');
+const realOsPromise = vi.importActual<typeof import('node:os')>('node:os');
+
+/**
+ * Reads one EnvironmentVariables value back out of a rendered plist. The
+ * generated plist puts a KeepAlive dict BEFORE EnvironmentVariables, so the
+ * block is anchored on its own key rather than on the first <dict>.
+ */
+function readPlistEnv(plist: string, key: string): string | undefined {
+  const envBlock = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(plist)?.[1];
+  if (envBlock === undefined) return undefined;
+  return new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`).exec(envBlock)?.[1];
+}
+
 describe('platform service managers', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    const [realFs, realPath, realOs] = await Promise.all([
+      realFsPromise, realPathPromise, realOsPromise,
+    ]);
+    SERVICE_HOME = realFs.realpathSync.native(
+      realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'whatsoup-home-')),
+    );
+    realFs.mkdirSync(realPath.join(SERVICE_HOME, 'claude-roots'));
+
     vi.useRealTimers();
     setPlatform(originalPlatform);
     if (originalDocker === undefined) delete process.env.WHATSOUP_DOCKER;
@@ -110,11 +200,15 @@ describe('platform service managers', () => {
 
     fsMocks.existsSync.mockReturnValue(false);
     fsMocks.readFileSync.mockImplementation(absentFile);
-    osMocks.homedir.mockReturnValue('/tmp/whatsoup-home');
+    osMocks.homedir.mockReturnValue(`${SERVICE_HOME}`);
     resolveExecFile();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    if (SERVICE_HOME) {
+      const realFs = await realFsPromise;
+      realFs.rmSync(SERVICE_HOME, { recursive: true, force: true });
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
     setPlatform(originalPlatform);
@@ -202,8 +296,8 @@ describe('platform service managers', () => {
     await manager.restart('agent');
     await manager.disable('agent');
 
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    expect(fsMocks.mkdirSync).toHaveBeenCalledWith('/tmp/whatsoup-home/Library/LaunchAgents', { recursive: true });
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    expect(fsMocks.mkdirSync).toHaveBeenCalledWith(`${SERVICE_HOME}/Library/LaunchAgents`, { recursive: true });
     expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
       expect.stringContaining('<string>com.whatsoup.agent</string>'),
@@ -275,7 +369,7 @@ describe('platform service managers', () => {
     });
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(
       1,
       'launchctl',
@@ -330,7 +424,7 @@ describe('platform service managers', () => {
     });
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
@@ -366,7 +460,7 @@ describe('platform service managers', () => {
 
   it('dry-runs a required existing launchd plist without modifying it', async () => {
     setPlatform('darwin');
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    mockReads({ plist: generatedPlistIdentity() });
     const { reconcileLaunchdPlist } = await importPlatform();
 
     await expect(reconcileLaunchdPlist('agent', { dryRun: true })).resolves.toMatchObject({
@@ -378,6 +472,706 @@ describe('platform service managers', () => {
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
     expect(fsMocks.renameSync).not.toHaveBeenCalled();
     expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('renders the configured service block into a first-install plist', async () => {
+    setPlatform('darwin');
+    mockReads({
+      config: {
+        name: 'agent',
+        service: {
+          claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent`,
+          pathPrepend: [`${SERVICE_HOME}/service-bin`],
+        },
+      },
+    });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    await new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      expect.stringContaining('<key>CLAUDE_CONFIG_DIR</key>'),
+      { encoding: 'utf-8', mode: 0o644 },
+    );
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).toContain(`<string>${SERVICE_HOME}/claude-roots/agent</string>`);
+    expect(written).toContain(`<string>${SERVICE_HOME}/service-bin:`);
+  });
+
+  it('fails a first install closed when the instance service block is invalid', async () => {
+    setPlatform('darwin');
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: 'relative/root' } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    // Drives the REAL install entry (startAfterAuthFire -> installLaunchdPlist),
+    // not the resolver in isolation, against a PERSISTED invalid service block.
+    // The refusal comes from the resolver, which validates and throws before
+    // installLaunchdPlist touches the filesystem; an explicit assertion after
+    // it would be unreachable, since this path takes no caller-supplied render
+    // options. The reconcile path, which does take an override, keeps its own
+    // assertion.
+    // Asserted by marker NAME, not `instanceof`: importPlatform() re-imports
+    // through vi.resetModules(), so the class the install path throws comes
+    // from a different module registry than the one this file imports and the
+    // identity check fails even though the error is the right type.
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart).rejects.toThrow('service.claudeConfigDir');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+    // Refused before ANY filesystem mutation, not merely before the write: the
+    // install path creates the LaunchAgents directory before rendering, so a
+    // guard placed after that point would leave a directory behind on every
+    // refusal while the assertions above stayed green.
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+  });
+
+  it('re-renders the resolved service block when reconciling an existing plist', async () => {
+    setPlatform('darwin');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {})).resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      expect.stringContaining('<key>CLAUDE_CONFIG_DIR</key>'),
+      { encoding: 'utf-8', mode: 0o644 },
+    );
+  });
+
+  it('fails reconciliation closed before bootout when the service block is invalid', async () => {
+    setPlatform('darwin');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: ['relative/bin'] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {})).rejects.toThrow('service.pathPrepend');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('renders caller-supplied renderOptions without consulting instance config', async () => {
+    setPlatform('darwin');
+    mockReads({ plist: generatedPlistIdentity(), config: '{ intentionally-not-json' });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {
+      renderOptions: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/explicit` },
+    })).resolves.toMatchObject({ dryRun: false });
+
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).toContain(`<string>${SERVICE_HOME}/claude-roots/explicit</string>`);
+  });
+
+  it('rejects caller-supplied renderOptions that violate the shared shape rules', async () => {
+    setPlatform('darwin');
+    mockReads({ plist: generatedPlistIdentity() });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {
+      renderOptions: { claudeConfigDir: 'relative/root' },
+    })).rejects.toThrow('service.claudeConfigDir');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // RENDER-SITE WIRING for home confinement.
+  //
+  // tests/fleet/launchd-render-home-confinement.test.ts proves the PREDICATE by
+  // calling assertHomeConfinedRenderOptions directly. Nothing there proved the
+  // predicate is WIRED INTO either render path, so deleting the guard statement
+  // from reconcileLaunchdPlist or from installLaunchdPlist killed zero tests and
+  // the security property could be reverted invisibly. These two drive the real
+  // entry points against a PERSISTED out-of-home service block instead, one per
+  // render call site.
+  //
+  // Both fixtures are shape-VALID (absolute, no ':', no control characters), so
+  // the shape assertion that runs first cannot be what refuses them and only
+  // confinement can. Both assert the refusal REASON, not merely that something
+  // threw, because a different validator refusing for a different cause would
+  // otherwise read as a pass.
+  // -------------------------------------------------------------------------
+
+  it('refuses an out-of-home pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: ['/opt/out-of-home-bin'] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    // Asserted by marker NAME rather than `instanceof`, for the module-registry
+    // reason recorded on the first-install refusal above.
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+
+    // A dry run is the read-only diagnostic and the guard precedes its early
+    // return, so a persisted out-of-home block is refused even here.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses an out-of-home claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: '/opt/out-of-home-root' } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+
+    // Refused before ANY filesystem mutation, not merely before the write: the
+    // install path creates the LaunchAgents directory before rendering.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  // A NONCANONICAL spelling whose components all exist is admitted by physical
+  // resolution: it resolves inside home right now. What is refused is the
+  // spelling, because the raw string is persisted and rendered and the kernel
+  // re-resolves its `..` at every exec. One test per render call site.
+  const noncanonicalFixture = async (): Promise<string> => {
+    const realFs = await realFsPromise;
+    realFs.mkdirSync(`${SERVICE_HOME}/anchor`, { recursive: true });
+    realFs.mkdirSync(`${SERVICE_HOME}/destination`, { recursive: true });
+    return `${SERVICE_HOME}/anchor/../destination`;
+  };
+
+  it('refuses a noncanonical pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    const raw = await noncanonicalFixture();
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: [raw] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must be a normalized absolute path within the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a noncanonical claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    const raw = await noncanonicalFixture();
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: raw } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must be a normalized absolute path within the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  // A DANGLING in-home symlink is the input that separates the PHYSICAL check
+  // from the spelling check at each call site. The value is canonical,
+  // absolute and lexically inside home, so the shape rule and the canonical
+  // rule both admit it and only physical resolution can refuse it. Without
+  // these two, deleting the physical branch while keeping the canonical one
+  // would leave every render-site test green.
+  const danglingLinkAt = async (linkName: string): Promise<void> => {
+    const realFs = await realFsPromise;
+    // The link target is never created, so something EXISTS at the path and
+    // fails to resolve. That is the case admission cannot bind: whoever can
+    // create the target later chooses where the value points.
+    realFs.symlinkSync(`${SERVICE_HOME}/never-created`, `${SERVICE_HOME}/${linkName}`);
+  };
+
+  it('refuses a dangling in-home pathPrepend at the reconcile render site', async () => {
+    setPlatform('darwin');
+    await danglingLinkAt('dangle');
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { pathPrepend: [`${SERVICE_HOME}/dangle/bin`] } },
+    });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    // The CONTAINMENT reason, not the spelling reason: the spelling is already
+    // canonical, so this asserts the physical branch specifically.
+    await expect(reconcileLaunchdPlist('agent', { dryRun: true }))
+      .rejects.toThrow(/service\.pathPrepend\[0\] must resolve to a path inside the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dangling in-home claudeConfigDir at the install render site', async () => {
+    setPlatform('darwin');
+    await danglingLinkAt('dangle-cfg');
+    mockReads({ config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/dangle-cfg` } } });
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    if (!manager.startAfterAuthFire) throw new Error('missing macOS authenticated-start hook');
+
+    const firstStart = new Promise<void>((resolve, reject) => {
+      manager.startAfterAuthFire!('agent', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    await expect(firstStart).rejects.toMatchObject({ name: 'LaunchdRenderConfigError' });
+    await expect(firstStart)
+      .rejects.toThrow(/service\.claudeConfigDir must resolve to a path inside the home directory/);
+
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(fsMocks.mkdirSync).not.toHaveBeenCalled();
+    expect(fsMocks.renameSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('restores the prior plist bytes, not the new render, when reload fails after an options render', async () => {
+    setPlatform('darwin');
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    mockReads({
+      plist: generatedPlistIdentity(),
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
+    });
+    childProcessMocks.execFile
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(null, '', ''));
+        return new EventEmitter();
+      })
+      .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
+        const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+        queueMicrotask(() => callback?.(new Error('bootstrap rejected'), '', ''));
+        return new EventEmitter();
+      });
+    const { reconcileLaunchdPlist } = await importPlatform();
+
+    await expect(reconcileLaunchdPlist('agent', {})).rejects.toThrow('bootstrap rejected');
+
+    // First write publishes the options render; the rollback write restores
+    // the exact prior bytes, which never contained the claude root.
+    const firstWrite = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(firstWrite).toContain('<key>CLAUDE_CONFIG_DIR</key>');
+    expect(fsMocks.writeFileSync).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      generatedPlistIdentity(),
+      { encoding: 'utf-8', mode: 0o644 },
+    );
+    expect(fsMocks.renameSync).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('.com.whatsoup.agent.plist.tmp-'),
+      plist,
+    );
+  });
+
+  it('reports governed-env drift on a dry-run reconcile without touching disk or launchd', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // The installed plist is a real render without the newly configured
+    // claude root: reconciliation must flag CLAUDE_CONFIG_DIR as missing.
+    const observed = buildPlist('agent');
+    mockReads({
+      plist: observed,
+      config: { name: 'agent', service: { claudeConfigDir: `${SERVICE_HOME}/claude-roots/agent` } },
+    });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift).toMatchObject({ comparable: true });
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'CLAUDE_CONFIG_DIR',
+      state: 'missing',
+      expectedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      observedDigest: null,
+    }]);
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('reports a hand-patched PATH with no config source as a tail difference, by digest only', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Simulates the hand-patched-plist class this feature adopts BEFORE the
+    // prepend is config-owned: nothing is configured, so the PATH prefix is
+    // trivially satisfied and only the tail differs from this shell's PATH.
+    const observed = buildPlist('agent', { pathPrepend: [`${SERVICE_HOME}/hand-patched-bin`] });
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    // WHATSOUP_PATH_PREPEND is a governed key, so an installed value with no
+    // config source is reported as governed `extra` drift rather than being
+    // invisible. Before it was governed the same hand-added key counted as a
+    // non-governed drop and refused --apply; now --apply overwrites it. Value
+    // still never leaves the comparator: digest only, asserted below.
+    expect(result.governedEnvDrift?.drift).toEqual([{
+      key: 'WHATSOUP_PATH_PREPEND',
+      state: 'extra',
+      expectedDigest: null,
+      observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
+    expect(result.governedEnvDrift?.pathPrefix).toEqual({
+      configured: false,
+      satisfied: true,
+      ambientTailDiffers: true,
+      expectedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      observedDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('hand-patched');
+  });
+
+  it('reports a governed PATH mismatch when the installed PATH lacks the configured prefix', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent', { pathPrepend: [`${SERVICE_HOME}/hand-patched-bin`] });
+    mockReads({ plist: observed, config: { name: 'agent', service: { pathPrepend: [`${SERVICE_HOME}/service-bin`] } } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    // Both governed surfaces disagree: the composed PATH and the governed
+    // prepend key that now carries the same config fact on its own.
+    expect(result.governedEnvDrift?.drift.map((entry) => `${entry.key}:${entry.state}`))
+      .toEqual(['PATH:mismatch', 'WHATSOUP_PATH_PREPEND:mismatch']);
+    expect(result.governedEnvDrift?.pathPrefix).toMatchObject({ configured: true, satisfied: false });
+  });
+
+  it('renders the governed PATH prepend as its own environment key without changing PATH composition', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    // env-allowed in test: buildPlist reads the generating shell's PATH as the
+    // ambient tail, so it has to be pinned for an exact-equality assertion.
+    process.env.PATH = '/loaded/bin';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin', '/fixture/second/bin'] });
+
+      expect(rendered).toContain('    <key>WHATSOUP_PATH_PREPEND</key>');
+      expect(readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND')).toBe('/fixture/pin/bin:/fixture/second/bin');
+      // PATH composition is untouched: still `prepend:ambient`.
+      expect(readPlistEnv(rendered, 'PATH')).toBe('/fixture/pin/bin:/fixture/second/bin:/loaded/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it('renders both governed PATH surfaces from one config fact', async () => {
+    setPlatform('darwin');
+    const previousPath = process.env.PATH;
+    const previousNode = process.env.WHATSOUP_NODE;
+    process.env.PATH = '/loaded/bin';
+    process.env.WHATSOUP_NODE = '/fixture/node/bin/node';
+    try {
+      const { buildPlist } = await importPlatform();
+      const rendered = buildPlist('agent', { pathPrepend: ['/fixture/pin/bin'] });
+      const servicePath = readPlistEnv(rendered, 'PATH');
+      const governedPrepend = readPlistEnv(rendered, 'WHATSOUP_PATH_PREPEND');
+
+      // These two are what the renderer actually decides, and they are what made
+      // this test red on base. launchd injects both, and deploy/lib/runtime-path.sh
+      // composes "$prepend:$home/.local/bin:$node_dir:$inherited", so the governed
+      // prepend appears TWICE in the effective PATH and first match wins. That
+      // composition is proven executably in
+      // deploy/scripts/tests/test_runtime_path_prepend.sh, which runs the real
+      // helper; node:child_process is mocked here, so re-joining the pieces in
+      // this file would only assert a literal against itself.
+      expect(servicePath).toBe('/fixture/pin/bin:/loaded/bin');
+      expect(governedPrepend).toBe('/fixture/pin/bin');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousNode === undefined) delete process.env.WHATSOUP_NODE;
+      else process.env.WHATSOUP_NODE = previousNode;
+    }
+  });
+
+  it('renders byte-identical output when no path prepend is configured', async () => {
+    setPlatform('darwin');
+    const { buildPlist } = await importPlatform();
+    const baseline = buildPlist('agent');
+
+    expect(baseline).not.toContain('WHATSOUP_PATH_PREPEND');
+    expect(buildPlist('agent', {})).toBe(baseline);
+    expect(buildPlist('agent', { pathPrepend: [] })).toBe(baseline);
+  });
+
+  it('refuses an apply that would drop installed non-governed keys unless the drop is acknowledged', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LaunchdReconcileRefusedError);
+    expect((thrown as Error).message).toContain('WHATSOUP_HEALTH_TOKEN');
+    expect((thrown as Error).message).not.toContain('never-reported');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('proceeds with the apply when the non-governed drop is explicitly acknowledged', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false, dropNonGovernedEnv: true }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('refuses mixed canonical and XML-whitespace-padded declarations before any apply mutation', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const observed = rendered.replace(
+      '</dict>\n</plist>',
+      [
+        '  <key >EnvironmentVariables</key >',
+        '  <dict>',
+        '    <key>PATH</key>',
+        '    <string>/opt/decoy-bin</string>',
+        '  </dict>',
+        '</dict>',
+        '</plist>',
+      ].join('\n'),
+    );
+    expect(observed).not.toBe(rendered);
+    expect(observed).toContain('<key>EnvironmentVariables</key>');
+    expect(observed).toContain('<key >EnvironmentVariables</key >');
+    expect(observed).toContain('/opt/decoy-bin');
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    let thrown: unknown;
+    try {
+      await reconcileLaunchdPlist('agent', { dryRun: false });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const launchctlCalls = childProcessMocks.execFile.mock.calls
+      .filter(([command]) => command === 'launchctl').length;
+    expect({
+      refused: thrown instanceof LaunchdReconcileRefusedError,
+      writeCalls: fsMocks.writeFileSync.mock.calls.length,
+      renameCalls: fsMocks.renameSync.mock.calls.length,
+      unlinkCalls: fsMocks.unlinkSync.mock.calls.length,
+      launchctlCalls,
+    }).toEqual({
+      refused: true,
+      writeCalls: 0,
+      renameCalls: 0,
+      unlinkCalls: 0,
+      launchctlCalls: 0,
+    });
+  });
+
+  it('proceeds with an apply whose only drift is a governed hand-added PATH prepend', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    // Before the key was governed this same plist refused --apply as a
+    // non-governed drop. Governing it means --apply now OVERWRITES an
+    // operator's hand-set value. That is the disclosed live behaviour change,
+    // and it needs a positive assertion, not just an empty droppedNonGovernedKeys.
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_PATH_PREPEND</key>\n    <string>/opt/hand-added-bin</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .resolves.toMatchObject({ dryRun: false });
+
+    expect(fsMocks.writeFileSync).toHaveBeenCalled();
+    const written = String(fsMocks.writeFileSync.mock.calls[0]?.[1]);
+    expect(written).not.toContain('hand-added-bin');
+    const domain = `gui/${currentUid()}`;
+    expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
+  });
+
+  it('refuses an apply when a credential key is hidden behind interposed markup', async () => {
+    // The apply-level consequence of the silent-absence class, and the reason it
+    // is a MUST rather than a probe nit. Pair-extraction dropped the credential
+    // key from the parsed map, droppedNonGovernedKeys came back empty, and the
+    // apply concluded there was nothing to drop -- then regenerated the plist
+    // and deleted the credential. The outer dict is spelled `<dict >`, which
+    // this branch newly made parseable, so the cell is reachable rather than
+    // hypothetical.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent')
+      .replace('  <key>EnvironmentVariables</key>\n  <dict>', '  <key>EnvironmentVariables</key>\n  <dict >')
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key><!-- rotated 2026-08 --><string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // The refusal must happen BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('refuses an apply when a commented-out decoy dict hides the live one', async () => {
+    // HIGH-1 at apply level, which is where the damage is. The comparator read
+    // the marker INSIDE the comment, parsed the decoy's body as the installed
+    // environment, and never looked at the live dict -- so
+    // droppedNonGovernedKeys came back empty, the apply concluded there was
+    // nothing to drop, regenerated the plist and deleted the credential.
+    //
+    // The decoy body is deliberately IDENTICAL to the fresh render, so before
+    // the fix the comparison was not merely wrong, it was clean: no drift, no
+    // dropped keys, nothing for an operator to notice.
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    // Vacuity guard: the slice really is the environment block, so a pass
+    // cannot come from commenting out nothing at all.
+    expect(environmentBlock).toContain('<key>EnvironmentVariables</key>');
+    expect(environmentBlock).toContain('<key>HOME</key>');
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false }))
+      .rejects.toThrow(LaunchdReconcileRefusedError);
+    // Refused BEFORE any mutation, or the credential is already gone.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('names the hidden key in the dry-run report rather than reporting an all-clear', async () => {
+    // The reporting half of the row above. A refusal alone would satisfy the
+    // apply assertion even if the comparator had merely become unparseable; the
+    // operator has to be told WHICH key the comment was hiding.
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const rendered = buildPlist('agent');
+    const environmentBlock = rendered.slice(
+      rendered.indexOf('  <key>EnvironmentVariables</key>'),
+      rendered.indexOf('  </dict>', rendered.indexOf('  <key>EnvironmentVariables</key>')) + '  </dict>'.length,
+    );
+    const observed = rendered
+      .replace(
+        '    <key>HOME</key>',
+        '    <key>OPERATOR_API_KEY</key>\n    <string>fixture-not-a-real-key</string>\n    <key>HOME</key>',
+      )
+      .replace('  <key>EnvironmentVariables</key>', `  <!-- ${environmentBlock} -->\n  <key>EnvironmentVariables</key>`);
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.droppedNonGovernedKeys).toEqual(['OPERATOR_API_KEY']);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('fixture-not-a-real-key');
+  });
+
+  it('refuses an apply when the installed EnvironmentVariables dict is unparseable, unless acknowledged', async () => {
+    setPlatform('darwin');
+    const { LaunchdReconcileRefusedError, reconcileLaunchdPlist } = await importPlatform();
+    // `environment: null` so this fixture carries exactly ONE marker: with the
+    // helper's default dict it would carry two, and the refusal would come from
+    // the duplicate-declaration rule rather than from the unterminated dict this
+    // test names. Same green, different behaviour.
+    const observed = `${generatedPlistIdentity('agent', { environment: null })}\n<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>`;
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    await expect(reconcileLaunchdPlist('agent', { dryRun: false })).rejects.toThrow(LaunchdReconcileRefusedError);
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('reports installed non-governed key names that an apply would drop', async () => {
+    setPlatform('darwin');
+    const { buildPlist, reconcileLaunchdPlist } = await importPlatform();
+    const observed = buildPlist('agent').replace(
+      '    <key>HOME</key>',
+      '    <key>WHATSOUP_HEALTH_TOKEN</key>\n    <string>sentinel-token-value-never-reported</string>\n    <key>HOME</key>',
+    );
+    mockReads({ plist: observed, config: { name: 'agent' } });
+
+    const result = await reconcileLaunchdPlist('agent', { dryRun: true });
+
+    expect(result.governedEnvDrift?.droppedNonGovernedKeys).toEqual(['WHATSOUP_HEALTH_TOKEN']);
+    expect(JSON.stringify(result.governedEnvDrift)).not.toContain('never-reported');
   });
 
   it('requires an existing plist for an explicit launchd migration', async () => {
@@ -435,7 +1229,7 @@ describe('platform service managers', () => {
   it('retries a transient launchd bootstrap I/O error after bootout settles', async () => {
     vi.useFakeTimers();
     setPlatform('darwin');
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
         const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
@@ -466,7 +1260,7 @@ describe('platform service managers', () => {
       dryRun: false,
     });
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
@@ -475,8 +1269,8 @@ describe('platform service managers', () => {
 
   it('restores the prior plist and job when launchd reload fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
         const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
@@ -522,8 +1316,8 @@ describe('platform service managers', () => {
 
   it('still restores the prior plist and attempts its restart when new-job cleanup fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
         const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
@@ -555,8 +1349,8 @@ describe('platform service managers', () => {
 
   it('boots out a partially loaded new job before restoring after kickstart fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile
       .mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
         const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
@@ -589,8 +1383,8 @@ describe('platform service managers', () => {
 
   it('restores only the plist and aborts when the initial launchd bootout fails', async () => {
     setPlatform('darwin');
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
-    fsMocks.readFileSync.mockReturnValue(generatedPlistIdentity());
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
+    mockReads({ plist: generatedPlistIdentity() });
     childProcessMocks.execFile.mockImplementationOnce((_cmd, _args, optionsOrCallback, maybeCallback) => {
       const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
       queueMicrotask(() => callback?.(new Error('bootout rejected'), '', ''));
@@ -614,7 +1408,7 @@ describe('platform service managers', () => {
     await expect(createServiceManager().disable('agent')).resolves.toBeUndefined();
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenCalledWith('launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(fsMocks.unlinkSync).toHaveBeenCalledWith(plist);
   });
@@ -713,7 +1507,7 @@ describe('platform service managers', () => {
     await expect(firstStart).rejects.toThrow('rollback also failed');
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
@@ -748,7 +1542,7 @@ describe('platform service managers', () => {
     await expect(firstStart).rejects.toThrow('bootstrap rejected');
 
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(fsMocks.unlinkSync).toHaveBeenCalledWith(plist);
@@ -779,7 +1573,7 @@ describe('platform service managers', () => {
 
     await expect(createServiceManager().restart('agent')).resolves.toBeUndefined();
     const domain = `gui/${currentUid()}`;
-    const plist = '/tmp/whatsoup-home/Library/LaunchAgents/com.whatsoup.agent.plist';
+    const plist = `${SERVICE_HOME}/Library/LaunchAgents/com.whatsoup.agent.plist`;
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(1, 'launchctl', ['bootout', `${domain}/com.whatsoup.agent`], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(2, 'launchctl', ['bootstrap', domain, plist], expect.any(Function));
     expect(childProcessMocks.execFile).toHaveBeenNthCalledWith(3, 'launchctl', ['kickstart', '-k', `${domain}/com.whatsoup.agent`], expect.any(Function));

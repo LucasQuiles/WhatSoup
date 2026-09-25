@@ -1,3 +1,4 @@
+import { admitHomeConfinedPath, ensureHomeConfinedDirectory } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/runtime.ts
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
@@ -7,6 +8,7 @@ import type { Database } from '../../core/database.ts';
 import type {
   DurabilityEngine,
   SessionCheckpointRow,
+  StaleReclaimedInbound,
 } from '../../core/durability.ts';
 import type { TurnRecoveryClaimFence, TurnRecoveryJobRow } from '../../core/turn-recovery-store.ts';
 import type {
@@ -16,6 +18,7 @@ import type {
   TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
+import { resolveCatchupReconcileDep, type TurnRecoveryCatchupReconcileOptions } from '../../core/turn-recovery-catchup-config.ts';
 import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
@@ -31,7 +34,7 @@ import {
   type ResponseWorkflow,
   type UserTemplateId,
 } from './response-registry.ts';
-import { autoSwitchNoticeMessage, renderUserMessage, providerUnknownTerminalNotice } from './response-templates.ts';
+import { autoSwitchNoticeMessage, renderUserMessage, providerUnknownTerminalNotice, renderFallbackAdvanceNotice } from './response-templates.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
@@ -45,6 +48,7 @@ import {
 } from './handoff-notice-prefix.ts';
 import { providerPreview } from './provider-preview-sanitizer.ts';
 import { formatContextLines } from './context-lines.ts';
+import { renderVoiceNotes } from './context-audio.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, deleteHandoffArtifact } from './handoff-artifact.ts';
@@ -56,8 +60,11 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
+import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
+  type AgentFallbackDiscoveryConfig,
   type AgentFallbackEntry,
 } from '../../core/fallback-chain.ts';
 import {
@@ -69,6 +76,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../../lib/time-units.ts';
@@ -79,6 +87,7 @@ import {
   AMBIGUOUS_SESSION_MAX_AGE_MS,
   MAX_RESIDENT_SESSIONS,
   SESSION_MIN_RESIDENCY_MS,
+  RESIDENT_TURN_PROGRESS_DEADLINE_MS,
   MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS,
   diagnosticBundleEnabled,
   DIAGNOSTIC_BUNDLE_THROTTLE_MS,
@@ -147,6 +156,7 @@ import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.t
 import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
 import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
+import { emitManagedLoopDegradedNotice, isManagedLoopFallbackDegraded, managedLoopDegradedSystemBlock } from './managed-loop-disclosure.ts';
 import { RuntimePollBridgeCoordinator, type RuntimePollBridgePort } from './runtime-poll-bridge.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
@@ -181,10 +191,16 @@ import {
 import { getRecentMessages, getMessagesSince, hasFromMeReplyAfter } from '../../core/messages.ts';
 import { toConversationKey, isGroupConversationKey, GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
 import { classifyAssistantTextEgress } from '../../core/outbound-message-safety.ts';
+import {
+  isolateScheduledAgentJobPrompt,
+  isScheduledAgentJobMapKey,
+  resolveAgentTurnMapKey,
+} from './scheduled-agent-job-isolation.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
+import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import {
   markRuntimeTurnReplayUnsafe,
@@ -192,10 +208,18 @@ import {
 } from './runtime-turn-context.ts';
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
+import { OPERATOR_CANCELLATION_ATTEMPT_OUTCOME } from './turn-terminal.ts';
 import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
-import { classifyRuntimeRecoveryHealth } from './runtime-recovery-health.ts';
+import {
+  classifyRuntimeRecoveryHealth,
+  runtimeRecoveryDegradation,
+} from './runtime-recovery-health.ts';
 import { CrashTracker } from './crash-tracker.ts';
-import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
+import {
+  AutoCompactController,
+  AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
+  AUTO_COMPACT_CONVERGENCE_LIMIT,
+} from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
 import {
   PendingSystemResultTracker,
@@ -231,6 +255,7 @@ import {
   type RuntimeTurnPostEffects,
   type RuntimeTurnQueueTeardown,
   type RuntimeTurnSourceSnapshot,
+  WedgedTurnReclaimedError,
 } from './runtime-turn-coordinator.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { SessionOwnershipRegistry } from './session-ownership.ts';
@@ -250,7 +275,7 @@ import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
-import type { StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
+import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
   checkAndRecordInterruptedBoot,
   markBootInProgress,
@@ -270,7 +295,7 @@ import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
-import type { SessionContext } from '../../mcp/types.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
@@ -293,6 +318,8 @@ import {
   writeProviderMcpConfigTarget,
 } from './providers/mcp-bridge.ts';
 import {
+  executionModeForProvider,
+  isProviderId,
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
@@ -304,8 +331,29 @@ import {
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import { buildPrimaryProbeAdapterDeps } from './primary-readiness-probe.ts';
+import {
+  buildPrimaryProbeAdapterDeps,
+  expectedProbeDeadlineFromDueMs,
+  expectedProbeDeadlineMs,
+  periodicProbeBackoffMultiple,
+} from './primary-readiness-probe.ts';
+import {
+  MessageHandlerDrainTimeoutError,
+  drainMessageHandlersForShutdown,
+} from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import {
+  AccountIdentityVerifier,
+  type AccountIdentityProbeTrigger,
+  type AccountIdentityVerifierHost,
+  type AccountIdentityVerifyFn,
+} from './account-identity-verifier.ts';
+import {
+  accountIdentityDegradedReasons,
+  deriveAccountIdentityHealth,
+  type AccountIdentityHealth,
+  type AccountIdentityVerification,
+} from './providers/claude-account-identity.ts';
 import {
   resolveFallbackRecoveryDecision,
   type FallbackRecoveryEvidence,
@@ -344,6 +392,30 @@ const AUTO_RESPAWN_MAX_CRASHES = 3;
 const AUTO_RESPAWN_BASE_MS = 2 * MS_PER_SECOND;
 /** Maximum respawn delay (ms) — caps the exponential backoff. */
 const AUTO_RESPAWN_MAX_DELAY_MS = 15 * MS_PER_SECOND;
+/**
+ * Max times a scheduled respawn may re-arm itself because provider termination
+ * is not yet proven. Bounds the one case that is genuinely transient — a tool
+ * loop still inside an already-entered call, which settles in its own `finally`
+ * — without letting a session that can never prove termination re-arm forever.
+ * At the respawn backoff this spans roughly 45 seconds before the respawn is
+ * abandoned and the conversation waits for the user's next message.
+ */
+const AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS = 5;
+
+/** One scheduled auto-respawn attempt for an owned per-chat session. */
+interface OwnedPerChatRespawnArgs {
+  initialMapKey: string;
+  chatJid?: string;
+  session: SessionManager;
+  managerId: string;
+  recoveryGeneration: number;
+  sessionId: string;
+  dbRowId: number | null;
+  crashedAtSec: number;
+  timer: ReturnType<typeof setTimeout>;
+  /** How many times this attempt already re-armed for unproven termination. */
+  terminationDeferrals?: number;
+}
 /** Periodic runtime health stats emission interval. */
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
@@ -435,6 +507,16 @@ export interface AgentRuntimeOptions {
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
   /**
+   * #3295 S2 (default OFF): defer replay-safe per_chat followers blocked
+   * solely by outstanding turn recovery into durable obligations instead of
+   * terminally rejecting them. Evaluated PER ADMISSION (kill-switch
+   * semantics): flipping `enabled` off stops deferral immediately. Drain is
+   * S3; until it lands an obligation only accumulates.
+   */
+  deferredTurnAdmission?: { enabled: boolean };
+  /** Catch-up reconciler gate (default OFF); see turn-recovery-catchup-config.ts. */
+  turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
+  /**
    * Systemd restart capability, injected from the composition root. The runtimes
    * layer cannot import the fleet layer, so main.ts constructs the concrete
    * ServiceManager and passes it here. When absent, the restart_self tool is not
@@ -451,6 +533,16 @@ export interface AgentRuntimeOptions {
    */
   modelCatalogueListFn?: typeof listModelCatalog;
   modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
+  /**
+   * Ratified account-identity digest (`service.expectedAccountDigest`,
+   * task-21). When set, the runtime verifies the claude CLI's serving
+   * identity against it on startup and on every primary-usability probe and
+   * alerts on mismatch; it never writes a credential. null/undefined =
+   * verification disabled (one info note at the first probe).
+   */
+  expectedAccountDigest?: string | null;
+  /** Test seam for the identity verification (defaults to the real CLI probe). */
+  accountIdentityVerify?: AccountIdentityVerifyFn;
 }
 
 export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
@@ -474,9 +566,11 @@ export function deriveModelUsable(
   if (!usability || usability.probeInFlight) {
     return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
   }
+  // A future-dated or non-finite proof time, clock or window is not current evidence.
+  const ageMs = typeof modelUsableCheckedAt === 'number' ? nowMs - modelUsableCheckedAt : NaN;
+  const fresh = Number.isFinite(ageMs) && Number.isFinite(freshnessMs)
+    && ageMs >= 0 && ageMs <= freshnessMs;
   if (usability.status === 'usable') {
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
@@ -486,13 +580,37 @@ export function deriveModelUsable(
     // than freshnessMs (e.g. a credential-unavailable cached at startup) is
     // stale evidence, not an authoritative red — report null (unknown) +
     // modelUsableStale=true so it re-probes rather than caching a stale false.
-    const fresh = typeof modelUsableCheckedAt === 'number'
-      && (nowMs - modelUsableCheckedAt) <= freshnessMs;
     return fresh
       ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
       : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
   }
   return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
+}
+
+/**
+ * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
+ * probe is armed the evidence can legitimately be as old as the scheduler's
+ * next fire (interval × backoff, plus the full jitter band and a grace), so the
+ * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
+ * window declared it stale for up to 3 minutes every cycle and for the back
+ * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
+ * flap). With no periodic probe armed the flat window is preserved unchanged.
+ * Pure + exported for direct unit testing.
+ */
+export function resolveModelUsabilityFreshnessMs(
+  periodicProbeExpected: boolean,
+  backoffMultiple: number,
+  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
+): number {
+  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
+  // The armed timer's due instant is the source of truth when known: cadence
+  // and window can then never diverge (a manual probe that resets the backoff
+  // re-arms the timer and moves this instant with it). The scheduler formula
+  // is the fallback only while no due instant has been recorded.
+  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
+    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
+  }
+  return expectedProbeDeadlineMs(backoffMultiple);
 }
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
@@ -552,6 +670,13 @@ import {
 } from './tool-update.ts';
 import { maybeEmitToolFailureAlert, type ToolFailureAlertDeps } from './tool-failure-alert.ts';
 import { runNewCommand } from './runtime-new-command.ts';
+import {
+  runStopCommand,
+  isStopTeardownInFlight,
+  NEW_ACK_REFUSED_STOP_IN_PROGRESS,
+  STOP_ACK_COMPOUND_BODY_REFUSED,
+  NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED,
+} from './runtime-stop-command.ts';
 
 // Provider-failure string matchers are the single source of truth in
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
@@ -648,17 +773,48 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
+/**
+ * What a wedged-lane release did to the provider (#3374 C7). `reaped_child` is
+ * the real-process wedge, where an intentional SIGKILL routes the exit through
+ * the session's own crash machinery. `reap_skipped_no_child` is the
+ * managed-provider wedge: the session holds no child, so nothing is killed and
+ * the remote request is left outstanding — the release still frees the lane,
+ * but it must not be recorded as a reap that happened.
+ * `reap_unavailable` is a session surface that does not implement the reap.
+ */
+type WedgedLaneReapOutcome = 'reaped_child' | 'reap_skipped_no_child' | 'reap_unavailable';
 
 export class AgentRuntime implements Runtime {
 
   private readonly db: Database;
   private readonly messenger: Messenger;
   private readonly instanceName: string;
+  /** #3295 S2: live-read flag object for deferred-turn admission (null = feature absent). */
+  private readonly deferredTurnAdmissionOptions: { enabled: boolean } | null;
   /** #2397: mapKeys that have exhausted auto-respawn and are not yet recovered. */
-  private readonly exhaustedRespawnOwners = new Set<string>();
+  private readonly exhaustedRespawnOwners = new Map<string, symbol>();
+  /**
+   * mapKey -> the epoch ms at which its auto-respawn was abandoned because
+   * provider termination was never proved.
+   *
+   * Deliberately NOT `exhaustedRespawnOwners`: the crash-exhaustion path writes
+   * that set too, so a health counter reading it would degrade for every
+   * crash-exhausted chat as well — chats that already alert under
+   * `agent_respawn_failed` and whose behaviour this signal does not describe.
+   *
+   * A timestamp map rather than a set with one timer per add: independent
+   * `setTimeout`s let a re-abandonment at T2 be erased by the T1 timer, an hour
+   * early. Expiry is lazy — every read prunes first — so the entry's own age
+   * decides, and a re-abandonment refreshes it.
+   */
+  private readonly abandonedRespawnOwners = new Map<string, number>();
+  /** A content-free obligation to retry the shared alert clear until accepted. */
+  private agentRespawnFailedClearPending = false;
+  /** How long an abandonment stays visible to health and alerting. */
+  private static readonly ABANDONED_RESPAWN_RETENTION_MS = MS_PER_HOUR;
   private readonly shared: boolean;
   private readonly sessionScope: SessionScope;
-  private readonly cwd: string | undefined;
+  private cwd: string | undefined;
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly sandbox: SandboxPolicy | undefined;
@@ -679,7 +835,7 @@ export class AgentRuntime implements Runtime {
   /** Task H injectable catalogue seam (AgentRuntimeOptions doc comment) — undefined in production. */
   private readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   private readonly modelCatalogueAnthropicFn: typeof fetchAnthropicModelIdsWithStatus | undefined;
-  private readonly pluginDirs: string[];
+  private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly autoCompactInputTokens: number | undefined;
@@ -689,7 +845,11 @@ export class AgentRuntime implements Runtime {
   private readonly providerBoundaryMode: ProviderBoundaryMode;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
   // The legacy scalar pair is normalized as entry zero for compatibility.
+  // Discovery mode (R6): the array starts empty and the fallback coordinator
+  // derives + maintains its contents IN PLACE from the gateway's model
+  // catalogue — the reference must stay stable (ports hold it by identity).
   private readonly agentFallbacks: AgentFallbackEntry[];
+  private readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
   /** Coordinate snapshot for numbered-drill stability (D16/D17) — the exact
@@ -795,6 +955,8 @@ export class AgentRuntime implements Runtime {
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
+  /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
+  private periodicUsabilityProbeDueAt: number | null = null;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -814,6 +976,13 @@ export class AgentRuntime implements Runtime {
   private lastDiagnosticBundleAt = 0;
   private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
   private primaryModelUsabilityAlertActive = false;
+  /** Ratified account-identity digest; null = identity verification disabled (task-21). */
+  private readonly expectedAccountDigest: string | null;
+  /** Last identity verification result — runtime-owned so the health snapshot reads it directly. */
+  private accountIdentity: AccountIdentityVerification | null = null;
+  /** When the expectation was armed (construction); `never-verified` is judged from here. */
+  private readonly accountIdentityArmedAt: number | null;
+  private readonly accountIdentityVerifier: AccountIdentityVerifier;
   /** Consecutive empty PRIMARY-provider user turns; reset on any successful turn
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
@@ -841,6 +1010,14 @@ export class AgentRuntime implements Runtime {
   // counters). Constructed in the constructor once autoCompactInputTokens is known.
   // See src/runtimes/agent/auto-compact-controller.ts.
   private readonly autoCompact: AutoCompactController;
+
+  /**
+   * #3523 (iteration 1): scope keys with a wedged-resident hard reset in flight.
+   * One reset per scope at a time, so the compaction-livelock escalation and the
+   * zombie sweep's non-progressing-resident disposition can never drive the same
+   * manager through two concurrent lifecycle transitions.
+   */
+  private readonly wedgedResidentResets = new Set<string>();
 
   /**
    * Post-turn event gate — tracks mapKeys where a 'result' event has been
@@ -891,6 +1068,13 @@ export class AgentRuntime implements Runtime {
   private recentNoFallbackReauthNotices = new Map<string, number>();
 
   /**
+   * Dedup for {@link emitManagedLoopDegradedNotice}
+   * (#3149), keyed `${chatJid}:managed-loop-degraded` — "this chat was already
+   * told it is being served with reduced capabilities" within the notice window.
+   */
+  private recentManagedLoopDegradedNotices = new Map<string, number>();
+
+  /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
    * processed for the current turn. Used to suppress the empty-turn fallback
    * notice when the agent's entire reply was tool work (e.g. send_message,
@@ -929,8 +1113,10 @@ export class AgentRuntime implements Runtime {
    * Window for the health-degraded crash signal (#1427). A crash older than this
    * no longer degrades health, so a transient crash that immediately recovers
    * clears within the window instead of pinning status=degraded forever. Sustained
-   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), so
-   * a short window here only governs the soft "crashed recently" health hint.
+   * crash LOOPS are still caught by auto-respawn exhaustion (a separate alert), and
+   * a respawn abandoned with termination unproved raises its own alert and its own
+   * non-decaying health reason, so a short window here only governs the soft
+   * "crashed recently" health hint.
    */
   private static readonly CRASH_HEALTH_DECAY_WINDOW_MS = 10 * MS_PER_MINUTE;
 
@@ -1111,6 +1297,33 @@ export class AgentRuntime implements Runtime {
     throw new Error(`SYSTEM_TURN_QUARANTINE_FAILED: provider lane "${scopeKey}" remains closed`);
   }
 
+  /**
+   * Returns the session's suspension barrier only while host admission has one
+   * (or a deferred start) outstanding. Callers await it conditionally, so the
+   * default dispatch path gains no extra microtask turns.
+   */
+  private hostWorkAdmissionSuspensionBarrier(session: SessionManager): Promise<void> | null {
+    if (!this.hasDeferredHostWorkAdmissionStart(session)) return null;
+    const wait = (session as unknown as {
+      waitForHostWorkAdmissionSuspension?: () => Promise<void>;
+    }).waitForHostWorkAdmissionSuspension;
+    return typeof wait === 'function' ? wait.call(session) : null;
+  }
+
+  private hasDeferredHostWorkAdmissionStart(session: SessionManager): boolean {
+    const deferred = (session as unknown as {
+      isHostWorkAdmissionStartDeferred?: () => boolean;
+    }).isHostWorkAdmissionStartDeferred;
+    return typeof deferred === 'function' && deferred.call(session);
+  }
+
+  private async suspendHostWorkAdmissionAfterTerminal(session: SessionManager): Promise<void> {
+    const suspend = (session as unknown as {
+      suspendHostWorkAdmissionAfterTerminal?: () => Promise<void>;
+    }).suspendHostWorkAdmissionAfterTerminal;
+    if (typeof suspend === 'function') await suspend.call(session);
+  }
+
   private async settleFailedSystemTurnDispatch(
     session: SessionManager,
     scopeKey: string,
@@ -1137,8 +1350,9 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
-    if (this.autoCompactInputTokens === undefined || session === null) return;
+  /** Returns true when a successor (a compact turn or a hard reset) now owns the session. */
+  private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean {
+    if (this.autoCompactInputTokens === undefined || session === null) return false;
     // QR-105: '/compact' is a claude-cli-only slash command. For any other provider
     // (codex-cli/opencode-cli/gemini-cli, anthropic-api/openai-api) sending it is a
     // plain user message that never emits a compact_boundary — so markSessionCompacted
@@ -1151,15 +1365,15 @@ export class AgentRuntime implements Runtime {
     // indeterminate provider fails safe (skip the claude-only command).
     const sessionProvider =
       typeof session.getProviderId === 'function' ? session.getProviderId() : null;
-    if (sessionProvider !== 'claude-cli') return;
-    if (this.sessionScope === 'shared') return;
-    if (!session.getStatus().active) return;
+    if (sessionProvider !== 'claude-cli') return false;
+    if (this.sessionScope === 'shared') return false;
+    if (!session.getStatus().active) return false;
 
     const rowId = session.getDbRowId();
-    if (rowId === null) return;
+    if (rowId === null) return false;
 
     const snapshot = getSessionTokenSnapshot(this.db, rowId);
-    if (!snapshot) return;
+    if (!snapshot) return false;
 
     // #1774: total_input_tokens no longer includes cache_read (it is
     // genuinely-new input only — see the schema note above ensureAgentSchema
@@ -1172,9 +1386,25 @@ export class AgentRuntime implements Runtime {
     const totalCombined = snapshot.totalInputTokens + snapshot.totalCacheReadTokens;
     const lastCompactCombined = snapshot.lastCompactInputTokens + snapshot.lastCompactCacheReadTokens;
     const inputSinceCompact = Math.max(0, totalCombined - lastCompactCombined);
-    if (inputSinceCompact < this.autoCompactInputTokens) return;
-
     const scopeKey = mapKey ?? GLOBAL_TOOL_SCOPE_KEY;
+    const overAutoCompactThreshold = inputSinceCompact >= this.autoCompactInputTokens;
+
+    // #3523 layer 1 (iteration 1): record whether the LAST compaction converged.
+    // This is the first eligibility evaluation after a compact_boundary (the
+    // turn-result handler calls recordAutoCompactSuccess and finishAutoCompact on
+    // the boundary turn itself and does NOT re-enter this method — see
+    // runtime-turn-result-handler.ts:597-609), so `inputSinceCompact` here is
+    // measured against the post-compaction baseline markSessionCompacted just set.
+    // Still at or above threshold means /compact did not shrink the context.
+    // Deliberately BEFORE the rapid-rearm block below, which deletes lastSuccessAt
+    // whenever the turn lands outside the 5-minute window: that deletion is why the
+    // rapid-rearm counter can never accumulate at the incident's ~30-minute cadence.
+    // Skipped while a compact is in flight — that turn's tokens are not a verdict.
+    const compactedAt = this.autoCompact.lastSuccessAt.get(scopeKey);
+    if (compactedAt !== undefined && !this.autoCompact.waiters.has(scopeKey)) {
+      this.autoCompact.recordCompactionOutcome(scopeKey, compactedAt, overAutoCompactThreshold);
+    }
+    if (!overAutoCompactThreshold) return false;
 
     // Rollout bootstrap: existing sessions that already accumulated past the
     // threshold before this knob was enabled would otherwise fire /compact
@@ -1197,10 +1427,10 @@ export class AgentRuntime implements Runtime {
         lastCompactInputTokens: snapshot.lastCompactInputTokens,
         threshold: this.autoCompactInputTokens,
       }, 'auto compact baseline initialised for existing session');
-      return;
+      return false;
     }
 
-    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
+    if (this.autoCompact.waiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return false;
 
     const now = Date.now();
     const lastSuccessAt = this.autoCompact.lastSuccessAt.get(scopeKey);
@@ -1210,7 +1440,7 @@ export class AgentRuntime implements Runtime {
         this.autoCompact.rapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
       if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
         this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
-        return;
+        return false;
       }
       if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
         this.autoCompact.consecutiveRapidRearms.delete(scopeKey);
@@ -1218,9 +1448,49 @@ export class AgentRuntime implements Runtime {
       }
     }
 
+    // #3523 layer 1: compaction convergence guard. Once /compact is proven unable
+    // to bring a scope's context back under threshold, arming another one just
+    // loops forever. For a resident '::scheduled-agent-job' scope (which accretes
+    // context across firings and cannot shrink) escalate to a hard session reset
+    // instead of another ineffective compact.
+    //
+    // Iteration 1 (#3527 review S1/M1/cross-model finding 3): the PRIMARY signal is
+    // consecutiveNonConvergentCompactions, which counts compactions after which
+    // the context was STILL over threshold on the very next evaluation. It is
+    // independent of inter-turn timing, so it accumulates at the incident's
+    // ~30-minute cadence — where consecutiveRapidRearms cannot, because the
+    // rapid-rearm reset above deletes it on every out-of-window turn. The
+    // rapid-rearm counter is RETAINED as a second, sufficient trigger: it is the
+    // interactive-cadence form of the same livelock (a user who keeps talking
+    // inside the 5-minute window), and dropping it would lose that coverage.
+    // Placed AFTER the rapid-rearm reset (a scope that has since recovered has
+    // that counter cleared to 0) but BEFORE the cooldown gate (a still-wedged
+    // scope escalates immediately instead of waiting out the backoff, up to an hour).
+    const consecutiveRapidRearms = this.autoCompact.consecutiveRapidRearms.get(scopeKey) ?? 0;
+    const nonConvergentCompactions =
+      this.autoCompact.consecutiveNonConvergentCompactions.get(scopeKey) ?? 0;
+    if (
+      (this.autoCompact.isCompactionNonConvergent(scopeKey)
+        || consecutiveRapidRearms >= AUTO_COMPACT_CONVERGENCE_LIMIT)
+      && isScheduledAgentJobMapKey(scopeKey)
+    ) {
+      void this.escalateCompactionLivelock(
+        session, scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
+      ).catch((err: unknown) => {
+        // Iteration 2 (the adversarial lens A2). The reset inside the escalation
+        // catches its own errors, but the bookkeeping cleanup and the alert emission
+        // that follow it do not. Without this handler a throw there becomes an
+        // unhandledRejection, which main.ts treats as fatal and force-exits on — so a
+        // livelock guard could take the whole runtime down. Contained and logged.
+        log.error({ err, scopeKey, rowId }, 'compaction livelock escalation failed');
+      });
+      // The serialized hard reset owns this session's lifecycle from here.
+      return true;
+    }
+
     const cooldownUntil = this.autoCompact.cooldownUntil.get(scopeKey);
     if (cooldownUntil !== undefined) {
-      if (now < cooldownUntil) return;
+      if (now < cooldownUntil) return false;
       this.autoCompact.cooldownUntil.delete(scopeKey);
     }
 
@@ -1273,9 +1543,115 @@ export class AgentRuntime implements Runtime {
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       await this.settleFailedSystemTurnDispatch(session, scopeKey, compactLease, err);
+      await this.suspendHostWorkAdmissionAfterTerminal(session);
     }).catch((err) => {
       log.error({ err, scopeKey, rowId }, 'auto compact failed to quarantine ambiguous dispatch');
     });
+    return true;
+  }
+
+  /**
+   * #3523 layer 1: break a compaction livelock on a resident
+   * '::scheduled-agent-job' scope. When /compact has proven unable to bring the
+   * context back under threshold AUTO_COMPACT_CONVERGENCE_LIMIT times in a row,
+   * re-arming another compact would loop forever. The only convergent action is a
+   * hard session reset — the session ends (dropping its resumable checkpoint) and
+   * a fresh one spawns with a new session_id, so the accreted context is discarded
+   * rather than repeatedly (and futilely) compacted.
+   *
+   * Iteration 1 (#3527 review cross-model finding 1/M2/S6): the reset is AWAITED through the
+   * owned-reset/generation path (resetWedgedResidentSession → resetOwnedPerChatSession),
+   * and the auto-compact bookkeeping is cleared and the admin alert emitted only
+   * AFTER it settles. A FAILED reset therefore keeps the convergence counters, so
+   * the next eligibility evaluation retries the escalation instead of needing K
+   * fresh accumulations, and the alert body reports the outcome rather than the
+   * attempt.
+   */
+  private async escalateCompactionLivelock(
+    session: SessionManager,
+    scopeKey: string,
+    rowId: number,
+    consecutiveRapidRearms: number,
+    nonConvergentCompactions: number,
+  ): Promise<void> {
+    log.error(
+      {
+        scopeKey, rowId, consecutiveRapidRearms, nonConvergentCompactions,
+        limit: AUTO_COMPACT_CONVERGENCE_LIMIT,
+      },
+      'auto compact convergence limit reached — hard-resetting scheduled-agent-job session (compaction livelock)',
+    );
+    const reset = await this.resetWedgedResidentSession(
+      scopeKey, session, 'compaction-livelock', { rowId },
+    );
+    if (reset === 'reset') {
+      // Drop all auto-compact bookkeeping for the scope so the fresh session is not
+      // immediately re-classified as non-convergent off the old counters. Only on a
+      // PROVEN reset: clearing it on a failed one would discard the evidence that
+      // triggers the retry.
+      this.autoCompact.cleanupScope(scopeKey);
+    }
+    if (reset === 'in_progress') return; // an earlier escalation owns this scope
+    emitAlertChecked(
+      this.instanceName,
+      'auto_compact_convergence_reset',
+      'Auto-compact convergence limit reached',
+      `scope=${scopeKey} consecutiveRapidRearms=${consecutiveRapidRearms} `
+      + `nonConvergentCompactions=${nonConvergentCompactions} — hard reset of the `
+      + `scheduled-agent-job session ${reset === 'reset' ? 'SUCCEEDED' : 'FAILED (will retry on the next turn)'} `
+      + '(context cannot shrink via /compact)',
+    );
+  }
+
+  /**
+   * #3523 layers 1+2 (iteration 1): the single serialized hard-reset path for a
+   * wedged resident session, shared by the compaction-livelock escalation and by
+   * the zombie sweep's non-progressing-resident disposition.
+   *
+   * Serialization has three parts. (a) `wedgedResidentResets` admits one reset per
+   * scope at a time, so a sweep and an escalation cannot both drive one manager.
+   * (b) `resetOwnedPerChatSession` is the runtime's OWNED reset: it aborts the
+   * chat's turn, advances the ownership generation, awaits shutdown and proven
+   * process exit, re-checks ownership, then spawns — so a turn dispatched
+   * concurrently loses the generation check instead of interleaving lifecycle
+   * transitions (the defect in the fire-and-forget `void session.handleNew()`).
+   * (c) the call is AWAITED, so callers observe the outcome.
+   *
+   * Returns 'reset' on a proven fresh session, 'failed' when the reset threw (the
+   * caller keeps its evidence and blocks/retries), or 'in_progress' when another
+   * reset already owns this scope.
+   */
+  private async resetWedgedResidentSession(
+    mapKey: string,
+    session: SessionManager,
+    trigger: 'compaction-livelock' | 'no-turn-progress',
+    logFields: Record<string, unknown>,
+  ): Promise<'reset' | 'failed' | 'in_progress'> {
+    if (this.wedgedResidentResets.has(mapKey)) {
+      log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset already in progress — skipping');
+      return 'in_progress';
+    }
+    this.wedgedResidentResets.add(mapKey);
+    try {
+      const chatJid = this.chatQueues.get(mapKey)?.targetChatJid;
+      if (chatJid === undefined) {
+        // No outbound queue for the scope: the owned per-chat reset cannot be
+        // addressed. Fall back to the manager's own reset, still AWAITED inside
+        // this barrier so the caller observes the outcome and no second reset
+        // can interleave. Weaker than the owned path (no generation advance).
+        log.warn({ ...logFields, mapKey, trigger }, 'wedged-resident reset has no chat queue — using the session-local reset');
+        await session.handleNew();
+      } else {
+        await this.resetOwnedPerChatSession(mapKey, chatJid, session);
+      }
+      log.warn({ ...logFields, mapKey, trigger }, 'wedged resident session hard-reset');
+      return 'reset';
+    } catch (err) {
+      log.error({ err, ...logFields, mapKey, trigger }, 'wedged-resident hard reset failed');
+      return 'failed';
+    } finally {
+      this.wedgedResidentResets.delete(mapKey);
+    }
   }
 
   /**
@@ -1344,6 +1720,7 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
       chatSessions: this.chatSessions.size,
       chatQueues: this.chatQueues.size,
+      perChatSessionsWithoutOwner: this.sweepPerChatSessionsWithoutOwner(),
       outboundQueues: this.outboundQueues.size,
       workspaceResources: this.workspaceResources.size,
       fdCount: this.getOpenFileDescriptorCount(),
@@ -1406,7 +1783,11 @@ export class AgentRuntime implements Runtime {
       if (queue.hasPendingWork?.() === true) continue;
 
       log.debug({ chatJid, idleMs }, 'evicting idle outbound queue');
-      void queue.shutdown().catch((err) => {
+      void this.observeOutboundQueueOperation(
+        GLOBAL_TOOL_SCOPE_KEY,
+        queue,
+        () => queue.shutdown(),
+      ).catch((err) => {
         log.warn({ err, chatJid }, 'idle outbound queue shutdown failed');
       });
       this.outboundQueues.delete(chatJid);
@@ -1500,14 +1881,76 @@ export class AgentRuntime implements Runtime {
 
     const residentRowIds = reconcileResidentSessionStatuses(this.db, this.chatSessions.values());
     const classified = classifyActiveSessions(this.db, this.durability);
+    const now = systemClock.now();
     for (const session of classified) {
       if (residentRowIds.has(session.id)) {
+        // #3523 layer 2: the resident exemption is liveness-gated. A current-process
+        // resident manager is only spared zombie disposition while it is making turn
+        // progress. A resident wedged between turns (e.g. a compaction livelock, or a
+        // manager whose child crashed but whose row is still mapped) would otherwise
+        // be protected forever and never self-clear. When it is NOT progressing, fall
+        // through to the classification's normal stale_live/stale_dead disposition
+        // instead of skipping.
+        if (this.isResidentManagerMakingProgress(session.id, now)) {
+          log.warn(
+            { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
+              reason: session.reason, providerSessionId: session.sessionId },
+            'skipping zombie-session disposition for current-process resident manager');
+          if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          continue;
+        }
         log.warn(
           { id: session.id, conversationKey: session.conversationKey, classification: session.classification,
             reason: session.reason, providerSessionId: session.sessionId },
-          'skipping zombie-session disposition for current-process resident manager');
-        if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
-        continue;
+          'resident manager making no turn progress — allowing zombie-session disposition');
+        // #3523 layer 2 (iteration 1, review H1/S2): 'authoritative_live' is the
+        // classification the incident's own journal records for the livelocked
+        // row — its child process IS alive and DOES match the active checkpoint,
+        // so every disposition arm below is a no-op for it (the switch only
+        // re-adds the conversation key to the proactive-resume block set, exactly
+        // what the old unconditional exemption did). A non-progressing
+        // authoritative resident must therefore be dispositioned HERE, by the
+        // same serialized owned reset the compaction-livelock escalation uses, so
+        // the incident's state (authoritative_live + no turn progress past the
+        // deadline) ends in a fresh, usable session instead of a log line.
+        // Every other classification keeps its existing disposition below.
+        //
+        // Iteration 2 (the adversarial lens A0/A1 = the spec lens N1): the hard
+        // reset is gated on the SCHEDULED scope, the same predicate layer 1's
+        // escalation already carries, because #3523 AC1 restricts it to
+        // '::scheduled-agent-job' scopes. Ungated, this arm aborted the in-flight
+        // turn and dropped the resumable checkpoint of ANY per-chat scope whose
+        // convergence streak had latched — the convergence gates in
+        // isResidentManagerMakingProgress deliberately outrank turnInFlight (the
+        // incident's compact turn is perpetually in flight), so an ordinary
+        // interactive chat could be reset mid-turn. A non-scheduled resident that
+        // stops progressing loses its exemption and keeps the pre-existing
+        // disposition for this classification: proactive resume stays blocked for
+        // the key, and the lapse is logged rather than acted on.
+        if (session.classification === 'authoritative_live') {
+          const entry = this.findResidentManagerForRow(session.id);
+          if (entry === undefined || !isScheduledAgentJobMapKey(entry.mapKey)) {
+            log.warn(
+              {
+                id: session.id, conversationKey: session.conversationKey,
+                mapKey: entry?.mapKey ?? null, trigger: 'no-turn-progress',
+              },
+              'non-progressing resident is not a scheduled-agent-job scope — exemption lapsed without a hard reset',
+            );
+            if (session.conversationKey) proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+            continue;
+          }
+          const outcome = await this.resetWedgedResidentSession(
+            entry.mapKey, entry.session, 'no-turn-progress',
+            { id: session.id, conversationKey: session.conversationKey, providerSessionId: session.sessionId },
+          );
+          if (outcome !== 'reset' && session.conversationKey) {
+            // The reset did not settle cleanly — the old session may still hold
+            // the conversation, so keep proactive resume blocked for this key.
+            proactiveResumeBlockedConversationKeys.add(session.conversationKey);
+          }
+          continue;
+        }
       }
       switch (session.classification) {
         case 'stale_dead':
@@ -1578,6 +2021,54 @@ export class AgentRuntime implements Runtime {
       }
     }
     return proactiveResumeBlockedConversationKeys;
+  }
+
+  /**
+   * #3523 layer 2: is the current-process resident manager backing this
+   * agent_sessions row actually making turn progress? Only a progressing resident
+   * earns the zombie-sweep exemption. Progress means: a turn is in flight, OR a
+   * turn completed within RESIDENT_TURN_PROGRESS_DEADLINE_MS — AND the scope is not
+   * stuck re-arming auto-compact past AUTO_COMPACT_CONVERGENCE_LIMIT (a compaction
+   * livelock keeps a turn perpetually "in flight" yet makes no real progress, so
+   * that signal overrides turnInFlight). Fails SAFE: when the manager cannot be
+   * located or has no usable timing evidence, it is treated as progressing so a
+   * healthy resident is never reaped on missing data.
+   */
+  private isResidentManagerMakingProgress(rowId: number, now: number): boolean {
+    const entry = this.findResidentManagerForRow(rowId);
+    if (entry === undefined) return true; // unknown → protect
+    const { mapKey, session } = entry;
+
+    // A scope wedged re-arming auto-compact past the convergence limit is
+    // livelocked, not progressing — even if a /compact turn shows as in flight.
+    // Both convergence signals count: the rapid-rearm counter (interactive
+    // cadence) and the non-convergence streak (any cadence — see #3527 S1/M1).
+    const rearms = this.autoCompact.consecutiveRapidRearms.get(mapKey) ?? 0;
+    if (rearms >= AUTO_COMPACT_CONVERGENCE_LIMIT) return false;
+    if (this.autoCompact.isCompactionNonConvergent(mapKey)) return false;
+
+    const st = session.getStatus();
+    if (st.turnInFlight === true) return true; // actively working a turn
+
+    const lastProgressTs = st.lastMessageAt ?? st.startedAt;
+    if (!lastProgressTs) return true; // no timing evidence → protect
+    const parsed = Date.parse(lastProgressTs);
+    if (!Number.isFinite(parsed)) return true; // unparseable → protect
+    return now - parsed <= RESIDENT_TURN_PROGRESS_DEADLINE_MS;
+  }
+
+  /**
+   * Locate the current-process resident SessionManager backing an agent_sessions
+   * row, with the scope key it is mapped under. Extracted so the liveness gate and
+   * the non-progressing disposition resolve the same manager from the same map.
+   */
+  private findResidentManagerForRow(
+    rowId: number,
+  ): { mapKey: string; session: SessionManager } | undefined {
+    for (const [mapKey, candidate] of this.chatSessions) {
+      if (candidate.getDbRowId() === rowId) return { mapKey, session: candidate };
+    }
+    return undefined;
   }
 
   /**
@@ -1744,6 +2235,11 @@ export class AgentRuntime implements Runtime {
 
   // Startup events are deferred until main's strict-readiness controller runs.
   private pendingStartupEvent: StartupNotificationEvent | null = null;
+  // #3570: expired-session notices raised before the transport connects, at
+  // most one per chat. Kept apart from the single slot above so that several
+  // failing chats, or a restart-loop alert, can never displace each other.
+  private readonly pendingStartupChatNotices = new Map<string, StartupChatNotice>();
+  private startupChatNoticesDrained = false;
 
   // Voice reply state (SP4) — tracks inbound contentType and accumulated assistant text per turn.
   // Per-chat mode uses Maps keyed by mapKey; single/shared mode uses scalar fields.
@@ -1772,11 +2268,20 @@ export class AgentRuntime implements Runtime {
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
   private pendingTurnActorJid: Map<string, string | undefined> = new Map();
-  // F-STICKY-ACTOR (QR-245): per-chat executing-turn actor register. HEAD =
+  private pendingTurnPurpose: Map<string, SessionContext['purpose']> = new Map();
+  // Per-chat executing-turn authorization context. HEAD =
   // oldest-dispatched-unresolved = the turn the subprocess is currently running.
-  // Read fail-closed by resolveExecutingActor (empty/absent -> deny). Cleared on
+  // Read fail-closed by the context resolvers (empty/absent -> deny). Cleared on
   // every abnormal termination (cleanupPerChatState + crash/resume/fallback).
-  private perChatExecActorQueue: Map<string, (string | undefined)[]> = new Map();
+  private perChatExecActorQueue: Map<string, ExecutingSessionContext[]> = new Map();
+  /**
+   * Bounds the unowned-session warning. That wedge persists until a turn
+   * evicts it, so an unthrottled per-tick warn is an unbounded log storm for
+   * exactly the chats an operator most needs to read about. Same powers-of-two
+   * shape the health probes use. Per runtime instance, keyed by map key. The
+   * COUNT the sweep returns is never throttled — only the log line is.
+   */
+  private readonly unownedSweepLogThrottle = new ProbeErrorThrottle();
   /** Exact actor FIFO slot owned by an output-producing system lease (poll continuation). */
   private readonly systemTurnExecActors = new Map<number, {
     scopeKey: string;
@@ -1784,6 +2289,7 @@ export class AgentRuntime implements Runtime {
   }>();
   private currentTurnReplayText: string | null = null;
   private currentTurnReplayActorJid: string | undefined;
+  private currentTurnReplayPurpose: SessionContext['purpose'];
 
   // ---------------------------------------------------------------------------
   // Image coalescing — batch rapid image sends into a single turn
@@ -1875,6 +2381,7 @@ export class AgentRuntime implements Runtime {
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
     this.pendingTurnActorJid.delete(mapKey);
+    this.pendingTurnPurpose.delete(mapKey);
     this.perChatExecActorQueue.delete(mapKey);
     this.clearSystemTurnExecutingActors(mapKey);
     this.resumeFailedHandling.delete(mapKey);
@@ -2034,6 +2541,7 @@ export class AgentRuntime implements Runtime {
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
+      this.pendingTurnPurpose.delete(mapKey);
       this.perChatTurnSourceMessageId.delete(mapKey);
       this.perChatTurnContentType.delete(mapKey);
       this.perChatTurnText.delete(mapKey);
@@ -2073,6 +2581,19 @@ export class AgentRuntime implements Runtime {
     inboundSeq: number | undefined,
     mapKey?: string,
   ): string | null {
+    if (mapKey !== undefined && isScheduledAgentJobMapKey(mapKey)) {
+      this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+      log.info(
+        {
+          chatJid: queue.targetChatJid,
+          reason: 'scheduled_job_plain_text',
+          satisfiesReplyGuarantee: true,
+          textPreview: providerPreview(text, 200),
+        },
+        'assistant_text egress gate suppressed scheduled-job plain text',
+      );
+      return null;
+    }
     const decision = classifyAssistantTextEgress(text);
     if (decision.action === 'allow') return text;
 
@@ -2236,6 +2757,18 @@ export class AgentRuntime implements Runtime {
     );
     this.messenger = messenger;
     this.instanceName = instanceName ?? 'personal';
+    // FLOS Stage 1: initialize the lifecycle-emission singleton from config
+    // here (composition edge already exists in this module — the domain
+    // module itself must stay config-free). First caller wins; the build
+    // thunk is evaluated inside the module's fail-closed boundary.
+    initializeRuntimeLifecycleEmitter(() => ({
+      phase: config.fleetLifecyclePhase,
+      storePath: join(config.dataRoot, 'lifecycle-events.db'),
+      instance: this.instanceName,
+    }));
+    // #3295 S2: keep the OPTIONS OBJECT (not a copied boolean) so the flag is
+    // read live at every admission — the kill-switch contract.
+    this.deferredTurnAdmissionOptions = options?.deferredTurnAdmission ?? null;
     this.providerExecutionGate = createProviderExecutionGate(this.instanceName);
     this.runtimeTurnSupervisor = new RuntimeTurnSupervisor(
       this.instanceName,
@@ -2249,6 +2782,7 @@ export class AgentRuntime implements Runtime {
       ),
       recoveryManagerId: this.recoveryManagerId, nextRecoveryGeneration: () => ++this.recoveryGeneration,
       resolveDispatchTarget: (job) => this.resolveTurnRecoveryDispatchTarget(job),
+      catchupReconcile: resolveCatchupReconcileDep(options?.turnRecoveryCatchupReconcile),
     });
     this.turnRecoveryDeadman = new TurnRecoveryDeadman({
       instanceName: this.instanceName,
@@ -2275,6 +2809,12 @@ export class AgentRuntime implements Runtime {
     this.serviceRestarter = options?.serviceRestarter;
     this.modelCatalogueListFn = options?.modelCatalogueListFn;
     this.modelCatalogueAnthropicFn = options?.modelCatalogueAnthropicFn;
+    this.expectedAccountDigest = options?.expectedAccountDigest ?? null;
+    this.accountIdentityArmedAt = this.expectedAccountDigest === null ? null : systemClock.now();
+    this.accountIdentityVerifier = new AccountIdentityVerifier(
+      this.createAccountIdentityVerifierHost(),
+      options?.accountIdentityVerify ? { verify: options.accountIdentityVerify } : {},
+    );
     this.workspaceSweeper = new WorkspaceSweeper(
       this.sandboxPerChat,
       this.workspaceResources,
@@ -2303,14 +2843,16 @@ export class AgentRuntime implements Runtime {
           fallbackDataPolicy: config.agentFallbackDataPolicy,
         });
     this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
+    this.agentFallbackDiscovery = config.agentFallbackDiscovery ?? null;
     this.registry = new ToolRegistry();
     this.registerAllTools();
+    const getAllowedRoot = () => this.cwd ?? homedir();
     this.perChatMcpSocketManager = new PerChatMcpSocketManager({
       stateRoot: config.stateRoot,
       registry: this.registry,
-      allowedRoot: this.cwd ?? homedir(),
+      get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
-      resolveActor: (mapKey) => this.resolveExecutingActorByMapKey(mapKey),
+      resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
@@ -2390,6 +2932,8 @@ export class AgentRuntime implements Runtime {
       get operationTracker() { return runtime.operationTracker; },
       set operationTracker(value) { runtime.operationTracker = value; },
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      // F2a (#2121): the id-bearing send, used by the pin-receipt path only.
+      sendDirectWithReceipt: (chatJid, text) => runtime.sendDirectWithReceipt(chatJid, text),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
       routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),
@@ -2549,6 +3093,8 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get agentProviderConfig() { return runtime.agentProviderConfig; },
       get agentFallbacks() { return runtime.agentFallbacks; },
+      get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
+      get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
@@ -2570,6 +3116,9 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeTimer(value) { runtime.periodicUsabilityProbeTimer = value; },
       get periodicUsabilityProbeBackoff() { return runtime.periodicUsabilityProbeBackoff; },
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
+      get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
+      set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
       get fallbackLastProbeAt() { return runtime.fallbackLastProbeAt; },
@@ -2595,13 +3144,38 @@ export class AgentRuntime implements Runtime {
       emitRouteEventChecked: (ev) => runtime.emitRouteEventChecked(ev),
       capDedupeMap: (map, max) => runtime.capDedupeMap(map, max),
       getTurnCapability: () => runtime.getTurnCapability(),
+      verifyAccountIdentity: (trigger) => runtime.verifyAccountIdentity(trigger),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
       notifyProviderFallbackActivated: (queue, activation, replay) =>
         runtime.notifyProviderFallbackActivated(queue, activation, replay),
       probePrimaryProviderRecovered: (onEvidence, signal) =>
         runtime.probePrimaryProviderRecovered(onEvidence, signal),
       deactivateProviderFallback: (reason, receipt) => runtime.deactivateProviderFallback(reason, receipt),
+      schedulePostTransitionRouteRecycles: () => runtime.schedulePostTransitionRouteRecycles(),
     };
+  }
+
+  /**
+   * Host for the account-identity verifier (task-21): live getters, and the
+   * verification result as runtime-owned state so getHealthSnapshot reads it
+   * without a second copy.
+   */
+  private createAccountIdentityVerifierHost(): AccountIdentityVerifierHost {
+    const runtime = this;
+    return {
+      get instanceName() { return runtime.instanceName; },
+      get agentProvider() { return runtime.agentProvider; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
+      get shutdownRequested() { return runtime.shutdownRequested; },
+      get accountIdentity() { return runtime.accountIdentity; },
+      set accountIdentity(value) { runtime.accountIdentity = value; },
+    };
+  }
+
+  /** Fire-and-forget identity verification after a usability probe settles
+   *  (the coordinator's seam); the verifier never rejects. */
+  private verifyAccountIdentity(trigger: AccountIdentityProbeTrigger): void {
+    void this.accountIdentityVerifier.run(trigger);
   }
 
   /**
@@ -2630,6 +3204,8 @@ export class AgentRuntime implements Runtime {
       get adminPhones() { return config.adminPhones; },
       get internalPeerJids() { return config.internalPeerJids; },
       get pollResolution() { return config.pollResolution; },
+      observeOutboundQueueOperation: (scopeKey, queue, operation) =>
+        runtime.observeOutboundQueueOperation(scopeKey, queue, operation),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
       sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
       deletePendingPollQuestions: (mapKey) => runtime.deletePendingPollQuestions(mapKey),
@@ -2648,6 +3224,8 @@ export class AgentRuntime implements Runtime {
     return {
       db: runtime.db,
       instanceName: runtime.instanceName,
+      get sessionScope() { return runtime.sessionScope; },
+      deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,
@@ -2678,6 +3256,7 @@ export class AgentRuntime implements Runtime {
       chatQueues: runtime.chatQueues,
       chatSessions: runtime.chatSessions,
       runtimeTurnAfterTerminal: runtime.runtimeTurnAfterTerminal,
+      requireSessionToolScopeKey: (session) => runtime.requireSessionToolScopeKey(session),
       get durability() { return runtime.durability; },
       get runtimeTurnCoordinator() { return runtime.runtimeTurnCoordinator; },
       get replyGuarantee() { return runtime.replyGuarantee; },
@@ -2719,8 +3298,8 @@ export class AgentRuntime implements Runtime {
       isShuttingDown: () => runtime.shutdownRequested,
       getActiveQueue: () => runtime.getActiveQueue(),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary) =>
-        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary),
+      sendTurnPerChat: (chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary, purpose) =>
+        runtime.sendTurnPerChat(chatJid, text, mapKey, actorJid, context, scopeRef, systemTurnLease, excludeJobId, deliveryKind, dispatchAllowed, onProviderBoundary, purpose),
       deleteOwnedPerChatSession: (mapKey, expected) => runtime.deleteOwnedPerChatSession(mapKey, expected),
       discardPerChatSessionForFallback: (mapKey, expected) =>
         runtime.discardPerChatSessionForFallback(mapKey, expected),
@@ -2759,7 +3338,8 @@ export class AgentRuntime implements Runtime {
         runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
       flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
-      activateProviderFallback: (resetAt, reason) => runtime.fallback.activateProviderFallback(resetAt, reason),
+      activateProviderFallback: (resetAt, reason, failedSession) =>
+        runtime.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null),
       activateProviderFallbackAfterTerminalResult: (resetAt, reason, session, evidenceText) =>
         runtime.fallback.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, evidenceText),
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
@@ -2769,6 +3349,14 @@ export class AgentRuntime implements Runtime {
       usageLimitNotice: () => runtime.fallback.usageLimitNotice(),
       kickDiagnosticBundle: (workflow, providerText) => runtime.kickDiagnosticBundle(workflow, providerText),
     } satisfies RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
+  }
+
+  private observeOutboundQueueOperation<T>(
+    scopeKey: string,
+    queue: IOutboundQueue,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.runtimeTurnCoordinator.observeOutboundQueueOperation(scopeKey, queue, operation);
   }
 
   private registerAllTools(): void {
@@ -2798,6 +3386,12 @@ export class AgentRuntime implements Runtime {
       this.outboundQueues.get(canonical) ??
       this.chatQueues.get(chatJid) ??
       this.chatQueues.get(canonical) ??
+      // In workspace-isolated per-chat mode the per-chat maps are keyed by the
+      // workspace key, which is neither of the ids above, so neither lookup
+      // reaches the queue actually mapped for this chat. Outside that mode this
+      // resolves to the canonical id the line above already probed, so the
+      // extra lookup changes nothing there.
+      this.chatQueues.get(this.resolvePerChatMapKey(chatJid)) ??
       this.queue ??
       undefined;
     return prior?.getSenderToken();
@@ -2851,6 +3445,14 @@ export class AgentRuntime implements Runtime {
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
     this.turnRecoveryDeadman.start();
 
+    // #3374 ask 2: when the W2 sweep durably reclaims a stale open inbound, a
+    // RUNTIME lane may still be pinned by that exact turn (provider terminal
+    // never arrived — the live wedge class). Durable reclamation alone repairs
+    // only the journal; this listener releases the wedged lane too.
+    if (typeof engine.setStaleInboundReclaimListener === 'function') {
+      engine.setStaleInboundReclaimListener((rows) => this.releaseWedgedReclaimedLanes(rows));
+    }
+
     // Obligation replay: opt-in, per_chat only; the helper keeps ABSENT fields inert.
     this.capabilityObligationRuntime = maybeActivateCapabilityObligationRuntime({
       enabled: this.sessionScope === 'per_chat', alreadyActive: this.capabilityObligationRuntime !== null,
@@ -2864,6 +3466,241 @@ export class AgentRuntime implements Runtime {
       captureOwnedGeneration: (key, s) => this.captureOwnedPerChatGeneration(key, s),
       activateSpawnedSession: (key, s, o) => this.activateSpawnedOwnedPerChatSession(key, s, o),
     }) ?? this.capabilityObligationRuntime;
+  }
+
+  /** #3295 S2: live per-admission flag read (RuntimeTurnCoordinatorPort). */
+  deferredTurnAdmissionEnabled(): boolean {
+    return this.deferredTurnAdmissionOptions?.enabled === true;
+  }
+
+  /**
+   * #3374 ask 2 — wedged-lane release, coupled to durable stale reclamation.
+   *
+   * A turn whose provider terminal never arrives pins its TurnQueue's
+   * activeTurn forever: the turn watchdog clears at provider-turn terminal,
+   * the idle sweep refuses mid-turn sessions, and the W2 sweep repairs only
+   * the journal row (after its 24h grace). When that sweep reclaims a stale
+   * open inbound that is STILL the active turn of a live lane, this handler
+   * drives the same crash-finalization path a provider death would: the held
+   * processor settles, queued followers drain to a fresh session, and the
+   * wedge ends without a process restart. Lanes that do not match a reclaimed
+   * row are untouched; the sweep's 24h grace means no legitimate long turn is
+   * at risk (the long-op liveness ceiling caps genuine work far below that).
+   */
+  private releaseWedgedReclaimedLanes(rows: readonly StaleReclaimedInbound[]): void {
+    if (rows.length === 0) return;
+    // shared and single own no per-chat lanes: a wedged turn there pins the ONE
+    // global lane instead, whose executing turn is published on
+    // currentRuntimeTurnContext rather than on a per-chat TurnQueue.
+    if (this.sessionScope !== 'per_chat') {
+      this.releaseWedgedReclaimedGlobalLane(rows);
+      return;
+    }
+    const byMessageId = new Map(rows.map((row) => [row.sourceMessageId, row]));
+    for (const [mapKey, turnQueue] of this.perChatTurnQueues) {
+      const active = turnQueue.activeTurn;
+      if (!active) continue;
+      const row = byMessageId.get(active.sourceMessageId);
+      if (row === undefined) continue;
+      // The reclaimed row must identify THIS lane's turn, not a cross-chat
+      // message-id collision: the journaled inbound and the queued turn share
+      // a chat, so their conversation keys must agree.
+      if (row.conversationKey !== toConversationKey(active.chatJid)) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: reclaimed row conversation does not match the lane — skipping',
+        );
+        continue;
+      }
+      const session = this.chatSessions.get(mapKey);
+      if (!session || session === this.controlSession) {
+        log.warn(
+          { inboundSeq: row.seq, queuedBehind: turnQueue.pending },
+          'wedged-lane release: reclaimed turn pins a queue with no owned session — skipping',
+        );
+        continue;
+      }
+      const managerId = this.sessionManagerIds.get(session);
+      const owner = this.sessionOwnership.get(mapKey);
+      if (!managerId || !owner || owner.managerId !== managerId) {
+        log.warn({ inboundSeq: row.seq }, 'wedged-lane release: session ownership is not current — skipping');
+        continue;
+      }
+      // A session whose provider turn is NOT in flight is not wedged: its
+      // terminal arrived and ordinary finalization is racing the sweep —
+      // killing it would shoot a healthy child. Doubles without the field
+      // report undefined and proceed.
+      if (session.getStatus().turnInFlight === false) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey },
+          'wedged-lane release: provider turn already terminalized — leaving finalization to its owner',
+        );
+        continue;
+      }
+      // Exactly one published context is the releasable shape; anything else
+      // is an anomalous lane no release action should touch (disclosed, not
+      // silent — and checked BEFORE the alert and the child kill).
+      const publishedContexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
+      if (publishedContexts.length !== 1) {
+        log.warn(
+          { inboundSeq: row.seq, mapKey, publishedContexts: publishedContexts.length },
+          'wedged-lane release: lane does not hold exactly one runtime turn context — skipping',
+        );
+        continue;
+      }
+      // Reap BEFORE announcing so the operator record carries what the reap
+      // actually did rather than what the release intended (#3374 C7). Both
+      // statements are synchronous and adjacent, so no lane state can change
+      // between them.
+      const reapOutcome = this.reapWedgedLaneProvider(session);
+      this.announceWedgedLaneRelease(row.seq, turnQueue.pending, reapOutcome);
+      // Reject the held turn's runtime completion (the turn-recovery
+      // replay-abort pattern), then settle the session's provider-turn
+      // promise: the pinned processor is parked inside `sendTurn`, which by
+      // contract resolves only at provider TERMINALIZATION — an event the
+      // wedge, by definition, will never produce. A killed real child
+      // resolves it from its exit handler; resolving directly keeps the
+      // release independent of a child existing (completeProviderTurn is
+      // idempotent). The processor then observes the rejected completion and
+      // the queue's ordinary processor-error finalization retires the turn —
+      // the finalizer recognizes the sweep-owned durable terminal
+      // (reclaimed_by_sweep) and retires the runtime state through the
+      // standard post-effects, so followers drain to a fresh session.
+      // Deliberately NOT pre-finalized here: a second finalization owner
+      // would race the canonical one.
+      this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+        new WedgedTurnReclaimedError(),
+        mapKey,
+        publishedContexts[0],
+      );
+      session.completeProviderTurn();
+    }
+  }
+
+  /**
+   * Kill the wedged lane's provider child, if it has one, and report what
+   * happened. `reapWedgedProviderChild` returns false when the session holds no
+   * child — every managed-loop provider — so a bare call cannot distinguish a
+   * reap from a no-op (#3374 C7). The absent-method case is a session surface
+   * older than the reap and is named separately: it is not evidence that the
+   * session had no child.
+   */
+  private reapWedgedLaneProvider(session: SessionManager): WedgedLaneReapOutcome {
+    if (typeof session.reapWedgedProviderChild !== 'function') return 'reap_unavailable';
+    return session.reapWedgedProviderChild() ? 'reaped_child' : 'reap_skipped_no_child';
+  }
+
+  /**
+   * Operator-facing announcement shared by every wedged-lane release. The reap
+   * outcome is required, not defaulted: the compiler is what proves both
+   * release call sites report one.
+   */
+  private announceWedgedLaneRelease(
+    inboundSeq: number,
+    queuedBehind: number,
+    reapOutcome: WedgedLaneReapOutcome,
+  ): void {
+    log.warn(
+      { inboundSeq, queuedBehind, scope: this.sessionScope, reapOutcome },
+      reapOutcome === 'reaped_child'
+        ? 'durably reclaimed turn still pins a live lane — releasing via crash finalization'
+        : 'durably reclaimed turn still pins a live lane — releasing with no provider child reaped',
+    );
+    emitAlertChecked(
+      this.instanceName,
+      'agent_wedged_turn_released',
+      'Wedged agent turn released after durable reclamation',
+      `inbound_seq=${inboundSeq} queued_behind=${queuedBehind} scope=${this.sessionScope} reap=${reapOutcome}`,
+      'warning',
+    );
+  }
+
+  /**
+   * #3374 ask 2 — the shared/single half of the wedged-lane release.
+   *
+   * shared serializes every chat on one global TurnQueue and single has no
+   * queue at all (turns chain on `turnChain`), so neither lane appears in
+   * `perChatTurnQueues` and the per-chat release above can never reach them.
+   * What both DO publish is the executing turn's immutable runtime context on
+   * `currentRuntimeTurnContext`, awaiting that turn's completion promise
+   * (processTurn for shared, sendTurnNonShared for single). That context is the
+   * global lane's observable, and it carries `identity.inboundSeq` — the exact
+   * durable key the sweep reclaimed, a stronger match than the per-chat path's
+   * source message id.
+   */
+  private releaseWedgedReclaimedGlobalLane(rows: readonly StaleReclaimedInbound[]): void {
+    const context = this.currentRuntimeTurnContext;
+    if (!context) return;
+    const inboundSeq = context.identity.inboundSeq;
+    // A legacy unjournaled turn has no durable identity to match a reclaimed
+    // row against, so it can never be proven to be the row's turn.
+    if (inboundSeq === null) return;
+    const row = rows.find((candidate) => candidate.seq === inboundSeq);
+    if (row === undefined) return;
+    // Identity must agree on both axes, exactly as the per-chat path requires.
+    if (row.conversationKey !== context.identity.conversationKey) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: reclaimed row conversation does not match the global lane — skipping',
+      );
+      return;
+    }
+    const session = this.session;
+    if (!session || session === this.controlSession) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: reclaimed turn pins the global lane with no owned session — skipping',
+      );
+      return;
+    }
+    if (this.sessionManagerIds.get(session) !== context.identity.managerId) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: global session ownership is not current — skipping',
+      );
+      return;
+    }
+    // A session whose provider turn is NOT in flight is not wedged: its
+    // terminal arrived and ordinary finalization is racing the sweep — killing
+    // it would shoot a healthy child. Doubles without the field report
+    // undefined and proceed (same comparison as the per-chat path).
+    if (session.getStatus().turnInFlight === false) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: provider turn already terminalized — leaving finalization to its owner',
+      );
+      return;
+    }
+    // shared queues followers behind the wedge; single chains them on turnChain
+    // with nothing to count.
+    // Same ordering as the per-chat path: the reap's answer is what the
+    // announcement reports (#3374 C7).
+    const reapOutcome = this.reapWedgedLaneProvider(session);
+    this.announceWedgedLaneRelease(row.seq, this.shared ? this.turnQueue.pending : 0, reapOutcome);
+    // The reject is the live-turn interlock, not just a signal: it refuses
+    // unless the published completion IS this context's logical turn
+    // (rejectRuntimeTurnCompletionValue). Only then is the provider-turn
+    // promise force-settled — so a lane holding some other turn keeps its
+    // provider boundary untouched. The global lane holds at most one context by
+    // construction, which is why this replaces the per-chat path's
+    // "exactly one published context" check.
+    const rejected = this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(
+      new WedgedTurnReclaimedError(),
+      undefined,
+      context,
+    );
+    if (!rejected) {
+      log.warn(
+        { inboundSeq: row.seq, scope: this.sessionScope },
+        'wedged-lane release: no published completion for the reclaimed turn — leaving the provider turn alone',
+      );
+      return;
+    }
+    // shared settles through the queue's ordinary processor-error path;
+    // single settles through handleMessage's turn-chain catch. Both recognize
+    // the sweep-owned durable terminal (reclaimed_by_sweep) rather than writing
+    // a second one.
+    session.completeProviderTurn();
   }
 
   /**
@@ -2966,6 +3803,7 @@ export class AgentRuntime implements Runtime {
       const lidKey = `${conversationKey}@lid`;
       const canonical = canonicalizeChatJid(newJid, this.db);
       this.runtimeTurnCoordinator.rekeyPerChatTurnQueueHaltScope(lidKey, canonical);
+      this.runtimeTurnCoordinator.rekeyPerChatOutboundQueuePoisonScope(lidKey, canonical);
       if (this.chatSessions.has(lidKey)) {
         if (canonical !== lidKey && !this.chatSessions.has(canonical)) {
           const legacyProviderTurn = this.legacyProviderTurnOwners.get(lidKey);
@@ -2981,6 +3819,7 @@ export class AgentRuntime implements Runtime {
           // Migrate session
           const session = this.chatSessions.get(lidKey)!;
           this.rekeyOwnedPerChatSession(lidKey, canonical, session);
+          this.rekeyAbandonedRespawnOwner(lidKey, canonical);
 
           // Migrate queue
           const chatQueue = this.chatQueues.get(lidKey);
@@ -3028,6 +3867,11 @@ export class AgentRuntime implements Runtime {
             const pendingActor = this.pendingTurnActorJid.get(lidKey);
             this.pendingTurnActorJid.delete(lidKey);
             this.pendingTurnActorJid.set(canonical, pendingActor);
+          }
+          if (this.pendingTurnPurpose.has(lidKey)) {
+            const pendingPurpose = this.pendingTurnPurpose.get(lidKey);
+            this.pendingTurnPurpose.delete(lidKey);
+            this.pendingTurnPurpose.set(canonical, pendingPurpose);
           }
           // F-STICKY-ACTOR (QR-247, F4): migrate the executing-actor queue and
           // actor-socket identity together so the live resolver follows the new key.
@@ -3198,6 +4042,12 @@ export class AgentRuntime implements Runtime {
   }
 
   async start(): Promise<void> {
+    // Refuse configured paths before startup writes or provider setup.
+    const home = homedir();
+    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
+    if (this.cwd) this.cwd = admitHomeConfinedPath(this.cwd, home);
+    this.pluginDirs = this.pluginDirs?.map(dir => admitHomeConfinedPath(dir, home));
+
     // C5 restart-loop guard: mark this boot BEFORE any fallible work so a
     // later crash leaves the marker standing. Consumed at the resume gate
     // below; fail-open inside the guard (a broken breaker never wedges a
@@ -3206,7 +4056,6 @@ export class AgentRuntime implements Runtime {
       ? markBootInProgress(restartLoopGuardPath(config.stateRoot))
       : false;
     this.db.assertWritableCompatibility();
-    if (this.cwd && isSamePhysicalDirectory(this.cwd, homedir())) throw new Error('configured agent cwd must not resolve to the user home directory');
     ensureAgentSchema(this.db);
     // Crash-safe latch table for the one-message handoff collapse. Idempotent;
     // created eagerly so an unconsumed notice from a prior process can flush.
@@ -3217,6 +4066,15 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    // Periodic real-completion canary over the chain (no-op unless
+    // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
+    this.fallback.startChainCanary();
+    // Discovery mode (R6): derive the chain from the live model catalogue
+    // BEFORE the MCP-config write below iterates the chain. Awaited but
+    // bounded (the catalogue probe carries its own kill-timer) and honest-
+    // degrading — an unavailable catalogue leaves the chain empty + alerted,
+    // never fails boot.
+    await this.fallback.refreshDiscoveredFallbackChain('boot');
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
     if (config.nlRouting) {
       // Additive + idempotent; gated so flag-off leaves the DB untouched.
@@ -3232,7 +4090,7 @@ export class AgentRuntime implements Runtime {
     if (this.sandbox) {
       const cwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(cwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
         // Resolve allowedPaths to absolute paths before writing
@@ -3294,7 +4152,7 @@ export class AgentRuntime implements Runtime {
     {
       const cwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(cwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
         ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
@@ -3315,7 +4173,7 @@ export class AgentRuntime implements Runtime {
     if (!this.sandboxPerChat) {
       const agentCwd = this.cwd ?? homedir();
       try {
-        const claudeDir = join(agentCwd, '.claude');
+        const claudeDir = ensureHomeConfinedDirectory(join(agentCwd, '.claude'), home);
         mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
         const socketPath = join(claudeDir, 'whatsoup.sock');
 
@@ -3332,7 +4190,14 @@ export class AgentRuntime implements Runtime {
           );
         }
         const globalSession: SessionContext = { tier: 'global', allowedRoot: agentCwd };
-        this.globalSocketServer = new WhatSoupSocketServer(socketPath, this.registry, globalSession);
+        // #2976 (ii): identity is resolved per request from the executing-turn
+        // register — never stored on the session (no broadcast to go stale).
+        this.globalSocketServer = new WhatSoupSocketServer(
+          socketPath,
+          this.registry,
+          globalSession,
+          () => this.resolveExecutingGlobalSession(),
+        );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
@@ -3497,6 +4362,14 @@ export class AgentRuntime implements Runtime {
             notifyUser: (msg) => {
               this.handleCrashNotify(msg, chatJid);
             },
+            // #3570: the provider can refuse the resumed session after spawn
+            // (exit 1, no init). Tell this chat and rebuild its context.
+            onResumeFailed: () => {
+              this.handleResumeFailed(chatJid, {
+                mapKey: resolveSessionMapKey() ?? initialMapKey,
+                session,
+              });
+            },
             eventToolScopeKey: toolScopeKey,
           });
         } catch (err) {
@@ -3579,6 +4452,15 @@ export class AgentRuntime implements Runtime {
               err,
             );
           }
+        }, (err: unknown) => {
+          // #3570: the resume itself was refused (for example, the checkpoint
+          // names a session this chat does not own). The chat's prior context
+          // is gone, so tell it and rebuild context in a fresh session.
+          log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume refused — notifying chat and starting fresh');
+          this.handleResumeFailed(chatJid, {
+            mapKey: resolveSessionMapKey() ?? initialMapKey,
+            session,
+          });
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
         });
@@ -3857,12 +4739,22 @@ export class AgentRuntime implements Runtime {
         'agent',
         now,
       );
+      // FLOS Stage 1 (plan §3): the occurrence is durably owned from here —
+      // L-SCH `admitted`, then `dispatched` once it is handed to the turn
+      // chain below. emit() is phase-gated (dark default) and never throws.
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'admitted',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
+      });
       const synthetic: IncomingMessage = {
         messageId,
         chatJid: ctx.reportChatJid,
         senderJid: config.memory.adminJid,
         senderName: ctx.title ? `Scheduled job: ${ctx.title}`.slice(0, 80) : 'Scheduled job',
-        content: ctx.prompt,
+        content: isolateScheduledAgentJobPrompt(ctx.prompt),
         contentText: null,
         contentType: 'text',
         isFromMe: false,
@@ -3881,6 +4773,13 @@ export class AgentRuntime implements Runtime {
           { err, triggerId: ctx.triggerId, beadId: ctx.beadId },
           'agent job turn failed after dispatch',
         );
+      });
+      runtimeLifecycleEmitter().emit({
+        lane: 'L-SCH',
+        work_id: messageId,
+        phase: 'dispatched',
+        correlation: { trigger_occurrence_id: String(ctx.occurrenceId), inbound_seq: inboundSeq },
+        attrs: { trigger_id: ctx.triggerId, bead_id: ctx.beadId },
       });
       return {
         dispatched: true,
@@ -4054,24 +4953,46 @@ export class AgentRuntime implements Runtime {
     const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
-        log.error(
-          { err, messageId: msg.messageId, chatJid: msg.chatJid },
-          'unhandled error in message processing',
-        );
+        // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
+        // settlement of a turn the W2 sweep already terminalized, not a
+        // processing failure. It reaches this catch because single mode has no
+        // TurnQueue to absorb it. The canonical finalization below still runs —
+        // the coordinator owns the runtime state — but the fault log, the
+        // legacy durable fallback (the sweep is the durable owner; a second
+        // write would collide with the terminal it already holds) and the user
+        // notice would all misreport it. For a scheduled job that notice lands
+        // in the report chat a day or more after the fact.
+        const wedgedReclaim = err instanceof WedgedTurnReclaimedError;
+        if (wedgedReclaim) {
+          log.warn(
+            { messageId: msg.messageId, chatJid: msg.chatJid, inboundSeq: msg.inboundSeq },
+            'turn released by durable stale reclamation — settling the turn chain',
+          );
+        } else {
+          log.error(
+            { err, messageId: msg.messageId, chatJid: msg.chatJid },
+            'unhandled error in message processing',
+          );
+        }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
           // Coordinator owns terminal persistence and reply-guarantee disarm.
-        } else if (this.durability && msg.inboundSeq !== undefined) {
+        } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
         // Notify user of failure
-        this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+        if (!wedgedReclaim) {
+          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+        }
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
-      ? this.resolvePerChatMapKey(msg.chatJid)
+      ? resolveAgentTurnMapKey(
+          this.resolvePerChatMapKey(msg.chatJid),
+          msg.isSyntheticJob === true && !this.sandboxPerChat,
+        )
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
@@ -4085,7 +5006,10 @@ export class AgentRuntime implements Runtime {
     // durable conversation key is the resolved phone while delivery stays @lid.
     const journalConversationKey = canonicalConversationKey(chatJid, this.db);
     const perChatMapKey = this.sessionScope === 'per_chat'
-      ? this.resolvePerChatMapKey(chatJid)
+      ? resolveAgentTurnMapKey(
+          this.resolvePerChatMapKey(chatJid),
+          msg.isSyntheticJob === true && !this.sandboxPerChat,
+        )
       : undefined;
 
     // Substrate slice 1: propagate sender identity to every MCP session so
@@ -4093,20 +5017,14 @@ export class AgentRuntime implements Runtime {
     // chat. In groups, msg.chatJid IS the group JID; without this propagation
     // admin gating would compare against the group JID and always reject.
     //
-    // Two cases to cover:
-    //   1. Global socket (single / shared / non-sandbox per_chat modes) —
-    //      always active when !sandboxPerChat; update unconditionally.
-    //   2. Per-chat sockets — only populated in workspaceResources when
-    //      sandboxPerChat=true (async ensureSessionAndQueue path). The
-    //      synchronous per_chat-without-sandbox path uses the global socket
-    //      above and never allocates a per-chat socket, so the `workspaceResources`
-    //      lookup here is only reachable under sandboxPerChat=true.
-    // Every non-sandbox per_chat subprocess uses its own actor-bound socket.
-    // Keep the shared global socket actor-less for the whole mode so any accidental
-    // fallback to it fails closed instead of inheriting another sender.
-    if (this.shouldBroadcastGlobalActor()) {
-      this.globalSocketServer?.updateActorJid(msg.senderJid);
-    }
+    // #2976 direction (ii): the global socket NEVER receives an actor
+    // broadcast. single/shared identity is resolved read-time per request
+    // from the executing-turn register (resolveExecutingGlobalActor), so no
+    // stored actor can go stale and a missed cleanup denies instead of
+    // allowing. Per-chat sockets (sandboxPerChat=true, below) keep their
+    // chat-scoped update; every non-sandbox per_chat subprocess uses its own
+    // actor-bound socket and the global socket stays actor-less for the
+    // whole mode so any accidental fallback fails closed.
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? perChatMapKey!
       : GLOBAL_TOOL_SCOPE_KEY;
@@ -4137,6 +5055,10 @@ export class AgentRuntime implements Runtime {
     // locally and then falls through to forward the raw command so the agent
     // CLI's own /model default reset still runs. Null for every other command.
     let forwardAfterLocalCommand: string | null = null;
+    // #2949 N1: set by the /new fence below so the compound site refuses the
+    // body too. A flag, not a second guard read: the teardown can settle
+    // between the two sites, and the body must follow the command's fate.
+    let newRefusedForStopTeardown = false;
 
     if (classified.type === 'local') {
       const spec = getCommandSpec(classified.command);
@@ -4203,6 +5125,14 @@ export class AgentRuntime implements Runtime {
       try {
         switch (classified.command) {
           case 'new':
+            // #2949 N1: /new re-runs this seam and then RESETS. Against a scope
+            // whose /stop teardown has not settled that spawns a replacement
+            // for an unproven cancellation, so refuse until the guard clears.
+            if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
+              newRefusedForStopTeardown = true;
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              break;
+            }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
             await runNewCommand<SessionManager, RuntimeTurnQueueTeardown>({
               chatJid,
@@ -4212,6 +5142,8 @@ export class AgentRuntime implements Runtime {
               scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
               perChatMapKey: perChatMapKey ?? null,
               isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
               getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
               abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
                 ?.abortTurn({ preserveEvidence: true }),
@@ -4257,6 +5189,59 @@ export class AgentRuntime implements Runtime {
                 const resetKey = toConversationKey(chatJid);
                 clearStandbyNotice(this.db, resetKey);
                 deleteHandoffArtifact(this.db, resetKey);
+              },
+              clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
+              sendDirect: (text) => this.sendDirect(chatJid, text),
+            });
+            break;
+
+          case 'stop':
+            // #2949 N1. Extracted leaf collaborator: runtime-stop-command.ts owns
+            // the control flow. Deliberately the SAME teardown closures /new's
+            // interrupt branch binds (one teardown seam, never a second) minus
+            // the reset epilogue — /stop stops, it does not start a new session.
+            await runStopCommand<SessionManager, RuntimeTurnQueueTeardown>({
+              chatJid,
+              sessionScope: this.sessionScope,
+              scopeKey: perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+              perChatMapKey: perChatMapKey ?? null,
+              isTurnInFlight: () => this.isTurnInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              isOutboundQueuePoisoned: () => this.runtimeTurnCoordinator
+                .isOutboundQueuePoisoned(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY),
+              // The runtime's OWN termination proof — the same predicate the
+              // respawn and turn-recovery abort paths require. /stop's
+              // 'stopped' is not authorized without it.
+              isSessionProvablyTerminated: (session) => this.isSessionProvablyTerminated(session),
+              getPerChatSession: () => this.chatSessions.get(perChatMapKey!),
+              abortPerChatQueue: () => this.chatQueues.get(perChatMapKey!)
+                ?.abortTurn({ preserveEvidence: true }),
+              disposePerChatSession: async (session, teardown) => {
+                await session.shutdown(false);
+                await this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown);
+                this.deleteOwnedPerChatSession(perChatMapKey!, session);
+                this.chatQueues.delete(perChatMapKey!);
+                this.cleanupPerChatState(perChatMapKey!);
+              },
+              getSingleSession: () => this.session,
+              abortActiveQueue: () => this.getGlobalInterruptQueue()
+                ?.abortTurn({ preserveEvidence: true }),
+              terminalizeTurnForInterrupt: () => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(
+                  perChatMapKey!,
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                )
+                : this.runtimeTurnCoordinator.terminalizeGlobalTurnForReset(
+                  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+                ),
+              retireTurnQueueAfterInterrupt: (teardown) => this.sessionScope === 'per_chat'
+                ? this.runtimeTurnCoordinator.retirePerChatTurnQueueAfterKill(teardown)
+                : this.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(teardown),
+              shutdownOperationTracker: () => { this.operationTracker?.shutdown(); this.operationTracker = null; },
+              cleanupGlobalAutoCompactState: () => this.cleanupGlobalAutoCompactState(),
+              shutdownSingleSession: (session) => session.shutdown(false),
+              clearSingleScopeRefs: () => {
+                this.session = null; this.queue = null; this.activeChatJid = null;
+                this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
               sendDirect: (text) => this.sendDirect(chatJid, text),
@@ -4439,7 +5424,31 @@ export class AgentRuntime implements Runtime {
         // via the turn's durable terminal — NOT local_command_handled. The body is
         // a NEW first-turn admission (not #2334 active-turn steering).
         if (classified.type === 'local' && classified.compoundBody !== undefined) {
-          forwardAfterLocalCommand = classified.compoundBody;
+          if (classified.command === 'stop' || newRefusedForStopTeardown) {
+            // #2949 N1: /stop is the one registered command whose handler tears
+            // the lane down, so the compound path would dispatch the body as a
+            // NEW turn onto state the teardown just cleared — in single/shared
+            // straight onto `this.session!` (runtime.ts:5162 and :5173 at
+            // 6ae583e1, non-null asserted after clearSingleScopeRefs nulled it),
+            // in per_chat as a fresh turn from the same inbound moments after
+            // the kill. Refuse the body instead of forwarding it; leaving
+            // forwardAfterLocalCommand null completes the inbound as
+            // 'local_command_handled', exactly as a plain /stop does. The body
+            // is NOT dispatched, so the acknowledgement says so rather than
+            // implying it was queued.
+            // A refused /new reaches here too: the fence broke out of the
+            // switch, so without this its body would still be forwarded into
+            // the scope whose teardown is unproven.
+            log.warn(
+              { command: classified.command, chatJid, compoundBodyLength: classified.compoundBody.length },
+              'compound body refused — not dispatched',
+            );
+            this.sendDirect(chatJid, newRefusedForStopTeardown
+              ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
+              : STOP_ACK_COMPOUND_BODY_REFUSED);
+          } else {
+            forwardAfterLocalCommand = classified.compoundBody;
+          }
         }
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
@@ -4520,7 +5529,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
-      this.turnQueue.enqueue({
+      this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
         conversationKey: journalConversationKey,
@@ -4531,6 +5540,7 @@ export class AgentRuntime implements Runtime {
         isGroup: msg.isGroup,
         groupName: msg.isGroup ? chatJid : undefined,
         contentType: msg.contentType,
+        purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
       });
@@ -4580,6 +5590,7 @@ export class AgentRuntime implements Runtime {
           isGroup: msg.isGroup,
           groupName: msg.isGroup ? chatJid : undefined,
           contentType: msg.contentType,
+          purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
         });
@@ -4606,7 +5617,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
     }
   }
 
@@ -4644,7 +5655,12 @@ export class AgentRuntime implements Runtime {
           'failed to clear crashed fallback handoff notice');
       }
     }
-    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, mapKey);
+    // #3398: every call into this wrapper is a genuine provider death
+    // mid-turn, so the queue may salvage an owed reply the crashed turn never
+    // delivered (status-role; crash finalization semantics unchanged).
+    this.runtimeTurnCoordinator.finalizeRuntimeCrash(context, queue, session, mapKey, {
+      salvageOwedReply: true,
+    });
   }
 
   private processPerChatTurn(scopeRef: PerChatRuntimeScopeRef, turn: QueuedTurn): Promise<void> {
@@ -4664,7 +5680,7 @@ export class AgentRuntime implements Runtime {
       onProviderBoundary: () => void;
     },
   ): Promise<void> {
-    const { chatJid, senderJid, senderName, text, isGroup } = turn;
+    const { chatJid, senderJid, senderName, text, isGroup, purpose } = turn;
 
     // Clear post-turn gate — legitimate new user turn begins (shared mode)
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -4689,6 +5705,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnRouteMarkerHold = config.nlRouting ? '' : null;
     this.currentTurnReplayText = exactText;
     this.currentTurnReplayActorJid = senderJid;
+    this.currentTurnReplayPurpose = purpose;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
     // Thread inbound seq into the outbound queue so ops can link back
@@ -4707,7 +5724,12 @@ export class AgentRuntime implements Runtime {
     }
 
     await this.waitForRejectedTerminalTeardown(this.session!);
-    if (!this.session!.getStatus().active) {
+    const globalSuspension = this.hostWorkAdmissionSuspensionBarrier(this.session!);
+    if (globalSuspension !== null) await globalSuspension;
+    if (
+      !this.session!.getStatus().active
+      && !this.hasDeferredHostWorkAdmissionStart(this.session!)
+    ) {
       await this.session!.spawnSession();
     }
 
@@ -4726,10 +5748,25 @@ export class AgentRuntime implements Runtime {
         recoveryDispatch.onProviderBoundary();
       }
       this.updateSessionActorJid(this.session!, senderJid);
-      await this.session!.sendTurn(withProviderApplicationContext(
-        renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
-        participantContext,
-      ));
+      // #2976 (ii): publish the executing turn's actor for the global-socket
+      // read-time resolver at the provider boundary (shared-mode dispatch
+      // bypasses sendTurnToSession, so it publishes here).
+      const sharedExecQ = this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY) ?? [];
+      sharedExecQ.push({
+        actorJid: senderJid,
+        purpose,
+        conversationKey: canonicalConversationKey(chatJid, this.db),
+      });
+      this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
+      try {
+        await this.session!.sendTurn(withProviderApplicationContext(
+          renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+          participantContext,
+        ));
+      } catch (sendErr) {
+        this.removeFailedExecutingActor(GLOBAL_TOOL_SCOPE_KEY, senderJid);
+        throw sendErr;
+      }
     } catch (err) {
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
@@ -4767,6 +5804,7 @@ export class AgentRuntime implements Runtime {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind: TurnDeliveryKind = 'live',
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     let effectiveMapKey = mapKey;
     let spawnedForTurn = false;
@@ -4797,12 +5835,14 @@ export class AgentRuntime implements Runtime {
     await this.waitForRejectedTerminalTeardown(session);
     await this.waitForSystemTurnQuarantine(systemScopeKey);
     await this.pendingSystemResults.waitUntilDispatchable(systemScopeKey, systemTurnLease);
+    const suspension = this.hostWorkAdmissionSuspensionBarrier(session);
+    if (suspension !== null) await suspension;
     if (dispatchCancelled()) return;
 
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
-    if (wasInactive) {
+    if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -4810,7 +5850,13 @@ export class AgentRuntime implements Runtime {
       // Without this, text in the 2-second stream debounce buffer is lost when
       // the child process is killed, because the stream parser stops emitting events.
       const queue = this.getQueueForChat(chatJid, effectiveMapKey);
-      if (queue) await queue.flush();
+      if (queue) {
+        await this.observeOutboundQueueOperation(
+          effectiveMapKey ?? GLOBAL_TOOL_SCOPE_KEY,
+          queue,
+          () => queue.flush(),
+        );
+      }
       if (dispatchCancelled()) return;
 
       // Shut down old session first to prevent zombie processes.
@@ -4849,12 +5895,38 @@ export class AgentRuntime implements Runtime {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
           if (recent.length > 0) {
-            const lines = formatContextLines(recent, this.isCrossProviderSession(session));
+            const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
             contextPreamble = `[Recent chat context — read before responding]\n${lines}`;
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context assembly failed — proceeding without context');
         }
+      }
+      // Stand-in introduction (once per manager): the first turn a fallback
+      // stand-in serves must open by identifying itself and then CONTINUE the
+      // conversation — without this, users get an unexplained voice change and
+      // the stand-in answers as if the thread just started (#2121 shape,
+      // incident 2026-08-15). Prepended so the model reads WHO it is before
+      // the recent-context block it is asked to continue from.
+      if (
+        this.isFallbackWindowActive
+        && this.isCrossProviderSession(session)
+        && !this.introducedStandIns.has(session)
+      ) {
+        this.introducedStandIns.add(session);
+        const entry = this.effectiveFallbackEntry;
+        const standInCard = entry
+          ? modelCardLabel(entry.provider, entry.model)
+          : modelCardLabel(session.getProviderId(), undefined);
+        const primaryCard = modelCardLabel(this.agentProvider, this.model);
+        const reason = (this.fallbackWindow.armReason ?? 'a temporary failure').replace(/-/g, ' ');
+        const intro = [
+          '[Provider handoff — read before responding]',
+          `You are ${standInCard}, temporarily standing in for the primary model (${primaryCard}) because of ${reason}.`,
+          'In your first reply only: introduce yourself in one short sentence (say which model you are), then continue the ongoing conversation and any in-progress task from the context above as the same assistant.',
+          'Do not re-greet, do not restart the conversation, and do not claim capabilities you have not verified in this environment.',
+        ].join('\n');
+        contextPreamble = contextPreamble === null ? intro : `${intro}\n\n${contextPreamble}`;
       }
     }
 
@@ -4872,6 +5944,10 @@ export class AgentRuntime implements Runtime {
       return;
     }
     let actorPushed = false;
+    // Hoisted so the dispatch-failure retirement (removeFailedExecutingActor)
+    // shifts the SAME register key the provider boundary pushed onto — the two
+    // must never drift.
+    let pushedExecScopeKey: string | undefined;
     const onProviderBoundaryReady = (): void => {
       if (dispatchCancelled()) {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
@@ -4879,21 +5955,53 @@ export class AgentRuntime implements Runtime {
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
-      if (this.sessionUsesPerChatActorSocket(session) && effectiveMapKey !== undefined) {
-        if (!session.getStatus().active) this.perChatExecActorQueue.delete(effectiveMapKey);
-        const execQ = this.perChatExecActorQueue.get(effectiveMapKey) ?? [];
-        execQ.push(actorJid);
-        this.perChatExecActorQueue.set(effectiveMapKey, execQ);
+      // #2976: single/shared turns publish into the SAME executing-actor
+      // register under GLOBAL_TOOL_SCOPE_KEY — the global socket's read-time
+      // resolver (resolveExecutingGlobalActor) reads it. per_chat sessions that
+      // ride a per-chat actor socket publish under their mapKey; #2976 residual:
+      // per_chat managed-loop (API) sessions have no socket but serve tools
+      // through the in-process bridge, so they publish under the mapKey too, and
+      // the provider bridge resolves it read-time.
+      const usesPerChatActorRegister =
+        this.sandboxPerChat
+        || this.sessionUsesPerChatActorSocket(session)
+        || (this.sessionScope === 'per_chat' && this.sessionUsesInProcessBridge(session));
+      const execScopeKey = usesPerChatActorRegister && effectiveMapKey !== undefined
+        ? effectiveMapKey
+        : (this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : undefined);
+      if (execScopeKey !== undefined) {
+        if (!session.getStatus().active) this.perChatExecActorQueue.delete(execScopeKey);
+        const execQ = this.perChatExecActorQueue.get(execScopeKey) ?? [];
+        execQ.push({
+          actorJid,
+          purpose,
+          conversationKey: canonicalConversationKey(chatJid, this.db),
+        });
+        this.perChatExecActorQueue.set(execScopeKey, execQ);
         actorPushed = true;
+        pushedExecScopeKey = execScopeKey;
         if (systemTurnLease) {
           this.systemTurnExecActors.set(systemTurnLease.id, {
-            scopeKey: effectiveMapKey,
+            scopeKey: execScopeKey,
             actorJid,
           });
         }
       }
       const queue = this.getQueueForChat(chatJid, effectiveMapKey);
       if (queue) queue.indicateTyping();
+      // A chat can be abandoned while its session still reports active: the
+      // abandon path fires when termination is not PROVED, and `status.active`
+      // is itself one of the conjuncts that blocks the proof. `status.active`
+      // alone cannot prove recovery; reaching this provider-ready boundary
+      // proves the chat served again, so settle here and not before the
+      // dispatch barriers, where a cancelled or refused turn would settle it.
+      if (
+        !wasInactive
+        && effectiveMapKey !== undefined
+        && (this.abandonedRespawnOwners.size > 0 || this.agentRespawnFailedClearPending)
+      ) {
+        this.settleAbandonedRespawn(effectiveMapKey);
+      }
     };
     try {
       const userTurnText = renderUserTurnForProvider(
@@ -4905,8 +6013,12 @@ export class AgentRuntime implements Runtime {
         : withProviderApplicationContext(userTurnText, contextPreamble);
       await dispatchProviderTurn(session, turnInput, onProviderBoundaryReady);
     } catch (err) {
-      if (actorPushed && effectiveMapKey !== undefined) {
-        this.removeFailedExecutingActor(effectiveMapKey, actorJid, systemTurnLease);
+      if (actorPushed && pushedExecScopeKey !== undefined) {
+        this.removeFailedExecutingActor(
+          pushedExecScopeKey,
+          actorJid,
+          systemTurnLease,
+        );
       }
       const errMsg = (err as Error).message ?? '';
       if (errMsg.includes('STDIN_WRITE_TIMEOUT')) {
@@ -4933,6 +6045,7 @@ export class AgentRuntime implements Runtime {
     actorJid: string,
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -4941,6 +6054,7 @@ export class AgentRuntime implements Runtime {
     this.turnHadVisibleOutput = false;
     this.currentTurnReplayText = text;
     this.currentTurnReplayActorJid = actorJid;
+    this.currentTurnReplayPurpose = purpose;
     let context: RuntimeTurnContext | null = null;
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
     if (source) {
@@ -4955,6 +6069,26 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      if (context && this.runtimeTurnCoordinator.rejectRuntimeTurnIfOutboundQueuePoisoned(
+        GLOBAL_TOOL_SCOPE_KEY,
+        {
+          sourceMessageId: source.sourceMessageId,
+          receivedAtUnixSeconds: source.receivedAtUnixSeconds,
+          conversationKey: source.conversationKey,
+          chatJid,
+          senderJid: source.senderJid,
+          senderName: source.senderName,
+          text,
+          isGroup: source.isGroup,
+          ...(source.groupName === undefined ? {} : { groupName: source.groupName }),
+          contentType: source.contentType,
+          runtimeContext: context,
+          inboundSeq,
+        },
+      )) {
+        await this.runtimeTurnCoordinator.awaitRejectedRuntimeTurnFinalizations();
+        return;
+      }
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
@@ -4976,7 +6110,7 @@ export class AgentRuntime implements Runtime {
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
-      ), context ?? undefined);
+      ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
@@ -5012,6 +6146,7 @@ export class AgentRuntime implements Runtime {
     requestedDeliveryKind?: TurnDeliveryKind,
     targetDispatchAllowed?: () => boolean,
     onProviderBoundary?: () => void,
+    purpose?: SessionContext['purpose'],
   ): Promise<void> {
     mapKey = scopeRef?.value ?? mapKey;
     const dispatchAllowed = runtimeContext === undefined && targetDispatchAllowed === undefined
@@ -5058,7 +6193,7 @@ export class AgentRuntime implements Runtime {
             if (queue) {
               queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
               try {
-                await queue.flush();
+                await this.observeOutboundQueueOperation(mapKey, queue, () => queue.flush());
               } catch (err) {
                 log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
               }
@@ -5115,6 +6250,7 @@ export class AgentRuntime implements Runtime {
     // before the agent can process it.
     this.pendingTurnText.set(mapKey, text);
     this.pendingTurnActorJid.set(mapKey, actorJid);
+    this.pendingTurnPurpose.set(mapKey, purpose);
 
     const legacyOwner: { value: LegacyProviderTurnOwner | null } = { value: null };
     const beginDispatchedTurn = (
@@ -5139,7 +6275,16 @@ export class AgentRuntime implements Runtime {
       );
     };
 
-    const session = this.chatSessions.get(mapKey);
+    const mappedSession = this.chatSessions.get(mapKey);
+    // A mapped session whose dispatch ownership was lost cannot serve a turn:
+    // it throws at the ownership rebind below and, because the spawn-and-claim
+    // repair is gated on this very lookup MISSING, it would keep throwing for
+    // the process lifetime. Drop the stale entry so this turn falls through to
+    // that repair — a one-turn delay instead of a permanent wedge.
+    const session = mappedSession !== undefined
+      && this.evictUnownedPerChatSession(mapKey, mappedSession)
+      ? undefined
+      : mappedSession;
     if (!session) {
       log.warn({ chatJid, mapKey }, 'no active session for chat — spawning new session');
       // Instead of silently dropping, initialize session and queue so message is handled
@@ -5157,6 +6302,7 @@ export class AgentRuntime implements Runtime {
         log.error({ chatJid, mapKey: currentMapKey }, 'failed to create session for chat — message dropped');
         this.pendingTurnText.delete(currentMapKey);
         this.pendingTurnActorJid.delete(currentMapKey);
+        this.pendingTurnPurpose.delete(currentMapKey);
         if (runtimeContext) {
           await this.runtimeTurnCoordinator.finalizeUndispatchedRuntimeTurnAndWait(runtimeContext, scopeRef);
         } else if (this.durability && this.perChatInboundSeqQueue.get(currentMapKey)?.[0] !== undefined) {
@@ -5189,7 +6335,7 @@ export class AgentRuntime implements Runtime {
             scopeRef?.value ?? currentMapKey,
           );
           onProviderBoundary?.();
-        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
+        }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind, purpose);
       } catch (err) {
         if (legacyOwner.value) {
           this.clearLegacyProviderTurn(currentMapKey, legacyOwner.value);
@@ -5207,7 +6353,7 @@ export class AgentRuntime implements Runtime {
           scopeRef?.value ?? mapKey,
         );
         onProviderBoundary?.();
-      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind);
+      }, systemTurnLease, dispatchAllowed, providerTurnContext, providerDeliveryKind, purpose);
     } catch (err) {
       if (legacyOwner.value) {
         this.clearLegacyProviderTurn(scopeRef?.value ?? mapKey, legacyOwner.value);
@@ -5232,7 +6378,7 @@ export class AgentRuntime implements Runtime {
     context = this.runtimeTurnCoordinator.rebindRuntimeTurnForDispatch(context, session, mapKey);
     const contexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
     if (contexts.length > 0) {
-      throw new Error(`Per-chat runtime turn context FIFO already has an active owner for "${mapKey}"`);
+      throw new PerChatTurnFifoOwnerConflictError(mapKey);
     }
     this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
     contexts.push(context);
@@ -5309,8 +6455,9 @@ export class AgentRuntime implements Runtime {
   ): Promise<boolean> {
     const session = target.session as SessionManager;
     if (!this.isTurnRecoveryDispatchTargetCurrent(target)) {
-      const status = session.getStatus();
-      return !status.active && status.pid === null && status.turnInFlight !== true;
+      // One termination contract. The older spelling proved termination from a
+      // null pid, which a managed-loop provider reports for its whole life.
+      return this.isSessionProvablyTerminated(session);
     }
     // #2170: singleton/shared targets have no mapKey — the reject/finalize
     // pair and queue lookup take their global (mapKey-less) forms.
@@ -5328,8 +6475,7 @@ export class AgentRuntime implements Runtime {
       log.error({ err }, 'turn recovery replay exact-generation shutdown failed');
       return false;
     }
-    const status = session.getStatus();
-    return !status.active && status.pid === null && status.turnInFlight !== true;
+    return this.isSessionProvablyTerminated(session);
   }
 
   private async dispatchTurnRecoveryReplay(
@@ -5667,6 +6813,16 @@ export class AgentRuntime implements Runtime {
     routeQueue?.endTurn();
     if (scopeKey === GLOBAL_TOOL_SCOPE_KEY) {
       this.currentTurnChatJid = null;
+    }
+    // Restricted system results bypass the regular result handler, so start
+    // the same post-terminal suspension barrier here. Later poll/user/system
+    // dispatches await it in sendTurnToSession before observing activity.
+    try {
+      void this.suspendHostWorkAdmissionAfterTerminal(sourceSession).catch((err) => {
+        log.warn({ err, scopeKey, purpose: systemTurn.purpose }, 'host-admission restricted terminal suspension rejected');
+      });
+    } catch (err) {
+      log.warn({ err, scopeKey, purpose: systemTurn.purpose }, 'host-admission restricted terminal suspension threw');
     }
   }
 
@@ -6163,18 +7319,36 @@ export class AgentRuntime implements Runtime {
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
-          queue.enqueueStreamingText(normalizedText);
-          if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
-            this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
-          }
-          // Reply-guarantee: visible output reached the user, so reset the
-          // silence window for this chat. The "still working" fallback then
-          // only fires after a full window of TRUE silence, not while a long
-          // turn is actively streaming replies.
-          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
-          // Accumulate assistant text for voice reply (SP4)
-          if (mapKey !== undefined) {
-            this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
+          const markReplayUnsafe = mapKey !== undefined
+            && this.pendingSystemResults.count(mapKey) === 0;
+          if (config.toolUpdateMode === 'minimal') {
+            const committedText = normalizedText;
+            queue.enqueueStreamingText(committedText, 'answer', () => {
+              if (markReplayUnsafe) {
+                this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
+              }
+              this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+              if (mapKey !== undefined) {
+                this.perChatTurnText.set(
+                  mapKey,
+                  (this.perChatTurnText.get(mapKey) ?? '') + committedText,
+                );
+              }
+            });
+          } else {
+            queue.enqueueStreamingText(normalizedText);
+            if (markReplayUnsafe) {
+              this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
+            }
+            // Reply-guarantee: visible output reached the user, so reset the
+            // silence window for this chat. The "still working" fallback then
+            // only fires after a full window of TRUE silence, not while a long
+            // turn is actively streaming replies.
+            this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+            // Accumulate assistant text for voice reply (SP4)
+            if (mapKey !== undefined) {
+              this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + normalizedText);
+            }
           }
         }
         break;
@@ -6202,10 +7376,13 @@ export class AgentRuntime implements Runtime {
             // Suppression state (suppressedAskUserToolIds) is registered synchronously
             // inside handleAskUserQuestionAsPoll before any async work, so tool_result
             // suppression is guaranteed even though we fire-and-forget the async poll send.
-            void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
+            void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue)
+              .catch((err) => log.error({ err, mapKey }, 'AskUserQuestion poll send aborted'));
             break; // skip normal tool_use handling — poll sent instead
           }
         }
+
+        queue.discardPreToolAssistantText?.();
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         this.turnHadToolActivity.add(toolScopeKey);
@@ -6329,6 +7506,17 @@ export class AgentRuntime implements Runtime {
     return event;
   }
 
+  /**
+   * Drain the per-chat startup notices (#3570). Main calls this once the
+   * transport is connected; later notices go straight to the chat's queue.
+   */
+  popStartupChatNotifications(): StartupChatNotice[] {
+    this.startupChatNoticesDrained = true;
+    const notices = [...this.pendingStartupChatNotices.values()];
+    this.pendingStartupChatNotices.clear();
+    return notices;
+  }
+
   getHealthSnapshot(): RuntimeHealth {
     const fallbackState = this.getFallbackState();
     const autoCompactHealth = this.autoCompact.healthSnapshot();
@@ -6341,15 +7529,34 @@ export class AgentRuntime implements Runtime {
       recovery: recoveryHealth,
       completedDeliveryIdentity: completedDeliveryIdentityAdmissions,
     });
+    // Only service-blocking recovery debt degrades; retained debt is reported
+    // through `recovery_debt` without paging.
+    const { finalizationDegraded, completedDeliveryIdentityDebt } =
+      runtimeRecoveryDegradation(recoveryClassification);
+    // Chats wedged with a session entry no ownership record backs. Read pure
+    // here: this snapshot is polled, so the warning sweep stays on the tick.
+    const perChatSessionsWithoutOwner = this.perChatSessionsWithoutOwner();
+    const perChatRespawnAbandoned = this.perChatRespawnAbandonedCount();
+    const agentRespawnFailedClearPending = this.agentRespawnFailedClearPending;
     const turnQueueHealth = this.runtimeTurnCoordinator.turnQueueHaltHealth(this.sessionScope);
+    const poisonHealth = this.runtimeTurnCoordinator.outboundQueuePoisonHealth();
+    const publicPoisonHealth = {
+      outboundQueuePoisoned: poisonHealth.outboundQueuePoisoned,
+      outboundQueuePoisonedScopes: poisonHealth.outboundQueuePoisonedScopes,
+    };
     // CAR-20 (#2539): current-vs-historical poll-persistence health + offline-decision
     // retry state, surfaced in BOTH health branches below.
     const pollPersistenceHealth = this.pollPersistence.healthDetails();
     const offlineDecisionRetry = this.offlineDecisionRetry.healthDetails();
+    // task-21: identity verdict as a status class (+ digest prefixes) and its
+    // companion degradedReason, pushed by both branches below.
+    const accountIdentity = this.accountIdentityHealth();
+    const accountIdentityReasons = accountIdentityDegradedReasons(accountIdentity);
     // Health-detail fields shared verbatim by both session-scope branches below.
     // Computed once here (all inputs are already in scope) and spread into each
     // branch's `details` at the same position, preserving key order and output.
     const sharedHealthDetails = {
+      accountIdentity,
       pollPersistenceErrors: this.pollPersistence.errors,
       pollPersistenceHealth,
       offlineDecisionRetry,
@@ -6361,6 +7568,7 @@ export class AgentRuntime implements Runtime {
       autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
       completedDeliveryIdentityAdmissions,
+      recoveryBlockingReasons: recoveryClassification.blockingReasons,
       recoveryDebtReasons: recoveryClassification.retainedReasons,
       completedDeliveryIdentityBlocking:
         recoveryClassification.completedDeliveryIdentityBlocking,
@@ -6376,6 +7584,9 @@ export class AgentRuntime implements Runtime {
       unownedProviderEventRejects: this.unownedProviderEventRejects,
       suppressedSystemTurnEffectRejects: this.suppressedSystemTurnEffectRejects,
       providerEventRejectReasons: Object.fromEntries(this.providerEventRejectReasonCounts),
+      perChatSessionsWithoutOwner: perChatSessionsWithoutOwner.length,
+      perChatRespawnAbandoned,
+      agentRespawnFailedClearPending,
       ...this.turnChronology.healthDetails(),
       providerExecution,
       turnFinalizationRetainedRetries: finalizationHealth.retainedRetries,
@@ -6384,6 +7595,7 @@ export class AgentRuntime implements Runtime {
       turnFinalizationRetryRecoveries: finalizationHealth.retryRecoveries,
       turnFinalizationRetryExhaustions: finalizationHealth.retryExhaustions,
       ...turnQueueHealth,
+      ...publicPoisonHealth,
       ...recoveryHealth,
       ...fallbackState,
     };
@@ -6412,11 +7624,28 @@ export class AgentRuntime implements Runtime {
       if (recentCrashCount > 0) degradedReasons.push('recent_crashes');
       if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
       if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-      degradedReasons.push(...recoveryClassification.blockingReasons);
+      if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+      if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
+      // This state rejects every inbound turn in the affected chat and, before
+      // the eviction path, did so with no operator-visible signal at all.
+      if (perChatSessionsWithoutOwner.length > 0) {
+        degradedReasons.push('per_chat_session_without_owner');
+      }
+      // An abandoned respawn stops recovering this chat until the user writes
+      // again, and unlike recent_crashes this signal does not decay inside the
+      // crash-health window.
+      if (perChatRespawnAbandoned > 0) {
+        degradedReasons.push('per_chat_respawn_abandoned');
+      }
+      if (agentRespawnFailedClearPending) {
+        degradedReasons.push('agent_respawn_failed_clear_pending');
+      }
       if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+      if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
       if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
       if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
       if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+      degradedReasons.push(...accountIdentityReasons);
       const healthStatus: RuntimeHealth['status'] = degradedReasons.length > 0 ? 'degraded' : 'healthy';
       return {
         status: healthStatus,
@@ -6439,15 +7668,21 @@ export class AgentRuntime implements Runtime {
     if (this.session !== null && status?.active === false) degradedReasons.push('session_inactive');
     if (autoCompactHealth.activeBackoffScopes > 0) degradedReasons.push('auto_compact_backoff');
     if (fallbackState.fallbackActiveUntil !== null) degradedReasons.push('provider_fallback_active');
-    degradedReasons.push(...recoveryClassification.blockingReasons);
+    if (finalizationDegraded) degradedReasons.push('turn_finalization_debt');
+    if (completedDeliveryIdentityDebt) degradedReasons.push('completed_delivery_identity_debt');
     if (providerExecution.pressureActive) degradedReasons.push('provider_execution_pressure');
     if (turnQueueHealth.turnQueueHalted) degradedReasons.push('turn_queue_halted');
+    if (poisonHealth.outboundQueuePoisoned) degradedReasons.push('outbound_queue_poisoned');
     if (pollPersistenceHealth.degraded) degradedReasons.push('poll_persistence_failure');
     if (offlineDecisionRetry.exhausted) degradedReasons.push('offline_decision_retry_exhausted');
+    if (agentRespawnFailedClearPending) {
+      degradedReasons.push('agent_respawn_failed_clear_pending');
+    }
+    degradedReasons.push(...accountIdentityReasons);
     // A halted single/shared queue is the active admission path — unhealthy/503,
     // matching the public-surface contract; every other reason degrades only.
     const healthStatus: RuntimeHealth['status'] =
-      turnQueueHealth.turnQueueHalted
+      turnQueueHealth.turnQueueHalted || poisonHealth.activeAdmissionLaneBlocked
         ? 'unhealthy'
         : degradedReasons.length > 0
           ? 'degraded'
@@ -6464,6 +7699,39 @@ export class AgentRuntime implements Runtime {
     };
   }
 
+  private armControlSessionTimeout(reportId: string, sourceSession: SessionManager): void {
+    if (this.controlSessionTimeout !== null) clearTimeout(this.controlSessionTimeout);
+    this.controlSessionTimeout = setTimeout(() => {
+      if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+      log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
+
+      // Send HEAL_ESCALATE to Loops so its heal state is updated
+      const controlQueue = this.getControlQueue();
+      const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
+      if (controlQueue && loopsPhone) {
+        const loopsJid = toPersonalJid(loopsPhone);
+        controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
+          reportId,
+          errorClass: 'timeout',
+          diagnosis: 'Repair session timed out after 15 minutes without resolution',
+        }, this.durability ?? undefined).catch(err =>
+          log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
+      }
+
+      // DM admin
+      const adminPhone = [...config.adminPhones][0];
+      if (adminPhone) {
+        const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
+        sendTracked(this.messenger, adminJid,
+          `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
+          this.durability ?? undefined, { replayPolicy: 'safe' })
+          .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
+      }
+
+      void this.finishTimedOutControlReport(reportId, sourceSession);
+    }, CONTROL_SESSION_TIMEOUT_MS);
+  }
+
   /**
    * Inject a repair turn into the control session for self-healing.
    * Single-flight: if a repair is already in-flight the call returns immediately;
@@ -6472,6 +7740,7 @@ export class AgentRuntime implements Runtime {
   async handleControlTurn(reportId: string, payload: string): Promise<void> {
     this.db.assertWritableCompatibility();
     const syntheticJid = 'control@heal.internal';
+    let sourceSession: SessionManager | null = null;
     try {
       // Only non-sandboxed instances (Q) can run repairs
       if (this.sandboxPerChat || this.sandbox) {
@@ -6527,59 +7796,51 @@ export class AgentRuntime implements Runtime {
         if (controlTracker) this.operationTrackers.set(syntheticJid, controlTracker);
       }
 
+      sourceSession = this.controlSession;
+      if (!sourceSession) throw new Error('control session was not created');
+      // Admission can wait in the host wrapper, so the control deadline starts
+      // with control-slot ownership before provider dispatch and is bound to
+      // this session rather than a later report's mutable runtime field.
+      this.armControlSessionTimeout(reportId, sourceSession);
+
       // Spawn session if not active
-      if (!this.controlSession.getStatus().active) {
-        await this.controlSession.spawnSession();
+      if (!sourceSession.getStatus().active) {
+        await sourceSession.spawnSession();
       }
+
+      if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
 
       // Format the turn
       const turn = `[REPAIR REQUEST — report_id: ${reportId}]\n${payload}`;
 
-      await this.controlSession.sendTurn(turn);
-      // Start hard timeout — if the control session doesn't resolve within 15 minutes,
-      // force-escalate and shut it down to prevent resource exhaustion.
-      this.controlSessionTimeout = setTimeout(() => {
-        log.warn({ reportId }, 'control session timed out after 15 minutes — force-escalating');
-
-        // Send HEAL_ESCALATE to Loops so its heal state is updated
-        const controlQueue = this.getControlQueue();
-        const loopsPhone = [...config.controlPeers.entries()].find(([name]) => name === 'loops')?.[1];
-        if (controlQueue && loopsPhone) {
-          const loopsJid = toPersonalJid(loopsPhone);
-          controlQueue.sendControlMessage(loopsJid, 'HEAL_ESCALATE', {
-            reportId,
-            errorClass: 'timeout',
-            diagnosis: 'Repair session timed out after 15 minutes without resolution',
-          }, this.durability ?? undefined).catch(err =>
-            log.error({ err, reportId }, 'failed to send HEAL_ESCALATE on timeout'));
-        }
-
-        // DM admin
-        const adminPhone = [...config.adminPhones][0];
-        if (adminPhone) {
-          const adminJid = resolveConfiguredAdminJid(config.transport, adminPhone);
-          sendTracked(this.messenger, adminJid,
-            `[HEAL_ESCALATE] Repair for report ${reportId} timed out after 15 minutes.`,
-            this.durability ?? undefined, { replayPolicy: 'safe' })
-            .catch(err => log.error({ err }, 'failed to DM admin on timeout'));
-        }
-
-        const timedOutSession = this.controlSession;
-        if (timedOutSession) {
-          void this.finishTimedOutControlReport(reportId, timedOutSession);
-        }
-      }, CONTROL_SESSION_TIMEOUT_MS);
+      await sourceSession.sendTurn(turn);
     } catch (err) {
-      log.error({ err, reportId }, 'control session failed to start — releasing slot');
+      if (sourceSession && (this.activeControlReportId !== reportId || this.controlSession !== sourceSession)) {
+        log.info({ reportId }, 'control startup continuation no longer owns the repair slot');
+        return;
+      }
+      log.error({ err, reportId }, 'control session failed to start — attempting teardown');
       if (this.controlSessionTimeout) {
         clearTimeout(this.controlSessionTimeout);
         this.controlSessionTimeout = null;
       }
 
+      if (sourceSession) {
+        try {
+          await sourceSession.shutdown();
+        } catch (shutdownErr) {
+          log.error({ shutdownErr, reportId }, 'control startup teardown failed — repair lane remains closed');
+          return;
+        }
+        if (this.activeControlReportId !== reportId || this.controlSession !== sourceSession) return;
+        this.releaseControlSession(reportId, sourceSession);
+        return;
+      }
+
+      if (this.activeControlReportId !== reportId || this.controlSession !== null) return;
       this.activeControlReportId = null;
       this.controlProtocolCompletedReportId = null;
       this.controlTerminalizingReportId = null;
-      const controlSession = this.controlSession;
       this.controlSession = null;
       this.chatSessions.delete(syntheticJid);
       this.chatQueues.delete(syntheticJid);
@@ -6593,13 +7854,6 @@ export class AgentRuntime implements Runtime {
       if (controlTracker) {
         controlTracker.shutdown();
         this.operationTrackers.delete(syntheticJid);
-      }
-      if (controlSession) {
-        try {
-          await controlSession.shutdown();
-        } catch (shutdownErr) {
-          log.warn({ shutdownErr, reportId }, 'failed to shutdown control session during error cleanup');
-        }
       }
     }
   }
@@ -6816,6 +8070,8 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.periodicUsabilityProbeTimer) { clearTimeout(this.periodicUsabilityProbeTimer); this.periodicUsabilityProbeTimer = null; }
+    this.periodicUsabilityProbeDueAt = null;
+    this.fallback.stopChainCanary();
     this.fallbackWindow.activeUntil = null;
     this.fallbackWindow.activatedAt = null;
     this.fallbackWindow.armReason = null;
@@ -6843,12 +8099,27 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     if (!preserveRuntimeTurnState) {
-      const messageHandlers = await Promise.allSettled(
+      // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
+      // deadline the coordinator above and the recycle lifecycle below honor.
+      // A handler that never settles no longer pins shutdown until main.ts's
+      // hard kill; it is counted, receipted content-free, and left to E20
+      // proper (which will abort it). Turn state is preserved because the
+      // blockers may still be mid-turn.
+      const drain = await drainMessageHandlersForShutdown(
         [...this.activeMessageHandlers].filter(
           (handler) => !this.routeRecycleCommandWork.has(handler),
         ),
+        shutdownDeadlineAt,
       );
-      const rejectedMessageHandlers = messageHandlers.filter(
+      if (drain.timedOut) {
+        log.warn(
+          { phase: 'message_handlers', blockers: drain.blockers, timedOut: true },
+          'message handlers did not drain before the shutdown deadline',
+        );
+        shutdownFailures.push(new MessageHandlerDrainTimeoutError(drain.blockers));
+        preserveRuntimeTurnState = true;
+      }
+      const rejectedMessageHandlers = drain.settled.filter(
         (item): item is PromiseRejectedResult => item.status === 'rejected',
       );
       if (rejectedMessageHandlers.length > 0) {
@@ -6943,7 +8214,11 @@ export class AgentRuntime implements Runtime {
         this.deleteOwnedPerChatSession(mapKey, session);
       }
       for (const [chatJid, queue] of this.chatQueues) {
-        try { await queue.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat queue shutdown failed'); }
+        try {
+          await this.observeOutboundQueueOperation(chatJid, queue, () => queue.shutdown());
+        } catch (err) {
+          log.warn({ err, chatJid }, 'per_chat queue shutdown failed');
+        }
       }
       this.chatQueues.clear();
       for (const mapKey of perChatKeys) {
@@ -6957,7 +8232,11 @@ export class AgentRuntime implements Runtime {
       // Shutdown all per-chat outbound queues
       for (const [chatJid, queue] of this.outboundQueues) {
         try {
-          await queue.shutdown();
+          await this.observeOutboundQueueOperation(
+            GLOBAL_TOOL_SCOPE_KEY,
+            queue,
+            () => queue.shutdown(),
+          );
         } catch (err) {
           log.warn({ err, chatJid }, 'queue shutdown failed — pending messages may be lost');
         }
@@ -6966,7 +8245,12 @@ export class AgentRuntime implements Runtime {
     } else if (!preserveRuntimeTurnState) {
       if (this.queue) {
         try {
-          await this.queue.shutdown();
+          const queue = this.queue;
+          await this.observeOutboundQueueOperation(
+            GLOBAL_TOOL_SCOPE_KEY,
+            queue,
+            () => queue.shutdown(),
+          );
         } catch (err) {
           log.warn({ err }, 'queue shutdown failed — pending messages may be lost');
         }
@@ -7071,8 +8355,10 @@ export class AgentRuntime implements Runtime {
       this.perChatAssistantItemText.clear();
       this.pendingTurnText.clear();
       this.pendingTurnActorJid.clear();
+      this.pendingTurnPurpose.clear();
       this.currentTurnReplayText = null;
       this.currentTurnReplayActorJid = undefined;
+      this.currentTurnReplayPurpose = undefined;
       this.resumeFailedHandling.clear();
       this.imageCoalesce.buffers.clear();
     }
@@ -7267,6 +8553,7 @@ export class AgentRuntime implements Runtime {
     }
     this.ownedSessionManagers.set(managerId, session);
     this.chatSessions.set(mapKey, session);
+    this.settleAbandonedRespawn(mapKey);
     session.bindGenerationOwnership(() => {
       const currentMapKey = this.findMapKeyForSession(session);
       if (!currentMapKey) return null;
@@ -7298,13 +8585,283 @@ export class AgentRuntime implements Runtime {
     const mapped = this.chatSessions.get(mapKey);
     if (expected && mapped !== expected) return false;
     const current = this.sessionOwnership.get(mapKey);
-    if (current) {
-      this.clearOwnedRespawnTimer(mapKey, current);
-      this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
-      this.sessionOwnership.release(mapKey, current.managerId);
-      this.ownedSessionManagers.delete(current.managerId);
+    try {
+      if (current) {
+        this.clearOwnedRespawnTimer(mapKey, current);
+        this.sessionOwnership.transition(mapKey, current.managerId, 'closing');
+        this.sessionOwnership.release(mapKey, current.managerId);
+      }
+    } finally {
+      // Retirement is all-or-nothing across the correlated stores. The
+      // session-map entry must never outlive its ownership record — a retained
+      // entry with no owner wedges every later turn at the dispatch rebind — but
+      // the inverse is just as bad and strictly harder to see: the unowned sweep
+      // iterates chatSessions, so a record stranded in `closing` with its
+      // manager still indexed is an orphan no detector can reach. Drop all three
+      // together even if the release above threw.
+      if (current) {
+        this.ownedSessionManagers.delete(current.managerId);
+        this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
+      }
+      this.chatSessions.delete(mapKey);
+      // Forget the chat's throttle history here, alongside the map entry the
+      // sweep iterates. Deliberately OUTSIDE the `if (current)` above: the
+      // throttle is keyed by mapKey, not by a manager id, and the eviction
+      // shape that has no ownership record at all is exactly one of the shapes
+      // that leaked. Without this, a deleted-then-re-added chat inherits its
+      // suppressed count and its next FIRST failure is silently dropped.
+      this.unownedSweepLogThrottle.onSuccess(mapKey);
     }
-    return this.chatSessions.delete(mapKey);
+    return mapped !== undefined;
+  }
+
+  /**
+   * A per-chat session entry is only usable while `sessionOwnership` holds a
+   * record naming the mapped session's manager: `rebindRuntimeTurnForDispatch`
+   * rejects every turn otherwise. Treat a violation as a stale entry and drop
+   * it, so the caller re-spawns and re-claims instead of wedging forever.
+   *
+   * Fail closed in three cases. A published runtime-turn context means a turn
+   * in this chat is still in flight and still needs the entry, so eviction
+   * waits. A child that is not provably gone could still be running, and
+   * detaching it would let the spawn start a second one. The heal control
+   * session is deliberately mapped without an ownership record and is never
+   * dispatched through this path (the wedged-lane sweep carries the same
+   * guard), so it is not a violation.
+   */
+  private evictUnownedPerChatSession(mapKey: string, session: SessionManager): boolean {
+    if (!this.isPerChatSessionWithoutOwner(mapKey, session)) return false;
+    if ((this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0) return false;
+    // Fail closed unless the mapped session is provably terminated.
+    if (!this.isSessionProvablyTerminated(session)) return false;
+    // The predicate treats "the registry names a DIFFERENT manager" as unowned
+    // too, and that shape is not ours to release: `deleteOwnedPerChatSession`
+    // releases whichever manager the REGISTRY names, so a registered, still
+    // live owner would be orphaned while the spawn below starts a replacement
+    // — two live provider children for one conversation, which is strictly
+    // worse than the wedge this repair replaces. `setOwnedPerChatSession`
+    // refuses the same situation only when that manager is indexed AND still
+    // `active` — its check reads that one field and falls through an optional
+    // chain when the index cannot produce the manager — so this guard is the
+    // stricter of the two rather than a restatement of it. Only a registered
+    // owner that is itself provably terminated, or no ownership record at all,
+    // may be released.
+    //
+    // The two arms are deliberately asymmetric. NO record is the field wedge
+    // this repair exists for, and it evicts. A record naming a manager the
+    // index cannot produce is a different shape: absence from a secondary index
+    // is not a termination proof, and releasing on it would spawn a second
+    // provider for a generation nobody proved had stopped. That fails closed.
+    const owner = this.sessionOwnership.get(mapKey);
+    if (owner !== undefined) {
+      const registeredOwner = this.ownedSessionManagers.get(owner.managerId);
+      if (registeredOwner === undefined) return false;
+      if (!this.isSessionProvablyTerminated(registeredOwner)) return false;
+    }
+    log.warn(
+      { mapKey, hasOwner: owner !== undefined },
+      'per-chat session entry has no current dispatch owner — evicting the stale entry so the next turn respawns',
+    );
+    // The replacement overwrites this chat's operation tracker unconditionally,
+    // so retire the current one rather than orphan it — an abandoned tracker
+    // keeps its armed timers running (QR-094).
+    const tracker = this.operationTrackers.get(mapKey);
+    // Retiring the predecessor's tracker and aborting its queue is housekeeping
+    // around the repair, not the repair itself. A synchronous throw from either
+    // must not abandon the eviction half-applied — that leaves the chat mapped
+    // to a dead session and wedged, which is the state this path exists to end.
+    // Each unmapping below therefore runs unconditionally.
+    try {
+      tracker?.shutdown();
+    } catch (err) {
+      log.warn({ err, mapKey }, 'operation tracker shutdown failed during eviction — continuing');
+    }
+    this.operationTrackers.delete(mapKey);
+    // Abort the outbound queue but LEAVE IT MAPPED. `createOutboundQueue` reads
+    // the predecessor's echo-guard token through `priorSenderTokenForChat`,
+    // which looks this very key up; deleting here would drop the token and let
+    // a replacement's first group reply fall inside the old cooldown. The spawn
+    // path replaces the entry unconditionally, so nothing leaks by leaving it.
+    try {
+      this.chatQueues.get(mapKey)?.abortTurn();
+    } catch (err) {
+      log.warn({ err, mapKey }, 'outbound queue abort failed during eviction — continuing');
+    }
+    // The retired generation's in-flight turns are gone with it, so its
+    // executing-actor entries must go too. `cleanupPerChatCrashTurnState` makes
+    // the same clear for the same reason: a later turn must not append behind a
+    // stale (possibly administrator) head and be served that actor for a
+    // sensitive tool call. The `!active` guard on the dispatch push cannot
+    // cover this path — eviction unmaps the dead session first, and the
+    // replacement is active — so clear it here.
+    this.perChatExecActorQueue.delete(mapKey);
+    this.clearSystemTurnExecutingActors(mapKey);
+    // Deliberately NOT cleanupPerChatState: unlike idle eviction, this runs at
+    // the head of a turn that is about to be dispatched, and that helper drops
+    // the in-flight turn's journal seq and pending text. Detaching to exactly
+    // the state the ordinary "no active session" spawn path expects is the
+    // point — that path also runs with this turn's state already set.
+    this.deleteOwnedPerChatSession(mapKey, session);
+    return true;
+  }
+
+  /**
+   * True only when this session can no longer be running provider work.
+   *
+   * `active` is cleared at the top of `SessionManager.shutdown` and by
+   * `resetFailedSessionStart`, in both cases while a provider handle may still
+   * be live, so it is not a termination proof on its own. `pid` is not one
+   * either: managed-loop providers never assign a child, so they report a null
+   * pid for their whole life. `providerTerminated` is the provider-independent
+   * answer, and an in-flight turn means work is still running whatever the
+   * handles say.
+   *
+   * An inconclusive durable failure is disqualifying too. That latch means a
+   * compensation was never confirmed, and `assertDurableFailureReconciled`
+   * refuses to respawn the manager holding it. Releasing such a manager throws
+   * the latch away and lets a replacement spawn as if the write had settled,
+   * so treat it as work that may still be outstanding rather than as a
+   * terminated generation.
+   *
+   * The guarantee is bounded by what the status reports: a kill-tree census
+   * that left descendant PIDs unsignalled still returns normally and clears the
+   * handle, and this predicate cannot see that, so it proves the manager's own
+   * generation is finished rather than that no provider descendant survives.
+   */
+  private isSessionProvablyTerminated(session: SessionManager): boolean {
+    const status = session.getStatus();
+    return !status.active
+      && status.providerTerminated === true
+      && status.turnInFlight !== true
+      && status.durableFailureInconclusive !== true;
+  }
+
+  /** True when this chat holds a session entry no ownership record backs. */
+  private isPerChatSessionWithoutOwner(mapKey: string, session: SessionManager): boolean {
+    if (session === this.controlSession) return false;
+    const owner = this.sessionOwnership.get(mapKey);
+    // Read the manager id rather than minting one: `managerIdFor` assigns an id
+    // as a side effect, which a predicate must not do.
+    return owner === undefined || owner.managerId !== this.sessionManagerIds.get(session);
+  }
+
+  /**
+   * Chats holding a session entry with no current dispatch owner — a state
+   * that should be impossible and that silently rejects every inbound turn in
+   * the affected chat. Pure, so the polled health snapshot can read it without
+   * emitting a log line per poll.
+   */
+  private perChatSessionsWithoutOwner(): string[] {
+    const unowned: string[] = [];
+    for (const [mapKey, session] of this.chatSessions) {
+      if (this.isPerChatSessionWithoutOwner(mapKey, session)) unowned.push(mapKey);
+    }
+    return unowned;
+  }
+
+  /**
+   * Drop abandonments older than the retention window. Lazy expiry, so an
+   * entry's own age decides when it clears and a re-abandonment refreshes it.
+   * Deliberately quiet: no log line, no id minted — the health snapshot calls
+   * this on every poll.
+   */
+  private pruneAbandonedRespawnOwners(): boolean {
+    const cutoff = systemClock.now() - AgentRuntime.ABANDONED_RESPAWN_RETENTION_MS;
+    let expired = false;
+    for (const [mapKey, abandonedAtMs] of this.abandonedRespawnOwners) {
+      if (abandonedAtMs <= cutoff) {
+        this.abandonedRespawnOwners.delete(mapKey);
+        expired = true;
+      }
+    }
+    // Reports the expiry only. The shared-alert clear an age-out may owe is
+    // decided by `reconcileAgentRespawnFailedClear`, so every caller turns the
+    // same verdict into at most one clear attempt.
+    return expired;
+  }
+
+  /**
+   * Clear the shared respawn alert only after its final owner retires. A clear
+   * is an obligation, not a best-effort side effect: refusal or transport
+   * failure stays visible and is retried by later health or provider-ready
+   * boundaries. A new abandonment or exhaustion blocks that debt without
+   * erasing it.
+   *
+   * `requestClear` is true only when an owner was just retired (settled or
+   * aged out). This runs on EVERY health poll, and a clear writes a durable
+   * outbox event, so an empty population with no debt must never write: one
+   * retirement, one accepted clear.
+   */
+  private reconcileAgentRespawnFailedClear(requestClear: boolean): void {
+    const sourceOwned = this.abandonedRespawnOwners.size > 0
+      || this.exhaustedRespawnOwners.size > 0;
+    if (requestClear && !sourceOwned) this.agentRespawnFailedClearPending = true;
+    if (!this.agentRespawnFailedClearPending || sourceOwned) return;
+
+    try {
+      if (clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed')) {
+        this.agentRespawnFailedClearPending = false;
+      }
+    } catch (err) {
+      log.warn({ err }, 'agent respawn failure alert clear threw — retaining retry obligation');
+    }
+  }
+
+  /** Mark one crash-exhaustion episode and give only that episode's timer retirement authority. */
+  private markExhaustedRespawnOwner(mapKey: string): void {
+    const token = Symbol();
+    this.exhaustedRespawnOwners.set(mapKey, token);
+    // #3052: retire after the retention window so a never-recovered chat does
+    // not leak. Unref so the timer does not prevent process shutdown.
+    setTimeout(() => {
+      this.retireExhaustedRespawnOwner(mapKey, token);
+    }, AgentRuntime.ABANDONED_RESPAWN_RETENTION_MS).unref();
+  }
+
+  /** Retire the current exhaustion episode, ignoring absent or superseded timer owners. */
+  private retireExhaustedRespawnOwner(mapKey: string, expectedToken?: symbol): boolean {
+    const currentToken = this.exhaustedRespawnOwners.get(mapKey);
+    if (currentToken === undefined) return false;
+    if (expectedToken !== undefined && currentToken !== expectedToken) return false;
+    this.exhaustedRespawnOwners.delete(mapKey);
+    this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(true);
+    return true;
+  }
+
+  /**
+   * Chats whose auto-respawn was abandoned with provider termination unproved.
+   * Counts only — the chat identities stay out of the health surface. Prunes
+   * first, so the count reflects live retention rather than history, and
+   * retries any pending shared-alert clear.
+   */
+  private perChatRespawnAbandonedCount(): number {
+    const expired = this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(expired);
+    return this.abandonedRespawnOwners.size;
+  }
+
+  /** Periodic sweep: report the impossible state. Health tick only. */
+  private sweepPerChatSessionsWithoutOwner(): number {
+    const unowned = this.perChatSessionsWithoutOwner();
+    const unownedKeys = new Set(unowned);
+    // A chat that recovered while still mapped clears its history here, so a
+    // later recurrence logs from the first occurrence again instead of
+    // inheriting a suppressed count. A chat that leaves the map entirely is
+    // cleared by `deleteOwnedPerChatSession`, not by this loop: it iterates
+    // chatSessions, so an evicted key is no longer reachable from it.
+    for (const mapKey of this.chatSessions.keys()) {
+      if (!unownedKeys.has(mapKey)) this.unownedSweepLogThrottle.onSuccess(mapKey);
+    }
+    for (const mapKey of unowned) {
+      const tickCount = this.unownedSweepLogThrottle.onFailure(mapKey);
+      if (tickCount === null) continue;
+      log.warn(
+        { mapKey, hasOwner: this.sessionOwnership.get(mapKey) !== undefined, tickCount },
+        'per-chat session entry has no current dispatch owner — turns in this chat are rejected until it is evicted',
+      );
+    }
+    return unowned.length;
   }
 
   private rekeyOwnedPerChatSession(fromMapKey: string, toMapKey: string, session: SessionManager): void {
@@ -7315,6 +8872,19 @@ export class AgentRuntime implements Runtime {
     this.sessionOwnership.rekey(fromMapKey, toMapKey, managerId);
     this.chatSessions.delete(fromMapKey);
     this.chatSessions.set(toMapKey, session);
+  }
+
+  /** Move a co-keyed abandonment with latest-wins collision semantics. */
+  private rekeyAbandonedRespawnOwner(fromMapKey: string, toMapKey: string): void {
+    if (fromMapKey === toMapKey) return;
+    const fromTimestamp = this.abandonedRespawnOwners.get(fromMapKey);
+    if (fromTimestamp === undefined) return;
+    const toTimestamp = this.abandonedRespawnOwners.get(toMapKey);
+    this.abandonedRespawnOwners.delete(fromMapKey);
+    this.abandonedRespawnOwners.set(
+      toMapKey,
+      toTimestamp === undefined ? fromTimestamp : Math.max(fromTimestamp, toTimestamp),
+    );
   }
 
   private captureOwnedPerChatGeneration(
@@ -7351,7 +8921,35 @@ export class AgentRuntime implements Runtime {
     if (owner.state !== 'active') {
       this.sessionOwnership.transition(mapKey, expected.managerId, 'active');
     }
+    // The chat is serving again. This is the OTHER recovery route and the one an
+    // abandoned chat actually takes: because abandonment retains the session
+    // entry, the next inbound turn finds it and respawns IN PLACE, never
+    // reaching `setOwnedPerChatSession`. Settling only there left the
+    // abandonment cleared by neither the repair nor the retention window.
+    this.settleAbandonedRespawn(mapKey);
     return mapKey;
+  }
+
+  /**
+   * Retire an abandonment because its chat is serving again, and clear the
+   * shared alert when nothing is left raising it.
+   *
+   * Called from BOTH recovery choke points — session creation
+   * (`setOwnedPerChatSession`) and in-place re-activation
+   * (`markOwnedPerChatSessionActive`, whose only caller is
+   * `activateSpawnedOwnedPerChatSession`). Together they cover every route back
+   * to service; neither covers it alone.
+   *
+   * The clear is gated on BOTH populations because the alert source is shared
+   * with crash exhaustion, and it is explicit-clear rather than self-expiring,
+   * so clearing early retracts a page that is still true. A removal or expiry
+   * creates the obligation; later calls do work only while a failed clear is
+   * still pending, so an accepted clear is never duplicated.
+   */
+  private settleAbandonedRespawn(mapKey: string): void {
+    const settled = this.abandonedRespawnOwners.delete(mapKey);
+    const expired = this.pruneAbandonedRespawnOwners();
+    this.reconcileAgentRespawnFailedClear(settled || expired);
   }
 
   private async activateSpawnedOwnedPerChatSession(
@@ -7524,7 +9122,7 @@ export class AgentRuntime implements Runtime {
     if (systemTurnLease) this.systemTurnExecActors.delete(systemTurnLease.id);
     const queue = this.perChatExecActorQueue.get(mapKey);
     if (!queue) return;
-    if (queue.at(-1) === actorJid) queue.pop();
+    if (queue.at(-1)?.actorJid === actorJid) queue.pop();
     else {
       log.error({ mapKey }, 'executing actor FIFO drift on failed dispatch — clearing fail-closed');
       queue.length = 0;
@@ -7542,7 +9140,7 @@ export class AgentRuntime implements Runtime {
     this.systemTurnExecActors.delete(lease.id);
     const queue = this.perChatExecActorQueue.get(binding.scopeKey);
     if (!queue) return;
-    if (queue[0] === binding.actorJid) queue.shift();
+    if (queue[0]?.actorJid === binding.actorJid) queue.shift();
     else {
       log.error(
         { scopeKey: binding.scopeKey, leaseId: lease.id },
@@ -7567,17 +9165,41 @@ export class AgentRuntime implements Runtime {
    * Re-derives mapKey each call so it is transparent to LID rekey.
    */
   private resolveExecutingActorByMapKey(mapKey: string): string | undefined {
+    return this.resolveExecutingSessionByMapKey(mapKey).actorJid;
+  }
+
+  private resolveExecutingSessionByMapKey(mapKey: string): ExecutingSessionContext {
     const session = this.chatSessions.get(mapKey);
-    if (!session || !session.getStatus().active) return undefined;
-    return this.perChatExecActorQueue.get(mapKey)?.[0];
+    if (!session || !session.getStatus().active) {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
+    return this.perChatExecActorQueue.get(mapKey)?.[0]
+      ?? { actorJid: undefined, purpose: undefined, conversationKey: undefined };
   }
 
   private resolveExecutingActor(chatJid: string): string | undefined {
     return resolveExecutingActorForPort(this.chatTransportHost, chatJid);
   }
 
-  private shouldBroadcastGlobalActor(): boolean {
-    return this.sessionScope !== 'per_chat';
+  /**
+   * #2976 direction (ii): read-time actor resolution for the GLOBAL socket.
+   * Returns the currently EXECUTING single/shared turn's sender, or undefined
+   * (fail-closed deny) when no turn executes, the session is down, or the
+   * runtime is per_chat scope (whose senders ride per-chat actor sockets).
+   */
+  private resolveExecutingGlobalActor(): string | undefined {
+    return this.resolveExecutingGlobalSession().actorJid;
+  }
+
+  private resolveExecutingGlobalSession(): ExecutingSessionContext {
+    if (this.sessionScope === 'per_chat') {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
+    if (!this.session?.getStatus().active) {
+      return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
+    }
+    return this.perChatExecActorQueue.get(GLOBAL_TOOL_SCOPE_KEY)?.[0]
+      ?? { actorJid: undefined, purpose: undefined, conversationKey: undefined };
   }
 
   private sessionUsesPerChatActorSocket(session: SessionManager): boolean {
@@ -7586,10 +9208,25 @@ export class AgentRuntime implements Runtime {
     return providerUsesWhatSoupMcp(provider);
   }
 
-  private wirePerChatActorSocket(chatJid: string, provider: string):
+  /**
+   * #2976 residual: managed-loop (API) providers advertise/execute WhatSoup
+   * tools through the in-process provider MCP bridge (createProviderMcpBridge),
+   * never a stdio-proxy socket. They therefore never wire a per-chat actor
+   * socket, so in per_chat scope their executing turn's actor was NOT published
+   * to the actor register — the bridge fell back to the stored session's stale
+   * actorJid. Detect the bridge sessions so the provider boundary publishes
+   * their actor into the same per-chat register (retired by the coordinator
+   * post-effects seam) and the bridge resolver can read it at request time.
+   */
+  private sessionUsesInProcessBridge(session: SessionManager): boolean {
+    const provider = session.getProviderId();
+    return isProviderId(provider) && executionModeForProvider(provider) === 'managed_loop';
+  }
+
+  private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
     | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
     | undefined {
-    return wirePerChatActorSocketForPort(this.chatTransportHost, chatJid, provider);
+    return wirePerChatActorSocketForPort(this.chatTransportHost, chatJid, provider, mapKeyOverride);
   }
 
   private teardownPerChatActorSocket(mapKey: string): void {
@@ -7770,6 +9407,72 @@ export class AgentRuntime implements Runtime {
     return session.getProviderId() !== this.agentProvider;
   }
 
+  /**
+   * True when a live manager's FROZEN provider/model still matches the route a
+   * NEW session would resolve right now. A manager's provider is fixed at
+   * construction and the session-map hit never re-resolves the route, so after
+   * a fallback window transition (arm / chain advance / revert) existing
+   * managers can silently keep serving the OLD route — live-proven 2026-08-15:
+   * turns (including a fresh /new) kept arming the dead fallback for 7+
+   * minutes after "reverting to primary provider". Model is compared only
+   * against an active fallback entry's explicit model (same-provider chains
+   * like opencode kimi→glm differ only by model); with no window active the
+   * primary comparison is provider-only.
+   */
+  private sessionMatchesCurrentRoute(session: SessionManager, chatJid?: string): boolean {
+    const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (provider === null) return true; // unattributable — never block on a guess
+    const entry = this.effectiveFallbackEntry;
+    if (entry) {
+      // Window active: anything not serving the armed entry is stale — a
+      // PRIMARY manager (would immediately re-hit the failed primary) or a
+      // dead prior chain entry after an advance.
+      if (provider !== entry.provider) return false;
+      if (entry.model === undefined) return true;
+      const model = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+      return model === null || model === entry.model;
+    }
+    // No window: retire ONLY a manager stranded on a CONFIGURED FALLBACK
+    // provider (the post-revert remnant this incident proved). Anything else —
+    // the primary, per-chat pinned providers, test scaffolds — is not this
+    // guard's to retire; being over-broad here blocked legitimate respawns.
+    if (!this.agentFallbacks.some((candidate) => candidate.provider === provider)) return true;
+    // A per-chat pin can legitimately route a chat onto a fallback-listed
+    // provider — honor the resolved route before declaring the manager stale.
+    if (chatJid) {
+      try {
+        if (this.resolveRouteForTurn(chatJid, undefined).provider === provider) return true;
+      } catch (err) {
+        log.debug({ err, chatJid }, 'route resolution failed during currency check — falling back to primary compare');
+      }
+    }
+    return provider === this.agentProvider;
+  }
+
+  /**
+   * After a fallback window transition, mark every live manager whose frozen
+   * route went stale for the deferred route recycle (Task G machinery): the
+   * pending flag is consumed at the next turn-idle boundary, which detaches
+   * the idle manager so ensureSessionAndQueueSync rebuilds it on the current
+   * route. Never touches a busy manager — the consumption site enforces idle.
+   */
+  private schedulePostTransitionRouteRecycles(): void {
+    if (this.sessionScope === 'per_chat') {
+      for (const [mapKey, session] of this.chatSessions) {
+        const deliveryJid = this.chatQueues.get(mapKey)?.targetChatJid;
+        if (!this.sessionMatchesCurrentRoute(session, deliveryJid)) {
+          this.pendingRecycle.add(mapKey);
+          log.info({ mapKey, sessionProvider: session.getProviderId?.() }, 'route transition left manager stale — recycle pended');
+        }
+      }
+      return;
+    }
+    if (this.session && !this.sessionMatchesCurrentRoute(this.session, this.activeChatJid ?? undefined)) {
+      this.pendingRecycle.add(GLOBAL_TOOL_SCOPE_KEY);
+      log.info({ sessionProvider: this.session.getProviderId?.() }, 'route transition left singleton manager stale — recycle pended');
+    }
+  }
+
   private get effectiveFallbackEntry(): AgentFallbackEntry | null {
     if (!this.isFallbackWindowActive) return null;
     return this.fallbackWindow.activeEntry ?? this.agentFallbacks[0] ?? null;
@@ -7807,11 +9510,20 @@ export class AgentRuntime implements Runtime {
     this.fallback.deactivateProviderFallback(reason, receipt);
   }
 
+  /**
+   * Test-seam delegator (no production callers — the fallback suites reach it
+   * through the runtime-view cast). Routes through the tier-aware
+   * activateProviderFallbackForSession so the failing session, when one
+   * exists, is REQUIRED at the signature: a future runtime-internal caller
+   * cannot silently derive the primary tier by omitting it. Passing null
+   * states "no session evidence" explicitly (primary tier).
+   */
   private activateProviderFallback(
     resetAt: Date | null,
-    reason: ProviderFallbackReason = 'usage-limit',
-  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallback']> {
-    return this.fallback.activateProviderFallback(resetAt, reason);
+    reason: ProviderFallbackReason,
+    failedSession: SessionManager | null,
+  ): ReturnType<RuntimeFallbackCoordinator['activateProviderFallbackForSession']> {
+    return this.fallback.activateProviderFallbackForSession(resetAt, reason ?? 'usage-limit', failedSession ?? null);
   }
 
   private armFallbackWindow(until: number, reason: string, activatedAt?: number, opts?: { restored?: boolean }): boolean {
@@ -7871,9 +9583,38 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  /** The freshness window the live verdict is judged against: scheduler-derived
+   *  while the periodic probe is armed, the flat 30min otherwise. */
+  private modelUsabilityFreshnessMs(): number {
+    return resolveModelUsabilityFreshnessMs(
+      this.periodicUsabilityProbeTimer !== null,
+      periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
+      {
+        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
+        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
+      },
+    );
+  }
+
+  /** Freshness-honest identity verdict for /health, judged against the same
+   *  window as model usability (the identity check rides the same probe). */
+  private accountIdentityHealth(): AccountIdentityHealth {
+    return deriveAccountIdentityHealth({
+      expectedConfigured: this.expectedAccountDigest !== null,
+      verification: this.accountIdentity,
+      armedAtMs: this.accountIdentityArmedAt,
+      nowMs: systemClock.now(),
+      freshnessMs: this.modelUsabilityFreshnessMs(),
+    });
+  }
+
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const { modelUsable, modelUsableStale, modelUsableCheckedAt } = deriveModelUsable(usability, Date.now());
+    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
+    const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
+    const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
+      deriveModelUsable(usability, Date.now(), modelUsableFreshnessMs);
     return {
       modelUsable,
       modelUsableStale,
@@ -7881,10 +9622,15 @@ export class AgentRuntime implements Runtime {
       modelUsabilityStatus: usability?.status ?? null,
       lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
       lastSuccessfulTurnProvider: this.turnCapabilityTracker.lastSuccessfulTurnProvider,
+      lastSuccessfulTurnModel: this.turnCapabilityTracker.lastSuccessfulTurnModel,
       lastSuccessfulTurnSessionCurrent: this.lastSuccessfulTurnSessionCurrent(),
+      primaryModel: this.model ?? null,
       lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
       lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
-      periodicProbeExpected: this.periodicUsabilityProbeTimer !== null,
+      periodicProbeExpected,
+      periodicProbeBackoffMultiple: backoffMultiple,
+      modelUsableFreshnessMs,
+      nextProbeDueAt: this.periodicUsabilityProbeDueAt,
     };
   }
 
@@ -7900,8 +9646,11 @@ export class AgentRuntime implements Runtime {
     // safe to null rather than throwing on a session that lacks the accessor.
     const successProvider =
       typeof session?.getProviderId === 'function' ? session.getProviderId() : null;
+    const successModel =
+      typeof session?.getModelRef === 'function' ? session.getModelRef() ?? null : null;
     this.turnCapabilityTracker.recordSuccess(
       successProvider,
+      successModel,
       session,
       sessionBinding,
     );
@@ -7914,7 +9663,7 @@ export class AgentRuntime implements Runtime {
       clearAlertSourceChecked(this.instanceName, 'provider_fallback_activated', 'reason=post-revert-turn-success');
       this.pendingPostRevertConfirmation = false;
     }
-    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now()).modelUsableStale;
+    const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
     this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
@@ -8011,6 +9760,9 @@ export class AgentRuntime implements Runtime {
               fallbackReason: s.fallbackReason,
               fallbackActiveUntil: s.fallbackActiveUntil,
               modelUsabilityStatus: s.turnCapability.modelUsabilityStatus,
+              modelUsable: s.turnCapability.modelUsable,
+              modelUsableStale: s.turnCapability.modelUsableStale,
+              modelUsableCheckedAt: s.turnCapability.modelUsableCheckedAt,
             },
           };
         },
@@ -8279,6 +10031,23 @@ export class AgentRuntime implements Runtime {
     mapKey?: string;
     oldSession: SessionManager | null;
     hadToolActivity?: boolean;
+    /**
+     * Dispatch the replay as a FRESH turn even when the crashed turn's
+     * journaled context is still published. The continuation path assumes the
+     * result-driven state a terminal result leaves behind ("keep evidence,
+     * FIFO slot, completion owned until the fallback result") — a process
+     * crash produces none of it, and the crash path finalizes the context
+     * asynchronously, so reading it here would race that finalization.
+     */
+    forceFresh?: boolean;
+    /**
+     * Awaited before the replay dispatch touches the session or queue. The
+     * managed-crash caller resolves it with the advance notice's outbound
+     * flush: the replay's own pre-spawn flush racing a notice still draining
+     * under send pacing trips the queue's completed-with-pending-work
+     * invariant, which POISONS the per-chat queue (live 2026-08-16).
+     */
+    preDispatch?: Promise<void>;
   }): boolean {
     // QR-103: never replay a turn that ALREADY delivered a visible reply — the
     // fallback replay would send a SECOND full answer (user gets both the primary
@@ -8304,6 +10073,9 @@ export class AgentRuntime implements Runtime {
     const actorJid = args.mapKey !== undefined
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
+    const purpose = args.mapKey !== undefined
+      ? this.pendingTurnPurpose.get(args.mapKey)
+      : this.currentTurnReplayPurpose;
 
     let routeOverride: ResolvedReplayRoute;
     try {
@@ -8325,9 +10097,11 @@ export class AgentRuntime implements Runtime {
     );
     if (!replayTargetSafe) return false;
 
-    const runtimeContext = args.mapKey !== undefined
-      ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
-      : this.currentRuntimeTurnContext;
+    const runtimeContext = args.forceFresh
+      ? undefined
+      : args.mapKey !== undefined
+        ? this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0]
+        : this.currentRuntimeTurnContext;
     if (runtimeContext) {
       if (
         runtimeContext.replay.text !== replayText
@@ -8364,13 +10138,14 @@ export class AgentRuntime implements Runtime {
         },
         replayText,
         actorJid,
+        purpose,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
         scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
         runtimeContext,
         err,
       ));
     } else {
-      void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid)
+      void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid, purpose)
         .then(() => {
           this.fallbackMetrics.recordReplay();
           emitAlertChecked(
@@ -8382,11 +10157,17 @@ export class AgentRuntime implements Runtime {
           );
         })
         .catch((err) => {
-          if (err instanceof FallbackReplayInvalidatedError) {
-            const queue = this.getQueueForChat(args.chatJid, args.mapKey);
-            if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
-          }
-          log.error({ err, chatJid: args.chatJid, mapKey: args.mapKey }, 'failed to replay unjournaled turn');
+          // ANY replay failure means the user's turn is definitively not being
+          // answered — always say so. The previous invalidated-only gate left
+          // generic errors (e.g. spawn refusals) as pure silence plus a log
+          // line (incident 2026-08-15).
+          const queue = this.getQueueForChat(args.chatJid, args.mapKey);
+          if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
+          // errorMessage() explicitly: the log serializer reduces unknown Error
+          // subclasses to {errorClass} and drops the message — the incident
+          // journal recorded only {"errorClass":"Error"}, leaving the root
+          // cause unrecoverable from logs.
+          log.error({ err, errorMessage: errorMessage(err), chatJid: args.chatJid, mapKey: args.mapKey }, 'failed to replay unjournaled turn');
           emitAlertChecked(
             this.instanceName,
             'runtime_provider_fallback_replay_failed',
@@ -8435,15 +10216,19 @@ export class AgentRuntime implements Runtime {
       oldSession: SessionManager | null;
       runtimeContext?: RuntimeTurnContext;
       routeOverride?: ResolvedReplayRoute;
+      preDispatch?: Promise<void>;
     },
     replayText: string,
     actorJid: string | undefined,
+    purpose: SessionContext['purpose'],
   ): Promise<void> {
+    if (args.preDispatch) await args.preDispatch;
     await this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
       replayText,
       actorJid,
+      purpose,
       oldSession: args.oldSession,
       runtimeContext: args.runtimeContext,
       routeOverride: args.routeOverride,
@@ -8479,8 +10264,13 @@ export class AgentRuntime implements Runtime {
       return;
     }
     this.notifyFailedFallbackReplay(queue, args.chatJid);
+    // errorMessage() explicitly: the log serializer reduces unknown Error
+    // subclasses to {errorClass} and drops the message — the 2026-08-15
+    // incident journal recorded only {"errorClass":"Error"} here, leaving the
+    // replay root cause unrecoverable from logs.
     log.error({
       err: error,
+      errorMessage: errorMessage(error),
       chatJid: args.chatJid,
       mapKey: args.mapKey,
       fallbackProvider: args.activation.fallbackProvider,
@@ -8586,6 +10376,7 @@ export class AgentRuntime implements Runtime {
    */
   private createSessionManager(opts: {
     chatJid: string;
+    sessionMapKey?: string;
     cwd: string | undefined;
     actorJid?: string;
     trackSingletonMcpSession?: boolean;
@@ -8598,21 +10389,34 @@ export class AgentRuntime implements Runtime {
     eventToolScopeKey?: string;
     routeOverride?: ResolvedReplayRoute;
   }): SessionManager {
-    const conversationKey = toConversationKey(opts.chatJid);
+    const deliveryConversationKey = toConversationKey(opts.chatJid);
+    const sessionConversationKey = opts.sessionMapKey ?? deliveryConversationKey;
     // Resolve the provider/model/policy tuple for every session. NL preferences
     // remain flag-gated inside resolveRouteForTurn; policy admission does not.
     const route = opts.routeOverride ?? this.resolveRouteForTurn(opts.chatJid, opts.actorJid);
-    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, conversationKey, route);
+    if (this.nlRoutingEnabled) this.noteRouteAtSpawn(opts.chatJid, deliveryConversationKey, route);
     // F-STICKY-ACTOR (QR-247 hardening): wire the per-chat actor socket HERE — the
     // single choke point every spawn path (ensure / proactive-resume / provider-
     // fallback) flows through — keyed on the session's ACTUAL provider, not the
     // instance-global one. A fallback to a non-claude provider tears the socket down.
     const sessionProvider = route ? route.provider : this.effectiveProvider;
     const mcpServerScript = providerMcpProxyScriptPath();
+    // #3149: a managed-loop API provider standing in for the configured primary
+    // silently loses the whole child-process tool surface. Mark the session so
+    // its system prompt discloses that to the MODEL, and tell the USER below.
+    const managedLoopDegraded = isManagedLoopFallbackDegraded(
+      sessionProvider ?? '', this.agentProvider, route !== undefined && route !== null,
+    );
     // BRNCH: undefined provider (no route, no effectiveProvider) means no per-chat
     // actor socket to wire — skip entirely (main parity on the undefined path).
+    const actorSocketMapKey = opts.sessionMapKey !== undefined
+      && opts.sessionMapKey !== this.resolvePerChatMapKey(opts.chatJid)
+      ? opts.sessionMapKey
+      : undefined;
     const perChatWire = sessionProvider
-      ? this.wirePerChatActorSocket(opts.chatJid, sessionProvider)
+      ? (actorSocketMapKey === undefined
+          ? this.wirePerChatActorSocket(opts.chatJid, sessionProvider)
+          : this.wirePerChatActorSocket(opts.chatJid, sessionProvider, actorSocketMapKey))
       : undefined;
     const mcpSocketPath = opts.mcpSocketPath ?? perChatWire?.mcpSocketPath;
     const providerTransitionReady = perChatWire?.providerTransitionReady;
@@ -8622,21 +10426,24 @@ export class AgentRuntime implements Runtime {
       this.sandboxPerChat,
     );
     if (actorSocketRequired && !mcpSocketPath?.trim()) {
-      throw new Error(`per_chat ${sessionProvider} session for ${conversationKey} would spawn without an actor-bound socket`);
+      throw new Error(`per_chat ${sessionProvider} session for ${sessionConversationKey} would spawn without an actor-bound socket`);
     }
     const providerToolSession: SessionContext =
       this.sandboxPerChat || this.sessionScope === 'per_chat'
         ? {
             tier: 'chat-scoped',
-            conversationKey,
+            conversationKey: deliveryConversationKey,
             deliveryJid: opts.chatJid,
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
             ...(opts.cwd ? { allowedRoot: opts.cwd } : {}),
+            ...(isScheduledAgentJobMapKey(sessionConversationKey)
+              ? { purpose: 'scheduled-agent-job' as const }
+              : {}),
           }
         : {
             tier: 'global',
             ...(opts.actorJid ? { actorJid: opts.actorJid } : {}),
-            ...(!this.shared ? { conversationKey } : {}),
+            ...(!this.shared ? { conversationKey: deliveryConversationKey } : {}),
         };
     if (opts.trackSingletonMcpSession) {
       this.singletonProviderToolSession = providerToolSession;
@@ -8646,6 +10453,7 @@ export class AgentRuntime implements Runtime {
       db: this.db,
       messenger: this.messenger,
       chatJid: opts.chatJid,
+      persistenceConversationKey: sessionConversationKey,
       onEvent: opts.onEvent,
       instanceName: this.instanceName,
       onResumeFailed: opts.onResumeFailed,
@@ -8662,12 +10470,23 @@ export class AgentRuntime implements Runtime {
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
         : (route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()),
-      mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
+      mcpBridge: createProviderMcpBridge(
+        this.registry,
+        providerToolSession,
+        () => this.sessionScope === 'per_chat'
+          ? this.resolveExecutingSessionByMapKey(
+              opts.sessionMapKey ?? this.resolvePerChatMapKey(opts.chatJid),
+            )
+          : this.resolveExecutingGlobalSession(),
+      ),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
       providerTransitionReady,
-      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, route ? route.provider : this.effectiveProvider),
+      handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
+      degradedCapabilitiesBlock: managedLoopDegraded
+        ? managedLoopDegradedSystemBlock
+        : undefined,
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
@@ -8702,6 +10521,19 @@ export class AgentRuntime implements Runtime {
       session,
       opts.eventToolScopeKey ?? GLOBAL_TOOL_SCOPE_KEY,
     );
+    // #3149: user-facing half of the disclosure — deduped per chat, emitted at
+    // the degraded session's creation so it precedes the first reduced reply.
+    if (managedLoopDegraded) {
+      const degradedQueue = this.getQueueForChat(opts.chatJid, opts.sessionMapKey);
+      if (degradedQueue) {
+        emitManagedLoopDegradedNotice({
+          queue: degradedQueue,
+          recentNotices: this.recentManagedLoopDegradedNotices,
+          noticeDedupMs: config.fallbackTunables.noticeDedupMs,
+          capDedupeMap: (map) => this.capDedupeMap(map),
+        });
+      }
+    }
     if (this.durability) {
       session.setDurability(this.durability);
     }
@@ -8791,7 +10623,12 @@ export class AgentRuntime implements Runtime {
               ...(actorJid ? { actorJid } : {}),
               allowedRoot: workspacePath,
             };
-            socketServer = new WhatSoupSocketServer(socketPath, this.registry, chatSession);
+            socketServer = new WhatSoupSocketServer(
+              socketPath,
+              this.registry,
+              chatSession,
+              () => this.resolveExecutingSessionByMapKey(workspaceKey),
+            );
             socketServer.start();
             log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
           } catch (err) {
@@ -8916,6 +10753,7 @@ export class AgentRuntime implements Runtime {
         // wirePerChatActorSocket + the choke-point guard.
         session = this.createSessionManager({
           chatJid,
+          ...(isScheduledAgentJobMapKey(initialMapKey) ? { sessionMapKey: initialMapKey } : {}),
           cwd: this.cwd,
           actorJid,
           onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
@@ -8923,9 +10761,16 @@ export class AgentRuntime implements Runtime {
             const mapKey = resolveSessionMapKey() ?? initialMapKey;
             this.handlePerChatCrash(mapKey, chatJid, info, session);
           },
-          notifyUser: (msg) => {
-            this.handleCrashNotify(msg, chatJid);
-          },
+          notifyUser: isScheduledAgentJobMapKey(initialMapKey)
+            ? () => {
+                log.warn(
+                  { mapKey: initialMapKey },
+                  'scheduled agent job crash notification suppressed',
+                );
+              }
+            : (msg) => {
+                this.handleCrashNotify(msg, chatJid, session);
+              },
           eventToolScopeKey: toolScopeKey,
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
@@ -8964,7 +10809,7 @@ export class AgentRuntime implements Runtime {
           this.cleanupSharedCrashTurnState();
           this.emitCrashHealReport(chatJid, info, turnWasInFlight);
         },
-        notifyUser: (msg) => this.handleCrashNotify(msg),
+        notifyUser: (msg) => this.handleCrashNotify(msg, undefined, singletonSession),
       });
       this.session = singletonSession;
       log.info({ chatJid, shared: this.shared, sessionScope: this.sessionScope }, 'created shared/single session manager');
@@ -9070,6 +10915,137 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
+    // MANAGED FALLBACK HANDOFF (incident 2026-08-15): a process failure of the
+    // ACTIVE fallback entry's session is chain evidence, not a plain crash —
+    // without this, a fallback whose account is suspended (connects, exits 1
+    // every turn, never emits a terminal result) pins the window forever while
+    // healthy entries wait behind it. recordFallbackTurnProcessFailure
+    // attributes the crash (null for primary/other sessions — those take the
+    // ordinary machinery below), marks the entry failed, and advances the
+    // window to the next eligible entry.
+    if (info) {
+      const processFailure = this.fallback.recordFallbackTurnProcessFailure(
+        session,
+        `process_exit code=${info.exitCode ?? 'null'} signal=${info.signal ?? 'none'}`
+          + (info.stderrPreview ? ` stderr=${info.stderrPreview.slice(-160)}` : ''),
+      );
+      if (processFailure) {
+        const noticeQueue = this.chatQueues.get(currentMapKey);
+        const deliveryJid = chatJid ?? noticeQueue?.targetChatJid;
+        // The managed copy replaces the raw session-crash line: mark the
+        // session so the notifyUnexpectedExit that follows this callback —
+        // and any same-episode echo (e.g. the pended route recycle's
+        // teardown) — is suppressed in handleCrashNotify.
+        this.managedCrashNotices.set(session, systemClock.now());
+        if (processFailure.advanced && processFailure.activation && deliveryJid) {
+          // Managed handoff = finalize the crashed turn FULLY, then re-dispatch
+          // the interrupted text as a FRESH turn on the advanced route. The
+          // journaled-continuation replay is a terminal-result instrument: that
+          // path deliberately keeps the crashed turn's evidence, FIFO slot, and
+          // completion open "until the fallback result" — state only a terminal
+          // result's processing prepares. A process crash produces none of it,
+          // so a continuation replay here either parks pre-spawn on the dirty
+          // physical turn state or dies against the crash finalization (both
+          // observed live 2026-08-15: replay sessions armed with
+          // message_count=0, later inbounds queued unserved until restart).
+          //
+          // Captured BEFORE cleanup wipes the streamed-text evidence: a crashed
+          // turn that already delivered visible output must not be replayed
+          // (QR-103 double-answer rule) — threaded through the schedule gate
+          // via hadToolActivity, which ORs into the same delivered-reply check.
+          const crashTurnDeliveredOutput =
+            (this.perChatTurnText.get(currentMapKey)?.trim() ?? '') !== '';
+          const managedPublishedContexts = this.perChatRuntimeTurnContexts.get(currentMapKey) ?? [];
+          const managedPublishedContext = managedPublishedContexts.length === 1
+            ? managedPublishedContexts[0]
+            : undefined;
+          const managedTurnQueue = this.perChatTurnQueues.get(currentMapKey);
+          const managedActiveTurn = managedTurnQueue?.activeTurn;
+          const managedActiveContext = managedActiveTurn?.runtimeContext;
+          const managedJournaledSeq = this.perChatInboundSeqQueue.get(currentMapKey)?.[0];
+          const managedUndispatchedContext = managedPublishedContexts.length === 0
+            && managedActiveContext?.identity.scope === 'per_chat'
+            && managedActiveTurn?.inboundSeq !== undefined
+            && managedActiveContext.identity.inboundSeq === managedActiveTurn.inboundSeq
+            && managedJournaledSeq === managedActiveTurn.inboundSeq
+            ? managedActiveContext
+            : undefined;
+          if (managedUndispatchedContext) {
+            const managedScopeRef = managedTurnQueue
+              ? this.perChatTurnQueueKeys.get(managedTurnQueue) ?? { value: currentMapKey }
+              : { value: currentMapKey };
+            this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(
+              managedUndispatchedContext,
+              managedScopeRef,
+            );
+          } else {
+            // The wrapper's continuation cancel is a no-op here — the fresh
+            // dispatch below never claims one — and its synchronous
+            // queue.abortTurn clears the crashed turn's outbound evidence
+            // before the replacement turn begins its own.
+            this.finalizeRuntimeCrash(
+              managedPublishedContext,
+              this.chatQueues.get(currentMapKey),
+              session,
+              currentMapKey,
+            );
+          }
+          const managedTracker = this.operationTrackers.get(currentMapKey);
+          managedTracker?.shutdown();
+          this.operationTrackers.delete(currentMapKey);
+          this.cleanupPerChatCrashTurnState(currentMapKey);
+          // The replay dispatch holds on this gate until the advance notice
+          // below has fully drained: its pre-spawn queue flush racing a notice
+          // still pacing out trips the completed-with-pending-work invariant
+          // and poisons the per-chat queue (live 2026-08-16).
+          let releaseReplayDispatch!: () => void;
+          const noticeDrained = new Promise<void>((resolve) => {
+            releaseReplayDispatch = resolve;
+          });
+          const replayScheduled = this.scheduleFallbackReplay({
+            activation: processFailure.activation,
+            chatJid: deliveryJid,
+            mapKey: currentMapKey,
+            oldSession: session,
+            hadToolActivity: crashTurnDeliveredOutput,
+            forceFresh: true,
+            preDispatch: noticeDrained,
+          });
+          noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+            fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
+            toCard: modelCardLabel(
+              processFailure.activation.fallbackProvider,
+              processFailure.activation.fallbackModel,
+            ),
+            replayScheduled,
+          }));
+          void Promise.resolve(noticeQueue?.flush())
+            .catch((flushErr: unknown) => {
+              // A failed notice flush must not strand the replay — its own
+              // dispatch path reports queue failures with a user notice.
+              log.debug({ err: flushErr, mapKey: currentMapKey }, 'advance notice flush failed before replay dispatch');
+            })
+            .finally(releaseReplayDispatch);
+          // The crashed turn is finalized and the replacement dispatch (when
+          // scheduled) owns the dead manager's disposal + recreation — the
+          // respawn/heal machinery below must not touch this manager. Later
+          // duplicate exit callbacks drop on the unmapped-manager guard.
+          log.info({
+            mapKey: currentMapKey,
+            fromProvider: processFailure.fromProvider,
+            fromModel: processFailure.fromModel,
+            replayScheduled,
+          }, 'fallback process failure handled as managed handoff');
+          return;
+        }
+        noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+          fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
+          toCard: null,
+          replayScheduled: false,
+        }));
+      }
+    }
+
     const recoveryGeneration = owner.generation;
     const journaledCrashSeq = this.perChatInboundSeqQueue.get(currentMapKey)?.[0];
     const publishedCrashContexts = this.perChatRuntimeTurnContexts.get(currentMapKey) ?? [];
@@ -9096,9 +11072,17 @@ export class AgentRuntime implements Runtime {
     }
 
     this.sessionOwnership.transition(currentMapKey, managerId, 'recoverable_dead');
-    this.recordCrash(currentMapKey);
+    // #3395: a marked-intentional exit (#3394's takeIntentionalKill match —
+    // the reap/suspend kill this manager issued on purpose) is a resumable
+    // suspend-class exit, not a crash: it must not charge the auto-respawn
+    // attempt budget, or a bot whose idle sessions are reaped repeatedly
+    // exhausts the budget and goes dark. Unmarked exits — an external SIGTERM,
+    // a bare 143 no marker claimed — keep counting, so a genuinely crashing
+    // child still exhausts at the same threshold.
+    const intentionalExit = info?.terminationReason !== undefined;
+    if (!intentionalExit) this.recordCrash(currentMapKey);
     const crashCount = this.getCrashCount(currentMapKey);
-    const exhausted = crashCount > AUTO_RESPAWN_MAX_CRASHES;
+    const exhausted = !intentionalExit && crashCount > AUTO_RESPAWN_MAX_CRASHES;
     if (exhausted) {
       this.terminalizeExhaustedPerChatSession(
         currentMapKey,
@@ -9117,7 +11101,8 @@ export class AgentRuntime implements Runtime {
         scopeRef,
       );
     } else if (!crashContext && journaledCrashSeq !== undefined) {
-      crashQueue?.abortTurn({ preserveEvidence: true });
+      // #3398: provider crash — salvage any owed reply before the wipe.
+      crashQueue?.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
       log.error(
         { mapKey: currentMapKey, inboundSeq: journaledCrashSeq },
         'journaled per-chat crash has no provable immutable context; retaining exhausted ownership',
@@ -9129,6 +11114,20 @@ export class AgentRuntime implements Runtime {
     tracker?.shutdown();
     this.operationTrackers.delete(currentMapKey);
     this.cleanupPerChatCrashTurnState(currentMapKey);
+    const idleScheduledSession = isScheduledAgentJobMapKey(currentMapKey)
+      && crashContext === undefined
+      && journaledCrashSeq === undefined;
+    if (idleScheduledSession) {
+      this.chatQueues.get(currentMapKey)?.abortTurn();
+      this.chatQueues.delete(currentMapKey);
+      this.cleanupPerChatState(currentMapKey);
+      this.deleteOwnedPerChatSession(currentMapKey, session);
+      log.info(
+        { mapKey: currentMapKey },
+        'idle scheduled agent job session retired after provider exit',
+      );
+      return;
+    }
     if (chatJid && info) {
       this.emitCrashHealReport(
         chatJid,
@@ -9144,7 +11143,9 @@ export class AgentRuntime implements Runtime {
       const sessionId = info.sessionId;
       const dbRowId = info.dbRowId;
       const crashedAtSec = Math.floor(Date.now() / 1000);
-      const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, crashCount - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+      // crashCount can be 0 here (#3395: an uncharged intentional exit) —
+      // clamp so the backoff exponent never goes negative.
+      const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, Math.max(crashCount - 1, 0), AUTO_RESPAWN_MAX_DELAY_MS);
       log.info({ mapKey: currentMapKey, sessionId, attempt: crashCount, delayMs }, 'scheduling auto-respawn');
       const timer = setTimeout(() => {
         void this.runOwnedPerChatRespawn({
@@ -9165,10 +11166,7 @@ export class AgentRuntime implements Runtime {
         clearTimeout(timer);
       }
     } else if (exhausted) {
-      this.exhaustedRespawnOwners.add(currentMapKey);
-      // #3052: prune after 1h so a never-recovered conversation does not leak.
-      // Unref so the timer does not prevent process shutdown.
-      setTimeout(() => { this.exhaustedRespawnOwners.delete(currentMapKey); }, 3600_000).unref();
+      this.markExhaustedRespawnOwner(currentMapKey);
       log.error({ mapKey: currentMapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
       emitAlertChecked(
         this.instanceName,
@@ -9185,20 +11183,105 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async runOwnedPerChatRespawn(args: {
-    initialMapKey: string;
-    chatJid?: string;
-    session: SessionManager;
-    managerId: string;
-    recoveryGeneration: number;
-    sessionId: string;
-    dbRowId: number | null;
-    crashedAtSec: number;
-    timer: ReturnType<typeof setTimeout>;
-  }): Promise<void> {
+  /**
+   * Re-arm a respawn whose only unmet precondition is proven termination.
+   *
+   * The timer is consumed at the top of `runOwnedPerChatRespawn`, before the
+   * gate reads it, so a refusal there spends the conversation's one automatic
+   * recovery. For an unproven termination that is the wrong trade: the state is
+   * usually transient — `managedTurnSettled` returns to true in the tool loop's
+   * own `finally`, and a crash can be handled while that loop is still inside an
+   * already-entered call — and nothing else re-arms the timer. The only other
+   * route back is the user's next inbound message, which for a managed provider
+   * does not await termination either: `shutdown()` does its termination work
+   * inside a child-handle guard and a managed-handle guard, and the managed
+   * crash path has already nulled both.
+   *
+   * Bounded by a count carried on the attempt's own arguments rather than by
+   * instance state, so a session that can never prove termination stops
+   * re-arming after a fixed number of tries and leaves nothing behind to reset.
+   * The delay reuses the respawn backoff, so the wait grows and stays capped.
+   */
+  private deferRespawnForUnprovenTermination(
+    mapKey: string,
+    args: OwnedPerChatRespawnArgs,
+  ): void {
+    const deferral = (args.terminationDeferrals ?? 0) + 1;
+    const status = args.session.getStatus();
+    const evidence = {
+      mapKey,
+      sessionId: args.sessionId,
+      generation: args.recoveryGeneration,
+      deferral,
+      providerTerminated: status.providerTerminated === true,
+      turnInFlight: status.turnInFlight === true,
+    };
+    if (deferral > AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS) {
+      log.warn(
+        evidence,
+        'auto-respawn abandoned — provider termination never proved; the next inbound message rebuilds this chat',
+      );
+      // The abandonment is deliberate, but until now it reached no operator
+      // surface: the chat keeps a correct ownership record, so the unowned
+      // predicate stays false and health never saw it, and the only other
+      // signal (recent_crashes) decays after CRASH_HEALTH_DECAY_WINDOW_MS.
+      // Record the abandonment time; expiry is lazy and a re-abandonment
+      // refreshes it, so a second abandonment cannot be aged out by the first.
+      this.abandonedRespawnOwners.set(mapKey, systemClock.now());
+      // Terminalize but RETAIN. This branch is reached only when termination is
+      // NOT proved, so the provider child may still be running. Releasing here
+      // would drop the session entry, the ownership record and the manager index
+      // — exactly the state `evictUnownedPerChatSession` refuses to release on,
+      // because detaching a live child lets the next inbound message start a
+      // second incarnation of one conversation. Abandonment changes what the
+      // operator SEES, not what the runtime holds; if that wedges the chat until
+      // termination is proved, the provably-terminated eviction path releases it
+      // later.
+      this.terminalizeExhaustedPerChatSession(
+        mapKey,
+        args.session,
+        args.managerId,
+        args.recoveryGeneration,
+        undefined,
+        { retainSession: true },
+      );
+      emitAlertChecked(
+        this.instanceName,
+        'agent_respawn_failed',
+        `whatsoup@${this.instanceName} agent respawn abandoned — provider termination never proved`,
+        [
+          `Abandoned chats: ${this.perChatRespawnAbandonedCount()}`,
+          `Deferral bound: ${AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS}`,
+        ].join('\n'),
+      );
+      return;
+    }
+    const delayMs = jitteredDelay(AUTO_RESPAWN_BASE_MS, deferral - 1, AUTO_RESPAWN_MAX_DELAY_MS);
+    const timer = setTimeout(() => {
+      void this.runOwnedPerChatRespawn({ ...args, timer, terminationDeferrals: deferral });
+    }, delayMs);
+    if (
+      this.sessionOwnership.setRespawnTimer(mapKey, args.managerId, args.recoveryGeneration, timer)
+    ) {
+      this.pendingRespawnTimers.add(timer);
+      log.info({ ...evidence, delayMs }, 'auto-respawn deferred — provider termination not yet proven');
+    } else {
+      clearTimeout(timer);
+    }
+  }
+
+  private async runOwnedPerChatRespawn(args: OwnedPerChatRespawnArgs): Promise<void> {
     this.pendingRespawnTimers.delete(args.timer);
     const mapKey = this.findMapKeyForSession(args.session, args.initialMapKey);
-    if (!mapKey) return;
+    if (!mapKey) {
+      log.info({
+        mapKey: args.initialMapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'session_unmapped',
+      }, 'auto-respawn withheld — the session is no longer mapped to any chat');
+      return;
+    }
     if (
       !this.sessionOwnership.clearRespawnTimer(
         mapKey,
@@ -9216,19 +11299,68 @@ export class AgentRuntime implements Runtime {
           args.timer,
         );
       }
+      log.info({
+        mapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'respawn_timer_superseded',
+      }, 'auto-respawn withheld — a newer attempt owns this chat respawn slot');
       return;
     }
 
     const owner = this.sessionOwnership.get(mapKey);
-    const status = args.session.getStatus();
+    // `active` and `pid` are not a termination proof for this gate. A managed
+    // provider never assigns a child, so its pid is null for its whole life,
+    // and `active` is cleared before any termination is awaited — a kill that
+    // threw, or a tool call the loop already entered, leaves provider work
+    // running behind both. Resuming there runs two incarnations of one
+    // conversation, with duplicate external side effects, and the respawn then
+    // clears the very uncertainty flag that should have blocked it. Use the
+    // same proof the eviction path uses: it subsumes `active`, adds the
+    // provider-handle release, an in-flight turn, and an unreconciled durable
+    // failure.
     if (
       this.chatSessions.get(mapKey) !== args.session ||
       owner?.managerId !== args.managerId ||
       owner.generation !== args.recoveryGeneration ||
-      owner.state !== 'recoverable_dead' ||
-      status.active ||
-      status.pid !== null
+      owner.state !== 'recoverable_dead'
     ) {
+      // The chat moved on: a different session, manager, generation or state
+      // owns it now. Consuming the timer is correct — this attempt is stale.
+      log.info({
+        mapKey,
+        sessionId: args.sessionId,
+        generation: args.recoveryGeneration,
+        reason: 'ownership_moved_on',
+        currentGeneration: owner?.generation ?? null,
+        currentState: owner?.state ?? null,
+      }, 'auto-respawn withheld — this chat is no longer owned by the attempt that scheduled it');
+      return;
+    }
+    if (!this.isSessionProvablyTerminated(args.session)) {
+      // Everything except the termination proof still matches, and the timer
+      // was already consumed above. Returning here would spend the
+      // conversation's one automatic recovery on a condition that is usually
+      // transient, so defer instead.
+      this.deferRespawnForUnprovenTermination(mapKey, args);
+      return;
+    }
+
+    // Route-currency guard: never resume a manager whose frozen provider/model
+    // no longer matches the route a new session would resolve — a PRIMARY
+    // manager auto-respawning into an active fallback window immediately
+    // re-hits the failed primary (2026-08-15: resumed claude re-hit its usage
+    // limit within seconds and re-extended the window), and a FALLBACK manager
+    // resuming after a revert re-arms the dead backup. Pend the deferred
+    // recycle instead: the next inbound detaches the stale manager at the
+    // turn-idle boundary and rebuilds on the current route.
+    if (!this.sessionMatchesCurrentRoute(args.session, args.chatJid)) {
+      this.pendingRecycle.add(mapKey);
+      log.info({
+        mapKey,
+        sessionProvider: args.session.getProviderId?.(),
+        effectiveProvider: this.effectiveProvider,
+      }, 'auto-respawn skipped — manager route is stale; recycle pended');
       return;
     }
 
@@ -9265,16 +11397,30 @@ export class AgentRuntime implements Runtime {
       const publishRespawnRecovery = (): void => {
         if (respawnRecoveryPublished) return;
         respawnRecoveryPublished = true;
-        // Remove this conversation from the exhausted set (#2397).
-        this.exhaustedRespawnOwners.delete(mapKey);
-        if (this.exhaustedRespawnOwners.size > 0) {
-          log.info(
-            { remaining: [...this.exhaustedRespawnOwners].length },
-            'respawn recovery: not clearing — other conversations still exhausted',
-          );
-          return;
+        // Retire this conversation from the exhausted owner collection (#2397).
+        // The alert source is shared with the abandonment path, and clearing is
+        // explicit rather than self-expiring, so a clear here would retract a
+        // page that is still true for an abandoned chat. Both populations must
+        // be empty before the source is cleared; the reconcile enforces that
+        // and turns a refused or throwing clear into retry debt.
+        const retiredExhaustedOwner = this.retireExhaustedRespawnOwner(mapKey);
+        if (!retiredExhaustedOwner) {
+          this.pruneAbandonedRespawnOwners();
+          // A successful respawn is itself a recovery event even when this
+          // attempt was never marked in the crash-exhausted owner collection.
+          // Preserve the pre-existing unconditional clear contract.
+          this.reconcileAgentRespawnFailedClear(true);
         }
-        clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
+        const abandonedRemaining = this.abandonedRespawnOwners.size;
+        if (this.exhaustedRespawnOwners.size > 0 || abandonedRemaining > 0) {
+          log.info(
+            {
+              remainingExhausted: this.exhaustedRespawnOwners.size,
+              remainingAbandoned: abandonedRemaining,
+            },
+            'respawn recovery: not clearing — other conversations still exhausted or abandoned',
+          );
+        }
       };
       let contextLease: SystemTurnLeaseToken | null = null;
       let continuationLease: SystemTurnLeaseToken | null = null;
@@ -9301,6 +11447,18 @@ export class AgentRuntime implements Runtime {
             if (!args.session.getStatus().active) return;
           }
         }
+        // #3398: the post-turn gate armed by the pre-crash turn's completed
+        // result survives the crash — no new user message has arrived to clear
+        // it. Left in place, it suppresses the continuation reply as
+        // 'post-turn gate: suppressed phantom assistant_text', silently
+        // dropping a user-owed reply. Clear the per-chat entry (and, outside
+        // per_chat scope, the shared entry gating keys on) before dispatching
+        // the continuation. Trade (reviewed): if a queued user turn completed
+        // inside the awaits above, its legitimately armed gate is wiped too —
+        // worst case one leaked phantom line, chosen over silently dropping
+        // the user-owed continuation reply.
+        this.postTurnGate.delete(activeMapKey);
+        if (this.sessionScope !== 'per_chat') this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
         continuationLease = this.markSystemTurn(
           args.session,
           activeMapKey,
@@ -9308,7 +11466,7 @@ export class AgentRuntime implements Runtime {
           args.chatJid,
         );
         await this.dispatchSystemTurn(
-          args.session, '[System: session resumed after crash ��� continue where you left off]',
+          args.session, '[System: session resumed after crash — continue where you left off]',
           continuationLease!, publishRespawnRecovery,
         );
         log.info({ mapKey: activeMapKey }, 'sent continuation turn after auto-respawn');
@@ -9327,11 +11485,12 @@ export class AgentRuntime implements Runtime {
         currentMapKey &&
         this.sessionOwnership.isCurrent(currentMapKey, args.managerId, respawnGeneration)
       ) {
-        const failedStatus = args.session.getStatus();
         this.sessionOwnership.transition(
           currentMapKey,
           args.managerId,
-          !failedStatus.active && failedStatus.pid === null ? 'recoverable_dead' : 'closing',
+          // Same proof as eviction and recovery-abort: a managed handle that is
+          // still held is not a dead generation to recover from.
+          this.isSessionProvablyTerminated(args.session) ? 'recoverable_dead' : 'closing',
         );
       }
       log.warn({ err, mapKey, sessionId: args.sessionId }, 'auto-respawn resume failed — will retry on next message');
@@ -9344,6 +11503,7 @@ export class AgentRuntime implements Runtime {
     managerId: string,
     generation: number,
     crashContext?: RuntimeTurnContext,
+    options?: { retainSession?: boolean },
   ): void {
     if (
       this.chatSessions.get(mapKey) !== session ||
@@ -9355,6 +11515,13 @@ export class AgentRuntime implements Runtime {
     if (!owner) return;
     this.clearOwnedRespawnTimer(mapKey, owner);
     this.sessionOwnership.transition(mapKey, managerId, 'exhausted');
+    // Callers that cannot prove the provider is gone stop here: ownership is
+    // terminal and the respawn timer is cleared, but the session entry, the
+    // ownership record and the manager index all stay. Keeping the manager
+    // indexed is load-bearing — `setOwnedPerChatSession` refuses a replacement
+    // while the incumbent is indexed AND active, which is the last guard against
+    // two live provider children for one conversation.
+    if (options?.retainSession === true) return;
     const journaledInboundSeq = this.perChatInboundSeqQueue.get(mapKey)?.[0];
     if (!crashContext && journaledInboundSeq !== undefined) {
       log.error(
@@ -9375,9 +11542,11 @@ export class AgentRuntime implements Runtime {
       this.chatQueues.get(releaseKey)?.abortTurn();
       this.chatQueues.delete(releaseKey);
       this.cleanupPerChatState(releaseKey, { preserveCrashHistory: true });
-      this.chatSessions.delete(releaseKey);
-      this.ownedSessionManagers.delete(managerId);
-      this.sessionOwnership.release(releaseKey, managerId);
+      // Drop the session entry and the ownership record together. Releasing
+      // them separately can desync — this closure may run long after the
+      // ownership state was set, and a release rejected on an unexpected state
+      // would strand one half of the pair.
+      this.deleteOwnedPerChatSession(releaseKey, session);
     };
     if (crashContext) {
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
@@ -9400,6 +11569,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnChatJid = null;
     this.currentTurnReplayText = null;
     this.currentTurnReplayActorJid = undefined;
+    this.currentTurnReplayPurpose = undefined;
     this.currentTurnInboundContentType = null;
     this.currentTurnSourceMessageId = null;
     this.currentTurnAssistantText = '';
@@ -9464,13 +11634,55 @@ export class AgentRuntime implements Runtime {
    * any partial turn output that was already enqueued before the crash.
    * Falls back to a direct send if the queue is gone.
    */
-  private handleCrashNotify(msg: string, chatJid?: string): void {
+  /**
+   * Sessions whose latest crash was handled as a MANAGED fallback handoff
+   * (chain advance / single-entry preservation notice already sent), mapped
+   * to the mark time. Raw "Agent session ended (exited with code N)" lines
+   * from such a session are suppressed for a short EPISODE WINDOW rather
+   * than one-shot-consumed: the session layer can emit more than one exit
+   * notification for the same crash episode — observed live 2026-08-16
+   * (round-5 cascade): the pended post-transition route recycle tore the
+   * crashed manager down ~600ms after its managed notice, and the teardown's
+   * second exit notification leaked the raw line past the already-consumed
+   * one-shot mark. Window-scoped suppression swallows every echo of the
+   * same episode while a genuinely new crash of the (respawned) manager
+   * minutes later still notifies normally. WeakMap: a discarded manager's
+   * entry vanishes with it.
+   */
+  private readonly managedCrashNotices = new WeakMap<SessionManager, number>();
+  private static readonly MANAGED_CRASH_SUPPRESS_WINDOW_MS = 5_000;
+
+  /**
+   * Stand-in managers that already received their one-shot handoff
+   * introduction block (see the fresh-spawn context assembly) — spawn-per-turn
+   * providers reuse the manager across turns, so without this the stand-in
+   * would re-introduce itself on every message.
+   */
+  private readonly introducedStandIns = new WeakSet<SessionManager>();
+
+  /** Whether `session` is inside its managed-crash suppression window. */
+  private managedCrashNoticeActive(session: SessionManager | undefined): boolean {
+    if (!session) return false;
+    const markedAt = this.managedCrashNotices.get(session);
+    if (markedAt === undefined) return false;
+    return systemClock.now() - markedAt <= AgentRuntime.MANAGED_CRASH_SUPPRESS_WINDOW_MS;
+  }
+
+  private handleCrashNotify(msg: string, chatJid?: string, session?: SessionManager): void {
+    // A crash the fallback machinery already handled as a managed handoff has
+    // its user-facing copy sent by that path — drop the raw session-crash line
+    // (and every same-episode echo of it; see managedCrashNotices).
+    if (this.managedCrashNoticeActive(session)) return;
     // In per_chat mode, chatJid MUST be passed — this.queue is not set.
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
     if (queue) {
       queue.enqueueText(msg);
-      queue.flush().catch((err) => log.error({ err }, 'flush after crash failed'));
+      const scopeKey = this.sessionScope === 'per_chat' && chatJid
+        ? this.resolvePerChatMapKey(chatJid)
+        : GLOBAL_TOOL_SCOPE_KEY;
+      this.observeOutboundQueueOperation(scopeKey, queue, () => queue.flush())
+        .catch((err) => log.error({ err }, 'flush after crash failed'));
     } else {
       const target = chatJid ?? this.activeChatJid;
       if (target) {
@@ -9499,7 +11711,7 @@ export class AgentRuntime implements Runtime {
       const convKey = canonicalConversationKey(chatJid, this.db);
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
-      lines = formatContextLines(missed, this.isCrossProviderSession(session));
+      lines = formatContextLines(renderVoiceNotes(missed), this.isCrossProviderSession(session));
       messageCount = missed.length;
     } catch (err) {
       log.warn({ err, chatJid }, 'missed message lookup failed — agent continues without context');
@@ -9518,21 +11730,71 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Called by SessionManager when a --resume attempt is rejected by Claude
-   * (exit code 1, no init event). Sends a clear status message and spawns a
-   * fresh session so the user can continue without manual intervention.
+   * Tell a chat that its prior session could not be restored (#3570).
+   * - A pending startup `resume` event for the same chat is replaced, because
+   *   that chat would otherwise be told its session resumed.
+   * - Until main drains startup notices, the notice waits in a per-chat list,
+   *   because the transport may not be connected yet. Any other occupant of
+   *   the single startup slot, such as a restart-loop alert, stays in place.
+   * - After that, the notice goes to the chat's queue immediately.
    */
-  private handleResumeFailed(chatJid: string): void {
+  private noticeExpiredSession(chatJid: string, opts: { deferDuringStartup: boolean }): void {
+    const text = '_Previous session expired_ — starting fresh. Send a message to begin.';
+    const pending = this.pendingStartupEvent;
+    if (pending?.kind === 'resume' && pending.chatJid === chatJid) {
+      this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text };
+      return;
+    }
+    if (!this.startupChatNoticesDrained && (opts.deferDuringStartup || pending !== null)) {
+      this.pendingStartupChatNotices.set(chatJid, { kind: 'expired_session_notice', chatJid, text });
+      return;
+    }
+    this.sendDirect(chatJid, text);
+  }
+
+  /**
+   * Called by SessionManager when a --resume attempt is rejected by Claude
+   * (exit code 1, no init event), and by the non-sandbox per_chat startup
+   * resume when the resume itself is refused. Sends a clear status message
+   * and spawns a fresh session so the user can continue without manual
+   * intervention.
+   */
+  private handleResumeFailed(
+    chatJid: string,
+    perChatTarget?: { mapKey: string; session: SessionManager },
+  ): void {
     log.warn({ chatJid }, 'resume failed — spawning fresh session');
 
     // Resolve the correct session and mapKey — sandboxPerChat uses the per-chat map,
-    // single/shared mode uses the shared this.session field.
+    // non-sandbox per_chat names its exact manager (#3570), and single/shared
+    // mode uses the shared this.session field.
     let session: SessionManager | undefined;
     let mapKey: string | undefined;
     if (this.sandboxPerChat) {
       const ws = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
       mapKey = ws.workspaceKey;
       session = this.chatSessions.get(mapKey);
+    } else if (perChatTarget) {
+      mapKey = perChatTarget.mapKey;
+      if (isScheduledAgentJobMapKey(mapKey)) {
+        // A scheduled job has no conversation of its own to restore or notify.
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: scheduled agent job scope — skipping');
+        return;
+      }
+      if (this.shutdownRequested) {
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: runtime shutting down — skipping recovery');
+        return;
+      }
+      session = this.chatSessions.get(mapKey) === perChatTarget.session
+        ? perChatTarget.session
+        : undefined;
+      if (!session) {
+        // Another manager now owns the chat, so it must not be respawned from
+        // here. The user still learns the prior context was not restored.
+        this.noticeExpiredSession(chatJid, { deferDuringStartup: true });
+        log.warn({ chatJid, mapKey }, 'handleResumeFailed: chat ownership moved — notice only');
+        return;
+      }
     } else {
       session = this.session ?? undefined;
     }
@@ -9553,12 +11815,7 @@ export class AgentRuntime implements Runtime {
 
     if (!pendingText) {
       // No pending message — notify user to resend
-      const msg = '_Previous session expired_ — starting fresh. Send a message to begin.';
-      if (this.pendingStartupEvent !== null) {
-        this.pendingStartupEvent = { kind: 'expired_session_notice', chatJid, text: msg };
-      } else {
-        this.sendDirect(chatJid, msg);
-      }
+      this.noticeExpiredSession(chatJid, { deferDuringStartup: perChatTarget !== undefined });
     }
 
     // Mark this mapKey as owned by handleResumeFailed before spawning
@@ -9591,7 +11848,7 @@ export class AgentRuntime implements Runtime {
             const recent = contextMessagesForTurn(
               getRecentMessages(this.db, canonicalConversationKey(chatJid, this.db), 30), pendingText, pendingActorJid);
             if (recent.length > 0) {
-              const lines = formatContextLines(recent, this.isCrossProviderSession(session));
+              const lines = formatContextLines(renderVoiceNotes(recent), this.isCrossProviderSession(session));
               // QR-095: same fix as the sendTurnToSession injection — in single/
               // shared mode mapKey is undefined here, so mark under GLOBAL to match
               // the single/shared consumeIfPending(GLOBAL_TOOL_SCOPE_KEY); otherwise
@@ -9873,17 +12130,30 @@ export class AgentRuntime implements Runtime {
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
-          queue.enqueueStreamingText(normalizedText);
-          this.turnHadVisibleOutput = true;
-          if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0) {
-            this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+          const markReplayUnsafe = this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0;
+          if (config.toolUpdateMode === 'minimal') {
+            const committedText = normalizedText;
+            queue.enqueueStreamingText(committedText, 'answer', () => {
+              this.turnHadVisibleOutput = true;
+              if (markReplayUnsafe) {
+                this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+              }
+              this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+              this.currentTurnAssistantText += committedText;
+            });
+          } else {
+            queue.enqueueStreamingText(normalizedText);
+            this.turnHadVisibleOutput = true;
+            if (markReplayUnsafe) {
+              this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
+            }
+            // Reply-guarantee: visible output reached the user — reset the silence
+            // window so the "still working" fallback only fires after a full window
+            // of TRUE silence, not while a long turn is actively streaming replies.
+            this.replyGuarantee?.notifyActivity(queue.targetChatJid);
+            // Accumulate text for voice reply (SP4)
+            this.currentTurnAssistantText += normalizedText;
           }
-          // Reply-guarantee: visible output reached the user — reset the silence
-          // window so the "still working" fallback only fires after a full window
-          // of TRUE silence, not while a long turn is actively streaming replies.
-          this.replyGuarantee?.notifyActivity(queue.targetChatJid);
-          // Accumulate text for voice reply (SP4)
-          this.currentTurnAssistantText += normalizedText;
         }
         break;
 
@@ -9900,6 +12170,8 @@ export class AgentRuntime implements Runtime {
         if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
           this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
         }
+
+        queue.discardPreToolAssistantText?.();
 
         // AskUserQuestion → Poll bridge is NOT supported in shared mode.
         // Shared mode's turn lifecycle (currentTurnChatJid, turnQueue) makes

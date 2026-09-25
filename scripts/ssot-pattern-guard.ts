@@ -239,11 +239,6 @@ export const SSOT_RULES: readonly SsotRuleSpec[] = [
           'list_chats conversation-list CTE joins lid_mappings SET-WISE across every row in one SQL pass; the imperative per-key resolveLid cannot express a JOIN. Debt: a lid-resolver-owned SQL view/fragment would re-centralize it.',
       },
       {
-        file: 'src/fleet/index.ts',
-        reason:
-          'fleet inventory endpoints export the raw mapping table INCLUDING updated_at for cross-instance reconciliation; resolveLid exposes neither bulk iteration nor timestamps.',
-      },
-      {
         file: 'src/fleet/routes/lines.ts',
         reason:
           'admin display route bulk-loads the lid→phone map for phone rendering — bulk read, same class as fleet/index.ts.',

@@ -17,7 +17,9 @@ import type { SessionManager } from './session.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
 import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
+import type { ExecutingSessionContext } from '../../mcp/types.ts';
 import { isProviderId, providerUsesWhatSoupMcp } from './providers/index.ts';
+import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
 
 /**
  * Structurally derived from OperationTracker's own constructor rather than
@@ -47,7 +49,7 @@ export interface ChatTransportPort {
   readonly chatSessions: Map<string, SessionManager>;
   readonly chatQueues: Map<string, IOutboundQueue>;
   readonly outboundQueues: Map<string, IOutboundQueue>;
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecutingSessionContext[]>;
   readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   readonly operationTrackers: Map<string, OperationTracker>;
   /** Threaded from runtime.ts's own `config` import (src/config.ts) rather than importing `config` here — this module stays out of the composition ring, matching the model-pin.ts precedent (createModelPinHost's `nlRoutingTiers: config.nlRoutingTiers`). */
@@ -69,7 +71,7 @@ export function resolveExecutingActor(port: ChatTransportPort, chatJid: string):
   const mapKey = port.resolvePerChatMapKey(chatJid);
   const session = port.chatSessions.get(mapKey);
   if (!session || !session.getStatus().active) return undefined;
-  return port.perChatExecActorQueue.get(mapKey)?.[0];
+  return port.perChatExecActorQueue.get(mapKey)?.[0]?.actorJid;
 }
 
 /**
@@ -82,11 +84,12 @@ export function wirePerChatActorSocket(
   port: ChatTransportPort,
   chatJid: string,
   provider: string,
+  mapKeyOverride?: string,
 ):
   | { mcpSocketPath?: string; providerTransitionReady: Promise<void> }
   | undefined {
   if (port.sessionScope !== 'per_chat' || port.sandboxPerChat) return undefined;
-  const mapKey = port.resolvePerChatMapKey(chatJid);
+  const mapKey = mapKeyOverride ?? port.resolvePerChatMapKey(chatJid);
   if (!isProviderId(provider)) {
     throw new Error(`unrecognized provider MCP capability: ${provider}`);
   }
@@ -96,7 +99,10 @@ export function wirePerChatActorSocket(
         port.perChatMcpSocketManager.providerTransitionReady(mapKey),
     };
   }
-  const { socketPath, ready } = port.perChatMcpSocketManager.acquire(mapKey, chatJid);
+  const scheduled = isScheduledAgentJobMapKey(mapKey);
+  const { socketPath, ready } = scheduled
+    ? port.perChatMcpSocketManager.acquire(mapKey, chatJid, 'scheduled-agent-job')
+    : port.perChatMcpSocketManager.acquire(mapKey, chatJid);
   return { mcpSocketPath: socketPath, providerTransitionReady: ready };
 }
 
@@ -181,9 +187,10 @@ export function getTracker(port: ChatTransportPort, mapKey?: string): OperationT
  * Direct-send outcome envelope (#2981 car-B). `messageId` is the transport's
  * sent-message id when the send is synchronously attributable (bypass and
  * fallback paths return the messenger's SubmissionReceipt id); it is null on
- * the queue path — the queue processes asynchronously and the outcome is
- * deferred by design (car-A note below) — and on failure. F2a reply-threading
- * (#2121) consumes this envelope.
+ * the healthy queue path — the queue processes asynchronously and the outcome
+ * is deferred by design (car-A note below) — and on failure. A known poisoned
+ * queue rejects synchronously without enqueue or messenger bypass. F2a
+ * reply-threading (#2121) consumes this envelope.
  */
 export interface SendDirectOutcome {
   readonly accepted: boolean;
@@ -203,9 +210,15 @@ export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: st
   }
   const queue = port.getQueueForChat(chatJid);
   if (queue) {
-    // Queue path: enqueueText is void (queue processes async). Accepted =
-    // taken into queue. The actual send outcome is deferred to the queue's
-    // own processing and is NOT observable here by design. #2981 car-A.
+    // A known poisoned queue cannot drain. Reject instead of falsely
+    // accepting more work or bypassing queue ordering and durability.
+    if (queue.isPoisoned()) {
+      return { accepted: false, messageId: null };
+    }
+    // Healthy queue path: enqueueText is void (queue processes async).
+    // Accepted = taken into queue. The actual send outcome is deferred to
+    // the queue's own processing and is NOT observable here by design.
+    // #2981 car-A.
     queue.enqueueText(text);
     return { accepted: true, messageId: null };
   }

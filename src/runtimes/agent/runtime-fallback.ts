@@ -12,13 +12,14 @@
 
 import { join, resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
-import type { AgentFallbackEntry } from '../../core/fallback-chain.ts';
+import type { AgentFallbackDiscoveryConfig, AgentFallbackEntry } from '../../core/fallback-chain.ts';
 import { sleep } from '../../core/retry.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { createChildLogger } from '../../logger.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import {
   fallbackKeyPresent as fallbackKeyPresentFor,
@@ -42,6 +43,13 @@ import {
   saveFallbackState,
 } from './fallback-state-db.ts';
 import { handoffContextEnabled, handoffDistillModel, handoffDistillerEnabled } from './handoff-distill-config.ts';
+import { CHAIN_CANARY_PROMPT, resolveFallbackCanaryConfig, type FallbackCanaryConfig } from './fallback-canary-config.ts';
+import {
+  probeChainEntryCompletion,
+  type ChainEntryCanaryFailureClass,
+  type ChainEntryCanaryResult,
+} from './providers/chain-entry-canary.ts';
+import { buildOpenCodeRunArgs } from './providers/opencode-execution-profile.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import {
   buildPrimaryProbeAdapterDeps,
@@ -49,7 +57,18 @@ import {
   calculatePeriodicProbeDelay,
   formatPrimaryModelUsabilityEvidence,
 } from './primary-readiness-probe.ts';
-import { probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import {
+  listModelCatalog,
+  probeFallbackBinary,
+  probeModelCatalog,
+  type ModelCatalogCaptureMode,
+  type ModelCatalogUnavailableReason,
+} from './providers/binary-preflight.ts';
+import {
+  deriveFallbackChainFromCatalog,
+  type CandidateEvidence,
+  type DiscoveredCandidate,
+} from './fallback-discovery.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import type { OpencodeProviderConfig } from './providers/mcp-bridge.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
@@ -80,6 +99,18 @@ import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runt
 const log = createChildLogger('agent-runtime');
 
 /**
+ * Which provider tier produced the failure driving a (re-)activation. The
+ * reason taxonomy (ProviderFallbackReason) encodes WHY the primary was left,
+ * never WHICH TIER just failed — so the tier is derived, in ONE place, from
+ * route-identity attribution (failureTierForSession). A fallback-tier
+ * failure carries no evidence about the PRIMARY: it must advance the chain
+ * without extending the window, overwriting the stored resetAt, or
+ * restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
+ * fallback tier plus user traffic postponed primary recovery indefinitely).
+ */
+type FallbackFailureTier = 'primary' | 'fallback';
+
+/**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
  * even when the independent usability probe has not (yet) flagged the primary.
  * A healthy primary effectively never returns two pure-empty user turns in a
@@ -89,6 +120,27 @@ const log = createChildLogger('agent-runtime');
  * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * The gateway provider discovery derives chains through — the one whose
+ * credential-aware `<binary> models` catalogue is the discovery source (v1
+ * scope, matching the canary's opencode-only probe scope).
+ */
+const DISCOVERY_GATEWAY_PROVIDER = 'opencode-cli';
+
+/**
+ * A discovery snapshot older than this is re-derived (fire-and-forget) when a
+ * fallback window arms — the moment the chain is about to matter is exactly
+ * when a rotted catalogue read must not steer it.
+ */
+const DISCOVERY_STALE_MS = 60 * MS_PER_MINUTE;
+
+/**
+ * Canary probe cap per sweep over the discovered candidate basis (design
+ * bound: ≤5 one-token completions per sweep). Candidates past the cap keep
+ * their prior evidence until a later sweep reaches them.
+ */
+const CHAIN_CANARY_DISCOVERY_SWEEP_CAP = 5;
 
 /**
  * Consecutive unclassified-terminal PRIMARY user turns that force a provider
@@ -161,6 +213,8 @@ export interface RuntimeFallbackPort {
   readonly agentProvider: string;
   readonly agentProviderConfig: Record<string, unknown> | undefined;
   readonly agentFallbacks: AgentFallbackEntry[];
+  readonly agentFallbackDiscovery: AgentFallbackDiscoveryConfig | null;
+  readonly modelCatalogueListFn: typeof listModelCatalog | undefined;
   readonly allowM365Mutations: boolean | undefined;
   readonly runtimeBootPerfMs: number;
   readonly globalMcpSocketPath: string | null;
@@ -178,6 +232,8 @@ export interface RuntimeFallbackPort {
   fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeBackoff: number;
+  periodicUsabilityProbeDueAt: number | null;
+  readonly shutdownRequested: boolean;
   fallbackProbeAttempts: number;
   fallbackLastProbeAt: number | null;
   fallbackWindowRestored: boolean;
@@ -194,6 +250,10 @@ export interface RuntimeFallbackPort {
   emitRouteEventChecked(ev: Omit<ModelRouteEvent, 'ts' | 'instance' | 'chatScope' | 'authority'>): void;
   capDedupeMap(map: Map<string, unknown>, max?: number): void;
   getTurnCapability(): RuntimeTurnCapability;
+  /** task-21: verify the ratified account identity after a usability probe
+   *  settles (startup / periodic / manual). Optional so hand-built hosts in
+   *  older suites keep compiling; the runtime always supplies it. */
+  verifyAccountIdentity?(trigger: 'startup' | 'manual' | 'periodic'): void;
   scheduleFallbackReplay(args: {
     activation: ProviderFallbackActivation;
     chatJid: string;
@@ -211,6 +271,8 @@ export interface RuntimeFallbackPort {
     signal?: AbortSignal,
   ): Promise<boolean>;
   deactivateProviderFallback(reason: string, receipt?: FallbackRecoveryReceipt | null): void;
+  /** Pend deferred route recycles for live managers left stale by a window transition. */
+  schedulePostTransitionRouteRecycles(): void;
 }
 
 export class RuntimeFallbackCoordinator {
@@ -227,6 +289,17 @@ export class RuntimeFallbackCoordinator {
     }
 
     const requireIndependentProvider = fallbackRequiresIndependentProbe(reason);
+    // Canary consult (fail-open): skip entries with FRESH real-completion
+    // failure evidence — but only when at least one otherwise-viable candidate
+    // has no such evidence. If every candidate looks canary-dead the evidence
+    // is disregarded entirely, so a stale or wrong sweep can never strand the
+    // chain below its pre-canary floor.
+    const applyCanary = this.host.agentFallbacks.some((candidate) => {
+      if (requireIndependentProvider && candidate.provider === this.host.agentProvider) return false;
+      const candidateKey = this.host.fallbackChain.entryKey(candidate);
+      if (this.host.fallbackChain.failedKeys.has(candidateKey)) return false;
+      return !this.chainCanaryDead(candidateKey);
+    });
     let firstEligibleIndex = -1;
     let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -237,6 +310,12 @@ export class RuntimeFallbackCoordinator {
         continue;
       }
       if (this.host.fallbackChain.failedKeys.has(this.host.fallbackChain.entryKey(entry))) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (applyCanary && this.chainCanaryDead(this.host.fallbackChain.entryKey(entry))) {
+        // Fresh evidence this entry cannot serve a completion — pass over it
+        // exactly like a failed key. No credential alert churn for a skip.
         state.push({ ...entry, eligible: false });
         continue;
       }
@@ -292,28 +371,127 @@ export class RuntimeFallbackCoordinator {
     };
   }
 
+  /**
+   * Pure attribution predicate: does `session` serve the ACTIVE fallback
+   * entry? The SINGLE identity mechanism behind both failed-entry marking
+   * (markActiveFallbackFailed) and failure-tier derivation — a session is
+   * fallback-tier evidence exactly when this holds, so the two can never
+   * disagree. No side effects.
+   */
+  private sessionServesActiveFallbackEntry(session: SessionManager | null): boolean {
+    if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return false;
+    const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== null) {
+      if (sessionProvider !== this.host.fallbackWindow.activeEntry.provider) return false;
+      // Chain entries can share one provider and differ only by model. A
+      // session spawned under a PRIOR entry can still be running when the
+      // chain advances (another chat's in-flight turn); its later failure is
+      // evidence against ITS OWN model, not the current entry. Null model ref
+      // stays attributable — never block on a guess.
+      const entryModel = this.host.fallbackWindow.activeEntry.model;
+      const sessionModel = typeof session.getModelRef === 'function' ? session.getModelRef() : null;
+      if (entryModel !== undefined && sessionModel !== null && sessionModel !== entryModel) return false;
+      return true;
+    }
+    const sessionId = session.getStatus().sessionId;
+    return sessionId?.startsWith(`${this.host.fallbackWindow.activeEntry.provider}-`) ?? false;
+  }
+
+  /**
+   * Window STATE exists (activeUntil set) — deliberately BROADER than
+   * {@link RuntimeFallbackPort.isFallbackWindowActive}: it also holds in the
+   * in-flight revert-probe gap, where the deadline is past but the window's
+   * state (activeEntry, resetAt, activatedAt, the probe's own pending
+   * decision) is still live. Clock/window state worth protecting exists
+   * exactly when this holds — the tier fail-closed scope and the no-arm scope
+   * both key on it, and MUST stay on the same predicate.
+   */
+  private fallbackWindowStateExists(): boolean {
+    return this.host.fallbackWindow.activeUntil !== null;
+  }
+
+  /**
+   * Failure-tier derivation by ROUTE identity — a different question from the
+   * marking predicate above. Marking asks "does this session serve the ACTIVE
+   * entry?" (evidence against that entry). The tier asks "is this session NOT
+   * the primary?" — a session attributable to ANY configured fallback entry,
+   * active or a PRIOR entry still running across a chain advance, is
+   * fallback-tier evidence and must not move the window clocks.
+   *
+   * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
+   * the primary compare is provider-only (isCrossProviderSession's inverse) —
+   * disambiguation comes from the model-aware fallback-entry side, because a
+   * same-provider chain differs from the primary only by model, plus one
+   * tiebreak: a session whose model exactly equals the EXPLICITLY configured
+   * primary model is the primary even when a wildcard (model-undefined)
+   * same-provider entry also matches it. When positive attribution is
+   * impossible (ambiguous same-provider session with a null model ref, a
+   * provider-default primary beside a wildcard same-provider entry, or a
+   * foreign provider), fail CLOSED for CLOCKS: with window state present the
+   * failure must not be able to move it; with no window at all there are no
+   * clocks to protect, and refusing to arm would break primary failover — so
+   * the legacy primary tier applies there.
+   */
+  private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
+    if (!session) return 'primary';
+    const failClosedTier: FallbackFailureTier =
+      this.fallbackWindowStateExists() ? 'fallback' : 'primary';
+    const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (provider === null) {
+      // Last-resort sessionId-prefix attribution, mirroring the marking
+      // predicate's fallback identity read.
+      const sessionId = session.getStatus().sessionId;
+      if (!sessionId) return 'primary'; // unattributable — never block on a guess
+      const prefixFallback = this.host.agentFallbacks.some((e) => sessionId.startsWith(`${e.provider}-`));
+      const prefixPrimary = sessionId.startsWith(`${this.host.agentProvider}-`);
+      if (prefixFallback && !prefixPrimary) return 'fallback';
+      if (prefixPrimary && !prefixFallback) return 'primary';
+      return failClosedTier;
+    }
+    // getModelRef() returns `string | undefined` — a provider-default spawn
+    // returns UNDEFINED (the common real case). Normalize at the read: a
+    // missing model is match-ELIGIBLE, exactly as the entry.model===undefined
+    // arm below already treats the entry side.
+    const model = (typeof session.getModelRef === 'function' ? session.getModelRef() : null) ?? null;
+    const matchesFallback = this.host.agentFallbacks.some((entry) => {
+      if (provider !== entry.provider) return false;
+      if (entry.model === undefined) return true;
+      return model === null || model === entry.model;
+    });
+    const matchesPrimary = provider === this.host.agentProvider;
+    if (matchesFallback && !matchesPrimary) return 'fallback';
+    if (matchesPrimary && !matchesFallback) return 'primary';
+    // Exact-primary disambiguation (review 2): a wildcard (model-undefined)
+    // fallback entry matches ANY session on its provider, which used to drop
+    // a failing PRIMARY session into the ambiguous bucket and discard its
+    // resetAt evidence under a legal config. When the primary route carries
+    // an EXPLICITLY configured model and the session's model equals it, the
+    // session IS the primary — the exact match beats the wildcard. The
+    // remainder stays fail-closed: a null session model on a same-provider
+    // chain, or a provider-default primary (host.model undefined) beside a
+    // wildcard same-provider entry, cannot be positively attributed.
+    if (matchesPrimary && matchesFallback && this.host.model !== undefined && model === this.host.model) {
+      return 'primary';
+    }
+    return failClosedTier;
+  }
+
   private markActiveFallbackFailed(
     session: SessionManager | null,
     reason: ProviderFallbackReason,
     evidenceText?: string,
   ): string | null {
-    if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return null;
-    const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
-    if (sessionProvider !== null) {
-      if (sessionProvider !== this.host.fallbackWindow.activeEntry.provider) return null;
-    } else {
-      const sessionId = session.getStatus().sessionId;
-      if (!sessionId?.startsWith(`${this.host.fallbackWindow.activeEntry.provider}-`)) return null;
-    }
+    const activeEntry = this.host.fallbackWindow.activeEntry;
+    if (!activeEntry || !this.sessionServesActiveFallbackEntry(session)) return null;
 
-    const key = this.host.fallbackChain.entryKey(this.host.fallbackWindow.activeEntry);
+    const key = this.host.fallbackChain.entryKey(activeEntry);
     if (!this.host.fallbackChain.failedKeys.has(key)) {
       this.host.fallbackChain.failedKeys.add(key);
       emitAlertChecked(
         this.host.instanceName,
         'fallback_provider_failed',
         'Active fallback provider failed during fallback window',
-        `provider=${this.host.fallbackWindow.activeEntry.provider} model=${this.host.fallbackWindow.activeEntry.model ?? 'default'}`
+        `provider=${activeEntry.provider} model=${activeEntry.model ?? 'default'}`
           + ` reason=${reason}`
           + (evidenceText ? ` evidence=${evidenceText.slice(0, 160)}` : ''),
       );
@@ -547,13 +725,39 @@ export class RuntimeFallbackCoordinator {
     evidenceText?: string,
   ): ProviderFallbackActivation | null {
     const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
-    const activation = this.activateProviderFallback(resetAt, reason);
+    // SINGLE tier source: route-identity attribution (failureTierForSession).
+    // Deliberately NOT derived from failedKey — marking answers "serves the
+    // ACTIVE entry" while the tier must answer "is NOT the primary": a stale
+    // PRIOR-entry session left running across a chain advance is unmarked
+    // (correctly) yet still fallback-tier. Callers never pass a tier, so no
+    // call site can disagree with the attribution and every future call site
+    // is clock-safe by construction.
+    const tier = this.failureTierForSession(session);
+    const activation = this.activateProviderFallback(resetAt, reason, tier);
     if (activation || !failedKey) return activation;
 
     // Preserve previous single-fallback behavior when no alternate exists:
     // keep the current fallback window instead of reverting to a known-bad primary.
     this.host.fallbackChain.failedKeys.delete(failedKey);
-    return this.activateProviderFallback(resetAt, reason);
+    return this.activateProviderFallback(resetAt, reason, tier);
+  }
+
+  /**
+   * Tier-aware variant of {@link activateProviderFallback} for call sites
+   * whose workflow must NOT mark the active entry failed — the
+   * model-unavailable split (response-registry: markActiveEntryFailedOnTrigger
+   * false, direct activation). Derives the failure tier from the same
+   * route-identity attribution the marking path's sibling uses
+   * (failureTierForSession), so a FALLBACK session's classified failure still
+   * cannot move the window clocks while the non-marking semantics (no
+   * failed-entry marking, no chain advance) are preserved.
+   */
+  activateProviderFallbackForSession(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason,
+    session: SessionManager | null,
+  ): ProviderFallbackActivation | null {
+    return this.activateProviderFallback(resetAt, reason, this.failureTierForSession(session));
   }
 
   /**
@@ -587,12 +791,33 @@ export class RuntimeFallbackCoordinator {
     primaryModelUsability: RuntimePrimaryModelUsability | null;
     turnCapability: RuntimeTurnCapability;
     activeFallbackEntry: AgentFallbackEntry | null;
-    fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
+    fallbackChain: Array<AgentFallbackEntry & {
+      eligible: boolean | null;
+      canary?: { status: string; checkedAt: number; failureClass: ChainEntryCanaryFailureClass | null } | null;
+    }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
     fallbackRestoredFromPersist: boolean;
     turnErrorCounts: Record<string, number>;
     handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
+    fallbackDiscovery: {
+      mode: 'auto';
+      lastDerivedAt: number | null;
+      catalogueSize: number | null;
+      captureMode: ModelCatalogCaptureMode | null;
+      refreshFailure: ModelCatalogUnavailableReason | null;
+      candidates: Array<{
+        model: string;
+        evidence: CandidateEvidence;
+        catalogStatus: string | null;
+        family: string | null;
+        releaseDate: string | null;
+        zeroCost: boolean | null;
+        eligibilityBasis: DiscoveredCandidate['eligibilityBasis'];
+        freeTier: boolean;
+        selected: boolean;
+      }>;
+    } | null;
   } {
     const active = this.host.isFallbackWindowActive;
     const fallbackEntry = active ? this.host.effectiveFallbackEntry : null;
@@ -619,7 +844,18 @@ export class RuntimeFallbackCoordinator {
       primaryModelUsability: this.host.primaryModelUsability ? { ...this.host.primaryModelUsability } : null,
       turnCapability: this.host.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.host.fallbackChain.snapshot(this.host.agentFallbacks, this.host.idleFallbackEligibilityResolver),
+      fallbackChain: this.host.fallbackChain.snapshot(this.host.agentFallbacks, this.host.idleFallbackEligibilityResolver)
+        .map((entry) => {
+          // Additive-only: entries without canary evidence keep their exact
+          // pre-canary shape so existing snapshot assertions stay byte-stable.
+          const record = this.chainCanary.get(this.host.fallbackChain.entryKey(entry));
+          // `failureClass` is a CLOSED set; the raw provider tail stays in
+          // debug logs (it carries unbounded third-party prose — request ids,
+          // JSON bodies, account status). /health must stay content-free.
+          return record
+            ? { ...entry, canary: { status: record.status, checkedAt: record.checkedAt, failureClass: record.failureClass ?? null } }
+            : entry;
+        }),
       fallbackChainExhausted: this.host.fallbackChain.isExhausted(this.host.agentFallbacks),
       failedEntryCount: this.host.fallbackChain.failedKeys.size,
       fallbackRestoredFromPersist: this.host.fallbackWindowRestored,
@@ -629,6 +865,26 @@ export class RuntimeFallbackCoordinator {
         contextInjection: handoffContextEnabled(),
         model: handoffDistillModel(),
       },
+      fallbackDiscovery: this.host.agentFallbackDiscovery
+        ? {
+            mode: 'auto' as const,
+            lastDerivedAt: this.lastDiscovery?.at ?? null,
+            catalogueSize: this.lastDiscovery?.catalogueSize ?? null,
+            captureMode: this.lastDiscovery?.captureMode ?? null,
+            refreshFailure: this.lastDiscovery?.refreshFailure ?? null,
+            candidates: (this.lastDiscovery?.basis ?? []).map((c) => ({
+              model: c.model,
+              evidence: c.evidence,
+              catalogStatus: c.catalogStatus,
+              family: c.family,
+              releaseDate: c.releaseDate,
+              zeroCost: c.zeroCost,
+              eligibilityBasis: c.eligibilityBasis,
+              freeTier: c.freeTier,
+              selected: c.selected,
+            })),
+          }
+        : null,
     };
   }
 
@@ -872,11 +1128,389 @@ export class RuntimeFallbackCoordinator {
     }
   }
 
+  /**
+   * Advance the chain when the ACTIVE fallback entry's turn PROCESS fails
+   * (non-zero exit or fatal spawn). Fleet incident 2026-08-15: a
+   * billing-suspended provider account CONNECTS and then exits 1 on every
+   * turn WITHOUT emitting a terminal result — the spawn-per-turn exit handler
+   * discards the buffered result on a non-zero exit, so neither the
+   * text-classified advance path nor the empty-output advance path
+   * (recordFallbackTurnOutcome) ever runs, and the window pins forever on a
+   * dead entry while healthy entries wait behind it in the chain. Metadata
+   * preflights cannot catch this class of failure (the suspended account's
+   * models endpoint still returns 200), so the only reliable evidence is the
+   * turn outcome itself.
+   *
+   * A process failure is decisive evidence against the entry, so advance on
+   * the FIRST failure: failedKeys stops this window re-selecting the dead
+   * entry, and the terminal path's single-fallback preservation keeps the
+   * current entry when no alternate exists.
+   *
+   * Returns null when the crash is not attributable to the active fallback
+   * entry (no window, primary-provider session, provider mismatch) so the
+   * caller runs the ordinary crash machinery unchanged.
+   */
+  recordFallbackTurnProcessFailure(
+    session: SessionManager | null,
+    evidence: string,
+  ): {
+    advanced: boolean;
+    activation: ProviderFallbackActivation | null;
+    fromProvider: string;
+    fromModel: string | null;
+  } | null {
+    if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry) return null;
+    const from = this.host.fallbackWindow.activeEntry;
+    const fromKey = this.host.fallbackChain.entryKey(from);
+    const advanceReason = isProviderFallbackReason(this.host.fallbackWindow.armReason)
+      ? this.host.fallbackWindow.armReason
+      : 'auth-required';
+    const resetAt = this.host.fallbackWindow.resetAt !== null
+      ? new Date(this.host.fallbackWindow.resetAt)
+      : null;
+    // Attribution gate: markActiveFallbackFailed only matches a session that is
+    // actually serving the active entry's provider — a PRIMARY session crashing
+    // during a window returns null here and takes the normal crash path. The
+    // duplicate call inside activateProviderFallbackAfterTerminalResult below
+    // is idempotent (failedKeys.has guard) and returns the same key.
+    if (this.markActiveFallbackFailed(session, advanceReason, evidence) === null) return null;
+    const activation = this.activateProviderFallbackAfterTerminalResult(
+      resetAt,
+      advanceReason,
+      session,
+      evidence,
+    );
+    const to = this.host.fallbackWindow.activeEntry;
+    const advanced = activation !== null
+      && to !== null
+      && this.host.fallbackChain.entryKey(to) !== fromKey;
+    if (advanced) {
+      log.warn({
+        deadProvider: from.provider,
+        deadModel: from.model,
+        advancedTo: to?.provider,
+        advancedModel: to?.model,
+        evidence: evidence.slice(0, 160),
+      }, 'advanced fallback chain past process-failing entry');
+    }
+    return { advanced, activation, fromProvider: from.provider, fromModel: from.model ?? null };
+  }
+
+  // ── Chain canary (R4-shape out-of-band probes; fleet incident 2026-08-15) ──
+  // Metadata preflights cannot see account-level death (a billing-suspended
+  // account's models endpoint returns 200); only a real completion can. The
+  // canary issues a tiny completion per configured opencode-cli entry on an
+  // interval, records per-entry evidence, alerts on health transitions, and
+  // lets window selection skip entries with FRESH failure evidence (fail-open:
+  // if every candidate has failure evidence, the canary is disregarded so a
+  // stale sweep can never strand the chain).
+
+  private readonly chainCanaryConfig: FallbackCanaryConfig = resolveFallbackCanaryConfig();
+  private readonly chainCanary = new Map<string, ChainEntryCanaryResult & { checkedAt: number }>();
+  private chainCanaryTimer: ReturnType<typeof setInterval> | null = null;
+  private chainCanarySweepInFlight = false;
+
+  /** Arm the periodic canary. No-op unless WHATSOUP_FALLBACK_CANARY_MS > 0. */
+  startChainCanary(): void {
+    if (this.chainCanaryConfig.intervalMs <= 0 || this.chainCanaryTimer) return;
+    this.chainCanaryTimer = setInterval(() => {
+      void this.runChainCanarySweep('scheduled');
+    }, this.chainCanaryConfig.intervalMs);
+    this.chainCanaryTimer.unref?.();
+    // First sweep shortly after boot so /health has evidence without waiting a
+    // full interval; delayed so startup work settles first.
+    setTimeout(() => { void this.runChainCanarySweep('startup'); }, 30_000).unref?.();
+    log.info({ intervalMs: this.chainCanaryConfig.intervalMs }, 'fallback chain canary armed');
+  }
+
+  stopChainCanary(): void {
+    if (this.chainCanaryTimer) {
+      clearInterval(this.chainCanaryTimer);
+      this.chainCanaryTimer = null;
+    }
+  }
+
+  /** Probe every canary-capable chain entry sequentially; record + alert transitions. */
+  async runChainCanarySweep(trigger: string): Promise<void> {
+    if (this.chainCanarySweepInFlight) return;
+    this.chainCanarySweepInFlight = true;
+    try {
+      for (const entry of this.chainCanarySweepEntries()) {
+        const key = this.host.fallbackChain.entryKey(entry);
+        if (entry.provider !== 'opencode-cli') {
+          // v1 scope: only the CLI transport the estate's chains use. Recorded
+          // as unknown so /health distinguishes "not probed" from "healthy".
+          if (!this.chainCanary.has(key)) {
+            this.chainCanary.set(key, { status: 'unknown', evidence: null, failureClass: null, durationMs: 0, checkedAt: systemClock.now() });
+          }
+          continue;
+        }
+        const binary = getProviderBinary(entry.provider);
+        if (!binary) continue;
+        const providerConfig = fallbackProviderConfigFor(entry.provider, this.host.agentProvider, this.host.agentProviderConfig);
+        let env: NodeJS.ProcessEnv;
+        try {
+          env = buildChildEnv(
+            entry.provider,
+            {
+              allowM365Mutations: this.host.allowM365Mutations,
+              whatsoupInstance: this.host.instanceName,
+              whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
+            },
+            entry.model,
+            providerConfig,
+          );
+        } catch (err) {
+          log.warn({ err: errorMessage(err), provider: entry.provider, model: entry.model }, 'chain canary env build failed — entry skipped');
+          continue;
+        }
+        const args = buildOpenCodeRunArgs({ providerConfig, model: entry.model });
+        const previous = this.chainCanary.get(key);
+        const result = await probeChainEntryCompletion(
+          binary,
+          args,
+          CHAIN_CANARY_PROMPT,
+          env,
+          this.chainCanaryConfig.timeoutMs,
+        );
+        this.chainCanary.set(key, { ...result, checkedAt: systemClock.now() });
+        const wasHealthy = previous === undefined || previous.status === 'ok' || previous.status === 'unknown';
+        if (result.status !== 'ok' && wasHealthy) {
+          emitAlertChecked(
+            this.host.instanceName,
+            'fallback_chain_entry_unhealthy',
+            'Fallback chain entry failed its real-completion canary',
+            `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
+              + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
+          );
+          log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
+          log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
+        } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
+          clearAlertSourceChecked(
+            this.host.instanceName,
+            'fallback_chain_entry_unhealthy',
+            `recoveryProof=canary_completion provider=${entry.provider} model=${entry.model ?? 'default'}`,
+          );
+          log.info({ provider: entry.provider, model: entry.model }, 'fallback chain entry canary recovered');
+        }
+      }
+      // Discovery mode: sweep evidence just changed — re-rank the chain on it
+      // (mid-window this re-orders only the not-yet-tried remainder).
+      if (this.host.agentFallbackDiscovery) {
+        await this.refreshDiscoveredFallbackChain('canary-sweep');
+      }
+    } finally {
+      this.chainCanarySweepInFlight = false;
+    }
+  }
+
+  /**
+   * Canary evidence for `key` projected onto the discovery evidence axis,
+   * honoring the trust TTL in BOTH directions: stale results (ok or failed)
+   * decay to 'unknown' so neither a lapsed success nor a lapsed failure keeps
+   * steering selection/derivation.
+   */
+  private chainCanaryEvidence(key: string): CandidateEvidence {
+    const record = this.chainCanary.get(key);
+    if (record === undefined) return 'unknown';
+    if (systemClock.now() - record.checkedAt > this.chainCanaryConfig.trustMs) return 'unknown';
+    if (record.status === 'ok') return 'ok';
+    if (record.status === 'failed' || record.status === 'timeout') return 'dead';
+    return 'unknown';
+  }
+
+  /** Fresh failure evidence for `key`, honoring the trust TTL. */
+  private chainCanaryDead(key: string): boolean {
+    return this.chainCanaryEvidence(key) === 'dead';
+  }
+
+  // ── Discovery-mode chain derivation (R6, owner directive 2026-08-15) ──
+  // The chain is DERIVED per host/user/deployment from the gateway's
+  // credential-aware model catalogue (`<binary> models`) instead of a
+  // hardcoded list. The derivation is pure (fallback-discovery.ts); this
+  // block owns the runtime lifecycle: boot derivation, staleness refresh at
+  // window arm, evidence-driven re-rank after each canary sweep, and the
+  // in-place mutation of host.agentFallbacks that every downstream consumer
+  // (selection, canary, exhaustion, restore membership, /health) reads live.
+
+  private lastDiscovery: {
+    at: number;
+    catalogueSize: number;
+    captureMode: ModelCatalogCaptureMode;
+    refreshFailure: ModelCatalogUnavailableReason | null;
+    basis: DiscoveredCandidate[];
+  } | null = null;
+  private discoveryRefreshInFlight = false;
+
+  /**
+   * Re-derive the discovered fallback chain from the live model catalogue.
+   * No-op unless discovery mode is configured. Honest degrade: an unavailable
+   * catalogue NEVER wipes a previously derived (or restored) chain — the
+   * current chain stands until the catalogue can be read again; the
+   * `fallback_discovery_empty` alert fires only when the instance is actually
+   * left without a ladder.
+   */
+  async refreshDiscoveredFallbackChain(trigger: 'boot' | 'window-arm' | 'canary-sweep'): Promise<void> {
+    const discovery = this.host.agentFallbackDiscovery;
+    if (!discovery) return;
+    if (this.discoveryRefreshInFlight) return;
+    this.discoveryRefreshInFlight = true;
+    try {
+      const binary = getProviderBinary(DISCOVERY_GATEWAY_PROVIDER);
+      const listing = binary
+        ? await (this.host.modelCatalogueListFn ?? listModelCatalog)(binary)
+        : ({ status: 'unavailable', reason: 'spawn-error' } as const);
+      if (listing.status !== 'ok') {
+        log.warn({ trigger, reason: listing.reason }, 'fallback discovery: model catalogue unavailable — keeping current chain');
+        if (this.host.agentFallbacks.length === 0) {
+          emitAlertChecked(
+            this.host.instanceName,
+            'fallback_discovery_empty',
+            'Fallback discovery has no chain',
+            `trigger=${trigger} catalogue=${listing.reason} entries=0`,
+          );
+        }
+        return;
+      }
+      const derived = deriveFallbackChainFromCatalog({
+        catalogIds: listing.ids,
+        ...(listing.metadata ? { catalogMetadata: listing.metadata } : {}),
+        gatewayProvider: DISCOVERY_GATEWAY_PROVIDER,
+        primary: { provider: this.host.agentProvider, model: this.host.model ?? null },
+        policy: {
+          ...(discovery.maxEntries !== undefined ? { maxEntries: discovery.maxEntries } : {}),
+          ...(discovery.preferModels !== undefined ? { preferModels: discovery.preferModels } : {}),
+          ...(discovery.excludeProviders !== undefined ? { excludeProviders: discovery.excludeProviders } : {}),
+          ...(discovery.includeFreeTier !== undefined ? { includeFreeTier: discovery.includeFreeTier } : {}),
+        },
+        evidenceFor: (modelId) => this.discoveredCandidateEvidence(modelId),
+      });
+      this.applyDiscoveredChain(derived.entries);
+      const captureMode = listing.captureMode ?? 'legacy';
+      const refreshFailure = listing.refreshFailure ?? null;
+      this.lastDiscovery = {
+        at: systemClock.now(),
+        catalogueSize: listing.ids.length,
+        captureMode,
+        refreshFailure,
+        basis: derived.basis,
+      };
+      log.info({
+        trigger,
+        catalogueSize: listing.ids.length,
+        captureMode,
+        refreshFailure,
+        chain: this.host.agentFallbacks.map((entry) => `${entry.provider}:${entry.model ?? 'default'}`),
+        basis: derived.basis.map((c) => ({
+          model: c.model,
+          evidence: c.evidence,
+          catalogStatus: c.catalogStatus,
+          family: c.family,
+          releaseDate: c.releaseDate,
+          zeroCost: c.zeroCost,
+          eligibilityBasis: c.eligibilityBasis,
+          freeTier: c.freeTier,
+          selected: c.selected,
+        })),
+      }, 'fallback chain discovered');
+      if (this.host.agentFallbacks.length === 0) {
+        emitAlertChecked(
+          this.host.instanceName,
+          'fallback_discovery_empty',
+          'Fallback discovery derived an empty chain',
+          `trigger=${trigger} catalogueSize=${listing.ids.length} candidates=${derived.basis.length}`,
+        );
+      } else {
+        clearAlertSourceChecked(
+          this.host.instanceName,
+          'fallback_discovery_empty',
+          `recoveryProof=chain_derived entries=${this.host.agentFallbacks.length}`,
+        );
+      }
+    } finally {
+      this.discoveryRefreshInFlight = false;
+    }
+  }
+
+  /**
+   * Install a derived chain into host.agentFallbacks IN PLACE (ports hold the
+   * array by reference). Mid-window the re-derivation NEVER swaps the ACTIVE
+   * entry and never drops entries already tried this window — their failed
+   * keys drive exhaustion — so only the not-yet-tried remainder is re-ranked;
+   * window semantics are unchanged.
+   */
+  private applyDiscoveredChain(derived: { provider: string; model: string }[]): void {
+    const chain = this.host.fallbackChain;
+    const active = this.host.isFallbackWindowActive ? this.host.fallbackWindow.activeEntry : null;
+    const keep: AgentFallbackEntry[] = [];
+    const keepKeys = new Set<string>();
+    if (active) {
+      for (const entry of this.host.agentFallbacks) {
+        const key = chain.entryKey(entry);
+        if (keepKeys.has(key)) continue;
+        if (key === chain.entryKey(active) || chain.failedKeys.has(key)) {
+          keep.push(entry);
+          keepKeys.add(key);
+        }
+      }
+      const activeKey = chain.entryKey(active);
+      if (!keepKeys.has(activeKey)) {
+        keep.unshift({ ...active });
+        keepKeys.add(activeKey);
+      }
+    }
+    const next = derived.filter((entry) => !keepKeys.has(chain.entryKey(entry)));
+    this.host.agentFallbacks.splice(0, this.host.agentFallbacks.length, ...keep, ...next);
+  }
+
+  /**
+   * Evidence oracle for the derivation: window-scoped failure records first
+   * (an entry that already failed THIS window is dead for re-ranking purposes),
+   * then fresh canary evidence.
+   */
+  private discoveredCandidateEvidence(modelId: string): CandidateEvidence {
+    const key = this.host.fallbackChain.entryKey({ provider: DISCOVERY_GATEWAY_PROVIDER, model: modelId });
+    if (this.host.isFallbackWindowActive && this.host.fallbackChain.failedKeys.has(key)) return 'dead';
+    return this.chainCanaryEvidence(key);
+  }
+
+  /**
+   * The entry set a canary sweep probes. Static chains sweep the configured
+   * entries. Discovery mode sweeps the last derivation's provider-candidate
+   * basis (capped), not just the selected chain. This preserves one recovery
+   * probe for a provider whose representative is dead. A dead model replaced
+   * by a live sibling is deliberately absent until its failure evidence lapses;
+   * sweeping every sibling would violate the bounded-probe contract.
+   */
+  private chainCanarySweepEntries(): AgentFallbackEntry[] {
+    if (!this.host.agentFallbackDiscovery || this.lastDiscovery === null) {
+      return this.host.agentFallbacks;
+    }
+    return this.lastDiscovery.basis
+      .slice(0, CHAIN_CANARY_DISCOVERY_SWEEP_CAP)
+      .map((candidate) => ({ provider: DISCOVERY_GATEWAY_PROVIDER, model: candidate.model }));
+  }
+
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
    *  time, and `opts.restored` so a resumed window is not re-counted. */
-  armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+  /**
+   * Discovery mode: re-derive a stale (or never-completed) catalogue snapshot
+   * fire-and-forget — the caller proceeds on the current chain (never blocks
+   * on a spawn); the refresh re-ranks the untried remainder.
+   */
+  private kickStaleDiscoveryRefresh(trigger: 'window-arm'): void {
+    if (
+      this.host.agentFallbackDiscovery
+      && (this.lastDiscovery === null || systemClock.now() - this.lastDiscovery.at > DISCOVERY_STALE_MS)
+    ) {
+      void this.refreshDiscoveredFallbackChain(trigger);
+    }
+  }
+
+  armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean; preserveClocks?: boolean }): boolean {
+    this.kickStaleDiscoveryRefresh('window-arm');
     const selection = this.selectFallbackEntryForWindow(reason);
     if (!selection) return false;
     const fallbackEntry = selection.entry;
@@ -944,21 +1578,32 @@ export class RuntimeFallbackCoordinator {
         );
       }
     }
-    if (this.host.revertTimer) {
-      clearTimeout(this.host.revertTimer);
-      this.host.revertTimer = null;
+    // A clock-preserving arm (fallback-tier chain advance, `until` unchanged)
+    // keeps the already-armed revert timer: its deadline is the same, and
+    // re-setting it would be the disallowed re-arm the moment a caller ever
+    // passed a moved `until`. The revert timer is only ever null while no
+    // window is active, so the preserve branch (active window by definition)
+    // still re-arms defensively if the handle is somehow missing.
+    if (!opts?.preserveClocks || this.host.revertTimer === null) {
+      if (this.host.revertTimer) {
+        clearTimeout(this.host.revertTimer);
+        this.host.revertTimer = null;
+      }
+      this.host.revertTimer = setTimeout(() => {
+        this.handleFallbackRevertTimer();
+      }, Math.max(0, until - Date.now()));
+      // Do not let the revert timer keep the process alive at shutdown.
+      this.host.revertTimer.unref?.();
     }
-    this.host.revertTimer = setTimeout(() => {
-      this.handleFallbackRevertTimer();
-    }, Math.max(0, until - Date.now()));
-    // Do not let the revert timer keep the process alive at shutdown.
-    this.host.revertTimer.unref?.();
     // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
     // after the set-when-null guard above) so the DB can never diverge from the
     // in-memory value even if a caller passes an incorrect reason directly.
     const persistReason = this.host.fallbackWindow.armReason ?? reason;
     this.host.fallbackWindow.recoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
-    this.scheduleFallbackPrimaryProbe();
+    // The standing primary probe's countdown must survive a clock-preserving
+    // arm: scheduleFallbackPrimaryProbe clears and restarts it, which under
+    // per-turn fallback failures kept pushing the probe out forever.
+    if (!opts?.preserveClocks) this.scheduleFallbackPrimaryProbe();
     try {
       saveFallbackState(this.host.db, {
         activeUntil: until,
@@ -984,6 +1629,13 @@ export class RuntimeFallbackCoordinator {
     // environment, and per-turn usage-limit extensions would otherwise
     // re-spawn every probe and re-fire every pre-flight alert — an
     // unthrottled storm under sustained load.
+    // Route currency: an arm (fresh, extension after advance, or restore) can
+    // change the route NEW sessions resolve — any live manager still frozen on
+    // the previous route (the primary, or a dead chain entry after an advance)
+    // must be recycled at its next idle boundary or it keeps serving the old
+    // provider indefinitely (live-proven 2026-08-15, see
+    // schedulePostTransitionRouteRecycles).
+    this.host.schedulePostTransitionRouteRecycles();
     if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
@@ -1156,14 +1808,53 @@ export class RuntimeFallbackCoordinator {
    * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
    * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
    * second activation while already active extends the window to the later of
-   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
-   * process alive).
+   * the two — except a fallback-tier re-activation (a FALLBACK entry's own
+   * failure), which keeps the window end, the stored resetAt, and the primary
+   * recovery clocks untouched regardless of any parsed reset time: a fallback
+   * entry's reset estimate describes the fallback provider, not the primary.
+   * Schedules an auto-revert timer (unref'd so it never keeps the process
+   * alive).
    */
   activateProviderFallback(
     resetAt: Date | null,
     reason: ProviderFallbackReason = 'usage-limit',
+    failureTier: FallbackFailureTier = 'primary',
   ): ProviderFallbackActivation | null {
+    // Discovery mode: kick a stale/absent snapshot BEFORE the empty-chain
+    // guard below — a failed boot derivation leaves the chain empty, and this
+    // activation attempt is the signal that a ladder is needed NOW. The kick
+    // is fire-and-forget: this activation honestly reports the current chain
+    // (possibly none); the refreshed chain serves the next attempt.
+    this.kickStaleDiscoveryRefresh('window-arm');
     if (this.host.agentFallbacks.length === 0) return null;
+
+    // The no-arm rule is scoped to EXISTING window state: while window state
+    // exists but the deadline is past (the ≤5s in-flight revert-probe gap), a
+    // fallback-tier arm would move activeUntil and the probe resolution's
+    // stale-window guard would then discard the probe's OWN decision — even a
+    // successful recovery — so such activations touch nothing. With NO window
+    // state at all there are no clocks or pending decisions to protect, and
+    // refusing to arm silently drops the user's turn (a /model-pinned chat on
+    // a chain-listed provider previously armed AND replayed): the full arm
+    // path applies. That deliberately keeps the pre-existing failover-policy
+    // residual that a stale post-revert fallback session's failure can arm a
+    // fresh window — a policy question beyond clock preservation.
+    if (failureTier === 'fallback' && this.fallbackWindowStateExists() && !this.host.isFallbackWindowActive) {
+      return null;
+    }
+
+    const wasActive = this.fallbackWindowStateExists();
+    // With window state present, a fallback-tier failure must not move its
+    // clocks: the default-window extension below would push activeUntil out
+    // by up to DEFAULT_FALLBACK_WINDOW_MS per failed fallback turn, and the
+    // re-arm would restart the standing primary recovery probe — together
+    // postponing primary recovery indefinitely while a dead fallback takes
+    // live traffic. This holds for ANY resetAt: a non-null one here is either
+    // the window's own stored value forwarded by an advance path (re-arming
+    // the probe on it per-turn suppresses early recovery for the whole
+    // window) or the FALLBACK entry's own parsed reset estimate, which
+    // describes the fallback provider's quota, never the primary's.
+    const preserveWindowClocks = failureTier === 'fallback' && this.fallbackWindowStateExists();
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
@@ -1171,12 +1862,13 @@ export class RuntimeFallbackCoordinator {
       now + MAX_FALLBACK_WINDOW_MS,
       Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
     );
-    // Extend rather than shorten an already-active window.
-    const until = this.host.fallbackWindow.activeUntil
-      ? Math.max(this.host.fallbackWindow.activeUntil, clampedUntil)
-      : clampedUntil;
-
-    const wasActive = this.host.fallbackWindow.activeUntil !== null;
+    // Extend rather than shorten an already-active window — unless this is a
+    // clock-preserving fallback-tier advance, which keeps the end unchanged.
+    const until = preserveWindowClocks
+      ? this.host.fallbackWindow.activeUntil!
+      : this.host.fallbackWindow.activeUntil
+        ? Math.max(this.host.fallbackWindow.activeUntil, clampedUntil)
+        : clampedUntil;
     // Preserve the original first-engagement time across extensions so the
     // persisted record always reflects when the fallback was first triggered,
     // not when it was last extended.
@@ -1187,8 +1879,11 @@ export class RuntimeFallbackCoordinator {
     // on first activation fallbackArmReason is null so armFallbackWindow
     // stores 'usage-limit' as the original cause.
     const persistedReason = wasActive && this.host.fallbackWindow.armReason !== null ? this.host.fallbackWindow.armReason : reason;
-    this.host.fallbackWindow.resetAt = resetAt?.getTime() ?? null;
-    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
+    // The stored resetAt is PRIMARY recovery state (when the primary's own
+    // limit lifts). A fallback-tier re-activation must never overwrite it —
+    // a fallback entry's parsed reset would masquerade as the primary's.
+    if (!preserveWindowClocks) this.host.fallbackWindow.resetAt = resetAt?.getTime() ?? null;
+    const armed = this.armFallbackWindow(until, persistedReason, activatedAt, preserveWindowClocks ? { preserveClocks: true } : undefined);
     if (!armed) return null;
     const fallbackEntry = this.host.fallbackWindow.activeEntry;
     if (!fallbackEntry) return null;
@@ -1290,6 +1985,12 @@ export class RuntimeFallbackCoordinator {
       primaryProvider: this.host.agentProvider,
       reason,
     }, 'reverting to primary provider');
+    // Route currency: the revert changes the route NEW sessions resolve, but a
+    // live manager frozen on the fallback provider keeps serving it — /new
+    // resets INSIDE the same manager and auto-respawn re-spawns the same
+    // object, so without this recycle the dead fallback kept receiving turns
+    // for 7+ minutes after this very log line on 2026-08-15.
+    this.host.schedulePostTransitionRouteRecycles();
     this.host.fallbackMetrics.recordRevert();
   }
 
@@ -1435,12 +2136,25 @@ export class RuntimeFallbackCoordinator {
           model: target.model,
           reason: 'probe-threw',
         }, trigger);
-      });
+      })
+      // task-21: the identity check rides this seam (no poller of its own) and
+      // runs after the usability result is recorded, whichever way it went —
+      // the verifier owns its own shutdown drop and never rejects.
+      .then(() => { this.host.verifyAccountIdentity?.(trigger); });
   }
 
   scheduleNextPeriodicUsabilityProbe(): void {
+    // Never arm after shutdown began: a probe that resolves post-shutdown must
+    // not resurrect the periodic loop (round-3 finding 1).
+    if (this.host.shutdownRequested) return;
     if (this.host.periodicUsabilityProbeTimer) clearTimeout(this.host.periodicUsabilityProbeTimer);
-    this.host.periodicUsabilityProbeTimer = setTimeout(() => { this.host.periodicUsabilityProbeTimer = null; if (this.host.primaryModelUsability?.probeInFlight) return void this.scheduleNextPeriodicUsabilityProbe(); this.schedulePrimaryModelUsabilityProbe('periodic'); }, calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, Date.now()));
+    const now = Date.now();
+    const delay = calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
+    // The due instant is the source of truth for the evidence freshness window
+    // (runtime.modelUsabilityFreshnessMs): set it together with the timer so
+    // cadence and window can never diverge.
+    this.host.periodicUsabilityProbeDueAt = now + delay;
+    this.host.periodicUsabilityProbeTimer = setTimeout(() => { this.host.periodicUsabilityProbeTimer = null; if (this.host.primaryModelUsability?.probeInFlight) return void this.scheduleNextPeriodicUsabilityProbe(); this.schedulePrimaryModelUsabilityProbe('periodic'); }, delay);
     this.host.periodicUsabilityProbeTimer.unref?.();
   }
 
@@ -1448,12 +2162,29 @@ export class RuntimeFallbackCoordinator {
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
   ): void {
+    if (this.host.shutdownRequested) {
+      // A probe started before shutdown resolved after it. Drop the result
+      // whole: no evidence mutation, no alert emission or clear, no timer —
+      // shutdown() already cleared the periodic loop and health is torn down.
+      log.debug({ trigger, status: result.status }, 'primary model usability result dropped after shutdown');
+      return;
+    }
     this.host.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),
       probeInFlight: false,
     };
-      this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(this.host.periodicUsabilityProbeBackoff, result.status === 'usable'); if (trigger === 'periodic') this.scheduleNextPeriodicUsabilityProbe();
+    const previousBackoff = this.host.periodicUsabilityProbeBackoff;
+    this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');
+    // A periodic result always re-arms. A manual/startup result re-arms only
+    // when it CHANGED the backoff while a periodic timer is armed: the old timer
+    // was scheduled for the old cadence, and leaving it would let the health
+    // window (derived from the due instant / backoff) diverge from the actual
+    // fire time. An unchanged backoff keeps the pending timer and its due instant.
+    const backoffChanged = this.host.periodicUsabilityProbeBackoff !== previousBackoff;
+    if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null)) {
+      this.scheduleNextPeriodicUsabilityProbe();
+    }
 
     if (result.status === 'usable') {
       // Always emit an idempotent clear on usable result.  If the prior process

@@ -62,6 +62,10 @@ interface LiveWiringRuntimeState extends RuntimeState {
   // its one live session and the scalar completion the same narrow-cast way.
   session: ReturnType<typeof sessionStub> | null;
   currentRuntimeTurnCompletion: RuntimeTurnCompletion | null;
+  perChatExecActorQueue: Map<string, Array<{
+    actorJid: string | undefined;
+    purpose?: 'scheduled-agent-job';
+  }>>;
   // requireSessionToolScopeKey (runtime.ts:1069) reads this WeakMap, normally
   // populated only by the real session-spawn path (runtime.ts:11166). A
   // stub session injected directly into chatSessions was never spawned, so
@@ -108,10 +112,11 @@ function crashOneSourceTurn(
   mapKey: string,
   suffix: string,
   scope: 'per_chat' | 'shared' | 'singleton' = 'per_chat',
+  sourceMessageId = `wamid-live-${suffix}`,
 ): { jobId: number; conversationKey: string; deliveryJid: string; sourceInboundSeq: number } {
   const conversationKey = mapKey;
   const deliveryJid = `${mapKey}@s.whatsapp.net`;
-  const inboundSeq = durability.journalInbound(`wamid-live-${suffix}`, conversationKey, deliveryJid, 'agent');
+  const inboundSeq = durability.journalInbound(sourceMessageId, conversationKey, deliveryJid, 'agent');
   const result: TurnTerminalResult = {
     identity: {
       scope,
@@ -136,7 +141,7 @@ function crashOneSourceTurn(
   });
   const finalResult: TurnTerminalResult = { ...result, deliveryEvidence: { kind: 'enqueued', opId: deliveryOpId } };
   const envelope: TurnRecoveryReplayEnvelope = {
-    sourceMessageId: `wamid-live-${suffix}`,
+    sourceMessageId,
     receivedAtUnixSeconds: 1_780_000_000,
     replaySafe: true,
     senderJid: '15550100002:9@s.whatsapp.net',
@@ -182,7 +187,14 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
 
   it('(a)+(b) threads job.id into the REAL beginRuntimeTurnEvidence as excludeJobId, so the replay is admitted against the REAL store while its own claim is still outstanding', async () => {
     const conversationKeySeed = '15550190777';
-    const { jobId, conversationKey, deliveryJid, sourceInboundSeq } = crashOneSourceTurn(db, durability, conversationKeySeed, 'ab');
+    const { jobId, conversationKey, deliveryJid, sourceInboundSeq } = crashOneSourceTurn(
+      db,
+      durability,
+      conversationKeySeed,
+      'ab',
+      'per_chat',
+      'agentjob-7-1780000000-occ11',
+    );
     // resolvePerChatMapKey -> canonicalizeChatJid is IDENTITY for an
     // @s.whatsapp.net jid (no LID mapping registered here), so the map key
     // the runtime resolves internally IS the delivery jid itself, not the
@@ -228,6 +240,9 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
     // failing the test with a clear signal.
     await vi.waitFor(() => {
       expect(state.perChatRuntimeTurnCompletions.has(mapKey)).toBe(true);
+    });
+    expect(state.perChatExecActorQueue.get(mapKey)?.[0]).toMatchObject({
+      purpose: 'scheduled-agent-job',
     });
 
     // The REAL admission call happened without throwing — direct proof that
@@ -375,6 +390,10 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
 
     let active = true;
     let turnInFlight = true;
+    // A real SessionManager releases every provider handle before `shutdown()`
+    // resolves, and that release — not a null pid, which managed-loop providers
+    // report for their whole life — is what proves termination. Model it.
+    let providerReleased = false;
     let resolveProvider: () => void = () => {};
     const providerGate = new Promise<void>((resolve) => { resolveProvider = resolve; });
     const session = sessionStub();
@@ -383,10 +402,12 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
       sessionId: active ? 'session-abort' : null,
       pid: active ? 4100 : null,
       turnInFlight,
+      providerTerminated: providerReleased,
     }));
     session.shutdown.mockImplementation(async () => {
       active = false;
       turnInFlight = false;
+      providerReleased = true;
       resolveProvider();
     });
     Object.assign(session, {
@@ -437,6 +458,7 @@ describe('AgentRuntime.dispatchTurnRecoveryReplay — live wiring (PRESTAGE-T4 P
       active: false,
       pid: null,
       turnInFlight: false,
+      providerTerminated: true,
     });
     expect(await dispatch).toEqual({ kind: 'retryable_failure' });
   });

@@ -17,6 +17,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { fakeTimeoutBody } from './fake-timeout-helper.ts';
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const installer = join(repoRoot, 'deploy/scripts/install-host-dependencies.sh');
 const roots: string[] = [];
@@ -62,7 +64,10 @@ function resolveHostTool(name: string): string {
 }
 
 function installShellToolbox(bin: string): void {
-  for (const name of ['bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'sed', 'tr']) {
+  for (const name of [
+    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp',
+    'ps', 'rm', 'rmdir', 'sed', 'sleep', 'tr',
+  ]) {
     symlinkSync(resolveHostTool(name), join(bin, name));
   }
 }
@@ -78,7 +83,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
 
   executable(join(bin, 'uname'), [
     'case "${1:-}" in',
-    `  -s) printf '%s\\n' '${platform}' ;;`,
+    `  -s) printf '%s\\n' '${platform}'; exit "\${FAKE_PLATFORM_EXIT:-0}" ;;`,
     '  -m) printf "%s\\n" "${FAKE_MACHINE:-arm64}" ;;',
     `  *) printf '%s\\n' '${platform}' ;;`,
     'esac',
@@ -97,12 +102,14 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   versionTool(bin, 'rg', 'ripgrep 14.1.1');
   versionTool(bin, 'zsh', 'zsh 5.9');
   versionTool(bin, 'shellcheck', 'ShellCheck 0.11.0');
-  versionTool(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout', 'timeout 9.7');
+  // The dependency doctor still probes timeout capability. Wrapped commands use
+  // the real shell supervisor and the restricted toolbox above.
+  executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
   executable(join(bin, 'python3.12'), [
     'case "${1:-}" in',
-    "  --version) printf '%s\\n' 'Python 3.12.13' ;;",
+    "  --version) printf '%s\\n' 'Python 3.12.13'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -268,6 +275,40 @@ describe('explicit host dependency installer', () => {
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
 
+  it('does not create a venv after a failed Python version probe', () => {
+    const fx = fixture();
+    fx.env.FAKE_PYTHON_PROBE_EXIT = '17';
+
+    const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(ledger(fx)).toEqual(['brew install git python@3.12 ripgrep zsh shellcheck']);
+    expect(result.stderr).toContain('Python 3.12 or newer is required');
+  });
+
+  it('does not install packages after a failed platform discovery', () => {
+    const fx = fixture();
+    fx.env.FAKE_PLATFORM_EXIT = '17';
+
+    const result = runInstaller(fx, ['--profile', 'runtime', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('unsupported platform');
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('fails post-install verification when a required probe emits output but exits nonzero', () => {
+    const fx = fixture();
+    executable(join(fx.bin, 'npm'), "printf '%s\\n' '11.12.1'\nexit 17");
+
+    const result = runInstaller(fx, ['--profile', 'runtime', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain('"outcome":"inconclusive"');
+    expect(result.stderr).toContain('post-install doctor did not pass');
+    expect(ledger(fx)).toEqual(['brew install git']);
+  });
+
   it('allows the compatibility lane to install and prove a supported Node 25 runtime', () => {
     const fx = fixture();
     fx.env.FAKE_NODE_VERSION = '25.4.0';
@@ -300,5 +341,49 @@ describe('explicit host dependency installer', () => {
 
     expect(result.status).toBe(1);
     expect(ledger(fx).length).toBeGreaterThan(0);
+  });
+
+  it('kills a stalled install command fast and reports a distinguishable timeout', () => {
+    const fx = fixture('Linux');
+    // Exercise the real supervisor with a short install budget.
+    executable(join(fx.bin, 'apt-get'), 'sleep 300');
+    fx.env.WHATSOUP_APT_UPDATE_TIMEOUT = '1';
+
+    const started = Date.now();
+    const result = runInstaller(fx, [
+      '--profile',
+      'quality',
+      '--manager',
+      'apt',
+      '--apply',
+      '--yes',
+    ]);
+    const wall = Date.now() - started;
+
+    // Expiry has a distinct status from an install failure and remains bounded.
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(124);
+    expect(result.stderr).toContain('TIMEOUT');
+    expect(result.stderr).toContain('apt-get update');
+    expect(result.stderr).not.toContain('command failed');
+    expect(wall).toBeLessThan(15_000);
+  });
+
+  it('reports a genuine install failure as a failure, not a timeout', () => {
+    const fx = fixture('Linux');
+    executable(join(fx.bin, 'apt-get'), 'exit 1');
+
+    const result = runInstaller(fx, [
+      '--profile',
+      'quality',
+      '--manager',
+      'apt',
+      '--apply',
+      '--yes',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain('command failed');
+    expect(result.stderr).toContain('apt-get update');
+    expect(result.stderr).not.toContain('TIMEOUT');
   });
 });

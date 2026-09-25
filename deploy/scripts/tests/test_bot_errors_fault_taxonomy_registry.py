@@ -12,6 +12,7 @@ REGISTRY = ROOT / "src" / "lib" / "fault-taxonomy-registry.json"
 EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "activeSessions",
     "sessionCount",
+    "outboundQueuePoisonedScopes",
     "recentCrashes",
     "pollPersistenceErrors",
     "autoCompactIneffective",
@@ -29,6 +30,9 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "turnRecoveryPending",
     "turnRecoveryExpiredClaimed",
     "turnRecoveryBlockedUnsafe",
+    "turnRecoveryBlockedUnsafeSynthetic",
+    "turnRecoveryBlockedUnsafeSuperseded",
+    "turnRecoveryBlockedUnsafeStranded",
     "turnRecoveryExhausted",
     "turnRecoveryOpenRecoveries",
     "turnRecoveryQuarantinedDelivery",
@@ -40,6 +44,15 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "turnFinalizationRetryRecoveries",
     "turnFinalizationRetryExhaustions",
     "turnRecoveryLiveClaimed",
+    "perChatSessionsWithoutOwner",
+    "perChatRespawnAbandoned",
+    "turnQueueHaltedScopes",
+    "proactiveResumeIdentityRejects",
+    "unownedProviderEventRejects",
+    "suppressedSystemTurnEffectRejects",
+    "chronologyDelayedDispatches",
+    "chronologyRecoveryReplayDispatches",
+    "chronologyMaxQueueAgeSeconds",
 )
 
 

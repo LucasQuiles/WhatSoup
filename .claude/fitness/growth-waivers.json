@@ -50,6 +50,14 @@
       "grantedAt": "2026-08-13",
       "expiresAt": "2026-08-27",
       "admitsNewIdentities": true
+    },
+    {
+      "path": "scripts/fault-taxonomy-source-coverage-baseline.json",
+      "maxWeight": 21,
+      "reason": "Honest re-measurement of a newly reached surface, not new debt and not un-paying paid-down debt: the source-coverage extractor silently discarded every non-literal Python source= (void unresolved, guard line 145) and scanned only the top level of deploy/scripts with a hyphen-free charset, so the paid-down 0 (PRs 3202-3206, 44 -> 0, each retirement matched by a sourceDispositions entry) was honest for the surface it measured and that surface was incomplete; the 21 (13 literal unregistered sources + 8 dynamic families) are emitters that measurement never reached, recorded with owner and reason. Cap at the exact measured weight (0 -> 21); no further growth authorized. Payback = registering each source's disposition through review (a paging contract, not invented in bulk); the guard only ever lets the baseline shrink after expiry, so expiry pressures the landing, not the debt.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2147",
+      "grantedAt": "2026-09-02",
+      "expiresAt": "2026-09-16"
     }
   ]
 }

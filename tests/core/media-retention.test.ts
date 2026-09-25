@@ -18,6 +18,7 @@ vi.mock('../../src/logger.ts', () => ({
 import { MediaRetentionTimer, runCleanup, DEFAULT_RETENTION, purgeFailedScheduledMessages } from '../../src/core/media-retention.ts';
 import type { RetentionConfig } from '../../src/core/media-retention.ts';
 import { Database } from '../../src/core/database.ts';
+import { fakeClock } from '../../src/lib/clock.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -474,5 +475,29 @@ describe('purgeFailedScheduledMessages (SP9)', () => {
   it('returns 0 when no rows match', () => {
     const purged = purgeFailedScheduledMessages(realDb, 7);
     expect(purged).toBe(0);
+  });
+
+  it('derives its purge cutoff from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const fakeNowSec = Math.floor(t0ms / 1000);
+    const cutoff = fakeNowSec - 7 * 24 * 60 * 60;
+
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'failed', ?)`,
+    ).run('111@s.whatsapp.net', 'text', '{"text":"aged"}', cutoff - 60, cutoff - 60);
+    realDb.raw.prepare(
+      `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'failed', ?)`,
+    ).run('222@s.whatsapp.net', 'text', '{"text":"recent"}', cutoff + 60, cutoff + 60);
+
+    const purged = purgeFailedScheduledMessages(realDb, 7, fakeClock(t0ms));
+
+    // Persisted outcome must derive from fakeClock's epoch. Reverted code reads
+    // the real 2026 wall clock and treats both ~2e9 created_at values as far
+    // future, purging nothing instead of exactly the aged row.
+    expect(purged).toBe(1);
+    const rows = realDb.raw.prepare('SELECT created_at FROM scheduled_messages').all() as Array<{ created_at: number }>;
+    expect(rows).toEqual([{ created_at: cutoff + 60 }]);
   });
 });

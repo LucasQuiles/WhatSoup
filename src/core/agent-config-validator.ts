@@ -23,10 +23,14 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
+import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
+import { validateLaunchdServiceConfig } from '../lib/launchd-service-config.ts';
+import { FLEET_LIFECYCLE_PHASES, isFleetLifecyclePhase } from './observability/fleet-lifecycle-flag.ts';
+import { validateServiceIdentityConfig } from '../lib/service-identity-config.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
+import { validateTurnRecoveryCatchupReconcileConfig } from './turn-recovery-catchup-config.ts';
 import {
   fallbackEntryKey,
   isSameAsPrimaryFallbackEntry,
@@ -52,6 +56,7 @@ import {
   WHATSOUP_HEADLESS_EXECUTION_PROFILE,
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
+import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -225,6 +230,11 @@ function validateAgentModelConsistency(raw: Record<string, unknown>): Validation
   }
 
   return null;
+}
+
+function validateClientOutputPolicyConfig(raw: Record<string, unknown>): ValidationError | null {
+  const parsed = parseClientOutputPoliciesForInstance(raw);
+  return parsed.ok ? null : err(parsed.error.field, `${parsed.error.field} ${parsed.error.reason}`);
 }
 
 /**
@@ -432,6 +442,25 @@ export function validateInstanceConfig(
   const transportErr = validateTransportConfig(raw);
   if (transportErr) return transportErr;
 
+  const clientOutputPolicyErr = validateClientOutputPolicyConfig(raw);
+  if (clientOutputPolicyErr) return clientOutputPolicyErr;
+
+  // --- service block (launchd render options) ---
+  // Shape rules live in lib/launchd-service-config.ts, the same source of
+  // truth the fleet-side plist render resolver enforces — rejecting here means
+  // an invalid block fails at config admission on every path (create / patch /
+  // load / discovery, all instance types) instead of first failing a render.
+  const serviceErr = validateLaunchdServiceConfig(raw);
+  if (serviceErr) return err(serviceErr.field, serviceErr.message);
+  // --- service.expectedAccountDigest (ratified account identity) ---
+  // Admission is the only gate between a raw account identifier and the
+  // instance config on disk; the shape rule lives in
+  // lib/service-identity-config.ts and runs on every path, authOnly included.
+  const identityErr = validateServiceIdentityConfig(raw, {
+    effectiveType: ctx.originalType,
+  });
+  if (identityErr) return err(identityErr.field, identityErr.message);
+
   if (raw['type'] === 'agent') {
     const modelConsistencyErr = validateAgentModelConsistency(raw);
     if (modelConsistencyErr) return modelConsistencyErr;
@@ -577,31 +606,39 @@ function validateProviderConfigShape(
  * NOT reuse validateAgentOptions or import anything agent-specific — chat and
  * agent config are independent shapes.
  */
-function validateChatOptions(raw: Record<string, unknown>): ValidationError | null {
-  const chatOpts = raw['chatOptions'];
-  if (chatOpts === undefined || chatOpts === null) {
+/**
+ * chatOptions and transcriptionOptions carry the identical OpenAI-compatible
+ * endpoint/key shape, so both validate through one parameterised pass. The
+ * option key supplies every error path, which keeps the two messages exactly
+ * as they were while removing the second copy of the walk.
+ */
+function validateOpenAiProviderOptions(
+  raw: Record<string, unknown>,
+  optionsKey: 'chatOptions' | 'transcriptionOptions',
+): ValidationError | null {
+  const value = raw[optionsKey];
+  if (value === undefined || value === null) {
     return null;
   }
-  if (typeof chatOpts !== 'object' || Array.isArray(chatOpts)) {
-    return err('chatOptions', 'chatOptions must be an object');
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return err(optionsKey, `${optionsKey} must be an object`);
   }
-  const opts = chatOpts as Record<string, unknown>;
+  const opts = value as Record<string, unknown>;
 
   const providerConfig = opts['openaiProviderConfig'];
   if (providerConfig === undefined || providerConfig === null) {
     return null;
   }
+  const providerPath = `${optionsKey}.openaiProviderConfig`;
   if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
-    return err(
-      'chatOptions.openaiProviderConfig',
-      'chatOptions.openaiProviderConfig must be an object when provided',
-    );
+    return err(providerPath, `${providerPath} must be an object when provided`);
   }
 
-  return validateProviderConfigShape(
-    providerConfig as Record<string, unknown>,
-    'chatOptions.openaiProviderConfig',
-  );
+  return validateProviderConfigShape(providerConfig as Record<string, unknown>, providerPath);
+}
+
+function validateChatOptions(raw: Record<string, unknown>): ValidationError | null {
+  return validateOpenAiProviderOptions(raw, 'chatOptions');
 }
 
 /**
@@ -610,30 +647,7 @@ function validateChatOptions(raw: Record<string, unknown>): ValidationError | nu
  * OpenAI config, without inheriting agent-only providerConfig rules.
  */
 function validateTranscriptionOptions(raw: Record<string, unknown>): ValidationError | null {
-  const transcriptionOpts = raw['transcriptionOptions'];
-  if (transcriptionOpts === undefined || transcriptionOpts === null) {
-    return null;
-  }
-  if (typeof transcriptionOpts !== 'object' || Array.isArray(transcriptionOpts)) {
-    return err('transcriptionOptions', 'transcriptionOptions must be an object');
-  }
-  const opts = transcriptionOpts as Record<string, unknown>;
-
-  const providerConfig = opts['openaiProviderConfig'];
-  if (providerConfig === undefined || providerConfig === null) {
-    return null;
-  }
-  if (typeof providerConfig !== 'object' || Array.isArray(providerConfig)) {
-    return err(
-      'transcriptionOptions.openaiProviderConfig',
-      'transcriptionOptions.openaiProviderConfig must be an object when provided',
-    );
-  }
-
-  return validateProviderConfigShape(
-    providerConfig as Record<string, unknown>,
-    'transcriptionOptions.openaiProviderConfig',
-  );
+  return validateOpenAiProviderOptions(raw, 'transcriptionOptions');
 }
 
 const COMMAND_SURFACE_VERBOSITIES: ReadonlySet<string> = new Set(['terse', 'normal']);
@@ -751,6 +765,10 @@ function validateCommandSurfaceConfig(
  * fallback's credential route is ALWAYS the model prefix.
  */
 function opencodeModelPrefixResolvesToService(model: unknown): boolean {
+  // Free-tier gateway models (`opencode/<model>`) are a legitimate KEYLESS
+  // route: buildChildEnv skips credential selection for them, so the
+  // mapped-service requirement this predicate mirrors does not apply.
+  if (isKeylessOpenCodeRoute('opencode-cli', model)) return true;
   const service = resolveProviderKeyService('opencode-cli', model);
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
 }
@@ -781,6 +799,34 @@ function validateAgentOptions(
       'agentOptions.sessionScope',
       'agentOptions.sessionScope must be single, shared, or per_chat',
     );
+  }
+
+  // observability.fleetLifecycle — the Fleet Lifecycle Observability Standard's
+  // dark flag: the promotion phase `off | shadow | alerting | default` (design
+  // §11), default `off`. Every lifecycle-observability code path gates through
+  // resolveFleetLifecyclePhase(); this block is a closed shape validated
+  // fail-closed so a typo INSIDE it can never silently change the phase. (A
+  // misspelled block name is an unknown agentOptions key and is ignored like
+  // any other — agentOptions itself is not a closed shape.)
+  const observability = opts['observability'];
+  if (observability !== undefined) {
+    if (!isRecord(observability)) {
+      return err('agentOptions.observability', 'agentOptions.observability must be an object when provided');
+    }
+    const unknownObservabilityKeys = Object.keys(observability).filter((key) => key !== 'fleetLifecycle');
+    if (unknownObservabilityKeys.length > 0) {
+      return err(
+        'agentOptions.observability',
+        `agentOptions.observability has unknown key(s): ${unknownObservabilityKeys.join(', ')} (allowed: fleetLifecycle)`,
+      );
+    }
+    const fleetLifecycle = observability['fleetLifecycle'];
+    if (fleetLifecycle !== undefined && !isFleetLifecyclePhase(fleetLifecycle)) {
+      return err(
+        'agentOptions.observability.fleetLifecycle',
+        `agentOptions.observability.fleetLifecycle must be one of: ${FLEET_LIFECYCLE_PHASES.join(', ')}`,
+      );
+    }
   }
 
   // cwd must be a string when provided.
@@ -925,6 +971,9 @@ function validateAgentOptions(
     }
   }
 
+  const catchupErr = validateTurnRecoveryCatchupReconcileConfig(opts['turnRecoveryCatchupReconcile']);
+  if (catchupErr) return err(catchupErr.field, catchupErr.message);
+
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives
   // the operator a clear 400-class error instead of a runtime crash.
@@ -1060,6 +1109,75 @@ function validateAgentOptions(
       if (isSameAsPrimaryFallbackEntry(entry, raw)) {
         return err(field, `${field} matches the primary provider/model pair`);
       }
+    }
+  }
+
+  // fallbackDiscovery (R6): discovery mode DERIVES the chain per host from the
+  // gateway's credential-aware model catalogue. Mutually exclusive with any
+  // operator-specified chain (non-empty fallbacks[] or the legacy pair) — a
+  // silent merge would hide which source actually orders the ladder.
+  if (opts['fallbackDiscovery'] !== undefined) {
+    const field = 'agentOptions.fallbackDiscovery';
+    if (!isRecord(opts['fallbackDiscovery'])) {
+      return err(field, `${field} must be an object`);
+    }
+    const discovery = opts['fallbackDiscovery'];
+    if (discovery['mode'] !== 'auto') {
+      return err(`${field}.mode`, `${field}.mode must be "auto"`);
+    }
+    if (Array.isArray(opts['fallbacks']) && opts['fallbacks'].length > 0) {
+      return err(
+        field,
+        `${field} cannot be combined with a non-empty agentOptions.fallbacks list — discovery derives the chain; use fallbackDiscovery.preferModels / excludeProviders to steer it`,
+      );
+    }
+    if (
+      opts['fallbackProvider'] !== undefined
+      || opts['fallbackModel'] !== undefined
+      || opts['fallbackDataPolicy'] !== undefined
+    ) {
+      return err(
+        field,
+        `${field} cannot be combined with agentOptions.fallbackProvider, agentOptions.fallbackModel, or agentOptions.fallbackDataPolicy`,
+      );
+    }
+    const maxEntries = discovery['maxEntries'];
+    if (maxEntries !== undefined) {
+      if (
+        typeof maxEntries !== 'number'
+        || !Number.isInteger(maxEntries)
+        || maxEntries < 1
+        || maxEntries > 4
+      ) {
+        return err(`${field}.maxEntries`, `${field}.maxEntries must be an integer between 1 and 4`);
+      }
+    }
+    const preferModels = discovery['preferModels'];
+    if (preferModels !== undefined) {
+      if (!isRecord(preferModels)) {
+        return err(`${field}.preferModels`, `${field}.preferModels must be an object mapping catalogue provider to model id`);
+      }
+      for (const [pinProvider, pinModel] of Object.entries(preferModels)) {
+        if (!isNonEmptyString(pinModel)) {
+          return err(
+            `${field}.preferModels`,
+            `${field}.preferModels[${JSON.stringify(pinProvider)}] must be a non-empty model id string`,
+          );
+        }
+      }
+    }
+    const excludeProviders = discovery['excludeProviders'];
+    if (excludeProviders !== undefined) {
+      if (
+        !Array.isArray(excludeProviders)
+        || excludeProviders.some((value) => !isNonEmptyString(value))
+      ) {
+        return err(`${field}.excludeProviders`, `${field}.excludeProviders must be an array of non-empty provider prefixes`);
+      }
+    }
+    const includeFreeTier = discovery['includeFreeTier'];
+    if (includeFreeTier !== undefined && typeof includeFreeTier !== 'boolean') {
+      return err(`${field}.includeFreeTier`, `${field}.includeFreeTier must be a boolean`);
     }
   }
 

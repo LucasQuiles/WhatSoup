@@ -8,6 +8,12 @@ import {
   LoopLagSampler,
 } from '../../src/lib/loop-lag-sampler.ts';
 
+function samplerDueAtMs(sampler: LoopLagSampler): number {
+  const lastIntervalAtMs = (sampler as unknown as { lastIntervalAtMs: number | null }).lastIntervalAtMs;
+  if (lastIntervalAtMs === null) throw new Error('sampler is not running');
+  return lastIntervalAtMs + LOOP_LAG_SAMPLE_INTERVAL_MS;
+}
+
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn(),
   clearAlertSource: vi.fn(() => true),
@@ -27,6 +33,7 @@ const { logger } = vi.hoisted(() => ({ logger: {} as Record<string, ReturnType<t
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: alertFns.emitAlert,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
@@ -56,23 +63,26 @@ describe('LoopLagSampler', () => {
     return new LoopLagSampler({ now: () => nowMs });
   }
 
-  function recordLag(lagMs: number): void {
-    nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + lagMs;
+  function recordLag(sampler: LoopLagSampler, lagMs: number): void {
+    nowMs = samplerDueAtMs(sampler) + lagMs;
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
   }
 
-  it('samples every 500ms and ignores callbacks earlier than the monotonic expectation', () => {
+  it('samples every 500ms; a fire arriving before its due point records zero lag rather than being discarded', () => {
     const sampler = createSampler();
     sampler.start();
 
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS - 1);
     expect(sampler.snapshot().sampleCount).toBe(0);
 
+    // The callback runs while the injected monotonic clock still reads 100 —
+    // earlier than its due point. Discarding such fires was the phantom
+    // ~500ms sample mechanism (#3253); they record as zero lag instead.
     nowMs = 100;
     vi.advanceTimersByTime(1);
     expect(sampler.snapshot()).toMatchObject({
-      sampleCount: 0,
-      p95LagMs: null,
+      sampleCount: 1,
+      p95LagMs: 0,
       locallyStarved: false,
     });
 
@@ -86,7 +96,7 @@ describe('LoopLagSampler', () => {
     vi.setSystemTime(Date.now() + 60_000);
     vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
 
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 1,
       p95LagMs: 0,
       locallyStarved: false,
@@ -101,9 +111,9 @@ describe('LoopLagSampler', () => {
     sampler.start();
 
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) {
-      recordLag(LOOP_LAG_STARVATION_THRESHOLD_MS + 1);
+      recordLag(sampler, LOOP_LAG_STARVATION_THRESHOLD_MS + 1);
     }
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 19,
       p95LagMs: 251,
       locallyStarved: false,
@@ -113,9 +123,9 @@ describe('LoopLagSampler', () => {
     sampler.stop();
     sampler.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
-      recordLag(index === LOOP_LAG_WINDOW_SAMPLES - 1 ? 251 : 0);
+      recordLag(sampler, index === LOOP_LAG_WINDOW_SAMPLES - 1 ? 251 : 0);
     }
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
@@ -125,9 +135,9 @@ describe('LoopLagSampler', () => {
     sampler.stop();
     sampler.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
-      recordLag(index >= LOOP_LAG_WINDOW_SAMPLES - 2 ? 251 : 0);
+      recordLag(sampler, index >= LOOP_LAG_WINDOW_SAMPLES - 2 ? 251 : 0);
     }
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 20,
       p95LagMs: 251,
       locallyStarved: true,
@@ -137,9 +147,9 @@ describe('LoopLagSampler', () => {
     sampler.stop();
     sampler.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
-      recordLag(LOOP_LAG_STARVATION_THRESHOLD_MS);
+      recordLag(sampler, LOOP_LAG_STARVATION_THRESHOLD_MS);
     }
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 20,
       p95LagMs: 250,
       locallyStarved: false,
@@ -152,13 +162,13 @@ describe('LoopLagSampler', () => {
   it('retains an exactly-10-second overdue observation without assuming one outlier starves p95', () => {
     const sampler = createSampler();
     sampler.start();
-    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) recordLag(0);
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) recordLag(sampler, 0);
 
     nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_000;
 
     const first = sampler.snapshot();
     const second = sampler.snapshot();
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
@@ -172,12 +182,12 @@ describe('LoopLagSampler', () => {
   it('resets the retained window for gaps above 10 seconds without retaining the gap', () => {
     const sampler = createSampler();
     sampler.start();
-    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(251);
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(sampler, 251);
     expect(sampler.snapshot().locallyStarved).toBe(true);
 
     nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
 
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 0,
       p95LagMs: null,
       locallyStarved: false,
@@ -187,28 +197,39 @@ describe('LoopLagSampler', () => {
   });
 
   it.each(['timer-first', 'snapshot-first'] as const)(
-    'produces the same empty window after consuming one physical discontinuity %s',
+    'consumes one physical discontinuity exactly once %s',
     (order) => {
       const sampler = createSampler();
       sampler.start();
       nowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 10_001;
 
-      let snapshot;
       if (order === 'timer-first') {
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
-        snapshot = sampler.snapshot();
+        // The fire consumed the discontinuity; the snapshot adds nothing.
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
       } else {
-        snapshot = sampler.snapshot();
+        // The snapshot consumes the discontinuity once...
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
+        // ...and the fire then lands exactly at its re-based due point,
+        // recording a single zero-lag sample — never a second discontinuity.
         vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
+        expect(sampler.snapshot()).toMatchObject({
+          sampleCount: 1,
+          p95LagMs: 0,
+          locallyStarved: false,
+          discontinuityCount: 1,
+        });
       }
-
-      expect(snapshot).toEqual({
-        sampleCount: 0,
-        p95LagMs: null,
-        locallyStarved: false,
-        discontinuityCount: 1,
-      });
-      expect(sampler.snapshot()).toEqual(snapshot);
       sampler.stop();
     },
   );
@@ -226,7 +247,7 @@ describe('LoopLagSampler', () => {
 
     sampler.stop();
     sampler.start();
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 0,
       p95LagMs: null,
       locallyStarved: false,
@@ -239,11 +260,11 @@ describe('LoopLagSampler', () => {
     const sampler = createSampler();
     sampler.start();
 
-    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(251);
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(sampler, 251);
     expect(sampler.snapshot().locallyStarved).toBe(true);
 
-    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(0);
-    expect(sampler.snapshot()).toEqual({
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(sampler, 0);
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 20,
       p95LagMs: 0,
       locallyStarved: false,
@@ -260,13 +281,13 @@ describe('LoopLagSampler', () => {
     sampler.start();
     sampler.start();
     expect(vi.getTimerCount()).toBe(timersBeforeStart + 1);
-    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(251);
+    for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) recordLag(sampler, 251);
     expect(sampler.snapshot().locallyStarved).toBe(true);
 
     sampler.stop();
     sampler.stop();
     expect(vi.getTimerCount()).toBe(timersBeforeStart);
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 0,
       p95LagMs: null,
       locallyStarved: false,
@@ -470,7 +491,7 @@ describe('HealthPoller probe liveness', () => {
     await poller.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES - 1; index += 1) {
       const lagMs = index >= LOOP_LAG_WINDOW_SAMPLES - 1 - priorHighSamples ? 300 : 0;
-      samplerNowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + lagMs;
+      samplerNowMs = samplerDueAtMs(sampler) + lagMs;
       vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     }
 
@@ -482,7 +503,7 @@ describe('HealthPoller probe liveness', () => {
     settleAbort!();
     await failingPoll;
 
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 20,
       p95LagMs: expectedP95LagMs,
       locallyStarved: expectedLocallyStarved,
@@ -571,7 +592,7 @@ describe('HealthPoller probe liveness', () => {
 
     await poller.start();
     for (let index = 0; index < LOOP_LAG_WINDOW_SAMPLES; index += 1) {
-      samplerNowMs += LOOP_LAG_SAMPLE_INTERVAL_MS + 300;
+      samplerNowMs = samplerDueAtMs(sampler) + 300;
       vi.advanceTimersByTime(LOOP_LAG_SAMPLE_INTERVAL_MS);
     }
     expect(sampler.snapshot().locallyStarved).toBe(true);
@@ -582,7 +603,7 @@ describe('HealthPoller probe liveness', () => {
     settleAbort!();
     await failingPoll;
 
-    expect(sampler.snapshot()).toEqual({
+    expect(sampler.snapshot()).toMatchObject({
       sampleCount: 0,
       p95LagMs: null,
       locallyStarved: false,

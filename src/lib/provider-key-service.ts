@@ -82,3 +82,23 @@ export function resolveProviderKeyService(
   }
   return null;
 }
+
+/**
+ * The opencode gateway's own free-tier catalogue prefix. Models under it
+ * (`opencode/<model>`) run WITHOUT an operator credential — the gateway serves
+ * them keyless — so the prefix deliberately has no SERVICE_ENV_MAP row.
+ */
+export const OPENCODE_FREE_TIER_PREFIX = 'opencode';
+
+/**
+ * True for an opencode-cli route whose model runs keyless (free-tier
+ * `opencode/<model>` catalogue ids). Config admission, spawn-env credential
+ * selection, and fallback key-presence all consult this ONE predicate so a
+ * keyless route can never be half-supported: admitted by the validator but
+ * thrown at spawn, or spawnable but reported uncredentialed.
+ */
+export function isKeylessOpenCodeRoute(provider: unknown, model: unknown): boolean {
+  if (provider !== 'opencode-cli' || typeof model !== 'string') return false;
+  const prefix = model.split('/')[0]?.trim().toLowerCase();
+  return prefix === OPENCODE_FREE_TIER_PREFIX && model.includes('/');
+}

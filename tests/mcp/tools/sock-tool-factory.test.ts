@@ -125,7 +125,23 @@ describe('makeSockTool', () => {
 
     await tool.handler({}, makeSession());
 
-    expect(call).toHaveBeenCalledWith({}, fakeSock);
+    expect(call).toHaveBeenCalledWith({}, fakeSock, undefined);
+  });
+
+  it('handler forwards the registry-supplied bond-effect dispatcher into call', async () => {
+    const fakeSock = makeFakeSock();
+    const call = vi.fn().mockResolvedValue(null);
+    const tool = makeSockTool(() => fakeSock, {
+      name: 'a',
+      description: '',
+      schema: z.object({}),
+      call,
+    });
+    const recordBondEffectDispatch = vi.fn();
+
+    await tool.handler({}, makeSession(), recordBondEffectDispatch);
+
+    expect(call).toHaveBeenCalledWith({}, fakeSock, recordBondEffectDispatch);
   });
 
   it('handler resolves to whatever call returns (string)', async () => {

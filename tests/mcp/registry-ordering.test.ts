@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 
 describe('ToolRegistry.listTools ordering', () => {
   function makeRegistry() {

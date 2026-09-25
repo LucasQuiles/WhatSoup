@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   asNonEmptyString,
   asRecord,
+  hasControlCharacters,
   isNonEmptyString,
   isRecord,
   nonEmptyString,
@@ -573,5 +574,62 @@ describe('nonEmptyStringRaw', () => {
     expect(nonEmptyStringRaw(' \t\n ')).toBeNull();
     expect(nonEmptyStringRaw(null)).toBeNull();
     expect(nonEmptyStringRaw([])).toBeNull();
+  });
+});
+
+/**
+ * Contract-lock tests for hasControlCharacters - the C0+DEL detector shared by
+ * account-identity-digest (canonical-input injectivity) and
+ * launchd-service-config (single-line rendered plist values).
+ *
+ * The character class is exactly C0 (U+0000-U+001F) plus DEL (U+007F). It is
+ * deliberately NARROWER than the two variants that stay separate: sql-fts.ts
+ * also rejects the double quote, and chat-display-name.ts also strips C1
+ * (U+0080-U+009F) and the U+2028/U+2029 line separators. Widening this
+ * predicate to match either of those would change admission for config paths
+ * and account identities, so the boundary cases below are load-bearing.
+ */
+describe('hasControlCharacters', () => {
+  it('detects every C0 control character and DEL', () => {
+    for (let code = 0x00; code <= 0x1f; code++) {
+      expect(hasControlCharacters(String.fromCharCode(code)), `U+${code.toString(16)}`).toBe(true);
+    }
+    expect(hasControlCharacters('\u007f')).toBe(true);
+  });
+
+  it('detects a control character embedded anywhere in a longer value', () => {
+    expect(hasControlCharacters('/opt/whatsoup\nreleases')).toBe(true);
+    expect(hasControlCharacters('owner\u0000@example.test')).toBe(true);
+    expect(hasControlCharacters('trailing\u007f')).toBe(true);
+    expect(hasControlCharacters('\ttabbed')).toBe(true);
+  });
+
+  it('accepts clean values, including the empty string', () => {
+    expect(hasControlCharacters('')).toBe(false);
+    expect(hasControlCharacters('/opt/whatsoup/releases/rel-1')).toBe(false);
+    expect(hasControlCharacters('owner.example@example.test')).toBe(false);
+    expect(hasControlCharacters(' padded ')).toBe(false);
+  });
+
+  it('is code-point safe: astral characters and lone surrogates are not controls', () => {
+    // The launchd-service-config predicate this consolidates iterated code
+    // POINTS (for...of) while the account-identity one tested code UNITS (a
+    // regex without the u flag). They agree on this class because no C0/DEL
+    // code unit ever appears inside a surrogate pair - these cases pin that
+    // equivalence so a future rewrite cannot silently diverge.
+    expect(hasControlCharacters('\u{1F600}')).toBe(false);
+    expect(hasControlCharacters('/srv/\u{1F600}/release')).toBe(false);
+    expect(hasControlCharacters('\uD83D')).toBe(false); // lone high surrogate
+    expect(hasControlCharacters('\uDE00')).toBe(false); // lone low surrogate
+  });
+
+  it('does NOT match C1 controls or the Unicode line separators', () => {
+    for (const value of ['\u0080', '\u009f', 'a\u2028b', 'a\u2029b']) {
+      expect(hasControlCharacters(value), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  it('does NOT match the double quote - that is the wider class sql-fts owns', () => {
+    expect(hasControlCharacters('say "hello"')).toBe(false);
   });
 });

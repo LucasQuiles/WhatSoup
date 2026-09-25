@@ -66,12 +66,21 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    visibility to enqueue a fallback intent when a session ends without a visible
    reply, capturing bounded tool-error context for that fallback.
 
-4. Drain daemon (shipped).
+4. Drain daemon and durability observer (shipped).
    `deploy/hooks/drain-stuck-replies.mjs` retries queued fallback intents when the
    in-session hook could not send immediately. It is driven by
    `deploy/scripts/reply-guarantee-drain.sh` on the
    `whatsoup-reply-guarantee.timer`/`.service` systemd units (and the
-   `com.whatsoup.reply-guarantee.plist` launchd agent on macOS).
+   `com.whatsoup.reply-guarantee.plist` launchd agent on macOS). The same wrapper
+   independently runs `deploy/scripts/reply-guarantee-observer.py`, which opens
+   each instance database with SQLite URI `mode=ro` so committed WAL frames remain
+   visible. It reports `active-breach`, `recovery-debt`, `clear`, or
+   `inconclusive` without replaying or modifying durable rows. Historical failed
+   terminals and continuity candidates are recovery debt with no runtime-health
+   impact; only stale open inbound or recovery work is an operational breach.
+   `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
+   additional replay count; it exposes contradictory delivery evidence that
+   must be reconciled before any targeted repair.
 
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in
@@ -125,6 +134,10 @@ RGP implementation must keep these boundaries intact:
 - Hook helpers may read transcript files and hook-local state only.
 - Hook helpers call runtime behavior through the MCP socket; they do not import
   `src/` modules or open SQLite directly.
+- The scheduled durability observer is not a hook helper. It may read the
+  canonical per-instance database, but only through normal SQLite read-only mode;
+  it must not use `immutable=1`, copy a live main file without its WAL/SHM
+  sidecars, write rows, or automatically replay broad failed-row cohorts.
 - Runtime code uses the existing durability, outbound audit, retry, and JID
   normalization helpers.
 - Per-instance state is keyed by `WHATSOUP_INSTANCE`; the runtime must emit this
@@ -147,3 +160,14 @@ The full six-layer implementation and its tests have since shipped (see the
 Layered Design section). Runtime watchdog behavior, including fail-closed typing
 adapter failures and continued monitoring of open inbound rows, is covered by
 `tests/core/reply-guarantee.test.ts`.
+
+The scheduled observer has a separate acceptance boundary in
+`deploy/scripts/tests/test_reply_guarantee_observer.py`: it proves visibility of
+an uncheckpointed WAL commit, active-versus-debt classification, schema and user
+context failures as inconclusive, content-free evidence, per-instance alert
+ownership, and fail-closed preservation of both drain and observer exit states.
+BOT ERRORS emissions are transition-latched in the shared private state root. A
+source is only latched after the emitter accepts the event, so rejected alerts
+and clears retry on the next observation. Repeated identical observations stay
+quiet, and an inconclusive scan never clears a previously latched breach or debt
+signal.

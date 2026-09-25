@@ -3,20 +3,6 @@ import type {
   MemoryOperationFailureCode,
 } from '../lib/memory-operation-telemetry.ts';
 
-/** A durable knowledge record promoted from episodic memory consolidation */
-export interface DurableKnowledge {
-  id: string;
-  claim: string;
-  sourceRecordIds: string[];
-  observationCount: number;
-  topic: string;
-  confidence: number;
-  promotionReason: string;
-  firstObserved: string;
-  lastObserved: string;
-  promotedAt: string;
-}
-
 /** Input to the consolidation pipeline — a cluster of related memories */
 export interface MemoryCluster {
   topic: string;

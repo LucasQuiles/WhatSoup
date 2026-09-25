@@ -18,7 +18,14 @@ import {
   shareLinesByName,
   shareMessagesByPk,
 } from '../lib/structural-sharing.js';
-import type { ChatItem, LineInstance, Message } from '../types.js';
+import { MS_PER_MINUTE, MS_PER_SECOND } from '../../../src/lib/time-units.ts';
+import type {
+  ChatItem,
+  LineInstance,
+  Message,
+  ProviderCatalogEntry,
+  ProviderModelsListing,
+} from '../types.js';
 import { useRealtime } from './use-websocket.js';
 export { computeKpis };
 
@@ -42,7 +49,7 @@ const POLL_FEED = 5000;
  * status transitions promptly — this interval only backstops freshness for
  * everything else in the payload.
  */
-const POLL_LINES_WS_BACKSTOP = 15_000;
+const POLL_LINES_WS_BACKSTOP = 15 * MS_PER_SECOND;
 
 // ---------------------------------------------------------------------------
 // Query option factories (static — no hook dependency)
@@ -146,12 +153,34 @@ export function useAccess(name: string) {
 /** Structured logs for a line. */
 export function useLogs(name: string) {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_LOGS;
+  const query = useQuery({
     queryKey: ['logs', name],
     queryFn: () => api.getLogs(name),
-    refetchInterval: connected ? false : POLL_LOGS,
+    refetchInterval: poll,
     enabled: !!name,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // Poll-aware threshold while polling; METRICS default (120s) when connected.
+  // ⚠ The 120s connected fallback conflates QUIET with STALE. ['logs'] *is*
+  // WS-invalidated — realtime-events.ts maps log_entry -> [['logs', instance]]
+  // and ['logs'] is in REALTIME_OWNED_QUERY_KEYS — so a connected tab refreshes
+  // within ~2s of any new entry. What ages is a line that is simply quiet: no
+  // new entries means no invalidation, dataUpdatedAt freezes, and at 120s the
+  // METRICS default labels current data stale. That backstop is still wanted
+  // (a silently dead socket emits no gap event, so agedOut is the only
+  // mid-connection tripwire) — it is just imprecise, and shared with useFeed.
+  // Inert today: no component reads this .freshness. Before the first consumer
+  // ships, add a connected backstop poll (POLL_LINES_WS_BACKSTOP idiom) so the
+  // signal tracks poll health rather than event silence.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
 /** Typing indicators from all instances. */
@@ -167,20 +196,87 @@ export function useTyping() {
 /** Global activity feed. */
 export function useFeed() {
   const { connected } = useRealtime();
-  return useQuery({
+  const poll = connected ? false : POLL_FEED;
+  const query = useQuery({
     queryKey: ['feed'],
     queryFn: () => api.getFeed(),
-    refetchInterval: connected ? false : POLL_FEED,
+    refetchInterval: poll,
   });
+  // #2519: promoted onto the #1925 freshness contract (useLines idiom).
+  // Poll-aware while polling is active (2 missed intervals); the METRICS
+  // default when WS-connected — the server invalidates ['feed'] on every
+  // fleet event (use-websocket), so dataUpdatedAt tracks realtime pushes.
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+      ...(poll ? { staleAfterMs: 2 * poll } : {}),
+    }),
+  };
 }
 
-/** Provider catalog (display names + capability flags). Static — long stale time. */
+export async function fetchProviders(
+  fetcher: () => Promise<ProviderCatalogEntry[]> = () => api.getProviders(),
+): Promise<{ status: 'ok'; providers: ProviderCatalogEntry[] } | { status: 'request-failed' }> {
+  try {
+    return { status: 'ok', providers: await fetcher() };
+  } catch {
+    return { status: 'request-failed' };
+  }
+}
+
+/** Server-reported execution-provider catalogue with explicit transport state. */
 export function useProviders() {
-  return useQuery({
+  const query = useQuery({
     queryKey: ['providers'],
-    queryFn: () => api.getProviders(),
-    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const receipt = await fetchProviders();
+      if (receipt.status === 'request-failed') {
+        throw new Error('Provider catalogue request failed');
+      }
+      return receipt;
+    },
+    retry: false,
+    staleTime: MS_PER_MINUTE,
   });
+  const receipt = query.data;
+  return {
+    ...query,
+    data: receipt?.status === 'ok' ? receipt.providers : undefined,
+    catalogueStatus: query.isError ? 'request-failed' : receipt?.status,
+  };
+}
+
+/** Provider-native model catalogue. The server owns probing, cache age, and
+ * provenance; the browser only caches the typed receipt for one minute. */
+export async function fetchProviderModels(
+  provider: string,
+  fetcher: (provider: string) => Promise<ProviderModelsListing> = (id) => api.getProviderModels(id),
+): Promise<ProviderModelsListing | { status: 'request-failed' }> {
+  try {
+    return await fetcher(provider);
+  } catch {
+    // Keep transport failure distinct from a provider-produced `unavailable`
+    // receipt without exposing raw transport errors in the UI.
+    return { status: 'request-failed' };
+  }
+}
+
+export function useProviderModels(provider: string) {
+  const query = useQuery({
+    queryKey: ['provider-models', provider],
+    queryFn: () => fetchProviderModels(provider),
+    staleTime: MS_PER_MINUTE,
+    enabled: provider.length > 0,
+  });
+  return {
+    ...query,
+    freshness: queryFreshness({
+      dataUpdatedAt: query.dataUpdatedAt,
+      refetchFailed: query.isRefetchError,
+    }),
+  };
 }
 
 /** Per-instance provider / key / fallback status. */

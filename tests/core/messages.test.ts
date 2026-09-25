@@ -24,6 +24,7 @@ import {
   type StoreMessageInput,
   type MessageRow,
 } from '../../src/core/messages.ts';
+import { fakeClock } from '../../src/lib/clock.ts';
 
 function tempDbPath(): string {
   return join(tmpdir(), `whatsoup-test-${randomBytes(4).toString('hex')}.db`);
@@ -350,6 +351,23 @@ describe('messages', () => {
     const deleted = deleteOldMessages(db, 30);
     expect(deleted).toBe(0);
     expect(getMessageCount(db)).toBe(1);
+  });
+
+  it('deleteOldMessages derives its retention cutoff from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const fakeNowSec = Math.floor(t0ms / 1000);
+    const cutoff = fakeNowSec - 30 * 86400;
+    storeMessageIfNew(db, makeMsg({ content: 'recent (survives)', timestamp: cutoff + 60 }));
+    storeMessageIfNew(db, makeMsg({ content: 'aged (deleted)', timestamp: cutoff - 60 }));
+
+    const deleted = deleteOldMessages(db, 30, fakeClock(t0ms));
+
+    // Persisted outcome must derive from fakeClock's epoch. Reverted code reads
+    // the real 2026 wall clock and treats both ~2e9 timestamps as far future,
+    // deleting nothing instead of exactly the aged row.
+    expect(deleted).toBe(1);
+    const remaining = getRecentMessages(db, 'group1_at_g.us', 10);
+    expect(remaining.map((m) => m.content)).toEqual(['recent (survives)']);
   });
 
   // --- #1772: receipts orphan-key prune (co-located with message retention) ---

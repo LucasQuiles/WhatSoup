@@ -36,6 +36,7 @@ describe('produceCapabilityAttestation (D5 producer)', () => {
       canary: { result: 'pass', nonce: 'nonce-1' },
       validForSeconds: 3600,
       attestedAt: new Date(), // fresh so findAdmissibleAttestation's freshness check passes
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
     expect(out).toEqual({ recorded: true, attestationId: expect.any(Number) });
     // End-to-end: the produced attestation is what the supervisor's admission consumes.
@@ -49,6 +50,7 @@ describe('produceCapabilityAttestation (D5 producer)', () => {
       canary: { result: 'fail', nonce: 'nonce-2' },
       validForSeconds: 3600,
       attestedAt: new Date('2026-08-13T00:00:00.000Z'),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
     expect(out).toEqual({ recorded: false, reason: 'canary_failed' });
     // Nothing was laundered into a passing attestation.
@@ -61,6 +63,7 @@ describe('produceCapabilityAttestation (D5 producer)', () => {
       produceCapabilityAttestation(db, {
         binding: BINDING, canary: { result: 'pass', nonce: 'n' }, validForSeconds: 0,
         attestedAt: new Date('2026-08-13T00:00:00.000Z'),
+        evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
       }),
     ).toEqual({ recorded: false, reason: 'invalid_validity_window' });
     expect((db.raw.prepare('SELECT COUNT(*) AS c FROM capability_attestations').get() as { c: number }).c).toBe(0);
@@ -70,6 +73,7 @@ describe('produceCapabilityAttestation (D5 producer)', () => {
     produceCapabilityAttestation(db, {
       binding: BINDING, canary: { result: 'pass', nonce: 'n-exp' }, validForSeconds: 600,
       attestedAt: new Date('2026-08-13T00:00:00.000Z'),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
     const row = db.raw.prepare('SELECT attested_at, expires_at FROM capability_attestations LIMIT 1').get() as {
       attested_at: string; expires_at: string;

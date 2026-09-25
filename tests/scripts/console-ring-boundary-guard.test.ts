@@ -30,12 +30,21 @@ const CONSOLE_SRC = path.join(process.cwd(), 'console', 'src');
  * belongs in the PR discussion, not in a quiet import line.
  */
 const BASELINE: Readonly<Record<string, readonly string[]>> = {
-  'console/src/types.ts': ['src/core/mark-read-types.ts'],
+  'console/src/types.ts': [
+    'src/core/mark-read-types.ts',
+    // Declaration-only wire vocabulary shared by the fleet response and console.
+    'src/lib/provider-catalogue-contract.d.ts',
+  ],
   'console/src/lib/providers.ts': [
     'src/lib/provider-ids.json',
     'src/lib/provider-ids.ts',
     'src/lib/provider-key-service.ts',
   ],
+  // time-units is the same pure-constant crossing class as provider-ids:
+  // the #2207 SSOT migration must not fork a second constants source in console.
+  'console/src/hooks/use-fleet.ts': ['src/lib/time-units.ts'],
+  'console/src/hooks/use-update-check.ts': ['src/lib/time-units.ts'],
+  'console/src/lib/freshness.ts': ['src/lib/time-units.ts'],
 };
 
 function walkConsoleFiles(dir: string): string[] {

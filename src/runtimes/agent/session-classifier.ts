@@ -55,6 +55,13 @@ interface ActiveSessionRow {
   started_at: string | null;
   message_count: number | null;
   provider: string | null;
+  /**
+   * The row's own persistence namespace — SessionManager.conversationKey, which
+   * is the scheduled-agent-job map key for a scheduled session and the plain
+   * conversation key for an interactive one (session.ts:1578). This is the key
+   * the row's session_checkpoints row is written under.
+   */
+  workspace_key: string | null;
 }
 
 interface CheckpointInfo {
@@ -163,7 +170,7 @@ export function classifyActiveSessions(
 ): ClassifiedSession[] {
   const activeSessions = db.raw
     .prepare(
-      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count, provider FROM agent_sessions WHERE status = 'active'`,
+      `SELECT id, session_id, claude_pid, chat_jid, status, started_at, message_count, provider, workspace_key FROM agent_sessions WHERE status = 'active'`,
     )
     .all() as unknown as ActiveSessionRow[];
 
@@ -176,7 +183,21 @@ export function classifyActiveSessions(
 
   for (const session of activeSessions) {
     let convKey: string | null = null;
-    if (session.chat_jid) {
+    // #3523 (iteration 1, the cross-model lens): group and look up by the row's OWN
+    // persistence namespace when it has one. A scheduled-agent-job session persists
+    // its checkpoint under '<conversationKey>::scheduled-agent-job' (built by
+    // sessionConversationKey in runtime.ts and stored as workspaceKey in session.ts)
+    // while its chat_jid is the plain delivery JID. Deriving the lookup key from
+    // chat_jid alone put a scheduled row and an interactive row for one chat into ONE
+    // group with a SINGLE checkpoint, so at most one could match and the other was
+    // classified against a checkpoint that was never its own — pid mismatch,
+    // stale_live, SIGTERM once the resident exemption lapsed. workspace_key is exactly
+    // the key the row's checkpoint is written under, and it is what the checkpoint join
+    // in session-db.ts already uses. For an interactive row it equals
+    // toConversationKey(chat_jid), so nothing else changes.
+    if (session.workspace_key) {
+      convKey = session.workspace_key;
+    } else if (session.chat_jid) {
       try {
         convKey = toConversationKey(session.chat_jid);
       } catch {
@@ -203,6 +224,35 @@ export function classifyActiveSessions(
 
     if (!checkpoint) {
       for (const session of sessions) {
+        // #3523 layer 4: a checkpoint-less 'active' row whose owning process is
+        // gone can never be resumed (there is no durable checkpoint to resume
+        // from), so it is definitively stale — not the "do-not-touch" ambiguous
+        // bucket. Before this the no-checkpoint branch never ran a liveness
+        // probe, so such rows sat 'active' forever (resolveAmbiguousAgeFallback
+        // only orphans zero-message rows past the age threshold, leaving a
+        // checkpoint-less dead-pid row with messages permanently unreconciled).
+        // A live PID stays ambiguous — we still cannot safely reap a running
+        // process with no checkpoint to compare against.
+        //
+        // Iteration 1 (#3527 review H2): gate on executionMode FIRST, exactly as
+        // the sibling branches below do (:242, :257). claude_pid is only a
+        // session's identity for a 'persistent_session' provider. A spawn-per-turn
+        // or managed-loop provider has no durable child, so its claude_pid is
+        // legitimately null/0 while the session is logically live — and
+        // defaultPidOwnershipChecker maps pid <= 0 to dead (:94-96). Without this
+        // gate a checkpoint-less pid-0 row of a non-persistent provider was
+        // classified stale_dead and orphaned on the next sweep. An unknown
+        // provider (mode === null) also fails safe to ambiguous.
+        const mode = executionMode(session.provider);
+        const pidCheck = pidChecker(session.claude_pid);
+        if (mode === 'persistent_session' && !pidCheck.alive) {
+          results.push({
+            ...sessionFields(session, convKey),
+            classification: 'stale_dead',
+            reason: `no session_checkpoint for this conversation; PID ${session.claude_pid} dead`,
+          });
+          continue;
+        }
         results.push({
           ...sessionFields(session, convKey),
           classification: 'ambiguous',

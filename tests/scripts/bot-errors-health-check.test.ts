@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
@@ -31,11 +31,19 @@ const secondParkedAddressFixture = ['50', '112', '20', '134'].join('.');
 
 beforeEach(() => {
   process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'] = '';
+  // The fixture /health bodies in this file model AUTHENTICATED instances:
+  // the daily probe only earns the diagnostic projection when a token
+  // resolves (authority-lattice ceiling), so every child run inherits this
+  // per-test fixture token via `...process.env`. Anonymous-path tests pass
+  // token flags explicitly. Scoped here (not module scope) so nothing leaks
+  // to other test files sharing the worker.
+  vi.stubEnv('WHATSOUP_HEALTH_TOKEN', 'fixture-health-token');
 });
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
+  vi.unstubAllEnvs();
   delete process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'];
 });
 
@@ -159,8 +167,23 @@ function runOpenCodeFallbackProbeInventory(
     '    assert child_env.get("PATH") == "/fixture/bin:/usr/bin:/bin"',
     '    assert child_env.get("MINIMAX_API_KEY") == "fixture-minimax-key"',
     '    assert child_env.get("WHATSOUP_INSTANCE") == "agent-alpha"',
-    '    assert child_env.get("WHATSOUP_MCP_SOCKET") == "/fixture/workspace/.claude/whatsoup.sock"',
-    '    assert child_cwd == "/fixture/workspace"',
+    // The workspace and the synthesized socket belong to the FUNCTIONAL probe,
+    // which drives a real session. The three capability surfaces (version, help,
+    // run help) only ask the binary what it supports, so they run from a fresh
+    // directory the probe owns with no socket. Asserted per surface rather than
+    // once for all four, which is what this harness used to do.
+    '    capability = dry_stdout_env in {',
+    '        "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",',
+    '        "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",',
+    '        "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",',
+    '    }',
+    '    if capability:',
+    '        assert "WHATSOUP_MCP_SOCKET" not in child_env, dry_stdout_env',
+    '        assert child_cwd != "/fixture/workspace", dry_stdout_env',
+    '        assert child_cwd and os.path.isdir(child_cwd), dry_stdout_env',
+    '    else:',
+    '        assert child_env.get("WHATSOUP_MCP_SOCKET") == "/fixture/workspace/.claude/whatsoup.sock"',
+    '        assert child_cwd == "/fixture/workspace"',
     '    if dry_stdout_env == "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT":',
     '        return "1.2.3", "", 0, False',
     '    if dry_stdout_env in {"BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT", "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT"}:',
@@ -271,7 +294,9 @@ describe('bot-errors-health-check', () => {
       env: {
         ...process.env,
         HOME: home,
+        BOT_ERRORS_STATE_DIR: join(tmpRoot, 'state'),
         BOT_ERRORS_DRY_TOOL_NAMES: 'send_message',
+        BOT_ERRORS_REQUIRED_TOOLS: 'send_message',
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'test-zero-byte',
           expectDispatcher: false,
@@ -1584,14 +1609,26 @@ print(json.dumps(samples, sort_keys=True))
 
     const outbox = join(tmpRoot, 'outbox');
     const files = dataEntries(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
-      severity: string;
-      evidence: string;
-    };
-    expect(event.severity).toBe('critical');
-    expect(event.evidence).toContain('FAIL personal_socket: <unset> exists=False');
-    expect(event.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+    expect(files).toHaveLength(2);
+    const events = files.map((file) =>
+      JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+        severity: string;
+        evidence: string;
+        alertSource?: string;
+        criticalAsset?: { failure?: { code?: string; confidence?: string } };
+      },
+    );
+    const aggregate = events.find((event) => event.alertSource !== 'required_tools');
+    expect(aggregate?.severity).toBe('critical');
+    expect(aggregate?.evidence).toContain('FAIL personal_socket: <unset> exists=False');
+    expect(aggregate?.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+    const companion = events.find((event) => event.alertSource === 'required_tools');
+    expect(companion).toBeDefined();
+    expect(companion?.evidence).toContain('FAIL required_tools_probe: outcome=probe_config_missing');
+    expect(companion?.evidence).toContain('last-trustworthy: none');
+    expect(companion?.evidence).not.toContain('required_missing=');
+    expect(companion?.criticalAsset?.failure?.code).toBe('MCP_TOOL_INVENTORY_UNOBSERVED');
+    expect(companion?.criticalAsset?.failure?.confidence).toBe('probable');
   });
 
   it('fails daily health when expected supervision services are inactive', () => {
@@ -1988,16 +2025,89 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
 
     const outbox = join(tmpRoot, 'outbox');
     const files = dataEntries(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
-      severity: string;
-      summary: string;
-      evidence: string;
+    expect(files).toHaveLength(2);
+    const events = files.map((file) =>
+      JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+        severity: string;
+        summary: string;
+        evidence: string;
+        instance?: string;
+        alertSource?: string;
+        criticalAsset?: { asset?: { kind?: string }; failure?: { code?: string; confidence?: string } };
+      },
+    );
+    const aggregate = events.find((event) => event.summary.includes('missing required tools'));
+    expect(aggregate).toBeDefined();
+    expect(aggregate?.severity).not.toBe('info');
+    expect(aggregate?.evidence).toContain('FAIL tools personal');
+    expect(aggregate?.evidence).toContain('required_missing=missing_tool');
+    const companion = events.find((event) => event.alertSource === 'required_tools');
+    expect(companion).toBeDefined();
+    expect(companion?.severity).toBe('critical');
+    expect(companion?.evidence).toContain('FAIL required_tools: required_missing=missing_tool');
+    expect(companion?.criticalAsset?.asset?.kind).toBe('mcp_tool_inventory');
+    expect(companion?.criticalAsset?.failure?.code).toBe('MCP_REQUIRED_TOOLS_MISSING');
+    expect(companion?.criticalAsset?.failure?.confidence).toBe('confirmed');
+    expect(companion?.instance ?? 'bot-errors-health').toBe('bot-errors-health');
+  });
+
+  it('clears the required-tools predicate exactly once after recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const baseEnv = {
+      ...process.env,
+      HOME: tmpRoot,
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_REQUIRED_TOOLS: 'send_message,missing_tool',
+      BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+        role: 'tool-lifecycle-test',
+        expectDispatcher: false,
+        expectQLoop: false,
+        expectPersonalSocket: false,
+        expectConfigInventory: false,
+        expectPluginInventory: false,
+      }),
     };
-    expect(event.severity).not.toBe('info');
-    expect(event.summary).toContain('missing required tools missing_tool');
-    expect(event.evidence).toContain('FAIL tools personal');
-    expect(event.evidence).toContain('required_missing=missing_tool');
+    const outbox = join(tmpRoot, 'outbox');
+    const readNew = (before: Set<string>) =>
+      dataEntries(outbox)
+        .filter((file) => !before.has(file))
+        .map((file) => JSON.parse(readFileSync(join(outbox, file), 'utf8')) as {
+          eventType: string;
+          severity: string;
+          alertSource?: string;
+          evidence: string;
+        });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message' },
+    });
+    let seen = new Set(dataEntries(outbox));
+    expect(
+      [...seen].some((file) => {
+        const event = JSON.parse(readFileSync(join(outbox, file), 'utf8')) as { alertSource?: string };
+        return event.alertSource === 'required_tools';
+      }),
+    ).toBe(true);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,missing_tool' },
+    });
+    const recoveryEvents = readNew(seen);
+    const clears = recoveryEvents.filter((event) => event.alertSource === 'required_tools');
+    expect(clears).toHaveLength(1);
+    expect(clears[0]?.eventType).toBe('clear');
+    expect(clears[0]?.severity).toBe('info');
+    expect(clears[0]?.evidence).toContain('required_missing=none');
+
+    seen = new Set(dataEntries(outbox));
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: { ...baseEnv, BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,missing_tool' },
+    });
+    const steadyEvents = readNew(seen);
+    expect(steadyEvents.filter((event) => event.alertSource === 'required_tools')).toHaveLength(0);
   });
 
   it('retries personal tool inventory before raising a missing-tool alert', () => {
@@ -2658,7 +2768,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('type=passive healthPort=9100');
   });
 
-  it('fails explicit host profiles that omit active WhatSoup instance services', () => {
+  it('exempts the managed collector while failing undeclared active WhatSoup instance services', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const knownDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'known-bot');
     mkdirSync(knownDir, { recursive: true });
@@ -2675,7 +2785,7 @@ print(m.probe_health(9092))
         ...process.env,
         HOME: tmpRoot,
         BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet,com.whatsoup.bot-errors-j1-collector',
         BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
@@ -2707,6 +2817,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('FAIL profile_coverage_service personal: active service not declared in health profile');
     expect(event.evidence).toContain('service=com.whatsoup.personal config_exists=False');
     expect(event.evidence).not.toContain('profile_coverage_service whatsoup-fleet');
+    expect(event.evidence).not.toContain('profile_coverage_service bot-errors-j1-collector');
   });
 
   it('allows explicit host profiles to opt out of unprofiled config coverage during transitions', () => {
@@ -4134,11 +4245,12 @@ print(m.probe_health(9092))
   });
 
   describe('health body validation (#1878)', () => {
-    function probeLine(status: number, body: string, expectedName?: string): string {
+    function probeLine(status: number, body: string, expectedName?: string, tokenSent = false): string {
       const nameArg = expectedName === undefined ? 'None' : JSON.stringify(expectedName);
+      const tokenArg = tokenSent ? 'True' : 'False';
       return python([
         importHealthModulePrelude(),
-        `print(m.format_health_probe('http://127.0.0.1:9090/health', ${status}, ${JSON.stringify(body)}, ${nameArg}))`,
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', ${status}, ${JSON.stringify(body)}, ${nameArg}, ${tokenArg}))`,
       ].join('\n'));
     }
 
@@ -4161,41 +4273,78 @@ print(m.probe_health(9092))
     });
 
     it('rejects a stale generated_at health body instead of reporting green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot'))
+      // Body-field validation is a diagnostic-projection concern (round 4):
+      // these freshness/status checks run on authenticated disclosed bodies.
+      expect(probeLine(200, healthyBody({ generated_at: '2000-01-01T00:00:00Z' }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_stale/);
     });
 
     it('rejects a future-skewed generated_at health body instead of reporting green', () => {
       const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: future }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_generated_at_future_skew/);
     });
 
-    it('rejects a health body missing instance identity when a name is configured', () => {
+    // Register F01: identity is asserted only on a DISCLOSED (diagnostic)
+    // body. The public liveness envelope and ambiguous undisclosed bodies
+    // leave identity unobserved — never failed. The previous test here
+    // fossilized the wrong cross-component contract (it required a
+    // public-shaped body to FAIL with health_identity_missing).
+    it('leaves identity unobserved on the public liveness envelope instead of failing it', () => {
+      const body = JSON.stringify({
+        schema_version: 'health.public.v1',
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        startupNotification: { state: 'sent' },
+      });
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=public/);
+    });
+
+    it('leaves identity unobserved on an ambiguous undisclosed body instead of failing it', () => {
       const body = JSON.stringify({ status: 'healthy', generated_at: new Date().toISOString() });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^FAIL 200 .*health_identity_missing/);
+      const line = probeLine(200, body, 'primary-bot');
+      expect(line).not.toMatch(/health_identity_missing/);
+      expect(line).not.toMatch(/^FAIL/);
+    });
+
+    it('still rejects a DISCLOSED body missing instance identity when a name is configured', () => {
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: {},
+      });
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^FAIL 200 .*health_identity_missing/);
     });
 
     it('flags a health body missing generated_at as inconclusive, never green', () => {
-      const body = JSON.stringify({ status: 'healthy', instance: { name: 'primary-bot' } });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_generated_at_missing/);
+      const body = JSON.stringify({
+        status: 'healthy',
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+        instance: { name: 'primary-bot' },
+      });
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_generated_at_missing/);
     });
 
     it('flags an unparseable generated_at as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ generated_at: 'not-a-timestamp' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_generated_at_unparseable/);
     });
 
     it('flags a missing status field as inconclusive, never green', () => {
       const body = JSON.stringify({
         generated_at: new Date().toISOString(),
+        whatsapp: { connected: true, connection: { state: 'connected' } },
         instance: { name: 'primary-bot' },
       });
-      expect(probeLine(200, body, 'primary-bot')).toMatch(/^WARN 200 .*health_status_missing/);
+      expect(probeLine(200, body, 'primary-bot', true)).toMatch(/^WARN 200 .*health_status_missing/);
     });
 
     it('flags an unknown status value as inconclusive, never green', () => {
-      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ status: 'spinning' }), 'primary-bot', true))
         .toMatch(/^WARN 200 .*health_status_unknown/);
     });
 
@@ -4203,13 +4352,59 @@ print(m.probe_health(9092))
       expect(probeLine(404, healthyBody(), 'primary-bot')).toMatch(/^FAIL 404 .*health_unexpected_status/);
     });
 
+    it('never grants an ANONYMOUS diagnostic-shaped body diagnostic authority', () => {
+      // Authority-lattice public-projection ceiling: without the token, a
+      // diagnostic-shaped body is invalid evidence for identity/auth/DB/
+      // provider claims — it must neither fail nor pass privileged checks.
+      const line = probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot');
+      expect(line).not.toMatch(/health_identity_mismatch/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=unobserved/);
+      expect(line).toMatch(/health_unauthenticated_disclosure/);
+    });
+
+    it('never fails the workload from an anonymous diagnostic-shaped unhealthy body', () => {
+      // The status field and the 5xx rule are workload verdicts only under
+      // the diagnostic projection; anonymous disclosure yields markers, not
+      // failure.
+      const body = JSON.stringify({
+        status: 'unhealthy',
+        generated_at: new Date().toISOString(),
+        whatsapp: { connected: false, connection: { state: 'close' } },
+        instance: { name: 'primary-bot' },
+      });
+      for (const status of [503, 200]) {
+        const line = probeLine(status, body, 'primary-bot');
+        expect(line).not.toMatch(/^FAIL/);
+        expect(line).not.toMatch(/health_unhealthy/);
+        expect(line).toMatch(/health_projection=unobserved/);
+      }
+    });
+
+    it('never evaluates identity from an AUTHENTICATED non-diagnostic body', () => {
+      // The ceiling binds to the projection, not to whether a token was
+      // attempted: a 200 body that is neither the disclosed diagnostic shape
+      // nor the public envelope stays unobserved even when authenticated, so
+      // identity fields inside it carry no verdict authority.
+      const body = JSON.stringify({
+        status: 'healthy',
+        generated_at: new Date().toISOString(),
+        instance: { name: 'other-bot' },
+      });
+      const line = probeLine(200, body, 'primary-bot', true);
+      expect(line).not.toMatch(/health_identity_mismatch/);
+      expect(line).not.toMatch(/^FAIL/);
+      expect(line).toMatch(/health_projection=unobserved/);
+      expect(line).toMatch(/health_token_rejected/);
+    });
+
     it('keeps an instance identity mismatch as a failure', () => {
-      expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ instance: { name: 'other-bot' } }), 'primary-bot', true))
         .toMatch(/^FAIL 200 .*health_identity_mismatch/);
     });
 
     it('accepts a fresh canonical healthy body with matching identity', () => {
-      const line = probeLine(200, healthyBody(), 'primary-bot');
+      const line = probeLine(200, healthyBody(), 'primary-bot', true);
       expect(line).not.toMatch(/^(FAIL|WARN) /);
       expect(line).toMatch(/^200 http:\/\/127\.0\.0\.1:9090\/health /);
       expect(line).toContain('status=healthy');
@@ -4219,8 +4414,9 @@ print(m.probe_health(9092))
     it('accepts healthy retained recovery debt without a general warning', () => {
       const line = probeLine(200, healthyBody({
         recovery_debt: canonicalRecoveryDebt(),
-      }), 'primary-bot');
+      }), 'primary-bot', true);
       expect(line).not.toMatch(/^(FAIL|WARN) /);
+      expect(line).toContain('status=healthy');
     });
 
     it.each([
@@ -4240,7 +4436,7 @@ print(m.probe_health(9092))
         'health_recovery_debt_invalid',
       ],
     ])('rejects %s', (_label, debt, marker) => {
-      expect(probeLine(200, healthyBody({ recovery_debt: debt }), 'primary-bot'))
+      expect(probeLine(200, healthyBody({ recovery_debt: debt }), 'primary-bot', true))
         .toMatch(new RegExp(`^FAIL 200 .*${marker}`));
     });
 
@@ -4253,7 +4449,7 @@ print(m.probe_health(9092))
           reasons: ['turn_recovery_actionable'],
           turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
         }),
-      }), 'primary-bot');
+      }), 'primary-bot', true);
       expect(line).toMatch(/^WARN 200 .*health_degraded/);
       expect(line).not.toContain('health_recovery_debt_status_contradiction');
       expect(line).not.toContain('health_recovery_debt_invalid');
@@ -4882,7 +5078,7 @@ print(m.probe_health(9092))
         ...(registryPath === undefined
           ? []
           : [`m.RUNTIME_AGENT_HEALTH_SIGNAL_REGISTRY_PATH = Path(${JSON.stringify(registryPath)})`]),
-        `print(m.format_health_probe('http://127.0.0.1:9090/health', 200, ${JSON.stringify(body)}, 'synthetic-bot'))`,
+        `print(m.format_health_probe('http://127.0.0.1:9090/health', 200, ${JSON.stringify(body)}, 'synthetic-bot', True))`,
       ].join('\n'));
     }
 
@@ -4895,6 +5091,9 @@ print(m.probe_health(9092))
         autoCompactConsecutiveRapidRearmsMax: 3,
         autoCompactNextTurnOverThreshold: 7,
         turnRecoveryBlockedUnsafe: 6,
+        turnRecoveryBlockedUnsafeSynthetic: 3,
+        turnRecoveryBlockedUnsafeSuperseded: 2,
+        turnRecoveryBlockedUnsafeStranded: 1,
         turnRecoveryQuarantinedDelivery: 2,
         turnRecoveryOrphanTransfers: 1,
         turnFinalizationRetryAttempts: 8,
@@ -4907,7 +5106,37 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_auto_compact_ineffective=5');
       expect(line).toContain('runtime_agent_auto_compact_rapid_rearms_max=3');
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe=6');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_synthetic=3');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_superseded=2');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_stranded=1');
       expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
+    });
+
+    it('labels the remaining agent counters as diagnostic evidence without raising risk', () => {
+      // Distinct value per field so a swapped label cannot pass.
+      const line = probeRuntimeAgent({
+        perChatSessionsWithoutOwner: 2,
+        perChatRespawnAbandoned: 3,
+        turnQueueHaltedScopes: 4,
+        proactiveResumeIdentityRejects: 11,
+        unownedProviderEventRejects: 12,
+        suppressedSystemTurnEffectRejects: 13,
+        chronologyDelayedDispatches: 21,
+        chronologyRecoveryReplayDispatches: 22,
+        chronologyMaxQueueAgeSeconds: 23,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_per_chat_sessions_without_owner=2');
+      expect(line).toContain('runtime_agent_per_chat_respawn_abandoned=3');
+      expect(line).toContain('runtime_agent_turn_queue_halted_scopes=4');
+      expect(line).toContain('runtime_agent_proactive_resume_identity_rejects=11');
+      expect(line).toContain('runtime_agent_unowned_provider_event_rejects=12');
+      expect(line).toContain('runtime_agent_suppressed_system_turn_effect_rejects=13');
+      expect(line).toContain('runtime_agent_chronology_delayed_dispatches=21');
+      expect(line).toContain('runtime_agent_chronology_recovery_replay_dispatches=22');
+      expect(line).toContain('runtime_agent_chronology_max_queue_age_seconds=23');
     });
 
     it('warns for declared current-risk signals and renders bounded backoff state', () => {
@@ -4930,6 +5159,13 @@ print(m.probe_health(9092))
       });
       expect(recovery).toMatch(/^WARN 200 /);
       expect(recovery).toContain('runtime_agent_at_risk');
+
+      const outboundPoison = probeRuntimeAgent({
+        outboundQueuePoisonedScopes: 1,
+      });
+      expect(outboundPoison).toMatch(/^WARN 200 /);
+      expect(outboundPoison).toContain('runtime_agent_at_risk');
+      expect(outboundPoison).toContain('runtime_agent_outbound_queue_poisoned_scopes=1');
     });
 
     it('warns visibly without inferring field severity when the registry is unavailable', () => {
@@ -5044,6 +5280,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '0',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: "You've hit your weekly limit · resets Jun 16, 10pm (America/New_York)",
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'central',
@@ -5430,11 +5679,17 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'loaded = """gui/501/com.whatsoup.agent-alpha = {\n\tenvironment = {\n\t\tPATH => /loaded/first:/loaded/second\n\t\tHOME => /fixture\n\t}\n}"""',
-      'print(json.dumps({"parsed": m.launchctl_environment_path(loaded), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
+      // launchctl_environment_path was a one-line wrapper with no production
+      // caller; it is gone and its parse assertion is carried here, driving the
+      // surviving readers directly: launchctl_environment for the block parse,
+      // environment_provider_path for the PATH accessor.
+      'parsed_env = m.launchctl_environment(loaded)',
+      'print(json.dumps({"parsed": m.environment_provider_path(parsed_env), "home": parsed_env.get("HOME"), "match": m.instance_provider_path_match("/loaded/first:/loaded/second", "/loaded/first:/loaded/second"), "mismatch": m.instance_provider_path_match("/disk", "/loaded")}))',
     ].join('\n'))) as Record<string, unknown>;
 
     expect(result).toEqual({
       parsed: '/loaded/first:/loaded/second',
+      home: '/fixture',
       match: true,
       mismatch: false,
     });
@@ -5475,7 +5730,7 @@ print(m.probe_health(9092))
     const lines = JSON.parse(python([
       importHealthModulePrelude(),
       'import json',
-      'm.instance_provider_path = lambda name: "/runtime/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/runtime/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/runtime/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/runtime/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {"opencodeProviderProbeCommand": "/gui-only/bin/opencode"}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
@@ -5490,7 +5745,7 @@ print(m.probe_health(9092))
       importHealthModulePrelude(),
       'import json',
       'm.HOST_PLATFORM = "darwin"',
-      'm.instance_provider_path = lambda name: "/generated/bin:/usr/bin:/bin"',
+      'm.instance_plist_governed_environment = lambda name: (m.GOVERNED_PLIST_READABLE, {"PATH": "/generated/bin:/usr/bin:/bin"})',
       'm.loaded_instance_environment = lambda name: {"PATH": "/loaded/bin:/usr/bin:/bin", "HOME": "/fixture"}',
       'm.executable_candidate = lambda command, path_value=None: "/loaded/bin/opencode"',
       'lines = m.opencode_provider_probe_inventory({}, {}, "agent-alpha", {"type": "agent", "agentOptions": {"provider": "opencode-cli", "model": "xai/grok-4"}}, "opencode-cli")',
@@ -6124,6 +6379,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain: "/Users/testuser/Library/Keychains/login.keychain-db"\\n"svce"<blob>="Claude_Credential-fixture"',
@@ -6235,7 +6503,10 @@ print(m.probe_health(9092))
       'import json',
       `m.current_epoch = lambda: ${now}`,
       'def evidence(snapshot):',
-      '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      '    # The producer always emits the whatsapp block; without it the body',
+      '    # is non-diagnostic and the projection ceiling strips its fields.',
+      '    snapshot.setdefault("whatsapp", {"connected": True})',
+      '    line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       '    return m.provider_live_session_from_health("claude-cli", line, 1800)',
       'progressing = evidence({',
       '    "status": "healthy",',
@@ -6344,6 +6615,7 @@ print(m.probe_health(9092))
       'snapshot = {',
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "lastSessionStartedAt": "2026-06-12T00:00:00Z",',
@@ -6351,7 +6623,7 @@ print(m.probe_health(9092))
       '    "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "claude-cli", "lastSuccessfulTurnSessionCurrent": True},',
       '  }},',
       '}',
-      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       'result = m.provider_live_session_from_health("claude-cli", line, 1800)',
       'print(json.dumps({"line": line, "fragments": result["fragments"]}))',
     ].join('\n'))) as { line: string; fragments: string[] };
@@ -6376,6 +6648,7 @@ print(m.probe_health(9092))
       '  "status": "healthy",',
       '  "generated_at": "2026-06-12T02:59:58Z",',
       '  "instance": {"provider": "instance-provider-token-do-not-emit", "effectiveProvider": "instance-effective-token-do-not-emit"},',
+      '  "whatsapp": {"connected": True},',
       '  "runtime": {"agent": {',
       '    "activeSessions": 1, "lastSessionStatus": "active",',
       '    "primaryProvider": "primary-provider-token-do-not-emit",',
@@ -6384,7 +6657,7 @@ print(m.probe_health(9092))
       '    "turnCapability": {"lastSuccessfulTurnAt": 1781233140000, "lastSuccessfulTurnProvider": "successful-provider-token-do-not-emit", "lastSuccessfulTurnSessionCurrent": True},',
       '  }},',
       '}',
-      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha")',
+      'line = m.health_probe_details(200, json.dumps(snapshot), "agent-alpha", True)',
       'result = m.provider_live_session_from_health("claude-cli", line, 1800)',
       'print(json.dumps({"line": line, "fragments": result["fragments"], "fresh": result["fresh"]}))',
     ].join('\n'))) as { line: string; fragments: string[]; fresh: boolean };
@@ -6536,6 +6809,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6653,6 +6939,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6786,6 +7085,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '0',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT: 'keychain item exists',
@@ -6921,6 +7233,19 @@ print(m.probe_health(9092))
           },
         }),
         BOT_ERRORS_DRY_PROVIDER_PROBE_RC: '1',
+        // These rows exercise provider AUTH classification, not LaunchAgent
+        // PATH governance, and they pin darwin for the keychain code path. On a
+        // darwin host with no loadable launchd job the probe now refuses before
+        // reaching the classification under test -- correctly, that is the
+        // fail-closed this branch adds. This is the sanctioned way to say "PATH
+        // governance does not apply to this fixture": it is the one affordance
+        // that legitimately marks the governed surfaces not-applicable, because
+        // it replaces the provider PATH at its source.
+        //
+        // Without it these rows were HOST-DEPENDENT: they passed on a Linux
+        // runner and failed on a macOS one, and only a production bypass that
+        // read the probe-stub variables was hiding that.
+        BOT_ERRORS_DRY_INSTANCE_PROVIDER_PATH: '/usr/bin:/bin',
         BOT_ERRORS_DRY_PROVIDER_PROBE_STDOUT: 'Not logged in · Please run /login',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_RC: '36',
         BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDERR: 'security: SecKeychainSearchCopyNext: User interaction is not allowed.',
@@ -7588,14 +7913,19 @@ print(m.probe_health(9092))
     expect(readJsonl(directLog)).toHaveLength(1);
 
     const deadmanStatePath = join(tmpRoot, 'deadman-state.json');
-    const stateDoc = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as {
-      incidents: Record<string, { firstSeenAtEpoch: number; lastSentAtEpoch: number; lastSentAt: string; sentCount: number; suppressed: number }>;
+    type EpisodeState = {
+      episode: {
+        openedAtEpoch: number;
+        members: Record<string, { firstSeenAtEpoch: number }>;
+        onset: { lastAcceptedAtEpoch: number; sentCount: number; suppressed: number };
+      };
     };
-    const incidentKey = Object.keys(stateDoc.incidents)[0]!;
-    expect(stateDoc.incidents[incidentKey]!.firstSeenAtEpoch).toBe(baseEpoch);
-    expect(stateDoc.incidents[incidentKey]!.lastSentAtEpoch).toBe(baseEpoch);
-    expect(stateDoc.incidents[incidentKey]!.sentCount).toBe(1);
-    expect(stateDoc.incidents[incidentKey]!.suppressed).toBe(2);
+    const stateDoc = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as EpisodeState;
+    expect(stateDoc.episode.openedAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.members['service_inactive']!.firstSeenAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.onset.lastAcceptedAtEpoch).toBe(baseEpoch);
+    expect(stateDoc.episode.onset.sentCount).toBe(1);
+    expect(stateDoc.episode.onset.suppressed).toBe(2);
 
     utimesSync(dispatcherState, new Date((baseEpoch + 61) * 1000), new Date((baseEpoch + 61) * 1000));
     const afterCooldown = runDeadman(tmpRoot, { ...env, BOT_ERRORS_DRY_NOW_EPOCH: String(baseEpoch + 61) });
@@ -7605,13 +7935,12 @@ print(m.probe_health(9092))
     expect(directMessages).toHaveLength(2);
     expect(String(directMessages[1]!['text'])).toContain('suppressed_since_last_send: 2');
 
-    const updatedState = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as {
-      incidents: Record<string, { firstSeenAtEpoch: number; lastSentAtEpoch: number; sentCount: number; suppressed: number }>;
-    };
-    expect(updatedState.incidents[incidentKey]!.firstSeenAtEpoch).toBe(baseEpoch);
-    expect(updatedState.incidents[incidentKey]!.lastSentAtEpoch).toBe(baseEpoch + 61);
-    expect(updatedState.incidents[incidentKey]!.sentCount).toBe(2);
-    expect(updatedState.incidents[incidentKey]!.suppressed).toBe(0);
+    const updatedState = JSON.parse(readFileSync(deadmanStatePath, 'utf8')) as EpisodeState;
+    expect(updatedState.episode.openedAtEpoch).toBe(baseEpoch);
+    expect(updatedState.episode.members['service_inactive']!.firstSeenAtEpoch).toBe(baseEpoch);
+    expect(updatedState.episode.onset.lastAcceptedAtEpoch).toBe(baseEpoch + 61);
+    expect(updatedState.episode.onset.sentCount).toBe(2);
+    expect(updatedState.episode.onset.suppressed).toBe(0);
   });
 
   it('falls back to email when deadman direct WhatsApp send fails', () => {
@@ -7645,11 +7974,16 @@ print(m.probe_health(9092))
     expect(fallbackArgs).toContain('BOT ERRORS DEADMAN - dispatcher supervision failed');
 
     const stateDoc = JSON.parse(readFileSync(join(tmpRoot, 'deadman-state.json'), 'utf8')) as {
-      incidents: Record<string, { lastSendStatus: { direct_whatsapp: string; email_fallback: string } }>;
+      episode: {
+        onset: {
+          deliveredKind: string;
+          lastAttempt: { direct_whatsapp: string; email_fallback: string };
+        };
+      };
     };
-    const incident = Object.values(stateDoc.incidents)[0]!;
-    expect(incident.lastSendStatus.direct_whatsapp).toBe('failed');
-    expect(incident.lastSendStatus.email_fallback).toBe('accepted_unconfirmed');
+    expect(stateDoc.episode.onset.lastAttempt.direct_whatsapp).toBe('failed');
+    expect(stateDoc.episode.onset.lastAttempt.email_fallback).toBe('accepted_unconfirmed');
+    expect(stateDoc.episode.onset.deliveredKind).toBe('accepted_unconfirmed');
   });
 
   it('sends a single deadman recovery clear when the supervised path is healthy again', () => {
@@ -7693,11 +8027,13 @@ print(m.probe_health(9092))
     expect(String(directMessages[1]!['text'])).toContain('BOT ERRORS DEADMAN RECOVERY');
 
     const deadmanState = JSON.parse(readFileSync(join(tmpRoot, 'deadman-state.json'), 'utf8')) as {
-      incidents: Record<string, { status: string; resolvedAt: string }>;
+      episode: unknown;
+      lastResolvedEpisode: { status: string; resolvedAt: string; resolution: string };
     };
-    const incident = Object.values(deadmanState.incidents)[0]!;
-    expect(incident.status).toBe('resolved');
-    expect(incident.resolvedAt).toMatch(/Z$/);
+    expect(deadmanState.episode).toBeNull();
+    expect(deadmanState.lastResolvedEpisode.status).toBe('resolved');
+    expect(deadmanState.lastResolvedEpisode.resolvedAt).toMatch(/Z$/);
+    expect(deadmanState.lastResolvedEpisode.resolution).toBe('recovery_accepted');
 
     utimesSync(dispatcherState, new Date((baseEpoch + 5) * 1000), new Date((baseEpoch + 5) * 1000));
     const recoveredAgain = runDeadman(tmpRoot, {

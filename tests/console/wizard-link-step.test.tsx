@@ -128,40 +128,55 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+
+// Pairing no longer begins on mount (q-canary T5.8): every test that expects
+// the EventSource to open must click the explicit Begin control first.
+async function beginPairing(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(await screen.findByRole('button', { name: /begin pairing/i }))
+  })
+}
+
 // ─── Initial render ──────────────────────────────────────────────────────────
 describe('LinkStep — initial render (waiting, no QR)', () => {
   it('shows the "Scan with WhatsApp" heading', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(screen.getByText('Scan with WhatsApp')).toBeDefined()
   })
 
   it('shows the navigation instructions', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(screen.getByText(/Linked Devices/)).toBeDefined()
   })
 
   it('shows "Generating QR code..." before any qr event arrives', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(screen.getByText('Generating QR code...')).toBeDefined()
   })
 
   it('does not render QrDisplay before a qr event', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(screen.queryByTestId('qr-display')).toBeNull()
   })
 
   it('opens EventSource to /api/lines/:name/auth (no fleet token in URL)', async () => {
     render(<LinkStep lineName="alpha-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(registry[0].url).toBe('/api/lines/alpha-line/auth')
   })
 
   it('URL-encodes line names that contain special characters', async () => {
     render(<LinkStep lineName="line with spaces" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(registry[0].url).toBe('/api/lines/line%20with%20spaces/auth')
   })
@@ -177,6 +192,7 @@ describe('LinkStep — fleet-token path', () => {
     )
 
     render(<LinkStep lineName="beta" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     expect(registry[0].url).toBe('/api/lines/beta/auth?ticket=sse-ticket-abc')
   })
@@ -189,6 +205,7 @@ describe('LinkStep — fleet-token path', () => {
     )
 
     render(<LinkStep lineName="gamma" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() =>
       expect(screen.queryByText('Authentication failed')).not.toBeNull(),
     )
@@ -201,6 +218,7 @@ describe('LinkStep — fleet-token path', () => {
 describe('LinkStep — qr event handling', () => {
   it('renders QrDisplay with the decoded QR value after receiving a qr event', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -213,6 +231,7 @@ describe('LinkStep — qr event handling', () => {
 
   it('swaps from "Generating QR code..." to "Waiting for scan..." after a qr event', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -225,6 +244,7 @@ describe('LinkStep — qr event handling', () => {
 
   it('updates the QR value when a second qr event arrives', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -240,6 +260,7 @@ describe('LinkStep — qr event handling', () => {
 
   it('passes size=256 to QrDisplay by default', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -251,6 +272,7 @@ describe('LinkStep — qr event handling', () => {
 
   it('enters error state when the qr event carries an invalid payload', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -264,6 +286,7 @@ describe('LinkStep — qr event handling', () => {
 
   it('clears a previous error when retry opens a new EventSource and a valid qr event arrives', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -297,6 +320,7 @@ describe('LinkStep — connected event', () => {
 
   it('transitions to the success screen showing "Line is live!"', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -308,6 +332,7 @@ describe('LinkStep — connected event', () => {
 
   it('displays the lineName in the success description', async () => {
     render(<LinkStep lineName="prod-line-1" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -320,6 +345,7 @@ describe('LinkStep — connected event', () => {
 
   it('renders a "View Line" button on the success screen', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -332,6 +358,7 @@ describe('LinkStep — connected event', () => {
   it('calls onComplete when "View Line" is clicked', async () => {
     const onComplete = vi.fn()
     render(<LinkStep lineName="my-line" onComplete={onComplete} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -344,6 +371,7 @@ describe('LinkStep — connected event', () => {
 
   it('closes the EventSource on connected', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     const src = latestSource()
 
@@ -356,6 +384,7 @@ describe('LinkStep — connected event', () => {
 
   it('does not show QrDisplay in the connected state', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -370,6 +399,7 @@ describe('LinkStep — connected event', () => {
 describe('LinkStep — server-sent error event', () => {
   it('shows "Authentication failed" heading on a generic error', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -382,6 +412,7 @@ describe('LinkStep — server-sent error event', () => {
 
   it('shows "Session timed out" heading when the error message contains "timed out"', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -393,6 +424,7 @@ describe('LinkStep — server-sent error event', () => {
 
   it('shows the fallback error text when the error event carries no data', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -406,6 +438,7 @@ describe('LinkStep — server-sent error event', () => {
 
   it('closes the EventSource on a server-sent error event', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
     const src = latestSource()
 
@@ -418,6 +451,7 @@ describe('LinkStep — server-sent error event', () => {
 
   it('renders a "Try Again" button on the error screen', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -432,6 +466,7 @@ describe('LinkStep — server-sent error event', () => {
 describe('LinkStep — retry / restart', () => {
   it('"Try Again" resets to waiting state and opens a new EventSource', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -445,8 +480,9 @@ describe('LinkStep — retry / restart', () => {
     expect(screen.getByText('Scan with WhatsApp')).toBeDefined()
   })
 
-  it('"Try Again" resets the retry count so onerror can cycle again', async () => {
+  it('"Try Again" starts exactly one fresh attempt (no automatic retry loop)', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
     act(() => {
@@ -456,35 +492,36 @@ describe('LinkStep — retry / restart', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try Again' }))
     await waitFor(() => expect(registry).toHaveLength(2))
 
-    // One native error on the fresh source should not show the persistent error.
+    // A native error on the fresh source surfaces the error state again and
+    // does NOT silently open another EventSource: each pairing attempt is an
+    // explicit operator action (q-canary T5.8).
     act(() => {
       latestSource().triggerNativeError()
     })
-    await waitFor(() => expect(registry).toHaveLength(3))
-    expect(screen.queryByText('Authentication failed')).toBeNull()
+    await waitFor(() =>
+      expect(screen.queryByText(/Use Retry to start a new pairing attempt/)).not.toBeNull(),
+    )
+    expect(registry).toHaveLength(2)
   })
 })
 
 // ─── native onerror retry exhaustion ─────────────────────────────────────────
 describe('LinkStep — native onerror exhaustion', () => {
-  it('shows a persistent error after 5 consecutive native onerror events', async () => {
+  it('shows a persistent error after the FIRST native onerror (no silent reconnect loop)', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     await waitFor(() => expect(registry).toHaveLength(1))
 
-    for (let attempt = 0; attempt < 5; attempt++) {
-      act(() => {
-        latestSource().triggerNativeError()
-      })
-      if (attempt < 4) {
-        // eslint-disable-next-line no-await-in-loop -- sequential retry probing requires ordered awaits; expires 2026-12-31
-        await waitFor(() => expect(registry).toHaveLength(attempt + 2))
-      }
-    }
+    act(() => {
+      latestSource().triggerNativeError()
+    })
 
     await waitFor(() =>
       expect(screen.queryByText('Authentication failed')).not.toBeNull(),
     )
-    expect(screen.getByText(/multiple attempts/)).toBeDefined()
+    expect(screen.getByText(/Use Retry to start a new pairing attempt/)).toBeDefined()
+    // No automatic reconnection was attempted.
+    expect(registry).toHaveLength(1)
   })
 })
 
@@ -494,8 +531,9 @@ describe('LinkStep — native onerror exhaustion', () => {
 // fake timers after render to avoid the waitFor+fake-timer deadlock that occurs
 // under --pool=forks.
 describe('LinkStep — QR age / expiry warning', () => {
-  it('shows the expiry warning after the QR age exceeds 45 seconds', () => {
+  it('shows the expiry warning after the QR age exceeds 45 seconds', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     // EventSource is constructed synchronously by FakeEventSource stub.
     expect(registry).toHaveLength(1)
 
@@ -515,8 +553,9 @@ describe('LinkStep — QR age / expiry warning', () => {
     }
   })
 
-  it('resets the QR age to 0 when a new qr event arrives', () => {
+  it('resets the QR age to 0 when a new qr event arrives', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     expect(registry).toHaveLength(1)
 
     vi.useFakeTimers()
@@ -542,8 +581,9 @@ describe('LinkStep — QR age / expiry warning', () => {
     }
   })
 
-  it('shows "Waiting for scan..." before the expiry threshold', () => {
+  it('shows "Waiting for scan..." before the expiry threshold', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     expect(registry).toHaveLength(1)
 
     vi.useFakeTimers()
@@ -565,6 +605,7 @@ describe('LinkStep — QR age / expiry warning', () => {
 
   it('clears the expiry warning after retry + new qr event', async () => {
     render(<LinkStep lineName="my-line" onComplete={vi.fn()} />)
+    await beginPairing()
     expect(registry).toHaveLength(1)
 
     vi.useFakeTimers()

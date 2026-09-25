@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
 const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSourceMock = vi.hoisted(() => vi.fn(() => true));
@@ -90,12 +92,14 @@ vi.mock('../../src/logger.ts', async () => {
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: emitAlertMock,
   emitAlertChecked: emitAlertMock,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: clearAlertSourceMock,
   clearAlertSourceChecked: clearAlertSourceMock,
 }));
 
 import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
+import { scheduleBondEventMaintenance } from '../../src/transport/bond-event-log.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -226,6 +230,8 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // T26d — Reconnect Resilience Tests
 // ---------------------------------------------------------------------------
+
+usePerTestBotErrorsMarkerIsolation();
 
 describe('ConnectionManager — backoff sequence', () => {
   it('first disconnect schedules reconnect with 1s backoff', async () => {
@@ -595,6 +601,47 @@ describe('ConnectionManager — terminal conditions', () => {
       reconnectDecision: 'reconnect:auth-401-unclassified',
     });
 
+    await manager.shutdown();
+  });
+
+  it('an unwritable bond event log is logged and never breaks disconnect handling', async () => {
+    vi.setSystemTime(new Date('2026-05-10T09:00:00.000Z'));
+    mkdirSync(join(testDataRoot, 'bond-events.ndjson'), { recursive: true, mode: 0o700 });
+    chmodSync(testDataRoot, 0o700);
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(loggedOutStreamErrorEvent('replaced'));
+
+    expect(manager.getConnectionState()).toMatchObject({ state: 'reconnecting', reconnectAttempts: 1 });
+    expect((manager as any).log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.objectContaining({ code: 'EINVAL' }) }),
+      'failed to persist WhatsApp bond event',
+    );
+    expect(lstatSync(join(testDataRoot, 'bond-events.ndjson')).isDirectory()).toBe(true);
+
+    await manager.shutdown();
+  });
+
+  it('startup recovers a bond event segment left by an interrupted rotation', async () => {
+    vi.useRealTimers();
+    mkdirSync(testDataRoot, { recursive: true, mode: 0o700 });
+    chmodSync(testDataRoot, 0o700);
+    const segment = join(testDataRoot, 'bond-events.ndjson.20260510T090000000Z-0000000a');
+    const records = '{"event":"before-crash"}\n';
+    writeFileSync(segment, records, { mode: 0o600 });
+
+    const manager = new ConnectionManager();
+    // The constructor's pass holds the maintenance lock until its first await,
+    // so the lock existing here proves the constructor started recovery.
+    expect(existsSync(join(testDataRoot, 'bond-events.ndjson.maintenance.lock'))).toBe(true);
+    const report = await scheduleBondEventMaintenance(testDataRoot);
+
+    expect(report.pendingSegments).toBe(0);
+    expect(existsSync(segment)).toBe(false);
+    expect(gunzipSync(readFileSync(`${segment}.gz`)).toString('utf8')).toBe(records);
     await manager.shutdown();
   });
 

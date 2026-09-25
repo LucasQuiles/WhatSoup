@@ -194,6 +194,31 @@ export async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMes
   await (runtime as unknown as { turnQueue: { idle: () => Promise<void> } }).turnQueue.idle();
 }
 
+/**
+ * Wait for a per-chat turn to reach the session. enqueuePerChatRuntimeTurn returns
+ * a synchronous boolean and the FIFO dispatches detached from turnChain, so
+ * sendAndDrain never covered dispatch — and the coordinator now awaits the
+ * delivery-echo gate in front of it, putting dispatch a few microtasks further out.
+ */
+export async function awaitDispatchedTurn(
+  sendTurn: ReturnType<typeof vi.fn>,
+  text: string,
+): Promise<void> {
+  await vi.waitFor(() => { expect(sendTurn).toHaveBeenCalledWith(text); });
+}
+
+/**
+ * Await a seeding turn's dispatch, then clear the spy — so a later assertion about
+ * what the session was asked to run measures its own window and not this turn.
+ */
+export async function retireDispatchedTurn(
+  sendTurn: ReturnType<typeof vi.fn>,
+  text: string,
+): Promise<void> {
+  await awaitDispatchedTurn(sendTurn, text);
+  sendTurn.mockClear();
+}
+
 export function attachRuntimeFaultMarkerSpies(runtime: AgentRuntime): {
   durability: {
     completeInbound: ReturnType<typeof vi.fn>;
@@ -236,11 +261,14 @@ export function makeQueueMock(targetChatJid: string): IOutboundQueue {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     endTurn: vi.fn(),

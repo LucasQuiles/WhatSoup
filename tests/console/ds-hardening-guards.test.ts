@@ -64,16 +64,39 @@ describe('PDR-3 fail-closed read pairing — every dbReader call has an error ch
 
 /** Pre-#1925 hooks grandfathered without the freshness field. Promotion of
  *  these onto the contract is tracked debt — do NOT add new entries here;
- *  new hooks must carry queryFreshness. */
+ *  new hooks must carry queryFreshness.
+ *
+ *  ⚠ A stale entry here is INVISIBLE to this guard: the check is an allowlist
+ *  `continue`, so a name that no longer needs exempting (or no longer exists)
+ *  can never fail. #2519 removed four entries: `useLogs` and `useFeed` were
+ *  promoted onto the contract in the same commit; `useLines` was already
+ *  carrying queryFreshness; `useKpis` had zero occurrences left anywhere in
+ *  console/src or tests/. Audit this list by running the extractor below over
+ *  the scanned files — a green run proves nothing about a stale entry. */
 const LEGACY_NO_FRESHNESS = new Set([
-  'useLines', // pre-#1925 (the D-3 PR promotes it onto the contract)
-  'useFeed', // pre-#1925 (caught by this guard on first run — same class as useLines)
-  'useLine', 'useChats', 'useMessages', 'useLogs', 'useAccess',
-  'useTyping', 'useProviders', 'useProviderStatus', 'useKpis',
+  'useLine', 'useChats', 'useMessages', 'useAccess',
+  'useTyping', 'useProviders', 'useProviderStatus',
+  // #2519 scope-gap backfill (pre-#1925 hook whose file the guard never scanned —
+  // not a new exemption of the "new hooks must carry queryFreshness" kind).
+  // Grandfathered on LEAD JUDGMENT — there is no owner adjudication on record for
+  // this entry. The reasoning: an aged version check costs a delayed update toast,
+  // never stale-data-rendered-as-live, and the payload already carries the
+  // server-stamped checkedAt. The alternative — promoting useUpdateCheck onto the
+  // contract as useLogs/useFeed were — was weighed and declined for that reason,
+  // not defaulted to. Re-open it if a consumer ever renders the check as live.
+  'useUpdateCheck',
 ])
 
 describe('freshness contract — data hooks carry queryFreshness (#1925/#1934)', () => {
-  const hookFiles = ['console/src/hooks/use-fleet.ts', 'console/src/hooks/use-metrics.ts']
+  // #2519: use-update-check.ts joined the scanned set in the same commit that
+  // grandfathered useUpdateCheck — either change alone is decorative (an
+  // exemption for an unscanned file is an inert diff; scope without the
+  // exemption fails the guard, by design).
+  const hookFiles = [
+    'console/src/hooks/use-fleet.ts',
+    'console/src/hooks/use-metrics.ts',
+    'console/src/hooks/use-update-check.ts',
+  ]
 
   function exportedQueryHooks(src: string): Array<{ name: string; body: string }> {
     const out: Array<{ name: string; body: string }> = []

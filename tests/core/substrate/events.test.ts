@@ -15,6 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
 import { writeBeadEvent } from '../../../src/core/substrate/events.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile(): string {
   return join(tmpdir(), `whatsoup-events-${randomBytes(8).toString('hex')}.db`);
@@ -175,5 +176,39 @@ describe('writeBeadEvent', () => {
     const id3 = writeBeadEvent(db.raw, { beadId, eventType: 'c', actor: 'tester' });
     expect(id2).toBeGreaterThan(id1);
     expect(id3).toBeGreaterThan(id2);
+  });
+
+  it('coalesces an explicit null `at` to the injected clock (matches main)', () => {
+    const beadId = insertParentBead(db);
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `const at = args.at ?? nowUnixSec()` coalesces an explicit null to
+    // the clock time, so the insert succeeds and created_at equals the fake
+    // clock seconds (floor(t0ms/1000) = 2_000_000_000), not a preserved NULL.
+    const rowId = writeBeadEvent(db.raw, {
+      beadId,
+      eventType: 'noted',
+      actor: 'tester',
+      at: null as unknown as number,
+    }, fakeClock(t0ms));
+    const row = db.raw
+      .prepare('SELECT created_at FROM bead_events WHERE id = ?')
+      .get(rowId) as { created_at: number };
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
+  });
+
+  it('derives the default `at` from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const beadId = insertParentBead(db);
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const rowId = writeBeadEvent(db.raw, {
+      beadId,
+      eventType: 'proposed',
+      actor: 'tester',
+    }, fakeClock(t0ms));
+    const row = db.raw
+      .prepare('SELECT created_at FROM bead_events WHERE id = ?')
+      .get(rowId) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 });

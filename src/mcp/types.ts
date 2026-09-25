@@ -51,6 +51,8 @@ export interface ConversationBinding {
 
 export interface SessionContext {
   tier: SessionTier;
+  /** Narrow runtime purpose used for fail-closed tool restrictions. */
+  purpose?: 'scheduled-agent-job';
   /** Canonical conversation identity — for reads, queries, scope checks */
   conversationKey?: string;
   /** Current raw JID alias — for sends, replies, reactions */
@@ -72,6 +74,118 @@ export interface SessionContext {
   allowedRoot?: string;
   /** Abort signal tied to the MCP client connection. Fires when the client disconnects. */
   abortSignal?: AbortSignal;
+}
+
+/** Mutable authorization and confinement fields resolved from the turn currently executing. */
+export interface ExecutingSessionContext {
+  actorJid: SessionContext['actorJid'];
+  purpose: SessionContext['purpose'];
+  conversationKey: SessionContext['conversationKey'];
+  /**
+   * Explicit assertion that a REAL executing-turn resolution produced this
+   * context (#3435, L1). Optional: a real resolution is normally recognized
+   * because it carries at least one defined authorization/confinement field. The
+   * all-undefined context is the UNRESOLVED state (`noExecutingSession()`, or a
+   * read-time resolver that found no executing-turn entry).
+   *
+   * WHAT SUPPLIES THAT DEFINED FIELD IS PER-SURFACE, AND IT IS NOT ALWAYS THE
+   * TURN. The per-chat actor socket is the standing exception: its resolver
+   * substitutes the SOCKET IDENTITY's conversation key whenever the executing turn
+   * left one undefined (src/runtimes/agent/per-chat-mcp-socket-manager.ts
+   * `conversationKey: executing.conversationKey ?? toConversationKey(identity.value)`),
+   * so every context leaving that surface carries a defined `conversationKey` and
+   * classifies `'resolved'` whether or not a turn actually resolved — the
+   * fail-closed UNRESOLVED branch is unreachable there by construction. That is
+   * intentional, not an oversight: the socket is created per bound conversation and
+   * its identity IS the confinement, so no ambiguous empty context can reach the
+   * gate through it. Do NOT read the branch's presence at that call site as runtime
+   * protection.
+   *
+   * The branch stays load-bearing for the surfaces that CAN emit an all-undefined
+   * context: the passive operator socket (`noExecutingSession()`,
+   * src/runtimes/passive/runtime.ts) and any read-time resolver that finds no
+   * executing-turn entry.
+   *
+   * Set `resolved: true` ONLY to assert resolution for a legitimately
+   * all-undefined resolved turn — in practice just the direct-registry test
+   * adapter, which snapshots a caller-built session rather than reading a live
+   * register entry. Never set it to paper over an empty resolution: that reopens
+   * the fail-open this brand closes. The permitted sites are inventoried and
+   * count-pinned by `npm run guard:resolved-override`
+   * (scripts/resolved-override-inventory-guard.ts): a production caller setting it
+   * fails the push gate.
+   */
+  resolved?: boolean;
+}
+
+declare const resolvedSessionContextBrand: unique symbol;
+
+/**
+ * A request-local session whose mutable authorization fields were resolved
+ * read-time. The brand additionally carries `executingResolution`, the explicit
+ * three-state discriminator the registry gate reads (#3435, L1):
+ *
+ *   - `'resolved'`   — a real executing-turn resolution produced this snapshot.
+ *                      Split further by `purpose`: resolved-normal (undefined
+ *                      purpose = an ordinary, non-scheduled turn) vs
+ *                      resolved-scheduled (`purpose === 'scheduled-agent-job'`).
+ *   - `'unresolved'` — an empty (all-undefined) context reached the gate; no real
+ *                      resolution happened. The scheduled-agent-job forbidden-tool
+ *                      set is denied fail-closed in this state.
+ *
+ * An undefined `purpose` is NOT by itself the unresolved state — on a
+ * resolved-normal turn it is the load-bearing representation of "this is a normal
+ * (non-scheduled) turn," and the history-mutation tools MUST stay reachable there.
+ */
+export type ResolvedSessionContext = SessionContext & {
+  readonly [resolvedSessionContextBrand]: true;
+  readonly executingResolution: 'resolved' | 'unresolved';
+};
+
+/** The sole production constructor for registry-authorized session snapshots. */
+export function resolveSessionContext(
+  session: SessionContext,
+  executing: ExecutingSessionContext,
+): ResolvedSessionContext {
+  const { resolved: assertedResolved, ...executingFields } = executing;
+  // A resolution is REAL when it is explicitly asserted OR carries at least one
+  // defined authorization/confinement field. The all-undefined context — the
+  // issue's own definition of the empty context — is the UNRESOLVED state
+  // (`noExecutingSession()`, or a read-time resolver that found no executing-turn
+  // entry). A caller that structurally cannot produce an all-undefined context
+  // needs no explicit assertion: the per-chat actor socket, for one, pins a
+  // `conversationKey` from the SOCKET IDENTITY before calling in, so its contexts
+  // are always classified resolved (see the `resolved` field's docstring above —
+  // that is a property of the socket, not of the turn). The callers that CAN emit
+  // one — the passive operator socket, and a read-time resolver that finds no
+  // entry — land in the fail-closed branch, which is the point.
+  const executingResolution: ResolvedSessionContext['executingResolution'] =
+    assertedResolved === true
+    || executingFields.actorJid !== undefined
+    || executingFields.purpose !== undefined
+    || (typeof executingFields.conversationKey === 'string' && executingFields.conversationKey.length > 0)
+      ? 'resolved'
+      : 'unresolved';
+  return { ...session, ...executingFields, executingResolution } as ResolvedSessionContext;
+}
+
+/**
+ * The UNCONFINED-OPERATOR resolver (#3435, L2): the read-time context for a
+ * surface that never executes an agent turn. It produces the all-undefined
+ * (UNRESOLVED) executing context, which is fail-closed for `actorJid`
+ * (`sensitiveAllowed` denies) AND — since #3435 — for the scheduled-agent-job
+ * forbidden-tool set (an unresolved context denies it).
+ *
+ * It is NOT a general "confine" helper. It does NOT confine conversation scope:
+ * an unresolved context leaves the cross-conversation guard unchanged (the
+ * passive operator socket is intentionally unconfined). Do NOT wire this to a
+ * surface that runs scheduled turns expecting it to gate `purpose`/`conversationKey`
+ * by scope — it only asserts "no executing turn." Its sole production consumer is
+ * the passive operator socket (src/runtimes/passive/runtime.ts), which processes
+ * no messages and therefore legitimately needs none of the history-mutation tools.
+ */
+export function noExecutingSession(): ExecutingSessionContext {
+  return { actorJid: undefined, purpose: undefined, conversationKey: undefined };
 }
 
 export interface ToolDeclaration {
@@ -105,6 +219,19 @@ export interface ToolDeclaration {
    */
   sensitive?: boolean;
   /**
+   * S1 (bond-revocation programme, 2026-08-17). Marks a tool that intentionally
+   * asks WhatsApp to remove this companion device. The registry writes an actor
+   * receipt to the bond-actor ledger through the handler's dispatch callback at
+   * the closest practical seam before the socket request, so the resulting
+   * terminal bond event can name what asked for it without misclassifying a
+   * pre-dispatch validation or socket-acquisition failure.
+   *
+   * Exactly one tool carries this today (`logout`). It is deliberately NOT a
+   * general "dangerous" flag: `sensitive` already gates authorization. This says
+   * something narrower and factual — the call requests device removal.
+   */
+  bondEffect?: 'requests_device_removal';
+  /**
    * Functional group tag (QR-017 / #1976 — progressive-disclosure taxonomy).
    * OPTIONAL and backward-compatible: untagged tools remain valid. Populated
    * at the registration seam (ToolRegistry.withModule, driven by
@@ -131,7 +258,17 @@ export interface ToolDeclaration {
    * creation. See src/mcp/external-effect.ts.
    */
   externalEffect?: import('./external-effect.ts').ExternalEffectDeclaration;
-  handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>;
+  handler: (
+    params: Record<string, unknown>,
+    session: SessionContext,
+    recordBondEffectDispatch?: () => void,
+    /**
+     * Issue 3457: the registry's cross-conversation guard, for a target the
+     * handler resolves itself (an alias). Throws CrossConversationDenied,
+     * which the handler must let escape. The registry always passes it.
+     */
+    assertTargetConversation?: import('./cross-conversation-guard.ts').AssertTargetConversation,
+  ) => Promise<unknown>;
 }
 
 export interface ToolCallResult {

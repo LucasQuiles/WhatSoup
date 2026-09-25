@@ -3,7 +3,12 @@
 // converts MCP tool definitions to API function-calling formats for API providers.
 
 import type { ToolRegistry } from '../../../mcp/registry.ts';
-import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
+import {
+  resolveSessionContext,
+  type ExecutingSessionContext,
+  type SessionContext,
+  type ToolCallResult,
+} from '../../../mcp/types.ts';
 import { createChildLogger } from '../../../logger.ts';
 import {
   buildProviderMcpConfigArgs,
@@ -139,17 +144,27 @@ export async function executeBridgeTool(
 /**
  * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
  * Used by managed-loop HTTP providers to advertise and execute tools directly.
+ *
+ * The stored `session` object is the long-lived per-session MCP context. Take a
+ * per-request snapshot and override its dynamic authorization fields from the
+ * executing-turn register so stale actor or purpose values never reach
+ * listTools/call. Explicit undefined values fail closed between turns.
+ * Mirrors socket-server.ts:238-243 (QR-042 per-request snapshot + resolver
+ * override). The resolver is mandatory so a new caller cannot silently trust
+ * long-lived authorization or confinement fields by omitting the rail.
  */
 export function createProviderMcpBridge(
   registry: ToolRegistry,
   session: SessionContext,
+  resolveExecutingSession: () => ExecutingSessionContext,
 ): ProviderMcpBridge {
+  const snapshotSession = () => resolveSessionContext(session, resolveExecutingSession());
   return {
     listTools(): ProviderMcpTool[] {
-      return registry.listTools(session);
+      return registry.listTools(snapshotSession());
     },
     async executeTool(name: string, params: Record<string, unknown>): Promise<ProviderMcpToolResult> {
-      return normalizeToolResult(await registry.call(name, params, session));
+      return normalizeToolResult(await registry.call(name, params, snapshotSession()));
     },
   };
 }

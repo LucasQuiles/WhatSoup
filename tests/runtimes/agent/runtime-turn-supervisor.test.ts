@@ -12,7 +12,7 @@ import type { FinalizeRuntimeTurnResult } from '../../../src/runtimes/agent/turn
 const emitAlert = vi.hoisted(() => vi.fn());
 const clearAlertSourceChecked = vi.hoisted(() => vi.fn(() => true));
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert, clearAlertSourceChecked }));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true), emitAlert, clearAlertSourceChecked }));
 
 const bookkeeping: TurnFinalizationBookkeepingParams = {};
 

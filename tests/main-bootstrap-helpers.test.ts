@@ -497,7 +497,7 @@ async function importMainWithMocks(options: {
     isProcessLockError,
     releaseProcessLock,
     flushLogger: vi.fn(async () => {}),
-    shutdownExitCode: vi.fn(() => 0),
+    shutdownExitCode: vi.fn((_signal: string, _outcome?: { complete: boolean }): 0 | 1 => 0),
     recordStartupBoot,
     settleStartupNotification,
     startupNotifyPath,
@@ -614,7 +614,15 @@ async function importMainWithMocks(options: {
     isProcessLockError: mocks.isProcessLockError,
     releaseProcessLock: mocks.releaseProcessLock,
   }));
-  vi.doMock('../src/main-shutdown-policy.ts', () => ({ shutdownExitCode: mocks.shutdownExitCode }));
+  // The real runShutdownSequence and the REAL exit-code policy run; the
+  // vi.fn wrapper only observes the calls, so the SIGTERM path can assert
+  // process.exit received the policy's actual nonzero code on an incomplete
+  // shutdown rather than a mock's constant.
+  vi.doMock('../src/main-shutdown-policy.ts', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../src/main-shutdown-policy.ts')>();
+    mocks.shutdownExitCode.mockImplementation(original.shutdownExitCode);
+    return { ...original, shutdownExitCode: mocks.shutdownExitCode };
+  });
   vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
   await import('../src/main.ts');
@@ -649,8 +657,11 @@ describe('main.ts — uncovered helpers and signal paths', () => {
   });
 
   const flushMicrotasks = async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    // The shutdown sequence now isolates every auxiliary stop behind its own
+    // await (round-3 finding 3), so reaching the finally block takes more
+    // interleaved microtask turns than the old two. Pure microtask flushing
+    // only: setImmediate would hang under suites running fake timers.
+    for (let i = 0; i < 80; i += 1) await Promise.resolve();
   };
 
   // ── A. resolveTilde ────────────────────────────────────────────────────────
@@ -821,7 +832,9 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       // finally block still runs
       expect(h.db.close).toHaveBeenCalledOnce();
       expect(h.flushLogger).toHaveBeenCalledOnce();
-      expect(exitSpy).toHaveBeenCalled();
+      // an incomplete shutdown must exit NONZERO even for an operator signal
+      expect(h.shutdownExitCode).toHaveBeenCalledWith('SIGTERM', expect.objectContaining({ complete: false }));
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
 
     it('shutdown() logs error and still flushes when db.close() throws', async () => {
@@ -1659,6 +1672,25 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
       expect(historyLogCalls).toHaveLength(0);
     });
+
+    it('records an all-noop batch at debug with its noop count', async () => {
+      const h = await importMainWithMocks();
+      const stats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0, noop: 3, failed: 0 };
+      h.processHistoryBatch.mockReturnValueOnce(stats);
+      h.connection.emit('historyMessages', [{ id: 'history-1' }]);
+
+      expect(h.logger.debug).toHaveBeenCalledWith(stats, 'historyMessages: batch already stored');
+    });
+
+    it('logs a batch with failures at info and warns with the failed count', async () => {
+      const h = await importMainWithMocks();
+      const stats = { inserted: 1, upgraded: 0, placeholders: 0, skipped: 0, noop: 0, failed: 2 };
+      h.processHistoryBatch.mockReturnValueOnce(stats);
+      h.connection.emit('historyMessages', [{ id: 'history-1' }]);
+
+      expect(h.logger.info).toHaveBeenCalledWith(stats, 'historyMessages: batch processed');
+      expect(h.logger.warn).toHaveBeenCalledWith({ failed: 2 }, 'historyMessages: some history messages failed to store');
+    });
   });
 
   // ── K. Event handler error paths not covered by main test ─────────────────
@@ -2053,7 +2085,10 @@ describe('main.ts — uncovered helpers and signal paths', () => {
         expect.objectContaining({ err: expect.any(Error) }),
         'failed to start',
       );
-      expect(h.shutdownExitCode).toHaveBeenCalledWith('startupError');
+      expect(h.shutdownExitCode).toHaveBeenCalledWith(
+        'startupError',
+        expect.objectContaining({ complete: expect.any(Boolean) }),
+      );
       expect(exitSpy).toHaveBeenCalled();
     });
   });

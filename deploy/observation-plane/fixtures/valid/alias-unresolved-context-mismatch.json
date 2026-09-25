@@ -1,0 +1,19 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-fixture-0005",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "unknown.host-3f2a",
+    "binding": { "authority": "unresolved", "confidence": "ambiguous" },
+    "raw": { "host_label": "Unknown-Host-3F2A", "source_label": "bot-errors-event" }
+  },
+  "claim_id": "incident.still_open",
+  "adapter_id": "legacy-events",
+  "outcome": "context_mismatch",
+  "unobserved_reason": "alias_unresolved",
+  "projection": { "scope": "not_applicable", "authorization": "not_applicable" },
+  "times": { "observed_at": "2026-08-20T22:04:00Z" },
+  "authority": { "tier": "declared_intent", "confidence": "ambiguous" },
+  "limitations": ["unresolved host alias: never merged with any canonical subject; excluded from coverage denominators"]
+}

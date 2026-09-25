@@ -6,7 +6,7 @@ import {
   TOOL_INPUT_MARKER,
   TOOL_RESULT_MARKERS,
 } from '../../src/core/durability-evidence-contract.ts';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { errorResult, makeConversationBinding, toolError } from '../../src/mcp/types.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 

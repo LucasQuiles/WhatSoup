@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { fakeTimeoutBody } from './fake-timeout-helper.ts';
 
 const tmp = trackTmpDirs('');
 
@@ -46,9 +47,33 @@ function extractVersionExposureBlock(source: string): string {
   return source.slice(start, end);
 }
 
+const PROBE_SCRIPT =
+  '#!/bin/bash\n. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"\n';
+
 function writeExecutable(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents, 'utf8');
   fs.chmodSync(filePath, 0o700);
+}
+
+/**
+ * Runs the runtime-PATH probe from a script on disk.
+ *
+ * The body is NOT passed via `bash -c`: CodeQL's
+ * js/shell-command-injection-from-environment models a `-c` program built near
+ * cwd-derived values as an injection sink, and positional arguments alone do not
+ * clear it (alert #75). Invoking a script file matches the query's
+ * indirect-command model, and mirrors the TMPDIR probe in this same file.
+ *
+ * Single definition on purpose: the `. "$1"` quoting is load bearing, and two
+ * copies would let a one-site quoting regression slip past a mutation that only
+ * altered the other copy.
+ */
+function runRuntimePathProbe(root: string, helperPath: string, binDir: string): string {
+  const probePath = path.join(root, 'runtime-path-probe.sh');
+  writeExecutable(probePath, PROBE_SCRIPT);
+  return execFileSync('/bin/bash', [probePath, helperPath, binDir], {
+    encoding: 'utf8',
+  }).trim();
 }
 
 function runKeyringLookupProbe(
@@ -63,7 +88,7 @@ function runKeyringLookupProbe(
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup-health-token" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "find-generic-password" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
-  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nshift\nexec "$@"\n`);
+  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
@@ -146,7 +171,7 @@ function runHealthTokenFileProbe(
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
   writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "keyring-hang" ] && [ "\${3:-}" = "whatsoup-health-token" ]; then sleep 30; fi\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
-  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nshift\nexec "$@"\n`);
+  writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
   writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -395,8 +420,7 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux');
 
     expect(stdout).toBe('canonical-secret');
-    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('secret-tool lookup service whatsoup-health-token user test-instance');
+    expect(log.trim()).toBe('secret-tool lookup service whatsoup-health-token user test-instance');
     expect(stdout).not.toBe('shared-env-token');
   });
 
@@ -404,10 +428,10 @@ describe('health token shell wrappers', () => {
     const { stdout, log } = runKeyringLookupProbe('Linux', 'canonical-miss-legacy-hit');
 
     expect(stdout).toBe('legacy-keyring-token');
-    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('timeout 3s secret-tool lookup service whatsoup_health');
-    expect(log).toContain('secret-tool lookup service whatsoup-health-token user test-instance');
-    expect(log).toContain('secret-tool lookup service whatsoup_health');
+    expect(log.trim().split('\n')).toEqual([
+      'secret-tool lookup service whatsoup-health-token user test-instance',
+      'secret-tool lookup service whatsoup_health',
+    ]);
     expect(stdout).not.toBe('shared-env-token');
   });
 
@@ -421,7 +445,7 @@ describe('health token shell wrappers', () => {
     writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' 'Linux'\n`);
     writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
     writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nexit 1\n`);
-    writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\nprintf 'timeout %s\\n' "$*" >> "$LOG_PATH"\nshift\nexec "$@"\n`);
+    writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
 
     const start = source.indexOf('# Health server auth token');
     const end = source.indexOf('exec "$NODE"', start);
@@ -654,16 +678,31 @@ describe('health token shell wrappers', () => {
     fs.mkdirSync(binDir, { recursive: true });
     writeExecutable(path.join(binDir, 'dirname'), `#!/bin/sh\n/usr/bin/touch '${marker}'\nprintf '/shadowed\\n'\n`);
 
-    const output = execFileSync('/bin/bash', [
-      '-c',
-      '. "$1"; PATH="$2"; whatsoup_effective_runtime_path "/fixture/user-root" "/fixture/node/bin/node" "/loaded/bin"',
-      'runtime-path',
+    const output = runRuntimePathProbe(
+      root,
       path.resolve('deploy/lib/runtime-path.sh'),
       binDir,
-    ], { encoding: 'utf8' }).trim();
+    );
 
     expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
     expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  // Guards the quoting inside the probe script. The suite's own paths contain no
+  // spaces, so an unquoted `. $1` would still pass every other assertion here —
+  // this case supplies a whitespace path so that the quoting is actually load
+  // bearing rather than incidental.
+  it('the runtime PATH probe sources a helper whose path contains spaces', () => {
+    const root = tmp.make('whatsoup runtime path spaced');
+    const binDir = path.join(root, 'bin dir');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const helperPath = path.join(root, 'runtime path.sh');
+    fs.copyFileSync(path.resolve('deploy/lib/runtime-path.sh'), helperPath);
+
+    const output = runRuntimePathProbe(root, helperPath, binDir);
+
+    expect(output).toBe('/fixture/user-root/.local/bin:/fixture/node/bin:/loaded/bin');
   });
 
   it('deploy/whatsoup captures full checkout SHA and branch after preflight', () => {

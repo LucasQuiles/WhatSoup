@@ -25,6 +25,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_envelope import new_event_fields
 from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
+from lib.target_provenance import (
+    safe_observer_provenance,
+    safe_release_divergence,
+    safe_target_provenance,
+)
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.durable_json import (
     JsonVersion,
@@ -337,14 +342,14 @@ def log_hints(args: argparse.Namespace) -> list[str]:
     return list(dict.fromkeys(redact(hint) for hint in hints if hint))[:10]
 
 
-def correlate_tail(text: str, source: str) -> str:
-    """Keep only lines matching the alert source (#2136).
+def correlate_tail(text: str, source: str, *, owned_invocation: bool = False) -> str:
+    """Correlate shared tails by source; an owned child capture is already scoped.
 
-    A fresh alert can carry stale, unrelated stdout/stderr lines as evidence
-    when the runner reuses a shared capture buffer. Filtering to source-matching
-    lines prevents generic log tails from diluting the signal.
+    Historical buffers may contain unrelated output (#2136). Dedicated pipes
+    from one subprocess invocation also contain untagged tracebacks and errno
+    details, which belong to that invocation regardless of their text.
     """
-    if not text:
+    if not text or owned_invocation:
         return text
     return "\n".join(line for line in text.split("\n") if source in line)
 
@@ -359,6 +364,8 @@ def build_evidence(
     failure: str,
 ) -> str:
     limit = args.capture_limit
+    stdout = redact(correlate_tail(stdout, args.source, owned_invocation=True))
+    stderr = redact(correlate_tail(stderr, args.source, owned_invocation=True))
     parts = [
         f"failure={failure}",
         f"host={socket.gethostname()}",
@@ -370,16 +377,22 @@ def build_evidence(
         f"command={shlex.join(command)}",
         f"exit_code={returncode}",
         f"duration_ms={duration_ms}",
+        "capture_scope=owned_invocation",
+        f"capture_limit_chars={limit}",
+        f"stdout_redacted_chars={len(stdout)}",
+        f"stderr_redacted_chars={len(stderr)}",
+        f"stdout_truncated={str(len(stdout) > limit).lower()}",
+        f"stderr_truncated={str(len(stderr) > limit).lower()}",
     ]
     if args.diagnostic:
         parts.append("diagnostics:")
         parts.extend(f"  {item}" for item in args.diagnostic)
     if stdout:
         parts.append("stdout_tail:")
-        parts.append(truncate_evidence(correlate_tail(stdout, args.source), limit))
+        parts.append(truncate_evidence(stdout, limit))
     if stderr:
         parts.append("stderr_tail:")
-        parts.append(truncate_evidence(correlate_tail(stderr, args.source), limit))
+        parts.append(truncate_evidence(stderr, limit))
     return redact("\n".join(parts))
 
 
@@ -393,7 +406,7 @@ def build_failure_event(
     failure: str,
 ) -> dict[str, Any]:
     event_id = args.event_id or f"process-{safe_segment(args.instance)}-{safe_segment(args.source)}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    return {
+    event = {
         **new_event_fields("observation" if args.severity == "info" else "alert", args.severity),
         "id": event_id,
         "createdAt": now_iso(),
@@ -411,6 +424,12 @@ def build_failure_event(
             "execPath": sys.executable,
         },
         "runtime": {"provenance": runtime_provenance()},
+        # #2358 shadow mode: separated observer/target provenance. The legacy
+        # generic `process` block above describes THIS wrapper; the target block
+        # is resolved from the detector-authoritative --instance identity and
+        # fails closed to `unknown` rather than inheriting wrapper values.
+        "observerProvenance": safe_observer_provenance("bot-errors-runner", __file__, sys.platform),
+        "targetProvenance": safe_target_provenance(args.instance, sys.platform),
         "diagnostics": {
             "logHints": log_hints(args),
             "queue": str(outbox_dir()),
@@ -418,6 +437,15 @@ def build_failure_event(
         },
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
+    # #2358 C9/C10: the two blocks above are adjacent but were never compared,
+    # so an operator had to eyeball two digests to see that the service was
+    # running other code than the producer. Read back off the envelope so the
+    # verdict describes the very blocks it ships with, and attached after
+    # construction so no probe is called earlier than it already was.
+    event["releaseDivergence"] = safe_release_divergence(
+        event["observerProvenance"], event["targetProvenance"]
+    )
+    return event
 
 
 def emit_failure(
@@ -451,6 +479,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.command = args.command[1:]
     if not args.command:
         parser.error("command required after --")
+    if args.capture_limit < 2:
+        parser.error("--capture-limit must be at least 2")
     return args
 
 

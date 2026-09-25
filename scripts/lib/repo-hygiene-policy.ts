@@ -162,6 +162,10 @@ export function isAllowedPatternMatch(filePath: string, code: string, token: str
   if (code === 'operator-phone') {
     return allowedPhoneFixture.test(token.replace(/[\s().-]/g, ''));
   }
+  if (code === 'masked-operator-line') {
+    const areaGroup = maskAreaGroup(token);
+    return areaGroup !== null && reservedFictionMaskAreaGroups.has(areaGroup);
+  }
   if (code === 'twilio-account-sid') {
     return allowedTwilioSidFixture.test(token);
   }
@@ -436,4 +440,54 @@ export function isChildProcessShellTrue(text: string): boolean {
 
 export function isDynamicCodeExecution(text: string): boolean {
   return /\b(?:eval\s*\(|(?:new\s+)?Function\s*\()/.test(text);
+}
+
+// Masked operator-line identifiers in published documentation.
+//
+// The published design documents render a line identifier as a mask: the
+// country code, a 3-digit area group, an ellipsis, and a trailing group. No
+// contiguous-digit rule can see that form - the spaces and the ellipsis glyph
+// break the digit run, so `operator-phone` (E.164, contiguous) never fires on
+// it, and a `[0-9]{10,}` sweep of the documentation tree reports near-zero.
+//
+// Detection is by exclusion rather than by literal: a mask whose area group is
+// not one of the reserved-for-fiction groups already encoded in
+// allowedPhoneFixture is treated as a real operator line. No real value is
+// stored here, and the rule generalises to any operator line rather than to one
+// known number.
+export const reservedFictionMaskAreaGroups = new Set(['555']);
+
+// Ellipsis glyph forms differ per document - ASCII periods in the QA reports,
+// middle-dot and horizontal-ellipsis runs in the mockups - and each document's
+// own glyph is preserved deliberately, so every form has to match. The trailing
+// group is optional because a quoted excerpt can truncate after the ellipsis and
+// still publish the area group.
+export const maskedOperatorLinePattern: GuardPattern = {
+  code: 'masked-operator-line',
+  message:
+    'Published documentation must not include an identifier mask built from a real operator line; use the reserved fiction group.',
+  regex: /\+\s?1\s+(\d{3})\s*(?:\.{3}|·{3}|…|⋯)(?:\s*\d{3,4}(?!\d))?/,
+};
+
+export function maskAreaGroup(token: string): string | null {
+  return /\+\s?1\s+(\d{3})/.exec(token)?.[1] ?? null;
+}
+
+// Sites the identifier-replacement change deferred to a separate owner ruling,
+// grandfathered by path with the occurrence count recorded at deferral time.
+// The count is an upper bound, so a ruling that removes masks keeps the sweep
+// green, while a new site or a higher count on a listed one fails it.
+export const deferredMaskedOperatorLineSites = new Map<string, number>([
+  ['docs/design-system/v35/mockups/agents.html', 1],
+  ['docs/design-system/v35/mockups/fleet.html', 5],
+  ['docs/design-system/v35/qa/reports/wave1-3/openai-1.txt', 2],
+  ['docs/design-system/v35/qa/reports/wave4/grok-1.txt', 1],
+]);
+
+export function countDisallowedMaskedOperatorLines(text: string): number {
+  let count = 0;
+  for (const match of patternMatches(maskedOperatorLinePattern, text)) {
+    if (!isAllowedPatternMatch('', maskedOperatorLinePattern.code, match.allowlistToken)) count += 1;
+  }
+  return count;
 }

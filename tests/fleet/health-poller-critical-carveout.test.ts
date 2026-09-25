@@ -44,6 +44,7 @@ const silenceManager = vi.hoisted(() => ({
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   ...alertFns,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
   ALERT_THROTTLE_INTERVAL_MS: 15 * 60 * 1000,

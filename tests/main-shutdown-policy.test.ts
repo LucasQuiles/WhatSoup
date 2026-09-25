@@ -14,8 +14,8 @@ describe('main shutdown exit policy', () => {
   it('uses the shutdown signal to choose the actual process exit code', () => {
     const source = readFileSync('src/main.ts', 'utf8');
 
-    expect(source).toContain("import { shutdownExitCode } from './main-shutdown-policy.ts';");
-    expect(source).toContain('process.exit(shutdownExitCode(signal));');
+    expect(source).toContain("import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';");
+    expect(source).toContain('process.exit(shutdownExitCode(signal, outcome));');
     expect(source).not.toContain('process.exit(0);');
   });
 });

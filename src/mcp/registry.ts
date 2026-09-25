@@ -1,14 +1,17 @@
 import {
   z,
-  ZodType,
-  ZodString,
-  ZodNumber,
-  ZodBoolean,
-  ZodOptional,
   ZodArray,
+  ZodBoolean,
+  ZodDefault,
+  ZodEffects,
   ZodEnum,
+  ZodNullable,
+  ZodNumber,
   ZodObject,
+  ZodOptional,
   ZodRecord,
+  ZodString,
+  ZodType,
 } from 'zod';
 import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
@@ -19,10 +22,19 @@ import {
   isToolErrorPayload,
   type ToolDeclaration,
   type ToolCallResult,
+  type ResolvedSessionContext,
   type SessionContext,
 } from './types.ts';
+import {
+  CrossConversationDenied,
+  evaluateTargetConversation,
+  type AssertTargetConversation,
+  type CrossConversationVerdict,
+} from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
+import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import {
   classifyThrownToolFailure,
   normalizeToolDurabilityGroup,
@@ -64,6 +76,41 @@ const log = createChildLogger('ToolRegistry');
 // notes in per-chat agents.
 export const CONVERSATION_SAFE_GLOBAL_TOOLS: ReadonlySet<string> = new Set(['transcribe_audio']);
 
+/** Scheduled background turns may publish a fresh update, but may not rewrite
+ * or remove chat history. This is enforced at discovery and call time. */
+export const SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'edit_message',
+  'delete_message',
+  'delete_message_for_me',
+  'clear_chat',
+  'delete_chat',
+  'set_disappearing_messages',
+]);
+
+/**
+ * Three-state gate for the scheduled-agent-job forbidden (history-mutation) set
+ * (#3435, L1). A forbidden tool is reachable ONLY on a resolved-NORMAL turn:
+ *
+ *   - not-forbidden tool           → always visible/callable (unchanged).
+ *   - resolved-normal (purpose     → REACHABLE. An undefined purpose on a REAL
+ *     undefined, real resolution)     resolution is the load-bearing marker of a
+ *                                     non-scheduled turn; it must NOT over-restrict.
+ *   - resolved-scheduled           → DENIED (the original gate).
+ *     (purpose === 'scheduled-agent-job')
+ *   - unresolved (empty context    → DENIED, fail-closed. Closes the asymmetry
+ *     reached the gate)               where `actorJid` undefined already fail-closes
+ *                                     `sensitiveAllowed` but an undefined `purpose`
+ *                                     used to fail-OPEN the forbidden set.
+ *
+ * The denial keys on the EXPLICIT `executingResolution` discriminator, never on
+ * `purpose === undefined` alone — that is the invariant #3435 hardens.
+ */
+function scheduledAgentJobMaySee(tool: ToolDeclaration, session: ResolvedSessionContext): boolean {
+  if (!SCHEDULED_AGENT_JOB_FORBIDDEN_TOOLS.has(tool.name)) return true;
+  if (session.executingResolution === 'unresolved') return false;
+  return session.purpose !== 'scheduled-agent-job';
+}
+
 /** Eligibility of a tool for a conversation-bound session (list AND call). */
 function conversationBoundMaySee(tool: ToolDeclaration): boolean {
   return tool.scope === 'chat' || CONVERSATION_SAFE_GLOBAL_TOOLS.has(tool.name);
@@ -73,7 +120,8 @@ function conversationBoundMaySee(tool: ToolDeclaration): boolean {
  *  by listTools filtering and the R1 denial-shape split (list-visible sessions
  *  get a typed admin_required denial; hidden-listing sessions keep the
  *  non-disclosing "Unknown tool" reply). */
-function sessionWouldList(tool: ToolDeclaration, session: SessionContext): boolean {
+function sessionWouldList(tool: ToolDeclaration, session: ResolvedSessionContext): boolean {
+  if (!scheduledAgentJobMaySee(tool, session)) return false;
   if (session.tier === 'chat-scoped' && tool.scope === 'global') return false;
   if (conversationBoundKey(session) !== undefined && !conversationBoundMaySee(tool)) return false;
   return true;
@@ -110,6 +158,23 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
 
   if (schema instanceof ZodOptional) {
     // Unwrap and mark the inner type while preserving descriptions attached after .optional().
+    return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
+  }
+
+  if (schema instanceof ZodEffects) {
+    // .refine() / .superRefine() / .transform() / .preprocess() wrap the schema in ZodEffects.
+    // The MCP input contract is the INNER shape; refinements are enforced at call time by
+    // registry.call()'s parse. Falling through to the `{}` fallback here made a single
+    // refine-wrapped tool (list_trigger_runs, #3227) invalidate the whole tools/list for
+    // strict MCP clients (any tool whose inputSchema.type !== "object" invalidates the list).
+    return withZodDescription(schema, zodToJsonSchema(schema.innerType()));
+  }
+
+  if (schema instanceof ZodDefault) {
+    return withZodDescription(schema, zodToJsonSchema(schema.removeDefault()));
+  }
+
+  if (schema instanceof ZodNullable) {
     return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
   }
 
@@ -239,6 +304,7 @@ export interface McpLivenessSnapshot {
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDeclaration>();
+  private readonly clock: Clock;
   private durability: DurabilityEngine | undefined;
   private sensitiveAuthorizer: ((session: SessionContext) => boolean) | null = null;
   // #1753 rem-2: every call() invocation registers itself here for the
@@ -259,14 +325,35 @@ export class ToolRegistry {
   private turnCorrelationResolver:
     | ((conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null)
     | null = null;
+  // Issue 3150 registry layer: canonical conversation-key fold for the
+  // cross-conversation guard (issue 3457: both its pre-handler and its
+  // post-resolution point). Null until installed (see
+  // setCanonicalConversationKeyResolver); the guard then falls back to bare
+  // toConversationKey (matrix cell M10).
+  private canonicalConversationKeyResolver: ((jid: string) => string) | null = null;
   // QR-017 / #1976: transient group tag applied by withModule() to any tool
   // registered inside the bracket. Set only for the synchronous span of a
   // withModule() call, so there is no cross-registration bleed. Pure taxonomy
   // metadata — it never affects listTools() output or call() authorization.
   private currentGroup: string | undefined;
 
+  constructor(
+    // Injectable so timing behaviour can be driven to a known instant (#2200).
+    // Optional and defaulted, so this slice changes no existing call site.
+    //
+    // Scope of the guarantee: this clock governs TIMESTAMPS (in-flight call age,
+    // durability loss timestamps, and tool-call duration). Any asynchronous
+    // gap between the `start` capture and the duration read still elapses on the
+    // real timer wheel, so under a pinned clock a fast handler reports
+    // durationMs 0 — not reachable in production, where systemClock and the
+    // timer wheel read the same wall clock.
+    clock: Clock = systemClock,
+  ) {
+    this.clock = clock;
+  }
+
   /** Oldest in-flight tool call's age + pending count (#1753 rem-2). */
-  getInFlightCallStats(now: number = Date.now()): McpLivenessSnapshot {
+  getInFlightCallStats(now: number = this.clock.now()): McpLivenessSnapshot {
     if (this.inFlightCalls.size === 0) {
       return { pendingCount: 0, oldestCallAgeMs: null, oldestCallTool: null };
     }
@@ -301,7 +388,7 @@ export class ToolRegistry {
   }
 
   private recordDurabilityWriteLoss(stage: ToolDurabilityWriteStage, toolName: string): void {
-    const now = Date.now();
+    const now = this.clock.now();
     this.durabilityWriteLosses = Math.min(Number.MAX_SAFE_INTEGER, this.durabilityWriteLosses + 1);
     this.durabilityWriteLossesByStage[stage] = Math.min(
       Number.MAX_SAFE_INTEGER,
@@ -412,6 +499,53 @@ export class ToolRegistry {
     this.turnCorrelationResolver = resolver;
   }
 
+  /**
+   * Issue 3150 registry layer: install the canonical conversation-key fold
+   * used by the cross-conversation guard at both of its points (issue 3457).
+   * Session conversation keys are stored PHONE-folded at ingest (QR-050), so
+   * a pinned global session addressing its OWN conversation by its mapped
+   * `@lid` JID must fold the same way — a bare `toConversationKey` yields the
+   * raw LID digits and falsely rejects the pin.
+   * Installed by `registerMessagingTools`, which holds the db the fold needs;
+   * until then the guard falls back to `toConversationKey`. That fallback
+   * rejects a mapped own `@lid` (matrix cell M10) but is not strictly more
+   * conservative: see the M10 notes in
+   * tests/integration/cross-conversation-guard-matrix.test.ts.
+   */
+  setCanonicalConversationKeyResolver(resolver: (jid: string) => string): void {
+    this.canonicalConversationKeyResolver = resolver;
+  }
+
+  /**
+   * Issue 3457: run the one cross-conversation guard with this registry's
+   * fold, and log every denial. A binding/mirror divergence is logged at
+   * error level with both keys, because it means the session state itself is
+   * inconsistent, not that a caller asked for a foreign chat.
+   */
+  private evaluateTargetConversation(
+    session: SessionContext,
+    targetJid: string,
+    tool: string,
+    point: 'pre-handler' | 'post-resolution',
+  ): CrossConversationVerdict {
+    const fold = this.canonicalConversationKeyResolver ?? toConversationKey;
+    const verdict = evaluateTargetConversation(session, targetJid, fold);
+    if (verdict.kind === 'deny') {
+      if (verdict.divergence) {
+        log.error(
+          { tool, point, branch: verdict.branch, targetJid, ...verdict.divergence },
+          'cross-conversation guard: conversation binding and its session mirror disagree - denied (fail-closed)',
+        );
+      } else {
+        log.warn(
+          { tool, point, branch: verdict.branch, targetJid, sessionConversationKey: session.conversationKey ?? null },
+          'cross-conversation guard denied tool target',
+        );
+      }
+    }
+    return verdict;
+  }
+
   /** AS-04: any tool-durability write loss at or after `sinceMs`? */
   hadDurabilityWriteLossSince(sinceMs: number): boolean {
     return this.lastDurabilityWriteLossAt !== null && this.lastDurabilityWriteLossAt >= sinceMs;
@@ -424,7 +558,7 @@ export class ToolRegistry {
    * - Chat-scoped sessions: see only 'chat' scope tools. Injected tools have
    *   chatJid omitted (auto-filled at call time).
    */
-  listTools(session: SessionContext): Array<{
+  listTools(session: ResolvedSessionContext): Array<{
     name: string;
     description: string;
     inputSchema: JsonSchema;
@@ -458,7 +592,7 @@ export class ToolRegistry {
   async call(
     name: string,
     params: Record<string, unknown>,
-    session: SessionContext,
+    session: ResolvedSessionContext,
   ): Promise<ToolCallResult> {
     const tool = this.tools.get(name);
     if (!tool) {
@@ -468,7 +602,7 @@ export class ToolRegistry {
       };
     }
 
-    const start = Date.now();
+    const start = this.clock.now();
     const replayPolicy = tool.replayPolicy ?? 'unsafe';
     const durabilityKey = session.conversationKey
       || (session.tier === 'global' ? GLOBAL_CONVERSATION_KEY : '');
@@ -511,7 +645,7 @@ export class ToolRegistry {
       if (durabilityId === undefined) return;
       const completion: ToolCompletionEvidence = {
         isError: true,
-        durationMs: Date.now() - start,
+        durationMs: this.clock.now() - start,
         failure: {
           failureCode,
           failureStage,
@@ -537,6 +671,10 @@ export class ToolRegistry {
         isError: true,
       };
     };
+
+    if (!scheduledAgentJobMaySee(tool, session)) {
+      return reject(`Unknown tool: ${name}`, 'authorization_denied', 'authorization');
+    }
 
     // --- R1 sensitive-tool gate (central, authoritative; in-handler
     // assertAdmin checks remain as defense in depth) ---
@@ -602,7 +740,17 @@ export class ToolRegistry {
           );
         }
         if (supportsAliasTarget) delete effectiveParams['to'];
-        effectiveParams['chatJid'] = session.binding!.deliveryJid;
+        const boundTarget = session.binding!.deliveryJid;
+        effectiveParams['chatJid'] = boundTarget;
+        // Cross-conversation guard, pre-handler point, on the injected target
+        // (issue 3585): most injected handlers never call the post-resolution
+        // callback, so without this check a bound session whose mirror has
+        // diverged from its binding would reach them unadjudicated. It can
+        // only deny: the target is the binding itself.
+        const verdict = this.evaluateTargetConversation(session, boundTarget, name, 'pre-handler');
+        if (verdict.kind === 'deny') {
+          return reject(verdict.text, verdict.failureCode, verdict.failureStage);
+        }
       } else if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {
@@ -632,26 +780,14 @@ export class ToolRegistry {
           );
         }
 
-        // Cross-conversation guard: only enforced when session has a bound conversationKey
-        // Alias targets are resolved inside the tool handler, then checked there.
-        if (session.conversationKey && hasCallerJid && !hasAliasTarget) {
-          let resolved: string;
-          try {
-            resolved = toConversationKey(callerJid);
-          } catch {
-            return reject(
-              `Invalid chatJid "${callerJid}": must be a valid JID`,
-              'validation_rejected',
-              'validation',
-            );
-          }
-
-          if (resolved !== session.conversationKey) {
-            return reject(
-              `chatJid "${callerJid}" resolves to conversation "${resolved}" which does not match session conversation "${session.conversationKey}"`,
-              'authorization_denied',
-              'authorization',
-            );
+        // Cross-conversation guard, pre-handler point (issue 3457): adjudicates
+        // the caller-supplied chatJid. An alias target is not resolved yet, so
+        // it is adjudicated at the post-resolution point instead, through the
+        // callback handed to the handler below.
+        if (hasCallerJid && !hasAliasTarget) {
+          const verdict = this.evaluateTargetConversation(session, callerJid, name, 'pre-handler');
+          if (verdict.kind === 'deny') {
+            return reject(verdict.text, verdict.failureCode, verdict.failureStage);
           }
         }
       }
@@ -678,6 +814,45 @@ export class ToolRegistry {
       }
     }
 
+    // --- S1 actor receipt (bond-revocation programme, 2026-08-17) ---
+    //
+    // Generic actions are written here, past every admission and authorization
+    // gate. Device removal is different: the handler receives a one-way callback
+    // and invokes it at the closest practical socket seam, after its own parsing
+    // and socket acquisition but BEFORE dispatch. A receipt written after the
+    // call is lost precisely when a removal request succeeds and the socket dies;
+    // one written here falsely labels pre-dispatch failures as requests.
+    //
+    // Both records are deliberate and distinct. The removal request is the
+    // discriminator — its ABSENCE on a terminal bond event is the durable form of
+    // the reasoning that excluded `logout` for the `q` revocation. The generic
+    // action is temporal context only, and the receipt labels it as such, so a
+    // read-only tool that merely happened to precede a revocation can never be
+    // read as its cause.
+    //
+    // This is best-effort by construction: attribution must never be able to fail
+    // a tool call that authorization already admitted.
+    const actorReceipt = {
+      route: 'mcp' as const,
+      action: `mcp_tool:${name}`,
+      actorIdentity: session.actorJid ?? null,
+      requestId: durabilityId === undefined ? null : `durability:${durabilityId}`,
+    };
+    try {
+      if (tool.bondEffect !== 'requests_device_removal') {
+        bondActorLedger.recordControlPlaneAction({
+          ...actorReceipt,
+          effect: tool.externalEffect?.kind === 'external'
+            ? 'external'
+            : tool.externalEffect?.kind === 'none'
+              ? 'read_only'
+              : 'unknown',
+        });
+      }
+    } catch (err) {
+      log.warn({ err, tool: name }, 'failed to record bond actor receipt');
+    }
+
     // #1753 rem-2: this call is "in flight" for the duration of tool.handler()
     // specifically — the durability bookkeeping above/below is synchronous and
     // cannot hang, so the async gap between registering and deregistering here
@@ -686,13 +861,30 @@ export class ToolRegistry {
     this.inFlightCalls.set(callId, { tool: name, startedAt: start });
     try {
       try {
-        const result = await tool.handler(effectiveParams, session);
+        const recordBondEffectDispatch = tool.bondEffect === 'requests_device_removal'
+          ? () => {
+              try {
+                bondActorLedger.recordBondRemovalRequest(actorReceipt);
+              } catch (err) {
+                log.warn({ err, tool: name }, 'failed to record bond effect dispatch');
+              }
+            }
+          : undefined;
+        // Cross-conversation guard, post-resolution point (issue 3457): the
+        // handler calls this on the JID it is about to act on, after alias
+        // and `@lid` resolution. A denial throws CrossConversationDenied,
+        // which the catch below maps onto the verdict's failure channel.
+        const assertTargetConversation: AssertTargetConversation = (targetJid) => {
+          const verdict = this.evaluateTargetConversation(session, targetJid, name, 'post-resolution');
+          if (verdict.kind === 'deny') throw new CrossConversationDenied(verdict);
+        };
+        const result = await tool.handler(effectiveParams, session, recordBondEffectDispatch, assertTargetConversation);
         const isError = isToolErrorPayload(result);
         const returnedErrorEvidence = getToolErrorEvidence(result);
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        log.info({ tool: name, durationMs: Date.now() - start }, 'tool call complete');
+        log.info({ tool: name, durationMs: this.clock.now() - start }, 'tool call complete');
         if (durabilityId !== undefined) {
-          const durationMs = Date.now() - start;
+          const durationMs = this.clock.now() - start;
           try {
             this.durability!.markToolComplete(
               durabilityId,
@@ -720,8 +912,13 @@ export class ToolRegistry {
           ...(isError ? { isError: true } : {}),
         };
       } catch (err) {
+        if (err instanceof CrossConversationDenied) {
+          // Same channel and same plain-text shape as a pre-handler denial.
+          finishFailure(err.verdict.failureCode, err.verdict.failureStage, 'complete');
+          return { content: [{ type: 'text', text: err.verdict.text }], isError: true };
+        }
         const message = errorMessage(err);
-        const durationMs = Date.now() - start;
+        const durationMs = this.clock.now() - start;
         log.error({ tool: name, durationMs }, 'tool handler threw');
         if (durabilityId !== undefined) {
           try {

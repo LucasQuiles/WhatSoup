@@ -503,3 +503,140 @@ def test_git_index_bytes_and_mtime_unchanged(tmp_path: Path):
     _mod.gather_tree_provenance(work.resolve(), do_fetch=False)
     assert index.read_bytes() == before_bytes
     assert index.stat().st_mtime_ns == before_mtime
+
+
+# ---------------------------------------------------------------------------
+# #2503: a requested-but-failed upstream refresh must never yield a clean
+# verdict.  The refresh outcome is a separate required dimension from the
+# ancestry comparison: a cached tracking ref that still compares "same" is
+# last-known state, not current upstream proof.
+# ---------------------------------------------------------------------------
+def _read_single_outbox_event(state: Path) -> dict:
+    import json
+
+    events = list((state / "outbox").glob("*.json"))
+    assert len(events) == 1, f"expected exactly one outbox event, got {len(events)}"
+    return json.loads(events[0].read_text())
+
+
+def test_failed_fetch_produces_warning_finding_not_clean(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=128"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    assert snap["fetch_attempted"] is True
+    assert snap["fetch_error"] == "fetch_failed:rc=128"
+    # The tree itself is clean/same-ancestry; the ONLY finding must be the
+    # failed refresh -- the classifier may not ignore what the gatherer
+    # recorded (#2503).
+    findings = _mod.provenance_findings(snap)
+    assert "fetch_failed" in _checks(findings), findings
+    assert _sev_for(findings, "fetch_failed") == "warning"
+    assert _mod.overall_severity(findings) == "warning"
+
+
+def test_failed_fetch_run_once_alerts_and_exits_nonzero(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=128"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    state = tmp_path / "state"
+    monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.run_once(do_fetch=True, dry=False)
+    assert rc == 1  # warning -- NOT the clean exit 0
+    payload = _read_single_outbox_event(state)
+    # Never a clear: a failed refresh is an alert (a prior open provenance
+    # condition must not be cleared by an inconclusive refresh cycle).
+    assert payload["eventType"] == "alert"
+    assert payload["severity"] == "warning"
+    # The bounded, content-free failure class must reach the event receipt.
+    assert "fetch_failed:rc=128" in payload["evidence"]
+    assert str(work) not in payload["evidence"]
+
+
+def test_failed_fetch_event_carries_bounded_fetch_fields(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:TimeoutExpired"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    state = tmp_path / "state"
+    monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.run_once(do_fetch=True, dry=False)
+    assert rc == 1
+    payload = _read_single_outbox_event(state)
+    tp = payload["treeProvenance"]
+    assert tp["comparison_mode"] == "fetch_failed"
+    assert tp["fetch_attempted"] is True
+    # Bounded verdict shape only: fetch_failed:<class|rc=N> -- no URL, path,
+    # ref content, or stderr text.
+    import re
+
+    assert re.fullmatch(r"fetch_failed:[A-Za-z0-9=]+", tp["fetch_verdict"]), tp["fetch_verdict"]
+
+
+def test_refreshed_same_ancestry_clears_with_refreshed_mode(tmp_path: Path, monkeypatch):
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    monkeypatch.setattr(_mod, "fetch_upstream", lambda repo, remote: None)
+    state = tmp_path / "state"
+    monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.run_once(do_fetch=True, dry=False)
+    assert rc == 0
+    payload = _read_single_outbox_event(state)
+    assert payload["eventType"] == "clear"
+    tp = payload["treeProvenance"]
+    assert tp["comparison_mode"] == "refreshed"
+    assert tp["fetch_attempted"] is True
+    assert tp["fetch_verdict"] == "success"
+
+
+def test_offline_clean_clear_keeps_offline_cached_ref_mode(tmp_path: Path, monkeypatch):
+    # Offline comparison is an explicit, valid observation mode -- NOT a
+    # refresh failure.  The default scheduled path stays a clean clear.
+    _, work = _make_origin_and_clone(tmp_path, branch="develop")
+    state = tmp_path / "state"
+    monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
+    rc = _mod.run_once(do_fetch=False, dry=False)
+    assert rc == 0
+    payload = _read_single_outbox_event(state)
+    assert payload["eventType"] == "clear"
+    tp = payload["treeProvenance"]
+    assert tp["comparison_mode"] == "offline_cached_ref"
+    assert tp["fetch_attempted"] is False
+    assert tp["fetch_verdict"] == "not_attempted"
+
+
+def test_fetch_failure_and_divergence_coexist(tmp_path: Path, monkeypatch):
+    # A failed refresh must not MASK other findings: divergence is still
+    # critical alongside the fetch warning.
+    origin, work = _make_origin_and_clone(tmp_path, branch="develop")
+    _commit(work, "local.txt", "local\n")
+    _git(work, "push", "origin", "develop")
+    # Rewrite upstream so histories fork.
+    _git(origin, "update-ref", "refs/heads/develop", _git(origin, "rev-list", "--max-parents=0", "HEAD"))
+    # ... simpler: force a diverged shape via a second local commit after a
+    # hard reset of the remote-tracking comparison is fiddly; use the gatherer
+    # directly with both signals present.
+    def _fail_fetch(repo, remote):
+        return "fetch_failed:rc=1"
+
+    monkeypatch.setattr(_mod, "fetch_upstream", _fail_fetch)
+    snap = _mod.gather_tree_provenance(work, do_fetch=True)
+    snap["ancestry"] = "diverged"  # inject the diverged comparison outcome
+    snap["upstream_resolved"] = True
+    snap["ahead"] = 1
+    snap["behind"] = 1
+    findings = _mod.provenance_findings(snap)
+    assert "fetch_failed" in _checks(findings)
+    assert _mod.CHECK_DIVERGED in _checks(findings)
+    assert _mod.overall_severity(findings) == "critical"

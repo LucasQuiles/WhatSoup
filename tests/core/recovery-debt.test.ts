@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  evaluateRecoveryProof,
   normalizeRecoveryDebt,
   type RecoveryDebtEvidence,
 } from '../../src/core/recovery-debt.ts';
@@ -12,7 +11,7 @@ function evidence(overrides: Partial<RecoveryDebtEvidence> = {}): RecoveryDebtEv
     runtime: {
       readable: true,
       details: {
-        degradedReasons: [],
+        recoveryBlockingReasons: [],
         recoveryDebtReasons: [],
         turnRecoveryBlockingOutstanding: 0,
         turnRecoveryRetainedTerminal: 0,
@@ -75,7 +74,7 @@ describe('normalizeRecoveryDebt', () => {
       runtime: {
         readable: true,
         details: {
-          degradedReasons: [],
+          recoveryBlockingReasons: [],
           recoveryDebtReasons: [
             'corroborated_delivery_retained',
             'completed_delivery_identity_operator',
@@ -123,7 +122,7 @@ describe('normalizeRecoveryDebt', () => {
       runtime: {
         readable: true,
         details: {
-          degradedReasons: ['turn_recovery_actionable'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
           recoveryDebtReasons: [],
           turnRecoveryBlockingOutstanding: 2,
           turnRecoveryRetainedTerminal: 0,
@@ -241,31 +240,5 @@ describe('normalizeRecoveryDebt', () => {
       service_blocking: true,
       attention: 'urgent',
     });
-  });
-});
-
-describe('evaluateRecoveryProof', () => {
-  const clearEvidence = {
-    transportConnected: true,
-    modelEvidenceCurrent: true,
-    runtimeReadable: true,
-    schemaReadable: true,
-    pendingPollsReadable: true,
-    recoveryDebt: normalizeRecoveryDebt(evidence()),
-  } as const;
-
-  it('clears with complete readable nonblocking evidence, including retained debt', () => {
-    const retained = normalizeRecoveryDebt(evidence({
-      continuity: { readable: true, open: 1, unresolved: 1, ambiguous: 0 },
-    }));
-    expect(evaluateRecoveryProof({ ...clearEvidence, recoveryDebt: retained })).toBe('clear');
-  });
-
-  it('degrades for an explicit blocker', () => {
-    expect(evaluateRecoveryProof({ ...clearEvidence, transportConnected: false })).toBe('degrade');
-  });
-
-  it('retains the latch when required evidence is unknown', () => {
-    expect(evaluateRecoveryProof({ ...clearEvidence, modelEvidenceCurrent: null })).toBe('retain');
   });
 });

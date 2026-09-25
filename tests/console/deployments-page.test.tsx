@@ -148,10 +148,18 @@ describe('v3.5 deployments — the one real deployment card', () => {
     expect(cells[3]!.textContent).toContain('fleet process')
   })
 
-  it('degrades the state pill and surfaces real issues when lines are not online', async () => {
+  // #2523: the issue list renders the canonical health-presentation label, the
+  // same one the feed card shows for the same condition. It used to print the
+  // producer's raw reason string, so a free-form prose reason reached the
+  // operator as trusted prose and a bounded code reached them as a raw token.
+  it('degrades the state pill and labels real issues from the canonical health registry', async () => {
     mockLines = [
       makeLine('personal'),
-      makeLine('builds', { status: 'degraded', statusReason: 'reconnect loop' }),
+      makeLine('builds', {
+        status: 'degraded',
+        statusReason: 'health_body_unhealthy',
+        statusConfidence: 'confirmed',
+      }),
     ]
     const { container, getByTestId } = renderPage()
     await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
@@ -159,7 +167,115 @@ describe('v3.5 deployments — the one real deployment card', () => {
     const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
     expect(cells[0]!.textContent).toContain('1 / 2')
     expect(cells[2]!.querySelector('.deploy-dcell__k')!.textContent).toBe('Issues')
-    expect(cells[2]!.textContent).toContain('builds: reconnect loop')
+    expect(cells[2]!.textContent).toContain('builds: health response reports unhealthy')
+    // The tooltip keeps the complete safe classification: code and confidence.
+    const chip = cells[2]!.querySelector('.deploy-mini__warn')!
+    expect(chip.getAttribute('title')).toContain('health_body_unhealthy')
+    expect(chip.getAttribute('title')).toContain('confidence confirmed')
+  })
+
+  it('fails closed on an unregistered reason instead of printing it as trusted prose', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', { status: 'degraded', statusReason: 'reconnect loop' }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('builds: unsupported reason code')
+    expect(cells[2]!.textContent).not.toContain('reconnect loop')
+  })
+
+  it('labels a stale observation even when the last-good reason is retained', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'degraded',
+        statusReason: 'health_body_unhealthy',
+        statusConfidence: 'confirmed',
+        stale: true,
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('stale observation')
+    expect(cells[2]!.textContent).toContain('health response reports unhealthy')
+  })
+
+  // #2523 MED-1: LineInstance.statusReason is produced by src/fleet/routes/lines.ts:506,
+  // which synthesises `config_error` and `not_polled` on top of relaying the poller's
+  // codes. Both are routine states, so neither may fall through to the fail-closed
+  // unsupported presentation.
+  it('labels a never-polled line as awaiting its first observation, not unsupported', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'unknown',
+        statusReason: 'not_polled',
+        statusConfidence: null,
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('builds: awaiting first health poll')
+    expect(cells[2]!.textContent).not.toContain('unsupported reason code')
+  })
+
+  it('labels a misconfigured line with its configuration cause, not unsupported', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'config_error',
+        statusReason: 'config_error',
+        statusConfidence: 'confirmed',
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('builds: line configuration is invalid')
+    expect(cells[2]!.textContent).not.toContain('unsupported reason code')
+    // A config error is a confirmed local observation, so the classification must
+    // not claim the observation was unavailable.
+    expect(cells[2]!.textContent).not.toContain('observation unavailable')
+  })
+
+  // #2523 LOW-1 / AC10: the complete safe classification must reach assistive text,
+  // not only a hover-only title attribute on a non-interactive span.
+  it('exposes the complete classification as accessible text, not only a tooltip', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'degraded',
+        statusReason: 'health_body_unhealthy',
+        statusConfidence: 'confirmed',
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    const hidden = cells[2]!.querySelector('.sr-only')
+    expect(hidden).not.toBeNull()
+    expect(hidden!.textContent).toContain('health response reports unhealthy')
+    expect(hidden!.textContent).toContain('health_body_unhealthy')
+    expect(hidden!.textContent).toContain('confidence confirmed')
+  })
+
+  it('keeps the auth-expired nuance for a reason-less unreachable line', async () => {
+    mockLines = [
+      makeLine('personal'),
+      makeLine('builds', {
+        status: 'unreachable',
+        statusReason: null,
+        lastSessionStatus: 'auth_expired',
+      }),
+    ]
+    const { getByTestId } = renderPage()
+    await waitFor(() => expect(getByTestId('deploy-card-local')).toBeDefined())
+    const cells = [...getByTestId('deploy-card-local').querySelectorAll('.deploy-dcell')]
+    expect(cells[2]!.textContent).toContain('builds: auth expired')
   })
 
   it('labels the crit severity critical (never a raw state code) on pill and summary', async () => {

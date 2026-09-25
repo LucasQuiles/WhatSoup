@@ -21,8 +21,12 @@ import type { TransportId } from './transport/registry.ts';
 import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
+import type { LaunchdPlistRenderOptions } from './lib/launchd-service-config.ts';
+import type { TurnRecoveryCatchupReconcileOptions } from './core/turn-recovery-catchup-config.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { setLoadedInstanceConfig } from './lib/instance-context.ts';
+import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
+import type { ConfiguredClientOutputPolicy } from './core/client-output-policy-contract.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,6 +88,12 @@ interface AgentOptions {
    * body is a startup ConfigValidationError. See `docs/configuration.md`.
    */
   capabilityObligations?: Record<string, unknown>;
+  /**
+   * Automatic operator catch-up reconciler gate (default OFF). Closed shape,
+   * validated by `validateTurnRecoveryCatchupReconcileConfig`
+   * (src/core/turn-recovery-catchup-config.ts). See `docs/configuration.md`.
+   */
+  turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
 }
 
 interface InstanceConfig {
@@ -123,6 +133,13 @@ interface InstanceConfig {
   imessageConfig?: ImessageConfig;
   // Signal transport config — present only when transport === 'signal'
   signalConfig?: SignalConfig;
+  // Governed launchd service render options (config-owned CLAUDE_CONFIG_DIR +
+  // PATH prepend) and the ratified account-identity digest. Validated on every
+  // path (create/patch/load) by validateLaunchdServiceConfig /
+  // validateServiceIdentityConfig (core/agent-config-validator.ts); CREATE
+  // passes it through PASSTHROUGH_FIELDS (#3401).
+  service?: LaunchdPlistRenderOptions & { expectedAccountDigest?: string };
+  clientOutputPolicies?: readonly ConfiguredClientOutputPolicy[];
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }
@@ -193,9 +210,22 @@ export function loadInstance(name: string, opts?: { authOnly?: boolean }): void 
   const paths = instancePaths(name);
   pinProcessTmpDir(paths);
 
+  const parsedPolicies = parseClientOutputPoliciesForInstance(parsed);
+  if (!parsedPolicies.ok) {
+    throw new ConfigValidationError(
+      `${parsedPolicies.error.field} ${parsedPolicies.error.reason}`,
+    );
+  }
+
   // 6. Build config — cast through unknown since validateInstance already
   // verified the required fields; TS cannot narrow from Record<string,unknown>
-  const config = { ...parsed, paths } as InstanceConfig;
+  const config = {
+    ...parsed,
+    ...(Object.prototype.hasOwnProperty.call(parsed, 'clientOutputPolicies')
+      ? { clientOutputPolicies: parsedPolicies.policies }
+      : {}),
+    paths,
+  } as InstanceConfig;
 
   // 7. Publish the validated config: typed store is the in-process SSOT
   // (#2206); the env var stays for the remaining compat consumers.

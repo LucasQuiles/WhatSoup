@@ -489,6 +489,26 @@ export interface FleetMappingInput {
   source_instance?: string;
 }
 
+export interface LidMappingRow {
+  lid: string;
+  phone_jid: string;
+  updated_at: string;
+}
+
+/** Read the canonical L5 synchronization projection from an instance database. */
+export function readLidMappings(rawDb: DatabaseSync): LidMappingRow[] {
+  const rows = rawDb
+    .prepare('SELECT lid, phone_jid, updated_at FROM lid_mappings')
+    .all();
+  return rows.map((row) => {
+    const { lid, phone_jid: phoneJid, updated_at: updatedAt } = row;
+    if (typeof lid !== 'string' || typeof phoneJid !== 'string' || typeof updatedAt !== 'string') {
+      throw new TypeError('lid_mappings row contains a non-text synchronization field');
+    }
+    return { lid, phone_jid: phoneJid, updated_at: updatedAt };
+  });
+}
+
 export interface FleetMappingConflict {
   lid: string;
   incoming_phone_jid: string;
@@ -506,7 +526,7 @@ export interface ImportLidMappingsResult {
 }
 
 export function importLidMappings(
-  db: Database,
+  db: Pick<Database, 'raw'>,
   mappings: ReadonlyArray<FleetMappingInput>,
 ): ImportLidMappingsResult {
   const out: ImportLidMappingsResult = {

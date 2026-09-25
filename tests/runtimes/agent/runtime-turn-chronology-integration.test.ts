@@ -326,15 +326,15 @@ describe('runtime turn chronology integration', () => {
       const mapKey = '15550190049@s.whatsapp.net';
       const oldSession = sessionStub();
       const replacementSession = sessionStub();
-      const replacementActors = ['replacement@s.whatsapp.net'];
+      const replacementActors = [{ actorJid: 'replacement@s.whatsapp.net' }];
       const mutable = state as RuntimeState & {
-        perChatExecActorQueue: Map<string, Array<string | undefined>>;
+        perChatExecActorQueue: Map<string, Array<{ actorJid: string | undefined; purpose?: 'scheduled-agent-job' }>>;
         recreatePerChatSessionForFallback: ReturnType<typeof vi.fn>;
         sendTurnPerChat: ReturnType<typeof vi.fn>;
         isReplayRouteCurrent: ReturnType<typeof vi.fn>;
       };
       state.chatSessions.set(mapKey, oldSession);
-      mutable.perChatExecActorQueue.set(mapKey, ['source@s.whatsapp.net']);
+      mutable.perChatExecActorQueue.set(mapKey, [{ actorJid: 'source@s.whatsapp.net' }]);
       let releaseShutdown!: () => void;
       const shutdownGate = new Promise<void>((resolve) => {
         releaseShutdown = resolve;

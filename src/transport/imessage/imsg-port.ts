@@ -21,6 +21,7 @@
 // provider processes or sockets — the same pattern as the signal-cli port.
 
 import net from 'node:net';
+import { z } from 'zod';
 import type { ImessageConfig } from './types.ts';
 import type {
   ImessagePort,
@@ -265,6 +266,11 @@ function encodeImsgCursor(rowId: number): string {
   return IMSG_CURSOR_PREFIX + Buffer.from(JSON.stringify({ version: 1, rowId }), 'utf8').toString('base64url');
 }
 
+const ImsgCursorStateSchema = z.object({
+  version: z.literal(1),
+  rowId: z.number().int().safe().nonnegative(),
+}) satisfies z.ZodType<ImsgCursorState>;
+
 function decodeImsgCursor(cursor: string): ImsgCursorState {
   if (!cursor.startsWith(IMSG_CURSOR_PREFIX)) {
     throw imsgError('invalid imsg inbound cursor', 'BadCursor', 400);
@@ -275,14 +281,11 @@ function decodeImsgCursor(cursor: string): ImsgCursorState {
   } catch {
     throw imsgError('invalid imsg inbound cursor', 'BadCursor', 400);
   }
-  const state = parsed as Partial<ImsgCursorState> | null;
-  if (state === null
-    || state.version !== 1
-    || !Number.isSafeInteger(state.rowId)
-    || (state.rowId as number) < 0) {
+  const state = ImsgCursorStateSchema.safeParse(parsed);
+  if (!state.success) {
     throw imsgError('invalid imsg inbound cursor', 'BadCursor', 400);
   }
-  return { version: 1, rowId: state.rowId as number };
+  return state.data;
 }
 
 function normalizeRecord(

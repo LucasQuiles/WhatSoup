@@ -12,6 +12,7 @@ import {
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from '../../../src/core/substrate/triggers.ts';
 import { nextCronRun } from '../../../src/core/cron.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 
@@ -38,6 +39,19 @@ describe('triggers core', () => {
     expect(t.next_fire_at).not.toBeNull();
     const kinds = (db.raw.prepare('SELECT event_type FROM bead_events WHERE bead_id = ?').all(bead.id) as Array<{ event_type: string }>).map(e => e.event_type);
     expect(kinds).toContain('trigger_created');
+  });
+
+  it('createTrigger persists created_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'clocked', ownerJid: 'mw', actor: 'user' });
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'c', actor: 'user',
+    }, fakeClock(t0ms));
+    const row = db.raw.prepare('SELECT created_at FROM bead_triggers WHERE id = ?').get(t.id) as { created_at: number };
+    // Persisted created_at must derive from fakeClock's epoch. Reverted code
+    // reads the real 2026 wall clock and stores ~1.7e9, not floor(t0ms/1000).
+    expect(row.created_at).toBe(Math.floor(t0ms / 1000));
   });
 
   it('QR-046: dedupe_key makes createTrigger idempotent for a LIVE (kind, dedupe_key)', () => {
@@ -185,6 +199,77 @@ describe('triggers core', () => {
       .toThrow(/bead_events/i);
 
     expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBe(before.terminal_at);
+  });
+
+  it('extendTrigger reactivates a paused trigger: status active, next_fire_at = now, event was_paused=true, terminal_at clamped', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    // A finite prior deadline: only an open-ended paused trigger keeps its lifetime (#3609).
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: now + 3600, actor: 'u',
+    }, clock);
+    pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+
+    extendTrigger(db.raw, t.id, { until: now + 10 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
+
+    const after = listTriggers(db.raw, { beadId: bead.id })[0];
+    expect(after.status).toBe('active');
+    expect(after.next_fire_at).toBe(now);
+    expect(after.terminal_at).toBe(now + 72 * 3600);
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: now + 72 * 3600 });
+  });
+
+  it('extendTrigger resumes a paused open-ended trigger without giving it a deadline (#3609)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume-open', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: null, actor: 'u',
+    }, clock);
+    expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBeNull();
+    pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
+
+    extendTrigger(db.raw, t.id, { until: now + 7 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
+
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+      status: 'active', next_fire_at: now, terminal_at: null,
+    });
+    expect(dueTriggers(db.raw, now, 10).map((row) => row.id)).toEqual([t.id]);
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: null });
+  });
+
+  it('extendTrigger on an active trigger leaves status and next_fire_at untouched (was_paused=false)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'active', ownerJid: 'mw', actor: 'u' });
+    const t0ms = 2_000_000_000_000;
+    const clock = fakeClock(t0ms);
+    const now = Math.floor(t0ms / 1000);
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+      reportChatJid: 'report-example-invalid@s.whatsapp.net', actor: 'u',
+    }, clock);
+    const before = listTriggers(db.raw, { beadId: bead.id })[0];
+
+    extendTrigger(db.raw, t.id, { until: now + 3600, maxTtlHours: 72, actor: 'u' }, clock);
+
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+      status: 'active', next_fire_at: before.next_fire_at, terminal_at: now + 3600,
+    });
+    const ev = db.raw.prepare(
+      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
+    ).get(bead.id) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ was_paused: false });
   });
 
   it('event.message persists with next_fire_at NULL (reserved scaffold, not polled)', () => {
@@ -453,5 +538,17 @@ describe('countPastDueTriggers (#1765)', () => {
     const t = activeTrigger(NOW - GRACE - 1000);
     db.raw.prepare(`UPDATE bead_triggers SET next_fire_at = NULL WHERE id = ?`).run(t.id);
     expect(countPastDueTriggers(db.raw, NOW, GRACE)).toBe(0);
+  });
+
+  it('preserves an explicit null `now` (default-parameter, not coalesce)', () => {
+    activeTrigger(NOW - GRACE - 1000);
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    // main's `now: number = nowUnixSec()` preserves an explicit null: the cutoff
+    // becomes null - grace (null coerces to 0) = -86400, which matches no
+    // positive next_fire_at (count 0). A `??` coalesce would substitute the
+    // clock (well after the stale next_fire_at) and count the trigger.
+    expect(countPastDueTriggers(db.raw, null as unknown as number, GRACE, fakeClock(t0ms))).toBe(0);
+    // Sanity: the same stale trigger IS past-due against a real cutoff.
+    expect(countPastDueTriggers(db.raw, Math.floor(t0ms / 1000), GRACE)).toBe(1);
   });
 });

@@ -45,6 +45,15 @@ export interface TurnDeliveryEvidence {
   readonly statusOpIds: readonly number[];
 }
 
+export class OutboundQueueClosedError extends Error {
+  readonly code = 'OUTBOUND_QUEUE_CLOSED';
+
+  constructor() {
+    super('Outbound queue is closed');
+    this.name = 'OutboundQueueClosedError';
+  }
+}
+
 export interface OutboundQueueOptions {
   /** Immutable durable attribution for every outbound operation owned by this queue. */
   readonly conversationKey: string;
@@ -92,6 +101,7 @@ interface QueuedOutboundChunk {
 
 interface BufferedStreamPart {
   readonly text: string;
+  readonly onCommit?: () => void;
   readonly role: OutboundMessageRole;
   readonly turnId: string | undefined;
   readonly turnEvidenceEpoch: number | undefined;
@@ -157,6 +167,13 @@ const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
 export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
 export const TOOL_BATCH_MAX_AGE_MS = 30 * MS_PER_SECOND;
 export const MIN_SEND_GAP_MS = 500;
+
+/** flush() quiescence loop: re-await cadence and cap. The cap bounds patience
+ *  so a genuinely stuck drain still reaches the poisoning assert; each spin
+ *  also awaits the live chain, so real forward progress (paced sends) never
+ *  burns spins at the polling cadence alone. */
+export const FLUSH_QUIESCENCE_SPIN_MS = 25;
+export const FLUSH_QUIESCENCE_MAX_SPINS = 200;
 /** Re-assert composing every N ms — WA auto-clears the indicator on the recipient side after ~10-15s. */
 export const TYPING_REFRESH_MS = 8 * MS_PER_SECOND;
 /**
@@ -223,6 +240,22 @@ export const STATUS_CAP_NOTICE =
  * gates or suppresses a send.
  */
 export const HIGH_VOLUME_TURN_WATERMARK = 40;
+/**
+ * #3398: prefix for a salvaged reply delivered when a turn is crash-aborted
+ * before its terminal result ever enqueues. The guarantee is "no silent turn",
+ * never "always the original answer" — the salvage is the model's last
+ * buffered narration, honestly framed as pre-interruption progress rather
+ * than a completed reply.
+ */
+export const SALVAGED_REPLY_NOTICE =
+  '_I was interrupted before I could finish. Last progress before the interruption:_';
+/**
+ * #3398: cap on the deferred narration retained per turn in the
+ * provisionalPreToolDiscard pen. Enforced by dropping the OLDEST whole
+ * batches first — never by slicing inside a batch, because a sliced secret
+ * fragment could evade the redaction patterns applied at delivery time.
+ */
+export const MAX_SALVAGE_RETENTION_CHARS = 4000;
 /** Hard cap on the terminal-text dedup map so it can't grow unbounded between window prunes. */
 const MAX_TERMINAL_TEXT_DEDUPE_KEYS = 1_000;
 
@@ -338,9 +371,13 @@ export interface IOutboundQueue {
   lastActivity?: number;
   enqueueText(text: string, role?: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
-  enqueueStreamingText(text: string, role?: OutboundMessageRole): void;
+  enqueueStreamingText(text: string, role?: OutboundMessageRole, onCommit?: () => void): void;
+  /** Commit buffered streaming text at the outbound-queue delivery boundary. */
+  commitStreamingText(): void;
+  /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
+  discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
-  enqueueResultText(text: string, role?: OutboundMessageRole): void;
+  enqueueResultText(text: string, role?: OutboundMessageRole): boolean;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -358,7 +395,14 @@ export interface IOutboundQueue {
   shutdown(): Promise<void>;
   /** Stop waiting on transport so durable finalization owns the shutdown budget. */
   preemptForShutdown?(deadlineAt: number): void;
-  abortTurn(options?: { preserveEvidence?: boolean }): void;
+  /**
+   * Cancel per-turn timers/buffers without a normal turn end. `salvageOwedReply`
+   * is for PROVIDER-CRASH finalization only: when the dying turn produced no
+   * visible text, its undelivered buffered/deferred narration is delivered as a
+   * status-role salvage message (never answer evidence) instead of being
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   */
+  abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
   readonly targetChatJid: string;
   /** Opaque echo-guard token. Exposed so a replacement queue can INHERIT the
@@ -384,6 +428,8 @@ export interface IOutboundQueue {
   setDurability(engine: DurabilityEngine): void;
   /** Whether the queue still has buffered, in-flight, or typing work that should block eviction. */
   hasPendingWork?(): boolean;
+  /** Whether a genuine send or durability failure has permanently poisoned this queue. */
+  isPoisoned(): boolean;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -467,6 +513,9 @@ export class OutboundQueue implements IOutboundQueue {
   private chain: Promise<void> = Promise.resolve();
   /** Sticky drain failure. A poisoned queue is never retried in-place. */
   private drainFailure: { readonly error: unknown } | undefined;
+  private lifecycle: 'open' | 'closing' | 'closed' = 'open';
+  private shutdownPromise: Promise<void> | undefined;
+  private postClosureWarningEmitted = false;
   /** One shared signal that can preempt an already-running send attempt at shutdown. */
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
@@ -600,16 +649,17 @@ export class OutboundQueue implements IOutboundQueue {
     active: MutableTurnDeliveryEvidence,
   ): Promise<TurnDeliveryEvidence> {
     try {
-      await this.flush();
-      this.assertEvidenceComplete();
-      if (this.activeTurnEvidence !== active) {
-        throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
-      }
+      return await this.atStableBoundary(() => {
+        this.completeFlushPresentation();
+        if (this.activeTurnEvidence !== active) {
+          throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
+        }
 
-      const completed = OutboundQueue.freezeTurnEvidence(active);
-      this.activeTurnEvidence = undefined;
-      this.completedTurnEvidence = completed;
-      return completed;
+        const completed = OutboundQueue.freezeTurnEvidence(active);
+        this.activeTurnEvidence = undefined;
+        this.completedTurnEvidence = completed;
+        return completed;
+      });
     } finally {
       if (this.turnEvidenceFlush?.evidence === active) {
         this.turnEvidenceFlush = undefined;
@@ -703,16 +753,45 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Aggregation buffer for streaming text deltas — prevents per-token messages from streaming providers. */
   private streamBufferParts: BufferedStreamPart[] = [];
+  /**
+   * Path C recovery holding pen — the SINGLE retention store for minimal-mode
+   * narration deferred at tool boundaries (#3415) and for abort-path salvage
+   * (#3398). `discardPreToolAssistantText()` moves buffered pre-tool text HERE
+   * rather than destroying it — grouped into whole batches and capped at
+   * MAX_SALVAGE_RETENTION_CHARS by dropping oldest whole batches (see
+   * retainDiscardedBatches) — because the text is USUALLY narration ("Let me
+   * check…") that later output supersedes, but if the turn ends without ever
+   * delivering visible text, this WAS the user-owed reply. Cleared the instant
+   * any visible text reaches the user (markVisibleTextDelivered); flushed by
+   * endTurn() only when the whole turn otherwise produced nothing; consumed or
+   * destroyed LOUDLY by abortTurn() (deliver on crash salvage, log.warn on
+   * every other abort); destroyed loudly by completeFlushPresentation().
+   * Deliberately NOT counted by hasPendingWork() — dormant salvage material,
+   * not pending sends.
+   */
+  private provisionalPreToolDiscard: BufferedStreamPart[][] = [];
   /** Timer for flushing aggregated streaming text after a pause. */
   private streamTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Mark that visible text has reached the user this turn. Setting the flag AND
+   * dropping any provisionally-discarded pre-tool text is a single invariant:
+   * once the user has seen output, deferred narration is moot and must never be
+   * resurrected by endTurn()'s Path C recovery.
+   */
+  private markVisibleTextDelivered(): void {
+    this.turnHasVisibleText = true;
+    this.provisionalPreToolDiscard = [];
+  }
 
   /** Enqueue a text message for immediate sending (after pacing). */
   enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
     if (!isNonEmptyString(text)) return;
+    if (this.rejectPostClosureEnqueue()) return;
     const attribution = this.snapshotAttribution(role);
     // Flush any pending streaming buffer first to maintain ordering
     this.flushStreamBuffer();
-    this.turnHasVisibleText = true;
+    this.markVisibleTextDelivered();
     this.enqueuePreparedText(text, attribution);
   }
 
@@ -756,12 +835,20 @@ export class OutboundQueue implements IOutboundQueue {
    * Use this for `assistant_text` events from streaming providers (codex-cli, gemini-cli)
    * that emit per-token or per-line deltas. Text is buffered and flushed after
    * TEXT_AGGREGATE_DELAY_MS of silence, producing batched messages instead of spam.
+   * Minimal mode holds the buffer until a turn boundary: a following tool call
+   * proves the text was pre-tool narration and discards it, while a terminal
+   * result flushes the final answer without exposing intermediate planning.
    */
-  enqueueStreamingText(text: string, role: OutboundMessageRole = 'answer'): void {
+  enqueueStreamingText(
+    text: string,
+    role: OutboundMessageRole = 'answer',
+    onCommit?: () => void,
+  ): void {
     if (!text) return;
-    this.turnHasVisibleText = true;
-    this.streamBufferParts.push({ text, ...this.snapshotAttribution(role) });
+    if (this.rejectPostClosureEnqueue()) return;
+    this.streamBufferParts.push({ text, onCommit, ...this.snapshotAttribution(role) });
     this.startTyping();
+    if (this.toolUpdateMode === 'minimal') return;
     if (this.streamTimer) clearTimeout(this.streamTimer);
     this.streamTimer = setTimeout(() => {
       this.flushStreamBuffer();
@@ -779,10 +866,12 @@ export class OutboundQueue implements IOutboundQueue {
     let group: BufferedStreamPart[] = [];
     const flushGroup = (): void => {
       if (group.length === 0) return;
-      const { text: _firstText, ...attribution } = group[0];
+      const { text: _firstText, onCommit: _firstOnCommit, ...attribution } = group[0];
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(text, attribution);
+        for (const part of group) part.onCommit?.();
       }
       group = [];
     };
@@ -796,19 +885,93 @@ export class OutboundQueue implements IOutboundQueue {
     flushGroup();
   }
 
+  commitStreamingText(): void {
+    this.flushStreamBuffer();
+  }
+
+  discardPreToolAssistantText(): void {
+    if (this.toolUpdateMode !== 'minimal') return;
+    if (this.streamBufferParts.length === 0) return;
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    const partCount = this.streamBufferParts.length;
+    const characterCount = this.streamBufferParts.reduce((total, part) => total + part.text.length, 0);
+    // Path C: DEFER, do not destroy. Buffered pre-tool text is almost always
+    // narration ("Let me check…") superseded by later output, but if the turn
+    // ends without ever delivering visible text, this text WAS the user-owed
+    // reply. Hold it (whole-batch grouped and capped — see
+    // retainDiscardedBatches); markVisibleTextDelivered() drops it the moment
+    // real output reaches the user, endTurn() flushes it iff nothing else did
+    // (keeping the NO_REPLY guarantee honest instead of silently dropping the
+    // answer), and abortTurn() salvages or loudly destroys it (#3398).
+    const deferredParts = this.streamBufferParts;
+    this.streamBufferParts = [];
+    this.retainDiscardedBatches(deferredParts);
+    log.info(
+      { chatJid: this.deliveryJid, partCount, characterCount },
+      'minimal mode deferred buffered assistant text at tool boundary',
+    );
+  }
+
+  /**
+   * #3398: fold buffered stream parts into the provisionalPreToolDiscard pen,
+   * grouped into whole batches exactly as flushStreamBuffer() would have
+   * grouped them (attribution-change boundaries). Whole batches are the cap
+   * and salvage granularity: the cap drops OLDEST whole batches and never
+   * slices inside one, because a sliced fragment could evade the redaction
+   * patterns applied at delivery time. onCommit callbacks stay attached to
+   * the retained parts (endTurn()'s path C recovery re-flushes them with full
+   * commit semantics) but are never fired by abortTurn()'s salvage delivery:
+   * salvage must not commit runtime bookkeeping (replay-unsafe marks,
+   * perChatTurnText, reply-guarantee resets), or the crash-recovery machinery
+   * would mistake stale narration for a delivered reply and skip the real
+   * recovery (QR-103 double-answer rule).
+   */
+  private retainDiscardedBatches(parts: BufferedStreamPart[]): void {
+    let group: BufferedStreamPart[] = [];
+    const commitGroup = (): void => {
+      if (group.length === 0) return;
+      if (group.some((part) => part.text.trim() !== '')) {
+        this.provisionalPreToolDiscard.push(group);
+      }
+      group = [];
+    };
+    for (const part of parts) {
+      const prior = group[0];
+      if (prior && !OutboundQueue.sameAttribution(prior, part)) commitGroup();
+      group.push(part);
+    }
+    commitGroup();
+    // Enforce the retention cap by dropping OLDEST whole batches (see
+    // MAX_SALVAGE_RETENTION_CHARS for why batches are never sliced).
+    let total = this.provisionalPreToolDiscard.reduce(
+      (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+      0,
+    );
+    while (this.provisionalPreToolDiscard.length > 1 && total > MAX_SALVAGE_RETENTION_CHARS) {
+      const dropped = this.provisionalPreToolDiscard.shift()!;
+      total -= dropped.reduce((len, part) => len + part.text.length, 0);
+    }
+  }
+
   /**
    * Enqueue the result/summary text from a completed turn.
    * In minimal mode, suppresses the text if the turn already produced visible
    * output — Claude Code often appends an internal task summary ("Done — I sent
    * the message and asked for...") that shouldn't reach non-technical users.
    */
-  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): void {
-    if (!isNonEmptyString(text)) return;
-    if (this.toolUpdateMode === 'minimal' && this.turnHasVisibleText) {
+  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): boolean {
+    if (!isNonEmptyString(text)) return false;
+    if (this.rejectPostClosureEnqueue()) return false;
+    const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');
+    if (this.toolUpdateMode === 'minimal' && (this.turnHasVisibleText || hasBufferedVisibleText)) {
       // Suppress — the user already got the real response during the turn
-      return;
+      return false;
     }
     this.enqueueText(text, role);
+    return true;
   }
 
   /**
@@ -820,6 +983,7 @@ export class OutboundQueue implements IOutboundQueue {
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
+    if (this.rejectPostClosureEnqueue()) return;
     if (this.toolUpdateMode === 'minimal') {
       this.startTyping();
       return;
@@ -849,6 +1013,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void {
+    if (this.rejectPostClosureEnqueue()) return;
     const name = instanceName;
 
     switch (event.type) {
@@ -1018,6 +1183,7 @@ export class OutboundQueue implements IOutboundQueue {
 
   /** Start the composing indicator immediately without queuing any content. */
   indicateTyping(): void {
+    if (this.rejectPostClosureEnqueue()) return;
     this.startTyping();
   }
 
@@ -1026,11 +1192,8 @@ export class OutboundQueue implements IOutboundQueue {
    * Ensures any in-progress text messages are delivered before the poll arrives.
    */
   async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
-    this.flushStreamBuffer();
-    this.flushToolBuffer();
-    await this.chain;
-    this.assertDrainComplete();
-    await sendFn();
+    if (this.lifecycle !== 'open') throw new OutboundQueueClosedError();
+    await this.atStableBoundary(sendFn);
   }
 
   hasPendingPoll(): boolean {
@@ -1055,11 +1218,47 @@ export class OutboundQueue implements IOutboundQueue {
   /** Flush all pending messages (tool buffer + send queue) immediately. */
   async flush(): Promise<void> {
     this.lastActivity = Date.now();
-    this.flushStreamBuffer();
-    this.flushToolBuffer();
-    this.throwDrainFailure();
-    // Wait for the current chain to drain
-    await this.chain;
+    // Wait for the current chain to drain. A concurrent producer can enqueue
+    // between the chain settling and the assertion below: its drainQueue()
+    // flips `sending` synchronously and chains a NEW segment this await never
+    // covered, so a single-shot assert poisons a HEALTHY, actively-draining
+    // queue (live 2026-08-16: the managed-handoff replay's pre-spawn flush
+    // interleaved with the advance notice drain — sticky drainFailure, chat
+    // outbound dead until restart).
+    //
+    // #3242's containment guarantee adds a second requirement a send-queue-only
+    // spin cannot satisfy: a late STREAM/TOOL buffer enqueued during flush
+    // never touches sendQueue — it parks in streamBufferParts/toolBuffer behind
+    // a debounce timer — so it must be re-flushed every pass, exactly what
+    // atStableBoundary() does. Reconcile the two by re-flushing the buffers
+    // each pass while keeping #3269's spin cap, which still bounds a livelocked
+    // queue so it reaches the poisoning assert instead of spinning forever.
+    // Poison is re-thrown immediately after each await (before any timer), so a
+    // genuine drain failure rejects flush() promptly rather than waiting out a
+    // spin tick.
+    for (let spin = 0; spin < FLUSH_QUIESCENCE_MAX_SPINS; spin++) {
+      this.flushStreamBuffer();
+      this.flushToolBuffer();
+      this.throwDrainFailure();
+      const observedChain = this.chain;
+      await observedChain;
+      this.throwDrainFailure();
+
+      if (
+        observedChain === this.chain
+        && !this.sending
+        && this.sendQueue.length === 0
+        && this.streamBufferParts.length === 0
+        && this.toolBuffer.length === 0
+        && this.streamTimer === null
+        && this.toolTimer === null
+        && this.toolMaxAgeTimer === null
+      ) {
+        break;
+      }
+
+      await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_QUIESCENCE_SPIN_MS));
+    }
     this.assertDrainComplete();
     // All messages delivered — clear typing indicator and per-turn state
     this.stopTyping();
@@ -1069,14 +1268,16 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Flush pending messages and clear all timers. */
-  async shutdown(): Promise<void> {
-    await this.flush();
-    this.activeTurnEvidence = undefined;
-    this.completedTurnEvidence = undefined;
-    if (this.toolTimer !== null) {
-      clearTimeout(this.toolTimer);
-      this.toolTimer = null;
-    }
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.lifecycle = 'closing';
+    this.shutdownPromise = this.atStableBoundary(() => {
+      this.completeFlushPresentation();
+      this.activeTurnEvidence = undefined;
+      this.completedTurnEvidence = undefined;
+      this.lifecycle = 'closed';
+    });
+    return this.shutdownPromise;
   }
 
   /**
@@ -1085,11 +1286,61 @@ export class OutboundQueue implements IOutboundQueue {
    * naturally on the recipient's side (~10-15s), acting as a soft signal that
    * the session is in trouble.
    */
-  abortTurn(options: { preserveEvidence?: boolean } = {}): void {
+  abortTurn(options: { preserveEvidence?: boolean; salvageOwedReply?: boolean } = {}): void {
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
+    // #3398 — reply-guarantee choke for turns that die WITHOUT a terminal
+    // result (the result path settles its own guarantee via commitStreamingText /
+    // enqueueResultText / endTurn()'s path C recovery and never reaches this
+    // branch with owed text). Semantics: an owed reply — buffered or
+    // tool-boundary-deferred narration on a turn that delivered NO visible
+    // text — either DELIVERS (salvageOwedReply: provider-crash finalization
+    // only) or fails LOUDLY (log.warn); it is never destroyed silently.
+    // Salvage is sent with role 'status' so it can never enter answerOpIds:
+    // crash finalization must keep seeing delivery evidence 'none', or the
+    // inbound disposition would flip from failed_terminal to
+    // transferred_to_recovery_owner and perturb the recovery lane's semantics
+    // (turn-finalizer.ts deriveInboundDisposition). Under an uncatchable
+    // SIGKILL before any output reaches the runtime there is nothing to
+    // salvage — the guarantee is "no silent drop of what we HELD", not
+    // "always the original answer".
+    const liveParts = this.streamBufferParts;
     this.streamBufferParts = [];
+    if (!this.turnHasVisibleText) {
+      this.retainDiscardedBatches(liveParts);
+      const owed = this.provisionalPreToolDiscard;
+      this.provisionalPreToolDiscard = [];
+      if (owed.length > 0) {
+        const batchCount = owed.length;
+        const characterCount = owed.reduce(
+          (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+          0,
+        );
+        if (options.salvageOwedReply === true) {
+          const lastBatch = owed[owed.length - 1];
+          const { text: _text, onCommit: _onCommit, ...batchAttribution } = lastBatch[0];
+          const attribution: OutboundAttribution = { ...batchAttribution, role: 'status' };
+          this.enqueuePreparedText(
+            `${SALVAGED_REPLY_NOTICE}\n\n${owed
+              .map((batch) => batch.map((part) => part.text).join(''))
+              .join('\n\n')}`,
+            attribution,
+          );
+          log.warn(
+            { chatJid: this.deliveryJid, batchCount, characterCount },
+            'crash abort salvaged undelivered assistant text as owed-reply fallback',
+          );
+        } else {
+          log.warn(
+            { chatJid: this.deliveryJid, batchCount, characterCount },
+            'turn abort destroyed undelivered assistant text with no visible reply this turn',
+          );
+        }
+      }
+    } else {
+      this.provisionalPreToolDiscard = [];
+    }
     this.toolBuffer = [];
     this.friendlyProgressSent.clear();
     this.recentProgressTextAt.clear();
@@ -1122,9 +1373,74 @@ export class OutboundQueue implements IOutboundQueue {
       || this.streamTimer !== null;
   }
 
+  isPoisoned(): boolean {
+    return this.drainFailure !== undefined;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
+  }
+
+  private rejectPostClosureEnqueue(): boolean {
+    if (this.lifecycle === 'open') return false;
+    if (!this.postClosureWarningEmitted) {
+      this.postClosureWarningEmitted = true;
+      log.warn(
+        { queueState: this.lifecycle },
+        'outbound enqueue rejected after queue closure',
+      );
+    }
+    return true;
+  }
+
+  private completeFlushPresentation(): void {
+    this.stopTyping();
+    this.friendlyProgressSent.clear();
+    this.recentProgressTextAt.clear();
+    // #3398: presentation teardown is a non-salvage seam — an owed reply
+    // destroyed here must fail loudly, never silently. (atStableBoundary()
+    // already flushed the stream buffer, so anything still in the pen on a
+    // no-visible-text turn is genuinely destroyed undelivered text.)
+    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+      const batchCount = this.provisionalPreToolDiscard.length;
+      const characterCount = this.provisionalPreToolDiscard.reduce(
+        (sum, batch) => sum + batch.reduce((len, part) => len + part.text.length, 0),
+        0,
+      );
+      log.warn(
+        { chatJid: this.deliveryJid, batchCount, characterCount },
+        'presentation flush destroyed undelivered assistant text with no visible reply this turn',
+      );
+    }
+    this.turnHasVisibleText = false;
+    this.provisionalPreToolDiscard = [];
+  }
+
+  private async atStableBoundary<T>(complete: () => T | Promise<T>): Promise<T> {
+    for (;;) {
+      this.flushStreamBuffer();
+      this.flushToolBuffer();
+      this.throwDrainFailure();
+      const observedChain = this.chain;
+      await observedChain;
+      this.throwDrainFailure();
+
+      if (
+        observedChain !== this.chain
+        || this.sending
+        || this.sendQueue.length > 0
+        || this.streamBufferParts.length > 0
+        || this.toolBuffer.length > 0
+        || this.streamTimer !== null
+        || this.toolTimer !== null
+        || this.toolMaxAgeTimer !== null
+      ) {
+        continue;
+      }
+
+      return complete();
+    }
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -1186,6 +1502,23 @@ export class OutboundQueue implements IOutboundQueue {
    */
   endTurn(): void {
     this.flushStreamBuffer();
+    // Path C recovery: the turn is ending. If it never delivered visible text
+    // yet we deferred pre-tool buffered text, that text WAS the user-owed reply —
+    // flush it now rather than dropping it into silence. Route it back through
+    // the streaming buffer so grouping, attribution, evidence, and onCommit all
+    // apply exactly as a normal flush would.
+    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+      const recovered = this.provisionalPreToolDiscard.flat();
+      this.provisionalPreToolDiscard = [];
+      const characterCount = recovered.reduce((total, part) => total + part.text.length, 0);
+      this.streamBufferParts.push(...recovered);
+      this.flushStreamBuffer();
+      log.warn(
+        { chatJid: this.deliveryJid, parts: recovered.length, characterCount },
+        'minimal mode recovered deferred pre-tool text as terminal reply (path C)',
+      );
+    }
+    this.provisionalPreToolDiscard = [];
     this.stopTyping();
     // PR-E: reset the per-turn status-cap state on the UNCONDITIONAL turn-end
     // choke (incl. early-break provider-failure branches that never reach
@@ -1237,7 +1570,7 @@ export class OutboundQueue implements IOutboundQueue {
       if (windowState.noticeSentAt === undefined) {
         windowState.noticeSentAt = now;
         this.flushStreamBuffer();
-        this.turnHasVisibleText = true;
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
@@ -1249,7 +1582,7 @@ export class OutboundQueue implements IOutboundQueue {
         this.statusCapNoticeSent = true;
         windowState.noticeSentAt ??= now;
         this.flushStreamBuffer();
-        this.turnHasVisibleText = true;
+        this.markVisibleTextDelivered();
         this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
@@ -1273,8 +1606,12 @@ export class OutboundQueue implements IOutboundQueue {
         statusText,
         resolveOutboundAudience(redirectJid),
       ).text;
-      this.messenger.sendMessage(redirectJid, safeStatusText).catch((err) => {
-        log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
+      this.chain = this.chain.then(async () => {
+        try {
+          await this.messenger.sendMessage(redirectJid, safeStatusText);
+        } catch (err) {
+          log.warn({ err, target: redirectJid, textLength: safeStatusText.length }, 'tool-status redirect send failed');
+        }
       });
       return;
     }
@@ -1293,7 +1630,7 @@ export class OutboundQueue implements IOutboundQueue {
     for (const batch of batches) {
       if (this.statusBudgetExhausted(batch.attribution)) continue;
       this.flushStreamBuffer();
-      this.turnHasVisibleText = true;
+      this.markVisibleTextDelivered();
       this.enqueuePreparedText(this.renderToolUpdates(batch.updates), batch.attribution);
     }
   }
@@ -1385,7 +1722,10 @@ export class OutboundQueue implements IOutboundQueue {
   private assertDrainComplete(): void {
     this.throwDrainFailure();
     if (this.sending || this.sendQueue.length > 0) {
-      const error = new Error('Outbound queue flush completed with pending send work');
+      const error = new Error(
+        'Outbound queue flush completed with pending send work'
+          + ` (sending=${this.sending} queued=${this.sendQueue.length})`,
+      );
       this.drainFailure = { error };
       throw error;
     }
@@ -1405,7 +1745,6 @@ export class OutboundQueue implements IOutboundQueue {
       throw error;
     }
   }
-
   private async sendWithPacing(chunk: QueuedOutboundChunk): Promise<void> {
     const now = Date.now();
     const elapsed = now - this.lastSentAt;

@@ -1,0 +1,18 @@
+{
+  "schema": "whatsoup.observation-envelope",
+  "schema_version": "0.1",
+  "envelope_id": "env-bad-0006",
+  "run_id": "run-fixture-0001",
+  "subject": {
+    "canonical_subject_id": "mini3/yl-bot",
+    "binding": { "authority": "roster", "confidence": "exact" },
+    "raw": { "host_label": "mini3" }
+  },
+  "claim_id": "auth_bond.status",
+  "adapter_id": "public-liveness",
+  "outcome": "pass",
+  "projection": { "scope": "diagnostic", "authorization": "token_sent_accepted" },
+  "times": { "observed_at": "2026-08-20T22:00:00Z" },
+  "authority": { "tier": "authenticated_diagnostic", "confidence": "confirmed" },
+  "limitations": ["adapter must not establish a claim outside its can_establish set"]
+}

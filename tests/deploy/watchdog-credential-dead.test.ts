@@ -271,6 +271,60 @@ describe('watchdog decision block — credential death', () => {
     expect(r.status).toBe(4);
     expect(r.stderr).toContain('terminal auth_failure_class');
   });
+
+  /**
+   * A review finding on the persistent-read escalation: a credential nobody
+   * could READ was being reported as `local_corruption_unrestorable`, which is
+   * in TERMINAL_AUTH_FAILURES — so the watchdog declined to restart and asked
+   * for a human relink, suppressing the one recovery that might clear a read
+   * fault. The class is now `auth_bond_read_persistent`, and this pins that it
+   * is NOT terminal here.
+   */
+  it('does not treat a persistent unreadable credential as terminal — it reaches the restart policy', () => {
+    // The payload is byte-for-byte the terminal case above apart from the
+    // class, so the two tests differ in exactly the thing under test.
+    const payload = {
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'auth_bond_read_persistent',
+        },
+      },
+    };
+
+    const r = runDecision(healthyPayload(payload));
+
+    // Not exit 4, and specifically not the terminal branch's exit 4: the
+    // stderr line is what separates "fell through to restart" from "declined
+    // to restart", since both quiescent and unknown outcomes also use 4.
+    expect(r.stderr).not.toContain('terminal auth_failure_class');
+    expect(r.status).not.toBe(4);
+    // Disconnected with a stale socket is restart-worthy, so the ordinary
+    // policy takes it — the same exit the identical payload reaches with
+    // auth_failure_class 'none'.
+    expect(r.status).toBe(1);
+
+    // Coverage assertion: the identical payload carrying a class that IS in
+    // TERMINAL_AUTH_FAILURES does reach the terminal branch. Without it, the
+    // assertions above could hold because the decision block stopped reading
+    // auth_failure_class at all.
+    const terminal = runDecision(healthyPayload({
+      ...payload,
+      whatsapp: {
+        connected: false,
+        connection: {
+          state: 'close',
+          last_pong_at: null,
+          auth_failure_class: 'local_corruption_unrestorable',
+        },
+      },
+    }));
+    expect(terminal.status).toBe(4);
+    expect(terminal.stderr).toContain('terminal auth_failure_class');
+  });
 });
 
 describe('watchdog decision block — recovery requires fresh, coherent evidence', () => {
@@ -345,6 +399,16 @@ describe('watchdog decision block — malformed evidence is HEALTH-UNKNOWN', () 
 });
 
 describe('watchdog shell wiring — exit 3 routes to marker + log, never restart', () => {
+  it('keeps the diagnostic ceiling below the observed raw-in-band projection', () => {
+    const ceiling = Number(template.match(/exceeds (\d+) bytes/)?.[1]);
+    const largestObservedDiagnostic = 48_639;
+    const maximumRawEndpointBody = 32 * 1024;
+
+    expect(ceiling).toBe(65_536);
+    expect(largestObservedDiagnostic).toBeLessThan(ceiling);
+    expect(largestObservedDiagnostic + maximumRawEndpointBody).toBeGreaterThan(ceiling);
+  });
+
   it('captures the decision exit code instead of `|| restart_label`', () => {
     expect(template).not.toMatch(/PY\s*\|\|\s*restart_label/);
     expect(template).toMatch(/py_rc=\$\?/);
@@ -413,7 +477,7 @@ describe('watchdog shell wiring — authenticated health read (#2515 public enve
   // restarts a perfectly healthy bot every cooldown window, and the
   // CREDENTIAL-DEAD branch can never see turn_capability at all. Surfaced
   // live on mini11 (2026-07-29): the watchdog kicked a healthy bot two
-  // minutes after a green gate. The bot health curl must therefore send the
+  // minutes after a green gate. The bot health read must therefore send the
   // instance bearer from a strictly validated tokens.env.
   it('reads the bearer through a private descriptor with canonical validation', () => {
     expect(template).toMatch(/BOT_TOKENS_ENV="\$HOME_DIR\/\.config\/whatsoup\/instances\/BOT_NAME\/tokens\.env"/);
@@ -425,17 +489,20 @@ describe('watchdog shell wiring — authenticated health read (#2515 public enve
     expect(template).not.toMatch(/sed -n 's\/\^WHATSOUP_HEALTH_TOKEN=/);
   });
 
-  it('sends the bearer through curl config stdin, never curl argv', () => {
-    const botCurl = template.match(/bot_resp="\$\([^\n]*curl --config -[^\n]*/)?.[0];
-    expect(botCurl, 'bot health curl line missing').toBeTruthy();
-    expect(botCurl).toContain('header = \\"Authorization: Bearer $HEALTH_TOKEN\\"');
-    expect(botCurl).not.toContain(' -H ');
+  it('sends the bearer through the health reader stdin, never reader argv', () => {
+    const botRead = template.match(/bot_resp="\$\([^\n]*read_health_response[^\n]*/)?.[0];
+    expect(botRead, 'bot health reader line missing').toBeTruthy();
+    expect(botRead).toContain('print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health');
+    expect(botRead!.split('|')[1]).not.toContain('$HEALTH_TOKEN');
+    expect(template).toContain('3<&0');
+    expect(template).toContain('with os.fdopen(3, "rb") as token_pipe:');
+    expect(template).toContain('headers = {"Authorization": "Bearer " + token}');
     expect(template).not.toContain('AUTH_ARGS=');
   });
 
   it('never writes the token to the log', () => {
     expect(template).not.toMatch(/export[^\n]*HEALTH_TOKEN/);
     expect(template).not.toMatch(/log[^\n]*\$HEALTH_TOKEN/);
-    expect(template).toMatch(/curl_rc=\$\?\n\s*HEALTH_TOKEN=""/);
+    expect(template).toMatch(/probe_rc=\$\?\n\s*HEALTH_TOKEN=""/);
   });
 });

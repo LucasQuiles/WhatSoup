@@ -39,6 +39,60 @@ function stringOrUndefined(value: unknown): string | undefined {
   return asNonEmptyString(value);
 }
 
+/**
+ * Discovery-mode fallback config (R6, owner directive 2026-08-15): the chain is
+ * DERIVED per host/user/deployment from the provider gateway's credential-aware
+ * model catalogue instead of a hardcoded list. Mutually exclusive with a
+ * non-empty `fallbacks` array (enforced at config admission — no silent merge).
+ * All tuning fields are optional; the runtime applies the discovery module's
+ * defaults (`DEFAULT_DISCOVERY_POLICY`).
+ */
+export interface AgentFallbackDiscoveryConfig {
+  mode: 'auto';
+  maxEntries?: number;
+  preferModels?: Record<string, string>;
+  excludeProviders?: string[];
+  includeFreeTier?: boolean;
+}
+
+/**
+ * Shape-normalize `agentOptions.fallbackDiscovery` into a typed config, or null
+ * when absent. Field-level validation (types, ranges, the mutual-exclusion
+ * rule) lives in agent-config-validator.ts; this normalizer only extracts the
+ * well-typed subset so a validator-bypassing caller degrades to defaults
+ * rather than threading junk into the derivation policy.
+ */
+export function normalizeFallbackDiscoveryFromAgentOptions(
+  agentOptions: Record<string, unknown> | null | undefined,
+): AgentFallbackDiscoveryConfig | null {
+  const raw = asRecord(agentOptions?.['fallbackDiscovery']);
+  if (!raw || raw['mode'] !== 'auto') return null;
+  const out: AgentFallbackDiscoveryConfig = { mode: 'auto' };
+  const maxEntries = raw['maxEntries'];
+  if (typeof maxEntries === 'number' && Number.isFinite(maxEntries)) {
+    out.maxEntries = Math.trunc(maxEntries);
+  }
+  const preferModels = asRecord(raw['preferModels']);
+  if (preferModels) {
+    const pins: Record<string, string> = {};
+    for (const [provider, model] of Object.entries(preferModels)) {
+      const pin = stringOrUndefined(model);
+      if (pin !== undefined) pins[provider] = pin;
+    }
+    out.preferModels = pins;
+  }
+  const excludeProviders = raw['excludeProviders'];
+  if (Array.isArray(excludeProviders)) {
+    out.excludeProviders = excludeProviders
+      .map((value) => stringOrUndefined(value))
+      .filter((value): value is string => value !== undefined);
+  }
+  if (typeof raw['includeFreeTier'] === 'boolean') {
+    out.includeFreeTier = raw['includeFreeTier'];
+  }
+  return out;
+}
+
 export function normalizeFallbackEntriesFromAgentOptions(
   agentOptions: Record<string, unknown> | null | undefined,
 ): AgentFallbackEntry[] {

@@ -105,6 +105,13 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // grandfathered per the project norm for large core files (cf. database.ts
   // above). Slice 2's concurrency/observer work should revisit an extraction.
   'src/core/substrate/poller.ts',
+  // The fallback-tier clock-preservation fixes (route-identity tier
+  // attribution, resetAt/probe protection, gap no-arm — ph-bot 2026-08-26
+  // incident) took this file just over the 2000-line warn budget. The logic is
+  // cohesive with the coordinator's window/chain responsibility; the named
+  // extraction path (first-class chain-advance operation, matcher unification
+  // with sessionMatchesCurrentRoute) is deferred to review in the same PR.
+  'src/runtimes/agent/runtime-fallback.ts',
   // #2398's durable stuck-scope escape store (file-backed registration,
   // startup reconcile, logged failure paths) took this file just over the
   // 2000-line arch.file-size warn budget. The store is cohesive with the
@@ -123,6 +130,15 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/fleet/health-poller.test.ts',
   'tests/fleet/index.test.ts',
   'tests/fleet/routes/feed.test.ts',
+  // #3242's outbound-poison containment added one console-consumer case to this
+  // suite — it asserts the bounded poison evidence reaches the line payload AND
+  // that the private scope name never does — taking it from 1959 to ~2008 lines,
+  // just over the 2000-line arch.file-size warn budget. The case reuses this
+  // suite's shared fakeInstance/fakeStatus/makeDeps harness, so extracting it
+  // would duplicate that harness to save eight lines of a redaction assertion.
+  // Grandfathered per the project norm for large cohesive route suites
+  // (cf. feed.test.ts above and ops.test.ts below).
+  'tests/fleet/routes/lines.test.ts',
   'tests/fleet/routes/ops.test.ts',
   // #2548's replay-outcome test matrix (all-succeed / one-fails-mid-loop)
   // reuses this suite's shared importMainWithMocks bootstrap-mock harness,
@@ -130,6 +146,10 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   // duplicate that harness; grandfathered per the project norm for large
   // cohesive test files (cf. the agent runtime/session twins below).
   'tests/main-bootstrap-helpers.test.ts',
+  // 2026-08-21 scheduled-isolation port (#3341 lane): the session-separation case (+120 lines)
+  // rides this file's SessionManager harness; extraction would duplicate the harness. Deliberate,
+  // recorded addition, same shape as the /model drill-down entry above.
+  'tests/runtimes/agent/runtime-secondhalf-branches.test.ts',
   // The two-level /model drill-down (Slice 2) added the drill handler cases
   // (bare->L1, brand->L2, leaf pin, recency both orderings, L1/L2 degrade, L2
   // discovery, cap) beside the Slice-1 selector suite, taking this file just

@@ -22,7 +22,7 @@ import {
   type TriggerSelfRestartOptions,
 } from '../../../src/runtimes/agent/self-restart.ts';
 import { Database } from '../../../src/core/database.ts';
-import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
 const ADMIN_DIGITS = '15550100111';

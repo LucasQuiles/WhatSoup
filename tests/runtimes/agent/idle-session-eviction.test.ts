@@ -10,6 +10,7 @@
 // Mock scaffolding mirrors zombie-sessions.test.ts.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -40,11 +41,14 @@ const { mockSession, mockQueue } = vi.hoisted(() => {
   const mockQueue = {
     enqueueText: vi.fn(),
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
@@ -172,6 +176,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     call = vi.fn();
     getChatScopedToolNames = vi.fn(() => []);
     setSensitiveToolAuthorizer = vi.fn();
+    setCanonicalConversationKeyResolver = vi.fn();
     withModule = vi.fn((_name: string, fn: () => void) => fn());
   },
 }));
@@ -231,6 +236,10 @@ function callSweep(runtime: AgentRuntime): void {
   expect(sweep, 'sweepIdleSessions() must be implemented on AgentRuntime').toBeTypeOf('function');
   sweep!.call(runtime);
 }
+
+beforeEach(async () => {
+  await prepareRuntimeHome();
+});
 
 describe('idle session eviction — sweepIdleSessions', () => {
   beforeEach(() => {

@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock child_process before importing the module
+// Mock child_process before importing the module. spawnSync stays the real
+// builtin: keyring's credential file-store writes go through
+// writeAtomicPrivateFileIsolatedSync, which publishes via a spawnSync-supervised
+// child. Without it those writes fail inside keyring's catch arms and surface as
+// KEYRING_WRITE_FAILED. Everything else stays mocked.
 vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   const { childProcessMock } = await import('../helpers/child-process.ts');
-  return childProcessMock();
+  return { ...childProcessMock(), spawnSync: actual.spawnSync };
 });
 
 import {

@@ -16,9 +16,26 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 
-import { jsonResponse, requireInstance } from '../../lib/http.ts';
+import { readFileSync } from 'node:fs';
+import { hostname } from 'node:os';
+
+import { jsonResponse, parseQueryString, readBody, requireInstance } from '../../lib/http.ts';
 import { SIGNAL } from '../../lib/signals.ts';
 import { MS_PER_MINUTE, MS_PER_SECOND } from '../../lib/time-units.ts';
+import { systemClock } from '../../lib/clock.ts';
+import { instancePaths } from '../paths.ts';
+import { parseAccountScopeId, type AccountScopeIdV1, type PairingErrorClass } from '../../transport/auth-custody-contracts.ts';
+import {
+  executePairingSaga,
+  pairingPreflight,
+  readPairingOperationRecord,
+  type PairingSagaEffects,
+} from '../../transport/pairing-saga.ts';
+import {
+  acquireCoordinationLease,
+  defaultLeaseProbes,
+  releaseCoordinationLease,
+} from '../../transport/coordination-lease.ts';
 import { persistIntroSentFlag } from '../../core/intro-sent-config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { repoRoot } from '../paths.ts';
@@ -51,7 +68,7 @@ const ALLOWED_SSE_EVENTS = new Set(['qr', 'connected', 'error']);
  */
 const AUTH_HELPER_ENV_KEYS = [
   'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-  'NODE_PATH', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'TMPDIR',
+  'NODE_PATH', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'TMPDIR',
 ] as const;
 
 function buildAuthHelperEnv(): NodeJS.ProcessEnv {
@@ -79,6 +96,20 @@ export async function handleAuth(
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
+
+  // Instances with a configured account scope pair ONLY through the explicit,
+  // idempotent POST saga (q-canary lane, T5): this legacy SSE route stops the
+  // service and pairs into the existing auth directory with no quarantine,
+  // exactly the replay surface the saga exists to close.
+  const legacyGateScope = readInstanceAccountScope(instance.configPath);
+  if (legacyGateScope !== null) {
+    jsonResponse(res, 409, {
+      error: legacyGateScope === 'malformed'
+        ? 'instance accountScopeId is malformed; fix config before pairing'
+        : 'this instance requires the pairing saga: POST /api/lines/:name/pairing/preflight then /apply',
+    });
+    return;
+  }
 
   // Prevent concurrent auth requests for the same instance from racing
   if (authInFlight.has(params.name)) {
@@ -160,9 +191,8 @@ export async function handleAuth(
     return;
   }
 
-  // Auth bootstrap is an admin-only operation that needs full environment access
-  // for WhatsApp pairing (QR code flow). This is not a user-facing agent session
-  // and does not process untrusted input, so full env inheritance is acceptable.
+  // Auth bootstrap is an admin-only operation, but it still receives only the
+  // explicit allowlist above plus WHATSOUP_* configuration overrides.
   // Resolve bootstrap-auth against the repo root, not `process.cwd()`.
   // Under systemd the fleet unit ships with no `WorkingDirectory=`, so cwd
   // is the service user's `$HOME` and a relative script path ENOENTs (#419).
@@ -313,4 +343,323 @@ export async function handleAuth(
     setTimeout(() => { try { child.kill(SIGNAL.KILL); } catch { /* already exited: the auth helper may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ } }, 5000);
     endOnce();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Pairing saga routes (q-canary lane, T5)
+//
+// POST /api/lines/:name/pairing/preflight  — side-effect-free typed plan
+// POST /api/lines/:name/pairing/apply      — idempotent saga execution
+// GET  /api/lines/:name/pairing/status     — plan + operation + last event
+//
+// These routes exist only for instances with a configured accountScopeId.
+// They are explicitly mutating POSTs behind the fleet bearer/ticket gate;
+// as CSRF defense they additionally require header-borne credentials (no
+// cookie-only acceptance) and reject cross-site fetch metadata. Shared
+// bearer possession authenticates the CALLER, not a named human — the
+// authorizationId in the apply body is the operator-supplied authorization
+// record, threaded into the durable operation journal.
+// ---------------------------------------------------------------------------
+
+/** Last pairing helper event per instance, served via the status route. */
+const lastPairingEvents = new Map<string, { event: string; data: string | null; at: string }>();
+
+function readInstanceAccountScope(configPath: string): AccountScopeIdV1 | null | 'malformed' {
+  // Absent or unparseable config reads as NO scope: legacy instances predate
+  // the field and discovery already owns config-error reporting. Only a
+  // present-but-invalid value is 'malformed' (fail closed on the value, not
+  // on unrelated read failures).
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    // intentional: absent or unparseable config reads as no scope - legacy
+    // instances predate the field and discovery owns config-error reporting.
+    return null;
+  }
+  const raw = parsed.accountScopeId;
+  if (raw === undefined || raw === null) return null;
+  const scope = parseAccountScopeId(raw);
+  return scope === null ? 'malformed' : scope;
+}
+
+function rejectNonHeaderAuthOrCrossSite(req: IncomingMessage, res: ServerResponse): boolean {
+  const authorization = req.headers.authorization ?? '';
+  if (!authorization.startsWith('Bearer ')) {
+    jsonResponse(res, 401, { error: 'pairing routes require header-borne Bearer credentials' });
+    return false;
+  }
+  // The global gate accepts a legacy ?token= query credential; a Bearer-shaped
+  // header alone does not prove the header is what authenticated. Refuse the
+  // URL-borne form outright so these mutations cannot ride a loggable token.
+  const query = parseQueryString(req.url);
+  if (typeof query.token === 'string') {
+    jsonResponse(res, 403, { error: 'pairing routes refuse URL-borne token credentials; use the Authorization header' });
+    return false;
+  }
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (typeof fetchSite === 'string' && fetchSite === 'cross-site') {
+    jsonResponse(res, 403, { error: 'cross-site pairing requests are refused' });
+    return false;
+  }
+  return true;
+}
+
+function pairingPathsFor(instance: { name: string; stateRoot: string }): { stateRoot: string; authDir: string } {
+  return { stateRoot: instance.stateRoot, authDir: instancePaths(instance.name).authDir };
+}
+
+/** POST /api/lines/:name/pairing/preflight */
+export async function handlePairingPreflight(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+  if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
+  const scope = readInstanceAccountScope(instance.configPath);
+  if (scope === 'malformed') {
+    jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
+    return;
+  }
+  if (scope === null) {
+    jsonResponse(res, 409, { error: 'pairing saga requires a configured accountScopeId; legacy instances use the SSE auth flow' });
+    return;
+  }
+  jsonResponse(res, 200, {
+    scopeId: scope,
+    plan: pairingPreflight(pairingPathsFor(instance)),
+  });
+}
+
+/** GET /api/lines/:name/pairing/status */
+export async function handlePairingStatus(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+  if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
+  const scope = readInstanceAccountScope(instance.configPath);
+  if (scope === null || scope === 'malformed') {
+    jsonResponse(res, 409, { error: 'pairing status exists only for accountScopeId-configured instances' });
+    return;
+  }
+  const qs = parseQueryString(req.url);
+  const paths = pairingPathsFor(instance);
+  const operation = typeof qs.idempotencyKey === 'string' && qs.idempotencyKey.length > 0
+    ? readPairingOperationRecord(paths.stateRoot, qs.idempotencyKey)
+    : null;
+  jsonResponse(res, 200, {
+    scopeId: scope,
+    plan: pairingPreflight(paths),
+    operation: operation === null
+      ? null
+      : operation === 'journal_unreadable'
+        ? { state: 'journal_unreadable' }
+        : { state: operation.operation.state, generationId: operation.generationId, custody: operation.custody },
+    lastEvent: lastPairingEvents.get(params.name) ?? null,
+  });
+}
+
+/** POST /api/lines/:name/pairing/apply */
+export async function handlePairingApply(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: OpsDeps,
+  params: { name: string },
+): Promise<void> {
+  if (!validateInstanceName(params.name, res)) return;
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+  if (!rejectNonHeaderAuthOrCrossSite(req, res)) return;
+  const scope = readInstanceAccountScope(instance.configPath);
+  if (scope === 'malformed') {
+    jsonResponse(res, 500, { error: 'instance accountScopeId is malformed; fix config before pairing' });
+    return;
+  }
+  if (scope === null) {
+    jsonResponse(res, 409, { error: 'pairing saga requires a configured accountScopeId; legacy instances use the SSE auth flow' });
+    return;
+  }
+  // Reserve the in-flight slot in the same synchronous section as the check:
+  // an `await` between has() and add() would let two concurrent applies both
+  // pass the guard and run sagas concurrently.
+  if (authInFlight.has(params.name)) {
+    jsonResponse(res, 409, { error: 'auth already in progress for this instance' });
+    return;
+  }
+  authInFlight.add(params.name);
+  try {
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+    } catch {
+      jsonResponse(res, 400, { error: 'apply requires a JSON body' });
+      return;
+    }
+    const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.length > 0 ? body.idempotencyKey : null;
+    const authorizationId = typeof body.authorizationId === 'string' && body.authorizationId.length > 0 ? body.authorizationId : null;
+    const method = body.method === 'qr' || body.method === 'pairing_code' ? body.method : null;
+    const expectedLatchRevision = typeof body.expectedLatchRevision === 'number' && Number.isInteger(body.expectedLatchRevision) && body.expectedLatchRevision >= 0
+      ? body.expectedLatchRevision
+      : null;
+    const expectedCurrentGenerationId = body.expectedCurrentGenerationId === null || body.expectedCurrentGenerationId === undefined
+      ? null
+      : typeof body.expectedCurrentGenerationId === 'string' && body.expectedCurrentGenerationId.length > 0
+        ? body.expectedCurrentGenerationId
+        : undefined;
+    if (idempotencyKey === null || authorizationId === null || method === null || expectedLatchRevision === null || expectedCurrentGenerationId === undefined) {
+      jsonResponse(res, 400, { error: 'apply requires idempotencyKey, authorizationId, method (qr|pairing_code), expectedLatchRevision, and expectedCurrentGenerationId (string or null)' });
+      return;
+    }
+
+    const paths = pairingPathsFor(instance);
+    const outcome = await executePairingSaga(
+      {
+        idempotencyKey,
+        host: hostname(),
+        instance: params.name,
+        scopeId: scope,
+        expectedCurrentGenerationId,
+        expectedLatchRevision,
+        method,
+        authorizationId,
+        actorOperationId: null,
+        startService: body.startService === true,
+      },
+      paths,
+      buildSagaEffects(params.name, deps, paths, scope),
+    );
+    jsonResponse(res, outcome.ok ? 200 : 409, outcome);
+  } catch (err) {
+    log.error({ err, instance: params.name }, 'pairing apply crashed');
+    jsonResponse(res, 500, projectError(err, { operation: 'auth', stage: 'execute' }));
+  } finally {
+    authInFlight.delete(params.name);
+  }
+}
+
+// Exported for focused effect-level tests (the spawn/service-control seams are
+// otherwise only reachable through a live pairing).
+export function buildSagaEffects(
+  name: string,
+  deps: OpsDeps,
+  paths: { stateRoot: string; authDir: string },
+  scope: AccountScopeIdV1,
+): PairingSagaEffects {
+  return {
+    nowMs: () => systemClock.now(),
+    stopService: async () => {
+      try {
+        if (deps.serviceManager.stopForAuth) {
+          return (await deps.serviceManager.stopForAuth(name)) !== false;
+        }
+        await deps.serviceManager.stop(name);
+        return true;
+      } catch {
+        // intentional: a failed stop maps to the saga's closed
+        // service_stop_unverified refusal rather than an exception.
+        return false;
+      }
+    },
+    startService: () =>
+      new Promise<boolean>(resolve => {
+        const onError = (err: Error | null) => resolve(err === null);
+        if (deps.serviceManager.startAfterAuthFire) {
+          deps.serviceManager.startAfterAuthFire(name, onError);
+        } else {
+          deps.serviceManager.startFire(name, onError);
+        }
+      }),
+    acquireLease: operationId =>
+      acquireCoordinationLease({
+        stateRoot: paths.stateRoot,
+        scopeId: scope,
+        operationId,
+        mode: 'pairing',
+        ttlMs: 10 * MS_PER_MINUTE,
+        probes: defaultLeaseProbes(),
+      }),
+    releaseLease: lease => {
+      releaseCoordinationLease({ stateRoot: paths.stateRoot, scopeId: scope, lease });
+    },
+    runPairingHelper: input =>
+      new Promise(resolve => {
+        const env = buildAuthHelperEnv();
+        // Delegated lease handoff (T4.3): the coordinator owns the lease; the
+        // helper adopts exactly this lease instead of acquiring its own.
+        env.WHATSOUP_PAIRING_LEASE_OP = input.lease.operationId;
+        env.WHATSOUP_PAIRING_LEASE_FENCING = String(input.lease.fencingToken);
+        // A stale 'connected' from a PREVIOUS helper run must never validate
+        // this one's exit; success evidence starts empty for every run.
+        lastPairingEvents.delete(name);
+        const child = spawn(process.execPath, [
+          '--experimental-strip-types',
+          path.join(repoRoot, 'src', 'bootstrap-auth.ts'),
+          name,
+        ], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+        activeAuthProcesses.set(name, child);
+
+        let settled = false;
+        const settle = (result: { ok: true } | { ok: false; errorClass: PairingErrorClass }) => {
+          if (settled) return;
+          settled = true;
+          activeAuthProcesses.delete(name);
+          clearTimeout(timer);
+          resolve(result);
+        };
+        const timer = setTimeout(() => {
+          try { child.kill(SIGNAL.TERM); } catch { /* already exited: the helper may finish between the timeout firing and this kill. */ }
+          settle({ ok: false, errorClass: 'pairing_timeout' });
+        }, AUTH_TIMEOUT_MS);
+
+        let stdoutBuffer = '';
+        child.stdout?.on('data', (chunk: Buffer) => {
+          stdoutBuffer += chunk.toString('utf-8');
+          let newlineAt = stdoutBuffer.indexOf('\n');
+          while (newlineAt !== -1) {
+            const line = stdoutBuffer.slice(0, newlineAt).trim();
+            stdoutBuffer = stdoutBuffer.slice(newlineAt + 1);
+            newlineAt = stdoutBuffer.indexOf('\n');
+            if (line.length === 0) continue;
+            try {
+              const parsed = JSON.parse(line) as { event?: string; data?: string; code?: string };
+              if (parsed.event === 'qr' && typeof parsed.data === 'string') {
+                lastPairingEvents.set(name, { event: 'qr', data: parsed.data, at: new Date(systemClock.now()).toISOString() });
+              } else if (parsed.event === 'pairing_code' && typeof parsed.code === 'string') {
+                lastPairingEvents.set(name, { event: 'pairing_code', data: parsed.code, at: new Date(systemClock.now()).toISOString() });
+              } else if (parsed.event === 'connected') {
+                lastPairingEvents.set(name, { event: 'connected', data: null, at: new Date(systemClock.now()).toISOString() });
+              }
+            } catch {
+              // by design: non-JSON stdout noise from the helper is ignored -
+              // only the typed qr/pairing_code/connected events matter here.
+            }
+          }
+        });
+        // Drain stderr: the helper logs freely there, and an unread pipe
+        // eventually blocks the child on backpressure until the timeout kills
+        // a pairing that was otherwise proceeding.
+        child.stderr?.on('data', (chunk: Buffer) => {
+          const text = chunk.toString('utf-8').trim();
+          if (text) log.info({ instance: name, stderr: text.slice(0, 200) }, 'pairing helper stderr');
+        });
+        child.on('exit', code => {
+          const last = lastPairingEvents.get(name);
+          if (last?.event === 'connected' && code === 0) {
+            settle({ ok: true });
+          } else {
+            settle({ ok: false, errorClass: code === 0 ? 'pairing_rejected' : 'unknown' });
+          }
+        });
+        child.on('error', () => settle({ ok: false, errorClass: 'unknown' }));
+      }),
+  };
 }

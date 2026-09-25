@@ -11,9 +11,9 @@ describe('COMMAND_REGISTRY', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it('seeds exactly the seven commands the classifier knows today (D11/D12: /why removed)', () => {
+  it('seeds exactly the eight commands the classifier knows today (D11/D12: /why removed; #2949 N1 added /stop)', () => {
     expect(COMMAND_REGISTRY.map((c) => c.name).sort()).toEqual(
-      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status'],
+      ['help', 'kill-session', 'model', 'new', 'reset', 'sessions', 'status', 'stop'],
     );
   });
 
@@ -67,15 +67,18 @@ describe('COMMAND_REGISTRY', () => {
     expect(getCommandSpec('status').renderContract?.fields).toMatchObject({ started: 'verified-runtime' });
   });
 
-  it('admin-gates (admin or admin-shared-scope) exactly new/sessions/kill-session (the session-control trio, D2)', () => {
+  it('admin-gates (admin or admin-shared-scope) exactly new/stop/sessions/kill-session (the session-control set, D2)', () => {
     // W1-T3 RULING: /new moved from gate:'admin' to gate:'admin-shared-scope'
-    // (scope-based — see the N17 test above); the trio's total admin coverage
-    // is unchanged, just split across the two gate values.
+    // (scope-based — see the N17 test above); its total admin coverage is
+    // unchanged, just split across the two gate values.
+    // #2949 N1: /stop joins the set on the same gate as /new and for the same
+    // reason (WG-5) — tearing down the active turn hits SHARED session state in
+    // single/shared scope and in a per_chat group.
     expect(
       COMMAND_REGISTRY.filter((c) => c.gate === 'admin' || c.gate === 'admin-shared-scope')
         .map((c) => c.name)
         .sort(),
-    ).toEqual(['kill-session', 'new', 'sessions']);
+    ).toEqual(['kill-session', 'new', 'sessions', 'stop']);
   });
 
   it('marks /status operator-only sensitive fields (D3: pid + sessionId) while staying ungated', () => {

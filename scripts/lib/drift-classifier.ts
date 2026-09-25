@@ -154,6 +154,14 @@ export const DRIFT_MATRIX: Readonly<Record<DriftClass, DriftClassSpec>> = {
  */
 const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClass; label: string }> = [
   {
+    // patch-package overlays rewrite vendored dependency behavior at install
+    // time (#3315 introduced patches/): a drifted patch changes what runs in
+    // production exactly like a source change does.
+    label: 'vendored-dependency overlay (patch-package)',
+    drift: 'DEPENDENCY',
+    test: (p) => p.startsWith('patches/'),
+  },
+  {
     label: 'CI workflow, git hook, or the gate composition itself',
     drift: 'POLICY_OR_WORKFLOW',
     test: (p) =>
@@ -195,6 +203,10 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       // classes, failure policies, and remediation. Editing it changes how every
       // downstream verdict is reached, so it is policy drift, not data drift.
       p.startsWith('controls/') ||
+      // Owner-approved runtime policy artifacts (#3221 Debt 3: policy/media-retention.json).
+      // The config-load gate verifies enabled activations against them fail-closed, so a
+      // drifted artifact changes what the runtime ACCEPTS — policy drift, not data.
+      p.startsWith('policy/') ||
       p.startsWith('tools/whatsoup_guard/'),
   },
   {

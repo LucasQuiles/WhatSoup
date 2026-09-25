@@ -247,4 +247,18 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
       expect(lookupCredentialMock).not.toHaveBeenCalled();
     },
   );
+
+  it('spawns a free-tier opencode/<model> KEYLESS: no credential selected, no provider key in env', () => {
+    const env = buildChildEnv('opencode-cli', undefined, 'opencode/big-pickle');
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+    for (const envVar of PROVIDER_CREDENTIAL_KEYS) {
+      expect(hasKey(env, envVar)).toBe(false);
+    }
+  });
+
+  it('a bare "opencode" model id (no slash) is NOT the keyless route and still throws', () => {
+    expect(() => buildChildEnv('opencode-cli', undefined, 'opencode')).toThrow(
+      /does not resolve to a mapped provider credential service/,
+    );
+  });
 });

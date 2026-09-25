@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
+import { MS_PER_HOUR } from '../../../src/lib/time-units.ts';
 import { api } from '../lib/api';
 import { useToast } from './toast-context';
 
-const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes
+const CHECK_INTERVAL_MS = MS_PER_HOUR; // 60 minutes
 
 export interface UpdateState {
   sha: string;

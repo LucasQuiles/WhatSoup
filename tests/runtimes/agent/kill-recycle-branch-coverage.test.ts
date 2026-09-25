@@ -557,7 +557,11 @@ describe('socket-manager — mcp directory symlink collision (line 99)', () => {
         registry: new ToolRegistry(),
         allowedRoot: root,
         conversationBound: true,
-        resolveActor: () => undefined,
+        resolveExecutingSession: () => ({
+          actorJid: undefined,
+          purpose: undefined,
+          conversationKey: undefined,
+        }),
       });
       expect(() => manager.acquire('cov@s.whatsapp.net', 'cov@s.whatsapp.net'))
         .toThrow(/directory collision/);

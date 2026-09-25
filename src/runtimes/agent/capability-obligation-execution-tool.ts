@@ -274,7 +274,7 @@ export function buildCapabilityExecutionTool(deps: CapabilityExecutionToolDeps):
         // remainder can begin with '-'. Refuse fail-closed BEFORE spawning: a
         // legitimate source (http(s) URL, or a content-addressed media path)
         // never begins with '-'; an operator needing a '-'-leading argument
-        // embeds it (--flag={source}).
+        // embeds it (--flag={source}; interpreted mode only — direct mode refuses flag args).
         if (executionSource.startsWith('-')) {
           recordOutcome(deps, active, observedSourceDigest, 'error', { reason: 'source_would_smuggle_option_flag' });
           return toolError({ error: 'capability_execution', message: 'Source may not begin with "-" (option-flag smuggling refused)' });

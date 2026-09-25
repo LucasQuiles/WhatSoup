@@ -181,6 +181,55 @@ describe('handleGetLines', () => {
     });
   });
 
+  it('preserves bounded outbound-poison health evidence for console consumers', () => {
+    const inst = fakeInstance({ name: 'poisoned-line' });
+    const status = fakeStatus({
+      name: 'poisoned-line',
+      status: 'degraded',
+      statusReason: 'health_body_degraded',
+      statusEvidence: [
+        'health_status=degraded',
+        'degradation_causes=agent_outbound_queue_poisoned',
+      ],
+      health: {
+        status: 'degraded',
+        degradation_causes: ['agent_outbound_queue_poisoned'],
+        runtime: {
+          agent: {
+            outboundQueuePoisoned: true,
+            outboundQueuePoisonedScopes: 1,
+          },
+        },
+      },
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['poisoned-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['poisoned-line', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const [line] = JSON.parse(res._body);
+
+    expect(line.health.degradation_causes).toEqual(['agent_outbound_queue_poisoned']);
+    expect(line.health.runtime.agent).toMatchObject({
+      outboundQueuePoisoned: true,
+      outboundQueuePoisonedScopes: 1,
+    });
+    expect(line.statusEvidence).toEqual([
+      'health_status=degraded',
+      'degradation_causes=agent_outbound_queue_poisoned',
+    ]);
+    expect(JSON.stringify(line)).not.toContain('private-poison-scope');
+    expect(JSON.stringify(line)).not.toContain('private outbound failure');
+  });
+
   it('normalizes sqlite-style runtime timestamps for lastActive', () => {
     const inst = fakeInstance({ name: 'alpha' });
     const status = fakeStatus({
@@ -547,7 +596,21 @@ describe('handleGetLine', () => {
 
   it('returns full detail with dbStats for known instance', async () => {
     const inst = fakeInstance({ name: 'gamma', type: 'passive', socketPath: '/state/gamma/whatsoup.sock' });
-    const status = fakeStatus({ name: 'gamma' });
+    const status = fakeStatus({
+      name: 'gamma',
+      health: {
+        uptime: 1234,
+        event_loop: {
+          raw_samples: {
+            available: true,
+            schema_version: 'health.event-loop-samples.v1',
+            path: '/health/event-loop-samples',
+            oldest_sequence: 1,
+            latest_sequence: 12,
+          },
+        },
+      },
+    });
 
     const deps = makeDeps({
       discovery: {
@@ -569,7 +632,9 @@ describe('handleGetLine', () => {
     expect(body.type).toBe('passive');
     expect(body.socketPath).toBe('/state/gamma/whatsoup.sock');
     expect(body.status).toBe('online');
-    expect(body.health).toEqual({ uptime: 1234 });
+    expect(body.health).toEqual(status.health);
+    expect(JSON.stringify(body.health)).not.toContain('raw_recent');
+    expect(JSON.stringify(body.health)).not.toContain('"samples":[');
     expect(body.dbStats).toEqual({ messageCount: 100, chatCount: 5, pendingAccess: 2 });
   });
 
@@ -1465,6 +1530,57 @@ describe('handleGetLine config and adminPhones', () => {
       expect(res._status).toBe(200);
       const body = JSON.parse(res._body);
       expect(body.config).toEqual({ name: 'mybot', webhookUrl: 'http://example.com' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts client-output blocked terms and public keys from the detailed config response', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-policy-cfg-'));
+    try {
+      const privateTerm = 'private-term-that-must-not-escape';
+      const publicKey = Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        Buffer.alloc(32, 11),
+      ]).toString('base64url');
+      const rawConfig = {
+        name: 'policy-line',
+        clientOutputPolicies: [{
+          conversationKey: 'synthetic-conversation',
+          maxCodePoints: 500,
+          maxQuestionMarks: 1,
+          blockedTerms: [{ value: privateTerm, match: 'whole_word', caseSensitive: false }],
+          rejectInternalArtifacts: true,
+          rejectWhatsAppJids: true,
+          authorization: {
+            keyId: 'synthetic-key',
+            publicKey,
+            requiredActions: ['send_message'],
+          },
+        }],
+      };
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify(rawConfig));
+      const inst = fakeInstance({ name: 'policy-line', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+      });
+
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'policy-line' });
+      const response = JSON.parse(res._body);
+      const serialized = JSON.stringify(response);
+
+      expect(res._status).toBe(200);
+      expect(serialized).not.toContain(privateTerm);
+      expect(serialized).not.toContain(publicKey);
+      expect(response.config.clientOutputPolicies[0]).toMatchObject({
+        conversationKey: 'synthetic-conversation',
+        blockedTerms: [{ value: '[redacted]', match: 'whole_word', caseSensitive: false }],
+        authorization: { keyId: 'synthetic-key', publicKey: '[redacted]' },
+      });
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf8'))).toEqual(rawConfig);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

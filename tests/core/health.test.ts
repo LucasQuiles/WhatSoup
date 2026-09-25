@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { request } from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -74,6 +74,7 @@ vi.mock('../../src/logger.ts', async () => {
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert: vi.fn(() => true),
   emitAlertChecked: vi.fn(() => true),
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: vi.fn(() => true),
   clearAlertSourceChecked: vi.fn(() => true),
 }));
@@ -93,9 +94,14 @@ import { seedChatAliases } from '../../src/core/chats-resolver.ts';
 import { createProfileRegistry } from '../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
+import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src/core/health.ts';
 import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
+import { systemClock } from '../../src/lib/clock.ts';
+import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
+import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -215,6 +221,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
           ...snapshot,
           details: {
             degradedReasons: [],
+            recoveryBlockingReasons: [],
             recoveryDebtReasons: [],
             turnRecoveryBlockingOutstanding: 0,
             turnRecoveryRetainedTerminal: 0,
@@ -1994,6 +2001,193 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('names frozen completed-delivery identity debt instead of agent_runtime_degraded_unclassified', async () => {
+    // ml-bot/mini8 (2026-08-16): five bots sat permanently degraded with the
+    // REAL reason (completed_delivery_identity_debt) visible only in
+    // status_reasons while degradation_causes — the field alerts and flap
+    // detection key on — fell through to agent_runtime_degraded_unclassified.
+    // The signal existed and was dropped from the field that matters. This
+    // pins the mapping rule so the debt is a NAMED cause.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+          // frozen debt with no classified next action: service-blocking
+          degradedReasons: ['completed_delivery_identity_debt'],
+          recoveryBlockingReasons: ['completed_delivery_identity_unclassified'],
+          completedDeliveryIdentityBlocking: 11,
+          completedDeliveryIdentityAdmissions: {
+            unresolvedCount: 11,
+            oldestTransitionAt: '2026-08-12T05:34:35.000Z',
+            maximumAttempts: 1,
+            nextAction: null,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('delivery_identity_debt');
+    // the named cause replaces the unclassified fall-through — never both
+    expect(json.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
+    db2.close();
+  });
+
+  it('keeps retained completed-delivery identity debt out of degradation causes', async () => {
+    // The live ml-bot shape (2026-08-16): frozen debt whose next action is a
+    // fresh inbound is retained recovery debt. It stays visible in
+    // recovery_debt but neither degrades status nor names a cause.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          recentCrashes: 0,
+          providerExecution: { pressureActive: false },
+          recoveryDebtReasons: ['completed_delivery_identity_fresh_inbound'],
+          completedDeliveryIdentityRetained: 11,
+          completedDeliveryIdentityAdmissions: {
+            unresolvedCount: 11,
+            oldestTransitionAt: '2026-08-12T05:34:35.000Z',
+            maximumAttempts: 1,
+            nextAction: 'fresh_inbound',
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('delivery_identity_debt');
+    expect(json.recovery_debt).toMatchObject({
+      open: true,
+      service_blocking: false,
+      completed_delivery_identity: { retained: 11, next_action: 'fresh_inbound' },
+    });
+    db2.close();
+  });
+
+  it('threads periodic-probe scheduler inputs (backoff multiple, freshness window) into turn_capability', async () => {
+    // The runtime now derives model_usable_stale from the probe scheduler's
+    // expected deadline instead of a flat 30 minutes. The inputs to that
+    // decision must be visible on the wire so an operator reading a stale flag
+    // can see WHICH window it was judged against.
+    db.close();
+    const db2 = makeDb();
+    const checkedAt = 1_782_349_406_162;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          active: true,
+          turnCapability: {
+            modelUsable: true,
+            modelUsableStale: false,
+            modelUsableCheckedAt: checkedAt,
+            modelUsabilityStatus: 'usable',
+            lastSuccessfulTurnAt: null,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+            periodicProbeExpected: true,
+            periodicProbeBackoffMultiple: 2,
+            modelUsableFreshnessMs: 68 * 60_000,
+            nextProbeDueAt: 1_782_353_006_162,
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.turn_capability.periodic_probe_expected).toBe(true);
+    expect(json.turn_capability.periodic_probe_backoff_multiple).toBe(2);
+    expect(json.turn_capability.model_usable_freshness_ms).toBe(68 * 60_000);
+    expect(json.turn_capability.next_probe_due_at).toBe(1_782_353_006_162);
+    expect(json.runtime.agent.turnCapability.nextProbeDueAt).toBe(1_782_353_006_162);
+    expect(json.runtime.agent.turnCapability.periodicProbeBackoffMultiple).toBe(2);
+    expect(json.runtime.agent.turnCapability.modelUsableFreshnessMs).toBe(68 * 60_000);
+    db2.close();
+  });
+
+  it('emits turn_recovery_degraded and its registered reason twin runtime.turn_finalization_debt for the same condition', async () => {
+    // One condition (runtimeTurnRecoveryIsDegraded) reaches the wire under two
+    // names. The cause->reason registry makes that cross-reference explicit;
+    // this pins that the live emission still matches the registry.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['turn_finalization_debt'],
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 1,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
+    expect(json.status_reasons).toContain('runtime.turn_finalization_debt');
+    const twins = HEALTH_DEGRADATION_CAUSE_REASON_TWINS.turn_recovery_degraded;
+    expect(twins).not.toBe(NO_REASON_TWIN);
+    expect((twins as readonly string[]).some((reason) => json.status_reasons.includes(reason))).toBe(true);
+    db2.close();
+  });
+
   it('threads #1392 modelUsableStale/modelUsableCheckedAt into runtime.agent and top-level turn_capability (F1)', async () => {
     // Regression for the half-deployed #1392: the freshness fields were exposed on
     // instance.turnCapability (via getFallbackState) but dropped from the core/health.ts
@@ -2167,6 +2361,71 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('projects active outbound poison independently of historical recovery debt', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['outbound_queue_poisoned'],
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryOpenRecoveries: 0,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('runtime.outbound_queue_poisoned');
+    expect(json.degradation_causes).toContain('agent_outbound_queue_poisoned');
+    expect(json.runtime.agent).toMatchObject({
+      outboundQueuePoisoned: true,
+      outboundQueuePoisonedScopes: 1,
+    });
+    db2.close();
+  });
+
+  it('does not infer active outbound poison from historical recovery debt', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['turn_finalization_debt'],
+          outboundQueuePoisoned: false,
+          outboundQueuePoisonedScopes: 0,
+          turnRecoveryOutstanding: 2,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { body } = await healthReq(port);
+    const json = JSON.parse(body);
+    expect(json.status_reasons).not.toContain('runtime.outbound_queue_poisoned');
+    expect(json.degradation_causes).not.toContain('agent_outbound_queue_poisoned');
+    db2.close();
+  });
+
   it('publishes turn-finalization recovery counters and degraded status', async () => {
     db.close();
     const db2 = makeDb();
@@ -2268,6 +2527,41 @@ describe('GET /health', () => {
     expect(json.runtime.agent.turnQueueHalted).toBe(true);
     expect(json.runtime.agent.turnQueueHaltedScopes).toBe(1);
     expect(json.runtime.agent.lastTurnErrorClass).toBe('auth-required');
+    db2.close();
+  });
+
+  it('retains the outbound poison reason when agent runtime health is unhealthy', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'unhealthy',
+        details: {
+          degradedReasons: ['outbound_queue_poisoned'],
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(503);
+    const json = JSON.parse(body);
+    expect(json.status_reasons).toEqual([
+      'agent_runtime_unhealthy',
+      'runtime.outbound_queue_poisoned',
+    ]);
+    expect(json.degradation_causes).toEqual(expect.arrayContaining([
+      'agent_runtime_unhealthy',
+      'agent_outbound_queue_poisoned',
+    ]));
     db2.close();
   });
 
@@ -2540,7 +2834,11 @@ describe('GET /health', () => {
     db2.close();
   });
 
-  it('clears the degraded latch on complete retained-only proof in the same server process', async () => {
+  it('reports retained-only debt as non-blocking while the #2280 latch holds a prior blocking episode', async () => {
+    // The #2280 latch releases only on an exact-primary-route turn receipt
+    // newer than the latch point, and neither runtime.turn_finalization_debt
+    // nor recovery_debt_blocking is turn-provable. Retained-only evidence is
+    // therefore reported as non-blocking debt while silence stays unproven.
     db.close();
     const db2 = makeDb();
     const turnCapability = {
@@ -2553,6 +2851,7 @@ describe('GET /health', () => {
     };
     const completeRecoveryDetails = (overrides: Record<string, unknown>) => ({
       degradedReasons: [],
+      recoveryBlockingReasons: [],
       recoveryDebtReasons: [],
       turnRecoveryBlockingOutstanding: 0,
       turnRecoveryRetainedTerminal: 0,
@@ -2567,7 +2866,8 @@ describe('GET /health', () => {
       .mockReturnValueOnce({
         status: 'degraded',
         details: completeRecoveryDetails({
-          degradedReasons: ['turn_recovery_actionable'],
+          degradedReasons: ['turn_finalization_debt'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
           turnRecoveryBlockingOutstanding: 1,
           turnCapability,
         }),
@@ -2599,9 +2899,12 @@ describe('GET /health', () => {
       status: 'degraded',
       recovery_debt: { open: true, service_blocking: true },
     });
+    expect(first.status_reasons).toEqual(
+      expect.arrayContaining(['runtime.turn_finalization_debt', 'recovery_debt_blocking']),
+    );
     expect(retained).toMatchObject({
-      status: 'healthy',
-      status_reasons: [],
+      status: 'degraded',
+      status_reasons: ['degradation_silence_unproven'],
       recovery_debt: {
         open: true,
         service_blocking: false,
@@ -2609,9 +2912,10 @@ describe('GET /health', () => {
       },
     });
     expect(retained.degradation_causes).not.toContain('turn_recovery_degraded');
+    expect(retained.degradation_causes).not.toContain('recovery_debt_blocking');
     expect(clear).toMatchObject({
-      status: 'healthy',
-      status_reasons: [],
+      status: 'degraded',
+      status_reasons: ['degradation_silence_unproven'],
       recovery_debt: { open: false, service_blocking: false },
     });
     expect(getHealthSnapshot).toHaveBeenCalledTimes(3);
@@ -3000,6 +3304,7 @@ describe('GET /health', () => {
         sessions: 2,
         compact: { lastError: 'timeout' },
         degradedReasons: [],
+        recoveryBlockingReasons: [],
         recoveryDebtReasons: [],
         turnRecoveryBlockingOutstanding: 0,
         turnRecoveryRetainedTerminal: 0,
@@ -3046,9 +3351,14 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'model-unavailable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: 'model-unavailable',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3088,9 +3398,14 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: 1_781_316_030_000,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -3136,9 +3451,14 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: 'unknown',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: 'empty-output',
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3586,9 +3906,14 @@ describe('GET /health', () => {
       model_usable_checked_at: null,
       model_usability_status: null,
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: 1_781_316_000_000,
     });
@@ -3599,9 +3924,15 @@ describe('GET /health', () => {
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastSuccessfulTurnProvider: null,
+      lastSuccessfulTurnModel: null,
       lastSuccessfulTurnSessionCurrent: null,
+      primaryModel: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: 1_781_316_000_000,
+      periodicProbeExpected: null,
+      periodicProbeBackoffMultiple: null,
+      modelUsableFreshnessMs: null,
+      nextProbeDueAt: null,
     });
     expect(body).not.toContain(rawProviderText);
     db2.close();
@@ -4088,6 +4419,35 @@ describe('POST /send — Authorization header check', () => {
     }]);
   });
 
+  it('canonicalizes a phone-JID recipient onto the existing @lid conversation and echoes the resolved JID (3150)', async () => {
+    process.env.WHATSOUP_HEALTH_TOKEN = 'test-health-token-2515';
+    // The instance knows this phone identity maps to a LID whose DM thread
+    // already exists — an admin /send addressed by phone JID must land in
+    // that thread, not open a second one, and the response must echo the
+    // resolved JID so callers can verify routing (issue 3150).
+    db.raw
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('11111110222', '15550100001@s.whatsapp.net');
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key) VALUES (?, ?)')
+      .run('11111110222@lid', '15550100001');
+
+    const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'canonical hello' });
+    const { status, body } = await httpReq(port, '/send', 'POST', payload, {
+      authorization: 'Bearer test-health-token-2515',
+    });
+
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.ok).toBe(true);
+    expect(json.chatJid).toBe('11111110222@lid');
+    expect(deps.connectionManager.sendMessage).toHaveBeenCalledWith(
+      '11111110222@lid',
+      'canonical hello',
+      { caller: 'health' },
+    );
+  });
+
   it('surfaces bounded aggregate outbound evidence without destination or provider identifiers', async () => {
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     const payload = JSON.stringify({ chatJid: '15550100001@s.whatsapp.net', text: 'hello health proof' });
@@ -4273,6 +4633,7 @@ describe('POST /send — Authorization header check', () => {
         messages: 0,
         triggerRuns: 0,
         triggerOccurrences: 0,
+        identityAdmissionsExpired: 0,
       },
     });
 
@@ -6018,9 +6379,14 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: null,
       last_successful_turn_provider: null,
+      last_successful_turn_model: null,
       last_successful_turn_session_current: null,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -6314,9 +6680,14 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       model_usable_checked_at: null,
       model_usability_status: 'usable',
       periodic_probe_expected: null,
+      periodic_probe_backoff_multiple: null,
+      model_usable_freshness_ms: null,
+      next_probe_due_at: null,
       last_successful_turn_at: 1_700_000_000_000,
       last_successful_turn_provider: 'claude-cli',
+      last_successful_turn_model: null,
       last_successful_turn_session_current: true,
+      primary_model: null,
       last_turn_error_class: null,
       last_turn_error_at: null,
     });
@@ -6435,12 +6806,163 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
       locallyStarved: boolean;
       discontinuityCount: number;
     }) {
+      // The raw-instrumentation fields (#3253) default to empty/null so the
+      // existing scenario call sites stay focused on the starvation contract.
       return {
         start: vi.fn(),
         stop: vi.fn(),
-        snapshot: vi.fn().mockReturnValue(snapshot),
+        snapshot: vi.fn().mockReturnValue({
+          minLagMs: null,
+          medianLagMs: null,
+          maxLagMs: null,
+          intervalSampleCount: 0,
+          snapshotSampleCount: 0,
+          lastEluUtilization: null,
+          lastCpuDeltaMs: null,
+          observerCostMs: 0,
+          ...snapshot,
+        }),
+        // P42: the handler brackets itself with an observer span, so the
+        // double has to answer beginObserverSpan like the real sampler.
+        beginObserverSpan: vi.fn().mockReturnValue(() => {}),
+        recordObserverSpan: vi.fn(),
+        rawSamples: vi.fn().mockReturnValue([]),
+        rawSamplePage: vi.fn().mockReturnValue({
+          oldestSequence: null,
+          latestSequence: null,
+          nextAfter: 0,
+          truncated: false,
+          gap: null,
+          samples: [],
+        }),
       };
     }
+
+    describe('GET /health/event-loop-samples', () => {
+      it('requires privileged health auth with no public-envelope fallback', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        ({ server, port } = await buildTestServer(makeDeps(db, { loopLagSampler: sampler as any })));
+
+        const missing = await httpReq(port, '/health/event-loop-samples', 'GET');
+        const invalid = await httpReq(
+          port,
+          '/health/event-loop-samples',
+          'GET',
+          undefined,
+          { Authorization: 'Bearer wrong-token' },
+        );
+
+        expect(missing.status).toBe(401);
+        expect(invalid.status).toBe(401);
+        expect(missing.body).toBe(JSON.stringify({ error: 'Unauthorized' }));
+        expect(missing.body).not.toContain('samples');
+        expect(sampler.rawSamplePage).not.toHaveBeenCalled();
+      });
+
+      it('returns one authenticated immutable page without sampling the loop', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        sampler.rawSamplePage.mockReturnValue({
+          oldestSequence: 5,
+          latestSequence: 5,
+          nextAfter: 5,
+          truncated: false,
+          gap: null,
+          samples: [{
+            sequence: 5,
+            atMs: 2_500,
+            wallAtMs: 1_785_000_002_500,
+            lagMs: 2.1254,
+            source: 'interval',
+            discontinuity: false,
+            eluUtilization: 0.25,
+            cpuDeltaMs: 1.5,
+          }],
+        });
+        const startedAt = 1_785_000_000_000;
+        ({ server, port } = await buildTestServer(makeDeps(db, {
+          loopLagSampler: sampler as any,
+          startedAt,
+        })));
+
+        const response = await httpReq(
+          port,
+          '/health/event-loop-samples?after=4&limit=1',
+          'GET',
+          undefined,
+          { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` },
+        );
+        const body = JSON.parse(response.body);
+
+        expect(response.status).toBe(200);
+        expect(sampler.rawSamplePage).toHaveBeenCalledExactlyOnceWith({ after: 4, limit: 1 });
+        expect(sampler.snapshot).not.toHaveBeenCalled();
+        expect(body).toMatchObject({
+          schema_version: 'health.event-loop-samples.v1',
+          process: { pid: process.pid, started_at_ms: startedAt },
+          cadence_ms: 500,
+          oldest_sequence: 5,
+          latest_sequence: 5,
+          next_after: 5,
+          truncated: false,
+          gap: null,
+        });
+        expect(body.samples).toEqual([{
+          sequence: 5,
+          at_ms: 2_500,
+          wall_at_ms: 1_785_000_002_500,
+          lag_ms: 2.125,
+          source: 'interval',
+          discontinuity: false,
+          elu_utilization: 0.25,
+          cpu_delta_ms: 1.5,
+        }]);
+      });
+
+      it('fails closed on malformed, repeated, or unknown query parameters', async () => {
+        const sampler = fakeLoopLagSampler({
+          sampleCount: 0,
+          p95LagMs: null,
+          locallyStarved: false,
+          discontinuityCount: 0,
+        });
+        ({ server, port } = await buildTestServer(makeDeps(db, { loopLagSampler: sampler as any })));
+        const headers = { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` };
+
+        for (const [query, code] of [
+          ['?after=-1', 'invalid_after'],
+          ['?limit=1&limit=2', 'repeated_query_parameter'],
+          ['?debug=true', 'unknown_query_parameter'],
+        ] as const) {
+          const response = await httpReq(
+            port,
+            `/health/event-loop-samples${query}`,
+            'GET',
+            undefined,
+            headers,
+          );
+          expect(response.status, query).toBe(400);
+          expect(JSON.parse(response.body), query).toEqual({ error: code });
+        }
+        expect(sampler.rawSamplePage).not.toHaveBeenCalled();
+      });
+
+      it('does not route non-GET methods or near-match paths', async () => {
+        ({ server, port } = await buildTestServer(makeDeps(db)));
+        const headers = { Authorization: `Bearer ${TEST_HEALTH_TOKEN}` };
+        expect((await httpReq(port, '/health/event-loop-samples', 'POST', '', headers)).status).toBe(404);
+        expect((await httpReq(port, '/health/event-loop-samples/', 'GET', undefined, headers)).status).toBe(404);
+      });
+    });
 
     it('exposes a well-shaped event_loop block with the real sampler by default', async () => {
       ({ server, port } = await buildTestServer(makeDeps(db)));
@@ -6476,8 +6998,67 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
         sample_count: 20,
         locally_starved: true,
         starvation_threshold_ms: 250,
+        observer_cost_ms: 0,
         discontinuity_count: 3,
+        lag_min_ms: null,
+        lag_median_ms: null,
+        lag_max_ms: null,
+        interval_sample_count: 0,
+        snapshot_sample_count: 0,
+        elu_utilization: null,
+        cpu_delta_ms: null,
+        raw_samples: {
+          available: true,
+          schema_version: 'health.event-loop-samples.v1',
+          path: '/health/event-loop-samples',
+          oldest_sequence: null,
+          latest_sequence: null,
+        },
       });
+    });
+
+    it('keeps raw samples out of diagnostic health and exposes only bounded discovery metadata', async () => {
+      const sampler = fakeLoopLagSampler({
+        sampleCount: 2,
+        p95LagMs: 12,
+        locallyStarved: false,
+        discontinuityCount: 0,
+      });
+      sampler.rawSamplePage.mockReturnValue({
+        oldestSequence: 2,
+        latestSequence: 161,
+        nextAfter: 161,
+        truncated: true,
+        gap: null,
+        samples: [{
+          sequence: 161,
+          atMs: 80_500,
+          wallAtMs: 1_785_000_080_500,
+          lagMs: 0,
+          source: 'interval',
+          discontinuity: false,
+          eluUtilization: 0.25,
+          cpuDeltaMs: 1.5,
+        }],
+      });
+      const deps = makeDeps(db, { loopLagSampler: sampler as any });
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await healthReq(port);
+      expect(status).toBe(200);
+      const eventLoop = JSON.parse(body).event_loop;
+      expect(eventLoop).not.toHaveProperty('raw_recent');
+      expect(eventLoop.raw_samples).toEqual({
+        available: true,
+        schema_version: 'health.event-loop-samples.v1',
+        path: '/health/event-loop-samples',
+        oldest_sequence: 2,
+        latest_sequence: 161,
+      });
+      expect(JSON.stringify(eventLoop.raw_samples)).not.toContain('at_ms');
+      expect(Buffer.byteLength(body), `diagnostic health body was ${Buffer.byteLength(body)} bytes`)
+        .toBeLessThan(65_536);
+      expect(sampler.rawSamplePage).toHaveBeenCalledExactlyOnceWith({ limit: 1 });
     });
 
     it('logs a warning when the sampler reports local starvation', async () => {
@@ -6653,6 +7234,908 @@ describe('health.ts upper-branch coverage (624-1020)', () => {
 
       const { body } = await healthReq(port);
       expect(JSON.parse(body).status).toBe('healthy');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Degradation-classification symmetry.
+//
+// The health body carries two parallel classifications: `degradation_causes`
+// (typed) and `status_reasons` (free-form). Two asymmetries between them:
+//
+//   1. `degradation_causes` has a catch-all safety net (non-healthy + no cause
+//      => 'unclassified'); `status_reasons` had none, so a non-healthy status
+//      could theoretically emit `status_reasons: []`. Closed by the exported
+//      `ensureStatusReasonFloor` helper (mirrors the causes net).
+//   2. The #2280 silence latch pushes a `status_reason`
+//      ('degradation_silence_unproven') with no matching degradation cause, so a
+//      silence-latched-but-otherwise-quiet instance classified as the catch-all
+//      'unclassified' cause instead of naming the silence latch. Closed by a
+//      dedicated 'degradation_silence_unproven' cause raised from the same latch.
+// ---------------------------------------------------------------------------
+describe('degradation classification symmetry', () => {
+  describe('ensureStatusReasonFloor (asymmetry 1 — status_reasons safety net)', () => {
+    it('adds an unclassified catch-all when a degraded status carries no reasons', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('degraded', reasons);
+      expect(reasons).toEqual(['unclassified']);
+    });
+
+    it('applies the same floor to an unhealthy status', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('unhealthy', reasons);
+      expect(reasons).toEqual(['unclassified']);
+    });
+
+    it('never adds a reason to a healthy status', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons: string[] = [];
+      ensureStatusReasonFloor('healthy', reasons);
+      expect(reasons).toEqual([]);
+    });
+
+    it('leaves an already-populated reason list untouched', async () => {
+      const { ensureStatusReasonFloor } = await import('../../src/core/health.ts');
+      const reasons = ['enrichment_stale'];
+      ensureStatusReasonFloor('degraded', reasons);
+      expect(reasons).toEqual(['enrichment_stale']);
+    });
+  });
+
+  describe('silence-latch degradation cause (asymmetry 2 — #2280)', () => {
+    let db: Database;
+    let prevToken: string | undefined;
+
+    beforeEach(() => {
+      prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
+      process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+      db = makeDb();
+    });
+
+    afterEach(() => {
+      db.close();
+      if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
+      else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
+    });
+
+    it('classifies a silence-latched degradation with a dedicated cause, not unclassified', async () => {
+      // A single server instance holds the recently-degraded set across
+      // requests, which is what arms the #2280 latch.
+      let enrichmentRuntimeDegraded = true;
+      const deps = makeDeps(db, {
+        getEnrichmentStats: () => ({
+          lastRun: null,
+          unprocessed: 0,
+          runtimeDegraded: enrichmentRuntimeDegraded,
+        }),
+      });
+      const { server, port } = await buildTestServer(deps);
+      try {
+        // Request 1: a real degradation signal seeds recentlyDegraded.
+        const first = JSON.parse((await healthReq(port)).body);
+        expect(first.status).toBe('degraded');
+        expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+
+        // Request 2: every live signal is quiet, but the silence latch keeps
+        // the instance degraded because recovery was never proven.
+        enrichmentRuntimeDegraded = false;
+        const second = JSON.parse((await healthReq(port)).body);
+        expect(second.status).toBe('degraded');
+        expect(second.status_reasons).toContain('degradation_silence_unproven');
+
+        // The classification must name the silence latch, not collapse to the
+        // catch-all — that is the asymmetry this fix closes.
+        expect(second.degradation_causes).toContain('degradation_silence_unproven');
+        expect(second.degradation_causes).not.toContain('unclassified');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2280 silence-latch release: explicit recovery proof.
+//
+// The silence latch (degradation_silence_unproven) keeps an instance degraded
+// when every live signal goes quiet after a real degradation, because silence
+// from child processes is not proof of recovery. Without a proof channel the
+// latch held for the LIFE OF THE PROCESS — a genuinely recovered instance
+// (live example: ph-bot, 2026-08-26) reported degraded forever.
+//
+// Recovery-proof contract under test: the latch releases ONLY when
+//   (1) the health evaluation observes turn-capability evidence of a
+//       successful PRIMARY-provider turn (primary identity is only known when
+//       the fallback-state snapshot reports NO window: fallbackActiveUntil is
+//       null; a non-null value — even one already past expiry by check time —
+//       means the snapshot was taken under a window, so its effectiveProvider
+//       is not the primary),
+//   (2) the receipt is strictly newer than the latch point (which advances on
+//       EVERY evaluation observing real degradation reasons — including the
+//       unhealthy branches and the late-computed reasons such as
+//       schema_future — so an episode after the receipt invalidates it;
+//       strictly-newer is the ONLY temporal guard: a genuine receipt never
+//       expires by wall clock), and
+//   (3) every reason in the latched set is turn-provable
+//       (TURN_PROVABLE_STATUS_REASONS): a turn proves the turn pipeline (turn
+//       capability, agent runtime, the connection it rode in on, and — by
+//       construction of the release guard — the end of a fallback window) —
+//       never enrichment/memory/durability/etc. FULL-VISIBILITY evaluations
+//       (the normal degraded path, which re-checks every reason source)
+//       REPLACE the latched set with their reasons — a blip that cleared
+//       before such an evaluation was observed clearing, so it is not
+//       unproven silence and must not poison the latch; SHORT-CIRCUIT
+//       evaluations (auth / not-connected / runtime-unhealthy) UNION their
+//       observed reasons in, never removing members they had no visibility
+//       to re-check. Only real EARLY-path reasons on the full-visibility
+//       path ARM a new latch — late-source-only reasons are directly probed
+//       every evaluation and never arm.
+// Silence alone, elapsed time alone, an empty reason list alone, a stale
+// receipt, or a non-primary receipt never release. The latch itself is
+// process-lifetime (in-memory): a restart clears it by amnesia, a known
+// pre-existing hazard, not a release channel. Reason/cause symmetry must hold
+// in both states.
+// ---------------------------------------------------------------------------
+describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
+  let db: Database;
+  let prevToken: string | undefined;
+
+  let clockOffsetMs = 0;
+  let clockNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+  beforeEach(() => {
+    prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db = makeDb();
+    clockOffsetMs = 0;
+    clockNowSpy = vi.spyOn(systemClock, 'now').mockImplementation(() => Date.now() + clockOffsetMs);
+  });
+
+  afterEach(() => {
+    clockNowSpy?.mockRestore();
+    clockNowSpy = null;
+    db.close();
+    if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
+    else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
+  });
+
+  // Turn-class degradation seed: model_usable=false + a non-transient error
+  // class produce the 'turn_capability_degraded' status reason.
+  function degradedTurnCapability(): Record<string, unknown> {
+    return {
+      modelUsable: false,
+      modelUsabilityStatus: 'model-unavailable',
+      lastSuccessfulTurnAt: null,
+      lastTurnErrorClass: 'model-unavailable',
+      lastTurnErrorAt: Date.now(),
+    };
+  }
+
+  // Recovered turn capability carrying a successful-turn receipt from the
+  // still-current session on the provider-default primary route (no explicit
+  // model on either side). Route/session overrides ride via object spread.
+  function receiptTurnCapability(at: number, provider: string): Record<string, unknown> {
+    return {
+      modelUsable: true,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: at,
+      lastSuccessfulTurnProvider: provider,
+      lastSuccessfulTurnSessionCurrent: true,
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+  }
+
+  // Agent-instance harness: one mutable non-turn degradation signal
+  // (enrichment runtime), mutable turn-capability evidence, a mutable
+  // fallback-state snapshot (default: on primary 'claude-cli', no window),
+  // and a mutable connection flag (false → 'connection_disconnected',
+  // status unhealthy).
+  async function buildLatchHarness(): Promise<{
+    server: ReturnType<typeof createServer>;
+    port: number;
+    setRuntimeDegraded: (v: boolean) => void;
+    setTurnCapability: (tc: Record<string, unknown> | null) => void;
+    setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => void;
+    setConnected: (v: boolean) => void;
+    setRuntimeSnapshot: (status: 'healthy' | 'degraded', degradedReasons: string[] | null) => void;
+  }> {
+    let runtimeDegraded = false;
+    let tc: Record<string, unknown> | null = null;
+    let fallback: { effectiveProvider: string; fallbackActiveUntil: number | null } | null =
+      { effectiveProvider: 'claude-cli', fallbackActiveUntil: null };
+    let connected = true;
+    let runtimeStatus: 'healthy' | 'degraded' = 'healthy';
+    let runtimeReasons: string[] | null = null;
+    const deps = makeDeps(db, {
+      instanceType: 'agent',
+      getEnrichmentStats: () => ({ lastRun: null, unprocessed: 0, runtimeDegraded }),
+      connectionManager: {
+        botJid: '15551230004@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: () => emptyConnectionStateSnapshot({
+          connected,
+          stateChangedAt: '2026-07-29T00:00:00.000Z',
+          lastDisconnectReason: null,
+        }),
+      } as unknown as ConnectionManager,
+      runtime: {
+        getHealthSnapshot: () => ({
+          status: runtimeStatus,
+          details: {
+            ...(tc === null ? {} : { turnCapability: tc }),
+            ...(runtimeReasons === null ? {} : { degradedReasons: runtimeReasons }),
+          },
+        }),
+        getFallbackState: () => (fallback === null ? null : {
+          ...fallback,
+          fallbackTurnsServed: 0,
+          fallbackTurnsEmpty: 0,
+          lastFallbackTurnAt: null,
+        }),
+      } as unknown as HealthDeps['runtime'],
+    });
+    const { server, port } = await buildTestServer(deps);
+    return {
+      server,
+      port,
+      setRuntimeDegraded: (v: boolean) => { runtimeDegraded = v; },
+      setTurnCapability: (next: Record<string, unknown> | null) => { tc = next; },
+      setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => { fallback = s; },
+      setConnected: (v: boolean) => { connected = v; },
+      setRuntimeSnapshot: (status: 'healthy' | 'degraded', degradedReasons: string[] | null) => {
+        runtimeStatus = status;
+        runtimeReasons = degradedReasons;
+      },
+    };
+  }
+
+  function expectLatched(json: Record<string, unknown>): void {
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain('degradation_silence_unproven');
+    expect(json.degradation_causes).toContain('degradation_silence_unproven');
+  }
+
+  function expectReleased(json: Record<string, unknown>): void {
+    expect(json.status).toBe('healthy');
+    expect(json.status_reasons).not.toContain('degradation_silence_unproven');
+    expect(json.degradation_causes).not.toContain('degradation_silence_unproven');
+  }
+
+  // Deterministic clock: latch stamps read systemClock.now(), which this
+  // suite spies to real time plus a controlled offset. advanceClock replaces
+  // real sleeps — it moves the stamp clock forward instantly — and
+  // harnessNow() builds receipt timestamps on the same offset clock, so every
+  // strictly-newer comparison is decided by the offset, never by a wall-clock
+  // race. The spy is installed per test (beforeEach) and restored (afterEach).
+  const advanceClock = (ms: number): void => { clockOffsetMs += ms; };
+  const harnessNow = (): number => Date.now() + clockOffsetMs;
+
+  // Seed a turn-class latch (every latched reason turn-provable).
+  async function seedTurnClassLatch(h: Awaited<ReturnType<typeof buildLatchHarness>>): Promise<void> {
+    h.setTurnCapability(degradedTurnCapability());
+    const first = JSON.parse((await healthReq(h.port)).body);
+    expect(first.status).toBe('degraded');
+    expect(first.status_reasons).toContain('turn_capability_degraded');
+    h.setTurnCapability(null);
+  }
+
+  it('releases a turn-class latch on a fresh primary-turn receipt newer than the latch point', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a non-turn-class latch is not released by a turn receipt (a turn proves the turn pipeline only)', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setRuntimeDegraded(true);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+
+      h.setRuntimeDegraded(false);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a receipt under a fallback-window snapshot does not release even if the window expired mid-evaluation', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // The snapshot says a window exists (non-null expiry) but the expiry is
+      // already behind the clock by the time the release check compares — the
+      // race a wall-clock liveness test loses. The snapshot's
+      // effectiveProvider is the FALLBACK provider and must not pass as
+      // primary.
+      h.setFallbackState({ effectiveProvider: 'openai-api', fallbackActiveUntil: Date.now() - 1 });
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'openai-api'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an unhealthy episode advances the latch point: a receipt predating it does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // Receipt T1: newer than the seed latch, fresh, primary.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      // Unhealthy episode T2 > T1: disconnected transport.
+      advanceClock(1000);
+      h.setConnected(false);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('connection_disconnected');
+
+      // Reconnect T3: every live signal quiet, but the only receipt predates
+      // the unhealthy episode — recovery is NOT proven.
+      h.setConnected(true);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+
+      // A receipt newer than the unhealthy episode proves the round trip and
+      // releases (the connection classes ride the turn pipeline).
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a stale receipt older than the latch point does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const staleAt = harnessNow() - 1000;
+      await seedTurnClassLatch(h);
+      h.setTurnCapability(receiptTurnCapability(staleAt, 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('silence alone never releases: no receipt and empty reasons stay latched across evaluations', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+      // Elapsed time / repeated quiet evaluations alone must not release either.
+      advanceClock(1000);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a fresh receipt from a non-primary provider does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'openai-api'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('after a release, a new degradation re-latches and only a NEWER fresh receipt releases again', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      const firstReceiptAt = harnessNow();
+      h.setTurnCapability(receiptTurnCapability(firstReceiptAt, 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+
+      // A NEW turn-class degradation re-latches normally...
+      advanceClock(1000);
+      h.setTurnCapability(degradedTurnCapability());
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('turn_capability_degraded');
+      expect(third.status_reasons).not.toContain('degradation_silence_unproven');
+
+      // ...and the receipt that released the FIRST latch predates the new
+      // latch point, so it must not release this one.
+      h.setTurnCapability(receiptTurnCapability(firstReceiptAt, 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+
+      // A receipt newer than the new latch point releases again.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const fifth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fifth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a non-provable blip that clears before the last real evaluation does not poison the latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // A non-provable enrichment blip arrives WHILE the turn-class
+      // degradation is still live...
+      h.setTurnCapability(degradedTurnCapability());
+      h.setRuntimeDegraded(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('degraded');
+      expect(second.status_reasons).toContain('turn_capability_degraded');
+      expect(second.status_reasons).toContain('enrichment_runtime_degraded');
+
+      // ...and clears while a real evaluation still observes the turn-class
+      // reason: the LAST real evaluation shows turn-class only, so the blip
+      // was observed clearing — it is not unproven silence.
+      h.setRuntimeDegraded(false);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('turn_capability_degraded');
+      expect(third.status_reasons).not.toContain('enrichment_runtime_degraded');
+
+      h.setTurnCapability(null);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('no release while the LAST real evaluation still shows a non-provable reason', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // The final real evaluation before silence carries the enrichment
+      // reason — the receipt cannot prove THAT recovered.
+      h.setTurnCapability(degradedTurnCapability());
+      h.setRuntimeDegraded(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('degraded');
+      expect(second.status_reasons).toContain('enrichment_runtime_degraded');
+
+      h.setRuntimeDegraded(false);
+      h.setTurnCapability(null);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a late-computed unhealthy episode (schema_future) advances the latch point', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // Receipt T1: newer than the seed latch.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      // T2: schema_future is computed AFTER the early status chain — only
+      // latch maintenance that runs truly last can observe it.
+      advanceClock(1000);
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('schema_future');
+
+      // T3: episode over; the only receipt predates it — NOT proof.
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+
+      // The episode's reason set {schema_future} is not turn-provable, so
+      // even a FRESH receipt does not release — fail-closed by design; a
+      // schema_future episode resolves through operator action + restart.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an unhealthy-only history never arms the latch: healthy immediately after recovery', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // No prior degraded evaluation — straight to unhealthy.
+      h.setConnected(false);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('unhealthy');
+      expect(first.status_reasons).toContain('connection_disconnected');
+
+      h.setConnected(true);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a late-source-only transient blip never arms the latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // No early-path degradation ever. A late-source-only reason appears
+      // (schema_not_ready is computed after the early status chain)...
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('schema_not_ready');
+      expect(first.status_reasons).not.toContain('degradation_silence_unproven');
+
+      // ...and clears. Late-source reasons are directly probed every
+      // evaluation — they are not silence-prone and need no silence latch.
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a fallback-window outage releases after revert on a fresh primary receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Outage: the runtime reports degraded with the window-derived reason
+      // while a fallback window is live.
+      h.setFallbackState({ effectiveProvider: 'openai-api', fallbackActiveUntil: Date.now() + 600_000 });
+      h.setRuntimeSnapshot('degraded', ['provider_fallback_active']);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('runtime.provider_fallback_active');
+
+      // Revert: window over, primary serving again, fresh primary receipt.
+      // The release guard only accepts a primary receipt while NO window is
+      // live, so acceptance itself proves the window ended — the reason is
+      // turn-provable by construction of the guard.
+      h.setRuntimeSnapshot('healthy', null);
+      h.setFallbackState({ effectiveProvider: 'claude-cli', fallbackActiveUntil: null });
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an unhealthy-verdict evaluation never arms, even with real early-path reasons', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Evaluation 1: a real EARLY-path reason (enrichment) is observed, but
+      // a late block flips the final verdict to unhealthy — schema_future
+      // even REPLACES the reason list, so an arm here would latch a set that
+      // lost the early evidence entirely. Arming on an unhealthy verdict
+      // contradicts the scoping that unhealthy verdicts advance/restore only.
+      h.setRuntimeDegraded(true);
+      db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('unhealthy');
+      expect(first.status_reasons).toContain('schema_future');
+
+      // Evaluation 2: everything clear — no latch may have been armed. The
+      // silence window this leaves is exactly base behavior for every
+      // unhealthy verdict.
+      h.setRuntimeDegraded(false);
+      db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION + 1);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('healthy');
+      expect(second.status_reasons).not.toContain('degradation_silence_unproven');
+      expect(second.degradation_causes).not.toContain('degradation_silence_unproven');
+
+      // A later plain degraded evaluation arms normally.
+      h.setRuntimeDegraded(true);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expect(third.status).toBe('degraded');
+      expect(third.status_reasons).toContain('enrichment_runtime_degraded');
+      h.setRuntimeDegraded(false);
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a same-provider receipt from a DIFFERENT model than the explicit primary does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Same provider, wrong model: a /model-pinned chat serving another
+      // claude-cli model is NOT the primary route — its success proves that
+      // route, not the one the latch is about.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnModel: 'claude-haiku-4-5',
+        lastSuccessfulTurnSessionCurrent: true,
+        primaryModel: 'claude-opus-4-5',
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('an explicit primary model with an UNKNOWN receipt model does not release', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Fail closed: when the primary model is explicit, a receipt that
+      // cannot name its serving model proves nothing about the primary route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: true,
+        primaryModel: 'claude-opus-4-5',
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a provider-default primary does not release on a model-pinned receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // The pinned rule for a provider-default primary: the receipt's model
+      // must be absent/default too — a model-pinned session's success is a
+      // different route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnModel: 'claude-haiku-4-5',
+        lastSuccessfulTurnSessionCurrent: true,
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a receipt from a rotated or dead session does not release (session-current guard)', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      advanceClock(1000);
+      // Explicitly not current: the success belongs to a session incarnation
+      // that no longer exists — it says nothing about the live route.
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: false,
+      });
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(second);
+
+      // Unknown currency fails closed too.
+      advanceClock(1000);
+      h.setTurnCapability({
+        ...receiptTurnCapability(harnessNow(), 'claude-cli'),
+        lastSuccessfulTurnSessionCurrent: null,
+      });
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a short-circuit evaluation must not launder a non-provable latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // Non-provable latch: enrichment-class.
+      h.setRuntimeDegraded(true);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('enrichment_runtime_degraded');
+      h.setRuntimeDegraded(false);
+
+      // A disconnect evaluation short-circuits before the enrichment probes
+      // run — it has no visibility to re-check them, so it must UNION its
+      // observed reason into the latch, never replace the set.
+      h.setConnected(false);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('unhealthy');
+      expect(second.status_reasons).toContain('connection_disconnected');
+
+      h.setConnected(true);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+});
+
+describe('GET /health — shadowGate (advisory)', () => {
+  const tmp = trackTmpDirs('health-shadow-gate-');
+  const { join } = path;
+  const mutableConfig = config as unknown as Record<string, unknown>;
+  const zeroCounts = Object.fromEntries(SHADOW_GATE_COUNT_KEYS.map((k) => [k, 0]));
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+  let savedShadowGate: PropertyDescriptor | undefined;
+
+  beforeEach(async () => {
+    savedShadowGate = Object.getOwnPropertyDescriptor(config, 'shadowGate');
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db = makeDb();
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+  });
+
+  afterEach(async () => {
+    await __resetShadowGateForTests();
+    if (savedShadowGate) Object.defineProperty(config, 'shadowGate', savedShadowGate);
+    else delete mutableConfig.shadowGate;
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  async function diagnostic(): Promise<Record<string, unknown>> {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    return JSON.parse(body) as Record<string, unknown>;
+  }
+
+  const statusFields = (body: Record<string, unknown>) => ({
+    status: body.status,
+    status_reasons: body.status_reasons,
+    degradation_causes: body.degradation_causes,
+  });
+
+  it('mode off (or an absent section) reports exactly { mode: "off" }', async () => {
+    expect((await diagnostic()).shadowGate).toEqual({ mode: 'off' });
+    mutableConfig.shadowGate = { mode: 'off', eventsDir: join(tmp.make('off'), 'events') };
+    expect((await diagnostic()).shadowGate).toEqual({ mode: 'off' });
+  });
+
+  it('shadow mode before the first dispatched message reports a not_started recorder', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('lazy'), 'events') };
+    expect((await diagnostic()).shadowGate).toEqual({
+      mode: 'shadow', recorder: 'not_started', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+    });
+  });
+
+  it('a closed sink behind a registered recorder reports unavailable, not not_started', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('closed'), 'events') };
+    const recorder = getShadowGateRecorder(db, config);
+    expect(recorder).not.toBeNull();
+    await recorder!.close();
+    expect((await diagnostic()).shadowGate).toMatchObject({
+      mode: 'shadow', recorder: 'unavailable', sinkState: 'closed',
+    });
+  });
+
+  it('shadow mode with a live recorder reports ready, closed codes and counters only', async () => {
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('ready'), 'events') };
+    expect(getShadowGateRecorder(db, config)).not.toBeNull();
+
+    await vi.waitFor(async () => {
+      expect((await diagnostic()).shadowGate).toMatchObject({ recorder: 'ready', sinkState: 'ready' });
+    });
+    const shadowGate = (await diagnostic()).shadowGate as Record<string, unknown>;
+    expect(Object.keys(shadowGate).sort()).toEqual(['counts', 'mode', 'recorder', 'sinkDegradedReason', 'sinkState']);
+    expect(shadowGate).toMatchObject({ mode: 'shadow', sinkDegradedReason: null });
+    expect(Object.keys(shadowGate.counts as object).sort()).toEqual([...SHADOW_GATE_COUNT_KEYS].sort());
+    expect(shadowGate.counts).toMatchObject({ evaluated: 0, recorded: 0 });
+  });
+
+  it('a latched creation failure reports a disabled recorder', async () => {
+    mutableConfig.shadowGate = {
+      mode: 'shadow',
+      get eventsDir(): string {
+        throw new Error('bad section');
+      },
+    };
+    expect(getShadowGateRecorder(db, config)).toBeNull();
+    expect((await diagnostic()).shadowGate).toEqual({
+      mode: 'shadow', recorder: 'disabled', sinkState: null, sinkDegradedReason: null, counts: zeroCounts,
+    });
+  });
+
+  it('a degraded sink is reported with its reason code and leaves health status untouched', async () => {
+    const baseline = statusFields(await diagnostic());
+    const blocker = join(tmp.make('degraded'), 'not-a-dir');
+    writeFileSync(blocker, 'x');
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(blocker, 'events') };
+    expect(getShadowGateRecorder(db, config)).not.toBeNull();
+
+    await vi.waitFor(async () => {
+      expect((await diagnostic()).shadowGate).toMatchObject({
+        mode: 'shadow', recorder: 'degraded', sinkState: 'degraded', sinkDegradedReason: 'mkdir_failed',
+      });
+    });
+    expect(statusFields(await diagnostic())).toEqual(baseline);
+  });
+
+  it('a degraded sink that is later closed still reports degraded with its reason', async () => {
+    const blocker = join(tmp.make('degraded-closed'), 'not-a-dir');
+    writeFileSync(blocker, 'x');
+    mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(blocker, 'events') };
+    const recorder = getShadowGateRecorder(db, config)!;
+    await vi.waitFor(() => expect(recorder.sinkStatus().state).toBe('degraded'));
+    await recorder.close();
+    expect((await diagnostic()).shadowGate).toMatchObject({
+      recorder: 'degraded', sinkState: 'closed', sinkDegradedReason: 'mkdir_failed',
+    });
+  });
+
+  describe('with a stubbed sink status', () => {
+    function stubbedRecorder() {
+      mutableConfig.shadowGate = { mode: 'shadow', eventsDir: join(tmp.make('stub'), 'events') };
+      return vi.spyOn(getShadowGateRecorder(db, config)!, 'sinkStatus');
+    }
+
+    it('reports a sink that is still starting as starting, not ready', async () => {
+      stubbedRecorder().mockReturnValue({ state: 'starting', degradedReason: null });
+      expect((await diagnostic()).shadowGate).toMatchObject({
+        recorder: 'starting', sinkState: 'starting', sinkDegradedReason: null,
+      });
+    });
+
+    it('replaces a degraded reason outside the id charset with unknown', async () => {
+      stubbedRecorder().mockReturnValue({ state: 'degraded', degradedReason: '/var/lib/whatsoup/events: EACCES' });
+      const { body } = await healthReq(port);
+      expect(body).not.toContain('/var/lib/whatsoup');
+      expect((JSON.parse(body) as Record<string, unknown>).shadowGate).toMatchObject({
+        recorder: 'degraded', sinkDegradedReason: 'unknown',
+      });
+    });
+
+    it('a throwing sink status still answers 200 and reports unavailable', async () => {
+      stubbedRecorder().mockImplementation(() => {
+        throw new Error('sink status failed');
+      });
+      expect((await diagnostic()).shadowGate).toEqual({
+        mode: 'shadow', recorder: 'unavailable', sinkState: null, sinkDegradedReason: null,
+        counts: expect.objectContaining({ evaluated: 0 }),
+      });
     });
   });
 });

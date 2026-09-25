@@ -2,6 +2,7 @@
 // Tests for the emit_heal_result MCP tool registered in AgentRuntime.start()
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -38,11 +39,14 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     updateDeliveryJid: vi.fn(),
@@ -113,6 +117,8 @@ const { mockControlQueueInstance } = vi.hoisted(() => {
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     indicateTyping: vi.fn(),
@@ -313,7 +319,8 @@ async function buildRuntime(db?: Database): Promise<{
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('emit_heal_result MCP tool', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.clearAllMocks();
     registeredTools.length = 0;
     mockDequeueNextReport.mockReturnValue(null);

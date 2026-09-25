@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,7 +47,7 @@ type RuntimeState = {
   chatQueues: Map<string, unknown>;
   operationTrackers: Map<string, unknown>;
   pendingSystemResults: { counts: Map<string, number> };
-  perChatExecActorQueue: Map<string, Array<string | undefined>>;
+  perChatExecActorQueue: Map<string, Array<{ actorJid: string | undefined; purpose?: 'scheduled-agent-job' }>>;
   sessionOwnership: SessionOwnershipRegistry;
 };
 
@@ -181,7 +182,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-owner', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions, queues, trackers } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);
@@ -244,7 +245,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-race', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions, queues, trackers } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);
@@ -300,7 +301,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-rekey', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 100);
@@ -398,7 +399,11 @@ describe('per-chat /new ownership transition', () => {
       // exec-actor queue landing under the ACTIVATED key instead.
       expect(routedTurns).toHaveLength(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{
+        actorJid: lidJid,
+        purpose: undefined,
+        conversationKey,
+      }]);
 
       releaseContextResult();
       await turn;
@@ -417,7 +422,11 @@ describe('per-chat /new ownership transition', () => {
       expect(indicateTyping).toHaveBeenCalledTimes(1);
       expect(state.pendingSystemResults.counts.get(canonicalKey) ?? 0).toBe(0);
       expect(state.pendingSystemResults.counts.has(lidKey)).toBe(false);
-      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([lidJid]);
+      expect(state.perChatExecActorQueue.get(canonicalKey)).toEqual([{
+        actorJid: lidJid,
+        purpose: undefined,
+        conversationKey,
+      }]);
       expect(state.perChatExecActorQueue.has(lidKey)).toBe(false);
       expect(routedTurns).toHaveLength(1);
       expect(routedTurns[0]?.mapKey).toBe(canonicalKey);
@@ -445,7 +454,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-fail', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const replacementPidFile = join(tmpdir(), `${runId}-replacement-pid.json`);
@@ -517,7 +526,7 @@ describe('per-chat /new ownership transition', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db as any, messenger as any, 'new-shutdown-fail', {
       sessionScope: 'per_chat',
-      cwd: '/tmp',
+      cwd: await ownedRuntimeCwd(runId),
     });
     const { state, ownership, sessions } = configureRuntime(runtime);
     const generationCount = installFakeProvider(runId, 300);

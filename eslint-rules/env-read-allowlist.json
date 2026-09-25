@@ -3,8 +3,8 @@
   "rows": [
     {
       "file": "src/config.ts",
-      "allowedUnmarkedSites": 47,
-      "reason": "SSOT env\u2192typed-RuntimeConfig conversion seam; every read is instance-config\u2192env\u2192default. Includes the bot-errors publish bridge (#2192 slices 3a+3b): conditional WRITES + post-publish reads for BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as baileysVersionPinned (#2192 s4a \u2014 baileys-version.ts entry retired), + the four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables via one dynamic-key resolver line (#2192 s4b \u2014 runtime-tunables 6->2)."
+      "allowedUnmarkedSites": 48,
+      "reason": "SSOT env\u2192typed-RuntimeConfig conversion seam; every read is instance-config\u2192env\u2192default. Includes the bot-errors publish bridge (#2192 slices 3a+3b): conditional WRITES + post-publish reads for BOT_ERRORS_{JID,EXPECTED_JID,REQUIRE_EXPECTED,SAFE_SHAPE_CRED_PATH} and EMIT_ALERT_THROTTLE_MS, + the BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS read behind toolFailureAlertsEnabled, + WHATSOUP_BAILEYS_VERSION absorbed as baileysVersionPinned (#2192 s4a \u2014 baileys-version.ts entry retired), + the four WHATSOUP_PROVIDER_FALLBACK_* tunables absorbed as fallbackTunables via one dynamic-key resolver line (#2192 s4b \u2014 runtime-tunables 6->2), + WHATSOUP_ACCOUNT_SCOPE_ID absorbed as accountScopeId (q-canary lane: instance-config\u2192env\u2192absent, validated by resolveConfiguredAccountScope)."
     },
     {
       "file": "src/core/arc-binding-health.ts",
@@ -15,6 +15,11 @@
       "file": "src/core/database-compatibility-early.ts",
       "allowedUnmarkedSites": 2,
       "reason": "build-time injected WHATSOUP_GIT_SHA / WHATSOUP_GIT_BRANCH (deploy hook, no typed source)."
+    },
+    {
+      "file": "src/core/durability.ts",
+      "allowedUnmarkedSites": 2,
+      "reason": "WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS (terminalization sweep bound) and WHATSOUP_IDENTITY_ADMISSION_STRANDED_SECONDS (earlier stranded-reporting bound) \u2014 both reliability-4.1 operational bounds, each resolved once at module load with an env-allowed marker on site."
     },
     {
       "file": "src/core/health-bind-guard.ts",
@@ -83,8 +88,8 @@
     },
     {
       "file": "src/lib/bot-errors-outbox.ts",
-      "allowedUnmarkedSites": 19,
-      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b); the DIR/test/identity vars stay env-late (absence semantics feed vitest isolation + outbox provenance policy)."
+      "allowedUnmarkedSites": 18,
+      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). The DIR/test/identity vars stay env-late because their absence semantics feed vitest isolation and outbox provenance policy."
     },
     {
       "file": "src/lib/emit-alert.ts",
@@ -122,6 +127,11 @@
       "reason": "env-late by design (#2192 slice 3c): BOT_ERRORS_STATE_DIR absence selects the XDG default (absence load-bearing); XDG_DATA_HOME is OS-ambient; WHATSOUP_INSTANCE is deploy-injected identity (systemd/launchd), never set in src."
     },
     {
+      "file": "src/lib/redaction-text.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "BOT_ERRORS_SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b); the shared redaction helper stays env-late because runtime and script consumers use it without importing the runtime config singleton."
+    },
+    {
       "file": "src/logger.ts",
       "allowedUnmarkedSites": 3,
       "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) \u2014 cannot import config (eval-order cycle)."
@@ -142,6 +152,11 @@
       "reason": "whole-object process.env \u2192 resolveReleaseIdentity (build/release identity)."
     },
     {
+      "file": "src/runtimes/agent/fallback-canary-config.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "pure resolver `env: Env = process.env` param-default (handoff-distill-config idiom)."
+    },
+    {
       "file": "src/runtimes/agent/handoff-distill-config.ts",
       "allowedUnmarkedSites": 3,
       "reason": "exemplar pure resolver `env: Env = process.env` param-defaults \u2014 the idiom to extend."
@@ -152,6 +167,11 @@
       "reason": "passes env into the pure resolver at the call boundary (not a bypass)."
     },
     {
+      "file": "src/runtimes/agent/host-work-admission.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "single injectable host-env seam: the opt-in predicate and helper lookup default to it; tests inject their own env."
+    },
+    {
       "file": "src/runtimes/agent/provider-canary-proof.ts",
       "allowedUnmarkedSites": 6,
       "reason": "child-env forward for canary probe (explicit allow-list of ambient vars)."
@@ -160,6 +180,11 @@
       "file": "src/runtimes/agent/providers/child-env.ts",
       "allowedUnmarkedSites": 35,
       "reason": "child-env builder: explicit allow-list, not passthrough \u2014 highest-leak-risk seam."
+    },
+    {
+      "file": "src/runtimes/agent/providers/claude-account-identity.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "`deps.env ?? process.env` DI seam for the read-only identity probe (task-21); scrubbed to the auth-status allow-list (HOME/PATH/USER/NO_COLOR/CLAUDE_CONFIG_DIR) before spawn, never forwarded whole — same seam shape as claude-filestore-heal.ts."
     },
     {
       "file": "src/runtimes/agent/providers/claude-filestore-heal.ts",
@@ -213,8 +238,8 @@
     },
     {
       "file": "src/transport/auth.ts",
-      "allowedUnmarkedSites": 4,
-      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent)."
+      "allowedUnmarkedSites": 6,
+      "reason": "WHATSOUP_PAIR_NUMBER \u2014 env-late by design (#2192 s4 verdict: per-CLI-run mode selector (QR vs pairing-code) + operator PII; a typed field would persist E.164 at rest and make an ephemeral per-run choice permanent). + WHATSOUP_PAIRING_LEASE_{OP,FENCING} \u2014 env-late by design (q-canary lane: per-spawn delegated coordination-lease handoff from the fleet pairing coordinator to the helper child; a typed config field would persist an ephemeral single-operation capability at rest)."
     },
     {
       "file": "src/transport/imessage/imsg-rpc-relay.ts",

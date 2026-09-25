@@ -97,7 +97,7 @@ Sharp and systemic. Confirmed REAL conformance violations the first two rounds m
 | Grant pills hue-coded (P violet / S cyan) | channel collision | neutral letter-coded chips |
 | Hatch done-steps green, selected glyph accent-tinted, glow persisted past the beat | ceremony/accent law | neutral steps, neutral glyph, glow fades to 0 |
 | Sub-11px labels systemic | type floor | surgical 11px floor sweep (after one bad regex attempt broke dimensions — restored from git and redone surgically) |
-| Masked IDs without suffix (l.quiles@…, help@…, lhquiles@…, 18459780···@s.w…) | mask law | prefix+suffix masks |
+| Masked IDs without suffix (l.quiles@…, help@…, lhquiles@…, 15550100···@s.w…) | mask law | prefix+suffix masks |
 | Bare-text actions (⋯ menus, pull updates, choose brain, skip ceremony) | affordance law | bordered buttons / bordered ghost |
 | Dream-lab selection in violet, approve in green | accent law | selection → accent, approve → accent |
 | Deployments pair card dashed = disabled-read | state legibility | solid hairline + inset |

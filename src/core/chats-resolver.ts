@@ -13,8 +13,14 @@
 //
 // Contract tests at tests/core/chats-resolver.test.ts lock the surface.
 
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import { isPnJid, toLidJid } from './jid-constants.ts';
+import { resolveLidsForPhone } from './lid-resolver.ts';
+import { createChildLogger } from '../logger.ts';
+import type { Database } from './database.ts';
+
+const log = createChildLogger('chats-resolver');
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +67,10 @@ export interface ChatResolver {
    * - Both set -> MutuallyExclusiveError.
    * - Neither set, or both empty -> MissingTargetError.
    * - Alias not found -> AliasNotFoundError.
+   * - Issue 3150: when the resolver was built with `dbWrapper`, a resolved
+   *   phone JID whose conversation lives under a mapped `@lid` JID (per
+   *   lid_mappings + an existing thread) canonicalizes onto that `@lid` JID;
+   *   otherwise it is returned as given (fail-open).
    */
   resolve(target: ChatTarget): string;
 }
@@ -69,6 +79,17 @@ export type ChatAliasSeeds = Record<string, string>;
 
 export interface ChatResolverDeps {
   db: DatabaseSync;
+  /**
+   * Issue 3150: optional Database wrapper over the SAME instance DB. When
+   * present, resolve() canonicalizes a resolved phone JID
+   * (`<E.164>@s.whatsapp.net`) onto the EXISTING `@lid` conversation via this
+   * instance's lid_mappings, so an outbound send lands in the established
+   * thread instead of opening a second, parallel one. Fail-open: no wrapper,
+   * no mapping, or no existing `@lid` thread -> the JID is returned as given.
+   * (`resolveLidsForPhone` needs the wrapper; the raw handle above cannot
+   * serve it — same split as MessagingDeps.dbWrapper.)
+   */
+  dbWrapper?: Database;
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
@@ -79,13 +100,72 @@ export interface ChatResolverDeps {
  * resolver instance with no shared state.
  */
 export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
-  const { db } = deps;
+  const { db, dbWrapper } = deps;
 
   // Prepared once per resolver. The statement is bound to this db; a resolver
   // constructed from a different db has its own statement and its own table.
   const lookupStmt = db.prepare(
     'SELECT chat_jid FROM chat_aliases WHERE alias = ?',
   );
+
+  // ── LID canonicalization (issue 3150) ────────────────────────────────────
+  // Existence probes are prepared lazily; a FAILED prepare (absent table —
+  // e.g. a minimal test schema) is memoized as a permanent miss so degraded
+  // handles never re-prepare, matching the resolveLidsForPhone contract in
+  // lid-resolver.ts. `undefined` = not yet attempted; `null` = permanent miss.
+  let chatProbe: StatementSync | null | undefined;
+  let messageProbe: StatementSync | null | undefined;
+
+  function lidConversationExists(lidJid: string): boolean {
+    if (chatProbe === undefined) {
+      try {
+        chatProbe = db.prepare('SELECT 1 FROM chats WHERE jid = ?');
+      } catch (err) {
+        chatProbe = null;
+        // Content-free: probe name only, never a JID. Without this line the
+        // degradation is silent for the resolver's whole lifetime.
+        log.debug({ err, probe: 'chats' }, 'LID canonicalization existence probe unavailable; memoized as permanent miss for this resolver');
+      }
+    }
+    if (chatProbe !== null && chatProbe.get(lidJid) !== undefined) return true;
+
+    // Fallback: a DM thread can hold messages before chat sync records a
+    // chats row — probe messages by chat_jid (indexed: idx_messages_chat_jid).
+    if (messageProbe === undefined) {
+      try {
+        messageProbe = db.prepare('SELECT 1 FROM messages WHERE chat_jid = ? LIMIT 1');
+      } catch (err) {
+        messageProbe = null;
+        log.debug({ err, probe: 'messages' }, 'LID canonicalization existence probe unavailable; memoized as permanent miss for this resolver');
+      }
+    }
+    return messageProbe !== null && messageProbe.get(lidJid) !== undefined;
+  }
+
+  /**
+   * Issue 3150: canonicalize a resolved phone JID onto the EXISTING `@lid`
+   * conversation. Reuses resolveLidsForPhone (most recently updated mapping
+   * first); the first mapped LID whose thread actually exists wins. NEVER
+   * throws — any failure means "send to the JID as given" (fail-open per the
+   * issue's ask). Group and `@lid` targets pass through untouched.
+   */
+  function canonicalizeToLidConversation(chatJid: string): string {
+    if (!dbWrapper || !isPnJid(chatJid)) return chatJid;
+    try {
+      for (const lid of resolveLidsForPhone(dbWrapper, chatJid)) {
+        const lidJid = toLidJid(lid);
+        if (lidConversationExists(lidJid)) return lidJid;
+      }
+    } catch (err) {
+      // Last-resort fail-open: resolve() must NEVER throw from the
+      // canonicalization step — the issue-3150 contract is that a degraded
+      // lookup means "send to the JID as given", never a failed send. A
+      // throw here is exceptional (e.g. closed handle), so a per-call debug
+      // line cannot get noisy. Content-free: no JIDs logged.
+      log.debug({ err }, 'LID canonicalization lookup failed; sending to the JID as given');
+    }
+    return chatJid;
+  }
 
   return {
     resolve(target: ChatTarget): string {
@@ -104,7 +184,7 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
       }
 
       if (hasChatJid) {
-        return target.chatJid as string;
+        return canonicalizeToLidConversation(target.chatJid as string);
       }
 
       // hasTo === true here; target.to is a non-empty string.
@@ -113,7 +193,7 @@ export function createChatResolver(deps: ChatResolverDeps): ChatResolver {
       if (!row) {
         throw new AliasNotFoundError(alias);
       }
-      return row.chat_jid;
+      return canonicalizeToLidConversation(row.chat_jid);
     },
   };
 }

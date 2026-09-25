@@ -432,4 +432,88 @@ describe('runAs01RehearsalCli', () => {
     expect(cap.err.join('\n')).toContain('egress is reachable');
     expect(cap.out.join('\n')).not.toContain('outcome=');
   });
+
+  it('#3231: an unknown --old-binary-contract value is refused with usage', () => {
+    const cap = capture();
+    expect(() => runAs01RehearsalCli(cliArgs(['--old-binary-contract', 'bogus']), cap.io, directRunner()))
+      .toThrow(/--old-binary-contract/);
+  });
+
+  it('#3231: under --old-binary-contract check, a future_schema status line at exit 0 is the designed rejection and PASSES', () => {
+    writeFileSync(join(releaseDir, 'check.js'),
+      "process.stdout.write('database-compatibility: future_schema (db 60 > ceiling 44)\\n'); process.exit(0);");
+    setReleaseScript('check.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(
+      cliArgs(['--confirm', '--network-isolated', '--old-binary-contract', 'check']), cap.io, directRunner());
+    expect(code).toBe(AS01_EXIT.PASS);
+    expect(cap.out.join('\n')).toContain('outcome=rejected_no_write');
+  });
+
+  it('#3231 FALSIFIER: under the check contract a silent graceful exit 0 (SIGTERM-drained hold) is INCONCLUSIVE, never accepted', () => {
+    writeFileSync(join(releaseDir, 'drain.js'), 'process.exit(0);');
+    setReleaseScript('drain.js');
+    const cap = capture();
+    const code = runAs01RehearsalCli(
+      cliArgs(['--confirm', '--network-isolated', '--old-binary-contract', 'check']), cap.io, directRunner());
+    expect(code).toBe(AS01_EXIT.INCONCLUSIVE);
+    expect(cap.out.join('\n')).toContain('outcome=inconclusive');
+  });
+
+  it('#3231: repeated --script-arg values reach the runner spec in order', () => {
+    writeFileSync(join(releaseDir, 'reject.js'),
+      "process.stderr.write('DatabaseCompatibilityError: future_schema\\n'); process.exit(1);");
+    setReleaseScript('reject.js');
+    const seen: string[][] = [];
+    const stub = directRunner();
+    const inner = stub.runOldBinary!;
+    const cap = capture();
+    const code = runAs01RehearsalCli(
+      cliArgs(['--confirm', '--network-isolated', '--script-arg', 'instance-a', '--script-arg', '--check']), cap.io,
+      { ...stub, runOldBinary: (spec) => { seen.push([...(spec.scriptArgs ?? [])]); return inner(spec); } });
+    expect(code).toBe(AS01_EXIT.PASS);
+    expect(seen).toEqual([['instance-a', '--check']]);
+  });
+});
+
+describe('classifyOldBinaryOutcome — check contract (#3231: deployed release --check mode)', () => {
+  const base = {
+    status: 0 as number | null, signal: null as string | null,
+    spawnError: false, stdout: '', stderr: '', wrote: false,
+  };
+
+  it('exit 0 with a future_schema status line is the designed rejection, not accepted', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', stdout: 'database-compatibility: future_schema (db 60 > ceiling 44)\n' }))
+      .toBe('rejected_no_write');
+  });
+
+  it('exit 0 with a ready status line is accepted', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', stdout: 'database-compatibility: ready\n' }))
+      .toBe('accepted');
+  });
+
+  it('FALSIFIER: exit 0 with NEITHER token is inconclusive — a graceful drain exit must never auto-accept', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check' })).toBe('inconclusive');
+  });
+
+  it('FALSIFIER: a tooling error naming the token is not a rejection under the check contract either', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', status: 1, stderr: 'npm ERR! missing script: future_schema' }))
+      .toBe('inconclusive');
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', status: 0, stdout: 'npm ERR! future_schema' }))
+      .toBe('inconclusive');
+  });
+
+  it('a write trumps everything under the check contract too', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', stdout: 'future_schema', wrote: true }))
+      .toBe('wrote_dangerous');
+  });
+
+  it('a nonzero error-class rejection still classifies (the release may throw instead of report)', () => {
+    expect(classifyOldBinaryOutcome({ ...base, contract: 'check', status: 1, stderr: 'DatabaseCompatibilityError: future_schema' }))
+      .toBe('rejected_no_write');
+  });
+
+  it('the legacy error contract is unchanged: exit 0 stays accepted when no contract is named', () => {
+    expect(classifyOldBinaryOutcome({ ...base, stdout: 'future_schema status text' })).toBe('accepted');
+  });
 });

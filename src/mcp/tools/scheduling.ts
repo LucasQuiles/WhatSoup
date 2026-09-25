@@ -4,7 +4,7 @@ import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
-import { nowUnixSec } from '../../core/substrate/time.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
@@ -185,7 +185,14 @@ function listScheduledMessages(
   };
 }
 
-export function registerSchedulingTools(registry: ToolRegistry, deps: SchedulingDeps): void {
+export function registerSchedulingTools(
+  registry: ToolRegistry,
+  deps: SchedulingDeps,
+  // Injectable so schedule/update timing can be driven to a known instant
+  // (#2200). Optional and defaulted, so this slice changes no existing call
+  // site.
+  clock: Clock = systemClock,
+): void {
   const { db } = deps;
 
   registry.register({
@@ -198,7 +205,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
     schema: ScheduleMessageSchema,
     handler: async (params, session) => {
       const parsed = ScheduleMessageSchema.parse(params);
-      return enqueueScheduledMessage(db, parsed, { allowedRoot: session.allowedRoot, now: nowUnixSec() });
+      return enqueueScheduledMessage(db, parsed, { allowedRoot: session.allowedRoot, now: clock.nowUnixSec() });
     },
   });
 
@@ -278,7 +285,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
       assertSessionAccess(row.chat_jid, session);
       if (row.status !== 'pending') throw new Error(`Scheduled message ${id} is ${row.status} and cannot be updated`);
 
-      if (scheduled_at !== undefined && scheduled_at <= nowUnixSec()) {
+      if (scheduled_at !== undefined && scheduled_at <= clock.nowUnixSec()) {
         throw new Error('scheduled_at must be a future UTC unix timestamp');
       }
 
@@ -300,7 +307,7 @@ export function registerSchedulingTools(registry: ToolRegistry, deps: Scheduling
         values.push(recurrence);
         // Anchor next_run_at to the new scheduled_at if both are changing,
         // otherwise use the supplied scheduled_at or wall-clock now.
-        const base = scheduled_at ?? nowUnixSec() - 60;
+        const base = scheduled_at ?? clock.nowUnixSec() - 60;
         const nextRun = nextCronRun(recurrence, base, row.timezone ?? 'UTC');
         updates.push('next_run_at = ?');
         values.push(nextRun);

@@ -683,7 +683,7 @@ If `durability` is `undefined` (rare, test contexts only), the send proceeds wit
 
 ---
 
-### 5.7 Capability-Obligation Replay (Migrations 58–59)
+### 5.7 Capability-Obligation Replay (Migrations 58, 60, 63)
 
 Off by default; activates only under `agentOptions.capabilityObligations.enabled === true`
 (see `docs/configuration.md`) and only for `per_chat` scope. When a managed-loop provider
@@ -691,7 +691,8 @@ turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media downl
 needs a child process), the C3 terminal transaction records a `capability_obligations` row
 instead of silently dropping the request, and a supervisor replays it later.
 
-**Migration 59 (post-merge-audit hotfix).** Two schema changes ride migration 59: (a)
+**Migration 60 (post-merge-audit hotfix; renumbered from 59 when #2567's fact-export
+rebuild claimed slot 59).** Two schema changes ride migration 60: (a)
 `capability_execution_reservations` — an append-only durable pre-spawn reservation, UNIQUE on
 (obligation, claim epoch, attempt), committed BEFORE the resolver spawns so a duplicate
 `execute_capability` call is a typed refusal instead of a second external side effect; and (b) the
@@ -700,6 +701,29 @@ instead of silently dropping the request, and a supervisor replays it later.
 the serving harness class — never a model's typed deferral) alongside `reviewed_backfill:%`.
 `typed_deferral` is reserved for the future typed-deferral contract (mid-term M1); legacy
 `typed_deferral_signal` rows are mapped to `harness_capability_gap` during the rebuild.
+
+**Migration 63 (#3221 Debt 2 graduation — attestation evidence IN the row, owner-ruled
+2026-08-28).** The design spec's `capability_attestations` description lists the probe
+evidence as row fields; rounds 16–17 preserved it in a correlated, nonce-keyed
+`--receipt-out` file instead (fsynced + read-back-verified BEFORE the row is admitted).
+Migration 63 graduates that deferral: `probe_stdout_ref` / `probe_stderr_ref` (sha256 refs
+of the canary streams — references, never raw content), `probe_exit`, `canary_input_ref`
+(sha256 of the bounded probe source), and `media_root_readable` now land ON the row (the
+producer writes them; `capability_attestations_immutable` is rebuilt to cover them), and
+the receipt file is **corroborating rather than the sole preservation**. Legacy rows carry
+NULL evidence — their receipts remain their only preservation. The bump is INSIDE the D5
+attestation binding (`schema_version`) by design: every previously computed attestation
+digest stops admitting on the 63 binary, and the AS-01 old-binary rehearsal must be re-run
+44→63 at rollout (see the operator runbook).
+
+**Media-retention policy artifact (#3221 Debt 3, A-08 — owner-ruled 2026-08-28).** The
+retained-media horizon is an OWNER decision recorded in `policy/media-retention.json`
+(**90 days**, `media-retention/2026-08-28`), never an engineering default. Config load
+(`src/config.ts` → `src/core/media-retention-policy.ts`) verifies every ENABLED activation
+against the shipped artifact fail-closed: `retentionPolicyVersion` must name the ratified
+version verbatim and `retentionHorizonDays` may be stricter but never longer than the
+approved horizon — a violation is a startup `EX_CONFIG`, upstream of every DM/group media
+drain.
 
 **The dispatch contract (operators read this first).** The replayed turn re-enters the
 *same* per-chat pipeline as a real inbound. Its prompt is NOT the bare original message: it
@@ -732,7 +756,9 @@ until a destination-specific, digest-bound `capability_drain_approvals` row is c
 schema enforces the four live drain facts match). Historical backfill (`creation_reason LIKE
 'reviewed_backfill:%'`) drains only reviewer-confirmed rows through the same machine, under a
 separately approved manifest. Retained media is bounded (`retentionHorizonDays`, A-08):
-expired media is no longer claimable and is GC-eligible.
+expired media is no longer claimable and is GC-eligible. The horizon is governed by the
+owner-approved `policy/media-retention.json` artifact (90 days — #3221 Debt 3, below);
+config compliance is verified fail-closed at startup.
 
 **Operator tooling.** `scripts/capability-obligation-admin.ts` provides
 `inspect`/`list`/`cancel`/`adjudicate`. It refuses unless the target database is at exactly
@@ -834,21 +860,23 @@ config contract) is owner-gated. On a composite mismatch the executor logs the s
 ISOLATED directory containing ONLY the resolver and its intentional siblings — nothing else may be
 written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media), it must be
 symlink-free, and within the 64 MB staging bound; otherwise every subsequent drain fails closed as
-`resolver_digest_mismatch`. The remaining graduation debt is the CONFIG-CONTRACT half of Option C
-(a typed `{ interpreter, resolverArtifactPath, args }` execution struct replacing the `command`
-array) — **owner-gated** because it touches every deployment resolver config. The runtime half is
-NOT fully done: round-21 narrowed the reopened bypasses above, but the direct-mode positional-code
-residual and the same-UID staged-copy window remain (structural closure is the typed contract +
-source-off-argv, both owner-gated). NARROW CLAIM: a passing canary attests only that the verified resolver, run against
+`resolver_digest_mismatch`. The CONFIG-CONTRACT half of Option C **LANDED** (#3221 Debt 4,
+owner-ratified as specced 2026-08-28): the config schema (`src/core/capability-contract.ts`)
+declares the typed `{ interpreter, resolverArtifactPath, args }` execution struct and DERIVES the
+`command`/`interpreted` pair the executor and the ONE canonicalizer consume — so the round-18/19
+decoy and mislabel shapes and the round-21 direct-mode flag/bare-positional shapes are
+unrepresentable AT LOAD, the legacy free-form `command` body is refused loudly, and an equivalent
+declaration canonicalizes byte-identically (no attested composite-digest drift). The RUNTIME
+residuals stand exactly as ratified above: the direct-mode positional-code residual (awk-shape —
+only source-off-argv would close it structurally) and the same-UID staged-copy window remain
+ACCEPTED threat-model boundaries, not open defects. NARROW CLAIM: a passing canary attests only that the verified resolver, run against
 `sha256(probeSource)`, exited 0 within bound and produced ≥ `minOutputBytes` — it is NOT proof of
 semantic processing; the fulfillment proof stays the D6 receipt + delivery chain. The attestation
-ROW has **no probe-evidence columns**: adding them is allocated migration 60 (58 and 59 are
-published), and any such migration bumps
-`CURRENT_SCHEMA_MIGRATION` *inside the attestation binding* — invalidating every computed digest and
-reopening AS-01 — so the evidence lives in the receipt file, correlated by `nonce`, as a deliberate
-deferral. (Design-spec deviation of record: the pinned Phase-2 spec §3.3 lists these as attestation
-row fields; migration-58 realizes them as the correlated receipt instead. Not an oversight — the
-spec's row-storage form graduates with the allocated migration 60.)
+ROW carries the probe-evidence columns since **migration 63** (#3221 Debt 2, above); the
+nonce-correlated receipt file remains required and is corroborating. (Design-spec reconciliation of
+record: the pinned Phase-2 spec §3.3 lists these as attestation row fields; migrations 58–62
+realized them as the correlated receipt as a deliberate, documented deferral; migration 63 realizes
+the spec's row-storage form.)
 
 **Group-drain approval is atomic.** `scripts/capability-obligation-approve-drain.ts` records the
 AS-08 approval AND drives the sole `waiting_approval → waiting_capability` transition in ONE store
@@ -888,7 +916,9 @@ survive a clean exit — round-18 finding 3). This exists because a synchronous 
 worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
 synchronous call, so a hung fixture produced no truthful completion signal. Semantics
 (round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
-a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125); a signalled
+a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125), except that an
+`EPERM` on a group with no live member (zombies only, or empty, per one `ps` read) counts as reaped
+(issue 3568; a live member or an unreadable `ps` keeps 125); a signalled
 child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
 armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an
 escaped descendant holding a stdio pipe after a successful kill) resolves INCONCLUSIVE (125) rather than
@@ -1640,10 +1670,10 @@ designed contract mirrors the fact-export queue machinery (§9):
   with the provider down. Scope-claim safety across the fleet assumes chat/sender
   scopes do not collide across instances sharing an index — the same assumption
   current scoping makes; the owner should confirm it for the fleet topology.
-- **`DurableKnowledge` disposition.** The existing `DurableKnowledge` interface
-  (`src/memory/types.ts`) has zero consumers; the ledger either becomes its
-  implementation or the type is deleted — it does not stay dead alongside the new
-  tables.
+- **`DurableKnowledge` disposition.** Resolved: the interface had zero consumers
+  and was removed from `src/memory/types.ts` (#2569 contract item 13). If the
+  ledger lands, its schema is authored fresh rather than reviving the dead type
+  (see `docs/architecture/adr-qr004-memory-consolidation-ssot.md`).
 
 **Architecture gate (owner).** The ledger places lifecycle state in local SQLite while
 knowledge text remains in the remote store — the process-state pattern §9 already
@@ -1661,3 +1691,41 @@ counters extend the #2568 run-report/receipt contract or surface behind a separa
 ledger-local gauge is an open owner decision, alongside: the canonical state enum,
 legacy classification of unattributed sources (`legacy_unclassified` vs `eligible`),
 promotion-id collision policy, and retention windows.
+
+## 11. Outbound Queue Stable Boundary and Poison Containment
+
+An agent outbound queue has one completion boundary shared by `flush()`, poll delivery,
+turn-evidence collection, and shutdown. The boundary drains every accepted text, stream,
+tool-status, redirected tool-status, and poll send, then follows successive installed
+drain-chain snapshots until the queue is genuinely idle. A late enqueue accepted before
+closure therefore joins the same boundary instead of being mistaken for an impossible
+post-flush state.
+
+Shutdown first closes admission, drains work already accepted, and marks the queue closed
+at that stable boundary. New content after closure is rejected with
+`OUTBOUND_QUEUE_CLOSED`; it cannot leak into a replacement queue epoch. Turn evidence is
+frozen only after the same boundary, so evidence cannot claim completion while accepted
+outbound work is still draining.
+
+A real send or drain failure poisons that outbound scope. Poison is monotonic and
+process-local: the first exact error is retained for in-process diagnosis, later
+operations observe the same failure, and there is no generic clear operation. Per-chat
+mode closes only the affected scope so unrelated chats continue. Shared and single modes
+poison their one active outbound lane. In-process queue or session replacement does not
+remove the coordinator-owned latch; only process restart constructs a fresh registry.
+Restart is **not** delivery proof and does not authorize replay or resend, so operators
+must preserve and evaluate the existing durable evidence separately.
+
+Terminal classification distinguishes the failure that caused containment from its
+consequences. The active failed turn keeps its actual processor or `pre_dispatch_error`
+classification. Already-admitted pending turns removed from that scope, and later turns
+rejected before provider dispatch, terminalize as `scope_blocked_recovery`. They are not
+silently retained in memory or automatically replayed.
+
+Health exposes aggregates only: `outboundQueuePoisoned` and
+`outboundQueuePoisonedScopes`, plus the normalized reason
+`runtime.outbound_queue_poisoned` and degradation cause
+`agent_outbound_queue_poisoned`. It never serializes scope identities or error text.
+Per-chat poison is degraded because healthy scopes remain available; shared or single
+poison is unhealthy because the active lane is unavailable. Durable recovery debt is an
+independent signal: it neither creates nor clears outbound queue poison.

@@ -40,6 +40,28 @@ export interface RuntimeRecoveryHealthClassification {
   completedDeliveryIdentityRetained: number;
 }
 
+/**
+ * Projects the blocking classification onto the two runtime degradedReasons
+ * that reach `status_reasons` as `runtime.turn_finalization_debt` and
+ * `runtime.completed_delivery_identity_debt`. Those literals are the registered
+ * twins of the turn_finalization_degraded, turn_recovery_degraded and
+ * delivery_identity_debt causes, so they are kept verbatim; the granular
+ * blocking reasons travel separately in `recoveryBlockingReasons` for the
+ * versioned `recovery_debt` contract. Retained debt sets neither flag.
+ */
+export function runtimeRecoveryDegradation(
+  classification: Pick<RuntimeRecoveryHealthClassification, 'blockingReasons'>,
+): { finalizationDegraded: boolean; completedDeliveryIdentityDebt: boolean } {
+  return {
+    finalizationDegraded: classification.blockingReasons.some(
+      (reason) => reason !== 'completed_delivery_identity_unclassified',
+    ),
+    completedDeliveryIdentityDebt: classification.blockingReasons.includes(
+      'completed_delivery_identity_unclassified',
+    ),
+  };
+}
+
 function pushUnique<T extends string>(values: T[], value: T): void {
   if (!values.includes(value)) values.push(value);
 }

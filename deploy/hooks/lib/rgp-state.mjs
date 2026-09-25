@@ -1,10 +1,38 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import {
+  acquireProcessLock,
+  isProcessLockError,
+  releaseProcessLock,
+} from '../../../src/lib/process-lock.ts';
+import {
+  appendPrivateJsonLineSync,
+  forceEnsurePrivateDirectorySync,
+  writeAtomicPrivateFileSync,
+} from '../../../src/lib/private-fs.ts';
 
 const INSTANCE_RE = /^[A-Za-z0-9._-]+$/;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_RATE_LIMIT_MAX = 3;
+const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
+const MAX_DIAGNOSTIC_LINE_BYTES = 4 * 1024;
+const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
+const MUTATION_LOCK_WAIT_MS = 500;
+const MUTATION_LOCK_POLL_MS = 10;
+const SENSITIVE_DIAGNOSTIC_KEY_RE = /(?:text|content|excerpt|message|error|token|secret|password|credential|transcript|socket|chatjid|jid)/i;
 
 function safeSegment(value, fallback) {
   if (typeof value !== 'string') return fallback;
@@ -15,7 +43,7 @@ function safeSegment(value, fallback) {
 }
 
 function ensureDir(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  forceEnsurePrivateDirectorySync(dir, 'RGP state');
   return dir;
 }
 
@@ -39,6 +67,10 @@ export function stuckRepliesQueuePath(instance = resolveInstanceName()) {
   return join(instanceStateDir(instance), 'stuck-replies.jsonl');
 }
 
+export function expiredRepliesQueuePath(instance = resolveInstanceName()) {
+  return join(instanceStateDir(instance), 'expired-replies.jsonl');
+}
+
 export function rateLimitPath(instance = resolveInstanceName()) {
   return join(instanceStateDir(instance), 'fallback-rate-limit.json');
 }
@@ -47,72 +79,126 @@ export function queueLockPath(instance = resolveInstanceName()) {
   return join(instanceStateDir(instance), 'stuck-replies.lock');
 }
 
+function queueMutationLockPath(queuePath) {
+  return join(dirname(queuePath), 'stuck-replies.mutation.lock');
+}
+
 export function defaultSocketPath() {
   return join(homedir(), '.claude', 'whatsoup.sock');
+}
+
+function sanitizeDiagnosticValue(key, value, depth = 0) {
+  if (depth > 3) return '[truncated]';
+  if (SENSITIVE_DIAGNOSTIC_KEY_RE.test(key)) return '[redacted]';
+  if (typeof value === 'string') return value.length > 256 ? `${value.slice(0, 256)}…` : value;
+  if (typeof value !== 'object' || value === null) return value;
+  if (Array.isArray(value)) return value.slice(0, 16).map((item) => sanitizeDiagnosticValue(key, item, depth + 1));
+  return Object.fromEntries(Object.entries(value).slice(0, 32).map(([childKey, childValue]) => (
+    [childKey, sanitizeDiagnosticValue(childKey, childValue, depth + 1)]
+  )));
 }
 
 export function logLine(file, obj) {
   try {
     ensureDir(dirname(file));
-    appendFileSync(file, `[${new Date().toISOString()}] ${JSON.stringify(obj)}\n`, { mode: 0o600 });
+    const safe = sanitizeDiagnosticValue('', obj);
+    let body = `[${new Date().toISOString()}] ${JSON.stringify(safe)}\n`;
+    if (Buffer.byteLength(body) > MAX_DIAGNOSTIC_LINE_BYTES) {
+      body = `[${new Date().toISOString()}] ${JSON.stringify({
+        event: safe?.event ?? 'diagnostic',
+        truncated: true,
+      })}\n`;
+    }
+    if (existsSync(file) && statSync(file).size + Buffer.byteLength(body) > MAX_DIAGNOSTIC_BYTES) {
+      writeFileSync(file, '', { mode: 0o600 });
+    }
+    appendFileSync(file, body, { mode: 0o600 });
   } catch {
     // Hook telemetry must never fail the caller path.
   }
 }
 
 export function appendQueueEntry(queuePath, entry) {
+  let serialized;
   try {
-    ensureDir(dirname(queuePath));
-    appendFileSync(queuePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-    return true;
+    serialized = JSON.stringify(entry);
   } catch {
     return false;
   }
+  if (Buffer.byteLength(`${serialized}\n`, 'utf8') > MAX_QUEUE_BYTES) return false;
+
+  const locked = withMutationLock(queuePath, () => {
+    appendPrivateJsonLineSync(queuePath, entry);
+    return true;
+  });
+  return locked.ok && locked.result === true;
 }
 
 function readQueueRecords(queuePath) {
-  if (!existsSync(queuePath)) return { records: [], malformedLines: 0 };
-  const text = readFileSync(queuePath, 'utf8');
+  let text;
+  try {
+    text = readBoundedPrivateText(queuePath, MAX_QUEUE_BYTES, 'queue');
+  } catch (err) {
+    return {
+      records: [],
+      malformedLines: 0,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (text === null) return { records: [], malformedLines: 0, error: null };
   const records = [];
   let malformedLines = 0;
 
   for (const raw of text.split('\n')) {
     if (!raw.trim()) continue;
     try {
-      records.push({ raw, entry: JSON.parse(raw) });
+      const entry = JSON.parse(raw);
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        malformedLines += 1;
+        records.push({ raw, entry: null });
+      } else {
+        records.push({ raw, entry });
+      }
     } catch {
       malformedLines += 1;
       records.push({ raw, entry: null });
     }
   }
 
-  return { records, malformedLines };
+  return { records, malformedLines, error: null };
 }
 
 export function readQueueEntries(queuePath) {
-  const { records, malformedLines } = readQueueRecords(queuePath);
+  const { records, malformedLines, error } = readQueueRecords(queuePath);
   return {
-    entries: records.flatMap((record) => (record.entry === null ? [] : [record.entry])),
+    entries: error ? [] : records.flatMap((record) => (record.entry === null ? [] : [record.entry])),
     malformedLines,
+    error,
   };
 }
 
 export function rewriteQueueEntries(queuePath, entries) {
+  let body;
   try {
-    ensureDir(dirname(queuePath));
-    const tmpPath = `${queuePath}.${process.pid}.${Date.now()}.tmp`;
-    const body = entries.length === 0 ? '' : `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
-    writeFileSync(tmpPath, body, { mode: 0o600 });
-    renameSync(tmpPath, queuePath);
-    return true;
+    body = entries.length === 0 ? '' : `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
   } catch {
     return false;
   }
+  if (Buffer.byteLength(body, 'utf8') > MAX_QUEUE_BYTES) return false;
+  const locked = withMutationLock(queuePath, () => {
+    if (readQueueRecords(queuePath).error) return false;
+    writeAtomicPrivateFileSync(queuePath, body, 'stuck replies queue', 'required');
+    return true;
+  });
+  return locked.ok && locked.result === true;
 }
 
 export function ackQueueEntries(queuePath, shouldAck) {
-  try {
-    const { records, malformedLines } = readQueueRecords(queuePath);
+  const locked = withMutationLock(queuePath, () => {
+    const { records, malformedLines, error } = readQueueRecords(queuePath);
+    if (error) {
+      return { ok: false, error, removed: 0, kept: 0, malformedLines };
+    }
     let removed = 0;
     const keptRecords = [];
 
@@ -124,60 +210,112 @@ export function ackQueueEntries(queuePath, shouldAck) {
       keptRecords.push(record);
     }
 
-    ensureDir(dirname(queuePath));
-    const tmpPath = `${queuePath}.${process.pid}.${Date.now()}.tmp`;
     const body = keptRecords.length === 0 ? '' : `${keptRecords.map((record) => (
       record.entry === null ? record.raw : JSON.stringify(record.entry)
     )).join('\n')}\n`;
-    writeFileSync(tmpPath, body, { mode: 0o600 });
-    renameSync(tmpPath, queuePath);
-    return { ok: true, removed, kept: keptRecords.length, malformedLines };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err), removed: 0, kept: 0, malformedLines: 0 };
+    if (Buffer.byteLength(body, 'utf8') > MAX_QUEUE_BYTES) {
+      return { ok: false, error: `queue replacement exceeds ${MAX_QUEUE_BYTES} bytes`, removed: 0, kept: keptRecords.length, malformedLines };
+    }
+    try {
+      writeAtomicPrivateFileSync(queuePath, body, 'stuck replies queue', 'required');
+      return { ok: true, removed, kept: keptRecords.length, malformedLines };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err), removed: 0, kept: keptRecords.length, malformedLines };
+    }
+  });
+  if (!locked.ok) {
+    return { ok: false, error: locked.error, removed: 0, kept: 0, malformedLines: 0 };
   }
+  return locked.result;
 }
 
 export async function withQueueLock(instance, fn, opts = {}) {
-  const staleMs = opts.staleMs ?? 60_000;
   const lockPath = queueLockPath(instance);
-  let fd = null;
-  let acquired = false;
-
-  const acquire = () => {
-    try {
-      fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
-      closeSync(fd);
-      fd = null;
-      acquired = true;
-      return true;
-    } catch (err) {
-      if (err?.code !== 'EEXIST') throw err;
-      const stat = statSync(lockPath);
-      if (Date.now() - stat.mtimeMs <= staleMs) return false;
-      unlinkSync(lockPath);
-      fd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), recoveredStale: true }));
-      closeSync(fd);
-      fd = null;
-      acquired = true;
-      return true;
-    }
-  };
-
+  let handle;
   try {
-    if (!acquire()) return { ok: false, locked: true };
-    const result = await fn();
-    return { ok: true, result };
+    handle = acquireProcessLock(lockPath, { reclaimDeadSameBoot: true });
+  } catch (err) {
+    if (isProcessLockError(err) && err.reason === 'active') return { ok: false, locked: true };
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  let outcome;
+  try {
+    outcome = { ok: true, result: await fn() };
+  } catch (err) {
+    outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  try {
+    if (!releaseProcessLock(handle)) {
+      return { ok: false, error: 'queue lock ownership could not be verified during release' };
+    }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return outcome;
+}
+
+function withMutationLock(queuePath, fn) {
+  const lockPath = queueMutationLockPath(queuePath);
+  let handle;
+  try {
+    ensureDir(dirname(queuePath));
+    handle = acquireProcessLock(lockPath, {
+      reclaimDeadSameBoot: true,
+      wait: { timeoutMs: MUTATION_LOCK_WAIT_MS, pollMs: MUTATION_LOCK_POLL_MS },
+    });
+  } catch (err) {
+    const reason = isProcessLockError(err) ? ` (${err.reason})` : '';
+    return { ok: false, error: `queue mutation lock unavailable${reason}` };
+  }
+
+  let outcome;
+  try {
+    outcome = { ok: true, result: fn() };
+  } catch (err) {
+    outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  try {
+    if (!releaseProcessLock(handle)) {
+      return { ok: false, error: 'queue mutation lock ownership could not be verified during release' };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return outcome;
+}
+
+function readBoundedPrivateText(file, maxBytes, label) {
+  ensureDir(dirname(file));
+  let fd = null;
+  try {
+    const flags = constants.O_RDONLY
+      | (constants.O_NOFOLLOW ?? 0)
+      | (constants.O_NONBLOCK ?? 0);
+    try {
+      fd = openSync(file, flags);
+    } catch (err) {
+      if (err?.code === 'ENOENT') return null;
+      throw err;
+    }
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+      throw new Error(`${label} is not owned by the current user`);
+    }
+    fchmodSync(fd, 0o600);
+    if (stat.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    return buffer.subarray(0, offset).toString('utf8');
   } finally {
-    if (fd !== null) {
-      try { closeSync(fd); } catch {}
-    }
-    if (acquired) {
-      try { unlinkSync(lockPath); } catch {}
-    }
+    if (fd !== null) closeSync(fd);
   }
 }
 

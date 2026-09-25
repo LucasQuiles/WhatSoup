@@ -7,11 +7,33 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
+import { type Clock, systemClock } from '../../lib/clock.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
-import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
-import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
+import {
+  conversationBoundKey,
+  errorResult,
+  toolError,
+  type SessionContext,
+  type ToolDeclaration,
+} from '../types.ts';
+import {
+  isOperatorInstance,
+  pineconeProjectGuardError,
+  resolvePineconeProjectGuard,
+  type PineconeProjectGuard,
+} from '../../lib/pinecone-project-guard.ts';
+import type { Database } from '../../core/database.ts';
+import {
+  memoryHitTier,
+  memoryIdentityFold,
+  resolveMemoryScope,
+  type GroupMembershipReader,
+  type InstanceIdentities,
+  type MemoryScope,
+  type MemoryTier,
+} from '../../core/memory-scope.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
@@ -24,12 +46,38 @@ const MAX_TEXT_PER_RESULT = 600;
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
 
+/**
+ * Most candidates sent to rerank. Candidates are cut in tier order, so this-chat
+ * hits are never the ones dropped to fit a rerank model's document limit.
+ */
+const RERANK_CANDIDATE_CAP = 100;
+
 interface ParsedHit {
   id: string;
   score: number;
   text: string;
   entityType: string;
   fields: Record<string, unknown>;
+  namespace?: string;
+}
+
+interface TieredHit extends ParsedHit {
+  /** Memory tier, or null for a document hit (not chat-scoped). */
+  tier: MemoryTier | null;
+}
+
+/**
+ * Instance facts knowledge_search needs to scope a search of the memory index.
+ * Optional so callers without a connection (tests, tools) still register; with
+ * none, admin and DM-lane checks cannot be proven and groups fall back to the
+ * configurable-group rule.
+ */
+export interface KnowledgeSearchDeps {
+  db?: Database | null;
+  identities?: () => InstanceIdentities;
+  membership?: GroupMembershipReader | null;
+  sharedWorkflowGroups?: Iterable<string>;
+  contactRecallScopes?: Readonly<Record<string, string>>;
 }
 
 function pineconeMemoryConfig(): {
@@ -52,13 +100,17 @@ function pineconeMemoryConfig(): {
       };
     };
   }).memory?.pinecone;
+  const { guard } = resolvePineconeProjectGuard((config as { botName?: unknown }).botName, {
+    projectId: pinecone?.projectId,
+    expectedHostSuffix: pinecone?.expectedHostSuffix,
+  });
   return {
     apiKeyEnv: pinecone?.apiKeyEnv || 'PINECONE_API_KEY',
     apiKeyService: isNonEmptyString(pinecone?.apiKeyService)
       ? pinecone.apiKeyService
       : undefined,
-    projectId: pinecone?.projectId,
-    expectedHostSuffix: pinecone?.expectedHostSuffix,
+    projectId: guard.projectId,
+    expectedHostSuffix: guard.expectedHostSuffix,
     namespaces: pinecone?.namespaces,
     knowledgeProfiles: pinecone?.knowledgeProfiles ?? {},
   };
@@ -71,13 +123,145 @@ function namespaceAllowlist(profile: KnowledgeProfileConfig): Set<string> {
   );
 }
 
+/**
+ * Namespace that memory_write (PineconeMemory.upsert) writes to. PineconeMemory
+ * opens `config.pineconeIndex` without a namespace, which the SDK resolves to
+ * its default namespace, spelled `__default__` (the SDK maps `''` to it too).
+ */
+const MEMORY_WRITE_NAMESPACE = '__default__';
+
+function isDefaultNamespace(namespace: string): boolean {
+  return namespace === '' || namespace === MEMORY_WRITE_NAMESPACE;
+}
+
+interface ResolvedNamespaces {
+  namespacesToSearch: string[];
+  queryIntent?: string;
+  error?: string;
+}
+
+function isMemoryIndex(indexName: string): boolean {
+  const memoryIndex = (config as { pineconeIndex?: unknown }).pineconeIndex;
+  return isNonEmptyString(memoryIndex) && indexName === memoryIndex;
+}
+
+/**
+ * Keep memory_write and knowledge_search in agreement: a search of the
+ * instance's own memory index always includes the namespace memory_write
+ * writes to, so the bot can find what it saved. Other indexes are unchanged,
+ * and a profile that already lists the default namespace keeps its behaviour.
+ */
+function withMemoryWriteNamespace(indexName: string, namespacesToSearch: string[]): { namespacesToSearch: string[] } {
+  if (!isMemoryIndex(indexName)) return { namespacesToSearch };
+  if (namespacesToSearch.some(isDefaultNamespace)) return { namespacesToSearch };
+  return { namespacesToSearch: [...namespacesToSearch, MEMORY_WRITE_NAMESPACE] };
+}
+
+interface SearchLeg {
+  namespace: string;
+  filter?: Record<string, unknown>;
+}
+
+/**
+ * Namespaces of the memory index whose records are chat memories, so the chat
+ * tiers and the group boundary apply to them: the memory_write namespace, and the
+ * WhatsApp conversation roles in `memory.pinecone.namespaces` (facts, chunks,
+ * summaries, and the legacy message namespace). Every other namespace, including
+ * the contacts, local-docs and OneDrive roles, is a document namespace: searched
+ * unfiltered in every context and merged in by relevance, as before scoping.
+ */
+function chatAttributedNamespaces(namespaces: ReturnType<typeof pineconeMemoryConfig>['namespaces']): Set<string> {
+  const roles = [namespaces?.facts, namespaces?.chunks, namespaces?.summaries, namespaces?.['legacy']];
+  return new Set(['', MEMORY_WRITE_NAMESPACE, ...roles.filter(isNonEmptyString)]);
+}
+
+/**
+ * The queries for one search. Outside the memory index, and for document
+ * namespaces, each namespace is queried once, unfiltered. For a chat namespace a
+ * scope with a pinned conversation also queries that conversation's records, so
+ * they are not crowded out of topK by other chats; a configurable group queries
+ * only this conversation. The filters only narrow the fetch: memoryHitTier
+ * decides what the caller may see.
+ */
+function searchLegs(
+  namespaces: string[],
+  scope: MemoryScope | null,
+  isChatNamespace: (namespace: string) => boolean,
+): SearchLeg[] {
+  if (!scope) return namespaces.map((namespace) => ({ namespace }));
+  const thisChat = scope.chatSpellings.length > 0 ? { chat_jid: { $in: scope.chatSpellings } } : undefined;
+  return namespaces.flatMap((namespace): SearchLeg[] => {
+    if (!isChatNamespace(namespace)) return [{ namespace }];
+    if (scope.kind === 'no_context') return [];
+    if (scope.kind === 'configurable_group') return thisChat ? [{ namespace, filter: thisChat }] : [];
+    return thisChat ? [{ namespace, filter: thisChat }, { namespace }] : [{ namespace }];
+  });
+}
+
+/** Better duplicate: the better memory tier, then the higher score. */
+function preferHit(candidate: TieredHit, existing: TieredHit): boolean {
+  if (candidate.tier !== null && existing.tier !== null && candidate.tier !== existing.tier) {
+    return candidate.tier < existing.tier;
+  }
+  return candidate.score > existing.score;
+}
+
+/**
+ * Gate the merged hits and remove duplicates (one record returned by the chat leg
+ * and the unfiltered leg) so they cannot take two result slots. Chat-memory hits
+ * get a tier or are dropped; document hits pass ungated with tier null.
+ */
+function tierHits(
+  hits: ParsedHit[],
+  scope: MemoryScope | null,
+  isChatNamespace: (namespace: string) => boolean,
+  db: Database | null | undefined,
+): TieredHit[] {
+  const fold = memoryIdentityFold(db);
+  const byId = new Map<string, TieredHit>();
+  for (const hit of hits) {
+    const isDocument = scope !== null && !isChatNamespace(hit.namespace ?? '');
+    const tier = isDocument ? null : scope ? memoryHitTier(hit.fields, scope, fold) : 0;
+    if (!isDocument && tier === null) continue;
+    const candidate: TieredHit = { ...hit, tier };
+    const existing = byId.get(hit.id);
+    if (!existing || preferHit(candidate, existing)) byId.set(hit.id, candidate);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Final order. Memories keep tier order (this chat -> other chats -> untagged),
+ * ordered by score within a tier, or by their current order when `reranked`
+ * (rerank orders within a tier only). Documents are merged in by score, so a
+ * relevant document can sit above a weakly relevant memory.
+ */
+function orderHits(hits: TieredHit[], reranked: boolean): TieredHit[] {
+  const memory = hits
+    .map((hit, position) => ({ hit, position }))
+    .filter(({ hit }) => hit.tier !== null)
+    .sort((a, b) => (a.hit.tier ?? 0) - (b.hit.tier ?? 0)
+      || (reranked ? a.position - b.position : b.hit.score - a.hit.score))
+    .map(({ hit }) => hit);
+  const documents = hits.filter((hit) => hit.tier === null);
+  if (!reranked) documents.sort((a, b) => b.score - a.score);
+  const merged: TieredHit[] = [];
+  let m = 0;
+  let d = 0;
+  while (m < memory.length || d < documents.length) {
+    const takeMemory = d >= documents.length || (m < memory.length && memory[m]!.score >= documents[d]!.score);
+    merged.push(takeMemory ? memory[m++]! : documents[d++]!);
+  }
+  return merged;
+}
+
 function resolveNamespacesToSearch(
   indexName: string,
   query: string,
   profile: KnowledgeProfileConfig,
   nsOverride: string | undefined,
   namespaces: ReturnType<typeof pineconeMemoryConfig>['namespaces'],
-): { namespacesToSearch: string[]; queryIntent?: string; error?: string } {
+): ResolvedNamespaces {
   const allowed = namespaceAllowlist(profile);
   if (nsOverride) {
     if (allowed.size > 0 && !allowed.has(nsOverride)) {
@@ -90,14 +274,14 @@ function resolveNamespacesToSearch(
     const routed = routeQuery(query, { namespaces });
     const routedSet = new Set(routed.namespaces);
     const others = profile.namespaces.filter((ns) => !routedSet.has(ns));
-    return { namespacesToSearch: [...routed.namespaces, ...others], queryIntent: routed.intent };
+    return { ...withMemoryWriteNamespace(indexName, [...routed.namespaces, ...others]), queryIntent: routed.intent };
   }
 
   if (profile.namespaces.length > 0) {
-    return { namespacesToSearch: profile.namespaces };
+    return withMemoryWriteNamespace(indexName, profile.namespaces);
   }
 
-  return { namespacesToSearch: [profile.namespace] };
+  return withMemoryWriteNamespace(indexName, [profile.namespace]);
 }
 
 async function validatePineconeProject(
@@ -266,11 +450,36 @@ export function createPineconeWatchSearch(
 export function registerKnowledgeTools(
   allowedIndexes: string[],
   register: (tool: ToolDeclaration) => void,
+  // Injectable so search duration can be driven to a known instant (#2200).
+  // Optional and defaulted, so this slice changes no existing call site.
+  clock: Clock = systemClock,
+  deps: KnowledgeSearchDeps = {},
 ): void {
   if (allowedIndexes.length === 0) return;
 
   const memoryConfig = pineconeMemoryConfig();
   const envVarName = memoryConfig.apiKeyEnv;
+  const chatNamespaces = chatAttributedNamespaces(memoryConfig.namespaces);
+  const isChatNamespace = (namespace: string): boolean => chatNamespaces.has(namespace);
+  const noIdentities: InstanceIdentities = {
+    adminPhones: new Set(), siblingPhones: new Set(), botJid: null, botLid: null,
+  };
+  const scopeFor = (session: SessionContext): Promise<MemoryScope> => resolveMemoryScope(
+    {
+      operatorInstance: isOperatorInstance((config as { botName?: unknown }).botName),
+      tier: session.tier,
+      conversationKey: conversationBoundKey(session) ?? session.conversationKey,
+      deliveryJid: session.deliveryJid,
+      actorJid: session.actorJid,
+    },
+    {
+      db: deps.db,
+      identities: deps.identities?.() ?? noIdentities,
+      membership: deps.membership,
+      sharedWorkflowGroups: deps.sharedWorkflowGroups ?? [],
+      contactRecallScopes: deps.contactRecallScopes,
+    },
+  );
   const apiKey = resolveApiKey({ service: memoryConfig.apiKeyService, envVar: envVarName });
   if (!apiKey) {
     log.warn('Pinecone API key env var not set — knowledge tools will not be registered');
@@ -321,7 +530,7 @@ export function registerKnowledgeTools(
     // Optional vendor-gated tool: Pinecone may be absent/misconfigured, in which case
     // registerAllTools logs and continues rather than aborting boot.
     core: false,
-    handler: async (params) => {
+    handler: async (params, session) => {
       const parsed = KnowledgeSearchSchema.safeParse(params);
       if (!parsed.success) {
         return errorResult(`Invalid parameters: ${parsed.error.issues.map(i => i.message).join(', ')}`);
@@ -329,7 +538,7 @@ export function registerKnowledgeTools(
 
       const { index: indexName, query, top_k, namespace: nsOverride } = parsed.data;
       const profile = memoryConfig.knowledgeProfiles[indexName]!;
-      const startMs = Date.now();
+      const startMs = clock.now();
 
       // Determine which namespaces to search.
       //
@@ -354,6 +563,11 @@ export function registerKnowledgeTools(
       const queryIntent = routed.queryIntent;
 
       try {
+        // Scope applies to every search of the instance's memory index, including
+        // an explicit namespace argument; other indexes are not memory and are
+        // searched as configured.
+        const scope = isMemoryIndex(indexName) ? await scopeFor(session) : null;
+        const legs = searchLegs(namespacesToSearch, scope, isChatNamespace);
         const projectError = await validatePineconeProject(pc, indexName, {
           projectId: memoryConfig.projectId,
           expectedHostSuffix: memoryConfig.expectedHostSuffix,
@@ -361,7 +575,7 @@ export function registerKnowledgeTools(
         if (projectError) return errorResult(projectError);
 
         const index = pc.index(indexName);
-        let hits: ParsedHit[] = [];
+        const hits: ParsedHit[] = [];
 
         if (profile.searchMode === 'vector') {
           // Standalone index: embed the query client-side and call index.query.
@@ -394,19 +608,20 @@ export function registerKnowledgeTools(
           }
 
           const topK = top_k ?? profile.topK;
-          const queryPromises = namespacesToSearch.map((ns) =>
-            index.namespace(ns).query({
+          const queryPromises = legs.map(({ namespace: ns, filter }) => {
+            return index.namespace(ns).query({
               topK,
               vector: vec,
               includeMetadata: true,
+              ...(filter ? { filter } : {}),
             }).catch((err) => {
               log.warn({ err, namespace: ns }, 'namespace vector query failed — skipping');
               return null;
-            }),
-          );
+            });
+          });
           const responses = await Promise.all(queryPromises);
-          for (const response of responses) {
-            if (!response || !Array.isArray(response.matches)) continue;
+          responses.forEach((response, legIndex) => {
+            if (!response || !Array.isArray(response.matches)) return;
             for (const match of response.matches) {
               const fields = (match.metadata ?? {}) as Record<string, unknown>;
               hits.push({
@@ -415,84 +630,83 @@ export function registerKnowledgeTools(
                 text: (fields['text'] as string) ?? '',
                 entityType: (fields['entity_type'] as string) ?? 'document',
                 fields,
+                namespace: legs[legIndex]!.namespace,
               });
             }
-          }
+          });
         } else {
           // Integrated-index branch: Pinecone-hosted embedding via searchRecords.
-          const searchPromises = namespacesToSearch.map((ns) =>
-            index.searchRecords({
+          const searchPromises = legs.map(({ namespace: ns, filter }) => {
+            return index.searchRecords({
               namespace: ns,
               query: {
                 topK: top_k ?? profile.topK,
                 inputs: { text: query },
+                ...(filter ? { filter } : {}),
               },
               fields: ['*'],
             }).catch((err) => {
               log.warn({ err, namespace: ns }, 'namespace search failed — skipping');
               return null;
-            }),
-          );
+            });
+          });
 
           const responses = await Promise.all(searchPromises);
-          for (const response of responses) {
+          responses.forEach((response, legIndex) => {
             if (response?.result?.hits) {
-              hits.push(...parseHits(response.result.hits));
+              const namespace = legs[legIndex]!.namespace;
+              hits.push(...parseHits(response.result.hits).map((hit) => ({ ...hit, namespace })));
             }
-          }
+          });
         }
 
-        // Sort merged results by score descending
-        hits.sort((a, b) => b.score - a.score);
+        // Gate, dedup by id, then order: memories by tier (this chat -> other
+        // chats -> untagged) and score, documents merged in by score. Outside the
+        // memory index every hit is tier 0.
+        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false)
+          .slice(0, RERANK_CANDIDATE_CAP);
+        let limit = MAX_RESULTS;
 
-        // Client-side rerank if configured
-        if (profile.rerank && hits.length > 0) {
+        // Client-side rerank if configured. It scores every candidate, then the
+        // tier order is restored so rerank reorders memories within a tier only;
+        // documents are merged back in by their rerank score.
+        if (profile.rerank && ranked.length > 0) {
           try {
             const rerankResult = await pc.inference.rerank({
               model: profile.rerankModel,
               query,
-              documents: hits.map((h) => ({
+              documents: ranked.map((h) => ({
                 id: h.id,
                 text: truncateForRerank(h.text),
               })),
-              topN: Math.min(profile.rerankTopN, MAX_RESULTS),
+              topN: ranked.length,
               rankFields: ['text'],
               returnDocuments: false,
             });
 
-            const reranked: ParsedHit[] = [];
+            const reranked: TieredHit[] = [];
             for (const doc of rerankResult.data) {
-              const original = hits[doc.index];
+              const original = ranked[doc.index];
               if (original) {
                 reranked.push({ ...original, score: doc.score });
               }
             }
-            hits = reranked;
+            ranked = orderHits(reranked, true);
+            limit = Math.min(profile.rerankTopN, MAX_RESULTS);
           } catch (rerankErr) {
             log.warn({ err: rerankErr }, 'Rerank failed — using vector scores');
-            // Fall through with unreranked results, capped
-            hits = hits.slice(0, MAX_RESULTS);
           }
-        } else {
-          hits = hits.slice(0, MAX_RESULTS);
         }
 
-        const hitsBeforeScoreFilter = hits.length;
+        const hitsBeforeScoreFilter = ranked.length;
         const minScore = profile.minScore;
         if (typeof minScore === 'number') {
-          hits = hits.filter((hit) => hit.score >= minScore);
+          ranked = ranked.filter((hit) => hit.score >= minScore);
         }
-        const discardedLowScore = hitsBeforeScoreFilter - hits.length;
+        const discardedLowScore = hitsBeforeScoreFilter - ranked.length;
+        const deduped: ParsedHit[] = ranked.slice(0, limit);
 
-        // Dedup by ID
-        const seen = new Set<string>();
-        const deduped = hits.filter((h) => {
-          if (seen.has(h.id)) return false;
-          seen.add(h.id);
-          return true;
-        });
-
-        const durationMs = Date.now() - startMs;
+        const durationMs = clock.now() - startMs;
         // PII hygiene: the raw query text may contain personal details
         // (names, phone numbers, addresses) and must NOT land in the INFO
         // stream that ships to aggregated log surfaces. The query prefix is
@@ -515,6 +729,7 @@ export function registerKnowledgeTools(
             routedNamespaces: namespacesToSearch,
             hits: deduped.length,
             discardedLowScore,
+            ...(scope ? { memoryScope: scope.kind, memoryScopeReason: scope.reason } : {}),
             ...(typeof minScore === 'number' ? { minScore } : {}),
             durationMs,
             ...(queryIntent ? { queryIntent } : {}),
@@ -548,7 +763,7 @@ export function registerKnowledgeTools(
           formatted,
         };
       } catch (err) {
-        const durationMs = Date.now() - startMs;
+        const durationMs = clock.now() - startMs;
         const message = errorMessage(err);
         log.error({ err, index: indexName, query: query.slice(0, 80), durationMs }, 'knowledge search failed');
 

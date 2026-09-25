@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { systemClock } from '../../lib/clock.ts';
 import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
 import type {
@@ -8,6 +9,7 @@ import type {
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import { classifyProviderFailure } from './failure-taxonomy.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
+import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import {
   TurnQueue,
   type QueuedTurn,
@@ -15,6 +17,17 @@ import {
   type TurnRejectReason,
 } from './turn-queue.ts';
 import { TurnQueueHaltLatch, type TurnQueueHaltHealth } from './turn-queue-halt-latch.ts';
+import {
+  OutboundQueuePoisonRegistry,
+  type OutboundQueuePoisonHealth,
+} from './outbound-queue-poison-registry.ts';
+import { GLOBAL_CONVERSATION_KEY } from '../../core/conversation-key.ts';
+import {
+  ScopeBlockedByDurableRecoveryError,
+  ScopeBlockedByFinalizationRecoveryError,
+  admissionRejectionLogFields,
+} from './turn-admission-errors.ts';
+import { attemptOutcomeToken, classifyTurnLane, runtimeLifecycleEmitter, type LifecycleEmitInput } from '../../core/observability/lifecycle-emission.ts';
 import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
@@ -24,7 +37,10 @@ import {
   rebindRuntimeTurnOwner,
   type RuntimeTurnContext,
 } from './runtime-turn-context.ts';
-import type { AttemptOutcome } from './turn-terminal.ts';
+import {
+  OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+  type AttemptOutcome,
+} from './turn-terminal.ts';
 import {
   finalizeRuntimeTurn,
   type FinalizeRuntimeTurnResult,
@@ -47,6 +63,7 @@ import {
   type RuntimeTurnCompletion,
 } from './runtime-turn-completion.ts';
 import { discardCancelledPreBoundaryPerChatTurn } from './runtime-turn-pre-boundary-cancellation.ts';
+import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
 import {
   replayTurnOnFallback as replayTurnOnFallbackForHost,
   type ProviderFallbackReplayArgs,
@@ -63,6 +80,19 @@ export type { ProviderFallbackReplayArgs, ResolvedReplayRoute } from './fallback
 export type { RuntimeTurnCompletion } from './runtime-turn-completion.ts';
 const log = createChildLogger('agent-runtime');
 export const RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS = 2_000;
+const QUEUED_DELIVERY_ECHO_WAIT_MS = 10_000;
+const QUEUED_DELIVERY_ECHO_POLL_MS = 25;
+
+/**
+ * #2976 residual: retire the turn's actor from a session's stored MCP conduit
+ * at turn end. Optional-called (like updateSessionActorJid in runtime.ts) so a
+ * partial session double that omits the method is a safe no-op; the real
+ * SessionManager always implements clearMcpActorJid.
+ */
+function clearSessionMcpActor(session: SessionManager | null | undefined): void {
+  (session as (SessionManager & { clearMcpActorJid?: () => void }) | null | undefined)
+    ?.clearMcpActorJid?.();
+}
 
 export interface RuntimeTurnSourceSnapshot {
   readonly sourceMessageId: string;
@@ -190,6 +220,12 @@ export function reconcileStuckScopes(instanceName: string): void {
 export interface RuntimeTurnCoordinatorPort {
   readonly durability: DurabilityEngine | null;
   readonly instanceName: string;
+  readonly sessionScope: 'single' | 'shared' | 'per_chat';
+  /**
+   * #3295 S2: live per-admission read of the deferred-turn flag (kill-switch
+   * semantics). Optional so narrow test hosts keep compiling; absent = OFF.
+   */
+  deferredTurnAdmissionEnabled?(): boolean;
   readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   readonly sessionOwnership: SessionOwnershipRegistry;
   readonly recoveryManagerId: string;
@@ -203,7 +239,7 @@ export interface RuntimeTurnCoordinatorPort {
   replaceGlobalTurnQueue(expected: TurnQueue): void;
   readonly perChatTurnQueues: Map<string, TurnQueue>;
   readonly perChatTurnQueueKeys: WeakMap<TurnQueue, PerChatRuntimeScopeRef>;
-  readonly perChatExecActorQueue: Map<string, (string | undefined)[]>;
+  readonly perChatExecActorQueue: Map<string, ExecutingSessionContext[]>;
   readonly pendingTurnText: Map<string, string>;
   readonly pendingTurnActorJid: Map<string, string | undefined>;
   readonly perChatTurnSourceMessageId: Map<string, string>;
@@ -230,6 +266,12 @@ export interface RuntimeTurnCoordinatorPort {
   readonly runtimeTurnAfterTerminal: Map<string, RuntimeTurnAfterTerminalAction>;
   managerIdFor(session: SessionManager): string;
   /**
+   * The event tool scope key the runtime registered for this session. Throws
+   * for a session the runtime never created, which is fail-closed: a dispatch
+   * whose target has no scope cannot have its events admitted anyway.
+   */
+  requireSessionToolScopeKey(session: SessionManager): string;
+  /**
    * Capability-obligation replay: derive the C3 decision for a finalizing
    * turn (undefined = the turn owes nothing / feature inert). Runs BEFORE
    * `finalizeTurnTerminal` so media staging precedes the transaction (D3).
@@ -253,6 +295,7 @@ export interface RuntimeTurnCoordinatorPort {
     deliveryKind?: TurnDeliveryKind,
     dispatchAllowed?: () => boolean,
     onProviderBoundary?: () => void,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
   deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
   discardPerChatSessionForFallback(mapKey: string, expected: SessionManager): boolean;
@@ -285,14 +328,64 @@ export interface RuntimeTurnCoordinatorPort {
     dispatchAllowed?: () => boolean,
     runtimeContext?: RuntimeTurnContext,
     deliveryKind?: TurnDeliveryKind,
+    purpose?: SessionContext['purpose'],
   ): Promise<void>;
   sendVoiceReply(chatJid: string, responseText: string): Promise<void>;
+}
+
+/**
+ * #3374 ask 2: thrown into a pinned per-chat processor when the W2 sweep has
+ * durably reclaimed its turn's inbound row. Signals the processor-error
+ * finalizer that the durable terminal is ALREADY owned by the sweep — a
+ * non-terminal finalization result must advance the queue instead of parking
+ * on a recovery that can never arrive (the row is already failed).
+ */
+export class WedgedTurnReclaimedError extends Error {
+  constructor() {
+    super('WEDGED_TURN_RECLAIMED');
+    this.name = 'WedgedTurnReclaimedError';
+  }
+}
+
+/**
+ * #3295 S2: thrown by `beginRuntimeTurnEvidence` when a recovery-blocked,
+ * replay-safe follower was DEFERRED into a durable obligation instead of
+ * being terminally rejected. The processor-error path recognizes it and
+ * retires the runtime turn state WITHOUT any durable inbound mutation — the
+ * obligation row is the turn's durable owner from this point on.
+ */
+export class TurnDeferredToObligationError extends Error {
+  readonly obligationId: number;
+
+  constructor(obligationId: number) {
+    super('TURN_DEFERRED_TO_OBLIGATION');
+    this.name = 'TurnDeferredToObligationError';
+    this.obligationId = obligationId;
+  }
+}
+
+/**
+ * Terminal-equivalent retirement marker for a deferred turn: post-effects
+ * (FIFO shift, reply-guarantee disarm, presentation clear) apply exactly as
+ * for an admission-rejected turn, but no `finalizeRuntimeTurn` runs — the
+ * inbound row stays `processing`, owned by the obligation. Deliberately NOT
+ * part of `FinalizeRuntimeTurnResult`: `finalizeRuntimeTurn` can never
+ * return it, so no finalization consumer needs to handle it.
+ */
+interface DeferredToObligationRetirement {
+  readonly kind: 'deferred_to_obligation';
+  readonly mayAdvance: true;
 }
 
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
+  private readonly outboundQueuePoisons = new OutboundQueuePoisonRegistry();
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
+  private readonly undispatchedTerminalFinalizations = new WeakMap<RuntimeTurnContext, {
+    attemptOutcome: AttemptOutcome;
+    finalization: Promise<FinalizeRuntimeTurnResult>;
+  }>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
   private readonly rejectedTurnFinalizations = new Set<Promise<void>>();
@@ -315,6 +408,78 @@ turnQueueHaltHealth(sessionScope: 'single' | 'shared' | 'per_chat'): TurnQueueHa
 }
 rekeyPerChatTurnQueueHaltScope(fromScopeKey: string, toScopeKey: string): void {
   this.turnQueueHalts.rekey(fromScopeKey, toScopeKey);
+}
+
+outboundQueuePoisonHealth(): OutboundQueuePoisonHealth {
+  return this.outboundQueuePoisons.snapshot();
+}
+
+isOutboundQueuePoisoned(scopeKey: string): boolean {
+  return this.outboundQueuePoisons.has(scopeKey);
+}
+
+rekeyPerChatOutboundQueuePoisonScope(fromScopeKey: string, toScopeKey: string): void {
+  this.outboundQueuePoisons.rekey(fromScopeKey, toScopeKey);
+}
+
+async observeOutboundQueueOperation<T>(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    this.observeOutboundQueueFailure(scopeKey, queue, error);
+    throw error;
+  }
+}
+
+private observeOutboundQueueFailure(
+  scopeKey: string,
+  queue: IOutboundQueue,
+  error: unknown,
+): void {
+  if (!queue.isPoisoned()) return;
+  try {
+    this.containOutboundQueuePoison(scopeKey, error);
+  } catch (containmentError) {
+    log.error({ err: containmentError }, 'outbound queue poison containment failed');
+  }
+}
+
+rejectRuntimeTurnIfOutboundQueuePoisoned(scopeKey: string, turn: QueuedTurn): boolean {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return false;
+  this.finalizeRejectedRuntimeTurn(turn, 'scope_blocked_recovery');
+  return true;
+}
+
+enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean {
+  if (this.host.isShuttingDown?.() === true) {
+    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    return false;
+  }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(GLOBAL_CONVERSATION_KEY, turn)) {
+    return false;
+  }
+  return this.host.turnQueue.enqueue(turn);
+}
+
+private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
+  this.outboundQueuePoisons.record(scopeKey, error);
+  const poisonCause = this.outboundQueuePoisons.cause(scopeKey);
+  if (this.host.sessionScope === 'per_chat') this.turnQueueHalts.halt(scopeKey);
+  const turnQueue = this.host.sessionScope === 'per_chat'
+    ? this.host.perChatTurnQueues.get(scopeKey)
+    : this.host.turnQueue;
+  for (const pending of turnQueue?.haltAndTakePendingTurns(poisonCause) ?? []) {
+    this.finalizeRejectedRuntimeTurn(pending, 'scope_blocked_recovery');
+  }
+}
+
+private retryOutboundQueuePoisonContainment(scopeKey: string): void {
+  if (!this.outboundQueuePoisons.has(scopeKey)) return;
+  this.containOutboundQueuePoison(scopeKey, this.outboundQueuePoisons.cause(scopeKey));
 }
 
 hasGlobalTeardownPending(): boolean {
@@ -410,9 +575,19 @@ rebindRuntimeTurnForDispatch(
   if (!owner || owner.managerId !== managerId) {
     throw new Error(`Per-chat runtime turn has no current dispatch owner for "${mapKey}"`);
   }
+  // The tool scope has to move with the manager. Tool scope keys are
+  // incarnation-specific (`createToolScopeKey` appends a monotonic ordinal), so
+  // when the eviction repair replaces a stale mapped session the turn is
+  // dispatched to a session whose scope the inbound context has never seen.
+  // Rebinding manager and generation alone leaves the predecessor's scope in
+  // the context that provider-event admission compares against, and the
+  // replacement's own terminal is then rejected as unowned: the dispatched turn
+  // runs, its completion never settles, and the chat stays pinned behind the
+  // FIFO conflict guard until the wedged-lane sweep's 24h grace releases it.
   return rebindRuntimeTurnOwner(context, {
     managerId: owner.managerId,
     generation: owner.generation,
+    toolScopeKey: this.host.requireSessionToolScopeKey(session),
   });
 }
 
@@ -593,6 +768,32 @@ createRuntimeTurnForDispatch(args: {
  * admission check. Every other caller (normal live turns) omits it, so
  * their admission predicate is unchanged.
  */
+/**
+ * FLOS Stage 1 (plan §3): emit one turn-scoped lifecycle event. Lane and
+ * `trigger_occurrence_id` derive from the #2566 synthetic message id; the
+ * work_id is the source message id so occurrence-layer and turn-layer
+ * events join into one chain. emit() is phase-gated and never throws.
+ */
+private emitTurnLifecyclePhase(
+  context: RuntimeTurnContext,
+  phase: 'admitted' | 'acknowledged' | 'terminal_result' | 'finalized',
+  attrs?: LifecycleEmitInput['attrs'],
+): void {
+  const cls = classifyTurnLane(context.replay?.sourceMessageId);
+  runtimeLifecycleEmitter().emit({
+    lane: cls.lane,
+    work_id: context.replay?.sourceMessageId ?? context.identity.logicalTurnId,
+    phase,
+    correlation: {
+      logical_turn_id: context.identity.logicalTurnId,
+      generation: context.identity.generation,
+      ...(context.identity.inboundSeq === null ? {} : { inbound_seq: context.identity.inboundSeq }),
+      ...(cls.lane === 'L-SCH' ? { trigger_occurrence_id: cls.trigger_occurrence_id } : {}),
+    },
+    ...(attrs === undefined ? {} : { attrs }),
+  });
+}
+
 beginRuntimeTurnEvidence(
   queue: IOutboundQueue,
   context: RuntimeTurnContext,
@@ -607,12 +808,89 @@ beginRuntimeTurnEvidence(
       excludeJobId !== undefined ? { excludeJobId } : undefined,
     )
   ) {
-    throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
+    // #3295 S2 (flag default OFF, read per admission): a follower blocked
+    // SOLELY by outstanding recovery — this predicate, before any dispatch —
+    // that is replay-safe becomes a durable obligation instead of a terminal
+    // admission rejection. Every other rejection class (including the
+    // supervisor check below) keeps the terminal path bit-for-bit.
+    const deferred = this.maybeDeferRecoveryBlockedTurn(context, durability);
+    if (deferred !== null) throw deferred;
+    throw new ScopeBlockedByDurableRecoveryError();
   }
   if (!this.host.runtimeTurnSupervisor.canAccept(context)) {
-    throw new Error('Runtime turn scope is blocked by terminal-finalization recovery state');
+    throw new ScopeBlockedByFinalizationRecoveryError();
   }
   queue.beginTurnEvidence(context.identity.logicalTurnId);
+  // FLOS Stage 1: the turn passed every admission gate above. A scheduled
+  // turn was already admitted+dispatched at the occurrence layer, so this
+  // seam is the turn chain ACKNOWLEDGING the dispatched work; an interactive
+  // turn enters the system here and is ADMITTED.
+  this.emitTurnLifecyclePhase(
+    context,
+    classifyTurnLane(context.replay?.sourceMessageId).lane === 'L-SCH' ? 'acknowledged' : 'admitted',
+  );
+}
+
+/**
+ * #3295 S2 deferral predicate + enqueue. Returns the typed error to throw
+ * when the recovery-blocked turn was deferred, or null to keep the terminal
+ * path. Deferrable = flag ON (live read) AND per_chat scope (the wedge class
+ * from the issue; shared/singleton keep the terminal path in S2) AND a
+ * journaled inbound AND a replay-safe text envelope with no dispatch started
+ * (this seam is pre-dispatch by construction).
+ */
+private maybeDeferRecoveryBlockedTurn(
+  context: RuntimeTurnContext,
+  durability: DurabilityEngine,
+): TurnDeferredToObligationError | null {
+  if (this.host.deferredTurnAdmissionEnabled?.() !== true) return null;
+  if (context.identity.scope !== 'per_chat') return null;
+  if (context.identity.inboundSeq === null) return null;
+  const replay = context.replay;
+  if (replay === undefined || replay.replaySafe !== true) return null;
+  if (context.contentType !== 'text') return null;
+  try {
+    const enqueued = durability.deferredTurns.enqueueDeferredObligation({
+      scope: context.identity.scope,
+      conversationKey: context.identity.conversationKey,
+      deliveryJid: context.identity.deliveryJid,
+      inboundSeq: context.identity.inboundSeq,
+      sourceMessageId: replay.sourceMessageId,
+      // Live source snapshots can carry a non-finite receive time (NaN from
+      // an absent upstream timestamp — it would bind as NULL); deferral order
+      // is by inbound_seq, so a now-stamp keeps the row honest without a read.
+      receivedAtUnixSeconds: Number.isFinite(replay.receivedAtUnixSeconds)
+        ? replay.receivedAtUnixSeconds
+        : systemClock.nowUnixSec(),
+      replaySafe: replay.replaySafe,
+      senderJid: replay.senderJid,
+      senderName: replay.senderName ?? null,
+      text: replay.text,
+      isGroup: replay.isGroup,
+      groupName: replay.groupName ?? null,
+      contentType: context.contentType,
+      toolScopeKey: context.toolScopeKey ?? null,
+    });
+    log.info(
+      {
+        inboundSeq: context.identity.inboundSeq,
+        obligationId: enqueued.id,
+        deduplicated: enqueued.deduplicated,
+        scopeKey: this.runtimeTurnScopeKey(context),
+      },
+      'recovery-blocked follower deferred into durable obligation (#3295 S2)',
+    );
+    return new TurnDeferredToObligationError(enqueued.id);
+  } catch (err) {
+    // Fail toward today's behavior: if the obligation cannot be recorded the
+    // follower keeps the terminal admission-rejection path — deferral must
+    // never turn an explicit loss into a silent one.
+    log.error(
+      { err, inboundSeq: context.identity.inboundSeq },
+      'deferred-turn enqueue failed — keeping terminal admission rejection',
+    );
+    return null;
+  }
 }
 
 attemptOutcomeForResult(
@@ -630,7 +908,19 @@ turnFinalizationBookkeeping(
   session: SessionManager | null,
   event?: Extract<AgentEvent, { type: 'result' }>,
   attemptOutcome?: AttemptOutcome,
+  perChatScopeKey?: string,
 ): TurnFinalizationBookkeepingParams {
+  // #3570: a non-sandbox per_chat scheduled job runs on its own manager, which
+  // persists its checkpoint under '<mapKey>::scheduled-agent-job'. The turn
+  // still carries the chat's conversation key, so writing the checkpoint here
+  // would put the scheduled session's id/pid/status and completed identity
+  // into the chat's row. The next restart would then try to resume the
+  // scheduled session for the chat. The scheduled manager records its own
+  // lifecycle under its own key (session.ts), so the chat's row is skipped.
+  const turnScopeKey = this.host.perChatRuntimeTurnScopeRefs.get(context.identity.logicalTurnId)?.value
+    ?? perChatScopeKey;
+  const checkpointOwnedByOtherManager = turnScopeKey !== undefined
+    && isScheduledAgentJobMapKey(turnScopeKey);
   const rowId = session?.getDbRowId() ?? null;
   const status = session?.getStatus();
   const hasUsage = event !== undefined
@@ -641,12 +931,22 @@ turnFinalizationBookkeeping(
       { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason },
       'journaled agent turn rejected before dispatch — automatic replay unavailable',
     );
+    // The `scope` above is the turn-scope KIND (per_chat | shared | singleton),
+    // not a conversation, and it is confined to metadata at the emission
+    // boundary regardless. The conversation must ride its own field or the
+    // dispatcher — which keys incidents on machine|instance|source — files
+    // every chat's rejection into whichever chat opened the incident first.
+    // The raw key is never emitted: buildBotErrorsEvent projects it to a
+    // bounded digest.
     emitAlertChecked(
       this.host.instanceName,
       'agent_turn_admission_rejected',
       'Journaled agent turn rejected before dispatch',
       `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`,
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: context.identity.conversationKey },
     );
   }
   // #1775: a turn only reaches here without recorded usage in two cases —
@@ -690,7 +990,7 @@ turnFinalizationBookkeeping(
           }
         : {}
     ),
-    checkpoint: {
+    ...(checkpointOwnedByOtherManager ? {} : { checkpoint: {
       // The completing turn owns checkpoint attribution. activeChatJid may
       // still name the first chat that spawned a shared session.
       conversationKey: context.identity.conversationKey,
@@ -709,7 +1009,7 @@ turnFinalizationBookkeeping(
           ? {}
           : { lastInboundSeq: context.identity.inboundSeq }),
       },
-    },
+    } }),
   };
 }
 
@@ -734,6 +1034,18 @@ finalizeRuntimeTurnContext(args: {
     }
   };
   void finalization.then(release, release);
+  // FLOS Stage 1: a provider result event means a terminal result existed
+  // for this attempt; `finalized` is emitted only when finalization actually
+  // settles (a rejected finalization leaves the chain honestly unfinalized).
+  if (args.event !== undefined) {
+    this.emitTurnLifecyclePhase(args.context, 'terminal_result', {
+      attempt_outcome: attemptOutcomeToken(args.attemptOutcome.kind),
+    });
+  }
+  void finalization.then(
+    () => { this.emitTurnLifecyclePhase(args.context, 'finalized'); },
+    () => {},
+  );
   return finalization;
 }
 
@@ -750,15 +1062,23 @@ private async performRuntimeTurnFinalization(args: {
   if (!this.host.durability) {
     throw new Error('Runtime turn finalization requires durability');
   }
-  const bookkeeping = this.turnFinalizationBookkeeping(args.context, args.session, args.event, args.attemptOutcome);
-  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
-    args.queue,
-    args.context.identity.logicalTurnId,
+  const bookkeeping = this.turnFinalizationBookkeeping(
+    args.context,
+    args.session,
+    args.event,
+    args.attemptOutcome,
+    args.mapKey,
   );
   const scopeRef = args.mapKey === undefined
     ? undefined
     : this.host.perChatRuntimeTurnScopeRefs.get(args.context.identity.logicalTurnId)
       ?? { value: args.mapKey };
+  const scopeKey = scopeRef?.value ?? GLOBAL_CONVERSATION_KEY;
+  const answerEvidence = await collectRuntimeTurnAnswerEvidence(
+    args.queue,
+    args.context.identity.logicalTurnId,
+    (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
+  );
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: args.queue,
     ...(scopeRef === undefined ? {} : { scopeRef }),
@@ -795,7 +1115,7 @@ private async performRuntimeTurnFinalization(args: {
     bookkeeping,
     ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
   });
-  const retained = result.kind === 'terminal'
+  const retained = result.kind === 'terminal' || result.kind === 'reclaimed_by_sweep'
     ? null
     : this.host.runtimeTurnSupervisor.retain({
         context: args.context,
@@ -804,6 +1124,7 @@ private async performRuntimeTurnFinalization(args: {
         refreshAnswerEvidence: () => collectRuntimeTurnAnswerEvidence(
           args.queue,
           args.context.identity.logicalTurnId,
+          (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
         ),
         bookkeeping,
         postEffects,
@@ -813,6 +1134,11 @@ private async performRuntimeTurnFinalization(args: {
       this.host.runtimeTurnSupervisor.markDegraded(args.context);
       return result;
     }
+    await this.applyRuntimeTurnPostEffects(result, args.context, postEffects);
+    this.finishRuntimeTurnContinuation(args.context);
+  } else if (result.kind === 'reclaimed_by_sweep') {
+    // The sweep owns the durable terminal (#3374 ask 2): retire the runtime
+    // state exactly like a terminal — no retention, no incident.
     await this.applyRuntimeTurnPostEffects(result, args.context, postEffects);
     this.finishRuntimeTurnContinuation(args.context);
   } else if (result.kind === 'durable_failure_incident' && retained?.mayAdvance === true) {
@@ -1028,7 +1354,9 @@ async finalizeActiveRuntimeTurnsForShutdown(
  * report processing after its legacy flags clear, so immutable contexts are
  * the authority here.
  */
-async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
+async terminalizeGlobalTurnForReset(
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+): Promise<RuntimeTurnQueueTeardown> {
   const existing = this.globalTeardown;
   if (existing) {
     if (
@@ -1079,7 +1407,7 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     finalizations.push(this.finalizeUndispatchedRuntimeTurn(
       turn.runtimeContext,
       undefined,
-      { kind: 'admission_rejected' },
+      operatorCancellation ?? { kind: 'admission_rejected' },
       () => { detached.ownershipProven = true; },
     ));
   }
@@ -1088,7 +1416,11 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     pendingSingleton
     && current?.identity.logicalTurnId !== pendingSingleton.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(pendingSingleton));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      pendingSingleton,
+      undefined,
+      operatorCancellation,
+    ));
   }
   const activeTurn = runtimeQueue.activeTurn;
   if (
@@ -1096,7 +1428,11 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
     && current?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
     && pendingSingleton?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(activeTurn.runtimeContext));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      activeTurn.runtimeContext,
+      undefined,
+      operatorCancellation,
+    ));
   }
   if (current) {
     const queue = this.host.getQueueForChat(current.identity.deliveryJid);
@@ -1109,7 +1445,7 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
       const finalization = this.finalizeRuntimeTurnContext({
         context: current,
         queue,
-        attemptOutcome: { kind: 'failed', class: 'crash' },
+        attemptOutcome: operatorCancellation ?? { kind: 'failed', class: 'crash' },
         session: this.host.session,
         clearReplayOnSuccess: false,
       });
@@ -1147,6 +1483,16 @@ async terminalizeGlobalTurnForReset(): Promise<RuntimeTurnQueueTeardown> {
         [err, rollbackError],
         'singleton/shared reset teardown rollback failed',
       );
+    }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(GLOBAL_CONVERSATION_KEY);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          'singleton/shared reset poison containment retry failed',
+        );
+      }
     }
     if (rollbackSucceeded && this.globalTeardown === state) {
       this.globalTeardown = null;
@@ -1207,7 +1553,10 @@ async retireGlobalTurnQueueAfterReset(transaction: RuntimeTurnQueueTeardown): Pr
  *
  * Scoped mirror of the per-chat arm of finalizeActiveRuntimeTurnsForShutdown().
  */
-async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQueueTeardown> {
+async terminalizePerChatTurnQueueForKill(
+  mapKey: string,
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
+): Promise<RuntimeTurnQueueTeardown> {
   const existing = this.perChatTeardowns.get(mapKey);
   if (existing) {
     if (
@@ -1264,7 +1613,7 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
       finalizations.push(this.finalizeUndispatchedRuntimeTurn(
         turn.runtimeContext,
         scopeRef,
-        { kind: 'admission_rejected' },
+        operatorCancellation ?? { kind: 'admission_rejected' },
         () => { detached.ownershipProven = true; },
       ));
     }
@@ -1278,7 +1627,11 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
     activeTurn?.runtimeContext
     && published?.identity.logicalTurnId !== activeTurn.runtimeContext.identity.logicalTurnId
   ) {
-    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(activeTurn.runtimeContext, scopeRef));
+    finalizations.push(this.terminalizeUndispatchedRuntimeCrash(
+      activeTurn.runtimeContext,
+      scopeRef,
+      operatorCancellation,
+    ));
   }
   if (published) {
     const queue = this.host.chatQueues.get(mapKey);
@@ -1291,7 +1644,7 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
       const finalization = this.finalizeRuntimeTurnContext({
         context: published,
         queue,
-        attemptOutcome: { kind: 'failed', class: 'crash' },
+        attemptOutcome: operatorCancellation ?? { kind: 'failed', class: 'crash' },
         session: this.host.chatSessions.get(mapKey) ?? null,
         mapKey,
         clearReplayOnSuccess: false,
@@ -1330,6 +1683,16 @@ async terminalizePerChatTurnQueueForKill(mapKey: string): Promise<RuntimeTurnQue
         failure = new AggregateError(
           [err, rollbackError],
           `per-chat reset teardown rollback failed for ${mapKey}`,
+        );
+      }
+    }
+    if (rollbackSucceeded) {
+      try {
+        this.retryOutboundQueuePoisonContainment(mapKey);
+      } catch (containmentError) {
+        failure = new AggregateError(
+          [failure, containmentError],
+          `per-chat reset poison containment retry failed for ${mapKey}`,
         );
       }
     }
@@ -1425,7 +1788,7 @@ retireIdlePerChatTurnQueueForRecycle(
 }
 
 async applyRuntimeTurnPostEffects(
-  result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }>,
+  result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }> | DeferredToObligationRetirement,
   context: RuntimeTurnContext,
   postEffects: RuntimeTurnPostEffects,
 ): Promise<void> {
@@ -1487,9 +1850,9 @@ async applyRuntimeTurnPostEffects(
     ledger.fifoValidated = true;
   }
 
-  const shouldDisarm = result.kind === 'durable_failure_incident'
-    ? result.mayAdvance
-    : result.effectiveReplyGuaranteeDisarmed;
+  const shouldDisarm = result.kind === 'terminal'
+    ? result.effectiveReplyGuaranteeDisarmed
+    : result.mayAdvance;
   if (shouldDisarm && !ledger.guaranteeDisarmed) {
     this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
     ledger.guaranteeDisarmed = true;
@@ -1510,6 +1873,11 @@ async applyRuntimeTurnPostEffects(
         seqs?.shift();
         if (seqs?.length === 0) this.host.perChatInboundSeqQueue.delete(mapKey);
         this.host.perChatExecActorQueue.get(mapKey)?.shift();
+        // #2976 residual: retire the turn's actor from the per-chat session's
+        // stored MCP conduit at the same seam the executing-actor register is
+        // retired, so it cannot linger onto the next turn. Optional-called like
+        // updateSessionActorJid (runtime.ts) — partial session doubles omit it.
+        clearSessionMcpActor(this.host.chatSessions.get(mapKey));
       }
       this.host.perChatRuntimeTurnScopeRefs.delete(context.identity.logicalTurnId);
       ledger.fifoAdvanced = true;
@@ -1555,6 +1923,16 @@ async applyRuntimeTurnPostEffects(
       this.host.currentTurnChatJid = null;
       this.host.currentTurnReplayText = null;
       this.host.currentTurnReplayActorJid = undefined;
+      // #2976 (ii): retire the executing-turn actor for the global-socket
+      // resolver (pushed at the provider boundary; admission-rejected turns
+      // never pushed, so nothing to shift there).
+      if (!postEffects.admissionRejected) {
+        this.host.perChatExecActorQueue.get(GLOBAL_CONVERSATION_KEY)?.shift();
+        // #2976 residual: retire the turn's actor from the shared/single
+        // session's stored MCP conduit at the same seam, so it cannot linger
+        // onto the next turn (the in-process bridge reads it defensively).
+        clearSessionMcpActor(this.host.session);
+      }
       ledger.fifoAdvanced = true;
     }
     if (!ledger.presentationCleared) {
@@ -1609,9 +1987,10 @@ runRuntimeTurnAfterTerminalAction(
 
 flushUnownedRuntimeResult(
   queue: IOutboundQueue,
+  scopeKey: string,
   voice?: { chatJid: string; responseText: string; inboundContentType: string | null },
 ): void {
-  queue.flush()
+  this.observeOutboundQueueOperation(scopeKey, queue, () => queue.flush())
     .then(() => {
       if (
         voice &&
@@ -1630,9 +2009,17 @@ async retryRuntimeTurnFinalizations(): Promise<RuntimeTurnRetryResult> {
 }
 
 async applyRecoveredRuntimeTurnFinalization(
-  result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+  result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
   retained: RetainedRuntimeTurnFinalization<RuntimeTurnPostEffects>,
 ): Promise<void> {
+  if (result.kind === 'reclaimed_by_sweep') {
+    // A retained finalization whose row the sweep later reclaimed: the sweep
+    // owns the durable terminal; only the in-memory retirement remains.
+    if (!retained.postEffectsApplied) {
+      await this.applyRuntimeTurnPostEffects(result, retained.context, retained.postEffects);
+    }
+    return;
+  }
   if (!this.terminalPostEffectsAreProven(result)) {
     throw new Error('Recovered runtime terminal lacks an exact durable ownership handoff');
   }
@@ -1659,6 +2046,9 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
     this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
     return false;
   }
+  if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(mapKey, turn)) {
+    return false;
+  }
   if (this.turnQueueHalts.has(mapKey)) {
     this.finalizeRejectedRuntimeTurn(turn, 'queue_halted');
     return false;
@@ -1680,7 +2070,10 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
         this.turnQueueHalts.halt(queueKey.value);
       },
     });
-    queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(queueKey, queued));
+    const liveQueue = queue;
+    queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(
+      queueKey, queued, undefined, undefined, undefined, liveQueue,
+    ));
     this.host.perChatTurnQueues.set(mapKey, queue);
     this.host.perChatTurnQueueKeys.set(queue, queueKey);
   }
@@ -1727,6 +2120,36 @@ async finalizeUndispatchedRuntimeTurn(
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
   onOwnershipProven?: () => void,
 ): Promise<FinalizeRuntimeTurnResult> {
+  const existing = this.undispatchedTerminalFinalizations.get(context);
+  if (existing) {
+    const result = await existing.finalization;
+    if (result.kind !== 'terminal' && result.kind !== 'reclaimed_by_sweep') {
+      // A retained finalization still owns its original outcome after storage
+      // recovers. Settle that owner before shutdown can request a crash outcome.
+      await this.host.runtimeTurnSupervisor.retryAll();
+      await this.host.runtimeTurnSupervisor.waitForRecovery(context);
+      existing.finalization = this.runUndispatchedRuntimeTurnFinalization(
+        context, scopeRef, existing.attemptOutcome, onOwnershipProven,
+      );
+      return existing.finalization;
+    }
+    onOwnershipProven?.();
+    return result;
+  }
+  // A timeout and shutdown can overlap before the FIFO releases this exact
+  // immutable context. Join its first terminal owner instead of changing the outcome.
+  const finalization = this.runUndispatchedRuntimeTurnFinalization(context, scopeRef, attemptOutcome, onOwnershipProven);
+  this.undispatchedTerminalFinalizations.set(context, { attemptOutcome, finalization });
+  void finalization.catch(() => { this.undispatchedTerminalFinalizations.delete(context); });
+  return finalization;
+}
+
+private async runUndispatchedRuntimeTurnFinalization(
+  context: RuntimeTurnContext,
+  scopeRef: PerChatRuntimeScopeRef | undefined,
+  attemptOutcome: AttemptOutcome,
+  onOwnershipProven?: () => void,
+): Promise<FinalizeRuntimeTurnResult> {
   if (!this.host.durability) {
     throw new Error('Journaled queue rejection requires durability');
   }
@@ -1736,7 +2159,7 @@ async finalizeUndispatchedRuntimeTurn(
   // rowId is always null and the usage-loss alert in turnFinalizationBookkeeping
   // never fires for this call site regardless of attemptOutcome — passed through
   // for signature consistency, not because it changes behavior here.
-  const bookkeeping = this.turnFinalizationBookkeeping(context, null, undefined, attemptOutcome);
+  const bookkeeping = this.turnFinalizationBookkeeping(context, null, undefined, attemptOutcome, scopeRef?.value);
   const postEffects = this.createRuntimeTurnPostEffects({
     queue: null,
     admissionRejected: true,
@@ -1756,6 +2179,16 @@ async finalizeUndispatchedRuntimeTurn(
     bookkeeping,
   });
   const scopeKey = this.runtimeTurnScopeKey(context);
+  if (result.kind === 'reclaimed_by_sweep') {
+    // The sweep owns the durable terminal: retire the in-memory state only.
+    onOwnershipProven?.();
+    if (scopeRef !== undefined) {
+      await this.applyRuntimeTurnPostEffects(result, context, postEffects);
+    } else {
+      this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
+    }
+    return result;
+  }
   if (result.kind !== 'terminal') {
     const retained = this.host.runtimeTurnSupervisor.retain({
       context,
@@ -1799,7 +2232,24 @@ async finalizeUndispatchedRuntimeTurnAndWait(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
+  rejection?: { error: unknown; fifoHead?: { turnId: string | undefined } },
 ): Promise<void> {
+  if (rejection !== undefined) {
+    // Diagnosability (2026-08-29 q DM wedge): record WHICH gate rejected and
+    // (per-chat) what held the FIFO head. Deliberately one warn per rejected
+    // turn — a wedged scope's rejection stream IS the forensic trail this
+    // incident lacked. Lives here so per_chat AND shared/singleton processor
+    // errors get the same record.
+    log.warn(
+      admissionRejectionLogFields(
+        scopeRef?.value ?? context.identity.scope,
+        context,
+        rejection.error,
+        rejection.fifoHead,
+      ),
+      'pre-dispatch turn rejection — finalizing failed with no replay',
+    );
+  }
   const result = await this.finalizeUndispatchedRuntimeTurn(context, scopeRef, attemptOutcome);
   if (result.kind !== 'terminal' && !result.mayAdvance) {
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
@@ -1809,13 +2259,15 @@ async finalizeUndispatchedRuntimeTurnAndWait(
 terminalizeUndispatchedRuntimeCrash(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
+  operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
 ): Promise<FinalizeRuntimeTurnResult> {
   const turnId = context.identity.logicalTurnId;
+  const interruption = operatorCancellation ? 'operator cancellation' : 'crash';
   this.cancelledUndispatchedTurnIds.add(turnId);
   const initialFinalization = this.finalizeUndispatchedRuntimeTurn(
     context,
     scopeRef,
-    { kind: 'failed', class: 'crash' },
+    operatorCancellation ?? { kind: 'failed', class: 'crash' },
   );
   const finalization = initialFinalization.then(async (result) => {
     if (result.kind !== 'terminal' && !result.mayAdvance) {
@@ -1825,12 +2277,12 @@ terminalizeUndispatchedRuntimeCrash(
     this.host.runtimeTurnSupervisor.markDegraded(context);
     log.error(
       { err, mapKey: scopeRef?.value, scopeKey: this.runtimeTurnScopeKey(context) },
-      'undispatched runtime crash finalization failed',
+      `undispatched runtime ${interruption} finalization failed`,
     );
     throw err;
   });
   this.undispatchedCrashFinalizations.set(turnId, finalization);
-  void finalization.catch((err) => log.debug({ err }, 'runtime-turn-coordinator: undispatched crash finalization rejected (consumed at its await site; barrier only)'));
+  void finalization.catch((err) => log.debug({ err }, `runtime-turn-coordinator: undispatched ${interruption} finalization rejected (consumed at its await site; barrier only)`));
   return initialFinalization;
 }
 
@@ -1885,6 +2337,32 @@ finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
   return true;
 }
 
+/**
+ * #3295 S2: retire a deferred turn's runtime state through the standard
+ * admission-rejected post-effects (inbound-seq FIFO advance, reply-guarantee
+ * disarm, presentation clear) with ZERO durable writes — the obligation row
+ * enqueued at admission is the turn's durable owner.
+ */
+private async retireDeferredRuntimeTurn(
+  context: RuntimeTurnContext,
+  scopeRef: PerChatRuntimeScopeRef,
+): Promise<void> {
+  const postEffects = this.createRuntimeTurnPostEffects({
+    queue: null,
+    admissionRejected: true,
+    advancePerChatInboundSeq:
+      context.identity.inboundSeq !== null
+      && this.host.perChatInboundSeqQueue.get(scopeRef.value)?.[0]
+        === context.identity.inboundSeq,
+    scopeRef,
+  });
+  await this.applyRuntimeTurnPostEffects(
+    { kind: 'deferred_to_obligation', mayAdvance: true },
+    context,
+    postEffects,
+  );
+}
+
 async finalizePerChatProcessorError(
   mapKey: string,
   turn: QueuedTurn,
@@ -1894,10 +2372,16 @@ async finalizePerChatProcessorError(
   if (!context) {
     throw new Error('Per-chat processor failure has no immutable runtime turn context', { cause: error });
   }
-  if (
-    this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId
-      !== context.identity.logicalTurnId
-  ) {
+  const fifoHeadTurnId = this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.identity.logicalTurnId;
+  if (fifoHeadTurnId !== context.identity.logicalTurnId) {
+    // #3295 S2: the deferral throw happens pre-publication (the context never
+    // entered the FIFO), so it always lands in this branch. Retire the
+    // runtime state with NO durable inbound mutation — the obligation row
+    // recorded at admission owns the turn now.
+    if (error instanceof TurnDeferredToObligationError) {
+      await this.retireDeferredRuntimeTurn(context, { value: mapKey });
+      return;
+    }
     if (this.isUndispatchedRuntimeTurnCancelled(context)) {
       await this.waitForUndispatchedRuntimeCrash(context);
       this.clearUndispatchedRuntimeTurnCancellation(context);
@@ -1907,6 +2391,7 @@ async finalizePerChatProcessorError(
       context,
       { value: mapKey },
       { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      { error, fifoHead: { turnId: fifoHeadTurnId } },
     );
     return;
   }
@@ -1923,6 +2408,18 @@ async finalizePerChatProcessorError(
     clearReplayOnSuccess: true,
   });
   if (result.kind !== 'terminal' && !result.mayAdvance) {
+    if (error instanceof WedgedTurnReclaimedError) {
+      // FALLBACK ONLY: a reclaimed turn normally finalizes as
+      // reclaimed_by_sweep (mayAdvance) and never reaches this branch. If the
+      // finalizer could not prove sweep ownership (e.g. the row read failed),
+      // parking would re-create the exact queue wedge the reclaim is
+      // releasing — advance instead.
+      log.warn(
+        { mapKey, scopeKey: this.runtimeTurnScopeKey(context), resultKind: result.kind },
+        'wedged-turn reclaim finalization is non-terminal — durable ownership already held by the stale-reclaim sweep; advancing queue',
+      );
+      return;
+    }
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
   }
 }
@@ -1953,6 +2450,7 @@ async finalizeSharedProcessorError(
       context,
       undefined,
       { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+      { error },
     );
     if (this.host.currentInboundSeq === context.identity.inboundSeq) {
       this.host.getQueueForChat(turn.chatJid)?.setInboundSeq(undefined);
@@ -1979,6 +2477,17 @@ async finalizeSharedProcessorError(
     session: this.host.session,
   });
   if (result.kind !== 'terminal' && !result.mayAdvance) {
+    if (error instanceof WedgedTurnReclaimedError) {
+      // FALLBACK ONLY, mirroring the per-chat path: a reclaimed turn normally
+      // finalizes as reclaimed_by_sweep (mayAdvance) and never reaches here.
+      // Parking the ONE global queue would re-create the exact wedge the
+      // reclaim is releasing, and in shared mode it blocks every chat.
+      log.warn(
+        { scopeKey: this.runtimeTurnScopeKey(context), resultKind: result.kind },
+        'wedged-turn reclaim finalization is non-terminal — durable ownership already held by the stale-reclaim sweep; advancing queue',
+      );
+      return;
+    }
     await this.host.runtimeTurnSupervisor.waitForRecovery(context);
   }
 }
@@ -1988,13 +2497,21 @@ finalizeRuntimeCrash(
   queue: IOutboundQueue | null | undefined,
   session: SessionManager | null,
   mapKey?: string,
+  // #3398: set ONLY by the runtime's provider-crash wrapper. The fence-lost
+  // replay abort (abortTurnRecoveryReplay) reaches here too and must stay
+  // quiet — a lane that lost its claim goes silent while the new claimant
+  // owns delivery — so salvage is opt-in per call site, and the salvage send
+  // is status-role (never answer evidence), leaving this function's crash
+  // finalization classes untouched.
+  options: { salvageOwedReply?: boolean } = {},
 ): void {
+  const salvageOwedReply = options.salvageOwedReply === true;
   if (!context || !queue || !this.host.durability) {
     if (!context && this.host.currentInboundSeq === undefined) {
       queue?.abortTurn();
       return;
     }
-    queue?.abortTurn({ preserveEvidence: true });
+    queue?.abortTurn({ preserveEvidence: true, ...(salvageOwedReply ? { salvageOwedReply } : {}) });
     if (context || this.host.currentInboundSeq !== undefined) {
       log.error(
         { mapKey, inboundSeq: context?.identity.inboundSeq ?? this.host.currentInboundSeq },
@@ -2003,7 +2520,7 @@ finalizeRuntimeCrash(
     }
     return;
   }
-  queue.abortTurn({ preserveEvidence: true });
+  queue.abortTurn({ preserveEvidence: true, ...(salvageOwedReply ? { salvageOwedReply } : {}) });
   void this.finalizeRuntimeTurnContext({
     context,
     queue,
@@ -2018,6 +2535,63 @@ finalizeRuntimeCrash(
   });
 }
 
+private async waitForQueuedDeliveryEcho(
+  scopeRef: PerChatRuntimeScopeRef,
+  turn: QueuedTurn,
+  runtimeQueue: TurnQueue,
+): Promise<boolean> {
+  const context = turn.runtimeContext;
+  const durability = this.host.durability;
+  if (!context || context.identity.inboundSeq === null || !durability) return true;
+
+  const startedAt = performance.now();
+  let waiting = false;
+  try {
+    for (;;) {
+      if (this.isUndispatchedRuntimeTurnCancelled(context)) {
+        await this.waitForUndispatchedRuntimeCrash(context);
+        this.clearUndispatchedRuntimeTurnCancellation(context);
+        return false;
+      }
+      if (this.host.isShuttingDown?.() === true
+        || this.perChatTeardowns.has(scopeRef.value)
+        || this.host.perChatTurnQueues.get(scopeRef.value) !== runtimeQueue
+        || runtimeQueue.activeTurn !== turn
+        || runtimeQueue.isHalted) {
+        await this.terminalizeUndispatchedRuntimeCrash(context, scopeRef);
+        await this.waitForUndispatchedRuntimeCrash(context);
+        this.clearUndispatchedRuntimeTurnCancellation(context);
+        return false;
+      }
+      // Partial runtime adapters still pass through the unchanged final admission guard.
+      const state = durability.getTurnRecoveryAdmissionStateForScope?.(
+        context.identity.scope, context.identity.conversationKey,
+      );
+      if (state !== 'awaiting_delivery_echo') return true;
+      if (!waiting) {
+        waiting = true;
+        log.info({ inboundSeq: context.identity.inboundSeq, logicalTurnId: context.identity.logicalTurnId },
+          'queued turn waiting for completed answer delivery echo');
+      }
+      if (performance.now() - startedAt >= QUEUED_DELIVERY_ECHO_WAIT_MS) {
+        // Same terminal class the thrown ScopeBlockedByDurableRecoveryError already maps to in
+        // finalizePerChatProcessorError, so a follower blocked by recovery lands in one class
+        // whether it was rejected before dispatch or after the echo wait timed out.
+        // scope_blocked_recovery stays reserved for outbound-queue-poison containment (#3321).
+        await this.finalizeUndispatchedRuntimeTurnAndWait(context, scopeRef,
+          { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+          { error: new ScopeBlockedByDurableRecoveryError() });
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, QUEUED_DELIVERY_ECHO_POLL_MS));
+    }
+  } finally {
+    if (waiting) log.info({ inboundSeq: context.identity.inboundSeq,
+      logicalTurnId: context.identity.logicalTurnId, elapsedMs: performance.now() - startedAt },
+    'queued turn delivery echo wait ended');
+  }
+}
+
 async processPerChatTurn(
   scopeRef: PerChatRuntimeScopeRef,
   turn: QueuedTurn,
@@ -2027,7 +2601,29 @@ async processPerChatTurn(
   excludeJobId?: number,
   dispatchAllowed?: () => boolean,
   onProviderBoundary?: () => void,
+  // Only the live FIFO carries this receipt; supervisor dispatches use their own fence.
+  expectedLiveQueue?: TurnQueue,
 ): Promise<void> {
+  const runtimeQueue = expectedLiveQueue;
+  if (runtimeQueue !== undefined) {
+    if (!(await this.waitForQueuedDeliveryEcho(scopeRef, turn, runtimeQueue))) return;
+    const context = turn.runtimeContext;
+    // Cancellation may win the promise handoff after the wait reports ready.
+    if (context && this.isUndispatchedRuntimeTurnCancelled(context)) {
+      await this.waitForUndispatchedRuntimeCrash(context);
+      this.clearUndispatchedRuntimeTurnCancellation(context);
+      return;
+    }
+    if (context && (this.host.isShuttingDown?.() === true
+      || this.perChatTeardowns.has(scopeRef.value)
+      || this.host.perChatTurnQueues.get(scopeRef.value) !== runtimeQueue
+      || runtimeQueue.activeTurn !== turn || runtimeQueue.isHalted)) {
+      await this.terminalizeUndispatchedRuntimeCrash(context, scopeRef);
+      await this.waitForUndispatchedRuntimeCrash(context);
+      this.clearUndispatchedRuntimeTurnCancellation(context);
+      return;
+    }
+  }
   const mapKey = scopeRef.value;
   const seqQueue = this.host.perChatInboundSeqQueue.get(mapKey) ?? [];
   if (turn.inboundSeq !== undefined) seqQueue.push(turn.inboundSeq);
@@ -2061,6 +2657,7 @@ async processPerChatTurn(
         providerBoundaryCrossed = true;
         onProviderBoundary?.();
       },
+      turn.purpose,
     );
   } catch (err) {
     dispatchFailed = true;

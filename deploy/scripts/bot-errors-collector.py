@@ -14,7 +14,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -2467,38 +2467,328 @@ def configured_remote_hosts(remotes: list[str]) -> list[str]:
     return hosts
 
 
-def alert_remote_from_key(key: str) -> str | None:
-    for source in ("remote-claim-failed", "remote-drain-stale", "remote-relay-failed"):
+# --- #2429 registered collector alert-source inventory ---------------------
+#
+# One inventory for pruning, so a source that any emit site mints cannot fall
+# outside the pruning model and strand its record after its producer is gone.
+# Each entry declares WHERE that source's open state lives, because the three
+# homes are retired differently:
+#
+#   ALERT_STATE_OPEN_ALERTS   -- state["alerts"] / state["openAlerts"], keyed
+#                                f"{remote}:{source}" by alert_key().
+#   ALERT_STATE_ACK_FAILURES  -- state["writefailAckFailures"], keyed by an
+#                                opaque payload digest, remote in the record
+#                                body (acknowledgement membership).
+#   ALERT_STATE_REMOTE_RECORD -- flags on state["remotes"][remote]. These
+#                                direct escalation tiers are minted straight
+#                                to the outbox by _emit_collector_outbox_event
+#                                and hold no open-alert bucket key at all.
+#
+# Only the ALERT_STATE_OPEN_ALERTS subset is suffix-matched against bucket
+# keys; the other two are matched by their own state shape.
+# test_bot_errors_collector_pruning_disposition_2429.py AST-scans this
+# module's emit sites and fails when a minted source literal is absent here,
+# so the inventory cannot drift behind a newly added emitter.
+ALERT_STATE_OPEN_ALERTS = "openAlerts"
+ALERT_STATE_ACK_FAILURES = "writefailAckFailures"
+ALERT_STATE_REMOTE_RECORD = "remotes"
+
+# HD-11b -- collector capture-failure escalation (DEFECT-REGISTER collection-
+# blindness class / NOTES.md wishlist 10, 13): a persistently uncollectable
+# remote must not silently stall collection. Distinct from and independently
+# tunable from RELAY_BACKOFF_FAILURE_THRESHOLD (backoff entry) -- both key off
+# the same consecutiveFailures counter but serve different purposes: this is
+# the earlier, lower-confidence escalation signal that opens a real dispatcher
+# incident with a typed clear; relay_host_down is backoff-schedule entry.
+# Defined here rather than beside collector_failure_escalate_threshold() so
+# the registry below has a single definition point for every source it names.
+COLLECTOR_CAPTURE_ESCALATION_SOURCE: str = "collector_remote_unreachable"
+RELAY_HOST_DOWN_SOURCE: str = "relay_host_down"
+
+REGISTERED_ALERT_SOURCES: dict[str, str] = {
+    "remote-claim-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-drain-stale": ALERT_STATE_OPEN_ALERTS,
+    "remote-relay-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-harvest-failed": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-nondurable": ALERT_STATE_OPEN_ALERTS,
+    "remote-writefail-ack-failed": ALERT_STATE_ACK_FAILURES,
+    COLLECTOR_CAPTURE_ESCALATION_SOURCE: ALERT_STATE_REMOTE_RECORD,
+    RELAY_HOST_DOWN_SOURCE: ALERT_STATE_REMOTE_RECORD,
+}
+
+OPEN_ALERT_KEY_SOURCES: tuple[str, ...] = tuple(
+    source for source, location in REGISTERED_ALERT_SOURCES.items() if location == ALERT_STATE_OPEN_ALERTS
+)
+
+# Which state["remotes"][remote] field marks each remote-record tier's incident
+# as open. prune_state_to_configured_remotes iterates THIS map rather than
+# branching on hand-typed flag names, so a tier added to
+# REGISTERED_ALERT_SOURCES with location ALERT_STATE_REMOTE_RECORD but no entry
+# here is a test failure, not a silent pruning-scope hole (#2429 review F1).
+REMOTE_RECORD_OPEN_FLAGS: dict[str, str] = {
+    COLLECTOR_CAPTURE_ESCALATION_SOURCE: "captureFailureEscalated",
+    RELAY_HOST_DOWN_SOURCE: "downEventEmitted",
+}
+
+# emit_relay_host_state_event's `kind` argument is NOT a source. #2419 requires
+# the recovered clear to carry the DOWN source so it keys onto the incident the
+# alert opened; "relay_host_recovered" must therefore never reach an envelope as
+# a source of its own. This map is that translation and the only place a relay
+# host kind becomes a source, so the drift guard can sweep its values and an
+# unknown kind fails closed instead of minting an unregistered source.
+RELAY_HOST_STATE_KIND_SOURCES: dict[str, str] = {
+    "relay_host_down": RELAY_HOST_DOWN_SOURCE,
+    "relay_host_recovered": RELAY_HOST_DOWN_SOURCE,
+}
+
+CONFIGURATION_RETIRED_DISPOSITION = "configuration_retired"
+CONFIGURATION_RETIRED_REASON = "remote_not_configured"
+
+
+class UnregisteredAlertSourceError(RuntimeError):
+    """An alert bucket key names a source outside REGISTERED_ALERT_SOURCES.
+
+    #2429 requires an unknown or newly added source key to fail closed rather
+    than be silently retained (old behaviour) or silently dropped. The message
+    is bounded and content-free -- a count plus an opaque digest, never the raw
+    key, remote identity, or remote root.
+    """
+
+
+def relay_host_state_source(kind: str) -> str:
+    """Translate a relay-host state kind into the source its envelope carries.
+
+    Fails closed on an unknown kind. Before #2429 an unrecognised kind fell
+    through to ``source = kind``, minting an envelope under a source no
+    inventory knew about, whose open state pruning would then delete with no
+    disposition -- the same class of hole the registry closes for bucket keys.
+    """
+    try:
+        return RELAY_HOST_STATE_KIND_SOURCES[kind]
+    except KeyError:
+        digest = hashlib.sha256(kind.encode("utf-8")).hexdigest()[:16]
+        raise UnregisteredAlertSourceError(
+            f"unregistered_relay_host_kind kinds=1 digest={digest}"
+        ) from None
+
+
+def split_alert_key(key: str) -> tuple[str, str] | None:
+    """Split an alerts/openAlerts key into (remote, source), or None.
+
+    None means the key names no registered open-alert source. Callers that
+    prune must treat that as fail-closed, never as "not an alert key".
+    """
+    for source in OPEN_ALERT_KEY_SOURCES:
         suffix = f":{source}"
         if key.endswith(suffix):
-            return key[: -len(suffix)]
+            return key[: -len(suffix)], source
     return None
 
 
+def _raise_unregistered_alert_sources(unregistered: list[str]) -> NoReturn:
+    """Fail closed with a bounded, content-free reason.
+
+    The message carries a count and an opaque digest only: an alert key holds
+    a remote identity and remote root, and #2429's public-surface rule keeps
+    those out of operator-visible diagnostics.
+    """
+    digest = hashlib.sha256("\0".join(unregistered).encode("utf-8")).hexdigest()[:16]
+    raise UnregisteredAlertSourceError(
+        f"unregistered_alert_source keys={len(unregistered)} digest={digest}"
+    )
+
+
+def require_registered_alert_keys(keys: list[str]) -> None:
+    """Raise once for the whole batch when any key names an unregistered source."""
+    unregistered = sorted({key for key in keys if split_alert_key(key) is None})
+    if unregistered:
+        _raise_unregistered_alert_sources(unregistered)
+
+
+def emit_configuration_retired_disposition(
+    remote: str,
+    source: str,
+    state_location: str,
+    *,
+    prior_status: str,
+    alert_key_value: str | None = None,
+    record_count: int = 1,
+) -> str:
+    """Publish the terminal disposition for one configuration-retired record.
+
+    Reuses _emit_collector_outbox_event -- the same publish_event_json +
+    require_advance + append_log path every other collector-minted lifecycle
+    transition already uses -- rather than opening a second ledger.
+
+    eventType is "observation", never "clear". Only kind == "incident_recovery"
+    (eventType "clear", severity info) closes a dispatcher incident, and #2429
+    forbids manufacturing a recovery clear: roster/configuration absence is
+    configuration evidence, not health evidence. The disposition keeps the
+    retired source and diagnostics.remote unchanged so dispatcher
+    incident_key() lands it on the very incident it disposes.
+    """
+    key = alert_key_value or f"{remote}:{source}"
+    retired_at = int(time.time())
+    retired_at_iso = now_iso()
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    evidence = "\n".join([
+        f"remote={remote}",
+        f"alert_source={source}",
+        f"disposition={CONFIGURATION_RETIRED_DISPOSITION}",
+        f"disposition_reason={CONFIGURATION_RETIRED_REASON}",
+        f"state_location={state_location}",
+        f"prior_status={prior_status}",
+        f"retired_record_count={record_count}",
+        f"alert_key_digest={key_digest}",
+        f"retired_at={retired_at_iso}",
+        "recovery_claimed=false",
+        f"collector_log={state_root() / 'logs/collector.jsonl'}",
+    ])
+    return _emit_collector_outbox_event(
+        remote,
+        source=source,
+        event_type="observation",
+        severity="info",
+        summary=f"BOT ERRORS collector retired open alert state for unconfigured remote: {remote}",
+        evidence=evidence,
+        log_type="alert_configuration_retired",
+        extra_diagnostics={
+            "disposition": CONFIGURATION_RETIRED_DISPOSITION,
+            "dispositionReason": CONFIGURATION_RETIRED_REASON,
+            "dispositionSource": source,
+            "dispositionStateLocation": state_location,
+            "retiredAt": retired_at,
+            "retiredAtIso": retired_at_iso,
+            "priorStatus": prior_status,
+            "retiredRecordCount": record_count,
+            "alertKeyDigest": key_digest,
+            "recoveryClaimed": False,
+        },
+    )
+
+
 def prune_state_to_configured_remotes(state: dict[str, Any], remotes: list[str]) -> None:
+    """Retire the state of remotes that configuration no longer lists.
+
+    #2429 (pruning half): every open record removed here first emits an
+    audited ``configuration_retired`` terminal disposition through the normal
+    durable outbox path, so an operator can tell a deliberate retirement from
+    a recovery, a corrupt-state loss, or an accidental roster omission. The
+    disposition is an observation, never a clear -- see
+    emit_configuration_retired_disposition.
+
+    Validation runs to completion BEFORE the first effect. A bucket key naming
+    a source outside REGISTERED_ALERT_SOURCES raises
+    UnregisteredAlertSourceError with nothing published and nothing popped.
+    This function runs at the top of _run_once_with_state, above every
+    remote/probe/claim/ack/outbox effect and above save_collector_state, so
+    that raise fails the whole cycle closed and leaves the prior ledger intact.
+    """
     configured = set(remotes)
+
+    # --- validation pass: no effects before the whole key world is known ---
+    alert_buckets: list[dict[str, Any]] = []
+    for bucket_name in ("alerts", "openAlerts"):
+        bucket = state.get(bucket_name)
+        if isinstance(bucket, dict):
+            alert_buckets.append(bucket)
+    require_registered_alert_keys([str(key) for bucket in alert_buckets for key in bucket])
+
+    # --- direct escalation tiers (state["remotes"][remote] flags) ----------
     remote_state = state.get("remotes")
     if isinstance(remote_state, dict):
         for remote in list(remote_state):
-            if remote not in configured:
-                remote_state.pop(remote, None)
+            if remote in configured:
+                continue
+            record = remote_state.get(remote)
+            if isinstance(record, dict):
+                # Registry-driven: one disposition per remote-record tier whose
+                # open flag is set. A quiet remote record owns no incident and
+                # needs no disposition.
+                for source, open_flag in REMOTE_RECORD_OPEN_FLAGS.items():
+                    if record.get(open_flag):
+                        emit_configuration_retired_disposition(
+                            remote,
+                            source,
+                            ALERT_STATE_REMOTE_RECORD,
+                            prior_status="open",
+                        )
+            remote_state.pop(remote, None)
     else:
         state["remotes"] = {}
+
+    # --- open alert bookkeeping (alerts + openAlerts share one key space) --
+    open_alerts = state.get("openAlerts")
+    retiring: dict[str, tuple[str, str]] = {}
+    for bucket in alert_buckets:
+        for raw_key in bucket:
+            key = str(raw_key)
+            if key in retiring:
+                continue
+            remote, source = split_alert_key(key)  # type: ignore[misc]
+            if remote not in configured:
+                retiring[key] = (remote, source)
+    for key, (remote, source) in retiring.items():
+        record = open_alerts.get(key) if isinstance(open_alerts, dict) else None
+        if isinstance(record, dict):
+            prior_status = str(record.get("status") or "open")
+        else:
+            # An alerts-only key is a pre-open-incident timestamp that
+            # legacy_open_record() would still materialise as an open episode.
+            prior_status = "legacy"
+        emit_configuration_retired_disposition(
+            remote,
+            source,
+            ALERT_STATE_OPEN_ALERTS,
+            prior_status=prior_status,
+            alert_key_value=key,
+        )
+    for bucket in alert_buckets:
+        for key in retiring:
+            bucket.pop(key, None)
     for bucket_name in ("alerts", "openAlerts"):
         bucket = state.get(bucket_name)
-        if not isinstance(bucket, dict):
-            if bucket is not None:
-                state[bucket_name] = {}
-            continue
-        for key in list(bucket):
-            remote = alert_remote_from_key(str(key))
-            if remote is not None and remote not in configured:
-                bucket.pop(key, None)
+        if not isinstance(bucket, dict) and bucket is not None:
+            state[bucket_name] = {}
+
+    # --- acknowledgement membership (writefailAckFailures) ----------------
     ack_failures = state.get("writefailAckFailures")
     if isinstance(ack_failures, dict):
-        for key, record in list(ack_failures.items()):
-            if not isinstance(record, dict) or record.get("remote") not in configured:
-                ack_failures.pop(key, None)
+        # This bucket is digest-keyed: one record per failed payload, many per
+        # remote. Collapse to ONE disposition per remote carrying the record
+        # count, mirroring how the openAlerts path collapses a key seen in both
+        # buckets, so retiring a remote holding N ack failures does not emit N
+        # identical observations (#2429 review F5).
+        retiring_ack: dict[str, int] = {}
+        unattributable: list[str] = []
+        doomed: list[str] = []
+        for key, record in ack_failures.items():
+            remote = record.get("remote") if isinstance(record, dict) else None
+            if isinstance(remote, str) and remote in configured:
+                continue
+            doomed.append(str(key))
+            if isinstance(remote, str) and remote:
+                retiring_ack[remote] = retiring_ack.get(remote, 0) + 1
+            else:
+                unattributable.append(str(key))
+        for remote, retired_records in retiring_ack.items():
+            emit_configuration_retired_disposition(
+                remote,
+                "remote-writefail-ack-failed",
+                ALERT_STATE_ACK_FAILURES,
+                prior_status="open",
+                record_count=retired_records,
+            )
+        for key in unattributable:
+            # No attributable remote: the record cannot be dispositioned
+            # against an incident, but its removal is still audited rather
+            # than silent.
+            append_log({
+                "type": "writefail_ack_failure_pruned_unattributable",
+                "recordKeyDigest": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
+            })
+        for key in doomed:
+            ack_failures.pop(key, None)
     elif ack_failures is not None:
         state["writefailAckFailures"] = {}
 
@@ -2511,16 +2801,9 @@ def default_recovery_successes() -> int:
         return 2
 
 
-# HD-11b — collector capture-failure escalation (DEFECT-REGISTER collection-
-# blindness class / NOTES.md wishlist 10, 13): a persistently uncollectable
-# remote must not silently stall collection. Distinct from and independently
-# tunable from RELAY_BACKOFF_FAILURE_THRESHOLD (backoff entry) -- both key off
-# the same consecutiveFailures counter but serve different purposes: this is
-# the earlier, lower-confidence escalation signal that opens a real dispatcher
-# incident with a typed clear; relay_host_down is backoff-schedule entry.
-COLLECTOR_CAPTURE_ESCALATION_SOURCE: str = "collector_remote_unreachable"
-
-
+# HD-11b escalation threshold. COLLECTOR_CAPTURE_ESCALATION_SOURCE, the source
+# this threshold opens, is defined with the REGISTERED_ALERT_SOURCES registry
+# above so the inventory has one definition point per source.
 def collector_failure_escalate_threshold() -> int:
     raw = os.environ.get("BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD", "2")
     try:
@@ -2630,6 +2913,483 @@ def remote_ack(host: str, claim: str, remote_root: str, action: str, timeout: in
     if proc.returncode != 0:
         raise RuntimeError(f"ssh ack {host} failed rc={proc.returncode}: {proc.stderr.strip()[:500]}")
     return proc.stdout.strip()
+
+
+REMOTE_CLAIM_STAT_SCRIPT = r"""
+import sys
+from pathlib import Path
+print("present" if Path(sys.argv[1]).exists() else "absent")
+"""
+
+
+def remote_claim_exists(host: str, claim: str, timeout: int) -> bool:
+    """#2427: read-only remote probe — does the claim file still exist?
+
+    After an ack-phase failure: claim PRESENT means the acknowledgement
+    genuinely failed (conservative requeue path). Claim ABSENT means either
+    the ack archived it to relayed/ or lease recovery returned it to the
+    remote outbox — absence does not discriminate the two, but in both cases
+    the already-durable local record makes reconciling safe (a reoffer
+    dedupes). Raises on probe failure so the caller can stay conservative.
+    """
+    proc = subprocess.run(
+        remote_python_command(host, [claim]),
+        input=REMOTE_CLAIM_STAT_SCRIPT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh claim-stat {host} failed rc={proc.returncode}: {proc.stderr.strip()[:500]}")
+    return proc.stdout.strip() == "present"
+
+
+REMOTE_ARCHIVE_CENSUS_SCRIPT = r"""
+import json, os, sys, time
+import errno
+from stat import S_ISDIR, S_ISLNK, S_ISREG
+
+# #2459 C3: read-only census of the terminal relay archive.
+#
+# Reports how much archive exists, how old it is and how much of it no longer
+# parses -- as aggregates only. It never deletes, moves, renames or rewrites
+# anything, and it never echoes the root it was pointed at, an artifact name,
+# a source value or any payload field. The answer an operator gets is a
+# handful of numbers, which is the whole point: the alternative (listing the
+# directory by hand) puts host, account, instance, user and message text on
+# a terminal.
+#
+# Scope: exactly the two directories this collector's own remote scripts
+# write under the given root -- relayed/ (REMOTE_ACK_SCRIPT) and
+# writefail-relayed/ (REMOTE_WRITEFAIL_ACK_SCRIPT). Sibling directories
+# (outbox/, relay-processing/) hold live queue state, not archive, and
+# conflating the two is the confusion this census exists to remove. Nested
+# directories are not walked. The other writefail terminal locations the
+# writefail script falls back to (home, TMPDIR, /tmp) are deliberately NOT
+# scanned: they are outside the root the caller named.
+#
+# UNAVAILABLE IS NOT EMPTY. A directory the census could not list reports
+# status "unavailable" with an errno CLASS, never a count of zero: "nothing
+# to retain" and "I cannot see what is there" drive opposite decisions, and a
+# later retention pass leans on this instrument. A directory that is itself a
+# symlink is refused outright ("refused_symlink") rather than followed, which
+# would walk the census out of the root entirely. Any directory that is not
+# ok makes the combined total "partial", so an incomplete answer can never be
+# mistaken for a complete one. When NO directory could be read at all the
+# total's own aggregates are null too, for the same reason they are null per
+# directory: summing an empty list to zero would answer "I could not look"
+# with "there is nothing there".
+#
+# THE SAME RULE ONE LEVEL DOWN. An entry that cannot be stat-ed is counted in
+# "unusableEntryCount" and makes its directory "partial"; only an entry that
+# vanished between the listing and the stat is skipped, because it is not in
+# the archive any more. A directory that lists but does not permit stat --
+# mode 0444 -- would otherwise report every artifact it holds as a healthy
+# zero.
+#
+# THE DIRECTORY IS PINNED. It is opened once with O_DIRECTORY|O_NOFOLLOW and
+# every listing, stat and read is addressed to that descriptor. Two
+# resolutions of the same name would let whoever can write the archive parent
+# swap the directory for a symlink between the refusal check and the listing;
+# with one resolution there is no window to swap in.
+#
+# `now` (argv[2], optional) makes ages deterministic for a caller that needs
+# a fixed clock; empty or absent means "read the clock here".
+
+ARCHIVE_DIRS = (("relayed", "relayed"), ("writefailRelayed", "writefail-relayed"))
+
+PERMISSION_ERRNOS = (errno.EACCES, errno.EPERM)
+MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
+
+# Looked up with getattr, the way the rest of this file guards optional open
+# flags: a bare attribute here would raise at import, outside the fail-quiet
+# guard below, on a platform that lacks one. Absence is handled where the
+# census can still emit a payload -- see the refusal in census().
+O_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
+O_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
+# The archive directory is opened ONCE and every later listing, stat and read
+# is addressed to the descriptor that comes back. O_NOFOLLOW refuses a
+# symlinked archive directory inside the syscall, so the refusal and the
+# listing cannot disagree about which inode they mean.
+DIR_OPEN_FLAGS = os.O_RDONLY | O_DIRECTORY_FLAG | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG
+# Entries are opened relative to that descriptor. O_NOFOLLOW keeps a symlinked
+# entry from being read out of the archive, and O_NONBLOCK keeps a fifo
+# planted in the archive from parking the census forever.
+ENTRY_OPEN_FLAGS = os.O_RDONLY | O_NOFOLLOW_FLAG | O_CLOEXEC_FLAG | O_NONBLOCK_FLAG
+READ_CHUNK_BYTES = 65536
+# An entry that is simply GONE -- before the stat or between the stat and the
+# open, the same ENOENT either way -- is not a measurement the census failed
+# to take. The archive moved on under a census that holds no lock, so it is
+# reported separately from the entries the census could not look at, and a
+# consumer can tell a busy archive from a broken one.
+VANISHED_ENTRY_ERRNOS = (errno.ENOENT,)
+
+
+def errno_class(exc):
+    # An errno CLASS, never the errno message: strerror can embed the path.
+    code = getattr(exc, "errno", None)
+    if code in PERMISSION_ERRNOS:
+        return "permission"
+    if code in MISSING_ERRNOS:
+        return "missing"
+    return "other"
+
+
+def blank_report(status, errno_name=None):
+    # Every aggregate is null, not zero. A zero here would be a claim about
+    # content the census never managed to look at.
+    return {
+        "status": status,
+        "errnoClass": errno_name,
+        "artifactCount": None,
+        "totalBytes": None,
+        "oldestAgeSeconds": None,
+        "newestAgeSeconds": None,
+        "parseFailureCount": None,
+        "unusableEntryCount": None,
+        "vanishedEntryCount": None,
+        "sourceKindCardinality": None,
+    }
+
+
+def refusal_report(directory, exc):
+    # Label a directory open that ALREADY failed. No descriptor exists and
+    # nothing is listed, stat-ed for an aggregate or read here; the only
+    # thing this produces is which refusal string to report.
+    code = getattr(exc, "errno", None)
+    if code == errno.ELOOP:
+        return blank_report("refused_symlink")
+    if code == errno.ENOTDIR:
+        # O_DIRECTORY collapses "is a symlink" and "is not a directory" into
+        # one errno on the BSDs (both ENOTDIR), so which of the two it was
+        # has to be recovered before the census can say. Linux reports ELOOP
+        # for the symlink and reaches this branch only for a real non-
+        # directory; either way the answer below is the same.
+        try:
+            info = os.lstat(directory)
+        except OSError as label_exc:
+            return blank_report("unavailable", errno_class(label_exc))
+        if S_ISLNK(info.st_mode):
+            return blank_report("refused_symlink")
+        if not S_ISDIR(info.st_mode):
+            # Present but not a directory: weird, not absent.
+            return blank_report("unavailable", "other")
+    return blank_report("unavailable", errno_class(exc))
+
+
+def read_entry(entry_fd):
+    chunks = []
+    while True:
+        chunk = os.read(entry_fd, READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def census(directory):
+    # Aggregate one archive directory. Returns (report, source_kinds).
+    # The directory is opened ONCE, with O_NOFOLLOW so a symlinked archive
+    # directory is refused by the kernel rather than followed -- following it
+    # would let whoever controls the remote root redirect the census at any
+    # directory on the host. Everything after this point is addressed to the
+    # descriptor, so there is no second resolution of the name for a swap
+    # between the check and the use to land in.
+    if not (O_DIRECTORY_FLAG and O_NOFOLLOW_FLAG):
+        # Without both flags the name can be neither pinned nor refused, and
+        # a census that cannot keep that promise must not count through an
+        # unpinned name as though it could.
+        return blank_report("unavailable", "other"), set()
+    try:
+        fd = os.open(directory, DIR_OPEN_FLAGS)
+    except OSError as exc:
+        return refusal_report(directory, exc), set()
+    try:
+        return census_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
+def census_descriptor(fd):
+    # One rule for every entry: it is MEASURED only if it was opened and
+    # stat-ed through the descriptor. An entry that vanished is counted as
+    # vanished, an entry that could not be looked at is counted as unusable,
+    # and neither contributes a size, an age or an artifact count -- a number
+    # taken from a name the census did not go on to read is exactly the
+    # path-resolved measurement the descriptor pinning exists to remove.
+    count = 0
+    total_bytes = 0
+    oldest = None
+    newest = None
+    parse_failures = 0
+    unusable = 0
+    vanished = 0
+    source_kinds = set()
+    try:
+        names = sorted(os.listdir(fd))
+    except OSError as exc:
+        # Unreadable is NOT empty.
+        return blank_report("unavailable", errno_class(exc)), set()
+    for name in names:
+        try:
+            info = os.lstat(name, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone before the stat.
+                vanished += 1
+                continue
+            # Every OTHER entry-level failure is information the census did
+            # not get: a directory that lists but does not permit stat (mode
+            # 0444, say) would otherwise report its whole contents as a
+            # healthy zero. Count what could not be looked at, and let the
+            # block below say it is incomplete.
+            unusable += 1
+            continue
+        # lstat + S_ISREG, so a symlink is never followed out of the archive
+        # and a nested directory is never descended into.
+        if not S_ISREG(info.st_mode):
+            continue
+        try:
+            entry_fd = os.open(name, ENTRY_OPEN_FLAGS, dir_fd=fd)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in VANISHED_ENTRY_ERRNOS:
+                # Gone between the stat and the open. The SAME event as the
+                # branch above, so it gets the same answer: the window it
+                # fell through is an implementation detail, not something an
+                # operator should have to reason about.
+                vanished += 1
+                continue
+            # Present but not openable -- mode 000, or now a symlink that
+            # O_NOFOLLOW refuses to follow out of the archive. It is NOT
+            # measured: the pre-open stat resolved a name the census never
+            # went on to read, and a size or an age taken from it is a claim
+            # about an object that may already have changed.
+            unusable += 1
+            continue
+        try:
+            try:
+                entry_info = os.fstat(entry_fd)
+            except OSError:
+                # Contained per entry, like every other entry-level failure.
+                # Letting this escape would discard the accumulated report for
+                # BOTH archives over one stale handle or one I/O error.
+                unusable += 1
+                continue
+            if not S_ISREG(entry_info.st_mode):
+                # Swapped for a non-file between the stat and the open. The
+                # descriptor, not the name, is what got counted -- so it is
+                # not counted as an artifact, and the swap the census DID
+                # detect is reported rather than dropped.
+                unusable += 1
+                continue
+            # Size and age come off the DESCRIPTOR that was read, not off a
+            # name that could have been repointed since.
+            count += 1
+            total_bytes += entry_info.st_size
+            age = int(round(now - entry_info.st_mtime))
+            oldest = age if oldest is None else max(oldest, age)
+            newest = age if newest is None else min(newest, age)
+            try:
+                record = json.loads(read_entry(entry_fd).decode("utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Unreadable or not JSON: still a present artifact occupying
+                # bytes and ageing, so it is counted AND flagged. Skipping it
+                # would under-report exactly the artifacts worth knowing about.
+                parse_failures += 1
+                continue
+        finally:
+            try:
+                os.close(entry_fd)
+            except OSError:
+                # The kernel releases the descriptor whether or not close
+                # reports an error, so there is nothing to record and nothing
+                # to reclassify -- the entry was measured before this point.
+                # Letting it escape would discard the accumulated report for
+                # BOTH archives, the way the entry stat once did.
+                pass
+        if not isinstance(record, dict):
+            # `[]` and `"text"` are valid JSON but not event records.
+            parse_failures += 1
+            continue
+        kind = record.get("source")
+        if isinstance(kind, str) and kind:
+            source_kinds.add(kind)
+    # A directory whose entries were not all readable is reported as partial,
+    # never as ok with a lower count.
+    status = "partial" if (unusable or vanished) else "ok"
+    if status == "partial" and not count:
+        # It listed, and possibly stat-ed, and measured NOTHING. A zero here
+        # would say "there is nothing there" about entries the census never
+        # managed to open, so the aggregates are null and the counts of what
+        # it could not look at carry the whole answer.
+        report = blank_report(status)
+    else:
+        report = {
+            "status": status,
+            "errnoClass": None,
+            "artifactCount": count,
+            "totalBytes": total_bytes,
+            "oldestAgeSeconds": oldest,
+            "newestAgeSeconds": newest,
+            "parseFailureCount": parse_failures,
+            # Cardinality only -- how MANY distinct producers are
+            # represented, never which ones.
+            "sourceKindCardinality": len(source_kinds),
+        }
+    # How many entries were listed but could not be looked at, and how many
+    # were gone. Zero in both is a claim that the aggregates are complete.
+    report["unusableEntryCount"] = unusable
+    report["vanishedEntryCount"] = vanished
+    if report["artifactCount"] is None:
+        # Nothing was measured, so no producer was seen either.
+        source_kinds = set()
+    return report, source_kinds
+
+
+def produced_numbers(report):
+    # A directory contributes to the sums exactly when it produced a number
+    # of its own. Every block that measured nothing -- unavailable, refused,
+    # or listed-but-never-measured -- already reports a null count, so there
+    # is one test here and not a second vocabulary of statuses to keep in
+    # step with the first.
+    return report["artifactCount"] is not None
+
+
+def gap_total(reports, field):
+    # Summed across EVERY directory that measured a gap, including one that
+    # contributed no other number. Dropping these with the sums would hide
+    # the size of what could not be looked at.
+    values = [r[field] for r in reports if r[field] is not None]
+    return sum(values) if values else None
+
+
+def combine(reports, kind_sets):
+    # If any directory is not ok the total is "partial", so a caller can
+    # never read an incomplete sum as a complete one.
+    numeric = [r for r in reports if produced_numbers(r)]
+    complete = [r for r in reports if r["status"] == "ok"]
+    status = "ok" if len(complete) == len(reports) else "partial"
+    gaps = {
+        "unusableEntryCount": gap_total(reports, "unusableEntryCount"),
+        "vanishedEntryCount": gap_total(reports, "vanishedEntryCount"),
+    }
+    if not numeric:
+        # NOTHING was measured. A zero here would answer "I could not look"
+        # with "there is nothing there" -- the conflation every directory
+        # block already refuses, and the one a retention pass would act on.
+        return dict(
+            status=status,
+            artifactCount=None,
+            totalBytes=None,
+            oldestAgeSeconds=None,
+            newestAgeSeconds=None,
+            parseFailureCount=None,
+            sourceKindCardinality=None,
+            **gaps,
+        )
+    oldest_values = [r["oldestAgeSeconds"] for r in numeric if r["oldestAgeSeconds"] is not None]
+    newest_values = [r["newestAgeSeconds"] for r in numeric if r["newestAgeSeconds"] is not None]
+    union = set()
+    for report, kinds in zip(reports, kind_sets):
+        if produced_numbers(report):
+            union |= kinds
+    return dict(
+        status=status,
+        artifactCount=sum(r["artifactCount"] for r in numeric),
+        totalBytes=sum(r["totalBytes"] for r in numeric),
+        oldestAgeSeconds=max(oldest_values) if oldest_values else None,
+        newestAgeSeconds=min(newest_values) if newest_values else None,
+        parseFailureCount=sum(r["parseFailureCount"] for r in numeric),
+        # Union, not a sum: a producer present in both archives is one kind.
+        sourceKindCardinality=len(union),
+        **gaps,
+    )
+
+
+try:
+    # argv is read INSIDE the guard. A bad clock argument or a missing root
+    # raises here, and an escaping traceback would echo argv -- which carries
+    # the remote root -- onto stderr.
+    root = os.path.expanduser(sys.argv[1])
+    now = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else time.time()
+    archives = {}
+    reports = []
+    kind_sets = []
+    for label, dirname in ARCHIVE_DIRS:
+        report, kinds = census(os.path.join(root, dirname))
+        archives[label] = report
+        reports.append(report)
+        kind_sets.append(kinds)
+    payload = {
+        "schemaVersion": 1,
+        "censusStatus": "ok",
+        "generatedAtEpoch": int(now),
+        "archives": archives,
+        "total": combine(reports, kind_sets),
+    }
+    print(json.dumps(payload, sort_keys=True))
+except Exception:
+    # Fail closed and fail QUIET: the caller sees a non-zero exit and an
+    # explicit failed status, never a path, an argument or an exception string.
+    print(json.dumps({"schemaVersion": 1, "censusStatus": "failed"}, sort_keys=True))
+    sys.exit(3)
+"""
+
+
+def remote_archive_census(host: str, remote_root: str, timeout: int, now: float | None = None) -> dict[str, Any]:
+    """#2459 C3: read-only, privacy-safe census of the remote relay archive.
+
+    The acknowledged-claim archive lives on the REMOTE host (REMOTE_ACK_SCRIPT
+    moves claims under the remote root), so no local scan can cover it -- see
+    the LOCAL_EVENT_LIFECYCLE_DIR_NAMES note below. This probe answers how
+    much of it there is, how old it is and how much of it no longer parses,
+    without moving or deleting anything and without surfacing a host,
+    account, instance, user, message, path or identifier.
+
+    EVERY route out of this function names the host and nothing else. Unlike
+    the other remote helpers the failure paths deliberately do NOT append
+    `proc.stderr`: the census's own stderr can name the remote root, and a
+    probe whose failure mode leaks the path defeats the privacy property that
+    is the reason it exists. `subprocess.TimeoutExpired` needs the same care
+    for a different reason -- it carries the assembled argv, whose last
+    argument IS the remote root -- so it is caught and re-raised host-only,
+    `from None` so the original is not chained back onto the traceback.
+
+    A census that did not complete is an error, never an empty report: an
+    empty stdout parses to `{}`, and returning that would answer "I could not
+    look" with "there is nothing there" -- the same conflation the script side
+    refuses per-directory.
+
+    `now` pins the clock the ages are measured against; None reads the remote
+    clock. Returns the parsed aggregate report.
+    """
+    args = [remote_root, "" if now is None else str(int(now))]
+    try:
+        proc = subprocess.run(
+            remote_python_command(host, args),
+            input=REMOTE_ARCHIVE_CENSUS_SCRIPT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh archive-census {host} timed out") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh archive-census {host} failed rc={proc.returncode}")
+    try:
+        report = json.loads(proc.stdout.strip() or "{}")
+    except ValueError:
+        raise RuntimeError(f"ssh archive-census {host} returned unparseable output") from None
+    if not isinstance(report, dict):
+        raise RuntimeError(f"ssh archive-census {host} returned a non-object report")
+    if report.get("censusStatus") != "ok":
+        raise RuntimeError(f"ssh archive-census {host} did not complete")
+    return report
 
 
 def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
@@ -2820,6 +3580,15 @@ def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
 
 
 def idless_event_filename_token(event: dict[str, Any], remote_host: str) -> str:
+    """Filename token for an event without a stable id.
+
+    #2427: the remote-relay path can no longer reach this — relay_event's
+    identity ingress gate quarantines id-less remote events before
+    local_outbox_path runs. The remaining callers are LOCAL collector-authored
+    writers (meta alerts, storm summaries): single-write, no acknowledgement
+    retry, so the fresh nanosecond token cannot cause retry-convergence
+    duplicates there.
+    """
     try:
         payload = json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
@@ -2843,22 +3612,47 @@ def local_record_event_identity(path: Path) -> tuple[str | None, str]:
     return None, ""
 
 
+# #2427: the single source of truth for every LOCAL directory that can hold
+# an authoritative per-event lifecycle record. local_event_exists derives its
+# scan candidates from this tuple (plus the env-aware outbox entry), and the
+# matrix guard (tests/test_bot_errors_collector_terminal_inventory_matrix.py)
+# cross-checks it against dispatcher state_paths() so a dispatcher-side
+# directory addition can no longer silently escape dedupe coverage (the
+# dead-letter and testleak resurrection defects). The identity parser
+# (local_record_event_identity) covers both record shapes: raw event files
+# (top-level id) and nested terminal wrappers ({"event": {...}}).
+#
+# Deliberately NOT here: the acknowledged-claim archive relayed/ lives on the
+# REMOTE host (REMOTE_ACK_SCRIPT moves claims under the remote root), so no
+# local scan can cover it — the ack-retry reconciliation remainder of #2427
+# owns that surface. Dispatcher dirs without per-event records (locks, logs,
+# storm-manifests, state files) carry documented exemptions in the matrix.
+LOCAL_EVENT_LIFECYCLE_DIR_NAMES = (
+    "processing",
+    "sent",
+    "storm-collapsed",
+    "suppressed",
+    "quarantine",
+    "testleak",
+    "writefail",
+    "writefail-recovered",
+    "writefail-quarantine",
+    "dead-letter",
+)
+
+
+def local_event_candidate_dirs() -> list[Path]:
+    root = state_root()
+    return [
+        Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
+        *(root / name for name in LOCAL_EVENT_LIFECYCLE_DIR_NAMES),
+    ]
+
+
 def local_event_exists(event_id: str, created_at: str = "") -> bool:
     if not event_id:
         return False
-    root = state_root()
-    candidates = [
-        Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
-        root / "processing",
-        root / "sent",
-        root / "storm-collapsed",
-        root / "suppressed",
-        root / "quarantine",
-        root / "writefail",
-        root / "writefail-recovered",
-        root / "writefail-quarantine",
-        root / "dead-letter",
-    ]
+    candidates = local_event_candidate_dirs()
     seen: set[Path] = set()
     for directory in candidates:
         try:
@@ -2989,7 +3783,10 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
         append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "root"})
         return path, "poison"
     event = crumb.get("event")
-    if crumb.get("kind") != "outbox_write_failure" or not isinstance(event, dict) or not isinstance(event.get("id"), str):
+    if crumb.get("kind") != "outbox_write_failure" or not isinstance(event, dict) or not isinstance(event.get("id"), str) or not event.get("id"):
+        # #2427: an EMPTY nested id is poison too — it would flow through
+        # local_event_exists('') and the idless fallback into the same
+        # non-convergent retry path the ordinary-relay ingress gate rejects.
         path = write_harvest_quarantine(remote_host, remote_root, record, "missing outbox_write_failure event.id")
         append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "schema"})
         return path, "poison"
@@ -3057,7 +3854,19 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     event = json.loads(record["payload"])
     if not isinstance(event, dict):
         raise ValueError("remote event root must be an object")
-    event_id = str(event.get("id") or "")
+    # #2427 identity ingress gate: without a stable nonempty string id,
+    # local_event_exists('') can never converge acknowledgement retries and
+    # the idless filename fallback mints a fresh identity per write — every
+    # reoffer would create another outbox copy with a reset delivery budget.
+    # Reject-and-ack: quarantine via the payload-sha-keyed harvest surface
+    # (idempotent across retries) and return like the duplicate path so the
+    # caller acknowledges the claim and it cannot lease-loop.
+    raw_id = event.get("id")
+    if not isinstance(raw_id, str) or not raw_id:
+        path = write_harvest_quarantine(remote_host, remote_root, record, "missing or empty event id")
+        append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "identity"})
+        return path
+    event_id = raw_id
     if local_event_exists(event_id, str(event.get("createdAt") or "")):
         append_log({"type": "duplicate_already_local", "remote": remote_host, "eventId": event_id, "remoteClaim": record["claim"]})
         return state_root() / "sent" / f"existing-{safe_segment(event_id)}"
@@ -3214,7 +4023,7 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
     # relay_host_down record open forever. The clear must carry the DOWN source;
     # the recovered kind survives in the summary and collector log_type.
     event_type = "clear" if kind == "relay_host_recovered" else "alert"
-    source = "relay_host_down" if kind == "relay_host_recovered" else kind
+    source = relay_host_state_source(kind)
     _emit_collector_outbox_event(
         remote,
         source=source,
@@ -3733,18 +4542,18 @@ def _run_once_with_state(
                     recovery_evidence,
                 )
         for record in records:
-            try:
-                local_path = relay_event(host, remote_root, record)
-                ack_path = remote_ack(host, str(record["claim"]), remote_root, "ack", timeout)
-                append_log({
-                    "type": "relayed",
-                    "remote": remote,
-                    "remoteClaim": record["claim"],
-                    "remoteAckPath": ack_path,
-                    "localPath": str(local_path),
-                })
-                processed += 1
-            except Exception as exc:  # noqa: BLE001
+            # #2427: the local durable write and the remote acknowledgement
+            # are separate failure domains. A relay_event failure means the
+            # claim was never consumed (requeue is correct); an ack-phase
+            # failure AFTER the local write may be pure response loss — the
+            # remote may have already archived the claim — so it gets a
+            # read-only existence probe before any requeue or alert.
+            # (Bounded residual, documented not engineered: a lease expiring
+            # DURING the sub-second local publish can hand the claim to a
+            # second collector; the durable-publish-before-ack ordering plus
+            # dedupe converges the record on the next offer.)
+            def _relay_record_failed(exc: Exception) -> None:
+                nonlocal outbox_relay_failed, failed, best_effort_failures
                 outbox_relay_failed = True
                 failed += 1
                 if is_best_effort:
@@ -3762,6 +4571,47 @@ def _run_once_with_state(
                     state,
                     alert_cooldown,
                 )
+
+            try:
+                local_path = relay_event(host, remote_root, record)
+            except Exception as exc:  # noqa: BLE001
+                _relay_record_failed(exc)
+                continue
+            try:
+                ack_path = remote_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+            except Exception as exc:  # noqa: BLE001
+                claim_absent = False
+                try:
+                    claim_absent = not remote_claim_exists(host, str(record["claim"]), timeout)
+                except Exception:  # noqa: BLE001
+                    # Probe unreachable — indistinguishable from a failed
+                    # ack; stay conservative (requeue + alert as before).
+                    pass
+                if claim_absent:
+                    # Claim absent ⇒ either the ack archived it, or lease
+                    # recovery already returned it to the remote outbox. In
+                    # BOTH cases the local record is durable and any reoffer
+                    # dedupes to it, so marking processed is safe — but
+                    # absence alone does not prove the ack landed; the
+                    # dedupe inventory is the backstop, not a redundancy.
+                    append_log({
+                        "type": "ack_response_lost_claim_absent",
+                        "remote": remote,
+                        "remoteClaim": record["claim"],
+                        "localPath": str(local_path),
+                    })
+                    processed += 1
+                else:
+                    _relay_record_failed(exc)
+                continue
+            append_log({
+                "type": "relayed",
+                "remote": remote,
+                "remoteClaim": record["claim"],
+                "remoteAckPath": ack_path,
+                "localPath": str(local_path),
+            })
+            processed += 1
         if not outbox_claim_failed and not outbox_relay_failed:
             remote_record = remote_state.setdefault(remote, {})
             remote_record["lastDrainAt"] = int(time.time())
@@ -3988,15 +4838,60 @@ def main() -> int:
     parser.add_argument("--alert-cooldown", type=int, default=900)
     parser.add_argument("--recovery-successes", type=int, default=default_recovery_successes())
     parser.add_argument("--daemon", action="store_true")
+    parser.add_argument("--allow-empty-roster", action="store_true")
     args = parser.parse_args()
 
-    remotes = args.remote or [r for r in os.environ.get("BOT_ERRORS_RELAY_REMOTES", "").split(",") if r]
-    if not remotes:
+    if args.daemon and args.allow_empty_roster:
+        # A declared-empty retirement is one-shot by definition, so this pair is
+        # refused at the usage boundary rather than reconciled. Parked in a
+        # unit's ExecStart it would look harmless while a roster existed and
+        # degrade the moment one emptied: the cycle would succeed, exit, and be
+        # restarted on the service manager's schedule, rewriting state every
+        # cycle instead of retiring once. Checked first because it reads only
+        # argv, so the answer cannot depend on the environment, and checked
+        # above the state session, so the ledger is never opened.
+        print(
+            "--allow-empty-roster is a one-shot retirement and cannot be combined with --daemon",
+            file=sys.stderr,
+        )
+        return 64
+    # None (never set, or an environment file that failed to load) is NOT the
+    # same as "" (an operator emptying the list), and reading with a default
+    # collapses the two. Keep the distinction: only a PRESENT variable can be
+    # declared empty.
+    roster_env = os.environ.get("BOT_ERRORS_RELAY_REMOTES")
+    remotes = args.remote or [r for r in (roster_env or "").split(",") if r]
+    declared_empty_roster = args.allow_empty_roster and roster_env is not None
+    if not remotes and not declared_empty_roster:
+        # Unchanged fail-closed default, now covering one more case. An absent
+        # or unreadable poll list is inconclusive configuration, not a decision
+        # to poll nothing, and that stays true when --allow-empty-roster is
+        # standing: the flag declares an EMPTY roster, never a MISSING one, so
+        # a broken environment file cannot retire the whole ledger. EX_USAGE,
+        # and no state work at all.
         print("no remotes configured", file=sys.stderr)
         return 64
     best_effort_remotes = set(args.best_effort_remote or [])
     recovery_successes = max(1, int(args.recovery_successes))
     try:
+        # A declared empty roster is a retirement, not a poll: it runs exactly
+        # one cycle so prune_state_to_configured_remotes can disposition every
+        # open record the departed remotes still own, then stops. The two
+        # guards above make that exact, so no third check is needed here:
+        # reaching this line with args.daemon set proves the roster is
+        # non-empty, because --daemon over an empty roster is either the
+        # fail-closed 64 or the refused combination. The cycle reaches the
+        # state session and nothing else, because _run_once_with_state's only
+        # work between the prune and the save is `for remote in remotes`, so an
+        # empty roster performs no remote, probe, claim or acknowledgement
+        # effect. It is not silent, though: the prune emits one info-severity
+        # observation per retired (remote, source) pair, which the dispatcher
+        # delivers as a BOT INFO line. That is not one per open record --
+        # acknowledgement membership is digest-keyed and collapses to a single
+        # disposition per remote carrying the count of records it retires.
+        # An unregistered bucket key still fails the whole cycle
+        # closed, which matters most here: retiring every remote at once is the
+        # widest reach the pruning validation pass ever has.
         if args.daemon:
             run_daemon(
                 remotes,
@@ -4025,6 +4920,21 @@ def main() -> int:
         # service manager's restart throttle owns retries. The once-per-process
         # fallback line is the only stderr output and carries no state content.
         emit_state_recovery_fallback(exc.diagnostic)
+        return STATE_RECOVERY_REQUIRED_EXIT
+    except UnregisteredAlertSourceError as exc:
+        # Same process boundary and the same exit code as
+        # ControllerStateRequired: 78 is this estate's typed "state needs an
+        # operator decision" code across collector, dispatcher and watchdog.
+        # It does NOT suppress restarts for this process -- the collector runs
+        # under deploy/bot-errors-collector.service (Restart=always,
+        # RestartSec=10, no RestartPreventExitStatus); the unit that holds 78
+        # out of its restart loop is deploy/whatsoup@.service, a different
+        # unit. What this replaces is therefore the bare traceback, not the
+        # loop: an operator gets a typed exit code and one bounded line instead
+        # of a stack trace every ten seconds. The line is the exception's own
+        # message, a count and an opaque digest, never a key, a remote
+        # identity, or a remote root.
+        print(f"bot-errors-collector: {exc}", file=sys.stderr)
         return STATE_RECOVERY_REQUIRED_EXIT
     print(json.dumps(result, sort_keys=True))
     return exit_code_for_result(result)

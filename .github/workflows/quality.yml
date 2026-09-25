@@ -2,6 +2,7 @@ name: Quality
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   # `quality (24.x)` / `quality (25.x)` are REQUIRED contexts on main. A merge queue
   # only advances once every required check reports on the merge_group ref, so without
   # this trigger an enabled queue would stall every PR indefinitely waiting for a run
@@ -283,12 +284,17 @@ jobs:
 
       - name: Fleet bot-hardening parity guard
         run: npm run guard:fleet-bot-hardening-parity
+      - name: Observation contract guard
+        run: npm run guard:observation-contract
 
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
 
       - name: BOT ERRORS sentinel coverage and deployer mutation gate
         run: bash deploy/scripts/run-sentinel-tests.sh
+
+      - name: Deployment qualification source suite
+        run: npm run test:deployment-qualification
 
       - name: BOT ERRORS full behavioral suite gate
         run: bash deploy/scripts/run-bot-errors-full-suite.sh
@@ -308,6 +314,9 @@ jobs:
       - name: Insecure tempfile guard
         run: npm run guard:insecure-tempfile
 
+      - name: PNG estate ratchet guard
+        run: npm run guard:png-estate
+
       - name: Zero-byte tracked file guard
         run: npm run guard:zero-byte-tracked
 
@@ -323,6 +332,9 @@ jobs:
 
       - name: Grant resolver inventory guard
         run: npm run guard:grant-resolver
+
+      - name: Resolved-override inventory guard
+        run: npm run guard:resolved-override
 
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls

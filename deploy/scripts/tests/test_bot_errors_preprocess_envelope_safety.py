@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
@@ -27,13 +32,7 @@ def _load_dispatcher():
 _dispatcher = _load_dispatcher()
 
 
-def _write_event(paths: dict[str, Path], filename: str, event: dict[str, Any]) -> Path:
-    path = paths["outbox"] / filename
-    path.write_text(json.dumps(event), encoding="utf-8")
-    # Producers publish events 0600 (emit + durable_json enforce it); the
-    # fenced dispatcher rejects looser modes, so the fixture must match.
-    path.chmod(0o600)
-    return path
+_write_event = dispatcher_fixtures.write_outbox_event
 
 
 def _incident_event(

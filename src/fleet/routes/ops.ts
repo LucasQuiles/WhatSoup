@@ -4,6 +4,14 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import {
+  admitHomeConfinedPath,
+  ensureHomeConfinedDirectory as provisionHomeConfinedDirectory,
+  isCanonicalAbsolutePath,
+  pathIsInsideDirectory,
+  plannedPrefixIsConfined,
+  rawAbsolutePath,
+} from '../../lib/home-confinement.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isNonEmptyString, isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
@@ -48,6 +56,8 @@ import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts
 import { errorMessage } from '../../lib/error-message.ts';
 import { projectError, validationError, mutationError, serviceActionError, configValidationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
+import { writeInitialDatabaseCreateMarker } from '../../core/initial-database-marker.ts';
+import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
 
 function deepMergeRecords(
   base: Record<string, unknown>,
@@ -502,6 +512,12 @@ export async function handleConfigUpdate(
       if (Array.isArray(mergedAo?.pluginDirs)) {
         if (!validatePluginDirs(mergedAo!.pluginDirs as unknown[], res)) haltConfigUpdateAfterResponse();
       }
+      // service-block home-confinement is fs-aware for the same reason, and runs
+      // on the MERGED view: a patch that leaves an out-of-home entry standing is
+      // refused even when the entry came from the existing config, matching the
+      // pluginDirs sibling. An instance already carrying one is therefore
+      // un-patchable until the entry is corrected.
+      if (!validateServiceHomeConfinement(merged.service, res)) haltConfigUpdateAfterResponse();
       if (patch.claudeMd && merged.type === 'agent') {
         // Invariant: resolveAndValidateAgentCwd() (called above whenever
         // merged.type === 'agent') always leaves agentOptions.cwd a validated
@@ -509,8 +525,8 @@ export async function handleConfigUpdate(
         const ao = merged.agentOptions as Record<string, unknown>;
         const cwd = ao.cwd as string;
         try {
-          const claudeDir = path.join(cwd, '.claude');
-          ensureHomeConfinedDirectory(claudeDir);
+          let claudeDir = path.join(cwd, '.claude');
+          claudeDir = ensureHomeConfinedDirectory(claudeDir);
           writePrivateFileSync(path.join(claudeDir, 'CLAUDE.md'), patch.claudeMd as string);
         } catch (err) {
           jsonResponse(res, 500, projectError(err, { operation: 'config_write', stage: 'commit' }));
@@ -523,10 +539,10 @@ export async function handleConfigUpdate(
         const ao = merged.agentOptions as Record<string, unknown>;
         const cwd = ao.cwd as string;
         try {
-          const claudeDir = path.join(cwd, '.claude');
+          let claudeDir = path.join(cwd, '.claude');
           const settings = mergeSettingsJson('agent', patch.settingsJson as PermissionsSettings);
           if (settings) {
-            ensureHomeConfinedDirectory(claudeDir);
+            claudeDir = ensureHomeConfinedDirectory(claudeDir);
             writePermissionsSettings(claudeDir, settings);
           }
         } catch (err) {
@@ -542,8 +558,8 @@ export async function handleConfigUpdate(
           const ao = merged.agentOptions as Record<string, unknown>;
           const cwd = ao.cwd as string;
           try {
-            const claudeDir = path.join(cwd, '.claude');
-            ensureHomeConfinedDirectory(claudeDir);
+            let claudeDir = path.join(cwd, '.claude');
+            claudeDir = ensureHomeConfinedDirectory(claudeDir);
             // Build a full PermissionsSettings so writePermissionsSettings handles the merge
             const settingsPath = path.join(claudeDir, 'settings.json');
             let existingPerms = defaultSettingsJson('agent')!.permissions;
@@ -603,7 +619,7 @@ export async function handleConfigUpdate(
 
   publishInstanceStatus(deps.realtime, params.name);
   publishFeedEvent(deps.realtime, params.name);
-  jsonResponse(res, 200, mergedClean);
+  jsonResponse(res, 200, projectClientOutputPolicyConfig(mergedClean));
 }
 
 /** DELETE /api/lines/:name — tear down and remove an instance completely.
@@ -658,46 +674,52 @@ export async function handleDeleteLine(
   jsonResponse(res, 200, { deleted: params.name });
 }
 
-function pathIsInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
-}
 
-function pathIsAtOrInsideDirectory(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
 
-function realpathExistingPrefix(targetPath: string): string {
-  let current = targetPath;
-  while (true) {
-    try {
-      return fs.realpathSync(current);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const parent = path.dirname(current);
-      if (parent === current) throw err;
-      current = parent;
-    }
-  }
-}
-
-function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: string): string | null {
+function resolveHomeConfinedPath(
+  inputPath: string,
+  res: ServerResponse,
+  error: string,
+  spellingError: string = error,
+): string | null {
   if (hasUnsupportedTildePrefix(inputPath)) {
     jsonResponse(res, 400, { error });
     return null;
   }
-  const resolved = path.resolve(expandHomePath(inputPath));
+  // Two forms, deliberately kept apart:
+  //  - `expanded` is the RAW spelling with `..` INTACT. It is what the physical
+  //    check must judge, because it is what gets persisted and rendered.
+  //  - `resolved` is the lexically collapsed form, used only as a cheap first
+  //    gate and as the return value.
+  const expanded = expandHomePath(inputPath);
+  // Refuse `.`/`..` components outright, on the tilde-expanded spelling.
+  //
+  // Chosen over resolving left-to-right because this route PERSISTS the
+  // lexically collapsed form: validating one string and storing another is the
+  // shape that produced the traversal bypass in the first place. Refusing the
+  // spelling makes the validated value and the stored value identical, and it
+  // is the same reject-not-canonicalise rule the service block already applies.
+  // A canonical form always exists, and no caller in this repo passes `..`.
+  if (!isCanonicalAbsolutePath(expanded)) {
+    // A distinct message: the path may well BE inside home, so telling the
+    // operator it "must be within the home directory" points at the wrong fix.
+    jsonResponse(res, 400, { error: spellingError });
+    return null;
+  }
+  const resolved = path.resolve(expanded);
   const homePath = path.resolve(os.homedir());
   if (!pathIsInsideDirectory(resolved, homePath)) {
     jsonResponse(res, 400, { error });
     return null;
   }
 
+  // Make the raw spelling absolute WITHOUT normalising it: `path.resolve` would
+  // collapse the `..` this check exists to catch.
+  const rawAbsolute = rawAbsolutePath(expanded);
+
   try {
-    const homeReal = fs.realpathSync(homePath);
-    const existingReal = realpathExistingPrefix(resolved);
-    if (!pathIsAtOrInsideDirectory(existingReal, homeReal)) {
+    const homeReal = fs.realpathSync.native(homePath);
+    if (!plannedPrefixIsConfined(rawAbsolute, homeReal)) {
       jsonResponse(res, 400, { error });
       return null;
     }
@@ -706,23 +728,26 @@ function resolveHomeConfinedPath(inputPath: string, res: ServerResponse, error: 
     return null;
   }
 
-  return resolved;
+  try {
+    return admitHomeConfinedPath(resolved, homePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      try {
+        if (plannedPrefixIsConfined(rawAbsolute, fs.realpathSync.native(homePath))) {
+          return resolved; // Planned path; creation and final consumption revalidate it.
+        }
+      } catch {
+        jsonResponse(res, 400, { error });
+        return null;
+      }
+    }
+    jsonResponse(res, 400, { error });
+    return null;
+  }
 }
 
-function ensureHomeConfinedDirectory(dirPath: string): void {
-  const resolved = path.resolve(dirPath);
-  const homePath = path.resolve(os.homedir());
-  const homeReal = fs.realpathSync(homePath);
-  const existingReal = realpathExistingPrefix(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(existingReal, homeReal)) {
-    throw privateWriteError('directory must be within the home directory', 'EACCES');
-  }
-
-  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
-  const dirReal = fs.realpathSync(resolved);
-  if (!pathIsInsideDirectory(resolved, homePath) || !pathIsAtOrInsideDirectory(dirReal, homeReal)) {
-    throw privateWriteError('directory must be within the home directory', 'EACCES');
-  }
+function ensureHomeConfinedDirectory(dirPath: string): string {
+  return provisionHomeConfinedDirectory(dirPath, os.homedir());
 }
 
 /**
@@ -733,7 +758,12 @@ function ensureHomeConfinedDirectory(dirPath: string): void {
 function resolveAndValidateCwd(agentOptions: Record<string, unknown>, res: ServerResponse): string | null {
   const cwd = agentOptions.cwd as string;
   if (!cwd.trim()) return cwd; // empty — caller decides whether it's valid
-  const safeCwd = resolveHomeConfinedPath(cwd, res, 'agentOptions.cwd must be within the home directory');
+  const safeCwd = resolveHomeConfinedPath(
+    cwd,
+    res,
+    'agentOptions.cwd must be within the home directory',
+    'agentOptions.cwd must be a normalized absolute path within the home directory',
+  );
   if (safeCwd === null) return null;
   try {
     if (isSamePhysicalDirectory(safeCwd, os.homedir())) {
@@ -779,17 +809,104 @@ function resolveAndValidateAgentCwd(
 }
 
 /**
+ * Validate a list of filesystem paths as home-confined, returning the accepted
+ * physical paths for existing entries and canonical spellings for planned paths.
+ *
+ * One helper for both callers: `agentOptions.pluginDirs` and the launchd
+ * `service` block ran near-identical loops over the same predicate, so a fix to
+ * one silently missed the other.
+ *
+ * `fieldFor(index)` names the offending field; the two messages are derived
+ * from it so a caller cannot drift them apart. Writes a 400 and returns null on
+ * the first violation.
+ */
+function validateHomeConfinedPathList(
+  values: readonly unknown[],
+  res: ServerResponse,
+  fieldFor: (index: number) => string,
+): string[] | null {
+  const accepted: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const field = fieldFor(i);
+    const containmentError = `${field} must be within the home directory`;
+    const spellingError = `${field} must be a normalized absolute path within the home directory`;
+    const value = values[i];
+    if (typeof value !== 'string') {
+      jsonResponse(res, 400, { error: containmentError });
+      return null;
+    }
+    const safe = resolveHomeConfinedPath(value, res, containmentError, spellingError);
+    if (safe === null) return null;
+    accepted.push(safe);
+  }
+  return accepted;
+}
+
+/**
  * Validate that every entry in pluginDirs is a string within the home directory.
  * Writes a 400 response and returns false on the first violation; returns true when valid.
  */
 function validatePluginDirs(dirs: unknown[], res: ServerResponse): boolean {
-  for (const dir of dirs) {
-    if (typeof dir !== 'string') {
-      jsonResponse(res, 400, { error: 'pluginDirs entries must be within the home directory' });
-      return false;
-    }
-    if (resolveHomeConfinedPath(dir, res, 'pluginDirs entries must be within the home directory') === null) return false;
+  const accepted = validateHomeConfinedPathList(dirs, res, () => 'each pluginDirs entry');
+  if (accepted === null) return false;
+  dirs.splice(0, dirs.length, ...accepted);
+  return true;
+}
+
+/**
+ * Confine the launchd `service` block's filesystem fields — `claudeConfigDir`
+ * and every `pathPrepend` entry — to the instance user's home directory.
+ *
+ * Deliberately a ROUTE guard rather than a rule in
+ * `validateLaunchdServiceConfig` (src/lib/launchd-service-config.ts): that
+ * validator is the shared shape contract and also runs on config *load*, so
+ * rejecting an out-of-home value there would stop an instance that already
+ * persisted one from loading at all.
+ *
+ * This is no longer the only confinement check.
+ * `assertHomeConfinedRenderOptions` (src/fleet/platform.ts) applies the same
+ * rule again at plist RENDER admission, on the reconcile and first-install
+ * paths, so an already-persisted out-of-home value still LOADS but no longer
+ * RENDERS. This guard is the early feedback half: it refuses the write with a
+ * 400 naming the field, while the operator is still at the keyboard, rather
+ * than at the next reconcile.
+ *
+ * The two are not redundant. Admission cannot bind a value whose meaning can
+ * still change: a path admitted while an intermediate segment was absent
+ * resolves to wherever a symlink later created at that segment points, and
+ * admission has already happened by then.
+ *
+ * Runs after the shared validator, so shape (absolute, bounded, no control
+ * characters, no ':') is already guaranteed; the typeof guards are
+ * defense-in-depth for callers that reorder the checks. Existing paths are
+ * replaced with their accepted physical form before persistence.
+ *
+ * Writes a 400 and returns false on the first violation; returns true when the
+ * block is absent or entirely home-confined. Mirrors validatePluginDirs above.
+ */
+function validateServiceHomeConfinement(service: unknown, res: ServerResponse): boolean {
+  if (service === undefined || service === null) return true;
+  if (typeof service !== 'object' || Array.isArray(service)) return true; // shape validator owns this
+  const block = service as Record<string, unknown>;
+
+  const claudeConfigDir = block['claudeConfigDir'];
+  if (claudeConfigDir !== undefined) {
+    const accepted = validateHomeConfinedPathList(
+      [claudeConfigDir], res, () => 'service.claudeConfigDir',
+    );
+    if (accepted === null) return false;
+    block['claudeConfigDir'] = accepted[0];
   }
+
+  const pathPrepend = block['pathPrepend'];
+  if (Array.isArray(pathPrepend)) {
+    const accepted = validateHomeConfinedPathList(
+      pathPrepend, res, (i) => `service.pathPrepend[${i}]`,
+    );
+    if (accepted === null) return false;
+    block['pathPrepend'] = accepted;
+  }
+
   return true;
 }
 
@@ -1130,12 +1247,20 @@ export async function handleCreateLine(
     'models', 'model', 'pineconeIndex', 'pineconeSearchMode', 'pineconeRerank', 'pineconeTopK',
     'pineconeAllowedIndexes', 'memory', 'agentOptions', 'toolUpdateMode', 'controlPeers',
     'transcriptionOptions',
+    // service: governed launchd render options (claudeConfigDir, pathPrepend) and
+    // the ratified account digest. Passed through so the shared validator below
+    // (validateLaunchdServiceConfig / validateServiceIdentityConfig) admits or
+    // rejects the block on CREATE as it already does on PATCH/load (#3401 item 2).
+    'service',
     'pineconeApiKeyEnv', 'pineconeProjectId', 'pineconeExpectedHostSuffix',
     'pineconeNamespaces', 'pineconeFactsNamespace', 'pineconeChunksNamespace',
     'pineconeSummariesNamespace', 'pineconeKnowledgeSearch', 'pineconeKnowledgeProfiles',
   ];
   for (const field of PASSTHROUGH_FIELDS) {
     if (body[field] != null) config[field] = body[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'clientOutputPolicies')) {
+    config['clientOutputPolicies'] = body['clientOutputPolicies'];
   }
   // chatOptions (openaiProviderConfig — QR-218 PR-2) is chat-only: gated to
   // type 'chat' so an agent/passive config can never carry an unvalidated
@@ -1165,6 +1290,15 @@ export async function handleCreateLine(
     }
   }
 
+  // service-block home-confinement (fs-aware, so not in the shared validator).
+  // Placed outside the `type === 'agent'` block above that holds the pluginDirs
+  // sibling: `service` is type-agnostic, so an out-of-home prepend on a chat or
+  // passive instance must be refused too. Reads the assembled `config` rather
+  // than `body` so it sees the post-passthrough, post-strip view that is about
+  // to be written. Runs before the first mkdir, so a refusal leaves no
+  // partially-created instance.
+  if (!validateServiceHomeConfinement(config['service'], res)) return;
+
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
   let serviceEnabled = false;
@@ -1184,6 +1318,7 @@ export async function handleCreateLine(
     fs.mkdirSync(path.join(dataRoot(name), 'logs'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(dataRoot(name), 'media', 'tmp'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(stateRoot(name), { recursive: true, mode: 0o700 });
+    writeInitialDatabaseCreateMarker(dataRoot(name), name);
 
     // --- Write config.json ---
     writePrivateFileSync(path.join(configDir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { exclusive: true });
@@ -1206,8 +1341,8 @@ export async function handleCreateLine(
     if (body.claudeMd && type === 'agent' && body.agentOptions &&
         typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
       const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
-      const claudeDir = path.join(cwd, '.claude');
-      ensureHomeConfinedDirectory(claudeDir);
+      let claudeDir = path.join(cwd, '.claude');
+      claudeDir = ensureHomeConfinedDirectory(claudeDir);
       const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
       const claudeMdSnapshot = snapshotExtra(claudeMdPath);
       createdExtras.push(claudeMdSnapshot);
@@ -1218,10 +1353,10 @@ export async function handleCreateLine(
     if (type === 'agent' && body.agentOptions &&
         typeof (body.agentOptions as Record<string, unknown>).cwd === 'string') {
       const cwd = (body.agentOptions as Record<string, unknown>).cwd as string;
-      const claudeDir = path.join(cwd, '.claude');
+      let claudeDir = path.join(cwd, '.claude');
       const settings = mergeSettingsJson('agent', body.settingsJson as PermissionsSettings | undefined);
       if (settings) {
-        ensureHomeConfinedDirectory(claudeDir);
+        claudeDir = ensureHomeConfinedDirectory(claudeDir);
         // Include enabledPlugins from agentOptions if provided
         const ao = body.agentOptions as Record<string, unknown>;
         if (ao.enabledPlugins && typeof ao.enabledPlugins === 'object') {

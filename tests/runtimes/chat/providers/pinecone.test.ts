@@ -58,6 +58,13 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({
 import { Pinecone } from '@pinecone-database/pinecone';
 import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import * as configModule from '../../../../src/config.ts';
+import { OPERATOR_PINECONE_PROJECT_ID } from '../../../../src/lib/pinecone-project-guard.ts';
+
+// The operator instance `q` is project-checked against the operator project
+// when its config sets no guard; blocks that run as `q` resolve the index there.
+const OPERATOR_PROJECT_INDEXES = {
+  indexes: [{ name: 'test-index', host: `test-index-${OPERATOR_PINECONE_PROJECT_ID}.svc.aped-4627-b74a.pinecone.io` }],
+};
 
 let dateNowSpy: ReturnType<typeof vi.spyOn>;
 
@@ -2000,7 +2007,7 @@ describe('alert clearing on recovery', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mutableConfig.botName = 'q'; // q never requires guard
+    mutableConfig.botName = 'q'; // q is checked against the operator project
     mutableConfig.pineconeTopK = 20;
     mutableConfig.pineconeRerank = false;
     mutableConfig.pineconeRerankTopN = 6;
@@ -2008,6 +2015,7 @@ describe('alert clearing on recovery', () => {
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);
       this.inference = { rerank: mockRerank };
+      this.listIndexes = vi.fn().mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     } as unknown as () => InstanceType<typeof Pinecone>);
     memory = new PineconeMemory();
   });
@@ -2238,10 +2246,11 @@ describe('pinecone.ts uncovered-branch coverage', () => {
     mockUpsertRecords.mockReset();
     mockRerank.mockReset();
     mockListIndexes.mockReset();
+    mockListIndexes.mockResolvedValue(OPERATOR_PROJECT_INDEXES);
     mutableConfig.pineconeTopK = 20;
     mutableConfig.pineconeRerank = false;
     mutableConfig.pineconeRerankTopN = 6;
-    mutableConfig.botName = 'q'; // q does not require a project guard
+    mutableConfig.botName = 'q'; // q is checked against the operator project
     const MockPinecone = vi.mocked(Pinecone);
     MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
       this.index = vi.fn().mockReturnValue(mockIndex);

@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-heartbeat-watchdog.py"
 
@@ -23,17 +30,7 @@ _ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_env():
-    saved = {key: os.environ.get(key) for key in _ENV_KEYS}
-    for key in _ENV_KEYS:
-        os.environ.pop(key, None)
-    yield
-    for key, value in saved.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
+_clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 
 def _load_module():
@@ -62,7 +59,7 @@ class _FakeResponse:
         return self._body
 
 
-def test_transient_transport_failure_then_success_is_retried():
+def test_transient_transport_failure_then_success_is_retried(monkeypatch):
     mod = _load_module()
     calls = {"count": 0}
     sleeps: list[float] = []
@@ -74,7 +71,7 @@ def test_transient_transport_failure_then_success_is_retried():
         return _FakeResponse(200, _HEALTHY_BODY)
 
     mod.urlopen = fake_urlopen
-    mod.time.sleep = lambda seconds: sleeps.append(seconds)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: sleeps.append(seconds))
 
     status, body, url = mod.local_health_http_response("line-alpha", 3201)
 
@@ -85,7 +82,7 @@ def test_transient_transport_failure_then_success_is_retried():
     assert len(sleeps) == 1
 
 
-def test_transport_failure_on_every_attempt_remains_unreachable():
+def test_transport_failure_on_every_attempt_remains_unreachable(monkeypatch):
     mod = _load_module()
     os.environ["BOT_ERRORS_LOCAL_HEALTH_RETRIES"] = "2"
     calls = {"count": 0}
@@ -95,7 +92,7 @@ def test_transport_failure_on_every_attempt_remains_unreachable():
         raise URLError("timed out")
 
     mod.urlopen = fake_urlopen
-    mod.time.sleep = lambda _seconds: None
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
     status, body, _url = mod.local_health_http_response("line-alpha", 3201)
 
@@ -104,7 +101,7 @@ def test_transport_failure_on_every_attempt_remains_unreachable():
     assert calls["count"] == 3
 
 
-def test_http_error_is_returned_without_retry():
+def test_http_error_is_returned_without_retry(monkeypatch):
     mod = _load_module()
     os.environ["BOT_ERRORS_LOCAL_HEALTH_RETRIES"] = "5"
     calls = {"count": 0}
@@ -114,7 +111,7 @@ def test_http_error_is_returned_without_retry():
         raise HTTPError(url="u", code=503, msg="bad", hdrs=None, fp=None)
 
     mod.urlopen = fake_urlopen
-    mod.time.sleep = lambda _seconds: None
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
     status, _body, _url = mod.local_health_http_response("line-alpha", 3201)
 
@@ -122,7 +119,7 @@ def test_http_error_is_returned_without_retry():
     assert calls["count"] == 1
 
 
-def test_first_attempt_success_does_not_sleep_or_retry():
+def test_first_attempt_success_does_not_sleep_or_retry(monkeypatch):
     mod = _load_module()
     calls = {"count": 0}
     sleeps: list[float] = []
@@ -132,7 +129,7 @@ def test_first_attempt_success_does_not_sleep_or_retry():
         return _FakeResponse(200, _HEALTHY_BODY)
 
     mod.urlopen = fake_urlopen
-    mod.time.sleep = lambda seconds: sleeps.append(seconds)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: sleeps.append(seconds))
 
     status, _body, _url = mod.local_health_http_response("line-alpha", 3201)
 
@@ -165,7 +162,7 @@ def test_backoff_env_parses_and_clamps():
     assert mod.local_health_retry_backoff() == pytest.approx(0.75)
 
 
-def test_zero_retries_preserves_single_shot_transport_failure():
+def test_zero_retries_preserves_single_shot_transport_failure(monkeypatch):
     mod = _load_module()
     os.environ["BOT_ERRORS_LOCAL_HEALTH_RETRIES"] = "0"
     calls = {"count": 0}
@@ -175,7 +172,7 @@ def test_zero_retries_preserves_single_shot_transport_failure():
         raise URLError("timed out")
 
     mod.urlopen = fake_urlopen
-    mod.time.sleep = lambda _seconds: None
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
 
     status, _body, _url = mod.local_health_http_response("line-alpha", 3201)
 

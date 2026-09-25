@@ -63,6 +63,7 @@ vi.mock('../../../../src/logger.ts', async () => {
 vi.mock('../../../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: mocks.clearAlert,
   emitAlertChecked: mocks.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
 }));
 
 vi.mock('../../../../src/core/retry.ts', () => ({
@@ -82,6 +83,7 @@ import type {
   ToolDeclaration,
 } from '../../../../src/mcp/types.ts';
 import { loadContext } from '../../../../src/runtimes/chat/context.ts';
+import { OPERATOR_PINECONE_PROJECT_ID } from '../../../../src/lib/pinecone-project-guard.ts';
 import {
   getPineconeReadiness,
   PineconeMemory,
@@ -143,6 +145,13 @@ describe('memory telemetry cross-surface confidentiality', () => {
       this.inference = { rerank: mocks.rerank };
       this.listIndexes = mocks.listIndexes;
     } as unknown as () => InstanceType<typeof Pinecone>);
+    // `q` with no configured guard is checked against the operator project.
+    mocks.listIndexes.mockResolvedValue({
+      indexes: [{
+        name: 'SYNTHETIC_PRIVATE_BOOTSTRAP_INDEX_MARKER',
+        host: `index-${OPERATOR_PINECONE_PROJECT_ID}.svc.aped-4627-b74a.pinecone.io`,
+      }],
+    });
   });
 
   afterEach(() => {

@@ -19,6 +19,7 @@ vi.mock('../../src/logger.ts', () => {
 
 import { FleetWebSocketServer } from '../../src/fleet/websocket-server.ts';
 import type { WsEvent } from '../../src/fleet/websocket-server.ts';
+import type { RealtimePollerHealthSnapshot } from '../../src/fleet/realtime-event-poller.ts';
 import { createTicketStore, type TicketStore } from '../../src/fleet/ws-ticket.ts';
 import { waitForMessage as waitForMessageHelper } from '../helpers/wait-for.ts';
 
@@ -133,6 +134,42 @@ describe('FleetWebSocketServer', () => {
     ws.close();
   });
 
+  it('hello carries realtime_poller null when the accessor is never wired (#2522)', async () => {
+    await startServer();
+    const { ws, firstMessage } = await connectWithTicket();
+    const msg = (await firstMessage) as Record<string, unknown>;
+    expect(msg).toHaveProperty('realtime_poller');
+    expect(msg.realtime_poller).toBeNull();
+    ws.close();
+  });
+
+  it('hello carries the realtime poller health snapshot once wired (#2522)', async () => {
+    await startServer();
+    const snapshot: RealtimePollerHealthSnapshot = {
+      schemaVersion: 1,
+      generation: 'gen-1',
+      lifecycle: 'current',
+      cycleSequence: 1,
+      inFlightAgeMs: null,
+      lastCompletedAgeMs: 0,
+      lastFullyObservedAgeMs: 0,
+      lastRecoveredAgeMs: null,
+      durationBucket: 'under_interval',
+      scheduledTicks: 1,
+      completedCycles: 1,
+      skippedOverlaps: 0,
+      consecutiveFailedCycles: 0,
+      expectedSources: 1,
+      observedSources: 1,
+      unavailableSources: 0,
+    };
+    wsServer.setRealtimePollerHealth(() => snapshot);
+    const { ws, firstMessage } = await connectWithTicket();
+    const msg = (await firstMessage) as Record<string, unknown>;
+    expect(msg.realtime_poller).toEqual(snapshot);
+    ws.close();
+  });
+
   describe('legacy: token in query', () => {
     it('still accepts ?token=<active> for one rollout cycle', async () => {
       await startServer();
@@ -163,7 +200,7 @@ describe('FleetWebSocketServer', () => {
     const msgPromise = waitForMessage(ws);
     wsServer.broadcast(event);
     const received = await msgPromise;
-    expect(received).toEqual(event);
+    expect(received).toMatchObject(event);
     ws.close();
   });
 
@@ -182,7 +219,7 @@ describe('FleetWebSocketServer', () => {
     const msgPromise = waitForMessage(ws);
     wsServer.broadcast(event);
     const received = await msgPromise;
-    expect(received).toEqual(event);
+    expect(received).toMatchObject(event);
     ws.close();
   });
 
@@ -198,15 +235,24 @@ describe('FleetWebSocketServer', () => {
       send: vi.fn(),
       close: vi.fn(),
     };
-    const clients = (wsServer as unknown as { clients: Set<{ readyState: number; send: (data: string) => void; close: () => void }> }).clients;
-    clients.add(failingClient);
-    clients.add(healthyClient);
+    const clients = (wsServer as unknown as {
+      clients: Map<
+        { readyState: number; send: (data: string) => void; close: () => void },
+        { missedPongs: number; backpressuredSinceMs: number | null }
+      >;
+    }).clients;
+    const freshRecord = () => ({ missedPongs: 0, backpressuredSinceMs: null });
+    clients.set(failingClient, freshRecord());
+    clients.set(healthyClient, freshRecord());
 
     const event: WsEvent = { type: 'feed_event', instance: 'test-line' };
     expect(() => wsServer.broadcast(event)).not.toThrow();
 
-    expect(failingClient.send).toHaveBeenCalledWith(JSON.stringify(event));
-    expect(healthyClient.send).toHaveBeenCalledWith(JSON.stringify(event));
+    const firstCall = failingClient.send.mock.calls[0] as unknown as [string, unknown] | undefined;
+    const sentFrame = JSON.parse(firstCall?.[0] ?? '{}') as Record<string, unknown>;
+    expect(sentFrame).toMatchObject(event);
+    expect(sentFrame.schema_version).toBe(1);
+    expect(healthyClient.send).toHaveBeenCalledWith(expect.any(String), expect.any(Function));
     expect(clients.has(failingClient)).toBe(false);
     expect(clients.has(healthyClient)).toBe(true);
   });

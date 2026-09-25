@@ -106,6 +106,25 @@ describe('push-gate manifest registry (#2224)', () => {
     );
   });
 
+  it('keeps deployment qualification in both local lanes and the Quality workflow', () => {
+    const expectedCommand = 'npm run test:deployment-qualification';
+    for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
+      expect(steps).toContainEqual(
+        expect.objectContaining({ name: 'test:deployment-qualification', cmd: expectedCommand }),
+      );
+    }
+
+    const qualityWorkflow = readFileSync('.github/workflows/quality.yml', 'utf8');
+    expect(qualityWorkflow).toContain(
+      '      - name: Deployment qualification source suite\n        run: npm run test:deployment-qualification',
+    );
+
+    const command = pkg.scripts['test:deployment-qualification'];
+    expect(command).toContain('bash -euc');
+    expect(command).not.toContain('bash -lc');
+    expect(command).toContain('deploy/scripts/lib/pytest-runner.sh');
+  });
+
   it('every curated test path exists on disk', () => {
     const missing = CURATED_TEST_PATHS.filter((path) => !existsSync(path));
     expect(missing, `curated test path(s) drifted from disk: ${missing.join(', ')}`).toEqual([]);
@@ -145,6 +164,14 @@ describe('push-gate manifest registry (#2224)', () => {
     expect(RELEASE_STEPS[releaseShadowIndex + 1].name).toBe('guard:test-integrity:required');
   });
 
+  it('promotes guard-test coverage semantic proof explicitly in both blocking lanes', () => {
+    for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
+      expect(steps.find(({ name }) => name === 'guard:guard-test-coverage')?.cmd).toBe(
+        'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+      );
+    }
+  });
+
   it('step names are unique within each lane (attribution is unambiguous)', () => {
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
       const names = steps.map((step) => step.name);
@@ -180,6 +207,29 @@ describe('push-gate manifest registry (#2224)', () => {
     } finally {
       delete process.env.WHATSOUP_SKIP_DOC_DRIFT;
       delete process.env.WHATSOUP_TEST_PASSTHROUGH_PROBE;
+    }
+  });
+
+  it('every env var a gate step reads survives the child allowlist', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const source = readFileSync('scripts/full-suite-battery.ts', 'utf8');
+    const envNames = [...source.matchAll(/process\.env\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+
+    expect(envNames.length, 'no process.env reads found — scan is vacuous').toBeGreaterThan(0);
+
+    for (const envName of envNames) {
+      const wasPresent = Object.prototype.hasOwnProperty.call(process.env, envName);
+      const priorValue = process.env[envName];
+      process.env[envName] = 'reachability-probe';
+      try {
+        expect(
+          pushGateChildEnv()[envName],
+          `scripts/full-suite-battery.ts reads ${envName}, but pushGateChildEnv() strips it`,
+        ).toBe('reachability-probe');
+      } finally {
+        if (wasPresent) process.env[envName] = priorValue;
+        else delete process.env[envName];
+      }
     }
   });
 });

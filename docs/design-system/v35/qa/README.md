@@ -21,8 +21,30 @@ Scripts are sanitized: machine-specific paths/hosts are environment variables.
   - `vision_qa.py`, `blind_qa.py` — waves 1–3 drivers (local Ollama host via ssh;
     set `OLLAMA_HOST`; API keys via keyring only).
   - Shared env: `QA_ROOT` (default `~/.cache/soup-v35-qa`) — images in, reports out.
-- `evidence/` — the 18 final screenshots (9 surfaces × 2 themes) the wave-4 verdicts
-  were rendered against.
+- `evidence/` — the tracked part of the final screenshots (9 surfaces × 2 themes)
+  the wave-4 verdicts were rendered against. Ten of the eighteen remain tracked
+  and are unchanged. The `agents`, `fleet`, `inbox` and `hatch` pairs were
+  removed: they were shot before the identifier-replacement pass and still
+  rendered an operator identifier at a length that reconstructs it completely,
+  which is no longer present in the mockups they were rendered from. They are not
+  replaced in place because the shrink-only tracked-PNG ratchet from issue #2219,
+  enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit` and the
+  push gate, caps any new PNG, and any changed PNG outside `docs/screenshots/`,
+  at 100 KiB, and pins every tracked PNG to its committed size (a tracked
+  screenshot under `docs/screenshots/` may be replaced only by one that is no
+  larger), while a fresh render of these surfaces is several times the 100 KiB
+  cap. Regenerate on demand instead, with the pipeline this directory
+  documents:
+
+      python3 -m venv .venv
+      .venv/bin/pip install playwright        # verified with 1.62.0
+      MOCKUPS=<repo>/docs/design-system/v35/mockups QA_ROOT=<output-dir> \
+        .venv/bin/python scripts/shoot_w4.py
+
+  `shoot_w4.py` drives the `chrome` channel at a 1440x900 viewport with a device
+  scale factor of 2, so each image is 2880x1800, and renders the mockups as they
+  currently stand. Review a fresh render for identifier masks before publishing
+  it anywhere.
 - `reports/wave4/` — raw reviewer outputs (gpt-5.4 waves, codex, grok waves, final
   confirmations).
 - `reports/wave4/personas/` — sol/tera/luna raw outputs.

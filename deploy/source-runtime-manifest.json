@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "21412e833c01baaf387244ccb3ffba746ecc1a80cae1f7b79780d1aeaef22db9",
+      "sha256": "e388709c3f700d35946fc56266e67e2d744f4e095a7d332101d212f6a1b677da",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -30,6 +30,18 @@
       "importGraph": true
     },
     {
+      "path": "scripts/restart-safety-preflight.ts",
+      "sha256": "39ee2172976abad5b6c0695c07c2d5061066b680e21df4ac82b0d6cbe2cdfe73",
+      "mustContain": [
+        "safeNonterminal",
+        "missing_database",
+        "initial_database_create",
+        "live_turns_in_flight",
+        "LIVE_TURN_WINDOW_SECONDS"
+      ],
+      "importGraph": true
+    },
+    {
       "path": "src/transport/factory.ts",
       "sha256": "5073684f9e31ca30fef8d748b62249ede7d457aa3343323b92883bf3fd6e45cd",
       "mustContain": [
@@ -41,7 +53,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "4d6b3e6b63d9f8491bd8b69f22020999f550f94bc7bb0f5f229f08e1afbe2707",
+      "sha256": "305ecd6eab9e0e58199744f33d7fd745d2eea153a3c3363a332bab86852e86c3",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -52,7 +64,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "9d3b7245372ddd86c505804c6ab614d24d71ae4a54319a71096de4642608e675",
+      "sha256": "c51f89b15f3408cf6d4bb5b2107cd1340967795b0aa96ce1041470ff82357b59",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -71,9 +83,11 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "911d359d844bb934db4421c6a2d7e16c1de0f904813503d577631b5c6b1a7285",
+      "sha256": "fad5fe6408c4adf78677db3a115a3609168f177dffd97d37a2405445b6ad4aef",
       "mustContain": [
-        "composeWithExactLineDedup"
+        "composeWithExactLineDedup",
+        "managedTerminationUnknown",
+        "providerTerminated"
       ],
       "importGraph": true
     },

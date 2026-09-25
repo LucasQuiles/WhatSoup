@@ -159,11 +159,11 @@ describe('durability-writer-guard — RED-GREEN teeth (case c)', () => {
       // a REAL scan of this repo's actual src/ tree, regardless of the tiny
       // synthetic snapshot above — must be suppressed here, or every real
       // table the synthetic snapshot doesn't mention would spuriously report
-      // as "unregistered". selfProvisioned/discoveryExclusions are left at
-      // their real defaults deliberately: those still read the real (clean)
-      // module files, proving this override doesn't silently hide a genuine
-      // self-provisioned-entry problem, only the unrelated discovery noise.
+      // as "unregistered". This test is not about self-provisioned tables,
+      // so those registries are isolated explicitly as well.
       discovered: new Map(),
+      selfProvisioned: [],
+      discoveryExclusions: [],
     });
     expect(result.findings).toHaveLength(0);
   });
@@ -375,13 +375,11 @@ describe('durability-writer-guard — beads unwired-terminal declared exception'
 });
 
 describe('durability-writer-guard — self-provisioned discovery (completeness blind-spot fix)', () => {
-  // Gap-analysis finding: six real, live tables (agent_fallback_state,
-  // agent_handoff_artifacts, chat_model_preference, command_surface_prefs,
-  // pending_poll_decisions, standby_notice) are created OUTSIDE the migration
-  // registry by self-managed ensureXSchema() functions and are invisible to
-  // migratedSchemaSnapshot() — while the registry/guard used to claim
-  // completeness over "every table". Check (1b) closes the blind spot with a
-  // static CREATE TABLE discovery scan across src/**/*.ts.
+  // Gap-analysis finding: real tables created outside the migration registry
+  // by self-managed schema functions are invisible to migratedSchemaSnapshot(),
+  // while the registry/guard used to claim completeness over "every table".
+  // Check (1b) closes the blind spot with CREATE TABLE discovery across
+  // src/**/*.ts.
 
   it('FAILS a synthetic discovered-but-unregistered table', () => {
     const result = scanDurabilityWriterInvariant(new Map(), repoRoot, {
@@ -422,7 +420,10 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
       nonStatusTables: new Set(),
       reservedTables: new Set(),
       nonStatusJustifications: {},
-      discovered: new Map(),
+      discovered: new Map([[
+        'synthetic_self_provisioned_no_justification',
+        ['src/core/durability.ts'],
+      ]]),
       selfProvisioned: [
         {
           table: 'synthetic_self_provisioned_no_justification',
@@ -451,7 +452,10 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
       nonStatusTables: new Set(),
       reservedTables: new Set(),
       nonStatusJustifications: {},
-      discovered: new Map(),
+      discovered: new Map([[
+        'synthetic_self_provisioned_justified',
+        ['src/core/durability.ts'],
+      ]]),
       selfProvisioned: [
         {
           table: 'synthetic_self_provisioned_justified',
@@ -493,7 +497,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
     expect(result.discoveredTableCount).toBeGreaterThan(0);
   });
 
-  it('SELF_PROVISIONED declares exactly the twelve known self-provisioned tables', () => {
+  it('SELF_PROVISIONED declares exactly the fourteen known self-provisioned tables', () => {
     const tables = SELF_PROVISIONED.map((e) => e.table).sort();
     expect(tables).toEqual(
       [
@@ -503,6 +507,8 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
         'command_surface_prefs',
         'events',
         'incidents',
+        'lifecycle_drop_counters',
+        'lifecycle_events',
         'meta',
         'pending_poll_decision_receipts',
         'pending_poll_decisions',
@@ -526,6 +532,7 @@ describe('durability-writer-guard — self-provisioned discovery (completeness b
       'inbound_events_v56',
       'fact_export_queue_v59',
       'capability_obligations_v60',
+      'completed_delivery_identity_admissions_v61',
     ]);
     for (const entry of DISCOVERY_EXCLUSIONS) {
       expect(entry.reason.trim().length, `${entry.table} needs a reason`).toBeGreaterThan(0);
@@ -547,11 +554,11 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     const outcome = evaluateDurabilityWriterInvariant(new Map(), repoRoot);
     expect(outcome.status).toBe('inconclusive');
     if (outcome.status === 'inconclusive') {
-      expect(outcome.reason).toMatch(/zero tables/i);
+      expect(outcome.reason).toBe('guard.durability.snapshot-empty');
     }
   });
 
-  it('(ii) a throw inside the scan maps to INCONCLUSIVE, never a silent pass', () => {
+  it('(ii) a throw inside the scan maps to a privacy-safe INCONCLUSIVE code, never a silent pass', () => {
     // A snapshot whose .keys() throws forces an exception at the very first
     // line of scanDurabilityWriterInvariant's check (1) — proving the wrapper
     // catches a throw from *inside* the scan, not just the async load.
@@ -564,9 +571,25 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     const outcome = evaluateDurabilityWriterInvariant(throwingSnapshot, repoRoot);
     expect(outcome.status).toBe('inconclusive');
     if (outcome.status === 'inconclusive') {
-      expect(outcome.reason).toMatch(/scan threw/i);
-      expect(outcome.reason).toMatch(/boom: simulated scan-time failure/);
+      expect(outcome.reason).toBe('guard.durability.scan-inconclusive');
+      expect(outcome.reason).not.toContain('boom: simulated scan-time failure');
     }
+  });
+
+  it('a malformed snapshot size is privacy-safe INCONCLUSIVE with inventory counters', () => {
+    const privateError = new Error('PRIVATE_SNAPSHOT_SIZE_CANARY');
+    const malformed = Object.create(null) as SchemaSnapshot;
+    Object.defineProperty(malformed, 'size', {
+      get: () => { throw privateError; },
+    });
+
+    const outcome = evaluateDurabilityWriterInvariant(malformed, repoRoot);
+
+    expect(outcome.status).toBe('inconclusive');
+    if (outcome.status !== 'inconclusive') throw new Error('expected inconclusive');
+    expect(outcome.reason).toBe('guard.durability.scan-inconclusive');
+    expect(outcome.result?.filesExamined).toBeGreaterThan(0);
+    expect(JSON.stringify(outcome)).not.toContain('PRIVATE_SNAPSHOT_SIZE_CANARY');
   });
 
   it('(iii) a discovery scan that found zero CREATE TABLE occurrences is INCONCLUSIVE, not pass', () => {
@@ -596,7 +619,7 @@ describe('durability-writer-guard — exit-code contract (evaluateDurabilityWrit
     });
     expect(outcome.status).toBe('inconclusive');
     if (outcome.status === 'inconclusive') {
-      expect(outcome.reason).toMatch(/zero CREATE TABLE/i);
+      expect(outcome.reason).toBe('guard.durability.discovery-empty');
     }
   });
 

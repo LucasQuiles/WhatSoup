@@ -8,9 +8,12 @@ delayed remote claim matching a terminal dead-letter record was never recognized
 as already-delivered. Without the fix, a reoffered remote claim would resurrect
 the terminal event with a fresh outbox copy and a reset delivery budget.
 
-This slice only adds the missing directory to the dedupe inventory. It does not
-touch fail-closed diagnostics, retention protocol, missing/empty remote identity
-handling, or the testleak terminal directory -- those remain open under #2427.
+The first slice added dead-letter to the dedupe inventory; the second added the
+dispatcher's testleak terminal directory (raw record shape -- the leak defense
+moves the claimed event file as-is). Still open under #2427: fail-closed
+diagnostics, retention protocol, missing/empty remote identity handling, the
+canonical inventory SSOT + dispatcher matrix test, and ack-retry
+exactly-one-record reconciliation.
 """
 from __future__ import annotations
 
@@ -107,3 +110,67 @@ def test_local_event_exists_false_when_dead_letter_directory_absent(tmp_state):
     assert (state_dir / "dead-letter").exists() is False
     with _env(state_dir, outbox_dir):
         assert mod.local_event_exists("terminal-event-4") is False
+
+
+# --- #2427 slice 2: testleak terminal directory ----------------------------
+# The dispatcher's test-leak defense moves the RAW claimed event file into
+# testleak/ unchanged (os.replace -- top-level id/createdAt, no nested
+# wrapper). A delayed remote claim matching that terminal record must be
+# recognized as already-delivered, or lease recovery resurrects the dropped
+# fixture event with a fresh outbox copy.
+
+
+def _testleak_record(event_id: str, created_at: str) -> dict[str, object]:
+    """Shape archived by bot-errors-dispatcher.py's test-leak drop: the raw
+    event file moved as-is (no nested `event` wrapper, no delivery metadata)."""
+    return {
+        "id": event_id,
+        "createdAt": created_at,
+        "source": "test_fixture_leak",
+        "summary": "leaked fixture test record",
+    }
+
+
+def test_local_event_exists_finds_raw_testleak_record(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    testleak_dir = state_dir / "testleak"
+    testleak_dir.mkdir(mode=0o700)
+    record = _testleak_record("leaked-event-1", "2026-08-01T12:00:00.000Z")
+    (testleak_dir / "leaked-event-1.testleak.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+
+    with _env(state_dir, outbox_dir):
+        assert mod.local_event_exists("leaked-event-1") is True
+
+
+def test_local_event_exists_respects_created_at_on_testleak_record(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    testleak_dir = state_dir / "testleak"
+    testleak_dir.mkdir(mode=0o700)
+    record = _testleak_record("leaked-event-2", "2026-08-01T12:00:00.000Z")
+    (testleak_dir / "leaked-event-2.testleak.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+
+    with _env(state_dir, outbox_dir):
+        assert mod.local_event_exists("leaked-event-2", created_at="2026-08-01T13:00:00.000Z") is False
+
+
+def test_local_event_exists_false_for_unrelated_id_with_testleak_present(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    testleak_dir = state_dir / "testleak"
+    testleak_dir.mkdir(mode=0o700)
+    record = _testleak_record("leaked-event-3", "2026-08-01T12:00:00.000Z")
+    (testleak_dir / "leaked-event-3.testleak.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+
+    with _env(state_dir, outbox_dir):
+        assert mod.local_event_exists("some-other-event-id") is False

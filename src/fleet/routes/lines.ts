@@ -13,6 +13,7 @@ import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { hasExplicitAuthLossSignal } from '../auth-loss-signals.ts';
+import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
@@ -634,7 +635,7 @@ export async function handleGetLine(
     gui: instance.gui,
     guiPort: instance.guiPort,
     dbStats: dbStats.ok ? dbStats.data : null,
-    config: instanceConfig,
+    config: projectClientOutputPolicyConfig(instanceConfig),
     ...(adminPhonesDisplay ? { adminPhonesDisplay } : {}),
   });
 }

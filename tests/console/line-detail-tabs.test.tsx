@@ -232,6 +232,28 @@ describe('LineDetail tablist (Tabs primitive)', () => {
     expect(within(list).getAllByRole('tab')).toHaveLength(9);
   });
 
+  it('renders the bounded outbound-poison degradation cause without private detail', async () => {
+    await act(async () => {
+      renderLineDetail({
+        line: makeLine({
+          status: 'degraded',
+          health: {
+            status: 'degraded',
+            degradation_causes: ['agent_outbound_queue_poisoned'],
+            uptime_seconds: 120,
+            messages_total: 1,
+            sqlite: { messages_total: 1, schema_version: 1 },
+          },
+        }),
+      });
+    });
+
+    const cause = screen.getByText('agent_outbound_queue_poisoned');
+    expect(cause.getAttribute('title')).toBe('agent_outbound_queue_poisoned');
+    expect(screen.queryByText('private outbound failure')).toBeNull();
+    expect(screen.queryByText('private-poison-scope')).toBeNull();
+  });
+
   it('renders 11 tabs when the line is MCP-capable (passive mode)', async () => {
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'passive' }) });

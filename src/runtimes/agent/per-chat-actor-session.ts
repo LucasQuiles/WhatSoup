@@ -20,10 +20,11 @@ export function perChatActorSession(
   allowedRoot: string,
   conversationBound: boolean,
   deliveryJid: string = conversationJid,
+  purpose?: SessionContext['purpose'],
 ): SessionContext {
   const conversationKey = toConversationKey(conversationJid);
   if (!conversationBound) {
-    return { tier: 'global', allowedRoot, conversationKey };
+    return { tier: 'global', allowedRoot, conversationKey, ...(purpose ? { purpose } : {}) };
   }
   return {
     tier: 'global',
@@ -31,5 +32,6 @@ export function perChatActorSession(
     conversationKey,
     deliveryJid,
     binding: makeConversationBinding(conversationKey, deliveryJid),
+    ...(purpose ? { purpose } : {}),
   };
 }

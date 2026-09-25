@@ -5,8 +5,15 @@ import { lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
-import { makeConversationBinding, type SessionContext } from './types.ts';
+import {
+  makeConversationBinding,
+  resolveSessionContext,
+  type ExecutingSessionContext,
+  type ResolvedSessionContext,
+  type SessionContext,
+} from './types.ts';
 
 const log = createChildLogger('WhatSoupSocketServer');
 const RESERVED_SESSION_ARGUMENTS = new Set(['actorJid', 'conversationKey']);
@@ -65,6 +72,7 @@ export class WhatSoupSocketServer {
   private readonly socketPath: string;
   private readonly registry: ToolRegistry;
   private readonly baseSession: SessionContext;
+  private readonly clock: Clock;
   /** Per-connection isolated sessions. Cleaned up on disconnect. */
   private readonly connectionSessions = new Map<number, SessionContext>();
   /** Active client sockets. Destroyed on stop() so FDs do not leak. */
@@ -72,31 +80,30 @@ export class WhatSoupSocketServer {
   /** Exact filesystem object created by this server; used to prevent replacement unlink. */
   private ownedSocket: { dev: number; ino: number } | null = null;
 
-  /**
-   * F-STICKY-ACTOR: optional per-request actor resolver. When set (per-chat
-   * sockets in non-sandbox per_chat mode), the actor for each tool call is
-   * resolved at read time from the turn the subprocess is currently executing,
-   * fail-closed (undefined -> deny). When unset, behavior is unchanged and the
-   * request uses the broadcast connSession.actorJid.
-   */
-  private readonly actorResolver?: () => string | undefined;
+  /** Dynamic authorization context for the turn executing this request. */
+  private readonly executingSessionResolver: () => ExecutingSessionContext;
 
   constructor(
     socketPath: string,
     registry: ToolRegistry,
     session: SessionContext,
-    actorResolver?: () => string | undefined,
+    executingSessionResolver: () => ExecutingSessionContext,
+    // Injectable so error-id timestamps can be driven to a known instant
+    // (#2200). Optional and defaulted, so this slice changes no existing call
+    // site.
+    clock: Clock = systemClock,
   ) {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
+    this.clock = clock;
     // Binding objects are immutable by contract (types.ts): enforce it at the
     // trust boundary so every per-request shallow snapshot below can safely
     // share the reference — a rekey REPLACES the object, never mutates it.
     if (session.binding && !Object.isFrozen(session.binding)) {
       session.binding = Object.freeze({ ...session.binding });
     }
-    this.actorResolver = actorResolver;
+    this.executingSessionResolver = executingSessionResolver;
   }
 
   /** Number of active client connections. */
@@ -228,12 +235,12 @@ export class WhatSoupSocketServer {
           // admin-gated tool reading actorJid (it could observe the wrong turn's actor).
           // A shallow per-request copy pins those fields at dispatch time; the live
           // abortSignal is preserved by reference so client-disconnect still aborts.
-          const requestSession: SessionContext = { ...connSession };
-          // F-STICKY-ACTOR: per-chat sockets bind the actor to the currently
-          // executing turn, resolved at read time and fail-closed (undefined ->
-          // deny). Overrides the broadcast connSession.actorJid, which is not
-          // maintained for per-chat sockets.
-          if (this.actorResolver) requestSession.actorJid = this.actorResolver();
+          // Dynamic authorization fields are pinned to the executing turn.
+          // Explicit undefined values overwrite stale base-session values.
+          const requestSession = resolveSessionContext(
+            connSession,
+            this.executingSessionResolver(),
+          );
           void this.handleRequest(req, requestSession).then((response) => {
             if (response !== null) {
               writeResponse(response, 'failed to write response');
@@ -465,7 +472,10 @@ export class WhatSoupSocketServer {
     }
   }
 
-  private async handleRequest(req: JsonRpcRequest, session: SessionContext): Promise<JsonRpcResponse | null> {
+  private async handleRequest(
+    req: JsonRpcRequest,
+    session: ResolvedSessionContext,
+  ): Promise<JsonRpcResponse | null> {
     const id = req.id ?? null;
 
     try {
@@ -517,7 +527,7 @@ export class WhatSoupSocketServer {
           };
       }
     } catch (err) {
-      const errorId = `E${Date.now().toString(36).toUpperCase()}`;
+      const errorId = `E${this.clock.now().toString(36).toUpperCase()}`;
       log.error({ err, method: req.method, errorId }, 'unhandled error in request handler');
       return {
         jsonrpc: '2.0',

@@ -158,7 +158,7 @@ class TestDailySummarySeverity:
 
     def test_dns_only_failure_is_warning(self):
         """DNS-only failure -> warning (infra-class)."""
-        failures = ["FAIL dns nucles-custom-domain: host=nucles.quiles.studio missing_expected=100.91.13.7"]
+        failures = ["FAIL dns example-custom-domain: host=alerts.example.com missing_expected=192.0.2.10"]
         assert daily_summary_severity(failures, []) == "warning"
 
     def test_rustdesk_only_failure_is_warning(self):

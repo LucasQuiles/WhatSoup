@@ -733,7 +733,7 @@ describe('useLogs', () => {
     expect(apiMocks.getLogs).not.toHaveBeenCalled();
   });
 
-  it('returns logs on success', async () => {
+  it('returns logs and a freshness contract on success', async () => {
     apiMocks.getLogs.mockResolvedValue([LOG_1]);
     const client = makeClient();
     const { result } = renderHook(() => useLogs('alpha'), { wrapper: wrapper(client) });
@@ -741,6 +741,11 @@ describe('useLogs', () => {
     expect(result.current.data).toHaveLength(1);
     expect(result.current.data?.[0].level).toBe('info');
     expect(result.current.data?.[0].msg).toBe('connected');
+    // #2519: promoted off LEGACY_NO_FRESHNESS onto the #1925 contract. The
+    // ds-hardening guard only scans for the identifier `queryFreshness` in the
+    // hook body — this is the assertion that the field is actually returned.
+    expect(result.current.freshness).toBeDefined();
+    expect(result.current.freshness.stale).toBe(false);
   });
 
   it('surfaces API errors', async () => {
@@ -836,7 +841,7 @@ describe('useTyping', () => {
 // ---------------------------------------------------------------------------
 
 describe('useFeed', () => {
-  it('returns feed events on success', async () => {
+  it('returns feed events and a freshness contract on success', async () => {
     apiMocks.getFeed.mockResolvedValue([FEED_1]);
     const client = makeClient();
     const { result } = renderHook(() => useFeed(), { wrapper: wrapper(client) });
@@ -844,6 +849,10 @@ describe('useFeed', () => {
     expect(result.current.data).toHaveLength(1);
     expect(result.current.data?.[0].text).toBe('agent started');
     expect(result.current.data?.[0].mode).toBe('agent');
+    // #2519: promoted off LEGACY_NO_FRESHNESS onto the #1925 contract — see the
+    // matching note in the useLogs success test.
+    expect(result.current.freshness).toBeDefined();
+    expect(result.current.freshness.stale).toBe(false);
   });
 
   it('uses query key ["feed"]', async () => {

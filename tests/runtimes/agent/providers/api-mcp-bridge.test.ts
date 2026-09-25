@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
-import type { SessionContext } from '../../../../src/mcp/types.ts';
+import {
+  noExecutingSession,
+  type ExecutingSessionContext,
+  type SessionContext,
+} from '../../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../../../src/mcp/registry.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
-import { createProviderMcpBridge } from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import {
+  createProviderMcpBridge as createProductionProviderMcpBridge,
+} from '../../../../src/runtimes/agent/providers/mcp-bridge.ts';
+import type { ProviderMcpBridge } from '../../../../src/runtimes/agent/providers/types.ts';
 
 vi.mock('../../../../src/logger.ts', async () => {
   const { loggerMock } = await import('../../../helpers/logger-mock.ts');
@@ -42,6 +49,27 @@ function registerEchoTool(registry: ToolRegistry): void {
       echoed: `${String(params['value'])}:${session.deliveryJid ?? 'unknown'}`,
     }),
   });
+}
+
+// L3 test-shim hygiene note (#3435, #3429 P3 rail): this local wrapper adds a
+// DEFAULT `resolveExecutingSession` (noExecutingSession), which DEFEATS the P3
+// mandatory-resolver rail for new tests authored here — production
+// `createProviderMcpBridge` deliberately has NO default so a surface must name
+// its read-time resolver. Unlike the socket-server.test.ts shim (whose default
+// derives from the stored session fields and thus re-creates the removed
+// verbatim base-session trust), THIS default is genuinely fail-closed:
+// `noExecutingSession` yields the UNRESOLVED context, which denies both the
+// actor gate and (since #3435) the scheduled forbidden set. The hazard here is
+// therefore the opposite — a NEW test that omits the resolver to model a
+// RESOLVED turn silently gets the unresolved deny path and passes VACUOUSLY
+// (testing the shim default, not production). Pass an explicit resolver for any
+// resolved-turn case.
+function createProviderMcpBridge(
+  registry: ToolRegistry,
+  session: SessionContext,
+  resolveExecutingSession: () => ExecutingSessionContext = noExecutingSession,
+): ProviderMcpBridge {
+  return createProductionProviderMcpBridge(registry, session, resolveExecutingSession);
 }
 
 function registerFailTool(registry: ToolRegistry): void {

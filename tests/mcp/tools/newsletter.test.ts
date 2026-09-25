@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerNewsletterTools } from '../../../src/mcp/tools/newsletter.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';

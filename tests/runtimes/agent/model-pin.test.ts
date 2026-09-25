@@ -11,6 +11,8 @@
  * file-scoped and cannot be shared across test files.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -27,6 +29,11 @@ import type {
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 // vi.hoisted values are available inside vi.mock factory callbacks.
+
+vi.mock('node:child_process', async () => {
+  const { childProcessMock } = await import('../../helpers/child-process.ts');
+  return childProcessMock();
+});
 
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
   type CapturedCrashInfo = {
@@ -88,11 +95,14 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     enqueueText: vi.fn(),
     getSenderToken: () => 'mock-sender-token',
     enqueueStreamingText: vi.fn(),
+    commitStreamingText: vi.fn(),
+    discardPreToolAssistantText: vi.fn(),
     enqueueResultText: vi.fn(),
     enqueueToolUpdate: vi.fn(),
     enqueueProgressUpdate: vi.fn(),
     indicateTyping: vi.fn(),
     flush: vi.fn(async () => {}),
+    isPoisoned: vi.fn(() => false),
     shutdown: vi.fn(async () => {}),
     abortTurn: vi.fn(),
     endTurn: vi.fn(),
@@ -167,6 +177,7 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
   emitAlertChecked: mockEmitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSource: mockClearAlertSource,
   clearAlertSourceChecked: mockClearAlertSource,
 }));
@@ -274,7 +285,7 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     textAggregateDelayMs: 2_000,
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    stateRoot: '/tmp/whatsoup-test-state-runtime',
+    stateRoot: '', // Assigned a private directory by the file-level beforeEach.
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     mediaDir: '/tmp/whatsoup-test-media-model-pin/tmp',
     pineconeAllowedIndexes: [] as string[],
@@ -451,6 +462,7 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
     getChatScopedToolNames = vi.fn(() => []);
     setDurability = vi.fn();
     setSensitiveToolAuthorizer = vi.fn();
+    setCanonicalConversationKeyResolver = vi.fn();
     withModule = vi.fn((_name: string, fn: () => void) => fn());
   },
 }));
@@ -481,7 +493,11 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import {
   applyRouteChangeAndRecycle,
   consumePendingRecycleIfIdle,
+  handleModelCommand,
+  PIN_RECEIPT_SEND_TIMEOUT_MS,
+  recordRouteModelPin,
   recycleLiveSession,
+  THREADED_AFFIRMATIVE_TOKENS,
   type ModelPinPort,
 } from '../../../src/runtimes/agent/model-pin.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
@@ -489,12 +505,25 @@ import { providerConfigEffort, providerHasNativeReasoningControl } from '../../.
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 
-function makeMessenger(): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string }> } {
-  const sentMessages: Array<{ jid: string; text: string }> = [];
+beforeEach(async () => {
+  // Give each test a private state root under the owned Vitest temporary-home lifecycle.
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'ws-model-pin-state-'));
+});
+
+function makeMessenger(
+  // F2a (#2121): production's SubmissionReceipt carries the sent message's
+  // transport id. The DEFAULT stays null — the pre-F2a shape every other test
+  // in this file was written against — and only the reply-threading tests opt
+  // in to a deterministic id, so nothing else in this suite changes behavior.
+  nextMessageId: () => string | null = () => null,
+): { messenger: Messenger; sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> } {
+  const sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> = [];
   const messenger: Messenger = {
     sendMessage: vi.fn(async (jid: string, text: string) => {
-      sentMessages.push({ jid, text });
-      return { waMessageId: null };
+      const waMessageId = nextMessageId();
+      sentMessages.push({ jid, text, waMessageId });
+      return { waMessageId };
     }),
     sendMedia: vi.fn(async () => ({ waMessageId: null })),
   };
@@ -634,8 +663,11 @@ describe('NL routing handlers (nlRouting flag)', () => {
     fs.rmSync(eventsDir, { recursive: true, force: true });
   });
 
-  function makeRoutingRuntime(runtimeOptions: Record<string, unknown> = {}): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string }> } {
-    const { messenger, sentMessages } = makeMessenger();
+  function makeRoutingRuntime(
+    runtimeOptions: Record<string, unknown> = {},
+    nextMessageId: () => string | null = () => null,
+  ): { runtime: AgentRuntime; sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> } {
+    const { messenger, sentMessages } = makeMessenger(nextMessageId);
     const runtime = new AgentRuntime(routingDb, messenger, 'test', runtimeOptions);
     // Mirror the flag-gated schema init that runtime.start() performs in
     // production (tests do not call start(); its other side effects are
@@ -665,7 +697,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     expect(Object.isFrozen(opts?.routePolicy)).toBe(true);
   });
 
-  function allReplies(sentMessages: Array<{ jid: string; text: string }>): string[] {
+  function allReplies(sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }>): string[] {
     return [
       ...sentMessages.map((s) => s.text),
       ...mockQueue.enqueueText.mock.calls.map((c) => String(c[0])),
@@ -1233,6 +1265,46 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).not.toContain("Couldn't pin");
       // Plain-language hold: no line/tier/weight in the new copy either.
       expect(reply).not.toMatch(/\b(line|tier|weight)\b/i);
+    });
+
+    it('DEFER retry: re-selecting the same pending model retries after backoff, keeps an honest continued defer, then promotes the existing pin after recovery', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const base = 1_800_000_000_000;
+      vi.setSystemTime(base);
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const listFn = vi.fn()
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'unavailable', reason: 'spawn-error' })
+        .mockResolvedValueOnce({ status: 'ok', ids: ['kimi/kimi-k3'] });
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
+
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-2' }));
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      expect(listFn).toHaveBeenCalledTimes(1);
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 1_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-3' }));
+
+      expect(listFn).toHaveBeenCalledTimes(2);
+      expect(prefRows()[0].model_pin_verified).toBe(0);
+      let reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('pending a catalogue check');
+      expect(reply).not.toContain('Already set');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      vi.setSystemTime(base + 2_000);
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'msg-4' }));
+
+      expect(listFn).toHaveBeenCalledTimes(3);
+      expect(prefRows()[0].model_pin_verified).toBe(1);
+      reply = allReplies(sentMessages).join('\n');
+      expect(reply).not.toContain('Already set');
+      expect(reply).not.toContain('pending a catalogue check');
+      expect(reply).toContain('kimi/kimi-k3');
     });
 
     it('PROVIDER-CHANGED FAIL-OPEN: a verified pin against a DIFFERENT provider than the one resolving now never bleeds its model into the route (Task H)', async () => {
@@ -2242,6 +2314,638 @@ describe('NL routing handlers (nlRouting flag)', () => {
     });
   });
 
+  // F2a reply-threaded widening (#2121, owner decision recorded on the issue
+  // 2026-08-04). The affirmative set gains `confirm`/`yes`/`pin`, but those
+  // three promote ONLY from a reply the client threaded to the pin receipt —
+  // the inbound's `quotedMessageId` must equal the id that receipt was sent
+  // with. The owner's stated reason: "a stray bare 'yes' in an unrelated reply
+  // cannot mutate routing; only a threaded reply to the actual receipt can."
+  //
+  // Bare `keep` is unchanged and is covered by the suite above; the tests here
+  // own the widening and, above all, the negative case the owner named as this
+  // change's acceptance falsifier — an UNQUOTED `confirm` must not promote.
+  describe('F2a: a reply threaded to the pin receipt confirms it', () => {
+    // LOW-1 (#2121 follow-up): every outbound carries its OWN id. The single
+    // constant this replaces made the fixture unable to distinguish "the
+    // stored id is the receipt's" from "the stored id is some other send's",
+    // so a mutant that captured the wrong message passed. The counter lives
+    // INSIDE the factory, never at module scope, so ids cannot leak between
+    // tests.
+    const RECEIPT_PROMISE = 'reply keep to make it permanent';
+    function sequentialMessageIds(): () => string {
+      let sent = 0;
+      return () => `WA-OUT-${String(++sent).padStart(4, '0')}`;
+    }
+
+    /** Ids of the keep-promising receipts the messenger actually carried, in
+     *  send order. Asserts each one is a real transport id rather than the
+     *  null the queue path reports (#2981 car-A), so a test can never quote
+     *  `null` and pass vacuously. */
+    function receiptIds(
+      sentMessages: Array<{ text: string; waMessageId: string | null }>,
+    ): string[] {
+      const ids = sentMessages
+        .filter((m) => m.text.includes(RECEIPT_PROMISE))
+        .map((m) => m.waMessageId);
+      expect(ids.length).toBeGreaterThan(0);
+      for (const id of ids) expect(typeof id).toBe('string');
+      return ids as string[];
+    }
+
+    // Pin through `/model N default`, which produces a keep-promising receipt
+    // ("Now answering with `opencode-cli`. reply keep to make it permanent").
+    // The pin is a GENUINE provider switch, so the live session recycles first
+    // and the recycle drops the outbound queue — that is what puts the receipt
+    // on the messenger path, where the transport id exists. On the queue path
+    // the id is null by design (#2981 car-A) and nothing is captured; see
+    // sendPinReceipt's coverage note in model-pin.ts.
+    async function pinWithReceipt(): Promise<{
+      runtime: AgentRuntime;
+      sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }>;
+      receiptId: string;
+    }> {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' }, sequentialMessageIds());
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets =
+        () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-pin',
+      }));
+      mockSession.sendTurn.mockClear();
+      const ids = receiptIds(sentMessages);
+      expect(ids).toHaveLength(1);
+      return { runtime, sentMessages, receiptId: ids[0]! };
+    }
+
+    function receiptRow(): Record<string, unknown> {
+      const rows = prefRows();
+      expect(rows).toHaveLength(1);
+      return rows[0]!;
+    }
+
+    it('captures the id of the receipt that promises the keep reply', async () => {
+      const { sentMessages, receiptId } = await pinWithReceipt();
+      const receipt = sentMessages.find((m) => m.text.includes(RECEIPT_PROMISE));
+      expect(receipt).toBeDefined();
+      expect(receipt!.waMessageId).toBe(receiptId);
+      // The STORED id is the receipt's own, not merely "some id this bot
+      // sent" — under the old one-constant fixture those were the same
+      // string and this assertion could not tell them apart.
+      expect(receiptRow().keep_receipt_message_id).toBe(receiptId);
+      // The id is stored against the pin it describes, and the pin is still
+      // temporary — capture must not promote anything by itself.
+      expect(receiptRow().expires_at).not.toBeNull();
+    });
+
+    // Items 6/7 (#2121 follow-up review) — the matrices below iterate the
+    // production tuple, which makes them a faithful oracle for "every shipped
+    // token behaves correctly" but NOT for "the shipped set is the intended
+    // set": shrinking THREADED_AFFIRMATIVE_TOKENS to ['confirm'] drops the
+    // suite from 157 to 151 and stays green, because the deleted tokens take
+    // their own coverage with them. This independent equality assertion is the
+    // contract the tuple cannot satisfy about itself — a token added or
+    // removed must be a deliberate edit here, reviewed as a change to the
+    // owner's F2a affirmative set.
+    it('the widened affirmative set is exactly confirm/yes/pin', () => {
+      expect([...THREADED_AFFIRMATIVE_TOKENS]).toEqual(['confirm', 'yes', 'pin']);
+    });
+
+    // ── Quadrant 1: threaded + affirmative token → promotes ──────────────────
+    // D4 (#2121 follow-up): the matrices below iterate the SAME tuple the
+    // runtime matcher is built from (THREADED_AFFIRMATIVE_TOKENS), not a
+    // hand-copied array. A token added to the widening now extends its own
+    // coverage instead of silently landing untested.
+    it.each([...THREADED_AFFIRMATIVE_TOKENS])(
+      'threaded + affirmative: a quoted "%s" promotes the pin',
+      async (token) => {
+        const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+        await sendAndDrain(runtime, makeMsg({
+          chatJid: CHAT,
+          senderJid: SENDER_A,
+          content: token,
+          quotedMessageId: receiptId,
+          messageId: 'msg-confirm',
+        }));
+        expect(allReplies(sentMessages).join('\n')).toContain('Keeping opencode-cli for this chat until you /reset.');
+        expect(receiptRow().expires_at).toBeNull();
+        expect(receiptRow().scope).toBe('sticky');
+        // Handled locally — the confirmation never reaches the agent.
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      },
+    );
+
+    // ── Quadrant 2: UNTHREADED + affirmative token → must NOT promote ────────
+    // THE ACCEPTANCE FALSIFIER. This is the property the widening buys its
+    // safety with; it must hold before and after the change.
+    it.each([...THREADED_AFFIRMATIVE_TOKENS])(
+      'unthreaded + affirmative: a bare "%s" does NOT promote and reaches the agent',
+      async (token) => {
+        const { runtime, sentMessages } = await pinWithReceipt();
+        await sendAndDrain(runtime, makeMsg({
+          chatJid: CHAT,
+          senderJid: SENDER_A,
+          content: token,
+          quotedMessageId: null,
+          messageId: 'msg-unthreaded',
+        }));
+        expect(receiptRow().expires_at).not.toBeNull();
+        expect(receiptRow().scope).toBe('this_thread');
+        expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+        expect(mockSession.sendTurn).toHaveBeenCalled();
+      },
+    );
+
+    // ── Quadrant 3: threaded + non-token → must NOT promote ──────────────────
+    it('threaded + non-token: quoting the receipt with ordinary text does NOT promote', async () => {
+      const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'thanks, that looks right',
+        quotedMessageId: receiptId,
+        messageId: 'msg-thanks',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // ── Quadrant 4: unthreaded + non-token → must NOT promote ────────────────
+    it('unthreaded + non-token: ordinary text does NOT promote', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'please confirm it for me',
+        quotedMessageId: null,
+        messageId: 'msg-sentence',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // D4 (#2121 follow-up) — the matcher is an EXACT match, and that is what
+    // keeps the widening from reopening the false-positive surface #2109
+    // closed. Derived from the same tuple, so a future token inherits this
+    // guard: "<token> please" is ordinary conversation even when it quotes
+    // the receipt, and must reach the agent untouched.
+    it.each([...THREADED_AFFIRMATIVE_TOKENS])(
+      'threaded near miss: "%s please" is NOT an affirmative and reaches the agent',
+      async (token) => {
+        const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+        await sendAndDrain(runtime, makeMsg({
+          chatJid: CHAT,
+          senderJid: SENDER_A,
+          content: `${token} please`,
+          quotedMessageId: receiptId,
+          messageId: 'msg-near-miss',
+        }));
+        expect(receiptRow().expires_at).not.toBeNull();
+        expect(receiptRow().scope).toBe('this_thread');
+        expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping opencode-cli');
+        expect(mockSession.sendTurn).toHaveBeenCalled();
+      },
+    );
+
+    // Threading is authenticated against THE receipt, not against any quote:
+    // a reply that quotes some other message is exactly as inert as no quote.
+    it('a quote of a DIFFERENT message does NOT promote', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'confirm',
+        quotedMessageId: 'WA-SOME-OTHER-MESSAGE',
+        messageId: 'msg-wrong-quote',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // Backward compatibility with the 2026-07-23 contract: the widening added
+    // a threading requirement to the NEW tokens only. `keep` must still work
+    // exactly as it did, with no quote.
+    it('bare keep still promotes with no quote at all', async () => {
+      const { runtime, sentMessages } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'keep',
+        quotedMessageId: null,
+        messageId: 'msg-keep',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain('Keeping opencode-cli for this chat until you /reset.');
+      expect(receiptRow().expires_at).toBeNull();
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    // LOW-1 (#2121 follow-up) — THE MUTANT KILLER, and the reason the fixture
+    // now issues sequential ids. Threading must authenticate against the
+    // CURRENT receipt, not against "some receipt this chat once got". A second
+    // pin supersedes the first, so the FIRST receipt's id must go as inert as
+    // a stranger's message id. Under the old one-constant fixture both
+    // receipts carried the same string, the stale quote authenticated, and
+    // this test could not be written at all.
+    //
+    // The packet asked for the `/model list` MENU id as the negative control.
+    // That is not expressible here and the reason is a real transport fact,
+    // not a fixture gap: the menu goes out on the outbound-queue path, which
+    // reports acceptance with a NULL id by design (#2981 car-A), so the menu
+    // has no transport id to quote. The superseded receipt is the same test
+    // with an id that actually exists.
+    it('a threaded affirmative quoting a SUPERSEDED receipt does NOT promote', async () => {
+      const { runtime, sentMessages, receiptId: staleReceiptId } = await pinWithReceipt();
+      // Re-pin to the OTHER routable provider: a genuine switch, so this
+      // writes a fresh row and sends a second keep-promising receipt.
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: '/model 1 default', messageId: 'msg-repin',
+      }));
+      const ids = receiptIds(sentMessages);
+      expect(ids).toHaveLength(2);
+      const freshReceiptId = ids[1]!;
+      // Coverage assertion: the fixture really does hand out distinct ids. A
+      // regression to one constant would make the quote below authenticate
+      // and silently void this test rather than fail it.
+      expect(freshReceiptId).not.toBe(staleReceiptId);
+      expect(receiptRow().keep_receipt_message_id).toBe(freshReceiptId);
+
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: 'confirm',
+        quotedMessageId: staleReceiptId,
+        messageId: 'msg-stale-quote',
+      }));
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(receiptRow().scope).toBe('this_thread');
+      expect(allReplies(sentMessages).join('\n')).not.toContain('Keeping ');
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // The actor policy the Q-CANARY contract established is not weakened by
+    // threading: possession of the receipt's id is not authority over the pin.
+    it('a threaded confirm from another group member is still refused', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' }, sequentialMessageIds());
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets =
+        () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model list' }));
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP, senderJid: SENDER_A, isGroup: true, content: '/model 2 default', messageId: 'msg-pin',
+      }));
+      const receiptId = receiptIds(sentMessages)[0]!;
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: GROUP,
+        senderJid: SENDER_B,
+        isGroup: true,
+        content: 'confirm',
+        quotedMessageId: receiptId,
+        messageId: 'msg-other-confirm',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain("Only whoever set this chat's pin can keep it.");
+      expect(receiptRow().expires_at).not.toBeNull();
+      // LOW-2 (#2121 follow-up) — THE SWALLOW, pinned deliberately rather than
+      // left to chance. A threaded affirmative that FAILS the actor check is
+      // handled locally: the other member gets the refusal and the text does
+      // NOT also reach the agent as an ordinary turn. That is the intended
+      // reading of the F2a contract — the widened tokens are a control
+      // surface, and a control surface answers rather than forwarding — and
+      // forwarding as well would answer the same message twice. Recorded in
+      // the PR body as a disclosed behaviour, not a silent one.
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    // A2 (#2121 follow-up) — the awaited receipt send had no bound of its own.
+    // `sendPinReceipt` is awaited on purpose (the id must be durable before a
+    // fast threaded confirm can arrive), but a transport that neither resolves
+    // nor rejects then held the `/model` handler open, and with it every turn
+    // queued behind it for this chat. The bound degrades that to exactly the
+    // condition the outbound-queue path already produces: pin written, receipt
+    // out, id not captured, widened tokens falling through to the agent.
+    it('a pin receipt send that never settles is bounded and does not wedge the chat', async () => {
+      cfgAny().agentFallbacks = [{ provider: 'opencode-cli', model: 'kimi/kimi-k3' }];
+      // Never released: the send is still pending when the test ends, which is
+      // the point — nothing downstream may depend on it settling.
+      const neverSettles = new Promise<void>(() => {});
+      const sentMessages: Array<{ jid: string; text: string; waMessageId: string | null }> = [];
+      const messenger: Messenger = {
+        sendMessage: vi.fn(async (jid: string, text: string) => {
+          if (text.includes(RECEIPT_PROMISE)) await neverSettles;
+          sentMessages.push({ jid, text, waMessageId: 'WA-OUT-0001' });
+          return { waMessageId: 'WA-OUT-0001' };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      };
+      const runtime = new AgentRuntime(routingDb, messenger, 'test', { model: 'claude-opus-4-8' });
+      if (cfgAny().nlRouting === true) ensurePrefSchema?.(routingDb);
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets =
+        () => ['claude-cli', 'opencode-cli'];
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model list' }));
+
+      // Only setTimeout/clearTimeout are faked, so the awaits in the handler
+      // still run as normal microtasks. Real timers are restored by this
+      // describe block's own unconditional afterEach.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const pinTurn = sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-pin',
+      }));
+      await vi.advanceTimersByTimeAsync(PIN_RECEIPT_SEND_TIMEOUT_MS + 1);
+      // The assertion IS this await returning: unbounded, it never does.
+      await pinTurn;
+      vi.useRealTimers();
+
+      // The pin itself landed; only the authentication did not.
+      expect(receiptRow().expires_at).not.toBeNull();
+      expect(receiptRow().keep_receipt_message_id).toBeNull();
+
+      // And the chat is not wedged behind the stalled send: an unrelated turn
+      // queued after the pin still reaches the agent.
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'anything at all', messageId: 'msg-after-stall',
+      }));
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+    });
+
+    // S2 (#2121 follow-up review) — the RUNTIME half of the A1 capture guard.
+    // The store test proves recordKeepReceiptMessageId REFUSES a sticky row;
+    // this proves the runtime actually REACHES that call with a sticky row
+    // underneath, so the guard is load-bearing rather than defensive.
+    //
+    // Two conditions must hold at once: the pin outcome is 'sticky_kept' (so
+    // no write clears the id) and the recycle is NOT a no-op (so the echo is
+    // the honest keep-promising receipt, not the plain "Already set (sticky)"
+    // line, which promises nothing and never reaches the capture). They
+    // coincide when the LIVE SESSION is on a different route from the sticky
+    // pin — the ordinary shape after a restart or a /new, where the session
+    // was spawned before the pin existed.
+    //
+    // Driven through the exported `handleModelCommand` with a port whose
+    // getActiveQueue() is null, which is the state the recycle itself leaves
+    // behind: recycleLiveSession drops the per-chat queue, and only then does
+    // the receipt go out on the messenger carrying a real transport id. Behind
+    // a live queue the send is accepted with a NULL id by design (#2981
+    // car-A), so no capture is attempted at all and the test would be vacuous.
+    it('a sticky re-confirm that recycles does not re-arm the receipt on the sticky row', async () => {
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      prefMod.ensureChatPreferenceSchema(routingDb);
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+
+      // The pin as `/model 2 default` + `keep` leaves it: permanent, and
+      // holding no receipt (A1 consumed it at promotion).
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'sticky',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: Date.now(),
+        expiresAt: null,
+        requestedModel: null,
+        validatedProvider: null,
+        modelPinVerified: null,
+        requestedEffort: null,
+        keepReceiptMessageId: null,
+      });
+
+      const sent: Array<{ text: string; id: string | null }> = [];
+      let outboundId = 0;
+      const port = {
+        db: routingDb,
+        instanceName: 'test',
+        sessionScope: 'single',
+        // 'sticky_kept': the row is already permanent and identical, so the
+        // store is not written — this is the real production return for a
+        // re-confirm, not a stub shortcut.
+        recordRoutePreference: () => 'sticky_kept' as const,
+        // The live session is on the DEFAULT route while the pin names
+        // opencode-cli, so applyRouteChangeAndRecycle reports a real change.
+        resolveRouteForTurn: () => ({ provider: 'opencode-cli', reasonCode: 'user_pin', pinnedProvider: 'opencode-cli' }),
+        resolvePerChatMapKey: (jid: string) => jid,
+        isTurnInFlight: () => false,
+        // Post-recycle: the queue is gone, so the receipt goes out on the
+        // messenger and carries a real id.
+        getActiveQueue: () => null,
+        catalogueSnapshot: {
+          resolveCataloguePick: () => ({ providerId: 'opencode-cli' }),
+          resolveLatestPick: () => null,
+        },
+        emitRouteEventChecked: () => {},
+        sendDirect: (_jid: string, text: string) => { sent.push({ text, id: null }); },
+        sendDirectWithReceipt: async (_jid: string, text: string) => {
+          const id = `WA-OUT-${String(++outboundId).padStart(4, '0')}`;
+          sent.push({ text, id });
+          return { accepted: true, messageId: id };
+        },
+        // A live session spawned on the DEFAULT route, before the pin existed
+        // — the ordinary shape after a restart or a /new. This is what makes
+        // the re-confirm a real route change rather than a no-op.
+        session: {
+          getProviderId: () => 'claude-cli',
+          getModelRef: () => 'claude-opus-4-8',
+          getSpawnedEffort: () => null,
+          shutdown: async () => {},
+        },
+        routeSessionProviderConfig: () => ({}),
+        cleanupGlobalAutoCompactState: () => {},
+        deleteOwnedPerChatSession: () => true,
+        cleanupPerChatState: () => {},
+        operationTracker: null,
+        activeChatJid: null,
+        queue: null,
+        chatSessions: new Map(),
+        chatQueues: new Map(),
+        pendingRecycle: new Set<string>(),
+        recyclePromises: new Map(),
+        recycleOwners: new Map(),
+        recycleFailures: new Map(),
+        effectiveFallbackEntry: null,
+        completeLocalInbound: () => {},
+      } as unknown as ModelPinPort;
+
+      await handleModelCommand(port, {
+        chatJid: CHAT, senderJid: SENDER_A, args: '1 default', perChatMapKey: CHAT,
+      });
+
+      // Coverage assertion: the test is only meaningful if a keep-promising
+      // receipt really went out WITH a real transport id. Without it the
+      // capture is never attempted and the row assertion below would hold
+      // vacuously, guard or no guard.
+      const receipts = sent.filter((m) => m.text.includes(RECEIPT_PROMISE));
+      expect(receipts).toHaveLength(1);
+      expect(typeof receipts[0]!.id).toBe('string');
+
+      // The guard's whole point: the pin is already permanent, so it takes no
+      // receipt and cannot intercept a later threaded affirmative.
+      expect(prefMod.getKeepReceiptMessageId(routingDb, chatKey)).toBeNull();
+      expect(prefMod.getPreference(routingDb, chatKey, senderKey, Date.now())).toMatchObject({
+        scope: 'sticky',
+        expiresAt: null,
+        keepReceiptMessageId: null,
+      });
+    });
+
+    // A1 (#2121 follow-up) — promotion did not clear the captured receipt id,
+    // so a sticky row kept authenticating replies to the receipt that made it
+    // sticky. Every later threaded affirmative was then intercepted and
+    // answered "already kept" instead of reaching the agent: the user's "yes"
+    // to a question the assistant had asked in the meantime was eaten by the
+    // pin surface. A pin that is already permanent has nothing left to
+    // confirm, so it must hold no receipt.
+    it('a threaded affirmative on an ALREADY-STICKY pin reaches the agent', async () => {
+      const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'confirm',
+        quotedMessageId: receiptId, messageId: 'msg-promote',
+      }));
+      expect(receiptRow().scope).toBe('sticky');
+      expect(receiptRow().expires_at).toBeNull();
+      // The promotion consumed the receipt.
+      expect(receiptRow().keep_receipt_message_id).toBeNull();
+
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'yes',
+        quotedMessageId: receiptId, messageId: 'msg-second-yes',
+      }));
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+      expect(allReplies(sentMessages).join('\n')).not.toContain('is already kept for this chat');
+    });
+
+    // The other half of A1, and the regression guard on the 2026-07-23
+    // contract: bare `keep` is NOT threaded-gated and must still be answered
+    // locally on a sticky pin. Clearing the receipt id changes what the
+    // WIDENED tokens do, and nothing about what `keep` does.
+    it('bare keep on an already-sticky pin still answers "already kept"', async () => {
+      const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'confirm',
+        quotedMessageId: receiptId, messageId: 'msg-promote',
+      }));
+      expect(receiptRow().scope).toBe('sticky');
+
+      mockSession.sendTurn.mockClear();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'keep',
+        quotedMessageId: null, messageId: 'msg-bare-keep-sticky',
+      }));
+      expect(allReplies(sentMessages).join('\n')).toContain('is already kept for this chat');
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    // Item 5 (#2121 follow-up, cross-model bench) — LEGACY ROWS. The capture
+    // guard added for A1 stops NEW receipt ids landing on a sticky row, and
+    // promotion consumes the id going forward. Neither repairs a row that the
+    // BASE code already stamped: `keep_receipt_message_id` set on a row that
+    // is now sticky. `getKeepReceiptMessageId` returned that stored id without
+    // consulting `expires_at`, so after upgrade an old receipt still
+    // authenticated a threaded affirmative and the pin surface went on
+    // swallowing it — the exact interception this work exists to end,
+    // surviving in the installed base.
+    //
+    // The row is seeded with a raw UPDATE precisely BECAUSE the fixed writer
+    // now refuses it: this is the state base produced, reproduced faithfully,
+    // not a state the current code can reach. Reading it back as null repairs
+    // every such row on the next read, with no migration and no write.
+    it('a threaded affirmative on a LEGACY sticky row carrying an old receipt id reaches the agent', async () => {
+      const { runtime, sentMessages, receiptId } = await pinWithReceipt();
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'confirm',
+        quotedMessageId: receiptId, messageId: 'msg-promote',
+      }));
+      expect(receiptRow().scope).toBe('sticky');
+
+      // Reproduce the pre-upgrade row shape: sticky, and still stamped with
+      // the receipt id that base's unguarded writer left behind.
+      const LEGACY_RECEIPT = 'WA-LEGACY-RECEIPT';
+      (routingDb.raw as unknown as { prepare: (s: string) => { run: (...a: unknown[]) => void } })
+        .prepare('UPDATE chat_model_preference SET keep_receipt_message_id = ?')
+        .run(LEGACY_RECEIPT);
+      // Coverage assertion: the seed really is in place, so the dispatch below
+      // exercises the legacy path rather than passing on an empty column.
+      expect(receiptRow().keep_receipt_message_id).toBe(LEGACY_RECEIPT);
+      expect(receiptRow().expires_at).toBeNull();
+
+      mockSession.sendTurn.mockClear();
+      const repliesBefore = allReplies(sentMessages).length;
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: 'yes',
+        quotedMessageId: LEGACY_RECEIPT, messageId: 'msg-legacy-yes',
+      }));
+
+      // The affirmative reaches the agent, and the pin surface produces no
+      // local reply of its own — no "already kept", nothing.
+      expect(mockSession.sendTurn).toHaveBeenCalled();
+      expect(allReplies(sentMessages)).toHaveLength(repliesBefore);
+    });
+
+    // A3 (#2121 follow-up) — setPreference's comment claims "a pin write
+    // always supersedes the previous receipt", but the two REFRESH sites
+    // (`recordRouteModelPin` and `recordRoutePreference`) re-write the row as
+    // `{ ...existing, updatedAt, expiresAt }`, and `existing` now carries the
+    // captured id, so the spread PRESERVED it. The refresh echo ("Already set
+    // — extended for another 24h") does not promise the keep reply, so the
+    // surviving id authenticated a reply to a receipt that is no longer the
+    // live invitation. Both sites now clear it, which makes the comment true
+    // as written.
+    // The MODEL-level refresh site is driven directly rather than through
+    // `/model N`: reaching recordRouteModelPin's 'refreshed' branch via the
+    // runtime needs a catalogue-VERIFIED pin, and this fixture has no
+    // catalogue plumbing, so its verify DEFERS and no keep-promising receipt
+    // is ever sent. A runtime route would have asserted null-is-null and
+    // proved nothing about the branch under test.
+    it('a model-pin REFRESH clears the previous receipt id', async () => {
+      makeRoutingRuntime({ model: 'claude-opus-4-8' });
+      const prefMod = await import('../../../src/runtimes/agent/chat-preference-db.ts');
+      const keysMod = await import('../../../src/runtimes/agent/preference-keys.ts');
+      const { chatKey, senderKey } = keysMod.preferenceKeys(routingDb, CHAT, SENDER_A);
+      const now = Date.now();
+      prefMod.setPreference(routingDb, {
+        chatJid: chatKey,
+        senderJid: senderKey,
+        intent: 'provider_specific',
+        requestedProvider: 'opencode-cli',
+        scope: 'this_thread',
+        pinStrict: true,
+        fallbackPermitted: false,
+        updatedAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        requestedModel: 'kimi/kimi-k3',
+        validatedProvider: 'opencode-cli',
+        modelPinVerified: true,
+        requestedEffort: null,
+      });
+      prefMod.recordKeepReceiptMessageId(routingDb, chatKey, senderKey, 'WA-OUT-0001');
+      // Coverage assertion: the refresh below has a real id to preserve.
+      expect(prefMod.getKeepReceiptMessageId(routingDb, chatKey)).toBe('WA-OUT-0001');
+
+      const port = { db: routingDb, emitRouteEventChecked: () => {} } as unknown as ModelPinPort;
+      // Same provider, same model, same effort -> the dedup guard's
+      // 'refreshed' branch (an identical repeat extends the TTL in place).
+      const outcome = recordRouteModelPin(port, CHAT, chatKey, senderKey, 'opencode-cli', 'kimi/kimi-k3', null);
+      expect(outcome).toBe('refreshed');
+      expect(prefMod.getKeepReceiptMessageId(routingDb, chatKey)).toBeNull();
+    });
+
+    it('a provider-pin REFRESH clears the previous receipt id', async () => {
+      const { runtime } = await pinWithReceipt();
+      expect(receiptRow().keep_receipt_message_id).not.toBeNull();
+      // Same intent, same provider, still no model -> the 'refreshed' branch
+      // in recordRoutePreference (runtime-routing.ts).
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT, senderJid: SENDER_A, content: '/model 2 default', messageId: 'msg-refresh-provider',
+      }));
+      expect(receiptRow().keep_receipt_message_id).toBeNull();
+    });
+  });
+
   // ── Slice 1: /model <vendor/model> direct selector ─────────────────────────
   // The power-user one-step path — pin an EXACT configured model id without
   // first walking the numbered menu. Resolves against the same configured
@@ -2356,9 +3060,9 @@ describe('NL routing handlers (nlRouting flag)', () => {
       // credential): `/model <provider>` already rejects it at SET time (F07,
       // see the uncredentialed-fallback test above); `/model <id>` MUST too, or
       // the direct selector could pin a route that hard-fails or silently falls
-      // back. `absentService` mirrors the provider-id F07 test — no keychain
-      // dependency (the service is absent from every store → credential null).
-      const absentService = `wa-test-absent-${Math.random().toString(36).slice(2)}`;
+      // back. The shared process mock supplies an empty keyring result; the
+      // isolated file stores and unknown service keep other sources absent.
+      const absentService = 'wa-test-absent-model-pin';
       cfgAny().agentProviderConfig = { apiKeyService: absentService };
       cfgAny().agentFallbacks = [{ provider: 'anthropic-api', model: 'anthropic/claude-test-x' }];
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8' });
@@ -2420,6 +3124,47 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(reply).toContain('kimi/kimi-k3');
       expect(reply).toContain('glm/glm-5.2');
       expect(listFn).toHaveBeenCalled();
+      expect(prefRows()).toHaveLength(0);
+    });
+
+    it('routes the shared CLI catalogue test seam through the codex-cli drill without spawning a real binary', async () => {
+      const listFn = vi.fn().mockResolvedValue({
+        status: 'ok',
+        ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      });
+      const { runtime, sentMessages } = makeRoutingRuntime({
+        model: 'claude-opus-4-8',
+        modelCatalogueListFn: listFn,
+      });
+      (runtime as unknown as { routablePinTargets: () => string[] }).routablePinTargets = () => [
+        'claude-cli',
+        'codex-cli',
+      ];
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: '/model',
+      }));
+      const brandMenu = allReplies(sentMessages).join('\n');
+      const codexRow = brandMenu.match(/^(\d+)\. Codex$/m);
+      expect(codexRow).not.toBeNull();
+
+      await sendAndDrain(runtime, makeMsg({
+        chatJid: CHAT,
+        senderJid: SENDER_A,
+        content: `/model ${codexRow![1]}`,
+        messageId: 'codex-drill',
+      }));
+
+      const reply = allReplies(sentMessages).join('\n');
+      expect(reply).toContain('*Codex — pick a model:*');
+      expect(reply).toContain('gpt-5.6-sol');
+      expect(reply).toContain('gpt-5.5');
+      // This suite's session mock deliberately returns no resolved binary, so
+      // fetchProviderCatalogue falls back to the provider id. Production uses
+      // getProviderBinary('codex-cli') -> 'codex'.
+      expect(listFn).toHaveBeenCalledWith('codex-cli');
       expect(prefRows()).toHaveLength(0);
     });
 
@@ -2612,7 +3357,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       expect(allReplies(sentMessages).join('\n')).toContain("isn't configured on this instance");
     });
 
-    it('L2 render is capped (review M-2): a chatty provider catalogue is bounded, with an honest "showing 1–N of M" disclosure', async () => {
+    it('L2 pagination: a chatty provider catalogue shows eleven models plus More, then resolves the next-page snapshot without widening the visible cap', async () => {
       const many = Array.from({ length: 20 }, (_, i) => `opencode/model-${i}`);
       const listFn = vi.fn().mockResolvedValue({ status: 'ok', ids: many });
       const { runtime, sentMessages } = makeRoutingRuntime({ model: 'claude-opus-4-8', modelCatalogueListFn: listFn });
@@ -2621,10 +3366,25 @@ describe('NL routing handlers (nlRouting flag)', () => {
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model' }));
       await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 2', messageId: 'm2' })); // → OpenCode L2
       const reply = allReplies(sentMessages).join('\n');
-      // Capped at MODEL_CATALOGUE_CAP (12) — the 13th id is not numbered.
-      expect(reply).toContain('12. opencode/model-11');
+      expect(reply).toContain('11. opencode/model-10');
+      expect(reply).toContain('12. More models');
       expect(reply).not.toContain('13. opencode/model-12');
-      expect(reply).toContain('showing 1–12 of 20');
+      expect(reply).toContain('showing 1–11 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 12', messageId: 'm3' }));
+      const nextPage = allReplies(sentMessages).join('\n');
+      expect(nextPage).toContain('1. opencode/model-11');
+      expect(nextPage).toContain('9. opencode/model-19');
+      expect(nextPage).not.toContain('10. ');
+      expect(nextPage).toContain('showing 12–20 of 20');
+
+      sentMessages.length = 0;
+      mockQueue.enqueueText.mockClear();
+      await sendAndDrain(runtime, makeMsg({ chatJid: CHAT, senderJid: SENDER_A, content: '/model 1', messageId: 'm4' }));
+      expect(prefRows()[0].requested_model).toBe('opencode/model-11');
+      expect(prefRows()[0].model_pin_verified).toBe(1);
     });
   });
 });

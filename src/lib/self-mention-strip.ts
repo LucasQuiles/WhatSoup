@@ -111,11 +111,50 @@ export function stripSelfMentions(text: string, patterns: readonly RegExp[]): st
 
 /**
  * Convenience: build patterns from identifiers and strip in one call.
+ *
+ * The pattern set is cached per identity list: `src/core/ingest.ts` calls this
+ * inline on every inbound GROUP message, and the bot's JID/LID are stable for
+ * the life of a connection (they change only across reconnect/re-pair), so
+ * rebuilding up to 8 RegExp objects per message is waste on the hottest path.
+ * Cache model mirrors `src/transport/connection.ts`'s per-connection-open
+ * fields: rebuilt iff the identity inputs actually change. Pattern contents
+ * are byte-identical to an uncached build — only their construction is cached.
  */
 export function stripSelfMentionsFrom(
   text: string,
   identifiers: readonly string[],
   options?: SelfMentionStripOptions,
 ): string {
-  return stripSelfMentions(text, buildSelfMentionStripPatterns(identifiers, options));
+  return stripSelfMentions(text, buildSelfMentionStripPatternsCached(identifiers, options));
+}
+
+/**
+ * Identity-keyed memoization for {@link buildSelfMentionStripPatterns}.
+ *
+ * Key discipline: the cache key is the exact call inputs (frozen identifiers
+ * tuple + serialized options), so ANY identity change — reconnect, re-pair, a
+ * caller passing a different list — produces a different key and a fresh
+ * build. A never-invalidating cache would be a correctness bug (stale bot
+ * identity would strip the wrong tokens); keying on the inputs makes that
+ * structurally impossible. Module-level, per-process; bounded de facto by the
+ * tiny set of distinct identities a process ever sees.
+ */
+const patternCache = new Map<string, RegExp[]>();
+
+/**
+ * Cached builder (identity-keyed). Exported for tests to observe cache
+ * instance identity and invalidation behaviour directly; production reaches
+ * it through {@link stripSelfMentionsFrom}.
+ */
+export function buildSelfMentionStripPatternsCached(
+  identifiers: readonly string[],
+  options: SelfMentionStripOptions = {},
+): RegExp[] {
+  const stripPrefixes = options.stripPrefixes ?? ['whatsapp:'];
+  const key = JSON.stringify({ identifiers, stripPrefixes });
+  const cached = patternCache.get(key);
+  if (cached !== undefined) return cached;
+  const built = buildSelfMentionStripPatterns(identifiers, options);
+  patternCache.set(key, built);
+  return built;
 }

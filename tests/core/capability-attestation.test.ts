@@ -51,6 +51,7 @@ function record(over: Partial<Parameters<typeof recordCapabilityAttestation>[1]>
     nonce: `nonce-${Math.random().toString(36).slice(2)}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     ...over,
   });
 }

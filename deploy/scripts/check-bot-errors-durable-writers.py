@@ -6,12 +6,27 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 from typing import Any
 
 
-DURABLE_PUBLISHERS = {"publish_event_json", "publish_state_json"}
+BOUNDED_JSONL_PUBLISHER = "append_bounded_jsonl"
+BOUNDED_JSONL_CONSUMER = "require_bounded_jsonl_commit"
+BOUNDED_JSONL_MODULE = "lib.bounded_jsonl"
+BOUNDED_JSONL_PATH = "deploy/scripts/lib/bounded_jsonl.py"
+SHARED_PUBLISHER_BINDING = {
+    "publisher": BOUNDED_JSONL_PUBLISHER,
+    "consumer": BOUNDED_JSONL_CONSUMER,
+    "module": BOUNDED_JSONL_MODULE,
+    "path": BOUNDED_JSONL_PATH,
+}
+SHARED_PUBLISHER_KEYS = {"publisher", "consumer", "module", "path"}
+DURABLE_PUBLISHERS = {
+    BOUNDED_JSONL_PUBLISHER,
+    "publish_event_json",
+    "publish_state_json",
+}
 ROW_KEYS = {
     "site_id",
     "script",
@@ -24,18 +39,24 @@ ROW_KEYS = {
     "fault_test_ids",
 }
 KINDS = {
+    "diagnostic_jsonl_append",
     "event_create_once",
     "state_replace_expected",
     "diagnostic_state",
     "lifecycle_move_deferred_draft_3",
 }
-IDENTITY_SOURCES = {"durable_json.operation_id.v1", "deferred_draft_3"}
+IDENTITY_SOURCES = {
+    "bounded_jsonl.record_sha256.evidence_only.v1",
+    "durable_json.operation_id.v1",
+    "deferred_draft_3",
+}
 RESULT_POLICIES = {
     "require_advance",
     "explicit_advance_check",
     "propagate_result",
     "aggregate_all",
     "deferred_draft_3",
+    "require_bounded_jsonl_commit",
 }
 
 
@@ -45,6 +66,13 @@ def _call_name(call: ast.Call) -> str:
     if isinstance(call.func, ast.Attribute):
         return call.func.attr
     return ""
+
+
+def _is_durable_publisher_call(call: ast.Call) -> bool:
+    name = _call_name(call)
+    if name == BOUNDED_JSONL_PUBLISHER:
+        return isinstance(call.func, ast.Name)
+    return name in DURABLE_PUBLISHERS
 
 
 def _constant_keyword(call: ast.Call, name: str) -> str | None:
@@ -158,6 +186,38 @@ def _contains_loaded_name(node: ast.AST, name: str) -> bool:
     )
 
 
+def _assigned_result_reaches_unshadowed_consumer(
+    function: ast.AST,
+    publisher_call: ast.Call,
+    assigned_name: str,
+    consumer_name: str,
+) -> bool:
+    for node in _scope_walk(function):
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Name)
+            or node.func.id != consumer_name
+            or not any(
+                _contains_loaded_name(argument, assigned_name)
+                for argument in [*node.args, *(keyword.value for keyword in node.keywords)]
+            )
+            or getattr(node, "lineno", -1) <= getattr(publisher_call, "lineno", -1)
+        ):
+            continue
+        rebound = any(
+            isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Store)
+            and candidate.id == assigned_name
+            and getattr(publisher_call, "lineno", -1)
+            < getattr(candidate, "lineno", -1)
+            < getattr(node, "lineno", -1)
+            for candidate in _scope_walk(function)
+        )
+        if not rebound:
+            return True
+    return False
+
+
 def _result_satisfies_policy(
     call: ast.Call,
     function: ast.AST,
@@ -165,6 +225,22 @@ def _result_satisfies_policy(
     policy: str,
 ) -> bool:
     parent = parents.get(call)
+    if policy == "require_bounded_jsonl_commit":
+        if (
+            isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Name)
+            and parent.func.id == BOUNDED_JSONL_CONSUMER
+        ):
+            return True
+        assigned_name = _assigned_name(call, parents)
+        if assigned_name is None or assigned_name == "_":
+            return False
+        return _assigned_result_reaches_unshadowed_consumer(
+            function,
+            call,
+            assigned_name,
+            BOUNDED_JSONL_CONSUMER,
+        )
     if (
         isinstance(parent, ast.Call)
         and isinstance(parent.func, ast.Name)
@@ -330,6 +406,174 @@ def _finding(code: str, row: dict[str, Any], detail: str) -> dict[str, str]:
     }
 
 
+def _shared_publisher_module_findings(
+    root: Path,
+    inventory: dict[str, Any],
+) -> list[dict[str, str]]:
+    binding = inventory["shared_publishers"][0]
+    path_value = str(binding["path"])
+    module_value = str(binding["module"])
+    relative_path = PurePosixPath(path_value)
+    expected_path = PurePosixPath("deploy/scripts") / PurePosixPath(
+        *module_value.split(".")
+    ).with_suffix(".py")
+    module_path = root / path_value
+    if (
+        relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or relative_path != expected_path
+        or not module_path.is_file()
+        or module_path.is_symlink()
+    ):
+        return [{
+            "code": "shared-publisher-module-missing",
+            "site_id": "",
+            "script": path_value,
+            "function": "",
+            "detail": "bound shared publisher module is missing or not a regular repo-relative file",
+        }]
+    try:
+        module_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"),
+            filename=str(module_path),
+        )
+    except SyntaxError:
+        return [{
+            "code": "shared-publisher-definition-missing",
+            "site_id": "",
+            "script": path_value,
+            "function": "",
+            "detail": "bound shared publisher module does not parse",
+        }]
+    top_level_functions = {
+        node.name
+        for node in module_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = {
+        str(binding["publisher"]),
+        str(binding["consumer"]),
+    } - top_level_functions
+    if missing:
+        return [{
+            "code": "shared-publisher-definition-missing",
+            "site_id": "",
+            "script": path_value,
+            "function": "",
+            "detail": f"bound shared publisher definitions are missing: {', '.join(sorted(missing))}",
+        }]
+    return []
+
+
+def _shared_publisher_binding_findings(
+    script: str,
+    tree: ast.Module,
+) -> list[dict[str, str]]:
+    bound_names = {BOUNDED_JSONL_PUBLISHER, BOUNDED_JSONL_CONSUMER}
+    string_assignments = _string_assignments(tree)
+    reflective_bound_name_references = [
+        node
+        for node in ast.walk(tree)
+        if _string_value(node, string_assignments) in bound_names
+    ]
+    reflective_namespace_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"globals", "locals", "vars"}
+    ]
+    relevant_imports = [
+        node
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and (
+                node.module == BOUNDED_JSONL_MODULE
+                or any(
+                    alias.name in bound_names or alias.asname in bound_names
+                    for alias in node.names
+                )
+            )
+        ) or (
+            isinstance(node, ast.Import)
+            and any(
+                alias.name == BOUNDED_JSONL_MODULE or alias.asname in bound_names
+                for alias in node.names
+            )
+        )
+    ]
+    bounded_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _call_name(node) in bound_names
+    ]
+    competing_definitions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name in bound_names
+    ]
+    competing_arguments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.arg) and node.arg in bound_names
+    ]
+    competing_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and node.id in bound_names
+    ]
+    if not (
+        relevant_imports
+        or bounded_calls
+        or competing_definitions
+        or competing_arguments
+        or competing_assignments
+    ):
+        return []
+
+    exact_imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and node.module == BOUNDED_JSONL_MODULE
+    ]
+    exact_import_valid = (
+        len(exact_imports) == 1
+        and len(relevant_imports) == 1
+        and len(exact_imports[0].names) == 2
+        and {alias.name for alias in exact_imports[0].names} == bound_names
+        and all(alias.asname is None for alias in exact_imports[0].names)
+    )
+    publisher_calls_are_bare = all(
+        isinstance(call.func, ast.Name)
+        for call in bounded_calls
+        if _call_name(call) == BOUNDED_JSONL_PUBLISHER
+    )
+    if (
+        exact_import_valid
+        and publisher_calls_are_bare
+        and not competing_definitions
+        and not competing_arguments
+        and not competing_assignments
+        and not reflective_bound_name_references
+        and not reflective_namespace_calls
+    ):
+        return []
+    return [{
+        "code": "shared-publisher-binding-invalid",
+        "site_id": "",
+        "script": script,
+        "function": "",
+        "detail": "bounded JSONL calls require the exact top-level unaliased, non-reflective shared publisher binding",
+    }]
+
+
 def _inventory_findings(inventory: Any) -> list[dict[str, str]]:
     invalid = {
         "code": "inventory-invalid",
@@ -340,9 +584,10 @@ def _inventory_findings(inventory: Any) -> list[dict[str, str]]:
     }
     if not isinstance(inventory, dict):
         return [invalid]
-    if inventory.get("schema_version") != 1 or inventory.get("helper_generation") != 1:
+    if inventory.get("schema_version") != 2 or inventory.get("helper_generation") != 2:
         return [invalid]
     list_fields = (
+        "shared_publishers",
         "principal_scripts",
         "cooperating_scripts",
         "embedded_publishers",
@@ -350,6 +595,14 @@ def _inventory_findings(inventory: Any) -> list[dict[str, str]]:
         "callers",
     )
     if any(not isinstance(inventory.get(field), list) for field in list_fields):
+        return [invalid]
+    shared_publishers = inventory["shared_publishers"]
+    if (
+        len(shared_publishers) != 1
+        or not isinstance(shared_publishers[0], dict)
+        or set(shared_publishers[0]) != SHARED_PUBLISHER_KEYS
+        or shared_publishers[0] != SHARED_PUBLISHER_BINDING
+    ):
         return [invalid]
     callers = inventory["callers"]
     if not callers:
@@ -397,6 +650,14 @@ def _inventory_findings(inventory: Any) -> list[dict[str, str]]:
             and (identity_is_deferred or policy_is_deferred)
         ):
             return [invalid]
+        bounded = row["kind"] == "diagnostic_jsonl_append"
+        identity_is_bounded = (
+            row["operation_identity_source"]
+            == "bounded_jsonl.record_sha256.evidence_only.v1"
+        )
+        policy_is_bounded = row["result_policy"] == "require_bounded_jsonl_commit"
+        if not (bounded == identity_is_bounded == policy_is_bounded):
+            return [invalid]
     return []
 
 
@@ -405,7 +666,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
     schema_findings = _inventory_findings(inventory)
     if schema_findings:
         return schema_findings
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, str]] = _shared_publisher_module_findings(root, inventory)
     covered_scripts = [
         *inventory.get("principal_scripts", []),
         *inventory.get("cooperating_scripts", []),
@@ -437,6 +698,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
         tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
         trees[script] = tree
         parent_maps[script] = _parent_map(tree)
+        findings.extend(_shared_publisher_binding_findings(script, tree))
         findings.extend(
             {
                 "code": "component-not-literal",
@@ -447,7 +709,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             }
             for call in ast.walk(tree)
             if isinstance(call, ast.Call)
-            and _call_name(call) in DURABLE_PUBLISHERS
+            and _is_durable_publisher_call(call)
             and _constant_keyword(call, "component") is None
         )
         findings.extend(
@@ -489,6 +751,12 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
         )
         embedded_trees[key] = embedded_tree
         findings.extend(
+            _shared_publisher_binding_findings(
+                f"{script}:{assignment}",
+                embedded_tree,
+            )
+        )
+        findings.extend(
             {
                 "code": "component-not-literal",
                 "site_id": "",
@@ -498,7 +766,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             }
             for call in ast.walk(embedded_tree)
             if isinstance(call, ast.Call)
-            and _call_name(call) in DURABLE_PUBLISHERS
+            and _is_durable_publisher_call(call)
             and _constant_keyword(call, "component") is None
         )
         findings.extend(
@@ -536,7 +804,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             for function in candidates
             for node in ast.walk(function)
             if isinstance(node, ast.Call)
-            and _call_name(node) in DURABLE_PUBLISHERS
+            and _is_durable_publisher_call(node)
             and _constant_keyword(node, "component") == row.get("logical_publication")
         ]
         if not calls:
@@ -581,7 +849,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
         for call in (
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _call_name(node) in DURABLE_PUBLISHERS
+            if isinstance(node, ast.Call) and _is_durable_publisher_call(node)
         ):
             if call in inventoried_calls:
                 continue
@@ -607,7 +875,7 @@ def scan(root: Path, inventory_path: Path) -> list[dict[str, str]]:
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
-            and _call_name(node) in DURABLE_PUBLISHERS
+            and _is_durable_publisher_call(node)
         ):
             if call in inventoried_calls:
                 continue

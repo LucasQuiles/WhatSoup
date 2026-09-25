@@ -35,6 +35,11 @@ scope, no inherited broad environment for child providers, mode-restricted
 secret files, and posture checks that verify presence/absence without reading
 secret values.
 
+The instance `service` block (launchd render options) is writable through the
+fleet config `PATCH` route, so a fleet-token holder can steer the service
+`PATH` and claude config root that the next plist reconcile renders; treat
+fleet tokens with the same care as the plist itself.
+
 ## Shell PATH
 
 Interactive shells may not include Homebrew's bin path. Set it before running
@@ -103,10 +108,18 @@ The bridge row is a deployment pattern, not evidence that a bridge is installed.
 Verify the concrete plist, wrapper, logs, and target Pinecone project before
 claiming queued facts are exported.
 
-Generated instance plists set `WorkingDirectory` to the checkout containing the
-running WhatSoup code. This makes relative repository health inputs, including
-`.arc/arc.toml`, deterministic. Regenerate the plist when changing checkouts;
-do not hand-edit it to point at a different tree.
+Generated instance plists set `WorkingDirectory` to the repo root the plist was
+generated from. This makes relative repository health inputs, including
+`.arc/arc.toml`, deterministic. It is the process's cwd, NOT a selector for
+which code runs — see the paragraph below. Regenerate the plist when changing
+checkouts; do not hand-edit it to point at a different tree.
+
+`WorkingDirectory` sets the process's current directory; it does not select
+which code executes. On a release-snapshot host the executing release is the
+target of the wrapper symlink `~/.local/bin/whatsoup`, so repointing
+`WorkingDirectory` alone leaves the previous release running behind a health
+check that reads green. See
+[Activating a release](release-deployment.md#activating-a-release).
 
 The launcher scrubs inherited credential environment variables (provider API
 keys and `WHATSOUP_HEALTH_TOKEN`) before its first subprocess, so ambient
@@ -166,6 +179,262 @@ scoped Keychain entry.
 
 Instances with `enabled: false` are skipped by fleet discovery but keep their
 config and auth state on disk.
+
+## Generated Render Options and Governed-Env Drift
+
+Generated instance plists render two config-owned environment surfaces from the
+instance `config.json` `service` block (schema:
+[docs/configuration.md](../configuration.md#service-launchd-render-options)):
+
+- `service.claudeConfigDir` → `CLAUDE_CONFIG_DIR` in `EnvironmentVariables`,
+  pointing the launchd service context at a dedicated claude-cli config root
+  (e.g. `$HOME/.claude-<instance>`). The block governs only which config root
+  the service resolves; credentials for that root stay keychain-resident and
+  are neither created nor copied by rendering. The host-level timers
+  (`com.whatsoup.harness-maintenance`, `com.whatsoup.reply-guarantee`,
+  `com.whatsoup.release-drift-check`) carry the same `CLAUDE_CONFIG_DIR` so
+  every job that runs the provider CLI uses the bot's store:
+  `deploy/setup.sh` and `scripts/check-launchd-drift.sh` inject the host's one
+  distinct value, and `deploy/scripts/render-release-drift-launchd.sh` injects
+  its `--instance` value. When config gives no value (unset, or several
+  different values), all three carry forward the `CLAUDE_CONFIG_DIR` the
+  installed plist already has (`--preserve-from <installed plist>`; pass the
+  live plist when re-rendering release-drift by hand), so a re-render keeps a
+  hand-added key and the drift check agrees with the install. A configured
+  value always wins. Make the value config-owned (below) so it is not only a
+  hand edit. An installed plist that mentions `CLAUDE_CONFIG_DIR` but whose
+  `EnvironmentVariables` the reader refuses (duplicated, unparseable, or using
+  a numeric character reference such as `&#45;`, which the reader does not
+  decode) stops
+  the render: `deploy/setup.sh` runs under `set -e`, so it aborts at that
+  timer and installs nothing further until the plist is repaired or removed.
+- `service.pathPrepend` → directories prepended, in order, ahead of the
+  generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
+  `$HOME/.local/bin` so an opencode fallback binary resolves under launchd), and
+  the same list joined with `:` into a second governed key
+  `WHATSOUP_PATH_PREPEND`. The launcher receives one already-joined `PATH` and
+  cannot tell a governed prefix from an ambient entry, so the dedicated key is
+  what makes the prepend outrank `$HOME/.local/bin` at runtime. Omitted or empty
+  renders neither surface. Never hand-edit the key: it is governed, so `--apply`
+  overwrites it, and an empty segment in a hand-set value makes the shared
+  runtime helper fail closed with a `FATAL:` line rather than start the instance
+  with the current directory on its PATH. The prepend outranks the pinned Node
+  directory as well as `$HOME/.local/bin`, so a `node` binary placed in it
+  shadows the `WHATSOUP_NODE` pin for every child process that resolves `node`
+  from `PATH`; the launcher is unaffected because it calls Node by absolute
+  path. The shared helper itself has no platform guard and is sourced on both
+  operating systems, so the colon collapse and the fail-closed empty-segment
+  path apply on Linux hosts too even though nothing renders the key there.
+
+Every render path — the first install after pairing and
+`reconcile-launchd-restart-policy` — resolves the block through the validated
+resolver (`src/fleet/launchd-render-options.ts`) and fails closed on an
+unreadable or invalid `config.json`. A missing `config.json` or absent block
+renders the historical byte-identical plist.
+
+### Checking governed-env drift
+
+The dry-run reconciler compares the fresh render against the installed plist on
+the governed keys (`CLAUDE_CONFIG_DIR`, `PATH`, `WHATSOUP_PATH_PREPEND`) by key
+and SHA-256 value digest.
+Installed bot plists carry live credentials, so values are never printed:
+
+```bash
+npm run reconcile-launchd-restart-policy -- --instance <instance>
+# governed env drift: CLAUDE_CONFIG_DIR missing expected=sha256:… observed=absent
+# governed env drift: PATH mismatch expected=sha256:… observed=sha256:…
+# governed env drift: WHATSOUP_PATH_PREPEND missing expected=sha256:… observed=absent   ← service.pathPrepend configured, installed plist predates the governed key: reconcile --apply
+# governed env: PATH configured prefix satisfied; tail differs from this shell's PATH (expected=sha256:… observed=sha256:…) — --apply bakes this shell's PATH tail
+# governed env: installed PATH present but not config-owned (no service.pathPrepend configured) — cannot verify PATH ownership; --apply bakes this shell's PATH (expected=sha256:… observed=sha256:…)
+# installed plist has 2 non-governed EnvironmentVariables keys (MINIMAX_API_KEY, WHATSOUP_HEALTH_TOKEN) that --apply will drop
+# governed env: no drift            ← all-clear, printed only when the render is config-owned and matches; a PATH with no service.pathPrepend prints the "cannot verify" line above instead
+```
+
+`PATH` is read in two parts. The config-owned fact is whether the installed
+`PATH` starts with the configured `pathPrepend` entries; only an unsatisfied
+*configured* prefix is governed drift (`PATH mismatch`). When no `pathPrepend`
+is configured at all, nothing about the installed `PATH` is config-owned, so
+the report says `cannot verify PATH ownership` — a coincidental match against
+this shell's ambient `PATH` is never reported as an all-clear (the render's
+`PATH` is only this shell's ambient `PATH`, and a launchd/ssh non-login shell
+can regenerate a different one). The rest of the
+rendered `PATH` is the reconciling shell's own `PATH`, so a satisfied prefix
+with a differing tail is reported as "tail differs from this shell's PATH",
+not as drift — `npm run` adds `node_modules/.bin` directories and the
+pinned-node wrapper prepends its Node directory, so the tail legitimately
+varies by how you invoke the reconciler. `--apply` bakes the invoking
+shell's tail into the job. To keep the baked tail predictable, run the
+reconciler through the pinned-node wrapper from a clean login shell rather
+than from a nested `npm run` inside another tool's environment:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+The report also lists the *names* (never values) of installed non-governed
+`EnvironmentVariables` keys the re-render would delete from the job; while
+that list is non-empty no all-clear is printed and `--apply` refuses unless
+`--drop-non-governed-env` acknowledges the drop. An installed
+`EnvironmentVariables` dict that exists but cannot be parsed is reported
+fail-closed as drift and refuses `--apply` the same way, because its keys
+cannot be enumerated. `scripts/check-launchd-drift.sh` keeps its separate
+structural-only checks for bot plists; the governed-key comparison lives in
+the reconciler because only the render path knows the expected values.
+
+### Preflight: service paths that are already persisted
+
+Plist render refuses a `service` path that is not a canonical absolute path
+inside the instance user's home directory, or whose intermediate components do not
+resolve. Only the final leaf may be absent; accepted paths are rendered in their
+physical form. The refusal happens before any bytes are written, so an instance
+carrying such a value keeps running its installed plist but cannot be installed
+or reconciled until the value is corrected. Sweep the hosts before upgrading.
+
+For each instance, dry-run the reconciler:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A normal governed-env report means the block is fine. A `LaunchdRenderConfigError`
+names the offending key, `service.claudeConfigDir` or `service.pathPrepend[N]`,
+and the rule it broke, without echoing the value. Then edit that key in the
+instance's `config.json`: make it an absolute path with no `.` or `..`
+component, inside the home directory, and create missing intermediate directories or repair unresolved symlinks. Dropping the entry is also a fix. Re-run
+the dry-run until it reports drift instead of refusing, then apply as usual.
+
+See [`service` (launchd render options)](../configuration.md#service-launchd-render-options)
+for the full rule list and for the trusted-ancestry boundary this check does
+not cover.
+
+### Adopting a hand-patched PATH (or claude root) into config
+
+For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`
+prepended to `PATH` so a fallback provider binary resolves, or a hand-added
+`CLAUDE_CONFIG_DIR` — make the patch config-owned so the next regeneration
+renders it instead of destroying it:
+
+1. Add the equivalent `service` block to
+   `~/.config/whatsoup/instances/<instance>/config.json`, using absolute paths
+   (the block does not expand `~`):
+
+   ```json
+   "service": {
+     "pathPrepend": ["/absolute/home-dir/.local/bin"]
+   }
+   ```
+
+2. Dry-run and read the governed-env report. Before the block exists the
+   installed `PATH` is not config-owned, so the report says `installed PATH
+   present but not config-owned (no service.pathPrepend configured) — cannot
+   verify PATH ownership` (never `no drift`, even if the ambient `PATH`
+   happens to match); once the block reproduces the hand-patched entries the
+   line becomes `PATH configured prefix satisfied`, which is the config-owned
+   fact you are after (the tail still differs until `--apply` re-bakes it):
+
+   ```bash
+   bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+   ```
+
+   The dry run is refused outright when the persisted `service` block names a
+   path outside the instance user's home directory, or one whose intermediate
+   segment is absent or does not resolve. Render-admission confinement runs
+   before the dry-run early return, so the command exits with a
+   `LaunchdRenderConfigError` naming the offending field instead of printing a
+   report. Correct that entry in `config.json` — or drop it from the block — and
+   re-run; the same refusal would otherwise have stopped `--apply` at step 4.
+
+3. Read the `installed plist has N non-governed EnvironmentVariables keys
+   (…) that --apply will drop` line of the same report. Reconciling
+   regenerates the whole plist, so every listed key (typically hand-added
+   credential variables) is destroyed by `--apply`. Move credentials to the
+   keychain ([Route B](../configuration.md#enabling-provider-fallback-on-a-new-host))
+   before applying; the reconciler refuses `--apply` while the list is
+   non-empty unless you pass `--drop-non-governed-env` to acknowledge the
+   drop explicitly.
+
+4. Apply with the usual bounded transaction, then run the acceptance gate from
+   [Generated-instance restart-policy migration](#generated-instance-restart-policy-migration):
+
+   ```bash
+   bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance> --apply
+   # add --drop-non-governed-env only after step 3 confirmed the listed keys are safe to drop
+   ```
+
+5. Re-run the dry-run: `governed env: no drift` confirms the hand-patch is now
+   rendered output owned by config and the baked tail matches this shell. This
+   acceptance is valid only because `no drift` now requires a *configured*
+   prefix — if the `service.pathPrepend` block is missing or empty the report
+   prints `cannot verify PATH ownership` instead, so a coincidental ambient
+   match can no longer be mistaken for config ownership.
+
+### Ratified account identity in the service context
+
+A dedicated `service.claudeConfigDir` root isolates *which* config the
+service resolves; it does not prove *whose* account the claude CLI is serving
+with there. Credentials for that root stay keychain-resident and CLI-managed
+(observed live: a token refresh moved the credential into the login keychain
+the gui-domain service reads). The verify-only pin
+`service.expectedAccountDigest`
+([schema and capture procedure](../configuration.md#ratified-account-identity-serviceexpectedaccountdigest))
+closes that gap without any credential write:
+
+- Capture the digest **in a context with login-keychain access**, and in the
+  service's own config-root context. A GUI/console session is the normal one.
+  When the capture must be unattended, a one-shot bootstrapped into the owner's
+  `gui/<uid>` launchd domain works, under two conditions: it needs the
+  **owner's explicit authorization**, because bootstrapping into someone's
+  login domain acts on their session rather than just their filesystem; and it
+  is temporary — `bootout` the job and delete its plist as soon as the digest
+  is captured, since a one-shot left loaded re-runs at the next login and
+  re-probes the credential with nobody watching.
+
+  **Not over SSH.** Supplying the plist's
+  `CLAUDE_CONFIG_DIR` does not make an SSH shell sufficient: it has no
+  login-keychain session, so the probe reads `loggedIn: false` and the
+  capture exits 2 anyway (observed live on an instance whose gui-domain
+  service was serving turns on that same credential at the time). That exit 2
+  is a false negative about the capture context, not evidence the instance is
+  logged out. Before treating it as a logout, check the instance's own
+  signals in authenticated `GET /health` — `turn_capability.model_usable`
+  true with `model_usable_stale` false (use these rather than the raw
+  `instance.primaryModelUsability.status`, which has no staleness guard, so a
+  stale `usable` would corroborate a credential that has since died);
+  `turn_capability.last_successful_turn_at` with
+  `last_successful_turn_provider` `claude-cli` and
+  `last_successful_turn_session_current` exactly `true`; and no armed fallback
+  window in the `instance` block (`fallbackActiveUntil`). All of them together
+  mean the credential is live and the SSH reading is wrong. Treat it as a real
+  logout in either of the opposite cases: those signals point the same way as
+  the exit 2, or any one of them is missing or stale. Absent corroboration is
+  not corroboration.
+
+  ```bash
+  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run --silent claude-account-digest
+  ```
+
+  `--silent` is load-bearing, not tidiness: without it `npm run` prints a
+  four-line banner to **stdout** before the digest, so
+  `DIGEST=$(npm run claude-account-digest)` captures the banner as well and
+  writes an `expectedAccountDigest` that can never match — producing a
+  `credential_identity_mismatch` alert caused by the capture rather than by the
+  credential. With `--silent` the command emits one opaque `sha256:` line on
+  stdout and nothing else; wrapper diagnostics go to stderr. Never paste
+  `claude auth status --json` output into a shared log; it carries the raw
+  email and organization id.
+- After the plist is (re)loaded, the runtime verifies the identity at startup
+  and on every primary-usability probe. Confirm with authenticated
+  `GET /health`: `runtime.agent.accountIdentity.status` must read `match`.
+  `mismatch` pages `credential_identity_mismatch` (critical);
+  `unverifiable` pages `credential_identity_unverifiable` (warning) and is
+  never a match. Both degrade health with the same-named cause.
+- Correcting a mismatch is an owner action in the GUI/launchd context (the
+  keychain-session hazard above applies), followed by a restart: the identity
+  reasons are not turn-provable, so a passing turn never releases a
+  silence-latched identity degradation. Correct the identity first. The
+  restart does not prove the fix — the latch is process-local, so a restart
+  clears it by amnesia — and restarting without correcting the identity only
+  hides the degradation until the next probe re-latches it.
 
 ## BYOK Memory Migration
 
@@ -229,6 +498,57 @@ Do not create `bot.db` at the repo root or inside `~/.config/whatsoup/`.
 Those are wrong tiers. `.gitignore` covers `*.db` to prevent accidental commit.
 
 ## Restart Procedures
+
+### Watchdog health reader binding
+
+Render the watchdog from the release tree the host runs, the same way the BOT
+ERRORS emitter is baked. `deploy/scripts/render-watchdog.py` binds that tree's
+`deploy/scripts/lib/health_reader.py` and takes its digest from that tree's
+`deploy/bot-errors-runtime-manifest.json`; `--health-reader` and
+`--runtime-manifest` name others. The render refuses (`BAD_INPUT`, exit 4) when
+the reader is missing, is not listed exactly once in the manifest, or differs
+from its pinned digest. For example, from the release tree:
+
+```bash
+python3 deploy/scripts/render-watchdog.py render \
+  --template deploy/templates/watchdog-script.sh \
+  --bot-name example-agent --bot-port 9001 --fleet-port 9002 \
+  --home /opt/operator-home --out ./watchdog-rendered.sh --json
+```
+
+The render receipt reports `health_reader_path` and `health_reader_sha256`.
+Before its first health read, each watchdog cycle verifies the reader digest
+and executes those verified bytes. A missing, changed, or invalid reader
+produces `HEALTH-UNKNOWN` and exit 2 without authorizing any service action,
+and that cycle reaches no credential verdict, so credential paging state is
+left unchanged.
+
+The shared reader makes one direct IPv4 loopback connection, without proxies,
+redirects, or a separate connectivity probe. The watchdog keeps its private
+token-file validation and passes the token to the reader through an anonymous
+descriptor. Only a connect-stage `EADDRNOTAVAIL` (local ephemeral-port
+exhaustion) suppresses restart for that target: the bot or fleet console is
+logged `HEALTH-UNKNOWN` instead of being restarted, because restarting a healthy
+target cannot free local ports. It remains a diagnostic failure, not an auth
+verdict. Ordinary connection refusal keeps the restart policy. Bootstrap now
+happens only after a restart-worthy observation passes the existing restart
+gates, and a successful bootstrap does not also kickstart the newly loaded job.
+A mixed cycle can restart the refused target while leaving the target that saw
+`EADDRNOTAVAIL` untouched.
+
+Review the final watchdog status and the per-target log lines together. The
+reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
+below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
+target that accepts the connection but never answers yields a typed transport
+failure and is restarted (`health endpoint unreachable` / `fleet console
+unreachable`), as `curl --max-time 8` did. A read killed at the deadline with no
+output (for example a trickling response) is also restart evidence, logged as
+`health read exceeded 8s`; a hang and a slow response are indistinguishable at
+that point, and the previous curl contract restarted both. Any other malformed
+or incomplete reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
+the watchdog against the new manifest digest. Keep the previous script and its
+matching release tree available for rollback; installing either alone leaves
+diagnostics unknown. Rendering does not install or activate any job.
 
 Restart fleet only:
 
@@ -345,22 +665,84 @@ launchctl kickstart -k "$domain/com.whatsoup.<instance>"
 
 Do not turn this per-instance command into a fleet-wide loop.
 
-**Acceptance gate after any restart of a keychain-backed instance: confirm
-`turn_capability.model_usable=true`, not just health HTTP 200** (which is true even
-while degraded):
+**Acceptance after a restart requires authenticated health for the intended
+instance, `status=healthy`, `turn_capability.model_usable=true`, and explicit
+`turn_capability.model_usable_stale=false`.** Run the helper with kickstarts
+disabled so the acceptance command cannot restart the service:
 
 ```bash
-curl -s --fail-with-body http://127.0.0.1:<port>/health | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(d["status"], d["turn_capability"]["model_usable"])'
+deploy/scripts/whatsoup-keychain-heal.sh \
+  --label com.whatsoup.<instance> --port <port> --max-kickstarts 0
 ```
 
-If an instance is found model-degraded, run the bounded, fail-closed remediation
-helper (it re-probes `/health` and, while degraded, issues `kickstart -k` up to a
-bounded number of times, exiting non-zero to escalate if it cannot recover):
+Exit 0 confirms this acceptance signal. Exit 1 reports observed degradation;
+with `--max-kickstarts 0` it performs no remediation. Exit 2 reports unavailable
+runtime/token, transport, HTTP authentication or diagnostic evidence. Exit 3
+reports authenticated evidence with missing/mismatched instance identity or
+missing/invalid model freshness fields. Neither exit 2 nor exit 3 authorizes a
+kickstart. An authenticated HTTP 503 diagnostic response can establish model
+degradation; HTTP 401/403 and public health envelopes cannot.
+
+Use the canonical label `com.whatsoup.<instance>` (instance names start with a
+lowercase letter, contain only lowercase letters, digits or hyphens, and have
+at most 30 characters). Run as the same OS user that owns the instance and its
+token; `--uid`, if supplied, must equal `id -u`. The helper requires the exact
+authenticated `instance.name` to match the label. Before invocation, verify
+that the supplied port belongs to that label's current process: the helper
+does not prove the launchd label/PID-to-port relationship.
+
+The canonical token file is
+`${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/<instance>/tokens.env`.
+The config root must match the target runtime's configuration. The file must
+be a same-user, nonsymlink regular file with mode 0600, inside a same-user real
+directory that is not group/world writable. Its sole assignment must be
+`WHATSOUP_HEALTH_TOKEN=` followed by exactly 64 lowercase hexadecimal characters
+(an optional final newline is permitted). Unsafe, missing or unreadable files
+fail closed; there is no environment-token or keyring fallback. The helper
+disables shell tracing before the read and passes the token only through curl
+config stdin, never a command argument, exported variable or temporary file.
+
+Run the helper from a complete release containing `deploy/lib/resolve-node.sh`,
+`deploy/lib/bounded-exec.sh`, `deploy/lib/read-private-health-token.mjs`,
+`src/fleet/health-token-file.ts`, and both `deploy/scripts/lib/health_reader.py`
+and `classify_health.py`. Node must satisfy that release's `.nvmrc` and
+`package.json` compatibility checks; the installed dependency tree must include
+the lockfile's `zod`. `WHATSOUP_NODE` can select an already installed compatible
+binary under the existing resolver contract. The helper does not install Node
+or dependencies. A partial bot-errors scripts deployment does not supply this
+complete dependency closure. The shared token reader and timeout helper support
+Linux and macOS; kickstart remediation here is specifically for macOS launchd.
+`--health-timeout` is a positive integer budget applied separately to Node
+resolution, each token read, each HTTP request and each launchctl kickstart.
+An external timeout backend may add its bounded termination grace. A failed or
+timed-out kickstart exits 2 without another remediation attempt. The configured
+`--settle` pause and `--max-kickstarts` attempt count still apply; this is not an
+overall run deadline.
+
+For authenticated model degradation, run the bounded remediation helper. It
+re-probes `/health` and issues at most the configured number of kickstarts:
 
 ```bash
 deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port <port>
 ```
+
+The helper requires an explicit boolean `turn_capability.model_usable_stale`.
+An authenticated degraded or unhealthy response with a fresh usable model exits
+2 without a kickstart: queue, transport or other non-model failures do not
+establish a keychain remediation case. Inspect those health signals separately.
+Missing, null or malformed freshness evidence exits 3 without a kickstart; inspect
+the health projection and producer schema before retrying. The helper trusts the
+runtime's stale verdict and does not independently validate provider-proof times.
+This F1 requirement does not qualify future timestamps or other independent
+freshness policies; acceptance evidence must name the tested release revision.
+The runtime itself reports a future-dated or non-finite provider proof time as
+stale (`model_usable` null, `model_usable_stale` true).
+
+The diagnostic bundle's `health-snapshot` finding uses the same canonical
+readiness and freshness fields. Missing, stale, future-dated or in-flight
+provider proof is inconclusive (`ok: false`, confidence `suspected`); the raw
+model status alone cannot confirm health or failure. An active fallback window
+still confirms degraded primary service.
 
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI
@@ -387,6 +769,22 @@ process-local count of monotonic scheduling gaps above 10 seconds. Such gaps
 reset the retained lag window and are not themselves starvation samples.
 Exactly 10 seconds remains a retained sample; local starvation still requires a
 full window whose nearest-rank p95 is strictly greater than 250 ms.
+
+For a release that changes loop-lag evidence, do not restore automated
+supervision until all of these canary checks pass:
+
+1. Measure the authenticated `/health` body and require fewer than 65,536 bytes.
+2. Request `/health/event-loop-samples?after=0&limit=160` with the scoped token
+   and require fewer than 32 KiB plus schema `health.event-loop-samples.v1`.
+3. Rehearse one local collector capture using the private token-file path and a
+   private output path; require a `run_completed` record and interpret any
+   nonzero exit as incomplete evidence.
+4. After restart, require a real served turn before interpreting whether local
+   starvation cleared. Startup model usability and an idle health response do
+   not reproduce the affected traffic condition.
+
+See [Loop-Lag Forensic Collector](loop-lag-forensic-collector.md) for invocation,
+retention, cursor gaps, and exit semantics.
 
 ## Worktree Discipline
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerOutboundAuditTools } from '../../../src/mcp/tools/audit.ts';
 import type { SessionContext, ToolDeclaration } from '../../../src/mcp/types.ts';
 

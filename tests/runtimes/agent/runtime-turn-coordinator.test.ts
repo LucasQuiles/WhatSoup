@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeTurnCoordinator, type RuntimeTurnCoordinatorPort } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-double.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AttemptOutcome } from '../../../src/runtimes/agent/turn-terminal.ts';
@@ -8,6 +9,7 @@ const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked,
+  emitObservationChecked: vi.fn(() => true),
 }));
 
 function context() {
@@ -41,12 +43,12 @@ function context() {
 }
 
 function makeCoordinator(): RuntimeTurnCoordinator {
-  const host = {
+  const host = coordinatorPortDouble({
     instanceName: 'bookkeeping-test',
     runtimeTurnSupervisor: {
       scopeKey: vi.fn(() => 'per_chat:15550190099'),
-    },
-  } as unknown as RuntimeTurnCoordinatorPort;
+    } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
+  });
   return new RuntimeTurnCoordinator(host);
 }
 
@@ -133,6 +135,9 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       'Journaled agent turn rejected before dispatch',
       expect.stringContaining('inbound_seq=41 reason=queue_closed automatic_replay=false'),
       'warning',
+      undefined,
+      undefined,
+      { conversationKey: '15550190099' },
     );
   });
 
@@ -151,6 +156,49 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
     );
 
     expect(emitAlertChecked).not.toHaveBeenCalled();
+  });
+
+  it('#3570: a scheduled-agent-job scope keeps usage but never writes the chat checkpoint, on every finalization path', () => {
+    const coordinator = makeCoordinator();
+    const scheduledScope = '15550190099@s.whatsapp.net::scheduled-agent-job';
+
+    // Dispatched turn: the scope comes from the runtime's own per-turn map.
+    const refs = (coordinator as unknown as {
+      host: { perChatRuntimeTurnScopeRefs: Map<string, { value: string }> };
+    }).host.perChatRuntimeTurnScopeRefs;
+    refs.set(context().identity.logicalTurnId, { value: scheduledScope });
+    const dispatched = coordinator.turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+    );
+    expect(dispatched.checkpoint).toBeUndefined();
+    expect(dispatched.sessionTokens).toEqual({ dbRowId: 7, inputTokens: 500, outputTokens: 40, cacheReadTokens: 0 });
+    refs.clear();
+
+    // Undispatched (or crash) turn: no scope ref, so the caller's scope key decides.
+    const undispatched = coordinator.turnFinalizationBookkeeping(
+      context(),
+      null,
+      undefined,
+      { kind: 'admission_rejected', class: 'queue_closed' },
+      scheduledScope,
+    );
+    expect(undispatched.checkpoint).toBeUndefined();
+
+    // Control: the chat's own scope still writes its checkpoint.
+    const interactive = coordinator.turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+      '15550190099@s.whatsapp.net',
+    );
+    expect(interactive.checkpoint).toEqual({
+      conversationKey: '15550190099',
+      fields: expect.objectContaining({ sessionId: 'sess-1', claudePid: 123, activeTurnId: null, lastInboundSeq: 41 }),
+    });
   });
 
   it('does NOT alert when there is no db row to attribute the loss to', () => {

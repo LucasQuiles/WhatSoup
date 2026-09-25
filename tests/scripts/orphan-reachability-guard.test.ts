@@ -88,19 +88,25 @@ interface TrackedEntry {
  * typing-start-guard has since been wired).
  */
 const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
+  // src/core/deferred-turn-store.ts graduated with #3295 S2: DurabilityEngine
+  // constructs the store and the coordinator's flagged admission defer is its
+  // runtime consumer.
   // src/fleet/incidents/* graduated 2026-07-28: the Plan-2 ingestion surface
   // (POST /api/signals in src/fleet/index.ts) is their production importer.
+  // src/lib/bounded-timeout.ts graduated 2026-09-02: the F2a pin-receipt send
+  // in src/runtimes/agent/model-pin.ts (the #2121 A2 follow-up) bounds its
+  // await with withBoundedTimeout, which makes it the first PRODUCTION
+  // importer of the #1816 primitive. Removed from the list below per this
+  // guard's own stale-check, which force-graduates an entry once it is wired.
   // 24h-window primitives (#1871 inventory): landed test-only-wired, pending
   // wiring or removal per each owning issue. Wiring is out of scope for #1871.
   { path: 'src/fleet/bot-errors-schedule-matrix.ts', issue: '#2749', reason: 'S8 matrix lands test-wired; the health-poller integration (S9c fleet remainder) is its runtime importer and lands next in the slice train' },
   { path: 'src/core/retry-runner.ts', issue: '#1817', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/bounded-timeout.ts', issue: '#1816', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/credential-diagnostics.ts', issue: '#1813', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/fallback-transition.ts', issue: '#1820', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/status-reaction-controller.ts', issue: '#1823', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
   // auth-loss durability signal modules: the store now has a production writer —
   // HealthPoller records the durable row on a confirmed logged_out (#1786) — so it
   // graduated out of this list, and the recovery-owner wiring (#1786) graduated the
@@ -115,12 +121,27 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/fleet/auth-loss-mode-bucket-producer.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
-  { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
+  // src/core/recovery-catchup-closure.ts graduated out of this registry when
+  // the turn-recovery supervisor wiring imported it (deploy-gated behind the
+  // catchupReconcile dependency, default off) — the guard's staleness check
+  // now enforces its continued production reachability.
   // Durable background work (Work Ledger + Results Outbox). PR1a lands the schema
   // and store DELIBERATELY unwired so it can be reviewed and verified on its own;
   // PR1b adds the registration write-path at the worker spawn sites and the
   // delivery daemon, and graduates this entry in the same PR.
   { path: 'src/core/background-work-store.ts', issue: '#2279', reason: 'PR1a lands schema+store unwired by design; registration write-path and delivery daemon land in PR1b (#2279)' },
+  // Client output policy evaluator: unwired by design until the enforcement change adds its send-path caller.
+  { path: 'src/core/client-output-policy.ts', issue: 'enforcement follow-up (no tracking issue yet; see the PR body)', reason: 'per-conversation client output policy evaluator; parsed and validated at startup, no send-path caller until the enforcement change lands (config and evaluator first, enforcement later, by owner ruling)' },
+  // FLOS Stage 1 (docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md §3):
+  // the keyed-digest primitive lands DARK by design — plan §1.3 requires every
+  // stage's code to ship behind `observability.fleetLifecycle` (off). The
+  // event.v1 emission slice is its runtime importer and graduates this entry.
+  // lifecycle-event.ts and lifecycle-event-store.ts graduated with the Stage 1
+  // emission slice: lifecycle-emission.ts (imported by runtime.ts and
+  // runtime-turn-coordinator.ts) is their runtime importer, dark behind
+  // `observability.fleetLifecycle` (off).
+  { path: 'src/core/observability/lifecycle-digest.ts', issue: 'FLOS Stage 1 (plan §3; design §7/F10)', reason: 'digest primitive lands unwired by design; keyed-digest emission needs the owner-gated secret-provisioning slice, which is its runtime importer and graduates this entry' },
+  { path: 'src/core/observability/lifecycle-clock.ts', issue: 'FLOS Stage 1 (plan §3; design §2 O4/O5)', reason: 'clock-model primitive lands unwired by design; Stage 2 settlement (progress-age derivation) is the runtime importer and graduates this entry' },
   { path: 'src/runtimes/chat/enrichment/contradiction.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; unreachable island with upserter.ts' },
   { path: 'src/runtimes/chat/enrichment/upserter.ts', issue: '#1871', reason: 'enrichment pipeline ported but never wired into a runtime chat root; island head (imports contradiction.ts)' },
   // command-surface (/config) feature cluster in runtimes/agent: built but never
@@ -161,6 +182,9 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // CONSUMES attestations (findAdmissibleAttestation in the supervisor). No autonomous
   // production path mints one by design, so the producer has no src/ importer.
   { path: 'src/core/capability-attestation-producer.ts', issue: 'cap-obligation-replay/finding-1', reason: 'attestation producer is operator-CLI-only (scripts/capability-obligation-attest.ts); runtime only consumes attestations — no production importer by design' },
+  // The shadow gate is logged-only; its measurement statistics run offline in the
+  // operator report, never in the runtime.
+  { path: 'src/lib/clopper-pearson.ts', issue: 'shadow-gate-20260923/task-4', reason: 'statistics helper is operator-CLI-only (scripts/shadow-gate-report.ts); the logged-only shadow gate computes no rates at runtime — no production importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

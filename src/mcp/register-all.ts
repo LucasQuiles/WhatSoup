@@ -37,13 +37,63 @@ import * as mediaTools from './tools/media.ts';
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
-import type { ToolDeclaration, ExtendedBaileysSocket } from './types.ts';
+import {
+  noExecutingSession,
+  resolveSessionContext,
+  type ToolDeclaration,
+  type ExtendedBaileysSocket,
+} from './types.ts';
 import type { Database } from '../core/database.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
+import { GroupMembershipCache } from '../core/memory-scope.ts';
+import type { KnowledgeSearchDeps } from './tools/knowledge.ts';
 
 const log = createChildLogger('register-all');
+
+/**
+ * Instance identities and group membership for knowledge_search's memory scope.
+ * Membership is read live from the socket (the groups table keeps only a count),
+ * cached briefly, and dropped on any participant change so a join takes effect on
+ * the next search. No socket, or a failed read, leaves membership unproven.
+ */
+function knowledgeSearchDeps(
+  connection: RuntimeConnection,
+  getSock: () => ExtendedBaileysSocket | null,
+  db: Database,
+): KnowledgeSearchDeps {
+  const membership = new GroupMembershipCache(async (groupJid) => {
+    const sock = getSock();
+    if (!sock) return null;
+    const metadata = await sock.groupMetadata(groupJid);
+    return Array.isArray(metadata?.participants)
+      ? metadata.participants.map((p) => ({
+        id: p.id,
+        ...(p.lid ? { lid: p.lid } : {}),
+        ...(p.phoneNumber ? { phoneNumber: p.phoneNumber } : {}),
+      }))
+      : null;
+  });
+  // Without the event, entries still expire on the cache TTL.
+  if (typeof connection.on === 'function') {
+    connection.on('groupParticipantsUpdate', (update: { groupJid?: unknown }) => {
+      if (typeof update?.groupJid === 'string') membership.invalidate(update.groupJid);
+    });
+  }
+  return {
+    db,
+    identities: () => ({
+      adminPhones: config.adminPhones,
+      siblingPhones: config.siblingPhones,
+      botJid: connection.botJid,
+      botLid: connection.botLid,
+    }),
+    membership,
+    sharedWorkflowGroups: config.sharedWorkflowGroups,
+    contactRecallScopes: config.contactRecallScopes,
+  };
+}
 
 export interface RegisterAllToolsOptions {
   enableKnowledgeSearch?: boolean;
@@ -207,13 +257,19 @@ export function registerAllTools(
     : Array.isArray(config.pineconeAllowedIndexes) ? config.pineconeAllowedIndexes : [];
   const knowledgeEnabled = memoryPinecone?.knowledgeSearch?.enabled !== false;
   if (allowedIndexes.length > 0 && knowledgeEnabled && options.enableKnowledgeSearch !== false) {
-    runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(allowedIndexes, register));
+    runModule('knowledge', false, (register) => knowledgeTools.registerKnowledgeTools(
+      allowedIndexes,
+      register,
+      undefined,
+      knowledgeSearchDeps(connection, getSock, db),
+    ));
   }
 
   // Memory write — agent-facing episodic WRITE into the configured per-person
   // Pinecone index (agent instances don't run the chat-runtime enrichment poller).
   // Vendor-gated (Pinecone): core: false. Registered whenever a Pinecone API key
-  // is available; PineconeMemory.upsert enforces the non-q project guard.
+  // is available; PineconeMemory.upsert enforces the project guard (the
+  // operator project for `q` when its config sets none).
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
   // env-allowed: memory-write API key resolver; secret surface stays env-late
@@ -241,7 +297,9 @@ export function registerAllTools(
 
   log.info(
     {
-      toolCount: registry.listTools({ tier: 'global' }).length,
+      toolCount: registry.listTools(
+        resolveSessionContext({ tier: 'global' }, noExecutingSession()),
+      ).length,
       optionalFailures: failures.filter((f) => !f.core).map((f) => f.module),
     },
     'all tools registered',

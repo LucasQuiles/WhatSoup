@@ -6,6 +6,7 @@
  * lastSessionStartedAt (string | null), and fallback-state fields.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type { AutoCompactController } from '../../../src/runtimes/agent/auto-compact-controller.ts';
@@ -73,6 +74,7 @@ vi.mock('../../../src/logger.ts', async () => {
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(),
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: vi.fn(),
 }));
 
@@ -216,6 +218,11 @@ vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => {
       this.onHalt?.();
     }
 
+    haltAndTakePendingTurns(): never[] {
+      this.halt();
+      return this.closeAndTakePendingTurns();
+    }
+
     private closeEpoch = 0;
     private accepting = true;
     beginTeardown(): { pending: readonly never[]; closeEpoch: number; wasAccepting: boolean } {
@@ -294,10 +301,15 @@ function expectedFallbackDetails(): Record<string, unknown> {
       modelUsabilityStatus: null,
       lastSuccessfulTurnAt: null,
       lastSuccessfulTurnProvider: null,
+      lastSuccessfulTurnModel: null,
       lastSuccessfulTurnSessionCurrent: null,
+      primaryModel: null,
       lastTurnErrorClass: null,
       lastTurnErrorAt: null,
       periodicProbeExpected: false,
+      periodicProbeBackoffMultiple: 1,
+      modelUsableFreshnessMs: 30 * 60_000,
+      nextProbeDueAt: null,
     },
     activeFallbackEntry: null,
     fallbackChain: [],
@@ -310,6 +322,9 @@ function expectedFallbackDetails(): Record<string, unknown> {
       contextInjection: false,
       model: null,
     },
+    // Static-list mode (no fallbackDiscovery config) reports null — the
+    // discovery block only populates for mode:"auto" instances (R6).
+    fallbackDiscovery: null,
   };
 }
 
@@ -329,11 +344,15 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryBlockingOutstanding: 0,
     turnRecoveryRetainedTerminal: 0,
     turnRecoveryCorroboratedRetained: 0,
+    turnRecoveryBlockedUnsafeSynthetic: 0,
+    turnRecoveryBlockedUnsafeSuperseded: 0,
+    turnRecoveryBlockedUnsafeStranded: 0,
   };
 }
 
 function expectedRecoveryClassificationDetails(): Record<string, unknown> {
   return {
+    recoveryBlockingReasons: [],
     recoveryDebtReasons: [],
     completedDeliveryIdentityBlocking: 0,
     completedDeliveryIdentityRetained: 0,
@@ -346,6 +365,9 @@ function expectedProviderExecutionDetails(): Record<string, unknown> {
       active: false,
       activeWorkKind: null,
       activeScopeHash: null,
+      activeAgeMs: 0,
+      activePhase: 'executing',
+      progressAgeMs: 0,
       pending: 0,
       oldestPendingWorkKind: null,
       oldestPendingScopeHash: null,
@@ -363,7 +385,31 @@ function expectedTurnQueueDetails(): Record<string, unknown> {
   return {
     turnQueueHalted: false,
     turnQueueHaltedScopes: 0,
+    outboundQueuePoisoned: false,
+    outboundQueuePoisonedScopes: 0,
   };
+}
+
+async function poisonOutboundScope(
+  runtime: AgentRuntime,
+  scopeKey: string,
+  message: string,
+): Promise<void> {
+  const coordinator = (runtime as unknown as {
+    runtimeTurnCoordinator: {
+      observeOutboundQueueOperation<T>(
+        key: string,
+        queue: { isPoisoned(): boolean },
+        operation: () => Promise<T>,
+      ): Promise<T>;
+    };
+  }).runtimeTurnCoordinator;
+  const error = new Error(message);
+  await expect(coordinator.observeOutboundQueueOperation(
+    scopeKey,
+    { isPoisoned: () => true },
+    async () => { throw error; },
+  )).rejects.toBe(error);
 }
 
 function makeQueuedTurn(text: string) {
@@ -431,6 +477,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         pollPersistenceErrors: 0,
         pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
         offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
+        accountIdentity: { status: 'disabled', reason: null, expectedDigestPrefix: null, observedDigestPrefix: null, checkedAt: null, stale: false },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -438,7 +485,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactActiveBackoffScopes: 0,
         autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
-        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null, relaunchesInWindow: 0, cleanRestartThrash: false, thrashWindowMs: 3_600_000 },
         unownedProviderEventRejects: 0,
         suppressedSystemTurnEffectRejects: 0,
         providerEventRejectReasons: {},
@@ -451,6 +498,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
           unresolvedCount: 0,
         },
         degradedReasons: [],
+        perChatSessionsWithoutOwner: 0,
+        perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -480,6 +530,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         pollPersistenceErrors: 0,
         pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
         offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
+        accountIdentity: { status: 'disabled', reason: null, expectedDigestPrefix: null, observedDigestPrefix: null, checkedAt: null, stale: false },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -487,7 +538,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactActiveBackoffScopes: 0,
         autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
-        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null, relaunchesInWindow: 0, cleanRestartThrash: false, thrashWindowMs: 3_600_000 },
         unownedProviderEventRejects: 0,
         suppressedSystemTurnEffectRejects: 0,
         providerEventRejectReasons: {},
@@ -500,6 +551,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
           unresolvedCount: 0,
         },
         degradedReasons: [],
+        perChatSessionsWithoutOwner: 0,
+        perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -518,6 +572,45 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('activeSessions is 0 when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(snapshot.details['activeSessions']).toBe(0);
+  });
+
+  it('projects each registered diagnostic counter onto its own health field', () => {
+    // Distinct value per field so a swapped mapping cannot pass.
+    const internals = runtime as unknown as {
+      proactiveResumeIdentityRejects: number;
+      unownedProviderEventRejects: number;
+      suppressedSystemTurnEffectRejects: number;
+      perChatSessionsWithoutOwner(): string[];
+      perChatRespawnAbandonedCount(): number;
+      turnChronology: { healthDetails(): Record<string, number> };
+      runtimeTurnCoordinator: {
+        turnQueueHaltHealth(scope: string): { turnQueueHalted: boolean; turnQueueHaltedScopes: number };
+      };
+    };
+    internals.proactiveResumeIdentityRejects = 11;
+    internals.unownedProviderEventRejects = 12;
+    internals.suppressedSystemTurnEffectRejects = 13;
+    vi.spyOn(internals, 'perChatSessionsWithoutOwner').mockReturnValue(['chat-a', 'chat-b']);
+    vi.spyOn(internals, 'perChatRespawnAbandonedCount').mockReturnValue(3);
+    vi.spyOn(internals.runtimeTurnCoordinator, 'turnQueueHaltHealth')
+      .mockReturnValue({ turnQueueHalted: true, turnQueueHaltedScopes: 4 });
+    vi.spyOn(internals.turnChronology, 'healthDetails').mockReturnValue({
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
+
+    expect(runtime.getHealthSnapshot().details).toMatchObject({
+      perChatSessionsWithoutOwner: 2,
+      perChatRespawnAbandoned: 3,
+      turnQueueHaltedScopes: 4,
+      proactiveResumeIdentityRejects: 11,
+      unownedProviderEventRejects: 12,
+      suppressedSystemTurnEffectRejects: 13,
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
   });
 
   it('degrades only while provider execution pressure is active', async () => {
@@ -651,6 +744,53 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
     });
   });
 
+  it('reports one and two poisoned per-chat scopes without serializing identities or causes', async () => {
+    await poisonOutboundScope(runtime, 'private-poison-scope-a', 'private poison cause a');
+    expect(runtime.getHealthSnapshot()).toMatchObject({
+      status: 'degraded',
+      details: {
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 1,
+        degradedReasons: expect.arrayContaining(['outbound_queue_poisoned']),
+      },
+    });
+
+    await poisonOutboundScope(runtime, 'private-poison-scope-b', 'private poison cause b');
+    const snapshot = runtime.getHealthSnapshot();
+    expect(snapshot).toMatchObject({
+      status: 'degraded',
+      details: {
+        outboundQueuePoisoned: true,
+        outboundQueuePoisonedScopes: 2,
+      },
+    });
+    const serialized = JSON.stringify(snapshot.details);
+    expect(serialized).not.toContain('private-poison-scope');
+    expect(serialized).not.toContain('private poison cause');
+    expect(serialized).not.toContain('@s.whatsapp.net');
+  });
+
+  it.each(['shared', 'single'] as const)(
+    'reports a poisoned %s admission lane as unhealthy',
+    async (sessionScope) => {
+      const poisonedRuntime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+        sessionScope,
+      });
+      await poisonOutboundScope(poisonedRuntime, '__global__', 'private global poison cause');
+
+      const snapshot = poisonedRuntime.getHealthSnapshot();
+      expect(snapshot).toMatchObject({
+        status: 'unhealthy',
+        details: {
+          outboundQueuePoisoned: true,
+          outboundQueuePoisonedScopes: 1,
+          degradedReasons: expect.arrayContaining(['outbound_queue_poisoned']),
+        },
+      });
+      expect(JSON.stringify(snapshot.details)).not.toContain('private global poison cause');
+    },
+  );
+
   it('recordTurnCapabilitySuccess refreshes primaryModelUsability, clearing staleness (#1884 follow-up)', () => {
     const staleCheckedAt = Date.now() - 31 * 60_000;
     (runtime as unknown as { primaryModelUsability: unknown }).primaryModelUsability =
@@ -732,6 +872,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         pollPersistenceErrors: 0,
         pollPersistenceHealth: { errors: 0, degraded: false, consecutiveFailures: 0, lastFailureAt: null, lastFailureErr: null, lastRecoveredAt: null, totalRecoveries: 0 },
         offlineDecisionRetry: { pending: false, attempts: 0, exhausted: false, nextRetryAt: null },
+        accountIdentity: { status: 'disabled', reason: null, expectedDigestPrefix: null, observedDigestPrefix: null, checkedAt: null, stale: false },
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
@@ -739,7 +880,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         autoCompactActiveBackoffScopes: 0,
         autoCompactWorstCurrentBackoffTier: 0,
         proactiveResumeIdentityRejects: 0,
-        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null },
+        restartLoopGuard: { enabled: true, bootsInWindow: 0, tripped: false, lastTripAt: null, windowMs: 300_000, bootsTotal: 0, checksPerformed: 0, lastCheckAt: null, relaunchesInWindow: 0, cleanRestartThrash: false, thrashWindowMs: 3_600_000 },
         unownedProviderEventRejects: 0,
         suppressedSystemTurnEffectRejects: 0,
         providerEventRejectReasons: {},
@@ -752,6 +893,9 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
           unresolvedCount: 0,
         },
         degradedReasons: [],
+        perChatSessionsWithoutOwner: 0,
+        perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
@@ -877,6 +1021,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
       const mutableConfig = config as unknown as Record<string, unknown>;
       mutableConfig.proactiveResumeOnStartup = true;
       try {
+        await prepareRuntimeHome();
         await runtime.start();
       } finally {
         delete mutableConfig.proactiveResumeOnStartup;

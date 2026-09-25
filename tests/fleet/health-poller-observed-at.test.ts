@@ -18,6 +18,7 @@ import type { InstanceHealth } from '../../src/fleet/health-poller.ts';
 vi.mock('../../src/logger.ts', async () => (await import('../helpers/logger-mock.ts')).loggerMock());
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: vi.fn(() => ({ ok: true, channel: 'outbox', status: 'durably_queued' })),
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: vi.fn(() => true),
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({

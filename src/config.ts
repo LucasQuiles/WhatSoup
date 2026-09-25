@@ -5,6 +5,7 @@ import { printErr } from './lib/cli-print.ts';
 import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
+import { resolveConfiguredAccountScope } from './transport/coordination-lease.ts';
 import type { Profile } from './core/profiles.ts';
 import { DEFAULT_BIND_ADDRESS } from './fleet/constants.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
@@ -15,7 +16,12 @@ import { DEFAULT_IMESSAGE, type ImessageConfig, type ImessageInboundMode } from 
 import { DEFAULT_SIGNAL, SIGNAL_UUID_RE, type SignalConfig, type SignalInboundMode } from './transport/signal/types.ts';
 import { canonicalizeImessageDirectIdentity } from './core/transport-refs.ts';
 import { parseCapabilityObligationsOptions } from './core/capability-contract.ts';
-import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
+import {
+  assertRetentionConfigCompliesWithPolicy,
+  loadMediaRetentionPolicy,
+} from './core/media-retention-policy.ts';
+import { resolveFleetLifecyclePhase } from './core/observability/fleet-lifecycle-flag.ts';
+import { normalizeFallbackDiscoveryFromAgentOptions, normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 import {
   isProviderBoundaryMode,
   isProviderDataPolicy,
@@ -25,6 +31,8 @@ import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR } from './lib/time-units.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
+import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
+import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -454,6 +462,16 @@ let bootstrapConfig: RuntimeBootstrapConfig | null = null;
 if (instanceRaw) {
   bootstrapConfig = parseRuntimeBootstrapConfig(instanceRaw);
   instance = bootstrapConfig.raw;
+}
+
+const clientOutputPolicySource = getLoadedInstanceConfigOrNull() ?? instance;
+const parsedClientOutputPolicies = parseClientOutputPoliciesForInstance(
+  clientOutputPolicySource ?? {},
+);
+if (!parsedClientOutputPolicies.ok) {
+  throw new ConfigValidationError(
+    `${parsedClientOutputPolicies.error.field} ${parsedClientOutputPolicies.error.reason}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,6 +1182,7 @@ const echoGuardSection = configSection(instance?.echoGuard, 'echoGuard');
 const elevenlabsSection = configSection(instance?.elevenlabs, 'elevenlabs');
 const mediaRetentionSection = configSection(instance?.mediaRetention, 'mediaRetention');
 const ingestSection = configSection(instance?.ingest, 'ingest');
+const shadowGateSection = configSection(instance?.shadowGate, 'shadowGate');
 const advancedSection = configSection(instance?.advanced, 'advanced');
 const instancePathsSection = instance ? configSection(instance.paths, 'paths') : undefined;
 
@@ -1186,7 +1205,16 @@ function configModelRole(value: string, role: string): string {
 // EX_CONFIG(78) (stops the restart-flap), never a bare throw with exit 1.
 function configCapabilityObligations() {
   try {
-    return parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+    const options = parseCapabilityObligationsOptions(resolvedAgentOptions['capabilityObligations']);
+    if (options !== null) {
+      // #3221 Debt 3 (A-08): every ENABLED activation must comply with the
+      // owner-approved media-retention policy artifact shipped with the release
+      // (policy/media-retention.json) — verified fail-closed at load, upstream
+      // of every DM/group media drain. A horizon longer than the owner ruled,
+      // or a policy-version mismatch, is a startup EX_CONFIG, never a drain.
+      assertRetentionConfigCompliesWithPolicy(options, loadMediaRetentionPolicy());
+    }
+    return options;
   } catch (err) {
     throw new ConfigValidationError(
       `agentOptions.capabilityObligations is enabled but malformed: ${errorMessage(err)}`,
@@ -1195,9 +1223,17 @@ function configCapabilityObligations() {
 }
 
 export const config = {
+  clientOutputPolicies: parsedClientOutputPolicies.registry,
+
   // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
   // with a malformed body fails startup as EX_CONFIG — never a partial activation.
   capabilityObligations: configCapabilityObligations(),
+
+  // FLOS Stage 1 (design §11): the fleet-lifecycle observability phase, lifted
+  // like capabilityObligations so runtime emission can gate on it. The resolver
+  // is total — malformed or absent input resolves to 'off' (dark), never a
+  // throw; the load-path validator separately rejects malformed values loudly.
+  fleetLifecyclePhase: resolveFleetLifecyclePhase(resolvedAgentOptions),
 
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
@@ -1364,6 +1400,14 @@ export const config = {
   // env var is exactly '0' (#2192 slice 2b).
   authBondAutoRestore: optionalBoolean(instance?.authBondAutoRestore, 'authBondAutoRestore')
     ?? process.env.WHATSOUP_AUTH_BOND_AUTO_RESTORE !== '0',
+  // Opaque account-scope identity for the fenced coordination lease. Absent
+  // keeps the lease machinery inert (legacy instances); a present but
+  // malformed value throws HERE at config load rather than silently
+  // disabling coordination.
+  accountScopeId: resolveConfiguredAccountScope(
+    optionalString(instance?.accountScopeId, 'accountScopeId')
+      ?? process.env.WHATSOUP_ACCOUNT_SCOPE_ID,
+  ),
   // Baileys protocol version pin, string passthrough (#2192 s4a). Parsing and
   // validation stay call-time in parsePinnedBaileysVersion so a malformed
   // value throws at connect (today's timing), not at config load.
@@ -1426,6 +1470,14 @@ export const config = {
       .map((jid: string) => jid.trim()),
   ),
 
+  // Memory recall scope per direct-chat contact (phone -> 'chat' | 'instance').
+  // A non-admin contact's direct chat recalls only its own memories unless set
+  // to 'instance'. Other values are dropped. See src/core/memory-scope.ts.
+  contactRecallScopes: Object.fromEntries(
+    Object.entries(stringRecordProp(instance, 'contactRecallScopes'))
+      .filter(([, scope]) => scope === 'chat' || scope === 'instance'),
+  ) as Record<string, 'chat' | 'instance'>,
+
   // Control peers — phones trusted to send self-healing control messages.
   // stringRecordProp fails loud on non-string values (and trims), replacing
   // the former unchecked Record cast.
@@ -1478,6 +1530,11 @@ export const config = {
   // access_list as 'allowed' at startup — the durable, source-reproducible
   // equivalent of a hand-inserted access grant. See seedAutoRespondGroups.
   autoRespondGroups: stringArrayProp(instance, 'autoRespondGroups'),
+
+  // Group JIDs run as shared workflows: every member's memory recall in the group
+  // covers all of that group's memories, not only the group's shared records plus
+  // the sender's own. See src/core/memory-scope.ts.
+  sharedWorkflowGroups: stringArrayProp(instance, 'sharedWorkflowGroups'),
 
   // Per-instance send decoration policies.
   profiles: profileRecordProp(instance, 'profiles'),
@@ -1540,6 +1597,12 @@ export const config = {
   agentFallbackProvider: resolvedFallbacks[0]?.provider,
   agentFallbackModel: resolvedFallbacks[0]?.model,
   agentFallbackDataPolicy: resolvedFallbacks[0]?.dataPolicy,
+
+  // Discovery-mode fallback (R6) — read from agentOptions.fallbackDiscovery.
+  // When present (mode:"auto"), the runtime DERIVES the chain per host from
+  // the gateway's credential-aware model catalogue; config admission rejects
+  // combining it with a non-empty fallbacks list. Null = static-list behavior.
+  agentFallbackDiscovery: normalizeFallbackDiscoveryFromAgentOptions(resolvedAgentOptions),
 
   // Provider-fallback tunables (#2192 s4b) — instance-config
   // (agentOptions.fallbackTunables.*) first, env second, defaults and clamps
@@ -1627,6 +1690,14 @@ export const config = {
   ingest: {
     maxConcurrent: optionalFiniteNumber(ingestSection?.maxConcurrent, 'ingest.maxConcurrent') ?? 20,
     maxQueueDepth: optionalFiniteNumber(ingestSection?.maxQueueDepth, 'ingest.maxQueueDepth') ?? 500,
+  },
+
+  // Shadow gate: advisory, logged-only reply-worthiness verdicts (never changes dispatch)
+  shadowGate: {
+    mode: optionalEnum(shadowGateSection?.mode, 'shadowGate.mode', ['off', 'shadow'] as const) ?? 'off',
+    eventsDir: shadowGateSection?.eventsDir === undefined || shadowGateSection?.eventsDir === null
+      ? null
+      : requireAbsolutePathString(shadowGateSection.eventsDir, 'shadowGate.eventsDir'),
   },
 
   // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart

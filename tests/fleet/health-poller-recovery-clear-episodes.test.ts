@@ -18,6 +18,7 @@ const silenceManager = vi.hoisted(() => ({
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   ...alertFns,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 vi.mock('../../src/fleet/alert-throttle-store.ts', () => ({
@@ -134,6 +135,11 @@ const reachableIncompleteProofCases: ReadonlyArray<[
   string,
 ]> = [
   ['missing auth bond', { whatsapp: { auth_bond: null } }, 'auth_bond_missing'],
+  // The 'unknown' arm fronts the 'missing' one and both withhold, so the only
+  // thing that separates them is the word the operator reads. Deleting the arm
+  // reports a credential that demonstrably exists as missing, which sends the
+  // operator to re-pair; this row is what catches that.
+  ['unknown auth bond', { authBond: { status: 'unknown' } }, 'auth_bond_unknown'],
   ['zero-byte credentials', { creds: { size: 0 } }, 'credentials_empty'],
   ['missing credential timestamp', { creds: { mtime: null } }, 'credentials_mtime_unavailable'],
   ['missing post-bond send', { outboundSends: { latest_successful_send_at: null } }, 'post_bond_send_missing'],

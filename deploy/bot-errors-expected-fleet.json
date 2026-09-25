@@ -47,7 +47,7 @@
       "instances": [
         {
           "name": "clanka",
-          "expected": "always_on",
+          "expected": "none",
           "service": "com.whatsoup.clanka",
           "healthPort": 9096
         }

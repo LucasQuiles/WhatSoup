@@ -9,6 +9,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
@@ -107,7 +108,8 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   }),
 }));
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
   readFileSync: vi.fn(),
 }));
 
@@ -255,6 +257,32 @@ function lastSpawnEnv(): NodeJS.ProcessEnv {
   return options?.env ?? {};
 }
 
+async function withOwnedSessionPaths(
+  run: (paths: { home: string; directory(relative: string): string }) => Promise<void>,
+): Promise<void> {
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const harnessHome = process.env.WHATSOUP_VITEST_HOME;
+  if (!harnessHome || !fs.lstatSync(join(harnessHome, '.whatsoup-vitest-home')).isFile()) {
+    throw new Error('session filesystem fixtures require the marked Vitest HOME');
+  }
+  const home = fs.mkdtempSync(join(harnessHome, 'session-paths-'));
+  const previousHome = homedir();
+  vi.mocked(homedir).mockReturnValue(home);
+  try {
+    await run({
+      home,
+      directory(relative) {
+        const cwd = join(home, relative);
+        fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
+        return cwd;
+      },
+    });
+  } finally {
+    vi.mocked(homedir).mockReturnValue(previousHome);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('SessionManager', () => {
@@ -269,6 +297,159 @@ describe('SessionManager', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each(['cwd', 'pluginDirs'] as const)('F6 refuses a missing intermediate before consuming %s', async (field) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-session-'));
+    fs.mkdirSync(join(home, 'cwd'));
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const bad = join(home, 'missing', 'leaf');
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      cwd: field === 'cwd' ? bad : join(home, 'cwd'),
+      pluginDirs: field === 'pluginDirs' ? [bad] : [],
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await expect(sm.spawnSession()).rejects.toThrow(/home|ENOENT/);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(fs.existsSync(join(home, 'missing'))).toBe(false);
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('F6 rechecks cwd after the final provider canary wait before spawn', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-transition-'));
+    const outside = await outsideRuntimeHome(home, 'f6-transition-outside-');
+    const cwd = join(home, 'cwd');
+    fs.mkdirSync(cwd);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    let release!: () => void;
+    let reachedFinal!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const finalWait = new Promise<void>(resolve => { reachedFinal = resolve; });
+    let admissions = 0;
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), cwd, providerCanaryAdmission: async () => {
+        if (++admissions === 2) {
+          reachedFinal();
+          await ready;
+        }
+        return { allowed: true, required: false, resolvedPath: 'claude', binarySha256: '', proxyScriptSha256: '' };
+      },
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    let starting: Promise<void> | undefined;
+    try {
+      starting = sm.spawnSession();
+      await Promise.race([finalWait, starting]);
+      expect(admissions, 'startup must reach its final canary admission').toBe(2);
+      expect(spawn).not.toHaveBeenCalled();
+      fs.rmdirSync(cwd);
+      fs.symlinkSync(outside, cwd);
+      release();
+      await expect(starting).rejects.toThrow(/home/);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      release();
+      try {
+        // The body observes the startup result; cleanup also waits for it to
+        // settle after releasing the canary, before retiring its child.
+        if (starting) await Promise.allSettled([starting]);
+        await sm.shutdown();
+      } finally {
+        vi.mocked(homedir).mockReturnValue(previousHome);
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('F6 refuses a spawn-per-turn relaunch after its physical cwd is replaced', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-relaunch-'));
+    const outside = await outsideRuntimeHome(home, 'f6-relaunch-outside-');
+    const cwd = join(home, 'cwd');
+    fs.mkdirSync(cwd);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const child = makeMockChild(12151);
+    vi.mocked(spawn).mockReturnValueOnce(child as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), cwd, provider: 'opencode-cli', model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    try {
+      await session.spawnSession();
+      await session.sendTurn('first');
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(spawn).toHaveBeenCalledWith('opencode', expect.any(Array), expect.objectContaining({ cwd }));
+      session.completeProviderTurn();
+      fs.rmdirSync(cwd);
+      fs.symlinkSync(outside, cwd);
+      await expect(session.sendTurn('must not launch outside home')).rejects.toThrow(/home/);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(fs.readdirSync(outside)).toEqual([]);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      child._closeCb?.(0, null);
+      try {
+        await session.shutdown();
+      } finally {
+        vi.mocked(homedir).mockReturnValue(previousHome);
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it.each(['claude-cli', 'openai-api'] as const)('F6 consumes accepted cwd and plugin paths for %s', async (provider) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-accepted-'));
+    const real = join(home, 'physical');
+    const alias = join(home, 'alias');
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, alias);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const initialize = vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), provider, cwd: alias, pluginDirs: [alias],
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await sm.spawnSession();
+      if (provider === 'openai-api') {
+        expect(initialize).toHaveBeenCalledWith(expect.objectContaining({ cwd: real, pluginDirs: [real] }));
+      } else {
+        expect(spawn).toHaveBeenCalledWith('claude', expect.arrayContaining(['--plugin-dir', real]), expect.objectContaining({ cwd: real }));
+      }
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('invalidates opaque evidence bindings on lifecycle or ownership generation changes', () => {
@@ -587,7 +768,8 @@ describe('SessionManager', () => {
     });
   });
 
-  it('spawnSession can isolate child HOME/XDG config roots when explicitly enabled', async () => {
+  it('spawnSession can isolate child HOME/XDG config roots when explicitly enabled', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('workspace/chat-a');
     await withConnectorMutationEnv({
       HOME: '/host/home',
       XDG_CONFIG_HOME: '/host/config',
@@ -601,19 +783,19 @@ describe('SessionManager', () => {
         messenger,
         chatJid: CHAT_JID,
         onEvent: vi.fn(),
-        cwd: '/workspace/chat-a',
-        configRoot: '/workspace/chat-a/.agent-home',
+        cwd: cwd,
+        configRoot: join(cwd, '.agent-home'),
       });
 
       await sm.spawnSession();
 
       expect(lastSpawnEnv()).toMatchObject({
-        HOME: '/workspace/chat-a/.agent-home',
-        XDG_CONFIG_HOME: '/workspace/chat-a/.agent-home/.config',
-        XDG_DATA_HOME: '/workspace/chat-a/.agent-home/.local/share',
+        HOME: join(cwd, '.agent-home'),
+        XDG_CONFIG_HOME: join(cwd, '.agent-home/.config'),
+        XDG_DATA_HOME: join(cwd, '.agent-home/.local/share'),
       });
     });
-  });
+  }));
 
   it('sendTurn writes JSONL to stdin', async () => {
     const db = makeDb();
@@ -897,7 +1079,7 @@ describe('SessionManager', () => {
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false, providerTerminated: true });
 
     await sm.spawnSession();
 
@@ -914,7 +1096,7 @@ describe('SessionManager', () => {
     await sm.spawnSession();
     await sm.shutdown();
 
-    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false });
+    expect(sm.getStatus()).toEqual({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null, turnInFlight: false, durableFailureClosed: false, durableFailureInconclusive: false, providerTerminated: true });
   });
 
   it('watchdog rearming is separate from provider turn ownership', async () => {
@@ -973,13 +1155,14 @@ describe('SessionManager', () => {
     expect(updateTranscriptPath).toHaveBeenCalledWith(db, 42, expectedPath);
   });
 
-  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => {
+  it('init event writes transcript path with configuredCwd (Linux-style path)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('srv/whatsoup/daemon');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/srv/whatsoup/daemon',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -988,17 +1171,18 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-srv-whatsoup-daemon', 'ses_lnx.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-srv-whatsoup-daemon`, 'ses_lnx.jsonl'),
     );
-  });
+  }));
 
-  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => {
+  it('init event writes transcript path with configuredCwd (macOS-style path)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('Applications/WhatSoup');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/Applications/WhatSoup',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -1007,17 +1191,18 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup', 'ses_macos.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-Applications-WhatSoup`, 'ses_macos.jsonl'),
     );
-  });
+  }));
 
-  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => {
+  it('init event writes transcript path with dot-in-path configuredCwd (double-dash regression guard)', async () => withOwnedSessionPaths(async ({ home, directory }) => {
+    const cwd = directory('Applications/WhatSoup/.worktrees/patch');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: () => {},
-      cwd: '/Applications/WhatSoup/.worktrees/patch',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
@@ -1026,9 +1211,9 @@ describe('SessionManager', () => {
 
     expect(updateTranscriptPath).toHaveBeenCalledWith(
       db, 42,
-      join(homedir(), '.claude', 'projects', '-Applications-WhatSoup--worktrees-patch', 'ses_dot.jsonl'),
+      join(homedir(), '.claude', 'projects', `${home.replaceAll('/', '-')}-Applications-WhatSoup--worktrees-patch`, 'ses_dot.jsonl'),
     );
-  });
+  }));
 
   it('init event writes transcript path under CLAUDE_CONFIG_DIR override', async () => {
     const prev = process.env['CLAUDE_CONFIG_DIR'];
@@ -1188,6 +1373,7 @@ describe('SessionManager', () => {
       turnInFlight: false,
       durableFailureClosed: false,
       durableFailureInconclusive: false,
+      providerTerminated: true,
     });
   });
 
@@ -1220,10 +1406,12 @@ describe('SessionManager', () => {
       turnInFlight: false,
       durableFailureClosed: false,
       durableFailureInconclusive: false,
+      providerTerminated: false,
     });
   });
 
-  it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => {
+  it('spawn-per-turn createSession uses cwd, chatJid, and workspaceKey', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -1233,19 +1421,19 @@ describe('SessionManager', () => {
       chatJid: CHAT_JID,
       onEvent: vi.fn(),
       provider: 'opencode-cli',
-      cwd: '/agent/dir',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
     expect(createSession).toHaveBeenCalledWith(
       db,
       0,
-      '/agent/dir',
+      cwd,
       CHAT_JID,
       toConversationKey(CHAT_JID),
       'opencode-cli',
     );
-  });
+  }));
 
   it.each([
     {
@@ -2613,23 +2801,24 @@ describe('SessionManager', () => {
 
   // ─── Configurable cwd + instructionsPath ─────────────────────────────────
 
-  it('spawnSession uses configurable cwd when provided', async () => {
+  it('spawnSession uses configurable cwd when provided', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('custom/cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
 
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       instanceName: 'personal',
-      cwd: '/custom/cwd',
+      cwd: cwd,
     });
     await sm.spawnSession();
 
     expect(spawn).toHaveBeenCalledWith(
       'claude',
       expect.any(Array),
-      expect.objectContaining({ cwd: '/custom/cwd' }),
+      expect.objectContaining({ cwd: cwd }),
     );
-  });
+  }));
 
   it('spawnSession uses homedir() when cwd is not provided', async () => {
     const db = makeDb();
@@ -2645,7 +2834,8 @@ describe('SessionManager', () => {
     );
   });
 
-  it('spawnSession reads instructionsPath and prepends identity line', async () => {
+  it('spawnSession reads instructionsPath and prepends identity line', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions here.');
@@ -2653,7 +2843,7 @@ describe('SessionManager', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       instanceName: 'mybot',
-      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+      cwd: cwd, instructionsPath: 'CLAUDE.md',
     });
     await sm.spawnSession();
 
@@ -2664,8 +2854,8 @@ describe('SessionManager', () => {
     const systemPrompt = args[systemPromptIdx + 1];
     expect(systemPrompt).toContain('mybot');
     expect(systemPrompt).toContain('Custom instructions here.');
-    expect(readFileSync).toHaveBeenCalledWith('/agent/dir/CLAUDE.md', 'utf8');
-  });
+    expect(readFileSync).toHaveBeenCalledWith(join(cwd, 'CLAUDE.md'), 'utf8');
+  }));
 
   // ─── Provider-aware system prompt identity ────────────────────────────────
 
@@ -2738,7 +2928,8 @@ describe('SessionManager', () => {
     })).toThrow(/unknown provider/i);
   });
 
-  it('system prompt with instructionsPath uses provider display name', async () => {
+  it('system prompt with instructionsPath uses provider display name', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const cwd = directory('agent/dir');
     const db = makeDb();
     const { messenger } = makeMessenger();
     (readFileSync as ReturnType<typeof vi.fn>).mockReturnValue('Custom instructions.');
@@ -2746,14 +2937,14 @@ describe('SessionManager', () => {
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
       provider: 'opencode-cli',
-      cwd: '/agent/dir', instructionsPath: 'CLAUDE.md',
+      cwd: cwd, instructionsPath: 'CLAUDE.md',
     });
     await sm.spawnSession();
 
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('a personal OpenCode agent');
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).not.toContain('Claude Code');
     expect((sm as unknown as { systemPrompt: string }).systemPrompt).toContain('Custom instructions.');
-  });
+  }));
 
   // ─── P3-C: Pending tool tracking ─────────────────────────────────────────
 
@@ -4003,6 +4194,56 @@ describe('Codex session resume via thread ID', () => {
         persistExtendedHistory: true,
       },
     });
+  });
+
+  it.each(['alias', 'physical'] as const)('F6 binds the Codex resume retry after its %s cwd is retargeted', async (target) => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const home = fs.mkdtempSync(join(process.env.HOME!, 'f6-codex-retry-'));
+    const outside = await outsideRuntimeHome(home, 'f6-codex-retry-outside-');
+    const physical = join(home, 'physical');
+    const alias = join(home, 'alias');
+    fs.mkdirSync(physical);
+    fs.symlinkSync(physical, alias);
+    const previousHome = homedir();
+    vi.mocked(homedir).mockReturnValue(home);
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      provider: 'codex-cli', cwd: alias, onEvent: vi.fn(),
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => { mockChild._exitCb?.(0, null); mockChild._closeCb?.(0, null); });
+      return true;
+    });
+    try {
+      await sm.spawnSession('thread_stale_xyz', 42);
+      expect(spawn).toHaveBeenCalledWith('codex', expect.any(Array), expect.objectContaining({ cwd: physical }));
+      const resumeRequest = mockChild.stdin.write.mock.calls
+        .map(call => JSON.parse(String(call[0])) as { id: string; method?: string })
+        .find(call => call.method === 'thread/start');
+      expect(resumeRequest).toBeDefined();
+      if (target === 'alias') fs.unlinkSync(alias);
+      else fs.rmdirSync(physical);
+      fs.symlinkSync(outside, target === 'alias' ? alias : physical);
+      mockChild.stdin.write.mockClear();
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({
+        jsonrpc: '2.0', id: resumeRequest!.id, error: { code: -32600, message: 'Thread not found' },
+      }) + '\n'));
+      const retries = mockChild.stdin.write.mock.calls
+        .map(call => JSON.parse(String(call[0])) as { method?: string; params?: { cwd?: string } })
+        .filter(call => call.method === 'thread/start');
+      if (target === 'alias') {
+        expect(retries).toHaveLength(1);
+        expect(retries[0]?.params?.cwd).toBe(physical);
+      } else {
+        expect(retries).toEqual([]);
+      }
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      await sm.shutdown();
+      vi.mocked(homedir).mockReturnValue(previousHome);
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('clears stale thread ID from DB after resume failure', async () => {
@@ -5822,21 +6063,23 @@ describe('providerConfig-driven claude-cli args', () => {
     expect(args).not.toContain('--fallback-model');
   });
 
-  it('--plugin-dir args are added for each pluginDir', async () => {
+  it('--plugin-dir args are added for each pluginDir', async () => withOwnedSessionPaths(async ({ directory }) => {
+    const firstPlugin = directory('plugins/a');
+    const secondPlugin = directory('plugins/b');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const sm = new SessionManager({
       db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
-      pluginDirs: ['/plugins/a', '/plugins/b'],
+      pluginDirs: [firstPlugin, secondPlugin],
     });
     await sm.spawnSession();
 
     const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
     const pluginDirIndices = args.reduce<number[]>((acc, v, i) => { if (v === '--plugin-dir') acc.push(i); return acc; }, []);
     expect(pluginDirIndices).toHaveLength(2);
-    expect(args[pluginDirIndices[0] + 1]).toBe('/plugins/a');
-    expect(args[pluginDirIndices[1] + 1]).toBe('/plugins/b');
-  });
+    expect(args[pluginDirIndices[0] + 1]).toBe(firstPlugin);
+    expect(args[pluginDirIndices[1] + 1]).toBe(secondPlugin);
+  }));
 });
 
 // ─── opencode-cli session resume via sessionId ────────────────────────────────
@@ -6268,6 +6511,207 @@ describe('session.ts uncovered-branch coverage', () => {
     await sm.spawnSession();
     await sm.shutdown(false);
     expect(shutdownSpy).toHaveBeenCalledWith('end');
+  });
+
+  // --- providerTerminated for a managed-loop provider mid-shutdown.
+  //     `shutdown()` clears `active` at its top, before either handle is
+  //     released, and a managed-loop provider never assigns a child — so a
+  //     cleared flag plus a null pid is NOT a termination proof for this
+  //     provider kind. Only releasing the managed handle is. Driven through a
+  //     real SessionManager because that is the surface the per-chat eviction
+  //     guard reads; a stubbed status could report anything.
+
+  it('reports providerTerminated false while the managed provider handle is still held', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    let releaseManagedShutdown: (() => void) | undefined;
+    const shutdownSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'shutdown')
+      .mockImplementation(() => new Promise<void>((resolve) => {
+        releaseManagedShutdown = resolve;
+      }));
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    await sm.spawnSession();
+
+    // Live managed session: no child was ever spawned, so the null pid alone
+    // must not read as terminated.
+    expect((sm as unknown as { child: unknown }).child).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const shuttingDown = sm.shutdown(true);
+    // `shutdown()` reaches the managed-provider race synchronously (no child to
+    // kill first), so the handle is already being released here.
+    expect(shutdownSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).not.toBeNull();
+
+    const midShutdown = sm.getStatus();
+    expect(midShutdown.active).toBe(false);
+    expect(midShutdown.pid).toBeNull();
+    expect(midShutdown.providerTerminated).toBe(false);
+
+    releaseManagedShutdown?.();
+    await shuttingDown;
+
+    // The handle is released only after its shutdown promise settles; that is
+    // the moment the flag is allowed to flip.
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
+  // --- F3(1): a managed kill that THROWS is not a termination proof.
+  //     `crashManagedProviderSession` clears the handle as part of cleanup, and
+  //     the interface permits `kill()` to fail (providers/types.ts). If the
+  //     handle is cleared regardless, `providerTerminated` claims a release that
+  //     never happened, and the per-chat eviction guard that reads it would
+  //     detach a conversation whose provider may still be running.
+
+  it('does not report the provider terminated when the managed kill throws during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-throw', generation: 1 };
+    const killSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'kill')
+      .mockImplementation(() => { throw new Error('managed kill failed'); });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null, providerTerminated: false });
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('kill failure probe')).toBe(true);
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(onCrash).toHaveBeenCalledTimes(1);
+    // Nothing released the handle, so termination is unproven, not proven.
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: false });
+  });
+
+  it('reports the provider terminated when the managed kill succeeds during crash cleanup', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const generationIdentity = { managerId: 'managed-kill-ok', generation: 1 };
+    const killSpy = vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash,
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('clean kill probe')).toBe(true);
+
+    // Positive counterpart: the flag must still flip when the kill DID release
+    // the handle, so the guard above cannot be satisfied by pinning it false.
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect((sm as unknown as { managedProviderSession: unknown }).managedProviderSession).toBeNull();
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, providerTerminated: true });
+  });
+
+  it('clears the unproven-termination flag when a new managed session spawns', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generationIdentity = { managerId: 'managed-flag-reset', generation: 1 };
+    let killThrows = true;
+    vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {
+      if (killThrows) throw new Error('managed kill failed');
+    });
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash: vi.fn(),
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+
+    expect(crash('kill failure probe')).toBe(true);
+    expect(sm.getStatus().providerTerminated).toBe(false);
+
+    // A new incarnation owns a fresh handle and must not inherit the previous
+    // one's unknown termination — otherwise the flag wedges the chat forever.
+    killThrows = false;
+    await sm.spawnSession();
+    expect(sm.getStatus()).toMatchObject({ active: true, providerTerminated: false });
+    expect(crash('clean kill probe')).toBe(true);
+    expect(sm.getStatus().providerTerminated).toBe(true);
+  });
+
+  it('does not report the provider terminated while a managed turn is still in flight', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const generationIdentity = { managerId: 'managed-turn-pending', generation: 1 };
+    let releaseTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    // Models a tool call the loop has already entered: aborting the HTTP request
+    // does not cancel it, so the turn promise stays pending past the crash.
+    const sendTurnSpy = vi
+      .spyOn(OpenAIApiProvider.prototype, 'sendTurn')
+      .mockImplementation(() => turnGate);
+    vi.spyOn(OpenAIApiProvider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+      onCrash: vi.fn(),
+    });
+    sm.bindGenerationOwnership(() => generationIdentity);
+    await sm.spawnSession();
+
+    const turn = sm.sendTurn('hello managed provider');
+    let settled = false;
+    void turn.then(() => { settled = true; }, () => { settled = true; });
+    expect(sendTurnSpy).toHaveBeenCalledTimes(1);
+
+    const crash = (sm as unknown as {
+      crashManagedProviderSession: (reason: string) => boolean;
+    }).crashManagedProviderSession.bind(sm);
+    expect(crash('managed provider turn watchdog fired')).toBe(true);
+
+    // The crash cleared the handle AND `turnInFlight`, so neither answers
+    // whether the tool call is still running. Termination is not proven.
+    expect(settled).toBe(false);
+    expect(sm.getStatus()).toMatchObject({
+      active: false,
+      turnInFlight: false,
+      providerTerminated: false,
+    });
+
+    releaseTurn?.();
+    await expect(turn).rejects.toThrow();
+
+    // Settled, so the proof is available again.
+    expect(sm.getStatus().providerTerminated).toBe(true);
   });
 
   // --- shutdown SIGKILL escalation when SIGTERM doesn't kill the child
@@ -7129,6 +7573,81 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it.each(['stdout', 'stderr'] as const)('reports OpenCode %s diagnostic progress and ignores stale-child output after handoff', async (stream) => {
+    let now = 20_000;
+    const firstChild = makeMockChild(12011);
+    const secondChild = makeMockChild(12012);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    try {
+      const gate = new ProviderExecutionGate({ now: () => now });
+      const first = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'first-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      const second = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'second-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      await first.spawnSession();
+      await second.spawnSession();
+
+      await first.sendTurn('first');
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('first-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_010;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'first live progress' },
+      })}\n`));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      now = 20_015;
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=tool-running\n'));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      const secondTurn = second.sendTurn('second');
+      await Promise.resolve();
+      now = 20_020;
+      firstChild._closeCb?.(0, null);
+      await secondTurn;
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('second-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_030;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'stale progress' },
+      })}\n`));
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=stale-tool\n'));
+      expect(gate.snapshot()).toMatchObject({
+        activePhase: 'executing',
+        progressAgeMs: 10,
+      });
+
+      secondChild._closeCb?.(0, null);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.mocked(spawn).mockReset();
+    }
+  });
+
   it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
     const firstChild = makeMockChild(12005);
     const secondChild = makeMockChild(12006);
@@ -7771,5 +8290,96 @@ describe('session.ts uncovered-branch coverage', () => {
     // A second shutdown with no child should not throw and should leave state clean.
     await expect(sm.shutdown(true)).resolves.toBeUndefined();
     expect(sm.getStatus()).toMatchObject({ active: false });
+  });
+});
+
+// #3391 — idle-suspend SIGTERM self-exits (code 143, signal null) must be
+// classified as intentional even when a concurrent inbound re-activated the
+// session mid-shutdown (the eviction race), while an UNMARKED 143 from a
+// child nothing killed on purpose must still alarm.
+describe('suspend SIGTERM graceful self-exit (#3391)', () => {
+  let mockChild: MockChild;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(31391);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('a suspend whose child self-exits 143 during a concurrent re-activation is intentional — no crash notice, no onCrash', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser, onCrash });
+    await sm.spawnSession();
+    mockChild.stdout.emit(
+      'data',
+      Buffer.from(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_3391_suspend' })}\n`),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    // Coverage assertion: the fixture really has a live session id to retain.
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBe('ses_3391_suspend');
+
+    // Idle-TTL sweep suspends; claude-cli catches the SIGTERM and gracefully
+    // self-exits code=143/signal=null. Before the exit lands, a concurrent
+    // inbound re-activates the session (evictIdleSession deletes the map entry
+    // synchronously after INITIATING shutdown, exactly to allow this).
+    const shutdownDone = sm.shutdown(true);
+    (sm as unknown as { active: boolean }).active = true;
+    mockChild._exitCb?.(143, null);
+    // Retention pin (#3391 review): the intentional-exit early return must NOT
+    // retire the session id — shutdown() owns that at its tail.
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBe('ses_3391_suspend');
+    await shutdownDone;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect((sm as unknown as { sessionId: string | null }).sessionId).toBeNull();
+
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sentMessages.filter((m) => m.text.includes('session ended'))).toHaveLength(0);
+    // The lane is re-spawnable: the dead child is released and the session is
+    // not left claiming an active provider.
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null });
+  });
+
+  it('an /new (ended) shutdown racing the same self-exit is equally intentional', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    const shutdownDone = sm.shutdown(false);
+    (sm as unknown as { active: boolean }).active = true;
+    mockChild._exitCb?.(143, null);
+    await shutdownDone;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(sentMessages.filter((m) => m.text.includes('session ended'))).toHaveLength(0);
+  });
+
+  it('an UNMARKED code-143 exit on an active session is still an untagged crash', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), onCrash });
+    await sm.spawnSession();
+
+    // Killed by something else (operator, systemd) — nothing marked this kill.
+    mockChild._exitCb?.(143, null);
+    await vi.waitFor(() => expect(onCrash).toHaveBeenCalledTimes(1));
+    expect(onCrash.mock.calls[0][0]).toMatchObject({ exitCode: 143, terminationReason: undefined });
+    await vi.waitFor(() => {
+      expect(sentMessages.filter((m) => m.text.includes('exited with code 143'))).toHaveLength(1);
+    });
   });
 });

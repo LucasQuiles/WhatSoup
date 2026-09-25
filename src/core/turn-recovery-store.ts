@@ -9,6 +9,7 @@ import {
 } from './delivery-corroboration-sql.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
+export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
 const TURN_RECOVERY_MAX_NAME_BYTES = 4096;
 export const TURN_RECOVERY_MAX_ATTEMPTS = 5;
 const TURN_RECOVERY_MAX_LEASE_SECONDS = 300;
@@ -230,6 +231,20 @@ export interface TurnRecoverySupervisorCounts {
   retainedTerminal?: number;
   /** Pending/claimed rows made unclaimable by valid later-echo proof. */
   corroboratedRetained?: number;
+  /**
+   * Actionability split of `blockedUnsafe` (② of the continuity work,
+   * docs/turn-recovery-continuity-reconciler.md). Synthetic self-turns
+   * (`agentjob-%` source IDs) owe no user a reply — a parked synthetic job is
+   * expected residue, never an incident. Real-source jobs split by whether
+   * their conversation has ANY newer inbound (the same newer-activity signal
+   * the safe-replay fence uses): newer activity means the thread moved on and
+   * the parked replay is correctly superseded; no newer activity means a real
+   * user turn may still be owed a reply — the only class that should page an
+   * operator. `synthetic + superseded + stranded === blockedUnsafe` always.
+   */
+  blockedUnsafeSynthetic: number;
+  blockedUnsafeSuperseded: number;
+  blockedUnsafeStranded: number;
 }
 
 export function validatePositiveSafeInteger(value: number, label: string): void {
@@ -459,6 +474,30 @@ const RECOVERY_JOB_SELECT = `
   unixepoch(i.received_at) AS source_received_at_unix_seconds
 `;
 
+// Corroborated delivery (a later echoed op for the same source inbound,
+// conversation and destination) is retained audit debt, not outstanding work:
+// it must never block admission for its scope.
+const OUTSTANDING_RECOVERY_FOR_SCOPE_FROM = `
+  FROM (
+    SELECT j.scope, j.conversation_key, j.id AS job_id
+    FROM turn_recovery_jobs j
+    WHERE j.state IN ('pending', 'claimed')
+      AND NOT ${validDeliveryCorroborationForJobSql('j')}
+    UNION ALL
+    SELECT t.scope, t.conversation_key, j.id AS job_id
+    FROM turn_terminal_records t
+    LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
+    WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
+      AND j.id IS NULL
+      AND NOT ${validDeliveryCorroborationForTerminalSql('t')}
+  ) outstanding
+`;
+const OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE = `
+  WHERE outstanding.scope = ?
+    AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
+    AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
+`;
+
 type TurnRecoveryStatements = {
   enqueueTurnRecoveryJob: PreparedStatement;
   getTurnRecoveryJob: PreparedStatement;
@@ -486,6 +525,7 @@ type TurnRecoveryStatements = {
   getOutstandingTurnRecoveryJobsForSupervisor: PreparedStatement;
   getNewestInboundSeqForConversation: PreparedStatement;
   getTurnRecoverySupervisorCounts: PreparedStatement;
+  getTurnRecoveryAdmissionStateForScope: PreparedStatement;
   hasOutstandingTurnRecoveryForScope: PreparedStatement;
 };
 
@@ -938,7 +978,31 @@ export class TurnRecoveryStore {
             WHEN j.state IN ('pending', 'claimed')
               AND ${validDeliveryCorroborationForJobSql('j')}
             THEN 1 ELSE 0
-          END), 0) AS corroborated_retained
+          END), 0) AS corroborated_retained,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_synthetic,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_superseded,
+          COALESCE(SUM(CASE
+            WHEN j.state = 'blocked_unsafe'
+              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND NOT EXISTS (
+                SELECT 1 FROM inbound_events i2
+                WHERE i2.conversation_key = j.conversation_key
+                  AND i2.seq > j.source_inbound_seq
+              ) THEN 1
+            ELSE 0
+          END), 0) AS blocked_unsafe_stranded
         FROM turn_recovery_jobs j
         LEFT JOIN turn_terminal_records t ON t.id = j.terminal_record_id
         LEFT JOIN inbound_events i ON i.seq = j.source_inbound_seq
@@ -949,24 +1013,23 @@ export class TurnRecoveryStore {
       // so the exclusion is one uniform outer-query predicate instead of two
       // arm-specific ones — a job actively claimed by the caller's own
       // supervisor replay must not block that replay's own admission check.
+      getTurnRecoveryAdmissionStateForScope: prepare(`
+        SELECT COUNT(*) AS outstanding_count, COUNT(echo.job_id) AS awaiting_echo_count
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_FROM}
+        LEFT JOIN (
+          SELECT j.id AS job_id
+          ${VALID_RECOVERY_JOB_FROM}
+          WHERE j.state = 'pending'
+            AND t.attempt_kind = 'completed'
+            AND t.delivery_kind = 'flushed'
+            AND o.status = 'submitted'
+        ) echo ON echo.job_id = outstanding.job_id
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE}
+      `),
       hasOutstandingTurnRecoveryForScope: prepare(`
         SELECT 1 AS found
-        FROM (
-          SELECT j.scope, j.conversation_key, j.id AS job_id
-          FROM turn_recovery_jobs j
-          WHERE j.state IN ('pending', 'claimed')
-            AND NOT ${validDeliveryCorroborationForJobSql('j')}
-          UNION ALL
-          SELECT t.scope, t.conversation_key, j.id AS job_id
-          FROM turn_terminal_records t
-          LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
-          WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
-            AND j.id IS NULL
-            AND NOT ${validDeliveryCorroborationForTerminalSql('t')}
-        ) outstanding
-        WHERE outstanding.scope = ?
-          AND (outstanding.scope <> 'per_chat' OR outstanding.conversation_key = ?)
-          AND (? IS NULL OR outstanding.job_id IS NULL OR outstanding.job_id != ?)
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_FROM}
+        ${OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE}
         LIMIT 1
       `),
     };
@@ -1500,11 +1563,26 @@ export class TurnRecoveryStore {
     return this.statements.reclaimDeadDeliveryRecoveryJob.run(jobId).changes === 1;
   }
 
-  reassignPendingTurnRecoveryJob(
+  /**
+   * `reassignPendingTurnRecoveryJob` and `reassignBlockedTurnRecoveryJob` ran
+   * the identical epoch-fenced reassignment: same argument validation, same
+   * source/owner identity guards, same idempotent-replay short circuit, same
+   * nine-argument statement call. Only the required state, the prepared
+   * statement and two messages differed. Parameterising keeps every guard,
+   * ordering and message byte-identical while leaving exactly ONE place to
+   * change the fencing rules, which are safety-critical.
+   */
+  private reassignTurnRecoveryJobInState(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
     newOwner: TurnRecoveryOwnerIdentity,
     fence: TurnRecoveryAssignmentFence,
+    spec: {
+      requiredState: InternalTurnRecoveryJobRow['state'];
+      statement: PreparedStatement;
+      wrongStateMessage: string;
+      fenceLostMessage: string;
+    },
   ): ReassignTurnRecoveryJobResult {
     validatePositiveSafeInteger(jobId, 'Recovery job ID');
     validateTurnRecoveryOwnerIdentity(currentOwner);
@@ -1520,7 +1598,7 @@ export class TurnRecoveryStore {
       throw new Error('Recovery source and assigned owner identities must differ');
     }
     if (
-      current.state === 'pending' &&
+      current.state === spec.requiredState &&
       current.assigned_owner_logical_turn_id === newOwner.logicalTurnId &&
       current.assigned_owner_manager_id === newOwner.managerId &&
       current.assigned_owner_generation === newOwner.generation &&
@@ -1541,10 +1619,10 @@ export class TurnRecoveryStore {
     ) {
       throw new Error('Recovery job may only be changed by its assigned recovery owner');
     }
-    if (current.state !== 'pending') {
-      throw new Error('Only pending recovery work can be reassigned');
+    if (current.state !== spec.requiredState) {
+      throw new Error(spec.wrongStateMessage);
     }
-    const row = this.statements.reassignTurnRecoveryJob.get(
+    const row = spec.statement.get(
       newOwner.logicalTurnId,
       newOwner.managerId,
       newOwner.generation,
@@ -1555,7 +1633,7 @@ export class TurnRecoveryStore {
       fence.claimEpoch,
       fence.assignmentEpoch,
     ) as InternalTurnRecoveryJobRow | undefined;
-    if (!row) throw new Error('Recovery reassignment lost its pending epoch fence');
+    if (!row) throw new Error(spec.fenceLostMessage);
     return {
       applied: true,
       jobId,
@@ -1564,68 +1642,32 @@ export class TurnRecoveryStore {
     };
   }
 
+  reassignPendingTurnRecoveryJob(
+    jobId: number,
+    currentOwner: TurnRecoveryOwnerIdentity,
+    newOwner: TurnRecoveryOwnerIdentity,
+    fence: TurnRecoveryAssignmentFence,
+  ): ReassignTurnRecoveryJobResult {
+    return this.reassignTurnRecoveryJobInState(jobId, currentOwner, newOwner, fence, {
+      requiredState: 'pending',
+      statement: this.statements.reassignTurnRecoveryJob,
+      wrongStateMessage: 'Only pending recovery work can be reassigned',
+      fenceLostMessage: 'Recovery reassignment lost its pending epoch fence',
+    });
+  }
+
   reassignBlockedTurnRecoveryJob(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
     newOwner: TurnRecoveryOwnerIdentity,
     fence: TurnRecoveryAssignmentFence,
   ): ReassignTurnRecoveryJobResult {
-    validatePositiveSafeInteger(jobId, 'Recovery job ID');
-    validateTurnRecoveryOwnerIdentity(currentOwner);
-    validateTurnRecoveryOwnerIdentity(newOwner);
-    validateRecoveryAssignmentFence(fence);
-    const current = this.getInternalTurnRecoveryJob(jobId);
-    if (!current) throw new Error('Recovery job does not exist');
-    if (
-      current.source_logical_turn_id === newOwner.logicalTurnId &&
-      current.source_manager_id === newOwner.managerId &&
-      current.source_generation === newOwner.generation
-    ) {
-      throw new Error('Recovery source and assigned owner identities must differ');
-    }
-    if (
-      current.state === 'blocked_unsafe' &&
-      current.assigned_owner_logical_turn_id === newOwner.logicalTurnId &&
-      current.assigned_owner_manager_id === newOwner.managerId &&
-      current.assigned_owner_generation === newOwner.generation &&
-      current.claim_epoch === fence.claimEpoch &&
-      current.assignment_epoch === fence.assignmentEpoch + 1
-    ) {
-      return {
-        applied: false,
-        jobId,
-        assignedOwner: newOwner,
-        assignmentEpoch: current.assignment_epoch,
-      };
-    }
-    if (
-      current.assigned_owner_logical_turn_id !== currentOwner.logicalTurnId ||
-      current.assigned_owner_manager_id !== currentOwner.managerId ||
-      current.assigned_owner_generation !== currentOwner.generation
-    ) {
-      throw new Error('Recovery job may only be changed by its assigned recovery owner');
-    }
-    if (current.state !== 'blocked_unsafe') {
-      throw new Error('Only blocked unsafe recovery work can use blocked reassignment');
-    }
-    const row = this.statements.reassignBlockedTurnRecoveryJob.get(
-      newOwner.logicalTurnId,
-      newOwner.managerId,
-      newOwner.generation,
-      jobId,
-      currentOwner.logicalTurnId,
-      currentOwner.managerId,
-      currentOwner.generation,
-      fence.claimEpoch,
-      fence.assignmentEpoch,
-    ) as InternalTurnRecoveryJobRow | undefined;
-    if (!row) throw new Error('Blocked recovery reassignment lost its epoch fence');
-    return {
-      applied: true,
-      jobId,
-      assignedOwner: newOwner,
-      assignmentEpoch: row.assignment_epoch,
-    };
+    return this.reassignTurnRecoveryJobInState(jobId, currentOwner, newOwner, fence, {
+      requiredState: 'blocked_unsafe',
+      statement: this.statements.reassignBlockedTurnRecoveryJob,
+      wrongStateMessage: 'Only blocked unsafe recovery work can use blocked reassignment',
+      fenceLostMessage: 'Blocked recovery reassignment lost its epoch fence',
+    });
   }
 
   promoteBlockedTurnRecoveryJob(
@@ -1790,6 +1832,9 @@ export class TurnRecoveryStore {
       blocking_outstanding: number;
       retained_terminal: number;
       corroborated_retained: number;
+      blocked_unsafe_synthetic: number;
+      blocked_unsafe_superseded: number;
+      blocked_unsafe_stranded: number;
     };
     return {
       outstanding: row.outstanding,
@@ -1806,6 +1851,9 @@ export class TurnRecoveryStore {
       blockingOutstanding: row.blocking_outstanding,
       retainedTerminal: row.retained_terminal,
       corroboratedRetained: row.corroborated_retained,
+      blockedUnsafeSynthetic: row.blocked_unsafe_synthetic,
+      blockedUnsafeSuperseded: row.blocked_unsafe_superseded,
+      blockedUnsafeStranded: row.blocked_unsafe_stranded,
     };
   }
 
@@ -1860,6 +1908,26 @@ export class TurnRecoveryStore {
     conversationKey: string,
     options?: { excludeJobId?: number },
   ): boolean {
+    this.validateRecoveryScopeQuery(conversationKey, options);
+    return this.statements.hasOutstandingTurnRecoveryForScope.get(
+      scope, conversationKey, options?.excludeJobId ?? null, options?.excludeJobId ?? null,
+    ) !== undefined;
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    this.validateRecoveryScopeQuery(conversationKey, options);
+    const row = this.statements.getTurnRecoveryAdmissionStateForScope.get(
+      scope, conversationKey, options?.excludeJobId ?? null, options?.excludeJobId ?? null,
+    ) as { outstanding_count: number; awaiting_echo_count: number };
+    if (row.outstanding_count === 0) return 'clear';
+    return row.outstanding_count === row.awaiting_echo_count ? 'awaiting_delivery_echo' : 'blocked';
+  }
+
+  private validateRecoveryScopeQuery(conversationKey: string, options?: { excludeJobId?: number }): void {
     validateBoundedRequired(
       conversationKey,
       'Recovery conversation key',
@@ -1869,12 +1937,6 @@ export class TurnRecoveryStore {
     if (excludeJobId !== undefined) {
       validatePositiveSafeInteger(excludeJobId, 'Recovery job ID');
     }
-    return this.statements.hasOutstandingTurnRecoveryForScope.get(
-      scope,
-      conversationKey,
-      excludeJobId ?? null,
-      excludeJobId ?? null,
-    ) !== undefined;
   }
 
   private toRecoveryEnumerationPage(

@@ -80,6 +80,48 @@ describe('stream-parser observability (id-only)', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('saturation telemetry: warns via the real logger at power-of-two milestones only (1,2,4,8), id-only', () => {
+    // Saturate the 128-key dedupe set with distinct, recorded types.
+    for (let i = 0; i < 128; i++) parseEvents(JSON.stringify({ type: `saturate_type_${i}` }));
+    warnSpy.mockClear(); // drop the 128 record-warns; isolate the saturation warns below
+
+    // Eight further NOVEL events cannot be recorded (set is full). They must NOT vanish
+    // silently: the saturation warn fires only at power-of-two occurrence counts.
+    const payloadSentinel = 'SAT_PAYLOAD_SENTINEL_qzx';
+    for (let i = 0; i < 8; i++) {
+      parseEvents(JSON.stringify({ type: 'post_cap_type', occurrence: i, blob: payloadSentinel }));
+    }
+
+    const satWarns = warnSpy.mock.calls.filter(
+      (c) => typeof c[1] === 'string' && c[1].includes('observability saturated'),
+    );
+    // Exactly four warns, at counts 1, 2, 4, 8 — proves it is neither silent (warning removed)
+    // nor logging every event (broken power-of-two sampling).
+    expect(satWarns.map((c) => c[0].suppressedNovelEventCount)).toEqual([1, 2, 4, 8]);
+    for (const c of satWarns) {
+      // Structured fields + exact message + bounded blockType.
+      expect(c[0]).toMatchObject({ classification: 'unknown', blockType: 'post_cap_type' });
+      expect(c[1]).toBe(
+        'stream-parser: unclassified-event observability saturated (id-only, power-of-two sampled)',
+      );
+    }
+    // id-only: no payload content in any warn.
+    expect(warnArgsString()).not.toContain(payloadSentinel);
+  });
+
+  it('logs a hostile top-level type as the bounded placeholder, never the raw hostile string', () => {
+    const hostileTail = 'RAW_HOSTILE_SENTINEL';
+    const oversized = 'X'.repeat(300);
+    const hostile = `${oversized}\u202E${hostileTail}`; // oversized + bidi override + sentinel
+    parseEvents(JSON.stringify({ type: hostile }));
+
+    expect(warnSpy).toHaveBeenCalled();
+    const logged = warnArgsString();
+    expect(logged).toContain('<unsafe>'); // bounded placeholder is surfaced …
+    expect(logged).not.toContain(hostileTail); // … and the raw hostile value is never logged
+    expect(logged).not.toContain(oversized); // nor the oversized run
+  });
+
   it('does NOT warn for current Claude informational event shapes', () => {
     parseEvents(JSON.stringify({
       type: 'rate_limit_event',

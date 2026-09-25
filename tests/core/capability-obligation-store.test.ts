@@ -109,6 +109,7 @@ function seedFreshAttestation(): number {
     canaryResult: 'pass', nonce: `att-store-${++attSeq}`,
     attestedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
   });
 }
 

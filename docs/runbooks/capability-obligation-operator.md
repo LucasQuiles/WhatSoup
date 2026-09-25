@@ -23,6 +23,12 @@ capability **attestation** (readiness) and, for a group, a **drain approval** (a
   attestation will never admit a real obligation. `--config PATH` (the instance
   `agentOptions.capabilityObligations` block) is cross-checked against your flags and the
   command refuses on any binding mismatch.
+- **Media-retention policy (#3221 Debt 3, A-08):** the instance config's
+  `retentionPolicyVersion` must name the owner-approved artifact
+  `policy/media-retention.json` verbatim, and `retentionHorizonDays` must not exceed its
+  approved horizon (**90 days**, owner-ruled 2026-08-28). Startup verifies this fail-closed
+  (`EX_CONFIG` on violation), so no DM/group media drain can run under an unapproved
+  horizon — check it here BEFORE cutover rather than discovering it as a boot refusal.
 
 ## 1. Produce a capability attestation — `scripts/capability-obligation-attest.ts`
 
@@ -168,18 +174,46 @@ the drain settles.
 
 ## End-to-end order
 
+0. Confirm the instance config complies with `policy/media-retention.json` (horizon ≤ 90,
+   version match — Prerequisites above); a violating config refuses to boot.
 1. `capability-obligation-attest … --run-canary --confirm` (readiness attestation).
 2. For a group: `capability-obligation-approve-drain … --confirm` (AS-08 approval + arm).
 3. The supervisor scans → admits (attestation) → claims (fenced) → dispatches → settles.
 4. (Cold restart only) `capability-obligation-drain-now … --confirm` (§3) to activate the
    named obligation's session; the same scan then drains it.
 
+## AS-01 old-binary contracts (#3231)
+
+The decisive old-binary observation supports two declared contracts
+(`--old-binary-contract`, default `error`):
+
+- `error` — a start-style binary that throws `DatabaseCompatibilityError` with the
+  `future_schema` reason and exits nonzero. This is the legacy contract.
+- `check` — a deployed release whose launcher runs
+  `database-compatibility-bootstrap.ts <instance> --check`: it REPORTS the status on
+  stdout (`future_schema` = refusal, `ready` = bootable) and exits 0 either way. Use
+  `--script-arg <instance>` (repeatable) to thread the instance argument the release's
+  `bootstrapCommon` requires; args pass through `npm run <script> -- ...`.
+
+The contract is always declared by the operator, never guessed from output shape: the
+release's `--hold` drain server also exits 0 on a graceful SIGTERM, so under `check` an
+exit 0 with no status token classifies INCONCLUSIVE, never accepted.
+
+**Sanctioned manual fallback (the 2026-08-14 rehearsal oracle):** run the release's own
+`--check` against the migrated clone and require `future_schema` with a byte-identical
+file-set hash before/after, then `ready` after the coupled restore. This is a valid AS-01
+oracle when the automated harness cannot run; keep both receipts.
+
 ## Safety recap
 
 - Schema-guarded, dry-run-by-default, `--json` for automation.
 - No live DB write, provider call, or WhatsApp send occurs from a dry run.
 - Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
-  a live migration additionally requires the AS-01 old-binary rehearsal to pass.
+  a live migration additionally requires the AS-01 old-binary rehearsal to pass. Migration 63
+  (#3221 Debt 2: attestation-evidence columns in the row; the `--receipt-out` file is now
+  corroborating) bumps the schema INSIDE the attestation binding — before its rollout the
+  AS-01 rehearsal must be re-run 44→63, and every previously recorded attestation digest
+  stops admitting on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
   (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now

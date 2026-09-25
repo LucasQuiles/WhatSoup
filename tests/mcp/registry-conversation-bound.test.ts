@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { z } from 'zod';
-import { ToolRegistry } from '../../src/mcp/registry.ts';
+import { ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import type { ToolDeclaration, SessionContext } from '../../src/mcp/types.ts';
 
 // A per-chat actor socket keeps tier:'global' but carries a conversation-bound

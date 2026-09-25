@@ -79,10 +79,21 @@ export interface AlertEmissionResult {
   outboxError?: string;
 }
 
+/**
+ * Optional, append-only emission modifiers. Every field is absent by default
+ * and absent from the emitted event when unset, so adding one never changes
+ * the shape an existing source produces.
+ */
+export interface AlertEmissionOptions {
+  renotify?: boolean;
+  /** Raw conversation identifier; confined to a digest by the event builder. */
+  conversationKey?: string;
+}
+
 export interface AlertEmissionContext {
   instance: string;
   source: string;
-  operation?: 'alert' | 'clear';
+  operation?: 'alert' | 'clear' | 'observation';
 }
 
 export interface ClearAlertSourceOptions {
@@ -215,13 +226,15 @@ if (!process.env['VITEST'] && alertSinkPath()) {
 function captureToAlertSink(
   sink: string,
   input: {
-    eventType: 'alert' | 'clear';
+    eventType: 'alert' | 'clear' | 'observation';
     instance: string;
     source: string;
     summary: string;
     evidence: string;
     severity: BotErrorsSeverity;
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
+    renotify?: boolean;
+    conversationKey?: string;
   },
 ): AlertEmissionResult {
   try {
@@ -272,16 +285,23 @@ export function emitAlert(
   evidence: string,
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+  opts?: AlertEmissionOptions,
 ): AlertEmissionResult {
   // Issue #2386: confine evidence and summary to bounded metadata BEFORE
   // any sink dispatch. This ensures the legacy fallback path, dry-run sink,
   // and durable outbox all receive the same safe representation.
+  const renotify = opts?.renotify === true;
+  // The raw key is confined to a digest inside the event builder, so every
+  // transport that goes through it sees only the bounded value. It is NOT
+  // forwarded to the legacy spawn path below, which deliberately ships a
+  // fixed {failureClass, source, reason} JSON and nothing else.
+  const conversationKey = opts?.conversationKey;
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset });
+    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);
@@ -323,6 +343,50 @@ export function emitAlert(
       outboxError: reason,
     };
   }
+}
+
+/**
+ * One-shot observation emission. Unlike emitAlert, an observation opens no
+ * incident and therefore needs no clear — use it for self-recovering
+ * one-shot events (e.g. a context-overflow session kill that respawns on
+ * the next message), so the telemetry can never join the still-open/stale
+ * renotify carpet. Best-effort: no legacy-subprocess fallback on outbox
+ * failure, because a lost observation loses one data point, not an incident.
+ */
+export function emitObservation(
+  instance: string,
+  source: string,
+  summary: string,
+  evidence: string,
+  severity: BotErrorsSeverity = 'info',
+): AlertEmissionResult {
+  const sink = alertSinkPath();
+  if (sink) {
+    return captureToAlertSink(sink, { eventType: 'observation', instance, source, summary, evidence, severity });
+  }
+  try {
+    const outbox = writeBotErrorsEvent({ eventType: 'observation', instance, source, summary, evidence, severity });
+    return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
+  } catch (err) {
+    const reason = errorMessage(err);
+    log.warn({ instance, source, err: reason }, 'bot-errors observation outbox write failed');
+    return { ok: false, channel: 'none', status: 'failed', outboxError: reason };
+  }
+}
+
+export function emitObservationChecked(
+  instance: string,
+  source: string,
+  summary: string,
+  evidence: string,
+  severity: BotErrorsSeverity = 'info',
+  strict?: boolean,
+): boolean {
+  return observeAlertEmission(
+    emitObservation(instance, source, summary, evidence, severity),
+    { instance, source, operation: 'observation' },
+    strict,
+  );
 }
 
 /**
@@ -456,9 +520,10 @@ export function emitAlertChecked(
   severity: BotErrorsSeverity = 'critical',
   criticalAsset?: BotErrorsCriticalAssetDiagnostic,
   strict?: boolean,
+  opts?: AlertEmissionOptions,
 ): boolean {
   return observeAlertEmission(
-    emitAlert(instance, source, summary, evidence, severity, criticalAsset),
+    emitAlert(instance, source, summary, evidence, severity, criticalAsset, opts),
     { instance, source, operation: 'alert' },
     strict,
   );

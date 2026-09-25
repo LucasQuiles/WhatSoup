@@ -5,6 +5,7 @@ import {
 } from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
+import { DeferredTurnStore } from './deferred-turn-store.ts';
 import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
@@ -14,10 +15,16 @@ import {
   setRecoveryMarker,
 } from '../lib/recovery-authority-store.ts';
 import { MS_PER_HOUR, MS_PER_MINUTE } from '../lib/time-units.ts';
+import { systemClock } from '../lib/clock.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
+import {
+  reconcileOperatorCatchupRecoveries,
+  type ReconcileOperatorCatchupParams,
+  type ReconcileOperatorCatchupReport,
+} from './recovery-catchup-closure.ts';
 import { isInboundStatus } from './inbound-status.ts';
 import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
@@ -99,6 +106,7 @@ import type {
   RequeueTurnRecoveryJobResult,
   RenewTurnRecoveryClaimResult,
   TurnRecoveryAssignmentFence,
+  TurnRecoveryAdmissionState,
   TurnRecoveryClaimFence,
   TurnRecoveryEnumerationPage,
   TurnRecoveryJobPersistenceParams,
@@ -154,6 +162,110 @@ export interface CompletedDeliveryIdentityAdmissionHealth {
   oldestTransitionAt: string | null;
   maximumAttempts: number;
   nextAction: 'fresh_inbound' | 'operator' | null;
+  /**
+   * Reliability 4.1 dual counters: `unresolvedCount` above is the ACTIVE
+   * count (drives /health degraded; clears when the condition genuinely
+   * clears), while `expiredCount` is the monotonic LIFETIME count of
+   * admissions terminalized by the overdue sweep — the audit record of debt
+   * that aged past the bound. Never conflate the two: health keys off the
+   * active count only.
+   */
+  expiredCount: number;
+  /**
+   * Of `unresolvedCount`, how many are old enough that self-resolution is no
+   * longer plausible.
+   *
+   * `unresolvedCount` alone cannot distinguish debt that is genuinely stuck
+   * from rows created minutes ago that will clear on the next inbound. A live
+   * census on 2026-08-16 measured this directly: one instance reported
+   * `unresolvedCount: 45`, but only 35 predated the observed resolution
+   * window — the other 10 were hours old and resolved normally, while a peer
+   * instance's rows resolved with latencies spanning 0 to 1428 minutes. An
+   * alert keyed on the raw count therefore over-reports on every busy
+   * instance, and an operator cannot tell which number needs action.
+   *
+   * This is the actionable middle of a three-stage lifecycle:
+   * in-flight (< bound) -> STRANDED (bound .. expiry) -> expired (terminalized).
+   * Without it the only signals are "immediately, including noise" or "after
+   * the seven-day expiry", which is far too late to act on.
+   */
+  strandedCount: number;
+}
+
+/**
+ * Reliability 4.1 — bound after which a quarantined completed-delivery
+ * identity admission is terminalized by the overdue sweep (mirrors the #2384
+ * overdue-proposal lifecycle). A `fresh_inbound`-owned admission whose peer
+ * never writes again would otherwise pin /health degraded forever (the
+ * frozen-debt permanent floor: five bots, oldest debt 4+ days, 2026-08-16).
+ * Seven days is deliberately far past every observed genuine resolution
+ * while still bounding the floor. Env-overridable for drills.
+ */
+export const IDENTITY_ADMISSION_EXPIRY_SECONDS = (() => {
+  // env-allowed: operational bound, resolved once at module load
+  const raw = process.env['WHATSOUP_IDENTITY_ADMISSION_EXPIRY_SECONDS'];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 7 * 86_400;
+})();
+
+/**
+ * Age past which a still-quarantined admission is reported as STRANDED — old
+ * enough that self-resolution via `fresh_inbound` is no longer plausible.
+ *
+ * Empirically grounded rather than picked: a 2026-08-16 census of an instance
+ * with 87 admissions (45 quarantined / 42 resolved) measured genuine
+ * resolution latencies spanning 0 to 1428 minutes (~23.8h). Forty-eight hours
+ * is ~2x that observed maximum, so a row crossing it has outlived every
+ * resolution actually seen in production and is reported as stuck rather than
+ * pending. Deliberately far BELOW `IDENTITY_ADMISSION_EXPIRY_SECONDS` (7d):
+ * stranded is the early actionable warning, expiry is the terminal sweep.
+ * Env-overridable for drills.
+ */
+export const IDENTITY_ADMISSION_STRANDED_SECONDS = (() => {
+  // env-allowed: operational bound, resolved once at module load
+  const raw = process.env['WHATSOUP_IDENTITY_ADMISSION_STRANDED_SECONDS'];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 2 * 86_400;
+})();
+
+export interface ExpireIdentityAdmissionsResult {
+  /** Rows transitioned quarantined → expired by this call. */
+  expired: number;
+}
+
+/**
+ * Reliability 4.1 — bounded TERMINALIZATION of overdue identity admissions.
+ *
+ * Quarantined admissions whose `last_transition_at` is older than
+ * `boundSeconds` move to the terminal 'expired' state with a mandatory
+ * `expired_at` stamp. The row is the RECEIPT: target, reason, created_at and
+ * last_transition_at are preserved — debt is auditable, never erased. Like
+ * #2384's `expireOverdueProposals` the sweep is bounded (`limit` rows per
+ * call), batched, and restartable (all state in SQLite). Resolution paths
+ * (operator, resolving fresh inbound) win any race: they only act on
+ * state='quarantined' rows and the UPDATE below only touches
+ * state='quarantined' rows, so a concurrently-resolved admission is simply
+ * not matched.
+ */
+export function expireOverdueCompletedDeliveryIdentityAdmissions(
+  db: DatabaseSync,
+  boundSeconds: number = IDENTITY_ADMISSION_EXPIRY_SECONDS,
+  limit: number = 100,
+): ExpireIdentityAdmissionsResult {
+  const result = db.prepare(`
+    UPDATE completed_delivery_identity_admissions
+    SET state = 'expired',
+        expired_at = datetime('now'),
+        last_transition_at = datetime('now')
+    WHERE id IN (
+      SELECT id FROM completed_delivery_identity_admissions
+      WHERE state = 'quarantined'
+        AND last_transition_at < datetime('now', ?)
+      ORDER BY last_transition_at ASC
+      LIMIT ?
+    )
+  `).run(`-${Math.max(1, Math.floor(boundSeconds))} seconds`, limit);
+  return { expired: Number(result.changes) };
 }
 
 const log = createChildLogger('durability');
@@ -261,6 +373,31 @@ function normalizeOutboundQuarantineEvidenceCoverage(
     && (OUTBOUND_EVIDENCE_COVERAGE as readonly string[]).includes(value)
     ? value as OutboundEvidenceCoverage
     : 'legacy_unclassified';
+}
+
+// ── Continuity-candidate reconciler ──
+//
+// Continuity-candidate marks are already surfaced to operators by the
+// out-of-process observer `deploy/scripts/reply-guarantee-observer.py`, which
+// counts unresolved marks (no terminal/outbound/recovery) into its
+// `reply-guarantee-recovery-debt` signal. This in-process pass does NOT emit a
+// competing alert and does NOT re-deliver. It only reconciles the durable
+// `continuity_candidate_consumed_at` lifecycle: a mark whose drop was already
+// resolved by another path (a terminal record, a terminal outbound, or an
+// enqueued recovery job now covers its seq) is stamped consumed so the reader
+// stops re-scanning it. Unresolved drops — fresh or stale — are LEFT untouched
+// for the observer to surface; auto-consuming them without a recovery path
+// would silently age out real dropped turns. Actual re-delivery is deferred to
+// the recovery follow-up that captures a replay envelope at mark time.
+
+/**
+ * Parse a SQLite `datetime('now')` UTC string (`YYYY-MM-DD HH:MM:SS`, no zone
+ * suffix) to epoch ms. Returns null for a malformed value so the caller treats
+ * it conservatively (unparseable → not fresh) rather than throwing on the sweep.
+ */
+function parseSqliteUtcToMs(value: string): number | null {
+  const ms = Date.parse(`${value.replace(' ', 'T')}Z`);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 // ── SQLite row interfaces ──
@@ -375,7 +512,52 @@ export type ContinuityCandidateSource =
   | 'pre_connect_recovery'
   | 'runtime_fault_disarm';
 
+/**
+ * A drop marked within this window of wall-clock time is FRESH: recent enough
+ * that operator catch-up is still meaningful and, in principle, recoverable.
+ * Older marks are STALE and surface-only — never blanket-replayed. Named so the
+ * 30-minute policy has a single source of truth shared by the consumer and its
+ * tests.
+ */
+export const CONTINUITY_CANDIDATE_FRESH_WINDOW_MS = 30 * 60 * 1000;
+
+/** A marked-but-unconsumed continuity candidate (reader projection). */
+export interface UnconsumedContinuityCandidate {
+  seq: number;
+  reason: ContinuityCandidateReason;
+  source: ContinuityCandidateSource;
+  /** SQLite `datetime('now')` UTC string, e.g. `2026-08-29 12:00:00`. */
+  markedAt: string;
+}
+
+/** Outcome of one {@link DurabilityEngine.reconcileContinuityCandidates} pass. */
+export interface ContinuityCandidateReconcileResult {
+  /**
+   * Marks whose drop was already resolved elsewhere (a terminal record,
+   * terminal outbound, or recovery job now covers their seq) and were stamped
+   * `continuity_candidate_consumed_at` on this pass.
+   */
+  reconciled: number;
+  /** Unresolved marks within the fresh window — still actionable, left surfaced. */
+  unresolvedFresh: number;
+  /** Unresolved marks older than the fresh window, left surfaced. */
+  unresolvedStale: number;
+  /** Newest marked_at across the unresolved rows, or null when none. */
+  newestUnresolvedMarkedAt: string | null;
+}
+
 /** Counts returned by {@link DurabilityEngine.sweepStuckInbound}. */
+/**
+ * #3374 ask 2: identity of an inbound row the W2 sweep reclaimed as
+ * `stale_reclaim`, handed to the runtime's release listener so a TurnQueue
+ * still pinned by that turn can be released too.
+ */
+export interface StaleReclaimedInbound {
+  seq: number;
+  sourceMessageId: string;
+  conversationKey: string;
+}
+
 export interface StuckInboundSweepResult {
   completedEchoed: number;
   completedTurnDone: number;
@@ -439,8 +621,13 @@ type DurabilityStatements = {
   markInboundComplete: PreparedStatement;
   markInboundFailed: PreparedStatement;
   markInboundFailedIfProcessing: PreparedStatement;
+  selectInboundReclaimState: PreparedStatement;
   markContinuityCandidate: PreparedStatement;
   markContinuityCandidateIfUnownedAndNoTerminalOutbound: PreparedStatement;
+  selectUnconsumedContinuityCandidates: PreparedStatement;
+  countUnconsumedContinuityCandidates: PreparedStatement;
+  stampContinuityCandidateConsumed: PreparedStatement;
+  continuityCandidateHasTerminalOrRecovery: PreparedStatement;
   markInboundSkipped: PreparedStatement;
   selectInboundStatus: PreparedStatement;
   selectInboundReceipt: PreparedStatement;
@@ -509,6 +696,8 @@ export class DurabilityEngine {
   private readonly turnRecovery: TurnRecoveryStore;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
+  /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
+  readonly deferredTurns: DeferredTurnStore;
   private readonly sessionLifecycle: SessionLifecycleStore;
   private readonly confirmedOutboundProbe: (seconds: number) => boolean;
   constructor(db: Database) {
@@ -529,6 +718,9 @@ export class DurabilityEngine {
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
         `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+      ),
+      selectInboundReclaimState: prepare(
+        `SELECT processing_status, failure_class FROM inbound_events WHERE seq = ?`,
       ),
       markInboundFailedIfProcessing: prepare(
         `UPDATE inbound_events
@@ -564,6 +756,43 @@ export class DurabilityEngine {
              WHERE o.source_inbound_seq = inbound_events.seq AND o.is_terminal = 1
                AND o.status NOT IN ('quarantined', 'failed_permanent')
            )`,
+      ),
+      selectUnconsumedContinuityCandidates: prepare(
+        `SELECT seq,
+                continuity_candidate_reason AS reason,
+                continuity_candidate_source AS source,
+                continuity_candidate_marked_at AS markedAt
+         FROM inbound_events
+         WHERE continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL
+         ORDER BY continuity_candidate_marked_at ASC, seq ASC
+         LIMIT ?`,
+      ),
+      countUnconsumedContinuityCandidates: prepare(
+        `SELECT COUNT(*) AS count
+         FROM inbound_events
+         WHERE continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL`,
+      ),
+      // Idempotent stamp: only an as-yet-unconsumed marked row is stamped, so a
+      // repeated consume of the same seq is a no-op (COALESCE preserves the
+      // first stamp; the IS NULL guard prevents a second surfacing).
+      stampContinuityCandidateConsumed: prepare(
+        `UPDATE inbound_events
+         SET continuity_candidate_consumed_at = COALESCE(continuity_candidate_consumed_at, datetime('now'))
+         WHERE seq = ?
+           AND continuity_candidate_reason IS NOT NULL
+           AND continuity_candidate_consumed_at IS NULL`,
+      ),
+      continuityCandidateHasTerminalOrRecovery: prepare(
+        `SELECT 1 AS found
+         WHERE EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = ?
+           )
+            OR EXISTS (
+             SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = ?
+           )
+         LIMIT 1`,
       ),
       markInboundSkipped: prepare(
         `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
@@ -948,7 +1177,7 @@ export class DurabilityEngine {
          LIMIT 200`,
       ),
       getStaleOpenNoSuccess: prepare(
-        `SELECT i.seq AS seq
+        `SELECT i.seq AS seq, i.message_id AS message_id, i.conversation_key AS conversation_key
          FROM inbound_events i
          WHERE i.processing_status IN ('pending', 'processing')
            AND i.received_at < datetime('now', '-24 hours')
@@ -1123,17 +1352,22 @@ export class DurabilityEngine {
         `SELECT completed_at FROM recovery_runs ORDER BY id DESC LIMIT 1`,
       ),
       getCompletedDeliveryIdentityAdmissionHealth: prepare(`
-        SELECT COUNT(*) AS unresolved_count,
-               MIN(last_transition_at) AS oldest_transition_at,
-               MAX(attempts) AS maximum_attempts,
+        SELECT COUNT(*) FILTER (WHERE state = 'quarantined') AS unresolved_count,
+               MIN(last_transition_at) FILTER (WHERE state = 'quarantined') AS oldest_transition_at,
+               MAX(attempts) FILTER (WHERE state = 'quarantined') AS maximum_attempts,
                CASE
-                 WHEN MAX(CASE WHEN next_action = 'operator' THEN 1 ELSE 0 END) = 1
+                 WHEN MAX(CASE WHEN state = 'quarantined' AND next_action = 'operator' THEN 1 ELSE 0 END) = 1
                    THEN 'operator'
-                 WHEN COUNT(*) > 0 THEN 'fresh_inbound'
+                 WHEN COUNT(*) FILTER (WHERE state = 'quarantined') > 0 THEN 'fresh_inbound'
                  ELSE NULL
-               END AS next_action
+               END AS next_action,
+               COUNT(*) FILTER (WHERE state = 'expired') AS expired_count,
+               COUNT(*) FILTER (
+                 WHERE state = 'quarantined'
+                   AND last_transition_at < datetime('now', ?)
+               ) AS stranded_count
         FROM completed_delivery_identity_admissions
-        WHERE state = 'quarantined'
+        WHERE state IN ('quarantined', 'expired')
       `),
       // #1789 companion fix: this INSERT sets completed_at at write time but
       // (until now) never set status, so under migration 45's
@@ -1156,6 +1390,7 @@ export class DurabilityEngine {
       this.statements.selectNow.get() as { now: string }
     ).now);
     this.capabilityObligations = new CapabilityObligationStore(db);
+    this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
     this.confirmedOutboundProbe = makeConfirmedOutboundProbe(db.raw);
     // Pre-warm the immediate-transaction runner so lifecycle methods that call
@@ -1413,6 +1648,21 @@ export class DurabilityEngine {
     this.statements.markInboundFailed.run(coerceInboundFailureClass(failureClass), seq);
   }
 
+  /**
+   * True when the inbound row was already terminalized by the W2 stuck-inbound
+   * sweep (processing_status 'failed', failure_class 'stale_reclaim'). The
+   * sweep owns the durable terminal in that case, so a later runtime
+   * finalization for the same turn must retire its in-memory state instead of
+   * raising a finalization incident (#3374 ask 2).
+   */
+  isInboundSweepReclaimed(seq: number): boolean {
+    const row = this.statements.selectInboundReclaimState.get(seq) as {
+      processing_status: string;
+      failure_class: string | null;
+    } | undefined;
+    return row?.processing_status === 'failed' && row.failure_class === 'stale_reclaim';
+  }
+
   /** Fail exactly the processing inbound owned by the supplied runtime message. */
   markInboundFailedIfProcessing(
     seq: number,
@@ -1446,6 +1696,89 @@ export class DurabilityEngine {
       source,
       seq,
     ).changes === 1;
+  }
+
+  /**
+   * Reader for the continuity-candidate consumer: marked-but-unconsumed drops,
+   * oldest first, bounded. A marked row is a durable record that an admitted
+   * turn was dropped with the reply guarantee still armed and no terminal
+   * outbound. Rows already stamped `continuity_candidate_consumed_at` are
+   * excluded so the consumer surfaces each drop once.
+   */
+  getUnconsumedContinuityCandidates(limit = 100): UnconsumedContinuityCandidate[] {
+    return allFromStatement<UnconsumedContinuityCandidate>(
+      this.statements.selectUnconsumedContinuityCandidates,
+      limit,
+    );
+  }
+
+  /** Operator/health probe: how many marked drops remain unsurfaced. */
+  countUnconsumedContinuityCandidates(): number {
+    return (this.statements.countUnconsumedContinuityCandidates.get() as { count: number }).count;
+  }
+
+  /**
+   * Idempotency guard for guarded recovery: true when a terminal record or a
+   * turn-recovery job now exists for this seq. The marker refuses to mark once a
+   * terminal record exists, so a live candidate normally returns false; this is
+   * the defensive check that keeps a seq which acquired coverage after marking
+   * out of the recoverable set.
+   */
+  continuityCandidateHasTerminalOrRecovery(seq: number): boolean {
+    return this.statements.continuityCandidateHasTerminalOrRecovery.get(seq, seq) !== undefined;
+  }
+
+  /**
+   * Reconcile the `continuity_candidate_consumed_at` lifecycle. For each
+   * marked-but-unconsumed row: if the drop was already resolved elsewhere (a
+   * terminal record, terminal outbound, or recovery job now covers its seq),
+   * stamp it consumed so the reader stops re-scanning a settled mark. Rows that
+   * are still unresolved are left untouched and reported by fresh/stale bucket
+   * (diagnostic only — the out-of-process observer owns the operator alert).
+   *
+   * Delivery blast radius is zero: this never re-sends and never mutates an
+   * unresolved drop. Re-delivery of unresolved drops is deferred to the recovery
+   * follow-up, which must capture a replay envelope at mark time — a continuity
+   * candidate has no `turn_terminal_records` row and inbound_events carries no
+   * replay envelope, so it cannot ride the terminal-record-linked
+   * `turn_recovery_jobs` path without fabricating one.
+   *
+   * Idempotent and safe to run repeatedly on a periodic sweep.
+   *
+   * @param nowMs wall-clock reference for the fresh/stale split (injectable for tests).
+   * @param limit max rows surfaced per pass.
+   */
+  reconcileContinuityCandidates(
+    nowMs: number = systemClock.now(),
+    limit = 100,
+  ): ContinuityCandidateReconcileResult {
+    const rows = this.getUnconsumedContinuityCandidates(limit);
+    if (rows.length === 0) {
+      return { reconciled: 0, unresolvedFresh: 0, unresolvedStale: 0, newestUnresolvedMarkedAt: null };
+    }
+
+    let reconciled = 0;
+    let unresolvedFresh = 0;
+    let unresolvedStale = 0;
+    let newestUnresolvedMarkedAt: string | null = null;
+    const freshWindowStart = nowMs - CONTINUITY_CANDIDATE_FRESH_WINDOW_MS;
+    for (const row of rows) {
+      if (this.continuityCandidateHasTerminalOrRecovery(row.seq)) {
+        // Drop already handled by another path — settle the mark.
+        this.statements.stampContinuityCandidateConsumed.run(row.seq);
+        reconciled += 1;
+        continue;
+      }
+      // Genuinely unresolved: leave it for the observer / recovery follow-up.
+      const markedMs = parseSqliteUtcToMs(row.markedAt);
+      if (markedMs !== null && markedMs >= freshWindowStart) unresolvedFresh += 1;
+      else unresolvedStale += 1;
+      if (newestUnresolvedMarkedAt === null || row.markedAt > newestUnresolvedMarkedAt) {
+        newestUnresolvedMarkedAt = row.markedAt;
+      }
+    }
+
+    return { reconciled, unresolvedFresh, unresolvedStale, newestUnresolvedMarkedAt };
   }
 
   markInboundSkipped(seq: number, reason: string): void {
@@ -1668,6 +2001,21 @@ export class DurabilityEngine {
     return this.turnRecovery.recoverStaleTurnRecoveryJobs(limit);
   }
 
+  /**
+   * Automatic catch-up reconciliation (turn-recovery continuity PR2): close
+   * open `recovery_pending_operator_catchup` links whose conversation has a
+   * delivered catch-up reply. Pure delegation to the hardened core selector —
+   * every closure is still independently re-proven by the closure primitive
+   * and the `inbound_disposition_closure_validate_insert` trigger. Never
+   * throws for per-group rejections (recorded as bounded skips in the report);
+   * see src/core/recovery-catchup-closure.ts.
+   */
+  reconcileOperatorCatchupRecoveries(
+    params: ReconcileOperatorCatchupParams = {},
+  ): ReconcileOperatorCatchupReport {
+    return reconcileOperatorCatchupRecoveries(this.db.raw, params);
+  }
+
   reassignPendingTurnRecoveryJob(
     jobId: number,
     currentOwner: TurnRecoveryOwnerIdentity,
@@ -1754,6 +2102,14 @@ export class DurabilityEngine {
     options?: { excludeJobId?: number },
   ): boolean {
     return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    return this.turnRecovery.getTurnRecoveryAdmissionStateForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
@@ -2888,8 +3244,37 @@ export class DurabilityEngine {
     return count;
   }
 
+  /**
+   * #3374 ask 2: registered by the runtime so durable stale reclamation can also
+   * release a RUNTIME lane still pinned by the reclaimed turn (a wedged
+   * TurnQueue whose provider terminal never arrived). Invoked post-commit,
+   * outside the sweep transaction; listener failures never affect the sweep.
+   */
+  setStaleInboundReclaimListener(
+    listener: ((rows: StaleReclaimedInbound[]) => void) | null,
+  ): void {
+    this.staleInboundReclaimListener = listener;
+  }
+
+  private staleInboundReclaimListener: ((rows: StaleReclaimedInbound[]) => void) | null = null;
+
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
+    const reclaimedStaleRows: StaleReclaimedInbound[] = [];
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
+      try {
+        this.staleInboundReclaimListener(reclaimedStaleRows);
+      } catch (err) {
+        log.warn({ err, rows: reclaimedStaleRows.length }, 'stale-inbound reclaim listener failed — sweep result unaffected');
+      }
+    }
+    return result;
+  }
+
+  private runSweepStuckInboundTransaction(
+    reclaimedStaleRows: StaleReclaimedInbound[],
+  ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
       let completedTurnDone = 0;
@@ -2898,7 +3283,11 @@ export class DurabilityEngine {
 
       const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
       const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
-      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{ seq: number }>;
+      const staleOpen = this.statements.getStaleOpenNoSuccess.all() as Array<{
+        seq: number;
+        message_id: string;
+        conversation_key: string;
+      }>;
       const recoveryOwned = this.statements.getRecoveryOwnedReclaimable.all() as Array<{
         seq: number;
         job_id: number;
@@ -2937,6 +3326,11 @@ export class DurabilityEngine {
           () => this.markInboundFailed(row.seq, 'stale_reclaim'),
         );
         failedStale += 1;
+        reclaimedStaleRows.push({
+          seq: row.seq,
+          sourceMessageId: row.message_id,
+          conversationKey: row.conversation_key,
+        });
       }
 
       // #1749: release the recovery-owner trap. Drive EVERY pending/claimed owning
@@ -3179,12 +3573,20 @@ export class DurabilityEngine {
     return counts;
   }
 
-  getCompletedDeliveryIdentityAdmissionHealth(): CompletedDeliveryIdentityAdmissionHealth {
-    const row = this.statements.getCompletedDeliveryIdentityAdmissionHealth.get() as {
+  getCompletedDeliveryIdentityAdmissionHealth(
+    strandedBoundSeconds: number = IDENTITY_ADMISSION_STRANDED_SECONDS,
+  ): CompletedDeliveryIdentityAdmissionHealth {
+    // SQLite modifier form; negative offset selects rows OLDER than the bound.
+    const strandedModifier = `-${Math.max(0, Math.floor(strandedBoundSeconds))} seconds`;
+    const row = this.statements.getCompletedDeliveryIdentityAdmissionHealth.get(
+      strandedModifier,
+    ) as {
       unresolved_count: number | bigint;
       oldest_transition_at: string | null;
       maximum_attempts: number | bigint | null;
       next_action: string | null;
+      expired_count: number | bigint;
+      stranded_count: number | bigint;
     };
     const nextAction = row.next_action === 'fresh_inbound' || row.next_action === 'operator'
       ? row.next_action
@@ -3194,6 +3596,8 @@ export class DurabilityEngine {
       oldestTransitionAt: row.oldest_transition_at,
       maximumAttempts: row.maximum_attempts === null ? 0 : Number(row.maximum_attempts),
       nextAction,
+      expiredCount: Number(row.expired_count),
+      strandedCount: Number(row.stranded_count),
     };
   }
 

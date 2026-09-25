@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { makeConversationBinding } from '../../src/mcp/types.ts';
 import type { SessionContext } from '../../src/mcp/types.ts';
 

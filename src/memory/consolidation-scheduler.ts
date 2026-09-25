@@ -1,5 +1,6 @@
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
 import {
   runConsolidation,
@@ -51,23 +52,37 @@ export class MemoryConsolidationScheduler {
   private readonly provider: LLMProvider;
   private readonly config: MemoryConsolidationSchedulerConfig;
   private readonly store: ConsolidationRunStore;
+  private readonly clock: Clock;
 
   constructor(
     pinecone: ConsolidationPinecone,
     provider: LLMProvider,
     config: MemoryConsolidationSchedulerConfig,
     store: ConsolidationRunStore,
+    // Injectable so timing behaviour can be driven to a known instant (#2200).
+    // Optional and defaulted, so this slice changes no existing call site.
+    //
+    // Scope of the guarantee: this clock governs TIMESTAMPS. Fencing still runs
+    // on real setTimeout/setInterval, so the two can disagree under test — a
+    // suite that pins the clock while advancing fake timers can observe a
+    // fenced run with durationMs 0, or a deadline that never fires when only
+    // the clock advances. Not reachable in production, where systemClock and
+    // the timer wheel read the same wall clock. Routing fencing through the
+    // clock as well is a larger change than this slice, and is deliberately
+    // left out rather than half-done.
+    clock: Clock = systemClock,
   ) {
     this.pinecone = pinecone;
     this.provider = provider;
     this.config = config;
     this.store = store;
+    this.clock = clock;
   }
 
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    this.store.abandonInterruptedRuns(Date.now());
+    this.store.abandonInterruptedRuns(this.clock.now());
     this.runScheduled('scheduler_immediate');
     this.timer = setInterval(() => {
       this.runScheduled('scheduler_periodic');
@@ -85,7 +100,7 @@ export class MemoryConsolidationScheduler {
     const active = this.activeRun;
     if (!active) return;
 
-    const nowMs = Date.now();
+    const nowMs = this.clock.now();
     try {
       this.store.requestCancellation(active.handle, nowMs);
     } catch {
@@ -118,7 +133,7 @@ export class MemoryConsolidationScheduler {
           retryable: true,
           evidenceCoverage: 'local_guard',
           counters: active.counters,
-          nowMs: Date.now(),
+          nowMs: this.clock.now(),
         });
       } catch {
         log.error({
@@ -139,7 +154,7 @@ export class MemoryConsolidationScheduler {
   ): Promise<ConsolidationRunReport> {
     const active = this.activeRun;
     if (active) {
-      const nowMs = Date.now();
+      const nowMs = this.clock.now();
       this.store.recordSkippedTick(active.handle, nowMs);
       const counters = emptyConsolidationCounters();
       counters.skipped = 1;
@@ -160,7 +175,7 @@ export class MemoryConsolidationScheduler {
       };
     }
 
-    const startedAtMs = Date.now();
+    const startedAtMs = this.clock.now();
     const totalRunTimeoutMs =
       this.config.totalRunTimeoutMs ?? DEFAULT_TOTAL_RUN_TIMEOUT_MS;
     const handle = this.store.beginRun({
@@ -206,10 +221,15 @@ export class MemoryConsolidationScheduler {
       dryRun: this.config.dryRun,
       runId: active.handle.runId,
       signal: active.controller.signal,
+      // The report is stamped inside runConsolidation, which keeps its own
+      // `options.now ?? Date.now`. Without this the injection would stop at
+      // the scheduler boundary: a caller could pin time and still get
+      // wall-clock timestamps back in the report (#2200).
+      now: () => this.clock.now(),
       isWriteAllowed: () =>
         this.activeRun === active && !active.controller.signal.aborted,
       onProgress: (stage, counters, evidenceCoverage) => {
-        const nowMs = Date.now();
+        const nowMs = this.clock.now();
         const owned = this.store.recordProgress(active.handle, {
           stage,
           evidenceCoverage,
@@ -241,7 +261,7 @@ export class MemoryConsolidationScheduler {
 
     let report: ConsolidationRunReport;
     if (result === timedOut) {
-      const nowMs = Date.now();
+      const nowMs = this.clock.now();
       const counters = {
         ...active.counters,
         failed: active.counters.failed + 1,
@@ -264,7 +284,7 @@ export class MemoryConsolidationScheduler {
     } else if (result.kind === 'report') {
       report = result.report;
     } else {
-      const nowMs = Date.now();
+      const nowMs = this.clock.now();
       const counters = {
         ...active.counters,
         failed: active.counters.failed + 1,

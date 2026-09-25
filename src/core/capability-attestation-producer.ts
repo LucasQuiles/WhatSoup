@@ -20,6 +20,7 @@
 import {
   recordCapabilityAttestation,
   type CapabilityAttestationBinding,
+  type CapabilityAttestationEvidence,
 } from './capability-attestation.ts';
 import type { Database } from './database.ts';
 
@@ -44,6 +45,36 @@ export interface ProduceAttestationInput {
   validForSeconds: number;
   /** Injected clock — the moment of attestation (tests pass a fixed value). */
   attestedAt: Date;
+  /**
+   * Migration-63 (#3221 Debt 2): the probe evidence recorded IN the row —
+   * stream refs, exit, canary-input ref, media-root readability. REQUIRED so
+   * every producer caller writes it consciously; derive it from a live canary
+   * outcome via `attestationEvidenceFromCanary`.
+   */
+  evidence: CapabilityAttestationEvidence;
+}
+
+/**
+ * Derive the row evidence from a canary outcome's structured `detail`
+ * (`runResolverCanary` records stdoutSha256/stderrSha256/exitCode/
+ * probeSourceDigest there) plus the front-door's media-root observation.
+ * Absent/underivable detail fields become NULL — never a fabricated ref.
+ */
+export function attestationEvidenceFromCanary(
+  canary: CapabilityCanaryOutcome,
+  mediaRootReadable: boolean | null,
+): CapabilityAttestationEvidence {
+  const detail = canary.detail ?? {};
+  const sha = (value: unknown): string | null =>
+    typeof value === 'string' && /^[0-9a-f]{64}$/.test(value) ? value : null;
+  const exit = detail['exitCode'];
+  return {
+    probeStdoutRef: sha(detail['stdoutSha256']),
+    probeStderrRef: sha(detail['stderrSha256']),
+    probeExit: typeof exit === 'number' && Number.isInteger(exit) ? exit : null,
+    canaryInputRef: sha(detail['probeSourceDigest']),
+    mediaRootReadable,
+  };
 }
 
 export type ProduceAttestationResult =
@@ -72,6 +103,7 @@ export function produceCapabilityAttestation(
     nonce: input.canary.nonce,
     attestedAt: input.attestedAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
+    evidence: input.evidence,
   });
   return { recorded: true, attestationId };
 }

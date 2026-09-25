@@ -1,0 +1,265 @@
+// src/transport/auth-generation-v2.ts
+//
+// T2.4 of the q-canary re-pair enablement lane: upgrade the generation receipt
+// to the frozen AuthGenerationReceiptV2 binding BEFORE any live consumer
+// relies on it.
+//
+// What V2 adds over the legacy module (which stays byte-stable for its
+// existing callers and its own journal):
+// - The receipt binds an opaque configured ACCOUNT SCOPE and the pairing
+//   OPERATION, not a hashed directory path.
+// - It binds the CREDENTIAL TREE DIGEST computed from the actual bytes the
+//   pairing persisted — the field the terminal-latch restore decision compares
+//   candidates against.
+// - Persistence returns a CLOSED success/failure result. The legacy writer's
+//   "never throw, pairing must not fail because bookkeeping did" contract is
+//   exactly wrong at an activation boundary: the pairing saga must treat a
+//   missing receipt as a failed pairing, so this writer never swallows.
+// - The write is verified by read-back before success is reported.
+//
+// The V2 journal lives beside the legacy file (`auth-generation.v2.json` vs
+// `auth-generation.json`) so legacy readers keep failing closed on bytes they
+// do not own, and the V2 resolver reports a legacy-only tree as `legacy_v1` —
+// visibly unbound, never silently promoted.
+
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { RestoreCandidateEvidence, ActiveTreeObservation } from './terminal-latch.ts';
+import { parseBackupCandidateManifest } from './auth-custody-contracts.ts';
+import {
+  privateJournalPath,
+  readPrivateV1JournalSync,
+  writePrivateJournalSync,
+} from '../lib/private-journal.ts';
+import {
+  parseAccountScopeId,
+  parseAuthGenerationReceiptV2,
+  type AuthGenerationReceiptV2,
+} from './auth-custody-contracts.ts';
+import {
+  resolveAuthGenerationEvidence,
+  type AuthGenerationReceipt,
+} from './auth-generation.ts';
+import { shortHash } from '../lib/short-hash.ts';
+
+const V2_JOURNAL_FILENAME = 'auth-generation.v2.json';
+const V2_JOURNAL_LABEL = 'auth-generation-v2';
+const V2_ENVELOPE_KIND = 'auth-generation-v2';
+const MAX_TREE_FILES = 50_000;
+
+export type CredentialTreeDigestResult =
+  | { ok: true; digest: string; fileCount: number }
+  | { ok: false; failure: 'unreadable' | 'empty' | 'too_many_files' };
+
+/**
+ * Deterministic digest over the credential tree: sorted path-relative walk,
+ * sha256 of each file's bytes, folded with its relative path. Renames and
+ * content edits both change the digest; read failure fails closed.
+ */
+export function computeCredentialTreeDigest(authDir: string): CredentialTreeDigestResult {
+  const files: string[] = [];
+  try {
+    collectFiles(authDir, '', files);
+  } catch {
+    return { ok: false, failure: 'unreadable' };
+  }
+  if (files.length === 0) return { ok: false, failure: 'empty' };
+  if (files.length > MAX_TREE_FILES) return { ok: false, failure: 'too_many_files' };
+  files.sort();
+  const fold = createHash('sha256');
+  try {
+    for (const relPath of files) {
+      const content = readFileSync(join(authDir, relPath));
+      const fileHash = createHash('sha256').update(content).digest('hex');
+      fold.update(relPath);
+      fold.update('\u0000');
+      fold.update(fileHash);
+      fold.update('\n');
+    }
+  } catch {
+    return { ok: false, failure: 'unreadable' };
+  }
+  return { ok: true, digest: fold.digest('hex'), fileCount: files.length };
+}
+
+function collectFiles(root: string, rel: string, out: string[]): void {
+  const entries = readdirSync(join(root, rel), { withFileTypes: true });
+  for (const entry of entries) {
+    const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
+    if (entry.isDirectory()) {
+      collectFiles(root, childRel, out);
+    } else if (entry.isFile()) {
+      out.push(childRel);
+      if (out.length > MAX_TREE_FILES) return;
+    }
+    // Symlinks and other non-regular entries are deliberately not followed;
+    // they are not credential material this digest vouches for.
+  }
+}
+
+export type PersistAuthGenerationV2Result =
+  | { ok: true; receipt: AuthGenerationReceiptV2 }
+  | {
+      ok: false;
+      failure: 'state_root_missing' | 'scope_invalid' | 'digest_unavailable' | 'clock_invalid' | 'write_failed';
+    };
+
+/**
+ * Persist the V2 generation receipt. Call ONLY after credentials are durably
+ * saved. Every failure is closed and typed — an activation boundary that
+ * receives `ok: false` must fail the pairing, never proceed.
+ */
+export function persistAuthGenerationReceiptV2(args: {
+  scopeId: unknown;
+  operationId: string;
+  authDir: string;
+  stateRoot: string | null;
+  createdAtMs: number;
+  persistedAtMs: number;
+  effectiveClient: Record<string, unknown> | null;
+  actorOperationId: string | null;
+}): PersistAuthGenerationV2Result {
+  if (args.stateRoot === null || args.stateRoot.trim() === '') {
+    return { ok: false, failure: 'state_root_missing' };
+  }
+  const scopeId = parseAccountScopeId(args.scopeId);
+  if (scopeId === null) return { ok: false, failure: 'scope_invalid' };
+  if (
+    !Number.isFinite(args.createdAtMs) ||
+    !Number.isFinite(args.persistedAtMs) ||
+    args.persistedAtMs < args.createdAtMs
+  ) {
+    return { ok: false, failure: 'clock_invalid' };
+  }
+  const tree = computeCredentialTreeDigest(args.authDir);
+  if (!tree.ok) return { ok: false, failure: 'digest_unavailable' };
+
+  const createdAt = new Date(args.createdAtMs).toISOString();
+  const persistedAt = new Date(args.persistedAtMs).toISOString();
+  const candidate: AuthGenerationReceiptV2 = {
+    v: 2,
+    scopeId,
+    generationId: `gen-${shortHash(`${scopeId}:${createdAt}:${tree.digest}`, 24)}`,
+    operationId: args.operationId,
+    credentialTreeDigest: tree.digest,
+    createdAt,
+    persistedAt,
+    effectiveClient: args.effectiveClient,
+    actorOperationId: args.actorOperationId,
+    advisoryAuthRootHash: null,
+  };
+  // Reject at the boundary rather than persisting something the closed parser
+  // would refuse to read back.
+  const parsed = parseAuthGenerationReceiptV2(candidate);
+  if (parsed === null) return { ok: false, failure: 'write_failed' };
+
+  const journalPath = privateJournalPath(args.stateRoot, V2_JOURNAL_FILENAME);
+  try {
+    writePrivateJournalSync(
+      journalPath,
+      { v: 1, kind: V2_ENVELOPE_KIND, receipt: candidate },
+      V2_JOURNAL_LABEL,
+    );
+  } catch {
+    return { ok: false, failure: 'write_failed' };
+  }
+
+  // Read-back verification: success is only reported for a receipt that the
+  // resolver will actually serve.
+  const verify = resolveAuthGenerationEvidenceV2(args.stateRoot);
+  if (verify.status !== 'recorded_v2' || verify.receipt.generationId !== candidate.generationId) {
+    return { ok: false, failure: 'write_failed' };
+  }
+  return { ok: true, receipt: parsed };
+}
+
+export const CANDIDATE_MANIFEST_FILENAME = 'candidate-manifest.v2.json';
+export const CANDIDATE_RECEIPT_FILENAME = 'generation-receipt.v2.json';
+
+/**
+ * Read the restore-candidate evidence for one backup directory: its
+ * `BackupCandidateManifestV2`, the copy of the V2 generation receipt persisted
+ * beside it, and the digest of the candidate's ACTUAL `auth/` bytes. Legacy
+ * backups carry neither record and read as 'missing' (unbound), which the
+ * restore decision refuses while a latch is active.
+ */
+export function readRestoreCandidateEvidence(backupPath: string): RestoreCandidateEvidence {
+  const manifest = readCandidateJson(join(backupPath, CANDIDATE_MANIFEST_FILENAME), value => {
+    return parseBackupCandidateManifest(value);
+  });
+  const generationReceipt = readCandidateJson(join(backupPath, CANDIDATE_RECEIPT_FILENAME), value => {
+    return parseAuthGenerationReceiptV2(value);
+  });
+  const tree = computeCredentialTreeDigest(join(backupPath, 'auth'));
+  return {
+    manifest,
+    generationReceipt,
+    observedTreeDigest: tree.ok ? tree.digest : null,
+  };
+}
+
+function readCandidateJson<T>(filePath: string, parse: (value: unknown) => T | null): T | 'missing' | 'corrupt' {
+  if (!existsSync(filePath)) return 'missing';
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return 'corrupt';
+  }
+  const parsed = parse(value);
+  return parsed === null ? 'corrupt' : parsed;
+}
+
+/** Observe the active auth tree for the connect-boundary decision. */
+export function observeActiveTree(authDir: string): ActiveTreeObservation {
+  if (!existsSync(authDir)) return { status: 'missing' };
+  const tree = computeCredentialTreeDigest(authDir);
+  if (tree.ok) return { status: 'digest', digest: tree.digest };
+  if (tree.failure === 'empty') return { status: 'missing' };
+  return { status: 'unreadable' };
+}
+
+export type AuthGenerationEvidenceV2 =
+  | { status: 'recorded_v2'; receipt: AuthGenerationReceiptV2 }
+  | { status: 'legacy_v1'; receipt: AuthGenerationReceipt }
+  | {
+      status: 'unavailable';
+      reason: 'no_receipt_written' | 'unreadable' | 'malformed' | 'resolver_threw';
+      bondCreatedAt: null;
+    };
+
+/**
+ * Resolve generation evidence, V2 first. A present-but-malformed V2 journal is
+ * `malformed` — it never falls back to V1, because falling back would let a
+ * corrupted binding masquerade as an older-but-valid one.
+ */
+export function resolveAuthGenerationEvidenceV2(stateRoot: string | null): AuthGenerationEvidenceV2 {
+  if (!stateRoot) return { status: 'unavailable', reason: 'no_receipt_written', bondCreatedAt: null };
+  try {
+    const journalPath = privateJournalPath(stateRoot, V2_JOURNAL_FILENAME);
+    const read = readPrivateV1JournalSync(journalPath, V2_JOURNAL_LABEL);
+    if (read.status === 'journal_unreadable') {
+      return { status: 'unavailable', reason: 'unreadable', bondCreatedAt: null };
+    }
+    if (read.version === 1) {
+      if (read.value.kind !== V2_ENVELOPE_KIND) {
+        return { status: 'unavailable', reason: 'malformed', bondCreatedAt: null };
+      }
+      const receipt = parseAuthGenerationReceiptV2(read.value.receipt);
+      if (receipt === null) {
+        return { status: 'unavailable', reason: 'malformed', bondCreatedAt: null };
+      }
+      return { status: 'recorded_v2', receipt };
+    }
+  } catch {
+    return { status: 'unavailable', reason: 'resolver_threw', bondCreatedAt: null };
+  }
+
+  // No V2 journal: report the legacy evidence without promotion.
+  const legacy = resolveAuthGenerationEvidence(stateRoot);
+  if (legacy.status === 'recorded') {
+    return { status: 'legacy_v1', receipt: legacy.receipt };
+  }
+  return { status: 'unavailable', reason: legacy.reason, bondCreatedAt: null };
+}

@@ -31,9 +31,22 @@ describe('sendDirect (#2981)', () => {
   });
 
   it('T4: returns true when queued (enqueueText is void — accepted, outcome deferred)', async () => {
-    const port = makePort({ getQueueForChat: () => ({ enqueueText: vi.fn() }) });
+    const port = makePort({ getQueueForChat: () => ({ enqueueText: vi.fn(), isPoisoned: () => false }) });
     const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text');
     expect(result).toBe(true);
+  });
+
+  it('T5: returns false without side effects for a known-poisoned queue', async () => {
+    const enqueueText = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue({ waMessageId: 'must-not-send' });
+    const port = makePort({
+      sendMessage,
+      getQueueForChat: () => ({ enqueueText, isPoisoned: () => true }),
+    });
+
+    await expect(sendDirect(port, 'jid@s.whatsapp.net', 'text')).resolves.toBe(false);
+    expect(enqueueText).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -57,7 +70,7 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
 
   it('B3: queue path reports acceptance with a null id (outcome deferred by design)', async () => {
     const enqueueText = vi.fn();
-    const port = makePort({ getQueueForChat: () => ({ enqueueText }) });
+    const port = makePort({ getQueueForChat: () => ({ enqueueText, isPoisoned: () => false }) });
     await expect(
       sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text'),
     ).resolves.toEqual({ accepted: true, messageId: null });
@@ -83,5 +96,20 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
     await expect(sendDirect(ok, 'jid@s.whatsapp.net', 'text', true)).resolves.toBe(true);
     const bad = makePort({ sendMessage: vi.fn().mockRejectedValue(new Error('boom')) });
     await expect(sendDirect(bad, 'jid@s.whatsapp.net', 'text', true)).resolves.toBe(false);
+  });
+
+  it('B7: a known-poisoned queue rejects without enqueue or messenger bypass', async () => {
+    const enqueueText = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue({ waMessageId: 'must-not-send' });
+    const port = makePort({
+      sendMessage,
+      getQueueForChat: () => ({ enqueueText, isPoisoned: () => true }),
+    });
+
+    await expect(
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text'),
+    ).resolves.toEqual({ accepted: false, messageId: null });
+    expect(enqueueText).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

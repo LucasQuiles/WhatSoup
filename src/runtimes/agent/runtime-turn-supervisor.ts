@@ -13,11 +13,16 @@ import { createChildLogger } from '../../logger.ts';
 const log = createChildLogger('agent-runtime-turn-supervisor');
 
 const MAX_RETAINED_FINALIZATIONS = 128;
+
+/** Why a scope-block was recorded; 'degraded' blocks have no retained record. */
+type ScopeBlockCause = 'degraded' | 'retain_non_advancing' | 'retry_failed' | 'retry_exhausted';
 const MAX_AUTOMATIC_RETRY_ATTEMPTS = 5;
 const RETRY_BATCH_SIZE = 16;
 const RETRY_DELAY_MS = 5_000;
 
-type NonTerminalFinalization = Exclude<FinalizeRuntimeTurnResult, { kind: 'terminal' }>;
+// reclaimed_by_sweep is terminal-equivalent (the sweep owns the durable
+// terminal) and is never retained, so it is excluded alongside 'terminal'.
+type NonTerminalFinalization = Exclude<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>;
 
 export interface RuntimeTurnFinalizationPostEffects {
   readonly queue: unknown;
@@ -81,7 +86,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
   private readonly instanceName: string;
   private readonly durability: () => RuntimeTurnFinalizerDurability | null;
   private readonly applyRecovered: (
-    result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+    result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
     retained: RetainedRuntimeTurnFinalization<TPostEffects>,
   ) => void | Promise<void>;
   private readonly retained = new Map<string, RetainedRuntimeTurnFinalization<TPostEffects>>();
@@ -99,7 +104,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     instanceName: string,
     durability: () => RuntimeTurnFinalizerDurability | null,
     applyRecovered: (
-      result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' }>,
+      result: Extract<FinalizeRuntimeTurnResult, { kind: 'terminal' | 'reclaimed_by_sweep' }>,
       retained: RetainedRuntimeTurnFinalization<TPostEffects>,
     ) => void | Promise<void>,
   ) {
@@ -125,7 +130,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
   }
 
   markDegraded(context: RuntimeTurnContext): void {
-    this.block(context);
+    this.block(context, 'degraded');
   }
 
   retain(
@@ -166,7 +171,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     this.recoveryWaiters.set(turnId, createRecoveryWaiter());
 
     if (!retained.mayAdvance || this.retained.size > MAX_RETAINED_FINALIZATIONS) {
-      this.block(record.context);
+      this.block(record.context, 'retain_non_advancing');
     }
     this.scheduleRetry();
     return retained;
@@ -269,7 +274,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           replay: retained.context.replay,
           bookkeeping: retained.bookkeeping,
         });
-        if (result.kind === 'terminal') {
+        if (result.kind === 'terminal' || result.kind === 'reclaimed_by_sweep') {
           await this.applyRecovered(result, retained);
           this.retained.delete(turnId);
           this.unblock(retained.context, turnId);
@@ -286,10 +291,10 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           retained.incidentDurable = true;
           retained.mayAdvance = retained.mayAdvance || result.mayAdvance;
         } else if (!retained.incidentDurable) {
-          this.block(retained.context);
+          this.block(retained.context, 'retry_failed');
         }
       } catch {
-        this.block(retained.context);
+        this.block(retained.context, 'retry_failed');
       }
 
       if (
@@ -299,7 +304,7 @@ export class RuntimeTurnSupervisor<TPostEffects> {
       ) {
         retained.exhausted = true;
         this.retryExhaustions += 1;
-        this.block(retained.context);
+        this.block(retained.context, 'retry_exhausted');
       }
     }
     return this.result(attempted, recovered);
@@ -344,11 +349,26 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     this.retryTimer = null;
   }
 
-  private block(context: RuntimeTurnContext): void {
+  private block(context: RuntimeTurnContext, cause: ScopeBlockCause): void {
     const scopeKey = this.scopeKey(context);
     const blocked = this.blockedTurnsByScope.get(scopeKey) ?? new Set<string>();
-    blocked.add(context.identity.logicalTurnId);
+    const turnId = context.identity.logicalTurnId;
+    const firstBlock = !blocked.has(turnId);
+    blocked.add(turnId);
     this.blockedTurnsByScope.set(scopeKey, blocked);
+    // Visibility (2026-08-29 q DM wedge family): a blocked scope rejects
+    // EVERY subsequent turn at admission, yet this mutation was silent. Log
+    // each turn's first block AND the retry-exhaustion transition — the
+    // moment a block becomes permanent-until-restart. `cause:'degraded'`
+    // blocks have no retained record, so the retry sweep can never release
+    // them either. (A phone-shaped scopeKey may be partially redacted in the
+    // journal; logicalTurnId is the surviving join.)
+    if (firstBlock || cause === 'retry_exhausted') {
+      log.warn(
+        { scopeKey, logicalTurnId: turnId, blockedInScope: blocked.size, cause },
+        'turn-supervisor: scope admission blocked',
+      );
+    }
   }
 
   private unblock(context: RuntimeTurnContext, turnId: string): void {
@@ -356,6 +376,11 @@ export class RuntimeTurnSupervisor<TPostEffects> {
     const blocked = this.blockedTurnsByScope.get(scopeKey);
     if (!blocked) return;
     blocked.delete(turnId);
-    if (blocked.size === 0) this.blockedTurnsByScope.delete(scopeKey);
+    if (blocked.size === 0) {
+      this.blockedTurnsByScope.delete(scopeKey);
+      // The matching exit line — without it a log tail shows scopes blocking
+      // but never clearing, which reads as a wedge even after recovery.
+      log.info({ scopeKey, logicalTurnId: turnId }, 'turn-supervisor: scope admission unblocked');
+    }
   }
 }

@@ -9,7 +9,7 @@
 // Merge these describe blocks into the existing groups.test.ts file.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerGroupTools } from '../../../src/mcp/tools/groups.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';

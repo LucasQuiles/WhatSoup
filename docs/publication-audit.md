@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 371
+**Total classification rows:** 407
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 173 |
+| PRIVATE-ARCHIVE | 209 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 371 |
+| Total | 407 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -34,14 +34,18 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/research/2026-06-30-continuity-rd/CLOUD-GROUPS-API-ELIGIBILITY-MAP.md` | PRIVATE-ARCHIVE | Internal continuity research; retained in the repository but excluded from public publication by default. |
 | `docs/research/2026-06-30-continuity-rd/WHATSOUP-FLEET-CONTINUITY-MATRIX.md` | PRIVATE-ARCHIVE | Internal continuity research; retained in the repository but excluded from public publication by default. |
 | `docs/research/gemini-cli-stream-json-investigation-2026-04-04.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/account-identity-recovery.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/agent-decision-polls.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/agent-job-dispatch-gap.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/capability-obligation-operator.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/daily-health-receipt-mode-repair.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/error-response-workflows.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/fleet-bot-hardening-standard.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/host-maintenance.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/imessage-transport.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/knowledge-profiles.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/launchd-governed-env-reader-contract.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/loop-lag-forensic-collector.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/macos-host-setup.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/macos-launchd-deployment.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/mwlab-deployment.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
@@ -64,6 +68,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/runbooks/transport-error-unsupported-capability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/twilio-transport.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/closed/fleet-charts-20260407/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/convention-map.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-08-whatsoup-protection-layer-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-fleet-topology-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-settings-migration-framework-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -145,6 +150,13 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-08-14-operational-health-recovery-debt.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-17-recovery-authority-store-concurrency-containment.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | PRIVATE-ARCHIVE | Internal TDD and dependency-advisory remediation plan with sanitized synthetic evidence; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-08-27-p8b-admission-invariant.md` | PRIVATE-ARCHIVE | Internal ruling record for the P8b admission invariant; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-09-06-daily-health-alert-evidence.md` | PRIVATE-ARCHIVE | Internal bounded-alert implementation plan using sanitized fixtures; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | PRIVATE-ARCHIVE | Internal copy-ready PR briefs from the audit; retained in the repository but excluded from public publication by default. |
@@ -189,6 +201,13 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-08-14-operational-health-recovery-debt-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | PRIVATE-ARCHIVE | Internal event-loop evidence transport and collection design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | PRIVATE-ARCHIVE | Internal durable replay, checkpoint-integrity, health, and staged fleet-rollout design; sanitized incident evidence only, retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | PRIVATE-ARCHIVE | Internal concurrency-failure evidence, containment architecture, falsifier protocol, and staged operational acceptance design; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | PRIVATE-ARCHIVE | Internal health-authority security remediation design with sanitized synthetic evidence; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | PRIVATE-ARCHIVE | Internal fleet lifecycle-observability standard design (review-passed draft); no production identifiers, sanitized incident references only; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | PRIVATE-ARCHIVE | Internal phased implementation plan for the approved lifecycle-observability standard; no production identifiers, sanitized operational references only; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol design; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/tasks.md` | PRIVATE-ARCHIVE | Internal targeted-cancellation implementation plan; retained in the repository but excluded from public publication by default. |
@@ -197,6 +216,23 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/provider-event-lifecycle/provider-contract-claude-code-2.1.207.json` | PRIVATE-ARCHIVE | Sanitized provider schema/correlation evidence; retained for internal conformance review and excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-agent-safety.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-console-observability.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-console-transport.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-database-migration.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-durability-memory.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-fleet-observability.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-health-collapse.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-observability-gaps.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-fixes.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-sweep.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-portability-test.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-qr-design.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-reliability-misc.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-salvage-work.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-tech-debt-drssot-2.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-tech-debt-drssot.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
+| `docs/triage/CLUSTER-transport-fragility.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
 | `docs/triage/README.md` | PUBLIC | Sanitized operator contract for deterministic issue evidence, dry-run, confirmation, and recovery; complete issue bodies and private runtime identifiers are forbidden. |
 | `docs/triage/open-issue-priority-clusters-20260728.json` | PUBLIC | Sealed numeric-only P0/P1 projection containing issue numbers, reviewed cluster identifiers, source bindings, and aggregate counts; titles, bodies, paths, ownership details, and pull-request content are excluded. |
 | `docs/triage/open-issue-priority-clusters-20260728.md` | PUBLIC | Deterministic view of the sealed numeric-only P0/P1 projection; it exposes no fields beyond the reviewed JSON projection. |

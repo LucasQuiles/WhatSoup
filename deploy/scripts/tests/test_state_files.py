@@ -31,6 +31,7 @@ EXPECTED_CONSTANTS = {
     "HEARTBEAT_WATCHDOG_STATE": "heartbeat-watchdog-state.json",
     "SELFCHECK_STATE": "selfcheck-state.json",
     "DEADMAN_STATE": "deadman-state.json",
+    "TOOL_INVENTORY_STATE": "tool-inventory-state.json",
     "GUI_SESSION_MONITOR_STATE": "gui-session-monitor-state.json",
     "RUNTIME_STALENESS_STATE": "runtime-staleness-state.json",
     "SENTINEL_HEARTBEAT": "sentinel-heartbeat.json",

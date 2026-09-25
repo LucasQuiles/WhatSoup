@@ -9,7 +9,7 @@
  * (`classifyCredentialValue`) and provider-key-service — does NOT reimplement
  * keyring/expiry classification.
  */
-import { resolveProviderKeyService } from './provider-key-service.ts';
+import { isKeylessOpenCodeRoute, resolveProviderKeyService } from './provider-key-service.ts';
 import { lookupCredential } from './keyring.ts';
 import { resolveClaudeOAuthCred, type ClaudeOAuthCredResult } from './model-advisor.ts';
 import { classifyCredentialValue } from './credential-state.ts';
@@ -46,6 +46,10 @@ export function resolveProviderCredentialState(
     if (cred.status === 'expired') return cred.hasRefreshToken ? 'present-expired-refreshable' : 'expired-no-refresh';
     return 'absent';
   }
+  // Free-tier gateway models (`opencode/<model>`) run keyless: the prefix
+  // resolves to a service name, but no credential exists or is needed —
+  // validity is discovered at spawn, same as a native-auth CLI.
+  if (isKeylessOpenCodeRoute(input.provider, input.model)) return 'native';
   const service = resolveProviderKeyService(input.provider, input.model, input.providerConfig);
   if (service === null) return 'native'; // default arm: any null-service provider fails open
   const value = (deps.lookup ?? lookupCredential)(service);

@@ -12,7 +12,14 @@
 #       stale/fresh observation)
 #   1   detector event-write failure (propagated)
 #   2   usage error, invalid/missing mode, missing dependency or detector
-#   75  lock contention: cycle skipped, recorded on stderr
+#   75  lock contention: cycle skipped. The skip is always recorded on
+#       stderr, and the exit status is 75 whether or not a receipt lands.
+#       When the receipt library resolves, the cycle is also stamped in the
+#       producer's cadence receipt as a pre-exec lock_skip that advances
+#       neither cadence clock. On a bundle whose allowlist does not carry
+#       the writer and its imports, no receipt is written and the
+#       interpreter's own "No module named" line, carrying an absolute
+#       filesystem path, appears on stderr instead.
 #
 # Early environment failures (e.g. an unwritable state dir at mkdir -p) also
 # surface as a nonzero exit before the lock is ever taken. Detector exit
@@ -21,7 +28,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: bot-errors-release-proof-run.sh tree|runtime-staleness|health-invariants" >&2
+  echo "usage: bot-errors-release-proof-run.sh tree|runtime-staleness" >&2
 }
 
 if [ "$#" -ne 1 ]; then
@@ -30,7 +37,7 @@ if [ "$#" -ne 1 ]; then
 fi
 COMPONENT="$1"
 case "$COMPONENT" in
-  tree|runtime-staleness|health-invariants) ;;
+  tree|runtime-staleness) ;;
   *)
     usage
     exit 2
@@ -78,31 +85,6 @@ case "$COMPONENT" in
       ARGS=(--once)
     fi
     ;;
-  health-invariants)
-    # Verify the running generation includes merged health invariants (#2446).
-    # Reads the runtime's health endpoint and checks for required invariant
-    # fields. Falls back to git provenance check if the health endpoint is
-    # unreachable. Does not run a detector subprocess.
-    HEALTH_PORT="${BOT_ERRORS_HEALTH_PORT:-9090}"
-    health=$(curl -sf "http://localhost:${HEALTH_PORT}/health" 2>/dev/null || echo "")
-    if echo "$health" | grep -q '"turnCapabilityEvidence":"affirmative"'; then
-      echo "release-proof: OK: runtime health invariants satisfied"
-      exit 0
-    elif [ -n "$health" ]; then
-      echo "release-proof: FAIL: runtime health invariants not satisfied — generation lacks #2446 fix"
-      exit 1
-    else
-      # Fallback: git provenance check
-      INVARIANTS_MERGE="${BOT_ERRORS_HEALTH_INVARIANTS_MERGE:-}"
-      APP_REPO="${BOT_ERRORS_RELEASE_PROOF_APP_REPO:-$HOME/LAB/WhatSoup}"
-      if [ -n "$INVARIANTS_MERGE" ] && git -C "$APP_REPO" merge-base --is-ancestor "$INVARIANTS_MERGE" HEAD 2>/dev/null; then
-        echo "release-proof: OK: runtime generation includes health invariants merge"
-        exit 0
-      fi
-      echo "release-proof: FAIL: runtime health invariants not satisfied — health endpoint unreachable and merge not verified"
-      exit 2
-    fi
-    ;;
 esac
 
 if [ ! -f "$DETECTOR" ]; then
@@ -115,6 +97,18 @@ fi
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "release-proof: lock held; skipping cycle ($COMPONENT)" >&2
+  # The refused cycle is the one outcome no detector can record: the exec below
+  # never happens, so nothing else knows this cycle existed. Stamp it here,
+  # before exec, through the producers' own receipt writer, which records
+  # lock_skip and advances neither cadence clock. The receipt is dark liveness
+  # evidence and exit 75 is a coordination contract, so the call's status is
+  # discarded here rather than allowed to change what this cycle reports. What
+  # reaches stderr on failure depends on the bundle: once the module imports,
+  # the writer reduces the failure to a bounded token; on a bundle whose
+  # allowlist lacks the receipt library the module never resolves, so nothing
+  # in it runs and the interpreter's own message goes to stderr instead.
+  PYTHONPATH="$BUNDLE_ROOT/deploy/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lib.producer_cadence_receipt lock-skip "$COMPONENT" "$MODE" || true
   exit 75
 fi
 

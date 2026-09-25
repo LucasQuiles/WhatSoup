@@ -10,6 +10,8 @@
  * Stale only labels; it never hides the payload (inconclusive ≠ invisible).
  */
 
+import { MS_PER_MINUTE } from '../../../src/lib/time-units.ts';
+
 export interface Freshness {
   /** Epoch ms of the last successful observation, or null when never fetched. */
   observedAt: number | null;
@@ -18,7 +20,7 @@ export interface Freshness {
 }
 
 /** Metrics planes poll every 60 s; two missed intervals means carried data. */
-export const METRICS_STALE_AFTER_MS = 2 * 60_000;
+export const METRICS_STALE_AFTER_MS = 2 * MS_PER_MINUTE;
 
 export function queryFreshness(args: {
   /** react-query `dataUpdatedAt` (0 when the query has never succeeded). */

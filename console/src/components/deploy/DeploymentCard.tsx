@@ -23,6 +23,7 @@ import {
   formatUptime,
   miniTagOverflow,
 } from '../../lib/deployments'
+import { healthPresentation, healthPresentationShortText } from '../../lib/health-presentation'
 import { Button } from '../primitives/Button'
 
 const STATE_CLASS: Record<string, string> = {
@@ -119,11 +120,30 @@ export function DeploymentCard({ lines, queryError }: { lines: LineInstance[]; q
           <div className="deploy-dcell__k">{issues.length > 0 ? 'Issues' : 'Load'}</div>
           <div className="deploy-dcell__v">{issues.length > 0 ? issues.length : '—'}</div>
           <div className="deploy-mini">
-            {issues.slice(0, 2).map((l) => (
-              <span key={l.name} className="deploy-mini__warn" title={l.statusReason ?? l.status}>
-                {l.name}: {l.statusReason ?? l.status}
-              </span>
-            ))}
+            {issues.slice(0, 2).map((l) => {
+              // Same canonical projection the feed card renders (#2523), so one
+              // condition reads identically on both surfaces. The compact chip
+              // shortens the label; the tooltip keeps the complete safe
+              // classification, including the reason code and confidence.
+              const health = healthPresentation({
+                status: l.status,
+                reason: l.statusReason,
+                confidence: l.statusConfidence,
+                stale: l.stale,
+                lastSessionStatus: l.lastSessionStatus,
+              });
+              return (
+                <span key={l.name} className="deploy-mini__warn" title={health.clipboardText}>
+                  {l.name}: {healthPresentationShortText(health)}
+                  {/* The chip is compact by design, but the issue's contract requires
+                      the COMPLETE safe classification to reach assistive text. A
+                      `title` on a non-interactive span is hover-only, so the reason
+                      code and confidence would otherwise be unreachable by keyboard
+                      or screen reader. */}
+                  <span className="sr-only">{` (${health.clipboardText})`}</span>
+                </span>
+              );
+            })}
             {issues.length > 2 ? <span className="deploy-mini__warn">+{issues.length - 2}</span> : null}
             {issues.length === 0 ? <span>no line issues</span> : null}
           </div>

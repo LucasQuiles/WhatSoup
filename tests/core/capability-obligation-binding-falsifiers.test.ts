@@ -87,6 +87,7 @@ function seedFreshAttestation(over: { expiresAt?: string } = {}): number {
     canaryResult: 'pass', nonce: `att-${++attSeq}`,
     attestedAt: new Date().toISOString(),
     expiresAt: over.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(),
+    evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
   });
 }
 
@@ -529,6 +530,7 @@ describe('D5 falsifier — attestation admission matches EVERY recorded binding 
       nonce: `n-${Math.random().toString(36).slice(2)}`,
       attestedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      evidence: { probeStdoutRef: null, probeStderrRef: null, probeExit: null, canaryInputRef: null, mediaRootReadable: null },
     });
   }
 

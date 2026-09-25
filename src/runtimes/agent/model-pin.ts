@@ -24,6 +24,8 @@ import {
   pruneExpired,
   clearChatPreference,
   promoteToSticky,
+  recordKeepReceiptMessageId,
+  getKeepReceiptMessageId,
   type PreferenceIntent,
 } from './chat-preference-db.ts';
 import { preferenceKeys } from './preference-keys.ts';
@@ -35,6 +37,7 @@ import { isProviderId } from './providers/index.ts';
 import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
+import type { SendDirectOutcome } from './chat-transport.ts';
 import type { IOutboundQueue } from './outbound-queue.ts';
 import type { TurnQueue } from './turn-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
@@ -45,6 +48,7 @@ import {
 } from './model-catalogue-render.ts';
 import { brandOf, listBrands } from './providers/provider-brand.ts';
 import { MS_PER_DAY } from '../../lib/time-units.ts';
+import { withBoundedTimeout, TimeoutError } from '../../lib/bounded-timeout.ts';
 import { renderBrandLevel, renderEffortLevel, renderModelLevel, prettyEffortLabel, type RenderedLevel } from './model-drilldown-render.ts';
 import { nativeReasoningControl, providerConfigEffort, providerHasNativeReasoningControl, type ReasoningControl } from './reasoning-control.ts';
 import {
@@ -70,10 +74,52 @@ class RouteRecycleOwnershipChangedError extends Error {}
 /** TTL for an ephemeral (non-sticky) route preference row. */
 export const PREFERENCE_TTL_MS = MS_PER_DAY;
 
+/**
+ * A2 (#2121 follow-up) — how long the awaited pin receipt may hold the turn
+ * chain before the handler gives up on capturing its id.
+ *
+ * The receipt send is awaited for a correctness reason (see sendPinReceipt),
+ * but it had no bound of its own: a transport that neither resolves nor
+ * rejects held the `/model` handler open, and with it every turn queued behind
+ * it for that chat. The bound converts an unbounded stall into the SAME
+ * degrade the queue path already has — the pin is written, the receipt is out,
+ * and only the id capture is lost, so the widened affirmatives fall through to
+ * the agent as ordinary text. Generous on purpose: this is a stall guard, not
+ * a latency budget, and a receipt that takes seconds should still be captured.
+ */
+export const PIN_RECEIPT_SEND_TIMEOUT_MS = 10_000;
+
 // Only the receipt's promised bare reply mutates routing (Q-CANARY model-pin
 // `keep` contract, 2026-07-23). Conversational uses such as "please keep it"
 // must continue to the agent unchanged.
+//
+// F2a widening (#2121) — per the owner decision recorded on that issue on
+// 2026-08-04, which this comment cites rather than silently replacing the
+// dated contract above. The affirmative set gains `confirm`/`yes`/`pin`, but
+// those three promote ONLY from a reply the client threaded to the pin
+// receipt itself: the inbound's `quotedMessageId` must equal the id that
+// receipt was sent with. The decision's own words for why this NARROWS
+// rather than reopens the false-positive surface PR #2109 closed — "a stray
+// bare 'yes' in an unrelated reply cannot mutate routing; only a threaded
+// reply to the actual receipt can".
+//
+// Bare `keep` is deliberately UNCHANGED: it still promotes whether or not the
+// reply is threaded, so nothing the 2026-07-23 contract admitted now needs a
+// quote. The threading requirement is the price of the WIDENING only.
 const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
+
+/**
+ * D4 (#2121 follow-up) — the widened affirmative set, as data. The matcher
+ * below is BUILT from this tuple and the test matrices iterate it, so a token
+ * added here extends the runtime and its coverage together; the two can no
+ * longer drift the way a hand-copied `['confirm','yes','pin']` array in the
+ * suite could. Exported for that reason only — it is not a runtime seam.
+ */
+export const THREADED_AFFIRMATIVE_TOKENS = ['confirm', 'yes', 'pin'] as const;
+const THREADED_AFFIRMATIVE_RE = new RegExp(
+  `^\\s*(?:${THREADED_AFFIRMATIVE_TOKENS.join('|')})[\\s!.]*$`,
+  'i',
+);
 
 /**
  * Task G (D14) — outcome of applyRouteChangeAndRecycle: 'recycled' (idle,
@@ -84,6 +130,21 @@ const BARE_KEEP_RE = /^\s*keep[\s!.]*$/i;
 export type RouteRecycleOutcome = 'recycled' | 'deferred' | 'noop';
 
 export type RouteRecycleFailure = LifecycleRouteRecycleFailure<SessionManager>;
+
+/**
+ * One rendered `/model` echo plus whether it is a keep-PROMISING pin receipt
+ * — i.e. whether its text invites the "reply keep to make it permanent"
+ * confirmation and so needs its message id captured for F2a (#2121)
+ * reply-threading. Only `renderPinPreferenceOutcome` produces such text.
+ *
+ * D3 (#2121 follow-up): module-private. It has no consumer outside this file
+ * (`echoReconfirmOutcome` produces it, `sendPinEcho` consumes it, both here),
+ * and an exported type reads as a supported seam other modules may build on.
+ */
+interface PinEcho {
+  readonly text: string;
+  readonly keepPromising: boolean;
+}
 
 /**
  * The AgentRuntime surface the pin/recycle path reads and mutates. Declared
@@ -149,13 +210,30 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
   /** Terminal durability completion for text handled locally without an
    *  agent turn (R14 shape) — a no-op when inboundSeq is undefined. */
   completeLocalInbound(inboundSeq: number | undefined): void;
+  /**
+   * F2a (#2121) — the id-bearing sibling of `sendDirect`, used ONLY for the
+   * pin receipts whose message id a threaded confirmation must quote. Landed
+   * for this feature by #2981 car-B (chat-transport.ts `sendDirectWithReceipt`,
+   * runtime.ts's public method of the same name); every other send in this
+   * module still goes through the void `sendDirect`, so the widening adds no
+   * new obligation at the other call sites.
+   */
+  sendDirectWithReceipt(chatJid: string, text: string): Promise<SendDirectOutcome>;
 }
 
 /**
  * Full bare-`keep` interception (Q-CANARY model-pin `keep` contract,
- * 2026-07-23) — the ONE call site runtime.ts needs. Only the receipt's
- * promised bare reply mutates routing; conversational uses like "please keep
- * it" continue to the agent unchanged (BARE_KEEP_RE requires an exact match).
+ * 2026-07-23; widened by the F2a decision of 2026-08-04, #2121) — the ONE
+ * call site runtime.ts needs. Only the receipt's promised bare reply mutates
+ * routing; conversational uses like "please keep it" continue to the agent
+ * unchanged (both matchers require an exact match).
+ *
+ * Two admission rules, not one. Bare `keep` is admitted on the text alone,
+ * exactly as before. The widened affirmatives (`confirm`/`yes`/`pin`) are
+ * admitted only when the reply is client-threaded to the pin receipt. An
+ * UNQUOTED `confirm` is therefore NOT a near miss to be receipted — it is
+ * ordinary conversation and reaches the agent untouched, which is the
+ * property the owner named as this change's acceptance falsifier.
  * Eligibility is evaluated at `msg.timestamp` (the inbound's own receive
  * time, epoch seconds), never `Date.now()` at processing time, so a
  * provider-queue delay cannot turn an on-time reply into a false "expired"
@@ -164,8 +242,17 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
  * immediately without any further dispatch.
  */
 export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult, chatJid: string, msg: IncomingMessage): boolean {
-  if (classified.type !== 'message' || !BARE_KEEP_RE.test(classified.text)) return false;
-  const keepReply = handleBareKeep(port, chatJid, msg.senderJid, msg.timestamp * 1000);
+  if (classified.type !== 'message') return false;
+  const isBareKeep = BARE_KEEP_RE.test(classified.text);
+  if (!isBareKeep && !THREADED_AFFIRMATIVE_RE.test(classified.text)) return false;
+  // D1 (#2121 follow-up): canonicalize ONCE, and only AFTER both text gates.
+  // `preferenceKeys` resolves LID/PN aliases through the database, so it is
+  // not free; the thread check and the promotion used to each compute the
+  // same pair for the same inbound. Keeping it below the gates also means an
+  // ordinary message never pays for it at all.
+  const keys = preferenceKeys(port.db, chatJid, msg.senderJid);
+  if (!isBareKeep && !isThreadedToPinReceipt(port, keys.chatKey, msg)) return false;
+  const keepReply = handleBareKeep(port, chatJid, keys, msg.timestamp * 1000);
   if (keepReply === null) return false;
   port.sendDirect(chatJid, keepReply);
   port.completeLocalInbound(msg.inboundSeq);
@@ -173,8 +260,137 @@ export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult,
 }
 
 /**
+ * F2a (#2121) — is this inbound a reply threaded to THIS chat's pin receipt?
+ *
+ * The comparison is between the inbound's `quotedMessageId` (the quoted
+ * message's transport id, `contextInfo.stanzaId` on the WhatsApp parse) and
+ * the id stored when that receipt was sent. The stored id is read from the
+ * same winning row `promoteToSticky` will resolve, so authentication and
+ * promotion can never disagree about which pin is being confirmed (pinned by
+ * the MED-1 tests in tests/runtimes/agent/chat-preference-db.test.ts).
+ *
+ * Takes the ALREADY-canonicalized `chatKey` (D1): the caller resolves the
+ * identity pair once and hands the same one to the promotion.
+ *
+ * Fails CLOSED on every uncertainty — no quote, an empty quote, no captured
+ * receipt id, a different message, or an unreadable store. A widened
+ * affirmative that cannot be authenticated stays ordinary text; it never
+ * promotes and never earns a receipt of its own.
+ */
+function isThreadedToPinReceipt(port: ModelPinPort, chatKey: string, msg: IncomingMessage): boolean {
+  const quoted = msg.quotedMessageId;
+  if (typeof quoted !== 'string' || quoted === '') return false;
+  try {
+    return getKeepReceiptMessageId(port.db, chatKey) === quoted;
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: receipt thread check failed');
+    return false;
+  }
+}
+
+/**
+ * F2a (#2121) — send a keep-PROMISING pin receipt and record the id it was
+ * sent with, so a threaded `confirm`/`yes`/`pin` can later be authenticated
+ * against it. Used only for the text `renderPinPreferenceOutcome` produces
+ * (the four branches that say "reply keep to make it permanent"); every other
+ * reply in this module still goes through the void `sendDirect`.
+ *
+ * KNOWN COVERAGE BOUNDARY, inherited from #2981 car-A and not papered over:
+ * `sendDirectWithReceipt` reports acceptance with a NULL id on the healthy
+ * outbound-queue path, because that queue sends asynchronously and the
+ * outcome is deferred by design. A receipt sent while a live queue owns the
+ * chat therefore stores no id, and the widened affirmatives simply fall
+ * through to the agent there, exactly as they did before this change. The
+ * primary F2a path is unaffected: a genuine route switch recycles the live
+ * session first (`recycleLiveSession` drops the per-chat queue, or nulls the
+ * singleton one), so the receipt goes out through the messenger and carries a
+ * real id. Bare `keep` is independent of all of this and works either way.
+ *
+ * A capture failure is never allowed to break the send that already happened:
+ * the receipt is out, so a store error is logged and swallowed, leaving the
+ * widened tokens unauthenticated rather than losing the user's reply.
+ *
+ * AWAITED, unlike the void `sendDirect` it replaces at these sites, and for a
+ * correctness reason rather than tidiness: the id must be durable before the
+ * user's reply can arrive, or a fast threaded `confirm` would race the write
+ * and be refused. BOUNDED since A2 (#2121 follow-up) by
+ * {@link PIN_RECEIPT_SEND_TIMEOUT_MS}, so a transport that never settles
+ * degrades to the unauthenticated path instead of holding the chat's turn
+ * chain open behind it. The handler already awaits slower work on this same path
+ * (the pin-time catalogue verify, the live-session recycle), so this adds no
+ * new class of blocking; every non-receipt reply in this module still goes out
+ * fire-and-forget.
+ */
+async function sendPinReceipt(
+  port: ModelPinPort,
+  chatJid: string,
+  chatKey: string,
+  senderKey: string,
+  text: string,
+): Promise<void> {
+  let outcome: SendDirectOutcome;
+  try {
+    // A2: bounded by PIN_RECEIPT_SEND_TIMEOUT_MS. `withBoundedTimeout` keeps
+    // observing the send after the bound fires, so a late rejection can never
+    // surface as an unhandled rejection and a late SUCCESS is dropped rather
+    // than writing an id the handler has already stopped waiting for — a write
+    // that landed after the fall-through would authenticate a confirmation the
+    // user sent while the pin was still unauthenticated.
+    outcome = await withBoundedTimeout(
+      () => port.sendDirectWithReceipt(chatJid, text),
+      PIN_RECEIPT_SEND_TIMEOUT_MS,
+      {
+        onLateSettle: (late) =>
+          log.warn(
+            { instance: port.instanceName, lateSettleOk: late.ok },
+            'keep: pin receipt settled after its bound; id deliberately not captured',
+          ),
+      },
+    );
+  } catch (err) {
+    // ONLY the timeout is absorbed here. A transport REJECTION keeps
+    // propagating exactly as it did before this change — bounding a wait is
+    // not licence to start swallowing send failures.
+    if (!(err instanceof TimeoutError)) throw err;
+    log.warn(
+      { err, instance: port.instanceName },
+      'keep: pin receipt send exceeded its bound; falling through unauthenticated',
+    );
+    return;
+  }
+  if (!outcome.accepted || outcome.messageId === null) return;
+  try {
+    recordKeepReceiptMessageId(port.db, chatKey, senderKey, outcome.messageId);
+  } catch (err) {
+    log.warn({ err, instance: port.instanceName }, 'keep: pin receipt id capture failed');
+  }
+}
+
+/**
+ * Send one `/model` echo, capturing its id only when it is a keep-promising
+ * receipt. Keeps the promise and the capture in one place so a future echo
+ * cannot advertise "reply keep" without also storing the id that reply must
+ * quote.
+ */
+async function sendPinEcho(
+  port: ModelPinPort,
+  chatJid: string,
+  chatKey: string,
+  senderKey: string,
+  echo: PinEcho,
+): Promise<void> {
+  if (!echo.keepPromising) {
+    port.sendDirect(chatJid, echo.text);
+    return;
+  }
+  await sendPinReceipt(port, chatJid, chatKey, senderKey, echo.text);
+}
+
+/**
  * Promote the chat's current live route preference to a permanent pin.
- * `nowMs` is the caller's eligibility instant. Delegates the actual
+ * `nowMs` is the caller's eligibility instant; `keys` is the caller's
+ * already-canonicalized identity pair (D1) — the same one the thread check
+ * authenticated against, so the two can never resolve different rows. Delegates the actual
  * compare-and-set to `promoteToSticky` (chat-preference-db.ts, the
  * preference SSOT): only the row that is STILL the chat's winning preference
  * at `nowMs` AND still belongs to the confirming sender is promoted — never
@@ -183,9 +399,12 @@ export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult,
  * as ordinary text via {@link tryHandleBareKeep}; every other outcome is
  * handled locally with a truthful, visible reply.
  */
-function handleBareKeep(port: ModelPinPort, chatJid: string, senderJid: string, nowMs: number): string | null {
-  const { chatKey, senderKey } = preferenceKeys(port.db, chatJid, senderJid);
-
+function handleBareKeep(
+  port: ModelPinPort,
+  chatJid: string,
+  { chatKey, senderKey }: { chatKey: string; senderKey: string },
+  nowMs: number,
+): string | null {
   let result: ReturnType<typeof promoteToSticky>;
   try {
     result = promoteToSticky(port.db, chatKey, senderKey, nowMs);
@@ -257,7 +476,7 @@ export function recordRouteModelPin(
   providerId: string,
   model: string,
   effort: string | null = null,
-): 'set' | 'refreshed' | 'sticky_kept' {
+): 'set' | 'refreshed' | 'sticky_kept' | 'reverify_pending' {
   const now = Date.now();
   const existing = getPreference(port.db, chatKey, senderKey, now);
   if (
@@ -270,8 +489,34 @@ export function recordRouteModelPin(
     // a fresh 'set' + re-verify + recycle), never a no-op 'refreshed'.
     (existing.requestedEffort ?? null) === effort
   ) {
+    // A matching pin that never passed its catalogue check is not a completed
+    // re-confirm. Keep the row pending and let the caller run the normal
+    // verification seam again; the resolver's failure backoff bounds retries.
+    if (existing.modelPinVerified === false) {
+      if (existing.expiresAt !== null) {
+        setPreference(port.db, {
+          ...existing,
+          updatedAt: now,
+          expiresAt: now + PREFERENCE_TTL_MS,
+          keepReceiptMessageId: null,
+        });
+      }
+      return 'reverify_pending';
+    }
     if (existing.expiresAt !== null) {
-      setPreference(port.db, { ...existing, updatedAt: now, expiresAt: now + PREFERENCE_TTL_MS });
+      // A3 (#2121 follow-up): `{ ...existing }` carries the captured
+      // `keepReceiptMessageId`, so this refresh used to PRESERVE the id and
+      // falsify setPreference's own "a pin write always supersedes the
+      // previous receipt" comment. It must be cleared: the refresh echo
+      // ("Already set — extended for another 24h") does not promise the keep
+      // reply, so after this write there is no live invitation for a threaded
+      // affirmative to answer.
+      setPreference(port.db, {
+        ...existing,
+        updatedAt: now,
+        expiresAt: now + PREFERENCE_TTL_MS,
+        keepReceiptMessageId: null,
+      });
       return 'refreshed';
     }
     return 'sticky_kept';
@@ -310,7 +555,7 @@ export function recordRouteModelPin(
  * (decideModelPinResolution, config-surface.ts — the SSOT) needs to
  * consume it. The catalogue probes are injectable
  * (modelCatalogueListFn/modelCatalogueAnthropicFn on AgentRuntimeOptions,
- * mirroring resolveModelCatalogue's own listFn/anthropicFn seam) so a test
+ * mirroring resolveModelCatalogue's CLI-list/anthropicFn seam) so a test
  * never spawns the real binary or hits the real keychain.
  *
  * Acts on decideModelPinResolution's verdict against the just-written
@@ -331,7 +576,7 @@ export function recordRouteModelPin(
  * The ONE provider-catalogue fetch preamble both the pin-time verify
  * ({@link verifyModelPinAgainstCatalogue}) and the drill Level-2 render
  * (`sendModelDrillModelLevel`) need: resolve the provider binary, then fetch
- * via the injectable listFn/anthropicFn seam (a test never spawns a binary or
+ * via the injectable CLI-list/anthropicFn seam (a test never spawns a binary or
  * hits the keychain). Callers diverge AFTER on the returned listing (verify
  * runs decideModelPinResolution; the drill renders it). Slice-3 forward-reuse.
  */
@@ -343,6 +588,7 @@ async function fetchProviderCatalogue(
   return resolveModelCatalogue(providerId, binary, {
     nowMs: Date.now(),
     listFn: port.modelCatalogueListFn,
+    codexFn: port.modelCatalogueListFn,
     anthropicFn: port.modelCatalogueAnthropicFn,
   });
 }
@@ -365,7 +611,22 @@ export async function verifyModelPinAgainstCatalogue(
   if (decision.action === 'use') {
     const existing = getPreference(port.db, chatKey, senderKey);
     if (existing) {
-      setPreference(port.db, { ...existing, modelPinVerified: true, validatedProvider: providerId, updatedAt: Date.now() });
+      // A3 (#2121 follow-up): cleared here too. Today this is a no-op — the
+      // only caller verifies a pin it has just written on the fresh 'set'
+      // path, before any receipt is sent, so the id is already null. It is
+      // written explicitly because "only reached before the send" is an
+      // ordering invariant a future edit can break silently, and the two ways
+      // of being wrong are not symmetric: clearing an id that was still valid
+      // costs one fall-through to the agent (the module's documented
+      // fail-closed degrade), while preserving a stale one authenticates a
+      // confirmation the user never aimed at this pin.
+      setPreference(port.db, {
+        ...existing,
+        modelPinVerified: true,
+        validatedProvider: providerId,
+        updatedAt: Date.now(),
+        keepReceiptMessageId: null,
+      });
     }
     return 'verified';
   }
@@ -702,16 +963,76 @@ export async function echoReconfirmOutcome(
   perChatMapKey: string | undefined,
   label: string,
   alreadySetText: string,
-): Promise<string> {
+): Promise<PinEcho> {
   const fallbackOutcome = fallbackReconfirmationOutcome(
     label,
     alreadySetText,
     fallbackRouteForResolvedPreference(port, chatJid, senderJid),
   );
-  if (fallbackOutcome) return fallbackOutcome;
+  // F2a: neither the health-fallback re-confirmation nor the plain
+  // "Already set" line advertises the keep reply — only
+  // renderPinPreferenceOutcome's four branches do. Reporting the branch
+  // instead of matching on the rendered words keeps that fact where the
+  // renderers are, not in a string test that a copy edit could silently
+  // invalidate.
+  if (fallbackOutcome) return { text: fallbackOutcome, keepPromising: false };
   const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  if (recycleOutcome === 'noop') return alreadySetText;
-  return renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome);
+  if (recycleOutcome === 'noop') return { text: alreadySetText, keepPromising: false };
+  return { text: renderPinOutcomeEcho(port, chatJid, senderJid, label, recycleOutcome), keepPromising: true };
+}
+
+/**
+ * D2 (#2121 follow-up) — the identity/echo context every pin handler already
+ * carried as five loose locals. Named once so the shared tail below can take
+ * one argument instead of five, in the order the handlers already build them.
+ */
+interface PinEchoContext {
+  chatJid: string;
+  senderJid: string;
+  perChatMapKey: string | undefined;
+  chatKey: string;
+  senderKey: string;
+}
+
+/** The two "nothing changed shape" re-confirm echoes (D2). All three pin
+ *  handlers share this prelude verbatim — only the label differs. Returns true
+ *  when the outcome WAS a re-confirm and its echo has gone out, in which case
+ *  the caller must return without pinning anything further. */
+async function echoPinReconfirm(
+  port: ModelPinPort,
+  ctx: PinEchoContext,
+  outcome: 'set' | 'refreshed' | 'sticky_kept',
+  label: string,
+): Promise<boolean> {
+  if (outcome === 'set') return false;
+  const alreadySetText = outcome === 'refreshed'
+    ? '_Already set — extended for another 24h. /reset to go back to the default route._'
+    : '_Already set (sticky). /reset to go back to the default route._';
+  await sendPinEcho(port, ctx.chatJid, ctx.chatKey, ctx.senderKey, await echoReconfirmOutcome(
+    port, ctx.chatJid, ctx.senderJid, ctx.perChatMapKey, label, alreadySetText,
+  ));
+  return true;
+}
+
+/** The WHOLE provider-pin outcome tail (D2): the re-confirm echoes above, then
+ *  the recycle-and-receipt a genuine change earns. The two provider-pin
+ *  handlers (`/model N default` and `/model <provider|intent>`) shared this
+ *  verbatim. `pinConfiguredModelEntry` shares only the prelude, because the
+ *  pin-time catalogue verify sits between the two halves for a MODEL pin. */
+async function applyProviderPinOutcome(
+  port: ModelPinPort,
+  ctx: PinEchoContext,
+  outcome: 'set' | 'refreshed' | 'sticky_kept',
+  label: string,
+): Promise<void> {
+  if (await echoPinReconfirm(port, ctx, outcome, label)) return;
+  // Task G: apply the switch immediately (idle) or defer it to the next
+  // message (busy) — the receipt below discloses which.
+  const recycleOutcome = await applyRouteChangeAndRecycle(port, ctx.chatJid, ctx.senderJid, ctx.perChatMapKey);
+  await sendPinReceipt(
+    port, ctx.chatJid, ctx.chatKey, ctx.senderKey,
+    renderPinOutcomeEcho(port, ctx.chatJid, ctx.senderJid, label, recycleOutcome),
+  );
 }
 
 /**
@@ -741,33 +1062,14 @@ export async function echoReconfirmOutcome(
  */
 async function pinConfiguredModelEntry(
   port: ModelPinPort,
-  ctx: {
-    chatJid: string;
-    senderJid: string;
-    perChatMapKey: string | undefined;
-    chatKey: string;
-    senderKey: string;
-  },
+  ctx: PinEchoContext,
   providerId: string,
   modelId: string,
   effort: string | null = null,
 ): Promise<void> {
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
   const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
-  if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
-      port, chatJid, senderJid, perChatMapKey, modelId,
-      '_Already set — extended for another 24h. /reset to go back to the default route._',
-    ));
-    return;
-  }
-  if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
-      port, chatJid, senderJid, perChatMapKey, modelId,
-      '_Already set (sticky). /reset to go back to the default route._',
-    ));
-    return;
-  }
+  if (outcome !== 'reverify_pending' && await echoPinReconfirm(port, ctx, outcome, modelId)) return;
   // Task H: verify the fresh pin against the catalogue BEFORE the echo
   // (awaited — no fire-and-forget) so a subsequent read (this same reply,
   // /model status, a next-session spawn) never observes an unverified pin
@@ -797,7 +1099,10 @@ async function pinConfiguredModelEntry(
   // receipt says what changed); a null effort (Default / no-rc model) echoes the
   // model alone, so the pre-Slice-3 receipt is byte-identical when no effort is set.
   const echoLabel = effort ? `${modelId} (${prettyEffortLabel(effort).toLowerCase()} reasoning)` : modelId;
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome));
+  await sendPinReceipt(
+    port, chatJid, chatKey, senderKey,
+    renderPinOutcomeEcho(port, chatJid, senderJid, echoLabel, recycleOutcome),
+  );
 }
 
 /**
@@ -867,6 +1172,7 @@ async function sendModelDrillModelLevel(
   senderJid: string,
   brand: string,
   provider: string,
+  offset = 0,
 ): Promise<void> {
   const listing = await fetchProviderCatalogue(port, provider);
   if (listing.status !== 'ok') {
@@ -875,15 +1181,18 @@ async function sendModelDrillModelLevel(
   }
   const route = port.resolveRouteForTurn(chatJid, senderJid);
   const currentModel = route.provider === provider ? route.model : null;
-  // Bound the render the same way the flat menu does (MODEL_CATALOGUE_CAP): a
-  // chatty provider's live catalogue is unbounded, and an uncapped numbered
-  // list makes an unusable WhatsApp message. The snapshot stores exactly what
-  // was SHOWN, so a number always resolves to a visible row.
-  const shown = listing.ids.slice(0, MODEL_CATALOGUE_CAP);
-  const rendered = renderModelLevel(brand, provider, shown, currentModel);
+  // A non-final page reserves its twelfth visible row for an explicit next
+  // page. The snapshot stores precisely those visible model and More rows.
+  const safeOffset = Number.isSafeInteger(offset) && offset >= 0 && offset < listing.ids.length ? offset : 0;
+  const pageSize = listing.ids.length - safeOffset > MODEL_CATALOGUE_CAP
+    ? MODEL_CATALOGUE_CAP - 1
+    : MODEL_CATALOGUE_CAP;
+  const shown = listing.ids.slice(safeOffset, safeOffset + pageSize);
+  const nextOffset = safeOffset + shown.length < listing.ids.length ? safeOffset + shown.length : null;
+  const rendered = renderModelLevel(brand, provider, shown, currentModel, nextOffset);
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'model', rendered.entries);
-  const text = shown.length < listing.ids.length
-    ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
+  const text = nextOffset !== null || safeOffset > 0
+    ? `${rendered.text}\n_showing ${safeOffset + 1}–${safeOffset + shown.length} of ${listing.ids.length}_`
     : rendered.text;
   port.sendDirect(chatJid, text);
 }
@@ -1007,24 +1316,12 @@ export async function handleModelCommand(
       return;
     }
     const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, 'provider_specific', entry.providerId);
-    if (outcome === 'refreshed') {
-      port.sendDirect(chatJid, await echoReconfirmOutcome(
-        port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
-        '_Already set — extended for another 24h. /reset to go back to the default route._',
-      ));
-      return;
-    }
-    if (outcome === 'sticky_kept') {
-      port.sendDirect(chatJid, await echoReconfirmOutcome(
-        port, chatJid, senderJid, perChatMapKey, `\`${entry.providerId}\``,
-        '_Already set (sticky). /reset to go back to the default route._',
-      ));
-      return;
-    }
-    // Task G: apply the switch immediately (idle) or defer it to the
-    // next message (busy) — the echo below discloses which.
-    const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-    port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, `\`${entry.providerId}\``, recycleOutcome));
+    await applyProviderPinOutcome(
+      port,
+      { chatJid, senderJid, perChatMapKey, chatKey, senderKey },
+      outcome,
+      `\`${entry.providerId}\``,
+    );
     return;
   }
   // D6/D10/D16 + Slice 2: `/model N` / `/model N<letter>` — resolve N against
@@ -1055,6 +1352,17 @@ export async function handleModelCommand(
       // Level-1 pick → open Level-2 for that brand's provider. (The union
       // narrows on `kind` — brand/provider are non-optional on this arm.)
       await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
+      return;
+    }
+    if (pick.entry.kind === 'more') {
+      await sendModelDrillModelLevel(
+        port,
+        chatJid,
+        senderJid,
+        pick.entry.brand,
+        pick.entry.provider,
+        pick.entry.offset,
+      );
       return;
     }
     if (pick.entry.kind === 'model') {
@@ -1174,20 +1482,5 @@ export async function handleModelCommand(
   // sticky_kept re-confirm echo can reuse it too (Important-1).
   const what = isProvider ? `\`${sub}\`` : `my ${sub} model`;
   const outcome = port.recordRoutePreference(chatJid, chatKey, senderKey, intent, requestedProvider);
-  if (outcome === 'refreshed') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
-      port, chatJid, senderJid, perChatMapKey, what,
-      '_Already set — extended for another 24h. /reset to go back to the default route._',
-    ));
-    return;
-  }
-  if (outcome === 'sticky_kept') {
-    port.sendDirect(chatJid, await echoReconfirmOutcome(
-      port, chatJid, senderJid, perChatMapKey, what,
-      '_Already set (sticky). /reset to go back to the default route._',
-    ));
-    return;
-  }
-  const recycleOutcome = await applyRouteChangeAndRecycle(port, chatJid, senderJid, perChatMapKey);
-  port.sendDirect(chatJid, renderPinOutcomeEcho(port, chatJid, senderJid, what, recycleOutcome));
+  await applyProviderPinOutcome(port, { chatJid, senderJid, perChatMapKey, chatKey, senderKey }, outcome, what);
 }

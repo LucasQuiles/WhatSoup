@@ -292,7 +292,9 @@ def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkey
     assert incident["ageSeconds"] == 1000
 
 
-def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeypatch):
+def test_infinite_suppression_resets_counters_without_renotify(tmp_path: Path, monkeypatch):
+    # Restored scenario: this test was shadowed by the same-named log-write-failure
+    # test below and never ran, silently dropping its coverage.
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
     _write_private_json(
@@ -769,14 +771,17 @@ def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Pa
     outbox = tmp_path / "outbox"
     outbox.mkdir()
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
-    original_glob = Path.glob
+    original_scandir = os.scandir
 
-    def glob(path: Path, pattern: str):
-        if path == outbox:
+    def scandir(path):
+        # scan_directory (#2460, fail-loud) enumerates the queue via os.scandir,
+        # not Path.glob; inject the directory-level failure at the real seam so
+        # the OSError propagates and is reported rather than silently swallowed.
+        if Path(path) == outbox:
             raise PermissionError("denied")
-        return original_glob(path, pattern)
+        return original_scandir(path)
 
-    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(os, "scandir", scandir)
 
     problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
 

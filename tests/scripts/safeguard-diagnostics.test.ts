@@ -120,10 +120,12 @@ const requiredPackageScripts = {
     'npm run guard:no-destructive-git',
     'npm run guard:catch-ratchet',
     'npm run guard:grant-resolver',
+    'npm run guard:resolved-override',
     'npm run guard:instance-config',
-    'npm run guard:guard-test-coverage',
+    'npm run guard:guard-test-coverage -- --semantic-mode enforce',
     'npm run guard:lint:src',
     'npm run test:tokenomics',
+    'npm run test:deployment-qualification',
     'npm run test:drills',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci',
     'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck',
@@ -131,7 +133,7 @@ const requiredPackageScripts = {
     'bash scripts/run-with-pinned-npm.sh --prefix console ci',
     'bash scripts/run-with-pinned-npm.sh --prefix console run lint',
     'npm run typecheck:all',
-    'npm run coverage:check -- --pool=forks --fileParallelism=false',
+    'npm run coverage:check -- --pool=forks',
     'bash scripts/run-with-pinned-npm.sh --prefix console run build',
     'npm run verify:console-design:live',
     'npm run verify:console-browser',
@@ -713,12 +715,44 @@ describe('safeguard diagnostics', () => {
       .toContain('missing npm run verify:console-browser');
   });
 
-  it('accepts serialized coverage as the only root full-suite release command', () => {
+  it('accepts parallel coverage as the only root full-suite release command', () => {
     const fixture = makeRepo();
     const result = checkSafeguards(fixture);
 
     expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
       status: 'pass',
+    });
+  });
+
+  it('rejects release verification without deployment qualification', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run test:deployment-qualification', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['missing npm run test:deployment-qualification']),
+    });
+  });
+
+  it('rejects deployment qualification moved after release coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run test:deployment-qualification', '')
+          .replace('npm run coverage:check -- --pool=forks',
+            'npm run coverage:check -- --pool=forks && npm run test:deployment-qualification'),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['exact command sequence mismatch']),
     });
   });
 
@@ -741,8 +775,8 @@ describe('safeguard diagnostics', () => {
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
-          'npm run coverage:check -- --pool=forks --fileParallelism=false',
-          'npm run coverage:check -- --pool=forks --fileParallelism=false && npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check -- --pool=forks',
+          'npm run coverage:check -- --pool=forks && npm run coverage:check -- --pool=forks',
         ),
       },
     });
@@ -752,11 +786,11 @@ describe('safeguard diagnostics', () => {
       .toContain('expected exactly one npm run coverage:check; found 2');
   });
 
-  it('rejects release coverage without serialized runner flags', () => {
+  it('rejects release coverage without the forks pool flag', () => {
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
-          'npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check -- --pool=forks',
           'npm run coverage:check',
         ),
       },
@@ -764,37 +798,39 @@ describe('safeguard diagnostics', () => {
     const result = checkSafeguards(fixture);
 
     expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
-      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+      .toContain('missing exact npm run coverage:check -- --pool=forks');
   });
 
   it('rejects release coverage with altered runner flags', () => {
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
-          '--pool=forks --fileParallelism=false',
-          '--pool=threads --fileParallelism=false',
+          'coverage:check -- --pool=forks',
+          'coverage:check -- --pool=threads',
         ),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
-      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+      .toContain('missing exact npm run coverage:check -- --pool=forks');
   });
 
-  it('rejects release coverage without file parallelism disabled', () => {
+  it('rejects release coverage that re-serializes test files', () => {
+    // The release gate runs the suite with CI's parallel workers (vitest.config.ts
+    // maxWorkers); a serial run cannot finish inside the full-suite battery bound.
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
-          'npm run coverage:check -- --pool=forks --fileParallelism=false',
           'npm run coverage:check -- --pool=forks',
+          'npm run coverage:check -- --pool=forks --fileParallelism=false',
         ),
       },
     });
     const result = checkSafeguards(fixture);
 
     expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
-      .toContain('missing exact npm run coverage:check -- --pool=forks --fileParallelism=false');
+      .toContain('missing exact npm run coverage:check -- --pool=forks');
   });
 
   it.each([
@@ -802,7 +838,7 @@ describe('safeguard diagnostics', () => {
     ['npm run coverage', 'npm run coverage -- --pool=forks --fileParallelism=false', 'forbidden npm run coverage'],
     ['direct coverage script', 'bash scripts/run-coverage-check.sh --pool=forks --fileParallelism=false', 'forbidden bash scripts/run-coverage-check.sh'],
   ])('rejects an extra full-suite launcher via %s', (_name, extraCommand, expectedEvidence) => {
-    const canonical = 'npm run coverage:check -- --pool=forks --fileParallelism=false';
+    const canonical = 'npm run coverage:check -- --pool=forks';
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
@@ -821,8 +857,8 @@ describe('safeguard diagnostics', () => {
     const fixture = makeRepo({
       scripts: {
         'verify:release': requiredPackageScripts['verify:release'].replace(
-          'npm run coverage:check -- --pool=forks --fileParallelism=false',
-          'node scripts/unexpected-release-step.mjs && npm run coverage:check -- --pool=forks --fileParallelism=false',
+          'npm run coverage:check -- --pool=forks',
+          'node scripts/unexpected-release-step.mjs && npm run coverage:check -- --pool=forks',
         ),
       },
     });

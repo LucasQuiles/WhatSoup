@@ -11,18 +11,18 @@ import {
   readContinuityGapHealth,
   type ContinuityGapHealth,
 } from './continuity-gap-ledger.ts';
-import {
-  applyRecoveryProof,
-  evaluateRecoveryProof,
-  normalizeRecoveryDebt,
-} from './recovery-debt.ts';
+import { normalizeRecoveryDebt } from './recovery-debt.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import { isFullyConnected } from '../transport/runtime-connection.ts';
+import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
-import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_BOND_READ_PERSISTENT_CLASS,
+  DEFAULT_FRESH_INVALID_GRACE_MS,
+  hasTransientAuthReadIssue,
+} from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -53,10 +53,21 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
-import { LoopLagSampler, LOOP_LAG_STARVATION_THRESHOLD_MS } from '../lib/loop-lag-sampler.ts';
+import {
+  LoopLagSampler,
+  LOOP_LAG_SAMPLE_INTERVAL_MS,
+  LOOP_LAG_STARVATION_THRESHOLD_MS,
+} from '../lib/loop-lag-sampler.ts';
+import {
+  LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES,
+  LOOP_LAG_SAMPLES_SCHEMA_VERSION,
+  buildLoopLagSamplesResponse,
+  parseLoopLagSamplesQuery,
+} from './loop-lag-samples-endpoint.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
+import { getShadowGateHealth } from './shadow-gate-adapter.ts';
 import {
   readOutboundSendHealth,
   readToolDurabilityHealth,
@@ -173,44 +184,11 @@ const NOT_APPLICABLE_STARTUP_NOTIFICATION_HEALTH: StartupNotificationHealth = Ob
   lastSendAt: null,
 });
 
-/**
- * Bounds health-probe error-log storms (#1778 Defect B). A permanent probe
- * failure (e.g. `no such table`) must not re-log on every ~5 s poll forever —
- * one observed instance emitted 24,613 identical lines over 34 h, another
- * 40,005. The degraded-state latch still fires every poll (the SIGNAL), but the
- * LOG is emitted on the 1st failure and then only at power-of-two counts,
- * turning O(polls) log lines into O(log polls) while a permanent error can never
- * become an unbounded storm.
- */
-export class ProbeErrorThrottle {
-  private readonly failures = new Map<string, number>();
-
-  /**
-   * Record a probe failure for `key`. Returns the running failure count when
-   * this occurrence should be logged (the 1st, then powers of two), or `null`
-   * to suppress it.
-   */
-  onFailure(key: string): number | null {
-    const n = (this.failures.get(key) ?? 0) + 1;
-    this.failures.set(key, n);
-    // Powers of two (and 1) satisfy (n & (n - 1)) === 0.
-    return (n & (n - 1)) === 0 ? n : null;
-  }
-
-  /**
-   * Record a probe success for `key`. Returns the number of accumulated
-   * failures cleared (0 when the probe was already healthy).
-   */
-  onSuccess(key: string): number {
-    const n = this.failures.get(key) ?? 0;
-    if (n > 0) this.failures.delete(key);
-    return n;
-  }
-
-  reset(): void {
-    this.failures.clear();
-  }
-}
+// Re-exported from its leaf module so consumers that must not pull this
+// file's import graph (which reaches the transport layer) can share the one
+// implementation instead of spelling the same throttle a second time.
+export { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
+import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 
 const probeErrorThrottle = new ProbeErrorThrottle();
 
@@ -230,6 +208,178 @@ function noteProbeSuccess(warnMsg: string): void {
   const cleared = probeErrorThrottle.onSuccess(warnMsg);
   if (cleared > 1) {
     log.info({ probe: warnMsg, clearedFailures: cleared }, 'health probe recovered after transient failures');
+  }
+}
+
+/** #2280: add degradation_silence_unproven when no active degradation reasons
+ * exist but the instance was recently degraded. Returns true when the silence
+ * latch fired, so the caller can raise the matching degradation cause (the
+ * `status_reasons` <-> `degradation_causes` symmetry) instead of letting the
+ * catch-all 'unclassified' cause absorb it. */
+export function addDegradationSilenceProof(
+  statusReasons: string[],
+  recentlyDegraded: ReadonlySet<string> | ReadonlyMap<string, unknown>,
+  instanceName: string,
+): boolean {
+  if (statusReasons.length === 0 && recentlyDegraded.has(instanceName)) {
+    statusReasons.push('degradation_silence_unproven');
+    return true;
+  }
+  return false;
+}
+
+/** One armed #2280 silence latch: when the latch point was last advanced and
+ * the union of every real status reason observed while the latch was armed. */
+export interface DegradationLatchEntry {
+  latchedAtMs: number;
+  reasons: ReadonlySet<string>;
+}
+
+/** Status reasons a successful primary-provider turn is evidence AGAINST: the
+ * turn pipeline itself (turn capability, agent runtime) and the transport
+ * connection the turn necessarily rode in on. Reasons outside this set
+ * (enrichment, memory, durability, flood/churn, auth-bond, the other
+ * `runtime.*` specifics) are NOT proven recovered by a turn, so a latch
+ * carrying any of them never releases on a turn receipt — a turn proves the
+ * turn pipeline only. The task-21 identity reasons
+ * (`runtime.credential_identity_mismatch` / `_unverifiable`) are deliberately
+ * absent: a turn proves the credential works, not whose it is. Named and
+ * exported so review can adjust membership without touching the release
+ * mechanics. */
+export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'turn_capability_degraded',
+  'agent_runtime_degraded',
+  'agent_runtime_unhealthy',
+  'connection_disconnected',
+  'connection_recovering',
+  // Provable BY CONSTRUCTION of the release guard: a primary receipt is only
+  // accepted while NO fallback window is live (primaryProviderId is null
+  // otherwise), so accepting one is precisely the evidence that the window
+  // ended and the primary serves again. This is the only window-derived
+  // runtime degradedReason literal — both getHealthSnapshot branches gate it
+  // on fallbackActiveUntil !== null; every sibling literal is its own
+  // independently probed condition and stays non-provable.
+  'runtime.provider_fallback_active',
+]);
+
+/** Status reasons that must never arm the degradation latch because each one
+ * clears itself when its condition is repaired, so no latch is needed to keep a
+ * real problem visible. Membership is NOT "any runtime reason" — it is the
+ * narrow class below, and admitting a reason on a looser reading would open a
+ * genuine silence hole.
+ *
+ * MEMBERSHIP RULE, restated because it is the thing a future candidate is
+ * judged against: a reason belongs here if and only if its condition is
+ * SETTLED by the repair that fixes it, so the reason disappears on its own once
+ * the system is healthy again. Being a runtime reason is not sufficient.
+ *
+ * The members satisfy it by different mechanisms, and the distinction is
+ * the point:
+ *   - `runtime.per_chat_session_without_owner` is recomputed from live state on
+ *     every poll (the runtime walks its session map), so a still-broken map
+ *     degrades again immediately.
+ *   - `runtime.per_chat_respawn_abandoned` is NOT re-derived from live state.
+ *     It is backed by a retention map emptied when the chat serves again by
+ *     either route — the next inbound message respawns an inactive session in
+ *     place, or is simply served by one that never went inactive — or when a
+ *     new owned session is indexed for it, and it also expires on age.
+ *     Admitted here because it self-clears on repair, not because it is
+ *     re-probed.
+ *   - `runtime.agent_respawn_failed_clear_pending` is a retry obligation whose
+ *     runtime reason disappears only after the shared alert clear is accepted.
+ *     Health itself re-attempts that clear while no abandonment or exhaustion
+ *     owns the source, so an accepted retry is immediately re-probed as clean.
+ *
+ * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
+ * in an unrelated chat proves nothing about a per-chat ownership map — so a
+ * latch carrying one could never be released by the only release channel that
+ * exists, and the instance would report degraded until process restart even
+ * after the runtime had repaired itself and its own snapshot read healthy. */
+export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
+  'runtime.agent_respawn_failed_clear_pending',
+  'runtime.per_chat_session_without_owner',
+  'runtime.per_chat_respawn_abandoned',
+]);
+
+/** The primary route the latch release compares a receipt against: the
+ * primary provider (only known while no fallback window is live) and its
+ * configured model, null meaning the provider default. */
+export interface PrimaryRouteForRelease {
+  providerId: string;
+  modelRef: string | null;
+}
+
+/** Recovery proof for the #2280 silence latch. The latch is released ONLY on
+ * a successful EXACT-PRIMARY-ROUTE turn receipt from the still-current
+ * session, strictly newer than the latch point, and only when every latched
+ * reason is turn-provable (TURN_PROVABLE_STATUS_REASONS — a turn proves the
+ * turn pipeline only). Guards, all fail-closed:
+ *   - route: the receipt's provider AND model must equal the primary route
+ *     (`primaryRoute`; pass null while the fallback snapshot shows a window
+ *     or fallback state is unavailable — no release). Model rule: an explicit
+ *     primary model requires the receipt to name the SAME model — a
+ *     different or unknown receipt model never releases (a /model-pinned
+ *     same-provider session proves its own route, not the primary); a
+ *     provider-default primary (modelRef null) requires the receipt model to
+ *     be absent/default too.
+ *   - session currency: `last_successful_turn_session_current` must be
+ *     exactly true — a receipt from a rotated or dead session incarnation
+ *     (false, or unknown = null) says nothing about the live route.
+ *   - time: `last_successful_turn_at` strictly greater than the latch point.
+ *     Strictly-newer is the ONLY temporal guard — deliberately no wall-clock
+ *     freshness window: anything bad after the receipt advanced the latch
+ *     point past it by construction, while an expiry window would make
+ *     release depend on /health polling cadence and permanently strand idle
+ *     instances.
+ * Silence, elapsed time, empty reason lists, stale receipts, non-primary or
+ * off-route receipts never release. The latch is process-lifetime, in-memory
+ * state: a process restart clears it by amnesia — a known, pre-existing
+ * hazard of the #2280 mechanism, which is loss of the latch, not a release
+ * channel; nothing here treats a restart as proof. Deletes the latch entry
+ * and returns true when the proof holds. Seam note: this predicate is the
+ * whole release contract — an alternative (e.g. N consecutive clean
+ * evaluations) can replace it without touching the call site. */
+export function releaseDegradationLatchOnRecoveryProof(
+  recentlyDegraded: Map<string, DegradationLatchEntry>,
+  instanceName: string,
+  turnCapability: {
+    last_successful_turn_at: number | null;
+    last_successful_turn_provider: string | null;
+    last_successful_turn_model: string | null;
+    last_successful_turn_session_current: boolean | null;
+  } | null,
+  primaryRoute: PrimaryRouteForRelease | null,
+): boolean {
+  const latch = recentlyDegraded.get(instanceName);
+  if (latch === undefined) return false;
+  for (const reason of latch.reasons) {
+    if (!TURN_PROVABLE_STATUS_REASONS.has(reason)) return false; // a turn cannot prove this recovered
+  }
+  if (turnCapability === null || primaryRoute === null) return false;
+  const receiptAt = turnCapability.last_successful_turn_at;
+  if (receiptAt === null || turnCapability.last_successful_turn_provider !== primaryRoute.providerId) {
+    return false;
+  }
+  if ((turnCapability.last_successful_turn_model ?? null) !== primaryRoute.modelRef) {
+    return false; // same provider, different or unknown model — not the primary route
+  }
+  if (turnCapability.last_successful_turn_session_current !== true) {
+    return false; // rotated/dead/unknown session incarnation — not live-route evidence
+  }
+  if (receiptAt <= latch.latchedAtMs) return false; // predates the latch — stale proof
+  recentlyDegraded.delete(instanceName);
+  return true;
+}
+
+/** Symmetric to the `degradation_causes` catch-all net (non-healthy status with
+ * no cause => 'unclassified'): a non-healthy status must always carry at least
+ * one `status_reason`. Defensive — every current status-mutation site already
+ * pushes a reason, so no live path reaches emit with a non-healthy status and
+ * an empty reason list, but this guarantees the invariant survives future
+ * refactors that add a status transition without a companion reason. */
+export function ensureStatusReasonFloor(status: string, statusReasons: string[]): void {
+  if (status !== 'healthy' && statusReasons.length === 0) {
+    statusReasons.push('unclassified');
   }
 }
 
@@ -261,13 +411,30 @@ interface HealthTurnCapability {
   model_usability_status: string | null;
   last_successful_turn_at: number | null;
   last_successful_turn_provider: string | null;
+  /** Model ref that served the last successful turn (null = unknown, or the
+   *  session carried no explicit model — the provider default). */
+  last_successful_turn_model: string | null;
   last_successful_turn_session_current: boolean | null;
+  /** The runtime's configured primary model (null = provider default). With
+   *  last_successful_turn_model this lets the latch release distinguish an
+   *  exact-primary-route success from a same-provider different-model one. */
+  primary_model: string | null;
   last_turn_error_class: string | null;
   last_turn_error_at: number | null;
   /** #3017 AXIS A: true when the periodic primary-readiness probe is active.
    *  When true, stale model-usability evidence on an idle bot is NOT benign —
    *  the periodic probe should have refreshed it. */
   periodic_probe_expected: boolean | null;
+  /** Scheduler backoff multiple the runtime derived the freshness window from
+   *  (1 when the periodic probe is not armed). */
+  periodic_probe_backoff_multiple: number | null;
+  /** Freshness window (ms) `model_usable_stale` was judged against — the
+   *  scheduler-derived deadline while the periodic probe is armed, the flat
+   *  30min otherwise. Lets a reader see WHICH window produced a stale flag. */
+  model_usable_freshness_ms: number | null;
+  /** Epoch ms the armed periodic probe is due (null while none is armed);
+   *  the freshness window is derived from it whenever it is known. */
+  next_probe_due_at: number | null;
 }
 
 const HEALTH_MODEL_USABILITY_STATUSES = new Set([
@@ -316,6 +483,7 @@ export type HealthDegradationCause =
   | 'database_retention_failed'
   | 'continuity_gap_unreadable'
   | 'continuity_gap_open'
+  | 'recovery_debt_blocking'
   | 'schema_future'
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
@@ -324,56 +492,208 @@ export type HealthDegradationCause =
   | 'agent_session_inactive'
   | 'turn_finalization_degraded'
   | 'turn_recovery_degraded'
+  | 'delivery_identity_debt'
   | 'provider_execution_pressure'
+  | 'agent_outbound_queue_poisoned'
+  // task-21: ratified account-identity verification (verify-only; the two
+  // classes are distinct so an unverifiable receipt never reads as a mismatch
+  // and a mismatch never hides behind "unknown").
+  | 'credential_identity_mismatch'
+  | 'credential_identity_unverifiable'
+  | 'agent_respawn_failed_clear_pending'
+  // per-chat dispatch-ownership conditions: named and deliberate, so they do not
+  // belong in the unclassified fall-through below.
+  | 'per_chat_session_without_owner'
+  | 'per_chat_respawn_abandoned'
   | 'agent_runtime_degraded_unclassified'
   | 'agent_runtime_unhealthy'
   | 'chat_runtime_degraded'
   | 'passive_runtime_degraded'
+  // #2280: the silence latch (degraded because recovery was never proven) is a
+  // distinct classification, not the catch-all below.
+  | 'degradation_silence_unproven'
   | 'unclassified';
 
-const HEALTH_DEGRADATION_CAUSE_PRESENCE: Readonly<Record<HealthDegradationCause, true>> = {
-  provider_fallback_active: true,
-  fallback_chain_exhausted: true,
-  fallback_entry_failures: true,
-  primary_model_unusable: true,
-  model_unusable: true,
-  turn_capability_error: true,
-  primary_model_evidence_stale: true,
-  turn_capability_evidence_stale: true,
-  auth_bond_degraded: true,
-  transport_disconnected: true,
-  enrichment_stale: true,
-  enrichment_runtime_degraded: true,
-  memory_readiness_degraded: true,
-  memory_context_degraded: true,
-  memory_consolidation_degraded: true,
-  connection_churn: true,
-  outbound_flood: true,
-  event_loop_starved: true,
-  durability_debt: true,
-  durability_evidence_unreadable: true,
-  database_retention_failed: true,
-  continuity_gap_unreadable: true,
-  continuity_gap_open: true,
-  schema_future: true,
-  schema_not_ready: true,
-  pending_polls_unreadable: true,
-  agent_recent_crashes: true,
-  agent_auto_compact_backoff: true,
-  agent_session_inactive: true,
-  turn_finalization_degraded: true,
-  turn_recovery_degraded: true,
-  provider_execution_pressure: true,
-  agent_runtime_degraded_unclassified: true,
-  agent_runtime_unhealthy: true,
-  chat_runtime_degraded: true,
-  passive_runtime_degraded: true,
-  unclassified: true,
+/**
+ * Annotation for a cause whose condition the `status_reasons` vector genuinely
+ * never names (it only ever reaches the wire as a cause). Using it is a reviewed
+ * choice: tests/core/health-cause-reason-twins pins the exact annotated set.
+ */
+export const NO_REASON_TWIN = 'no_reason_twin';
+
+/**
+ * `status_reasons` twins of a degradation cause: exact reason literals,
+ * `runtime.<reason>` for the agent-runtime degradedReasons passthrough, or a
+ * `prefix*` family where the reason carries a classifier suffix
+ * (`auth_failure.<class>`, `memory_readiness_<state>`).
+ */
+export type HealthDegradationCauseReasonTwins = readonly string[] | typeof NO_REASON_TWIN;
+
+export interface HealthDegradationCauseRegistryEntry {
+  readonly reasonTwins: HealthDegradationCauseReasonTwins;
+}
+
+/**
+ * The degradation-cause registry: one entry per `HealthDegradationCause` (a
+ * Record over the union, so totality is a compile-time fact). `HEALTH_DEGRADATION_CAUSES`
+ * is derived from its keys. Each entry names the `status_reasons` twin(s) the
+ * SAME condition pushes — /health reports degradation under two vocabularies
+ * (ordered reasons supporting the aggregate status; typed causes that alerts
+ * and flap detection key on) and several conditions reach the wire under
+ * different names in the two, the clearest being runtimeTurnRecoveryIsDegraded:
+ * `runtime.turn_finalization_debt` as a reason, `turn_recovery_degraded` as a
+ * cause. `ensureStatusReasonFloor` (#3316) only guarantees a reason EXISTS;
+ * this is the cross-reference that says which one. Live strings are never
+ * renamed here — add, never rename.
+ */
+export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
+  Record<HealthDegradationCause, HealthDegradationCauseRegistryEntry>
+> = {
+  // provider fallback — the window surfaces as an agent-runtime degradedReason;
+  // chain exhaustion and entry failures widen the cause vector only (they feed
+  // turn_capability_degraded indirectly via healthyProviderFallbackCapacity).
+  provider_fallback_active: { reasonTwins: ['runtime.provider_fallback_active'] },
+  fallback_chain_exhausted: { reasonTwins: NO_REASON_TWIN },
+  fallback_entry_failures: { reasonTwins: NO_REASON_TWIN },
+  // turn capability — every model/evidence/error condition folds into the one
+  // turn_capability_degraded reason (turnCapabilityIsDegraded).
+  primary_model_unusable: { reasonTwins: ['turn_capability_degraded'] },
+  model_unusable: { reasonTwins: ['turn_capability_degraded'] },
+  turn_capability_error: { reasonTwins: ['turn_capability_degraded'] },
+  primary_model_evidence_stale: { reasonTwins: ['turn_capability_degraded'] },
+  turn_capability_evidence_stale: { reasonTwins: ['turn_capability_degraded'] },
+  // transport / auth
+  auth_bond_degraded: { reasonTwins: ['auth_failure.*'] },
+  transport_disconnected: { reasonTwins: ['connection_disconnected', 'connection_recovering'] },
+  // enrichment / memory
+  enrichment_stale: { reasonTwins: ['enrichment_stale'] },
+  enrichment_runtime_degraded: { reasonTwins: ['enrichment_runtime_degraded'] },
+  memory_readiness_degraded: { reasonTwins: ['memory_readiness_*'] },
+  memory_context_degraded: { reasonTwins: ['memory_context_*'] },
+  memory_consolidation_degraded: { reasonTwins: ['memory_consolidation_*'] },
+  connection_churn: { reasonTwins: ['connection_churn'] },
+  outbound_flood: { reasonTwins: ['outbound_flood'] },
+  // process / durability / storage — continuity gaps reach the body and the
+  // cause vector only; the reason vector has never carried them.
+  event_loop_starved: { reasonTwins: ['event_loop_starvation'] },
+  durability_debt: { reasonTwins: ['durability_delivery_debt'] },
+  durability_evidence_unreadable: { reasonTwins: ['durability_evidence_unreadable'] },
+  database_retention_failed: { reasonTwins: ['database_retention_failed'] },
+  continuity_gap_unreadable: { reasonTwins: NO_REASON_TWIN },
+  continuity_gap_open: { reasonTwins: NO_REASON_TWIN },
+  // The normalized recovery_debt verdict: service-blocking debt (including
+  // unreadable or contradictory recovery evidence) can never read healthy.
+  recovery_debt_blocking: { reasonTwins: ['recovery_debt_blocking'] },
+  schema_future: { reasonTwins: ['schema_future'] },
+  schema_not_ready: { reasonTwins: ['schema_not_ready'] },
+  pending_polls_unreadable: { reasonTwins: ['pending_polls_unreadable'] },
+  // agent runtime — each cause is keyed from a runtime detail counter whose
+  // companion degradedReason reaches the reason vector as `runtime.<reason>`.
+  // runtimeTurnRecoveryIsDegraded pushes ONE reason for finalization debt AND
+  // recovery debt; the cause vector splits the same predicate into two names.
+  agent_recent_crashes: { reasonTwins: ['runtime.recent_crashes'] },
+  agent_auto_compact_backoff: { reasonTwins: ['runtime.auto_compact_backoff'] },
+  agent_session_inactive: { reasonTwins: ['runtime.session_inactive'] },
+  turn_finalization_degraded: { reasonTwins: ['runtime.turn_finalization_debt'] },
+  turn_recovery_degraded: { reasonTwins: ['runtime.turn_finalization_debt'] },
+  delivery_identity_debt: { reasonTwins: ['runtime.completed_delivery_identity_debt'] },
+  provider_execution_pressure: { reasonTwins: ['runtime.provider_execution_pressure'] },
+  // #3321: poisoned outbound queue scopes (successor to PR #3242) - the runtime
+  // pushes the companion degradedReason while the containment latch is up.
+  agent_outbound_queue_poisoned: { reasonTwins: ['runtime.outbound_queue_poisoned'] },
+  // task-21: the runtime pushes the companion degradedReason from its identity
+  // verdict (runtime.agent.accountIdentity.status).
+  credential_identity_mismatch: { reasonTwins: ['runtime.credential_identity_mismatch'] },
+  credential_identity_unverifiable: { reasonTwins: ['runtime.credential_identity_unverifiable'] },
+  agent_respawn_failed_clear_pending: {
+    reasonTwins: ['runtime.agent_respawn_failed_clear_pending'],
+  },
+  // per-chat dispatch ownership: both conditions are named, deliberate and
+  // directly re-probed, so each carries its own cause rather than landing in the
+  // fall-through where an operator cannot separate it from a genuine unknown.
+  per_chat_session_without_owner: { reasonTwins: ['runtime.per_chat_session_without_owner'] },
+  per_chat_respawn_abandoned: { reasonTwins: ['runtime.per_chat_respawn_abandoned'] },
+  // the fall-through when the agent runtime is degraded for a reason no named
+  // cause covers: the degradedReasons without a cause of their own, plus the
+  // bare marker used when the runtime reported no reasons at all.
+  agent_runtime_degraded_unclassified: {
+    reasonTwins: [
+      'runtime.turn_queue_halted',
+      'runtime.poll_persistence_failure',
+      'runtime.offline_decision_retry_exhausted',
+      'agent_runtime_degraded',
+    ],
+  },
+  agent_runtime_unhealthy: { reasonTwins: ['agent_runtime_unhealthy'] },
+  chat_runtime_degraded: { reasonTwins: ['runtime_degraded', 'runtime_unhealthy'] },
+  passive_runtime_degraded: { reasonTwins: ['runtime_degraded', 'runtime_unhealthy'] },
+  // the two symmetric floors
+  degradation_silence_unproven: { reasonTwins: ['degradation_silence_unproven'] },
+  unclassified: { reasonTwins: ['unclassified'] },
 };
 
 export const HEALTH_DEGRADATION_CAUSES = Object.freeze(
-  Object.keys(HEALTH_DEGRADATION_CAUSE_PRESENCE),
+  Object.keys(HEALTH_DEGRADATION_CAUSE_REGISTRY),
 ) as readonly HealthDegradationCause[];
+
+/** Derived cause -> status_reason twins view of the registry above. */
+export const HEALTH_DEGRADATION_CAUSE_REASON_TWINS: Readonly<
+  Record<HealthDegradationCause, HealthDegradationCauseReasonTwins>
+> = Object.freeze(
+  Object.fromEntries(
+    HEALTH_DEGRADATION_CAUSES.map((cause) => [cause, HEALTH_DEGRADATION_CAUSE_REGISTRY[cause].reasonTwins]),
+  ),
+) as Readonly<Record<HealthDegradationCause, HealthDegradationCauseReasonTwins>>;
+
+/**
+ * Which causes already CLASSIFY an agent-runtime degradation — derived from the
+ * registry above, not restated as a literal chain.
+ *
+ * `agent_runtime_degraded_unclassified` is the fall-through raised when the
+ * agent runtime is degraded and nothing named the reason. Deciding "did
+ * anything already name it?" used to be an inline predicate chain of
+ * `cause.startsWith('agent_') || cause === '...' || ...`, which every new
+ * agent-runtime cause had to remember to extend. Forgetting was silent and
+ * wrong in the same direction every time: the real cause AND the unclassified
+ * marker both reached the wire, so alerts and flap detection keyed on a
+ * meaningless catch-all beside the specific one. #3406 grew that chain to its
+ * 6th and 7th special case.
+ *
+ * Membership is two registry-visible facts, either sufficient:
+ *   - the cause declares a `runtime.*` reason twin, i.e. its condition reaches
+ *     status_reasons through the agent-runtime degradedReasons passthrough; or
+ *   - the cause is in the `agent_*` naming family, which the registry uses for
+ *     runtime conditions keyed off runtime detail counters. This second arm
+ *     retains `agent_runtime_unhealthy`, whose twin is the bare
+ *     `agent_runtime_unhealthy` reason rather than a `runtime.*` passthrough.
+ *
+ * `chat_runtime_degraded` / `passive_runtime_degraded` are deliberately OUT:
+ * their twins are `runtime_degraded` / `runtime_unhealthy` (underscore, not the
+ * `runtime.` passthrough prefix) and they describe non-agent instance modes.
+ *
+ * The derivation admits one cause the old literal chain did not,
+ * `provider_fallback_active`, and that addition is inert by construction: it is
+ * raised if and only if `fallbackWindowActive`, and the fall-through guard's own
+ * `&& !fallbackWindowActive` conjunct has already short-circuited in exactly
+ * that case. Exported (with the derivation) so review can check membership and
+ * a test can prove a newly registered runtime-scoped cause is picked up without
+ * a manual edit.
+ */
+export function deriveAgentRuntimeClassifiedCauses(
+  registry: Readonly<Record<string, HealthDegradationCauseRegistryEntry>>,
+): ReadonlySet<string> {
+  const classified = new Set<string>();
+  for (const [cause, entry] of Object.entries(registry)) {
+    const twins = entry.reasonTwins;
+    const runtimeScoped = twins !== NO_REASON_TWIN
+      && twins.some((reason) => reason.startsWith('runtime.'));
+    if (runtimeScoped || cause.startsWith('agent_')) classified.add(cause);
+  }
+  return classified;
+}
+
+export const AGENT_RUNTIME_CLASSIFIED_CAUSES: ReadonlySet<string> =
+  deriveAgentRuntimeClassifiedCauses(HEALTH_DEGRADATION_CAUSE_REGISTRY);
 
 function normalizeBooleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
@@ -391,6 +711,12 @@ function normalizeProviderNameOrNull(value: unknown): string | null {
   return isProviderId(value) ? value : null;
 }
 
+// Model refs are free-form provider model ids, not a closed enum — accept any
+// non-empty bounded string, null otherwise (absent = provider default).
+function normalizeModelRefOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
+}
+
 function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
   if (!details) return null;
   const raw = details.turnCapability;
@@ -402,10 +728,15 @@ function normalizeAgentTurnCapability(details: Record<string, unknown> | null): 
     model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
     last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
     last_successful_turn_provider: normalizeProviderNameOrNull(raw.lastSuccessfulTurnProvider),
+    last_successful_turn_model: normalizeModelRefOrNull(raw.lastSuccessfulTurnModel),
     last_successful_turn_session_current: normalizeBooleanOrNull(raw.lastSuccessfulTurnSessionCurrent),
+    primary_model: normalizeModelRefOrNull(raw.primaryModel),
     last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
     last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
     periodic_probe_expected: normalizeBooleanOrNull(raw.periodicProbeExpected),
+    periodic_probe_backoff_multiple: normalizeNumberOrNull(raw.periodicProbeBackoffMultiple),
+    model_usable_freshness_ms: normalizeNumberOrNull(raw.modelUsableFreshnessMs),
+    next_probe_due_at: normalizeNumberOrNull(raw.nextProbeDueAt),
   };
 }
 
@@ -511,9 +842,15 @@ function agentRuntimeDetailsForHealth(
           modelUsabilityStatus: turnCapability.model_usability_status,
           lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
           lastSuccessfulTurnProvider: turnCapability.last_successful_turn_provider,
+          lastSuccessfulTurnModel: turnCapability.last_successful_turn_model,
           lastSuccessfulTurnSessionCurrent: turnCapability.last_successful_turn_session_current,
+          primaryModel: turnCapability.primary_model,
           lastTurnErrorClass: turnCapability.last_turn_error_class,
           lastTurnErrorAt: turnCapability.last_turn_error_at,
+          periodicProbeExpected: turnCapability.periodic_probe_expected,
+          periodicProbeBackoffMultiple: turnCapability.periodic_probe_backoff_multiple,
+          modelUsableFreshnessMs: turnCapability.model_usable_freshness_ms,
+          nextProbeDueAt: turnCapability.next_probe_due_at,
         }
       : null,
   };
@@ -568,7 +905,10 @@ const HEALTH_PUBLIC_SCHEMA_VERSION = 'health.public.v1';
 // probe failed to fire — the OAuth may have expired between probe cycles — so
 // the evidence is NOT benign. The function degrades in that case regardless of
 // turn activity. An idle primary with expired OAuth must go non-green without a
-// user turn.
+// user turn. `model_usable_stale` itself is judged by the runtime against the
+// scheduler-derived window (`model_usable_freshness_ms`, see
+// expectedProbeDeadlineMs in primary-readiness-probe.ts), so "stale" here
+// already means "older than the scheduler could legitimately leave it".
 export const MODEL_STALE_RELIANCE_MS = 30 * MS_PER_MINUTE; // 30 minutes
 
 export function modelEvidenceStaleWhileRelied(
@@ -596,7 +936,14 @@ type AuthFailureClass =
   | 'serverside_logout_irreversible'
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
-  | 'auth_bond_at_risk';
+  | 'auth_bond_at_risk'
+  // A credential that has been UNREADABLE for longer than the stale-risk
+  // bound. Deliberately its own class rather than a local-corruption one:
+  // nothing on this path establishes corruption, and the corruption classes
+  // carry terminal consequences — the unrestorable one takes /health to 503
+  // and tells the watchdog a human relink is required. See
+  // AUTH_BOND_READ_PERSISTENT_CLASS.
+  | typeof AUTH_BOND_READ_PERSISTENT_CLASS;
 
 type DisconnectClass =
   | 'none'
@@ -618,6 +965,22 @@ function emptyRecentDisconnects(): ConnectionRecentDisconnects {
     lastStatusCode: null,
     byReason: {},
   };
+}
+
+/**
+ * Read connection state for the health projection.
+ *
+ * Prefers the transport's observability projection, which serves the auth-bond
+ * tree digest from an off-request cache. Falls back to the live getter for
+ * transports that have no such projection — they carry no auth tree, so the
+ * live call is already cheap for them. health.ts is the ONLY caller of the
+ * cached projection; scheduler.ts and main.ts keep the live one.
+ */
+function readHealthConnectionState(
+  connectionManager: HealthDeps['connectionManager'],
+): ConnectionStateSnapshot {
+  const reader = connectionManager as HealthConnectionStateReader;
+  return reader.getHealthConnectionState?.() ?? connectionManager.getConnectionState();
 }
 
 function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
@@ -645,6 +1008,44 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
     tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
     file_count: authBond.fileCount,
     total_bytes: authBond.totalBytes,
+    // P42 — the tree digest is no longer computed during this request, so say
+    // where it came from. 'live' is the pre-cache behaviour and reports age 0;
+    // 'stale' is a completed walk that an event invalidated or that is past its
+    // max age, still reported because it is the best evidence available;
+    // 'absent' means no walk has finished yet and the three tree fields above
+    // are null for that reason rather than because the tree is unreadable.
+    // An 'absent' or long-stale digest also forces `status` to 'unknown', so a
+    // consumer reading status alone cannot mistake it for a healthy tree.
+    digest_source: authBond.treeProvenance?.source ?? 'live',
+    digest_age_ms: authBond.treeProvenance ? authBond.treeProvenance.ageMs : 0,
+    digest_refresh_in_flight: authBond.treeProvenance?.refreshInFlight ?? false,
+    digest_refresh_count: authBond.treeProvenance?.refreshCount ?? null,
+    // How the last refresh attempt ended. 'incomplete' and 'failed' keep the
+    // previous digest and let it age, so this is the field that distinguishes a
+    // digest that is merely old from one that cannot be replaced.
+    digest_refresh_outcome: authBond.treeProvenance?.lastRefreshKind ?? 'live',
+    digest_refresh_reason: authBond.treeProvenance?.lastRefreshReason ?? null,
+    // Queued-but-not-started, reported separately from the last COMPLETED
+    // attempt. Without these two, a reader immediately after a floor-blocked
+    // invalidation sees a successful outcome and no refresh in flight, which
+    // together read as "nothing is happening" while a walk is queued.
+    digest_refresh_scheduled: authBond.treeProvenance?.refreshScheduled ?? false,
+    digest_next_refresh_eligible_ms: authBond.treeProvenance?.nextRefreshEligibleInMs ?? null,
+    // Walks started, including ones that did not publish. digest_refresh_count
+    // counts only publications, so the pair separates cost from progress.
+    digest_refresh_attempts: authBond.treeProvenance?.refreshAttemptCount ?? null,
+    // Why auth_failure_class can read 'auth_bond_read_persistent' next to an
+    // issue whose whole meaning is "not right now". Without these three the two
+    // readings contradict each other and the response carries nothing to
+    // reconcile them: the issue list has no age, and the flag that changed the
+    // class was internal. The reason names the ONE transient issue the streak
+    // belongs to — a different reason starts a new streak — and the age is that
+    // streak's, in milliseconds. Both are process-local: a restart starts the
+    // streak over, so a small age on a long-running fault means the process is
+    // young, not that the fault is.
+    transient_read_persistent: authBond.transientReadPersistent ?? false,
+    transient_read_reason: authBond.transientReadReason ?? null,
+    transient_read_age_ms: authBond.transientReadAgeMs ?? null,
     backup: {
       root: authBond.backup.root,
       latest: authBond.backup.latest,
@@ -706,6 +1107,38 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 
   const authBond = connectionState.authBond;
   if (!authBond) return 'none';
+
+  // No current tree evidence is not the same as evidence of a clean tree. This
+  // must be tested BEFORE both branches below: the fresh-credential-write guard
+  // would return 'none' and read the unknown tree as healthy, and the
+  // not-'present' branch would report it as local corruption, which it is not.
+  // 'auth_bond_at_risk' degrades (200) rather than paging, which is the right
+  // severity for "the walk has not landed yet".
+  if (authBond.status === 'unknown') return 'auth_bond_at_risk';
+
+  // A read that could not establish the credential has not earned 'none'. Sits
+  // with the 'unknown' check and BEFORE the fresh-write debounce for the reason
+  // that comment gives: degrading costs nothing inside the write window, while
+  // a false clean there lands in exactly the window a restore may act on.
+  //
+  // Bounded in TIME the same way 'unknown' is, and bounded ONLY in what it
+  // reports. Past the guard's treeStaleRiskMs the class becomes
+  // 'auth_bond_read_persistent', which names the fault instead of leaving it
+  // indistinguishable from a fresh one. It must NOT fall through to the
+  // not-'present' branch below: that reports 'local_corruption_*', and the
+  // unrestorable half takes /health to 503 and matches the watchdog's terminal
+  // set, so a credential nobody could READ would suppress the restart that
+  // might clear the read fault. Both halves stay degraded at HTTP 200; the
+  // difference between them is only that the second one is explainable, which
+  // is what the serialized transient_read_* fields on the auth_bond block are
+  // for. The tracking lives on the guard because a transient prefix is issue
+  // text with no age of its own, and this must be one shared bound across live
+  // and cached reads.
+  if (hasTransientAuthReadIssue(authBond.issues)) {
+    return authBond.transientReadPersistent
+      ? AUTH_BOND_READ_PERSISTENT_CLASS
+      : 'auth_bond_at_risk';
+  }
 
   if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 
@@ -849,16 +1282,24 @@ function sendRequestErrorMessage(err: unknown): string {
 }
 
 export function startHealthServer(deps: HealthDeps): ReturnType<typeof createServer> {
-  // #2280: tracks instances that have recently been in STATUS_DEGRADED, so
-  // status updates that see empty statusReasons (silence) can keep the
-  // instance degraded until explicit recovery proof arrives. Scoped to the
+  // #2280: tracks instances that have recently been in STATUS_DEGRADED — the
+  // epoch-ms of the latest evaluation that observed a real degradation reason
+  // (the latch point) plus THAT evaluation's reason set (replace semantics,
+  // maintained by the latch-maintenance block just before emit) — so status
+  // updates that see empty statusReasons (silence) keep the instance degraded
+  // until explicit recovery proof arrives: a successful primary-turn receipt
+  // strictly newer than the latch point, when every latched reason is
+  // turn-provable (releaseDegradationLatchOnRecoveryProof). Scoped to the
   // server instance: module scope would leak degradation across server
   // lifetimes that share an instance name (observed as cross-test pollution).
-  const recentlyDegraded = new Set<string>();
+  const recentlyDegraded = new Map<string, DegradationLatchEntry>();
   // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
   // path for every protected route on this server (see HealthAuthState).
   const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
-  const chatResolver = createChatResolver({ db: deps.db.raw });
+  // Issue 3150: the wrapper enables outbound LID canonicalization — a
+  // phone-JID recipient whose thread lives under a mapped `@lid` JID is
+  // resolved onto that existing conversation before dispatch (fail-open).
+  const chatResolver = createChatResolver({ db: deps.db.raw, dbWrapper: deps.db });
   const sendPipeline = createSendPipeline({
     resolver: chatResolver,
     profiles: deps.profiles,
@@ -983,7 +1424,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
+        // Issue 3150: echo the JID the pipeline actually dispatched to (it may
+        // have been canonicalized onto an existing @lid conversation) so
+        // callers can verify routing.
+        let resolvedChatJid: string | undefined;
         sendPipeline.executeSend(parsed, async (prepared) => {
+          resolvedChatJid = prepared.chatJid;
           // QR-086: the admin /send is an authenticated infra action — tag it as
           // a system caller ('health') so the outbound-identity guard's spec
           // §4.2-step-B exemption applies and a deliberate admin send to a cold
@@ -993,7 +1439,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         })
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
+            res.end(JSON.stringify({
+              ok: true,
+              ...(resolvedChatJid !== undefined ? { chatJid: resolvedChatJid } : {}),
+            }));
           })
           .catch((err) => {
             const sendError = sendRequestErrorMessage(err);
@@ -1480,11 +1929,55 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       return;
     }
 
+    const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+    if (requestUrl.pathname === '/health/event-loop-samples' && req.method === 'GET') {
+      if (!requireAuth(req, res, healthAuth)) return;
+      const query = parseLoopLagSamplesQuery(requestUrl);
+      if (!query.ok) {
+        res.writeHead(query.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: query.code }));
+        return;
+      }
+      const page = loopLagSampler.rawSamplePage({
+        ...(query.after === undefined ? {} : { after: query.after }),
+        limit: query.limit,
+      });
+      const body = JSON.stringify(buildLoopLagSamplesResponse({
+        generatedAt: systemClock.nowIso(),
+        process: {
+          pid: process.pid,
+          startedAtMs: deps.startedAt,
+          commit: readWhatsoupGitSha(),
+        },
+        cadenceMs: LOOP_LAG_SAMPLE_INTERVAL_MS,
+        page,
+      }));
+      if (Buffer.byteLength(body) >= LOOP_LAG_SAMPLES_MAX_RESPONSE_BYTES) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'loop_lag_samples_response_too_large' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+      return;
+    }
+
     if (req.url !== '/health' || req.method !== 'GET') {
       res.writeHead(404);
       res.end();
       return;
     }
+
+    // #1753 rem-1 excluded this request's own cost from this request's reading
+    // by snapshotting first. That is not enough: the window is 20 samples at
+    // 500 ms, so the PREVIOUS request's block sits inside it and, at any poll
+    // cadence faster than one request per 5 s, requests contaminate each
+    // other's readings. Bracketing the handler tells the sampler which spans
+    // were the observer's, so the exclusion covers the whole window.
+    //
+    // Scoped to GET /health deliberately. A slow POST /send is real work
+    // blocking the loop and must keep showing up in the gauge.
+    const endObserverSpan = loopLagSampler.beginObserverSpan();
 
     try {
       const startupNotification = deps.getStartupNotificationHealth?.()
@@ -1501,7 +1994,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // no auth-bond formatting, and no privileged fields touch the public
       // bytes. Authenticated callers proceed to the full diagnostic below.
       if (!hasHealthAuth(req, healthAuth)) {
-        const cs = deps.connectionManager.getConnectionState();
+        const cs = readHealthConnectionState(deps.connectionManager);
         const publicConnected = isFullyConnected(cs);
         const publicRecovering =
           cs.state === 'connecting'
@@ -1531,6 +2024,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // this reflects lag accumulated up to the moment the request arrived, not
       // lag this handler's own (synchronous) work might introduce.
       const loopLag = loopLagSampler.snapshot();
+      const loopLagRawPage = loopLagSampler.rawSamplePage({ limit: 1 });
       if (loopLag.locallyStarved) {
         const warningNowMs = loopLagWarningNow();
         if (
@@ -1542,6 +2036,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             p95LagMs: loopLag.p95LagMs,
             sampleCount: loopLag.sampleCount,
             thresholdMs: LOOP_LAG_STARVATION_THRESHOLD_MS,
+            // #3253 provenance: this warning is emitted at health-request time,
+            // potentially long after the causal delayed callback — these fields
+            // say what the window was made of; the dedicated authenticated
+            // sample endpoint has the causal stream.
+            intervalSampleCount: loopLag.intervalSampleCount,
+            snapshotSampleCount: loopLag.snapshotSampleCount,
+            lagMaxMs: loopLag.maxLagMs,
           }, 'event loop starvation detected during health check');
           lastLoopLagWarningAtMs = warningNowMs;
         }
@@ -1578,7 +2079,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           'abandoned',
           'unreadable',
         ].includes(memoryConsolidation.state);
-      const connectionState = deps.connectionManager.getConnectionState();
+      const connectionState = readHealthConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
       const disconnectClass = classifyDisconnect(connectionState);
@@ -1602,6 +2103,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         ? normalizeChatEnrichmentCycle(runtimeSnapshot?.details ?? null)
         : null;
       const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
+      const poisonRuntimeReason = runtimeDegradedReasons(runtimeSnapshot?.details ?? null)
+        .includes('outbound_queue_poisoned')
+        ? ['runtime.outbound_queue_poisoned']
+        : [];
       const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
       const healthyProviderFallbackCapacity = isHealthyProviderFallbackCapacity(fallbackState);
       const turnCapability = deps.instanceType === 'agent'
@@ -1719,7 +2224,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to read continuity gap ledger',
       );
       const zeroRuntimeRecoveryDetails = {
-        degradedReasons: [],
+        recoveryBlockingReasons: [],
         recoveryDebtReasons: [],
         turnRecoveryBlockingOutstanding: 0,
         turnRecoveryRetainedTerminal: 0,
@@ -1758,6 +2263,32 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
+      // #2280: set when the silence latch keeps the instance degraded, so the
+      // degradation-cause assembly below can raise a matching typed cause.
+      let silenceUnprovenLatched = false;
+      // #2280: true when this evaluation took the normal degraded evaluation
+      // path (the else branch) — the FULL-VISIBILITY path that re-checks
+      // every early reason source. Latch maintenance uses it to decide
+      // replace-vs-union: only a full-visibility evaluation may REPLACE the
+      // latched reason set; a short-circuit branch (auth / not-connected /
+      // runtime-unhealthy) never evaluated the other sources and must UNION.
+      let wentThroughDegradedPath = false;
+      // #2280: real EARLY-path reasons observed on the degraded evaluation
+      // path, captured at that point — the ONLY source that may ARM a new
+      // latch. Late-source-only reasons never arm (they are directly probed
+      // every evaluation, not silence-prone, so a transient late blip must
+      // clear to healthy on the next poll); the unhealthy short-circuit
+      // branches never arm either.
+      let latchArmEligible = false;
+      // #2280: a release earlier in THIS evaluation is provisional — if a
+      // late-computed reason turns up before emit, latch maintenance RESTORES
+      // the released latch (advanced point, prior set ∪ observed reasons), so
+      // the release only sticks (and is only logged) when the evaluation ends
+      // quiet. Non-null exactly when a release happened this evaluation,
+      // carrying the released latch's prior reason set for restoration — one
+      // variable, so the release flag and the captured set cannot desync (a
+      // release implies the entry existed, so the set is always available).
+      let releasedLatchReasons: ReadonlySet<string> | null = null;
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
         statusReasons = [`auth_failure.${authFailureClass}`];
@@ -1766,7 +2297,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         statusReasons = [isRecoveringConnection ? 'connection_recovering' : 'connection_disconnected'];
       } else if (agentRuntimeStatus === 'unhealthy') {
         status = 'unhealthy';
-        statusReasons = ['agent_runtime_unhealthy'];
+        statusReasons = ['agent_runtime_unhealthy', ...poisonRuntimeReason];
       } else {
         if (authFailureIsDegraded) statusReasons.push(`auth_failure.${authFailureClass}`);
         if (enrichmentIsStale) statusReasons.push('enrichment_stale');
@@ -1789,6 +2320,45 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
         if (recoveryDebt.service_blocking) statusReasons.push('recovery_debt_blocking');
+        if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
+        // #2280: silence from child processes is not proof of recovery.
+        // If statusReasons is empty but the instance was recently degraded,
+        // keep it degraded until explicit recovery evidence is observed. The
+        // evidence that DOES release the latch is a fresh successful
+        // primary-provider turn receipt strictly newer than the latch point,
+        // checked BEFORE the silence proof so a genuinely recovered instance
+        // flips healthy on this evaluation. Primary identity is judged against
+        // the fallback-state SNAPSHOT: a non-null fallbackActiveUntil means
+        // the snapshot was taken under a fallback window, so effectiveProvider
+        // is the FALLBACK provider — comparing the expiry to a later
+        // Date.now() would let a window expiring mid-evaluation pass that
+        // provider off as primary. Fail closed on the snapshot instead. (The
+        // cause section's fallbackWindowActive keeps its wall-clock check for
+        // reporting; it has no release authority.)
+        wentThroughDegradedPath = true;
+        latchArmEligible = statusReasons.length > 0;
+        if (!latchArmEligible) {
+          const primaryRoute =
+            fallbackState !== null && fallbackState.fallbackActiveUntil === null
+              ? {
+                  providerId: fallbackState.effectiveProvider,
+                  modelRef: turnCapability?.primary_model ?? null,
+                }
+              : null;
+          const priorLatch = recentlyDegraded.get(deps.instanceName);
+          if (
+            priorLatch !== undefined
+            && releaseDegradationLatchOnRecoveryProof(
+              recentlyDegraded,
+              deps.instanceName,
+              turnCapability,
+              primaryRoute,
+            )
+          ) {
+            releasedLatchReasons = priorLatch.reasons;
+          }
+        }
+        silenceUnprovenLatched = addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
@@ -1872,7 +2442,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         0,
         'failed to read sqlite schema migration version',
-        probeAvailability, 'schema_migration',
       );
       const schemaReady = schemaMigrationLatest === CURRENT_SCHEMA_MIGRATION;
       const schemaIsFuture = schemaMigrationLatest > CURRENT_SCHEMA_MIGRATION;
@@ -2067,37 +2636,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
       }
 
-      if (status !== 'unhealthy') {
-        const modelEvidenceCurrent = deps.instanceType !== 'agent'
-          ? true
-          : turnCapability === null
-            ? null
-            : turnCapability.model_usable === null
-              || turnCapability.model_usable_stale === true
-              || turnCapability.model_usability_status === 'unknown'
-              ? null
-              : turnCapability.model_usable === true
-                && turnCapability.model_usability_status === 'usable';
-        const recoveryProof = evaluateRecoveryProof({
-          transportConnected: isConnected,
-          modelEvidenceCurrent,
-          runtimeReadable: deps.instanceType !== 'agent' || runtimeSnapshot !== null,
-          schemaReadable:
-            probeAvailability['schema_version'] === true
-            && probeAvailability['schema_migration'] === true
-            && schemaReady,
-          pendingPollsReadable,
-          recoveryDebt,
-        });
-        applyRecoveryProof(
-          statusReasons,
-          recentlyDegraded,
-          deps.instanceName,
-          recoveryProof,
-        );
-        status = statusReasons.length > 0 ? 'degraded' : 'healthy';
-      }
-
       const degradationCauses: HealthDegradationCause[] = [];
       const addDegradationCause = (cause: HealthDegradationCause): void => {
         if (!degradationCauses.includes(cause)) degradationCauses.push(cause);
@@ -2144,6 +2682,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (databaseRetentionFailed) addDegradationCause('database_retention_failed');
       if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
       else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
+      if (recoveryDebt.service_blocking) addDegradationCause('recovery_debt_blocking');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -2182,13 +2721,49 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (runtimeProviderExecution?.['pressureActive'] === true) {
         addDegradationCause('provider_execution_pressure');
       }
+      // Frozen completed-delivery identity debt pinned five bots at permanently
+      // degraded while the cause fell through to _unclassified — the real
+      // reason lived only in status_reasons, invisible to alerts/flap keying
+      // (fleet-flapping root-cause, 2026-08-16). Name it.
+      // Only BLOCKING identity debt (no fresh-inbound or operator next action)
+      // is named: retained identity debt stays in recovery_debt, matching the
+      // runtime.completed_delivery_identity_debt reason twin.
+      if (positiveRuntimeCounter('completedDeliveryIdentityBlocking')) {
+        addDegradationCause('delivery_identity_debt');
+      }
+      if (
+        runtimeDetails?.['outboundQueuePoisoned'] === true
+        || positiveRuntimeCounter('outboundQueuePoisonedScopes')
+      ) {
+        addDegradationCause('agent_outbound_queue_poisoned');
+      }
+      // task-21: the identity verdict is a status class on the runtime block;
+      // name its cause so a mismatch or an unverifiable receipt never falls
+      // through to _unclassified (alerts and flap detection key on causes).
+      const accountIdentityStatus = isRecord(runtimeDetails?.['accountIdentity'])
+        ? runtimeDetails['accountIdentity']['status']
+        : undefined;
+      if (accountIdentityStatus === 'mismatch') addDegradationCause('credential_identity_mismatch');
+      else if (accountIdentityStatus === 'unverifiable') addDegradationCause('credential_identity_unverifiable');
+      // Registering a cause is not enough to emit one: the derived membership
+      // below only suppresses the fall-through. Both per-chat ownership counts
+      // reach the wire through the runtime details block, so name them here.
+      if (positiveRuntimeCounter('perChatSessionsWithoutOwner')) {
+        addDegradationCause('per_chat_session_without_owner');
+      }
+      if (positiveRuntimeCounter('perChatRespawnAbandoned')) {
+        addDegradationCause('per_chat_respawn_abandoned');
+      }
+      if (runtimeDetails?.['agentRespawnFailedClearPending'] === true) {
+        addDegradationCause('agent_respawn_failed_clear_pending');
+      }
+      // Membership comes from AGENT_RUNTIME_CLASSIFIED_CAUSES, derived from the
+      // cause registry: a newly registered runtime-scoped cause classifies
+      // itself here without an edit to this guard.
       if (
         agentRuntimeStatus === 'degraded'
         && !fallbackWindowActive
-        && !degradationCauses.some((cause) => cause.startsWith('agent_')
-          || cause === 'turn_finalization_degraded'
-          || cause === 'turn_recovery_degraded'
-          || cause === 'provider_execution_pressure')
+        && !degradationCauses.some((cause) => AGENT_RUNTIME_CLASSIFIED_CAUSES.has(cause))
       ) {
         addDegradationCause('agent_runtime_degraded_unclassified');
       } else if (agentRuntimeStatus === 'unhealthy') {
@@ -2198,8 +2773,79 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (deps.instanceType !== 'agent' && runtimeSnapshot?.status !== undefined && runtimeSnapshot.status !== 'healthy') {
         addDegradationCause(deps.instanceType === 'chat' ? 'chat_runtime_degraded' : 'passive_runtime_degraded');
       }
+      // #2280 symmetry: the silence latch is a status_reason; give it a matching
+      // degradation cause so it classifies distinctly instead of being absorbed
+      // by the catch-all 'unclassified' net below.
+      if (silenceUnprovenLatched) addDegradationCause('degradation_silence_unproven');
       if (status !== 'healthy' && degradationCauses.length === 0) {
         addDegradationCause('unclassified');
+      }
+      // Symmetric floor for status_reasons (mirrors the degradation_causes net
+      // above): a non-healthy status must always carry at least one reason.
+      ensureStatusReasonFloor(status, statusReasons);
+
+      // #2280 latch maintenance — runs LAST, after every status-reason source
+      // (the early status chain, durability/retention, schema, pending polls,
+      // fact export, the late runtime block, and the reason floor), so the
+      // latch point advances on EVERY evaluation that observes real
+      // degradation reasons. The silence reason never advances the latch
+      // point or enters the latched set (a receipt could never outrun a
+      // frequently-polled latch), and the defensive 'unclassified' floor
+      // literal is excluded too — it is not an observed reason, and latching
+      // it would create an unreleasable set. Rules by case:
+      //   ADVANCE (existing latch): a full-visibility evaluation (the normal
+      //     degraded path re-checked every reason source) REPLACES the
+      //     latched set with this evaluation's reasons — a blip that cleared
+      //     before it was observed clearing, so it is not unproven silence; a
+      //     short-circuit evaluation (auth / not-connected /
+      //     runtime-unhealthy) had no visibility to re-check members it did
+      //     not observe, so it UNIONS its observed reasons in — never
+      //     removes.
+      //   RESTORE (release earlier this evaluation + late reasons): the
+      //     provisional release comes back as the prior set ∪ the observed
+      //     reasons, advanced point — never a new arm.
+      //   ARM (no latch): only from real EARLY-path reasons on the
+      //     full-visibility degraded path (latchArmEligible), and only when
+      //     the FINAL verdict is degraded. Late-source-only reasons never
+      //     arm — they are directly probed every evaluation, not
+      //     silence-prone, so a transient late blip clears to healthy on the
+      //     next poll. An unhealthy final verdict never arms either
+      //     (unhealthy verdicts advance/restore only): arming there would
+      //     contradict that scoping, and when a late reassignment like
+      //     schema_future replaced the reason list the armed set would even
+      //     have lost the early evidence. The silence window this leaves —
+      //     early-degraded evidence on an unhealthy-verdict evaluation arms
+      //     nothing — is exactly base behavior for every unhealthy verdict.
+      const realReasons = statusReasons.filter(
+        (reason) => reason !== 'degradation_silence_unproven'
+          && reason !== 'unclassified'
+          // Directly re-probed reasons never arm and are never latched: no
+          // release channel could ever clear them, so latching one pins the
+          // instance degraded past its own repair. See
+          // DIRECTLY_REPROBED_STATUS_REASONS.
+          && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason),
+      );
+      if (realReasons.length > 0) {
+        const existingLatch = recentlyDegraded.get(deps.instanceName);
+        if (existingLatch !== undefined) {
+          const reasons = wentThroughDegradedPath
+            ? new Set(realReasons)
+            : new Set([...existingLatch.reasons, ...realReasons]);
+          recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
+        } else if (releasedLatchReasons !== null) {
+          recentlyDegraded.set(deps.instanceName, {
+            latchedAtMs: systemClock.now(),
+            reasons: new Set([...releasedLatchReasons, ...realReasons]),
+          });
+        } else if (latchArmEligible && status === 'degraded') {
+          log.info({ instance: deps.instanceName }, 'degradation silence latch set');
+          recentlyDegraded.set(deps.instanceName, {
+            latchedAtMs: systemClock.now(),
+            reasons: new Set(realReasons),
+          });
+        }
+      } else if (releasedLatchReasons !== null) {
+        log.info({ instance: deps.instanceName }, 'degradation silence latch released: fresh primary-turn receipt');
       }
 
       const body = JSON.stringify({
@@ -2356,6 +3002,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           fallback: config.models.fallback,
         },
         model_advisories: getModelAdvisories(),
+        // Advisory only: never feeds status, status_reasons or degradation_causes.
+        shadowGate: getShadowGateHealth(config),
         durability: durabilityStats,
         continuity,
         recovery_debt: recoveryDebt,
@@ -2372,8 +3020,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           lag_p95_ms: loopLag.p95LagMs,
           sample_count: loopLag.sampleCount,
           locally_starved: loopLag.locallyStarved,
+          // Health-handler time ALREADY subtracted from the lag figures above.
+          // Published so a consumer can see what the observer cost; subtracting
+          // it a second time double-counts.
+          observer_cost_ms: loopLag.observerCostMs,
           starvation_threshold_ms: LOOP_LAG_STARVATION_THRESHOLD_MS,
           discontinuity_count: loopLag.discontinuityCount,
+          lag_min_ms: loopLag.minLagMs,
+          lag_median_ms: loopLag.medianLagMs,
+          lag_max_ms: loopLag.maxLagMs,
+          interval_sample_count: loopLag.intervalSampleCount,
+          snapshot_sample_count: loopLag.snapshotSampleCount,
+          elu_utilization: loopLag.lastEluUtilization,
+          cpu_delta_ms: loopLag.lastCpuDeltaMs,
+          raw_samples: {
+            available: true,
+            schema_version: LOOP_LAG_SAMPLES_SCHEMA_VERSION,
+            path: '/health/event-loop-samples',
+            oldest_sequence: loopLagRawPage.oldestSequence,
+            latest_sequence: loopLagRawPage.latestSequence,
+          },
         },
         mcp_liveness: mcpLiveness
           ? {
@@ -2394,6 +3060,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       log.error({ err }, 'health check failed');
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error' }));
+    } finally {
+      // finally, not a trailing call: the handler has early returns (the public
+      // envelope) and a catch, and an unclosed span would leak observer time
+      // into every later interval.
+      endObserverSpan();
     }
   });
 

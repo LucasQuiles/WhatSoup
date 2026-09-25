@@ -132,6 +132,70 @@
       }
     },
     {
+      "id": "test.guard-coverage",
+      "policyCategory": "test-integrity",
+      "domain": "test-integrity",
+      "owner": "guard-test-coverage-owner",
+      "decisionOwner": "test-integrity-decision-owner",
+      "implementation": {
+        "commandId": "guard:guard-test-coverage",
+        "detectorId": "guard-test-coverage-check",
+        "nativeSchemaVersion": 1
+      },
+      "stages": [
+        "local",
+        "pre-push",
+        "release"
+      ],
+      "trustClass": "untrusted-candidate",
+      "mode": "block",
+      "availability": "report-only",
+      "severity": "high",
+      "riskTiers": [
+        "standard",
+        "elevated",
+        "system-wide"
+      ],
+      "surfaces": [
+        "test-integrity"
+      ],
+      "dependencies": [
+        "repo.hygiene"
+      ],
+      "evidence": {
+        "schemaVersion": null,
+        "paths": [
+          "scripts/guard-test-coverage-check.ts",
+          "scripts/lib/guard-test-coverage-report.ts"
+        ],
+        "digestBinding": "none",
+        "freshness": "same-process"
+      },
+      "failurePolicy": {
+        "finding": "block",
+        "crash": "inconclusive",
+        "timeout": "inconclusive",
+        "missing": "inconclusive",
+        "skipped": "inconclusive",
+        "cancelled": "inconclusive",
+        "stale": "inconclusive"
+      },
+      "remediation": {
+        "summary": "Run the semantic guard-test coverage check.",
+        "steps": [
+          "Run the canonical reproduction command.",
+          "Add a real failure-path proof for each named guard without weakening the semantic checker."
+        ],
+        "reproduction": "npm run guard:guard-test-coverage -- --semantic-mode enforce --format json"
+      },
+      "exceptionPolicy": {
+        "allowed": false,
+        "scope": "none",
+        "approverRole": null,
+        "maxLifetimeSeconds": null
+      }
+    },
+    {
       "id": "test.integrity",
       "policyCategory": "test-integrity",
       "domain": "test-integrity",
@@ -646,10 +710,26 @@
         "schemaVersion": 1,
         "paths": [
           "scripts/drift-classify.ts",
+          "scripts/lib/ci-control/classification-admission.ts",
+          "scripts/lib/ci-control/classifier.ts",
+          "scripts/lib/ci-control/git-blob-input.ts",
+          "scripts/lib/ci-control/git-input-core.ts",
+          "scripts/lib/ci-control/git-input.ts",
+          "scripts/lib/ci-control/manifest.ts",
+          "scripts/lib/ci-control/preconditions.ts",
+          "scripts/lib/ci-control/reasons.ts",
+          "scripts/lib/ci-control/ref-policy.ts",
+          "scripts/lib/ci-control/trusted-git.ts",
           "scripts/lib/cli-args.ts",
           "scripts/lib/drift-classifier.ts",
           "scripts/lib/guard-core.ts",
-          "src/lib/git-env.ts"
+          "scripts/lib/verification/boundary-run/contracts.ts",
+          "scripts/lib/verification/boundary-run/model.ts",
+          "scripts/lib/verification/boundary-run/schema.ts",
+          "scripts/lib/verification/boundary-run/shared.ts",
+          "scripts/lib/verification/boundary-run/worktree.ts",
+          "src/lib/git-env.ts",
+          "src/lib/type-guards.ts"
         ],
         "digestBinding": "exact",
         "freshness": "same-process"
@@ -714,10 +794,26 @@
         "schemaVersion": 1,
         "paths": [
           "scripts/drift-classify.ts",
+          "scripts/lib/ci-control/classification-admission.ts",
+          "scripts/lib/ci-control/classifier.ts",
+          "scripts/lib/ci-control/git-blob-input.ts",
+          "scripts/lib/ci-control/git-input-core.ts",
+          "scripts/lib/ci-control/git-input.ts",
+          "scripts/lib/ci-control/manifest.ts",
+          "scripts/lib/ci-control/preconditions.ts",
+          "scripts/lib/ci-control/reasons.ts",
+          "scripts/lib/ci-control/ref-policy.ts",
+          "scripts/lib/ci-control/trusted-git.ts",
           "scripts/lib/cli-args.ts",
           "scripts/lib/drift-classifier.ts",
           "scripts/lib/guard-core.ts",
-          "src/lib/git-env.ts"
+          "scripts/lib/verification/boundary-run/contracts.ts",
+          "scripts/lib/verification/boundary-run/model.ts",
+          "scripts/lib/verification/boundary-run/schema.ts",
+          "scripts/lib/verification/boundary-run/shared.ts",
+          "scripts/lib/verification/boundary-run/worktree.ts",
+          "src/lib/git-env.ts",
+          "src/lib/type-guards.ts"
         ],
         "digestBinding": "exact",
         "freshness": "same-process"
@@ -1044,6 +1140,15 @@
       "bash",
       "scripts/run-with-pinned-node.sh",
       "scripts/publication-guard.ts"
+    ],
+    "guard:guard-test-coverage": [
+      "bash",
+      "scripts/run-with-pinned-node.sh",
+      "scripts/guard-test-coverage-check.ts",
+      "--semantic-mode",
+      "enforce",
+      "--format",
+      "json"
     ],
     "guard:test-integrity:required": [
       "env",

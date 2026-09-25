@@ -91,7 +91,7 @@ def deadman():
     return 0
 
 def daily():
-    tool_lines, missing_required_tools = tool_inventory({})
+    tool_lines, tool_probe = tool_inventory({})
     lines = [
         "machine: fixture-host",
         "profile: role=test path=/Users/testuser/private-profile.json",
@@ -104,7 +104,7 @@ def daily():
     return 0
 
 def tool_inventory(profile):
-    return [], []
+    return [], {"outcome": "skipped", "missing": []}
 
 def outbox_event(summary, evidence, source, event_type):
     return "/Users/testuser/private-outbox/event.json"

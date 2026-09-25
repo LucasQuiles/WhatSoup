@@ -13,7 +13,15 @@ export const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
 
 export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   '.git/**',
+  // Host-side `npm ci` installs dependencies inside the release for the root and for
+  // nested package roots (console/); deployed fleet manifests already exclude the deep
+  // form, and drift checks must never flag host-installed dependencies.
   'node_modules/**',
+  '**/node_modules/**',
+  // The console is built ON THE HOST into `<release>/dist` (vite outDir '../dist',
+  // served by src/fleet/index.ts); dist/ is gitignored and its hashed asset names
+  // can never be tracked, so built console assets must never count as drift.
+  'dist/**',
   'artifacts/**',
   '.sweep/**',
   'coverage/**',
@@ -24,6 +32,10 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   '**/*.sqlite3',
   '**/auth/**',
   '**/tokens.env',
+  // CPython writes bytecode caches beside deploy/scripts helpers at runtime; they are
+  // mutable by nature and must never count as release drift.
+  '**/__pycache__/**',
+  '**/*.pyc',
   RELEASE_MANIFEST_FILE,
 ] as const;
 
@@ -311,6 +323,14 @@ function matchesExclude(relPath: string, patterns: readonly string[]): boolean {
     }
     if (candidate.startsWith('**/*.')) return normalized.endsWith(candidate.slice(4));
     if (candidate.startsWith('*.')) return base.endsWith(candidate.slice(1));
+    // `**/<name>` (no wildcard in the tail): match the exact basename at any
+    // depth, including the repo root. Without this branch the default
+    // `**/tokens.env` exclude is a dead pattern — a git-tracked root-level
+    // tokens.env would ship inside a release export.
+    if (candidate.startsWith('**/') && !candidate.slice(3).includes('*')) {
+      const name = candidate.slice(3);
+      return normalized === name || normalized.endsWith(`/${name}`);
+    }
     return false;
   });
 }

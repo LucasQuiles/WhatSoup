@@ -25,12 +25,83 @@ import type { PrimaryModelProbeAdapterDeps } from './providers/primary-model-usa
 // avoidance), a 5min rate-limit floor (probe-storm prevention), and
 // exponential backoff on probe failures (2x up to 4x = 2h max — a
 // persistently-failing probe gradually widens its cadence rather than
-// spinning).
+// spinning). While the periodic probe is armed the freshness window is
+// `expectedProbeDeadlineMs` (scheduler-derived) rather than the flat 30min,
+// so evidence is never judged stale before the scheduler could have refreshed it.
 export const PERIODIC_PROBE_INTERVAL_MS = 30 * 60_000;
 export const PERIODIC_PROBE_JITTER_MS = Math.floor(PERIODIC_PROBE_INTERVAL_MS * 0.1);
 export const PERIODIC_PROBE_RATE_LIMIT_MS = 5 * 60_000;
 export const PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE = 4;
 export const PERIODIC_PROBE_BACKOFF_BASE = 2;
+
+/**
+ * Grace added on top of the latest legitimate scheduler fire before evidence
+ * is judged stale: covers the probe's own execution (15s default timeout) and
+ * event-loop latency between the timer firing and `checkedAt` being stamped.
+ * Two minutes is deliberately generous relative to the 15s probe timeout and
+ * still small relative to the 30-minute base interval.
+ */
+export const PERIODIC_PROBE_EVIDENCE_GRACE_MS = 2 * 60_000;
+
+/**
+ * The scheduler's backoff multiple for a backoff counter: 2^backoff capped at
+ * PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE. Shared by the delay calculation and the
+ * evidence-freshness bound so the two can never disagree.
+ */
+export function periodicProbeBackoffMultiple(backoff: number): number {
+  return Math.min(
+    Math.pow(PERIODIC_PROBE_BACKOFF_BASE, backoff),
+    PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE,
+  );
+}
+
+/**
+ * Latest instant (ms after the last probe's `checkedAt`) by which the periodic
+ * scheduler is expected to have refreshed the evidence, plus grace.
+ *
+ * Mirrors `calculatePeriodicProbeDelay` at its maximum: the full positive
+ * jitter band (`+JITTER*backoff`) instead of a random draw, and the caller's
+ * rate-limit remainder if larger. The freshness window the health verdict
+ * uses MUST be this value whenever the periodic probe is armed — a flat 30min
+ * window declared evidence stale for up to 3 minutes every cycle (positive
+ * jitter) and for the whole back half of every backoff>=2 cycle, which is the
+ * `turn_capability_evidence_stale` flap seen in the canary soak ledger.
+ *
+ * The multiple is clamped to [1, PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE]: the
+ * upper clamp is the hard ceiling (`PERIODIC_PROBE_EVIDENCE_CEILING_MS`) so a
+ * wedged scheduler — or a corrupt counter — still lets the evidence go stale;
+ * a degenerate (<1 / NaN) multiple fails toward the strictest window, while
+ * +Infinity clamps to the ceiling like any oversized multiple.
+ */
+export function expectedProbeDeadlineMs(backoffMultiple: number, rateLimitRemainingMs = 0): number {
+  const multiple = Number.isNaN(backoffMultiple)
+    ? 1
+    : Math.min(Math.max(backoffMultiple, 1), PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE);
+  const latestScheduledFire = Math.max(
+    Math.max(0, rateLimitRemainingMs),
+    PERIODIC_PROBE_INTERVAL_MS * multiple + PERIODIC_PROBE_JITTER_MS * multiple,
+  );
+  return latestScheduledFire + PERIODIC_PROBE_EVIDENCE_GRACE_MS;
+}
+
+/** Hard ceiling on the scheduler-derived freshness window (max-backoff cycle + grace). */
+export const PERIODIC_PROBE_EVIDENCE_CEILING_MS = expectedProbeDeadlineMs(PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE);
+
+/**
+ * Freshness window when the armed timer's due instant is KNOWN: the evidence
+ * stays fresh until the probe is actually due, plus grace — measured from the
+ * evidence's own `checkedAt` so `deriveModelUsable` can compare ages. A manual
+ * or startup probe that refreshes `checkedAt` without moving the due instant
+ * therefore shrinks the remaining window instead of restarting it, and a due
+ * instant already in the past leaves only the grace. Ceiling-bound like the
+ * formula so a wedged scheduler still goes stale.
+ */
+export function expectedProbeDeadlineFromDueMs(nextProbeDueAt: number, checkedAt: number): number {
+  return Math.min(
+    PERIODIC_PROBE_EVIDENCE_CEILING_MS,
+    Math.max(nextProbeDueAt - checkedAt, 0) + PERIODIC_PROBE_EVIDENCE_GRACE_MS,
+  );
+}
 
 /**
  * Calculate the delay for the next periodic primary-readiness probe.
@@ -44,10 +115,7 @@ export function calculatePeriodicProbeDelay(
   lastProbeCheckedAt: number | null,
   now: number,
 ): number {
-  const backoffMultiple = Math.min(
-    Math.pow(PERIODIC_PROBE_BACKOFF_BASE, backoff),
-    PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE,
-  );
+  const backoffMultiple = periodicProbeBackoffMultiple(backoff);
   const baseInterval = PERIODIC_PROBE_INTERVAL_MS * backoffMultiple;
   // Jitter: ±10% of the (backoff-adjusted) interval, centered.
   const jitter = (Math.random() - 0.5) * 2 * PERIODIC_PROBE_JITTER_MS * backoffMultiple;

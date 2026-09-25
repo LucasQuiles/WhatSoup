@@ -3,7 +3,7 @@ import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
 import type { ToolDurabilityTelemetrySnapshot } from '../core/durability-evidence-contract.ts';
-import type { StartupNotificationEvent } from '../core/startup-notification-controller.ts';
+import type { StartupChatNotice, StartupNotificationEvent } from '../core/startup-notification-controller.ts';
 
 export interface RuntimeTurnCapabilityHealth {
   modelUsable: boolean | null;
@@ -20,8 +20,15 @@ export interface RuntimeTurnCapabilityHealth {
   lastSuccessfulTurnAt: number | null;
   /** Provider that served the most recent successful user turn, if known. */
   lastSuccessfulTurnProvider: string | null;
+  /** Model ref that served that turn (null = unknown, or the session carried
+   *  no explicit model — the provider default). Optional for older
+   *  implementers; consumers treat absence as null. */
+  lastSuccessfulTurnModel?: string | null;
   /** Whether that success belongs to the exact still-live session incarnation. */
   lastSuccessfulTurnSessionCurrent: boolean | null;
+  /** The configured primary model of this runtime (null = provider default).
+   *  Optional for older implementers; consumers treat absence as null. */
+  primaryModel?: string | null;
   lastTurnErrorClass: string | null;
   lastTurnErrorAt: number | null;
   /** #3017 AXIS A: true when the periodic primary-readiness probe is active
@@ -30,6 +37,18 @@ export interface RuntimeTurnCapabilityHealth {
    *  it, so staleness means the probe failed to fire, not that the bot is
    *  naturally idle. Default false for backward compatibility. */
   periodicProbeExpected?: boolean;
+  /** Scheduler backoff multiple (1, 2, 4) the freshness window was derived from
+   *  when the periodic probe is armed; 1 when it is not. */
+  periodicProbeBackoffMultiple?: number | null;
+  /** The freshness window (ms) `modelUsableStale` was judged against: the
+   *  scheduler-derived deadline while the periodic probe is armed, otherwise
+   *  the flat MODEL_USABILITY_FRESHNESS_MS. Surfaced so a stale flag can be
+   *  read against the window that produced it. */
+  modelUsableFreshnessMs?: number | null;
+  /** Epoch ms the armed periodic probe is due to fire (same clock as
+   *  `modelUsableCheckedAt`); null while no periodic timer is armed. The
+   *  freshness window is derived from it whenever it is known. */
+  nextProbeDueAt?: number | null;
 }
 
 export interface AgentCommandRequest {
@@ -63,6 +82,8 @@ export interface Runtime {
   setDurability(engine: DurabilityEngine): void;
   /** Agent runtimes expose at most one deferred startup event for main's controller. */
   popStartupNotificationEvent?(): StartupNotificationEvent | null;
+  /** Agent runtimes drain per-chat startup notices once the transport is connected (#3570). */
+  popStartupChatNotifications?(): StartupChatNotice[];
   /** Update delivery JID for active sessions/queues when a LID→phone mapping changes. */
   handleJidAliasChanged?(conversationKey: string, newJid: string): void;
   /** Inject a repair turn into the control session for self-healing. */

@@ -259,6 +259,7 @@ const ACK_FILLER_PATTERNS: readonly RegExp[] = [
 ];
 
 const INTERNAL_NARRATION_OPENERS: readonly RegExp[] = [
+  /^the\b.{0,120}\b(?:closeout|turn)\b.{0,160}\b(?:turn receipt|delivery_pending|session log)\b/i,
   /^now\b.{0,160}\b(?:add|wire|rebuild|update|run|send|read|check|pull|load|implement|smoke|verify|workbook|sheet|script|command|tool|delete|revoke|entryrows|weekemployeetotals)\b/i,
   /^let me\b(?!\s+know\b).{0,160}\b(?:implement|close|pull|send|verify|revoke|delete|wire|load|check|read|run)\b/i,
   /^i(?:'|’)?ll\s+(?:silently\s+)?(?:check|record|confirm|inspect|look|verify)\b.{0,180}\b(?:gate|state|surface|surfacing|tool|thread|message|target|preflight)\b/i,
@@ -562,10 +563,12 @@ export function redactInternalArtifacts(
   // whole email-class pass; the preserve* flags are kept so flipping the email
   // flag back for any single audience restores the exact prior behavior with
   // one edit (e.g. a future client-tier exception).
+  // Exempt recognized prose sentences while keeping ambiguous assignments strict.
   const sanitized = sanitizeProviderPreviewText(out, {
     preserveWhatsAppJids: audience === 'internal',
     preserveWhatsAppMentions: true,
     redactEmailLike: false,
+    keyedSecretValues: 'prose-aware',
   });
   if (sanitized !== out) {
     redactions.push({ category: 'provider_secret', label: 'token-or-credential' });

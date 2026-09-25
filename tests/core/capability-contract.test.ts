@@ -231,10 +231,11 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     mediaRoot: '/var/obligation-media',
     retentionPolicyVersion: 'policy/1',
     retentionHorizonDays: 30,
-    // round-18/20: an enabled config REQUIRES an explicit resolver artifact, an explicit
-    // interpreted flag, and (interpreted) an explicit interpreter PATH. Validation here is
-    // syntactic (Zod only) — the paths need not exist on disk for a parse test.
-    execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
+    // #3221 Debt 4 typed execution contract: the artifact and mode are declared
+    // structurally ({ interpreter, resolverArtifactPath, args }); `command` and
+    // `interpreted` are DERIVED by the schema. Validation here is syntactic
+    // (Zod only) — the paths need not exist on disk for a parse test.
+    execution: { interpreter: '/usr/bin/node', resolverArtifactPath: '/opt/watch/resolver.cjs', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
     attestation: {
       skillName: 'watch',
       skillVersion: '1.0.0',
@@ -267,11 +268,11 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     expect(() => parseCapabilityObligationsOptions({ ...VALID, retentionHorizonDays: 0 })).toThrow();
     expect(() => parseCapabilityObligationsOptions({ ...VALID, retentionHorizonDays: 10_000 })).toThrow();
     expect(() => parseCapabilityObligationsOptions({ ...VALID, execution: undefined })).toThrow();
-    // The resolver argv must reference the source placeholder.
+    // The resolver args must reference the source placeholder.
     expect(() =>
       parseCapabilityObligationsOptions({
         ...VALID,
-        execution: { command: ['node', '-e', 'x'], timeoutMs: 1000, minOutputBytes: 8 },
+        execution: { ...VALID.execution, args: ['--json'] },
       }),
     ).toThrow();
     expect(() =>
@@ -285,37 +286,46 @@ describe('parseCapabilityObligationsOptions — all-or-inert activation', () => 
     ).toThrow();
   });
 
-  it('round-18/20 refines: an enabled config with a missing resolver declaration FAILS CLOSED at LOAD (never deferred to the drain seam)', () => {
-    // resolverArtifactPath is REQUIRED (non-null) for an enabled config.
+  it('typed struct (#3221 Debt 4): a missing artifact or mode declaration FAILS CLOSED at LOAD (never deferred to the drain seam)', () => {
+    // resolverArtifactPath is a REQUIRED key of the typed struct.
     expect(() =>
       parseCapabilityObligationsOptions({
         ...VALID,
-        execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, interpreted: true },
+        execution: { interpreter: '/usr/bin/node', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
       }),
-    ).toThrow(/resolverArtifactPath is required/);
-    // interpreted is REQUIRED (non-null) for an enabled config.
+    ).toThrow();
+    // The interpreter KEY is required (pass null for direct mode) — mode is declared, never guessed.
     expect(() =>
       parseCapabilityObligationsOptions({
         ...VALID,
-        execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs' },
+        execution: { resolverArtifactPath: '/opt/watch/resolver.cjs', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
       }),
-    ).toThrow(/interpreted is required/);
+    ).toThrow();
+    // The legacy free-form command/interpreted body is unrepresentable (strict shape).
+    expect(() =>
+      parseCapabilityObligationsOptions({
+        ...VALID,
+        execution: { command: ['/usr/bin/node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
+      }),
+    ).toThrow();
   });
 
-  it('round-20 refine: interpreted:true with a BARE interpreter name (no path separator) is refused at LOAD — a $PATH-resolved interpreter is unpinnable', () => {
+  it('round-20 refine carried into the typed struct: a BARE interpreter name (no path separator) is refused at LOAD — a $PATH-resolved interpreter is unpinnable', () => {
     expect(() =>
       parseCapabilityObligationsOptions({
         ...VALID,
-        execution: { command: ['node', '/opt/watch/resolver.cjs', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver.cjs', interpreted: true },
+        execution: { interpreter: 'node', resolverArtifactPath: '/opt/watch/resolver.cjs', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
       }),
     ).toThrow(/explicit interpreter PATH|unpinnable/);
-    // interpreted:false does NOT require a path separator in command[0] (the artifact itself may be
-    // declared relative and is realpath-resolved at verify time, not here).
-    expect(
-      parseCapabilityObligationsOptions({
-        ...VALID,
-        execution: { command: ['/opt/watch/resolver', '{source}'], timeoutMs: 30_000, minOutputBytes: 8, resolverArtifactPath: '/opt/watch/resolver', interpreted: false },
-      }),
-    ).not.toBeNull();
+    // Direct mode (interpreter: null) does NOT require a path separator in the artifact (it may be
+    // declared relative and is realpath-resolved at verify time, not here); the schema derives
+    // command/interpreted from the typed declaration.
+    const direct = parseCapabilityObligationsOptions({
+      ...VALID,
+      execution: { interpreter: null, resolverArtifactPath: '/opt/watch/resolver', args: ['{source}'], timeoutMs: 30_000, minOutputBytes: 8 },
+    });
+    expect(direct).not.toBeNull();
+    expect(direct?.execution.command).toEqual(['/opt/watch/resolver', '{source}']);
+    expect(direct?.execution.interpreted).toBe(false);
   });
 });

@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import LinkStep from '../../console/src/components/wizard/LinkStep'
 
 afterEach(() => {
@@ -53,7 +53,7 @@ function ticketResponse(ticket: string): Response {
 }
 
 describe('LinkStep SSE ticket reconnects', () => {
-  it('mints a fresh sse ticket after a native EventSource error', async () => {
+  it('mints a fresh single-use sse ticket when the operator retries after a native error', async () => {
     addProductionAuthMode()
     sources.length = 0
     const fetchMock = vi.fn()
@@ -63,14 +63,26 @@ describe('LinkStep SSE ticket reconnects', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
 
     render(<LinkStep lineName="alpha" onComplete={vi.fn()} />)
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /begin pairing/i }))
+    })
 
     await waitFor(() => expect(sources).toHaveLength(1))
     expect(sources[0].url).toBe('/api/lines/alpha/auth?ticket=sse-ticket-1')
 
-    sources[0].onerror?.(new Event('error'))
+    await act(async () => {
+      sources[0].onerror?.(new Event('error'))
+    })
+
+    // No automatic reconnect (q-canary T5.8): the error is surfaced and the
+    // operator explicitly retries, which mints a fresh single-use ticket.
+    expect(sources).toHaveLength(1)
+    expect(sources[0].readyState).toBe(FakeEventSource.CLOSED)
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /try again/i }))
+    })
 
     await waitFor(() => expect(sources).toHaveLength(2))
-    expect(sources[0].readyState).toBe(FakeEventSource.CLOSED)
     expect(sources[1].url).toBe('/api/lines/alpha/auth?ticket=sse-ticket-2')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })

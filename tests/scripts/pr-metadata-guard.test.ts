@@ -1,8 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPrMetadataGuard } from '../../scripts/pr-metadata-guard.ts';
@@ -12,7 +13,12 @@ const tmp = trackTmpDirs('');
 const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 
 function git(repo: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', [
+    '-c', 'user.email=guard-test@users.noreply.github.com',
+    '-c', 'user.name=Guard Test',
+    '-c', 'commit.gpgsign=false',
+    ...args,
+  ], {
     cwd: repo,
     encoding: 'utf8',
     env: cleanGitEnv(),
@@ -24,9 +30,6 @@ function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid:
   const repo = tmp.make('pr-metadata-guard');
 
   git(repo, ['init']);
-  git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
-  git(repo, ['config', 'user.name', 'Guard Test']);
-  git(repo, ['config', 'commit.gpgsign', 'false']);
   writeFileSync(path.join(repo, 'note.txt'), 'base\n');
   git(repo, ['add', 'note.txt']);
   git(repo, ['commit', '-m', 'base']);
@@ -38,7 +41,44 @@ function makeRangeRepo(candidateMessage = 'candidate'): { repo: string; baseOid:
   return { repo, baseOid, headOid: git(repo, ['rev-parse', 'HEAD']) };
 }
 
+function makeAdvancedBaseRepo(candidateMessage = 'candidate', advanceMessage = 'advance'): {
+  repo: string;
+  headOid: string;
+  advancedBaseOid: string;
+} {
+  const { repo, baseOid, headOid } = makeRangeRepo(candidateMessage);
+
+  git(repo, ['checkout', '-b', 'base-advance', baseOid]);
+  writeFileSync(path.join(repo, 'base.txt'), 'advance\n');
+  git(repo, ['add', 'base.txt']);
+  git(repo, ['commit', '-m', advanceMessage]);
+  return { repo, headOid, advancedBaseOid: git(repo, ['rev-parse', 'HEAD']) };
+}
+
+function makeUnrelatedRootOid(repo: string): string {
+  git(repo, ['checkout', '--orphan', 'unrelated']);
+  writeFileSync(path.join(repo, 'lonely.txt'), 'lonely\n');
+  git(repo, ['add', 'lonely.txt']);
+  git(repo, ['commit', '-m', 'unrelated root']);
+  return git(repo, ['rev-parse', 'HEAD']);
+}
+
 describe('PR metadata guard', () => {
+  it('receives fresh PR metadata after edits while preserving normal PR qualification events', () => {
+    const workflow = parse(readFileSync(path.join(REPO_ROOT, '.github/workflows/quality.yml'), 'utf8'));
+    const activities = workflow.on.pull_request?.types ?? ['opened', 'synchronize', 'reopened'];
+
+    for (const activity of ['opened', 'synchronize', 'reopened', 'edited']) {
+      expect(activities, `Quality must receive ${activity} PR events`).toContain(activity);
+    }
+    const guard = workflow.jobs.quality.steps.find((step: { name: string }) => step.name === 'PR metadata guard');
+    expect(guard).toMatchObject({
+      if: "github.event_name == 'pull_request'",
+      env: { PR_METADATA_EVENT: '${{ github.event_path }}' },
+    });
+    expect(guard.run).toContain('guard:pr-metadata -- --github-event "$PR_METADATA_EVENT"');
+  });
+
   it('rejects the #2391 historical negated closing phrase outside the declared directive section', () => {
     const { repo, baseOid, headOid } = makeRangeRepo();
 
@@ -280,12 +320,14 @@ describe('PR metadata guard', () => {
     });
   });
 
-  it('reads a complete pull-request event payload without querying GitHub', () => {
+  it.each(['opened', 'edited'])('reads the current body from a complete %s PR event without querying GitHub', (action) => {
     const { repo, baseOid, headOid } = makeRangeRepo();
     const eventPath = path.join(repo, 'event.json');
     writeFileSync(
       eventPath,
       JSON.stringify({
+        action,
+        changes: { body: { from: 'Closes owner/repo#132' } },
         number: 77,
         repository: { default_branch: 'main' },
         pull_request: {
@@ -350,6 +392,70 @@ describe('PR metadata guard', () => {
     });
   });
 
+  it('scans only the PR commits when the base branch advanced past the fork point', () => {
+    const { repo, headOid, advancedBaseOid } = makeAdvancedBaseRepo('candidate', 'advance: fixes #900');
+
+    const result = runPrMetadataGuard(
+      [
+        '--stdin',
+        '--base', advancedBaseOid,
+        '--head', headOid,
+        '--target', 'main',
+        '--default-branch', 'main',
+      ],
+      repo,
+      'Refs #146.\n',
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 0,
+      receipt: { decision: 'pass', findings: [] },
+    });
+  });
+
+  it('still rejects closing directives in the PR commits when the base branch advanced', () => {
+    const { repo, headOid, advancedBaseOid } = makeAdvancedBaseRepo('This does not fix #147');
+
+    const result = runPrMetadataGuard(
+      [
+        '--stdin',
+        '--base', advancedBaseOid,
+        '--head', headOid,
+        '--target', 'main',
+        '--default-branch', 'main',
+      ],
+      repo,
+      'Refs #147.\n',
+    );
+
+    expect(result).toMatchObject({ exitCode: 1, receipt: { decision: 'fail' } });
+    expect(result.receipt.findings).toContainEqual({
+      code: 'pr-metadata.commit-closing-directive',
+      issueNumbers: [147],
+    });
+  });
+
+  it('treats a head already contained in the base as an empty commit range', () => {
+    const { repo, baseOid, headOid } = makeRangeRepo('This does not fix #148');
+
+    const result = runPrMetadataGuard(
+      [
+        '--stdin',
+        '--base', headOid,
+        '--head', baseOid,
+        '--target', 'main',
+        '--default-branch', 'main',
+      ],
+      repo,
+      'Refs #148.\n',
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 0,
+      receipt: { decision: 'pass', findings: [] },
+    });
+  });
+
   it('rejects closing-keyword prose in the exact candidate commit range', () => {
     const { repo, baseOid, headOid } = makeRangeRepo('This change does not fix #134');
     const result = runPrMetadataGuard(
@@ -389,8 +495,9 @@ describe('PR metadata guard', () => {
     });
   });
 
-  it('fails closed for incomplete sources and non-ancestor commit ranges', () => {
+  it('fails closed for incomplete sources and unrelated commit histories', () => {
     const { repo, baseOid, headOid } = makeRangeRepo();
+    const unrelatedOid = makeUnrelatedRootOid(repo);
     const incompleteEventPath = path.join(repo, 'incomplete-event.json');
     writeFileSync(incompleteEventPath, JSON.stringify({ number: 78 }), 'utf8');
 
@@ -417,11 +524,11 @@ describe('PR metadata guard', () => {
       repo,
       'Refs #144.\n',
     );
-    const nonAncestor = runPrMetadataGuard(
+    const unrelatedHistories = runPrMetadataGuard(
       [
         '--stdin',
-        '--base', headOid,
-        '--head', baseOid,
+        '--base', unrelatedOid,
+        '--head', headOid,
         '--target', 'main',
         '--default-branch', 'main',
       ],
@@ -441,7 +548,7 @@ describe('PR metadata guard', () => {
       exitCode: 2,
       receipt: { decision: 'inconclusive', errors: ['pr-metadata.input-invalid'] },
     });
-    expect(nonAncestor).toMatchObject({
+    expect(unrelatedHistories).toMatchObject({
       exitCode: 2,
       receipt: { decision: 'inconclusive', errors: ['pr-metadata.commit-range-invalid'] },
     });

@@ -19,6 +19,7 @@
 //   maps them to typed TransportError subclasses.
 
 import { request } from 'undici';
+import { z } from 'zod';
 import type { ImessageConfig } from './types.ts';
 import type {
   ImessagePort,
@@ -158,6 +159,13 @@ function encodeCursor(state: BbCursorState): string {
   return BB_CURSOR_PREFIX + Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
 }
 
+const BbCursorStateSchema = z.object({
+  version: z.literal(1),
+  afterRowId: z.number().int().safe().nonnegative(),
+  upperRowId: z.number().int().safe().nonnegative().nullable(),
+  bootstrapAfterMs: z.number().int().safe().nonnegative().nullable(),
+}) satisfies z.ZodType<BbCursorState>;
+
 function decodeCursor(cursor: string): BbCursorState {
   if (!cursor.startsWith(BB_CURSOR_PREFIX)) {
     throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
@@ -168,20 +176,11 @@ function decodeCursor(cursor: string): BbCursorState {
   } catch {
     throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
   }
-  const state = parsed as Partial<BbCursorState> | null;
-  if (state === null
-    || state.version !== 1
-    || !isSafeNonNegativeInteger(state.afterRowId)
-    || (state.upperRowId !== null && !isSafeNonNegativeInteger(state.upperRowId))
-    || (state.bootstrapAfterMs !== null && !isSafeNonNegativeInteger(state.bootstrapAfterMs))) {
+  const state = BbCursorStateSchema.safeParse(parsed);
+  if (!state.success) {
     throw { message: 'invalid bluebubbles inbound cursor', code: 'BadCursor', status: 400 } satisfies ImessagePortError;
   }
-  return {
-    version: 1,
-    afterRowId: state.afterRowId,
-    upperRowId: state.upperRowId,
-    bootstrapAfterMs: state.bootstrapAfterMs,
-  };
+  return state.data;
 }
 
 function parseQueryPage(

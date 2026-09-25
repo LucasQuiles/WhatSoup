@@ -1,0 +1,7 @@
+{
+  "policyVersion": "media-retention/2026-08-28",
+  "retentionHorizonDays": 90,
+  "approvedBy": "owner",
+  "approvedAt": "2026-08-28",
+  "appliesTo": "capability-obligation retained media (A-08); see docs/durability.md §5.7 and docs/runbooks/capability-obligation-operator.md"
+}

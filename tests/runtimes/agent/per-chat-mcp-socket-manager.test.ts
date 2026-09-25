@@ -2,7 +2,9 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -11,18 +13,22 @@ import {
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { WhatSoupSocketServer } from '../../../src/mcp/socket-server.ts';
+import { noExecutingSession } from '../../../src/mcp/types.ts';
+import { isPathWithinAllowedRoot } from '../../../src/lib/path-boundary.ts';
+import { admitHomeConfinedPath } from '../../../src/lib/home-confinement.ts';
 import {
   assertSafeOwnedSocket,
   PerChatMcpSocketManager,
 } from '../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts';
 import { waitForSocket } from '../../helpers/wait-for.ts';
 import { sendJsonRpc } from '../../helpers/socket-rpc.ts';
+import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 
 describe('PerChatMcpSocketManager', () => {
   const roots: string[] = [];
@@ -45,7 +51,11 @@ describe('PerChatMcpSocketManager', () => {
       registry: options.registry ?? new ToolRegistry(),
       allowedRoot: root,
       conversationBound: options.conversationBound ?? true,
-      resolveActor: () => undefined,
+      resolveExecutingSession: () => ({
+        actorJid: undefined,
+        purpose: undefined,
+        conversationKey: undefined,
+      }),
     });
   }
 
@@ -67,6 +77,44 @@ describe('PerChatMcpSocketManager', () => {
     expect(response.id).toBe(1);
     expect(response.result?.tools).toEqual(expect.any(Array));
   }
+
+  it('F6 carries an admitted runtime root into the first actor socket after alias retarget', async () => {
+    const root = mkdtempSync(join(homedir(), 'f6-actor-root-'));
+    const outside = await outsideRuntimeHome(homedir(), 'f6-actor-outside-');
+    roots.push(root, outside);
+    const physical = join(root, 'physical');
+    const alias = join(root, 'alias');
+    mkdirSync(physical);
+    symlinkSync(physical, alias);
+    const insideFile = join(physical, 'inside.txt');
+    const outsideFile = join(outside, 'outside.txt');
+    writeFileSync(insideFile, 'inside');
+    writeFileSync(outsideFile, 'outside');
+    const admittedRoot = admitHomeConfinedPath(alias, homedir());
+    const manager = new PerChatMcpSocketManager({
+      stateRoot: root,
+      registry: new ToolRegistry(),
+      allowedRoot: admittedRoot,
+      conversationBound: true,
+      resolveExecutingSession: noExecutingSession,
+    });
+    const later = 'later@s.whatsapp.net';
+    try {
+      const resources = (manager as unknown as {
+        resources: Map<string, { server: { baseSession: { allowedRoot?: string } } }>;
+      }).resources;
+      expect(resources.size).toBe(0);
+      unlinkSync(alias);
+      symlinkSync(outside, alias);
+      await manager.acquire(later, later).ready;
+      const context = resources.get(later)!.server.baseSession;
+      expect(isPathWithinAllowedRoot(realpathSync.native(outsideFile), context.allowedRoot)).toBe(false);
+      expect(isPathWithinAllowedRoot(realpathSync.native(insideFile), context.allowedRoot)).toBe(true);
+      expect(context.allowedRoot).toBe(admittedRoot);
+    } finally {
+      manager.release(later);
+    }
+  });
 
   it('binds an awaitable mode-0600 socket below a mode-0700 state-root directory using only a digest', async () => {
     const root = mkdtempSync(join(tmpdir(), 'whatsoup-actor-manager-'));
@@ -148,6 +196,7 @@ describe('PerChatMcpSocketManager', () => {
       socketPath,
       new ToolRegistry(),
       { tier: 'global', allowedRoot: root },
+      noExecutingSession,
     );
 
     await expect(server.startAndWait({ unlinkExisting: false })).rejects.toBeDefined();
@@ -215,9 +264,13 @@ describe('PerChatMcpSocketManager', () => {
       registry: new ToolRegistry(),
       allowedRoot: root,
       conversationBound: true,
-      resolveActor: (identity) => {
+      resolveExecutingSession: (identity) => {
         observedIdentities.push(identity);
-        return identity;
+        return {
+          actorJid: identity,
+          purpose: undefined,
+          conversationKey: identity,
+        };
       },
     });
     const oldIdentity = '15550001111@lid';
@@ -227,7 +280,11 @@ describe('PerChatMcpSocketManager', () => {
     const resources = (manager as unknown as {
       resources: Map<string, {
         server: {
-          actorResolver: () => string | undefined;
+          executingSessionResolver: () => {
+            actorJid?: string;
+            purpose?: string;
+            conversationKey?: string;
+          };
           baseSession: {
             binding?: { conversationKey: string; deliveryJid: string };
           };
@@ -236,9 +293,13 @@ describe('PerChatMcpSocketManager', () => {
     }).resources;
     const resource = resources.get(oldIdentity)!;
 
-    expect(resource.server.actorResolver()).toBe(oldIdentity);
+    const oldContext = resource.server.executingSessionResolver();
+    expect(oldContext.actorJid).toBe(oldIdentity);
+    expect(oldContext.conversationKey).toBe(oldIdentity);
     manager.rekey(oldIdentity, newIdentity, newIdentity);
-    expect(resource.server.actorResolver()).toBe(newIdentity);
+    const newContext = resource.server.executingSessionResolver();
+    expect(newContext.conversationKey).toBe(newIdentity);
+    expect(newContext.actorJid).toBe(newIdentity);
     expect(observedIdentities).toEqual([oldIdentity, newIdentity]);
     expect(resource.server.baseSession.binding).toEqual({
       kind: 'conversation-bound',

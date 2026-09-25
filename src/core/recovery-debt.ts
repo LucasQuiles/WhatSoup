@@ -49,17 +49,6 @@ export interface RecoveryDebtSnapshot {
   };
 }
 
-export type RecoveryProof = 'clear' | 'retain' | 'degrade';
-
-export interface RecoveryProofEvidence {
-  transportConnected: boolean | null;
-  modelEvidenceCurrent: boolean | null;
-  runtimeReadable: boolean | null;
-  schemaReadable: boolean | null;
-  pendingPollsReadable: boolean | null;
-  recoveryDebt: RecoveryDebtSnapshot;
-}
-
 const BLOCKING_RUNTIME_REASONS = [
   'turn_finalization_active',
   'turn_recovery_actionable',
@@ -153,7 +142,9 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
   const corroboratedRetained = count(details['turnRecoveryCorroboratedRetained']);
   const identityBlocking = count(details['completedDeliveryIdentityBlocking']);
   const identityRetained = count(details['completedDeliveryIdentityRetained']);
-  const degradedReasons = stringArray(details['degradedReasons']);
+  // Granular blocking reasons travel apart from `degradedReasons`, whose
+  // recovery literals are the registered status_reasons twins.
+  const degradedReasons = stringArray(details['recoveryBlockingReasons']);
   const retainedReasons = stringArray(details['recoveryDebtReasons']);
   const admissionValue = details['completedDeliveryIdentityAdmissions'];
   const admissions = isRecord(admissionValue) ? admissionValue : null;
@@ -318,43 +309,4 @@ export function normalizeRecoveryDebt(evidence: RecoveryDebtEvidence): RecoveryD
     completed_delivery_identity: runtime.completedIdentity,
     delivery: delivery.delivery,
   };
-}
-
-export function evaluateRecoveryProof(evidence: RecoveryProofEvidence): RecoveryProof {
-  if (
-    evidence.transportConnected === false
-    || evidence.modelEvidenceCurrent === false
-    || evidence.runtimeReadable === false
-    || evidence.schemaReadable === false
-    || evidence.pendingPollsReadable === false
-    || evidence.recoveryDebt.service_blocking
-  ) return 'degrade';
-  if (
-    evidence.transportConnected !== true
-    || evidence.modelEvidenceCurrent !== true
-    || evidence.runtimeReadable !== true
-    || evidence.schemaReadable !== true
-    || evidence.pendingPollsReadable !== true
-  ) return 'retain';
-  return 'clear';
-}
-
-export function applyRecoveryProof(
-  statusReasons: string[],
-  recentlyDegraded: Set<string>,
-  instanceName: string,
-  proof: RecoveryProof,
-): void {
-  if (statusReasons.length > 0 || proof === 'degrade') {
-    recentlyDegraded.add(instanceName);
-    if (statusReasons.length === 0) statusReasons.push('degradation_silence_unproven');
-    return;
-  }
-  if (proof === 'clear') {
-    recentlyDegraded.delete(instanceName);
-    return;
-  }
-  if (recentlyDegraded.has(instanceName)) {
-    statusReasons.push('degradation_silence_unproven');
-  }
 }

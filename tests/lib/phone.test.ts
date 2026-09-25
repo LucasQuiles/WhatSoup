@@ -99,14 +99,14 @@ describe('isAdminPhone', () => {
   });
 
   it('QR-033: the admin check is not a fuzzy suffix match (no privilege escalation)', () => {
-    const admins = new Set(['8459780919']); // operator, configured without country code
+    const admins = new Set(['5550100199']); // operator, configured without country code
     // Controls — still admin across country-code formats:
-    expect(isAdminPhone('8459780919', admins)).toBe(true);    // exact (CC-less)
-    expect(isAdminPhone('18459780919', admins)).toBe(true);   // + NANP country code
+    expect(isAdminPhone('5550100199', admins)).toBe(true);    // exact (CC-less)
+    expect(isAdminPhone('15550100199', admins)).toBe(true);   // + NANP country code
     // Escalation vectors that MUST now be rejected:
-    expect(isAdminPhone('99999998459780919', admins)).toBe(false); // attacker prepends junk, ends in admin digits
-    expect(isAdminPhone('9780919', admins)).toBe(false);           // a short (7-digit) suffix of the admin number
-    expect(isAdminPhone('559998459780919', admins)).toBe(false);   // 5 extra leading digits (not a 1-3 digit CC)
+    expect(isAdminPhone('99999995550100199', admins)).toBe(false); // attacker prepends junk, ends in admin digits
+    expect(isAdminPhone('0100199', admins)).toBe(false);           // a short (7-digit) suffix of the admin number
+    expect(isAdminPhone('559995550100199', admins)).toBe(false);   // 5 extra leading digits (not a 1-3 digit CC)
     // A real international CC-tolerant pair still matches (<= 3 digit CC):
     expect(isAdminPhone('447911123456', new Set(['447911123456']))).toBe(true); // exact full E.164
     expect(isAdminPhone('447911123456', new Set(['7911123456']))).toBe(true);   // +44 CC (2-digit) tolerance

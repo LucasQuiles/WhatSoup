@@ -41,6 +41,13 @@ export interface ProcessLockHandle {
   reclaimedDeadSameBoot?: boolean;
 }
 
+export interface ProcessLockWaitOptions {
+  timeoutMs: number;
+  pollMs: number;
+  monotonicNow?: () => number;
+  sleep?: (ms: number) => void;
+}
+
 export interface AcquireProcessLockOptions {
   pid?: number;
   token?: string;
@@ -60,6 +67,12 @@ export interface AcquireProcessLockOptions {
    */
   reclaimDeadSameBoot?: boolean;
   /**
+   * Optional bounded wait for short coordination lanes. Callers that omit it
+   * retain the immediate fail-closed active/stale/corrupt behavior used by
+   * singleton-service startup locks.
+   */
+  wait?: ProcessLockWaitOptions;
+  /**
    * Test seam: invoked once immediately before the identity-checked unlink in
    * the reclaim path, to deterministically simulate a concurrent replacement of
    * the lock file between the read and the unlink. Production callers leave this
@@ -68,17 +81,47 @@ export interface AcquireProcessLockOptions {
   beforeReclaimUnlink?: () => void;
 }
 
+/**
+ * Reclaim-decision inputs captured at throw time. A fail-closed `stale`
+ * result has exactly four possible causes — holder alive, unknown boot ids,
+ * same-boot without the opt-in, or a second EEXIST after a reclaim — and the
+ * 2026-08-16 q crash-loop was only diagnosable by manually deleting the lock
+ * because none of those inputs were surfaced. Attached to the error so boot
+ * logging can print the full decision without re-reading (and racing) the
+ * lock file.
+ */
+export interface ProcessLockDecision {
+  /** bootId recorded in the existing lock, null when absent/corrupt. */
+  lockBootId: string | null;
+  /** The acquiring process's own boot identity, null when unresolvable. */
+  currentBootId: string | null;
+  /** Whether the existing holder pid answered the liveness probe. */
+  holderAlive: boolean;
+  /** Whether reclaimDeadSameBoot was armed for this acquisition. */
+  reclaimDeadSameBootArmed: boolean;
+  /** True when this throw happened AFTER a reclaim already ran once —
+   *  i.e. a second EEXIST followed the identity-checked unlink. */
+  afterReclaimAttempt: boolean;
+}
+
 export class ProcessLockError extends Error {
   readonly reason: ProcessLockErrorReason;
   readonly lockPath: string;
   readonly existingPid?: number;
+  readonly decision?: ProcessLockDecision;
 
-  constructor(reason: ProcessLockErrorReason, lockPath: string, existingPid?: number) {
+  constructor(
+    reason: ProcessLockErrorReason,
+    lockPath: string,
+    existingPid?: number,
+    decision?: ProcessLockDecision,
+  ) {
     super(`process lock ${reason}: ${lockPath}`);
     this.name = 'ProcessLockError';
     this.reason = reason;
     this.lockPath = lockPath;
     this.existingPid = existingPid;
+    this.decision = decision;
   }
 }
 
@@ -179,18 +222,40 @@ const ProcessLockShapeSchema = z.object({
   startedAt: z.string(),
 }) satisfies z.ZodType<Omit<ProcessLockPayload, 'bootId'>>;
 
-export function readProcessLockPayload(lockPath: string): ProcessLockPayload | null {
+type ProcessLockReadResult =
+  | { status: 'missing' }
+  | { status: 'corrupt' }
+  | { status: 'valid'; payload: ProcessLockPayload };
+
+function readProcessLockResult(lockPath: string): ProcessLockReadResult {
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<ProcessLockPayload>;
+    text = readFileSync(lockPath, 'utf8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { status: 'missing' }
+      : { status: 'corrupt' };
+  }
+
+  try {
+    const parsed = JSON.parse(text) as Partial<ProcessLockPayload>;
     const result = ProcessLockShapeSchema.safeParse(parsed);
-    if (!result.success) return null;
+    if (!result.success) return { status: 'corrupt' };
     return {
-      ...result.data,
-      ...(typeof parsed.bootId === 'string' ? { bootId: parsed.bootId } : {}),
+      status: 'valid',
+      payload: {
+        ...result.data,
+        ...(typeof parsed.bootId === 'string' ? { bootId: parsed.bootId } : {}),
+      },
     };
   } catch {
-    return null;
+    return { status: 'corrupt' };
   }
+}
+
+export function readProcessLockPayload(lockPath: string): ProcessLockPayload | null {
+  const result = readProcessLockResult(lockPath);
+  return result.status === 'valid' ? result.payload : null;
 }
 
 /** Full-identity equality of two lock payloads across every recorded field. */
@@ -199,6 +264,59 @@ function samePayloadIdentity(a: ProcessLockPayload, b: ProcessLockPayload): bool
     && a.token === b.token
     && a.startedAt === b.startedAt
     && a.bootId === b.bootId;
+}
+
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+interface ValidatedProcessLockWait {
+  deadlineMs: number;
+  pollMs: number;
+  now: () => number;
+  sleep: (ms: number) => void;
+}
+
+function validatedWait(options: ProcessLockWaitOptions | undefined): ValidatedProcessLockWait | null {
+  if (!options) return null;
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0) {
+    throw new RangeError('process lock wait timeoutMs must be a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(options.pollMs) || options.pollMs < 1) {
+    throw new RangeError('process lock wait pollMs must be a positive safe integer');
+  }
+  const rawNow = options.monotonicNow ?? (() => performance.now());
+  const rawSleep = options.sleep ?? sleepSync;
+  const startedAtMs = rawNow();
+  if (!Number.isFinite(startedAtMs)) {
+    throw new RangeError('process lock wait monotonic clock must return a finite number');
+  }
+  const deadlineMs = startedAtMs + options.timeoutMs;
+  let lastObservedMs = startedAtMs;
+  const now = (): number => {
+    const currentMs = rawNow();
+    if (!Number.isFinite(currentMs)) {
+      throw new RangeError('process lock wait monotonic clock must return a finite number');
+    }
+    if (currentMs < lastObservedMs) {
+      throw new RangeError('process lock wait monotonic clock must not move backwards');
+    }
+    lastObservedMs = currentMs;
+    return currentMs;
+  };
+  return {
+    deadlineMs,
+    pollMs: options.pollMs,
+    now,
+    sleep: (ms) => {
+      const beforeSleepMs = lastObservedMs;
+      rawSleep(ms);
+      if (now() <= beforeSleepMs) {
+        throw new RangeError('process lock wait monotonic clock must advance after sleep');
+      }
+    },
+  };
 }
 
 export function acquireProcessLock(lockPath: string, options: AcquireProcessLockOptions = {}): ProcessLockHandle {
@@ -220,6 +338,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
     throw err;
   }
   try {
+    const wait = validatedWait(options.wait);
     // linkSync is atomic. The loop performs at most one reclaim: if the existing
     // lock is provably from a previous boot, remove it and retry the link once.
     // Any lock seen after that is necessarily from the current boot (every
@@ -229,6 +348,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
     let reclaimed = false;
     let reclaimedPreviousBoot = false;
     let reclaimedDeadSameBoot = false;
+    let terminalWaitAttempted = false;
     for (;;) {
       try {
         linkSync(tempPath, lockPath);
@@ -237,8 +357,17 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         const nodeErr = err as NodeJS.ErrnoException;
         if (nodeErr.code !== 'EEXIST') throw err;
 
-        const existing = readProcessLockPayload(lockPath);
-        if (!existing) throw new ProcessLockError('corrupt', lockPath);
+        const observed = readProcessLockResult(lockPath);
+        if (observed.status === 'missing') continue;
+        if (observed.status === 'corrupt') throw new ProcessLockError('corrupt', lockPath);
+        const existing = observed.payload;
+        const decisionOf = (holderAlive: boolean): ProcessLockDecision => ({
+          lockBootId: existing.bootId ?? null,
+          currentBootId: payload.bootId ?? null,
+          holderAlive,
+          reclaimDeadSameBootArmed: options.reclaimDeadSameBoot === true,
+          afterReclaimAttempt: reclaimed,
+        });
 
         // Liveness beats boot id, deliberately. A live holder is NEVER evicted,
         // even when the lock's bootId differs from ours. This preserves the
@@ -250,7 +379,19 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         // prior-boot lock whose PID was recycled by an unrelated live process
         // stays fail-closed — a rare, alerting, operator-recoverable brick (see
         // docs/runbook.md §5.6). Do not reorder this below the bootId check.
-        if (isProcessAlive(existing.pid)) throw new ProcessLockError('active', lockPath, existing.pid);
+        if (isProcessAlive(existing.pid)) {
+          if (wait && !terminalWaitAttempted) {
+            const currentMs = wait.now();
+            const remainingMs = wait.deadlineMs - currentMs;
+            if (remainingMs > 0) {
+              wait.sleep(Math.min(wait.pollMs, remainingMs));
+              continue;
+            }
+            terminalWaitAttempted = true;
+            continue;
+          }
+          throw new ProcessLockError('active', lockPath, existing.pid, decisionOf(true));
+        }
 
         // The holder pid is dead. Singleton-service callers reclaim ONLY when
         // both boot ids are known and differ. Short, retry-safe coordination
@@ -265,7 +406,7 @@ export function acquireProcessLock(lockPath: string, options: AcquireProcessLock
         const reclaimable = fromPreviousBoot
           || (options.reclaimDeadSameBoot === true && fromSameBoot);
         if (reclaimed || !reclaimable) {
-          throw new ProcessLockError('stale', lockPath, existing.pid);
+          throw new ProcessLockError('stale', lockPath, existing.pid, decisionOf(false));
         }
 
         reclaimed = true;
@@ -320,7 +461,7 @@ export function releaseProcessLock(handle: ProcessLockHandle, options: ReleasePr
   return true;
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
+export function defaultIsProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

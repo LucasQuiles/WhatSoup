@@ -1,5 +1,5 @@
 [Unit]
-Description=WhatSoup Reply Guarantee queue drain
+Description=WhatSoup Reply Guarantee queue drain and durability observer
 Documentation=https://github.com/LucasQuiles/WhatSoup
 
 [Service]

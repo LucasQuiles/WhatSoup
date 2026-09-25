@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  checkHealthPortParity,
   checkHealthProfiles,
   checkInstanceConfigs,
   checkMemoryIntegrity,
@@ -355,5 +356,60 @@ describe('end-to-end via checkInstanceConfigs over a fixture root', () => {
     });
     const result = checkInstanceConfigs(root);
     expect(result.findings.some((f) => f.category === 'schema' && f.field === 'adminPhones')).toBe(true);
+  });
+});
+
+describe('Class B — health-port authority parity (#2342)', () => {
+  /** Live instance tree + health-profile root with divergent/equal ports. */
+  function makeDivergentRoots(profilePort: number, livePort: number) {
+    const live = makeRoot({
+      drifty: validChatConfig({ name: 'drifty', healthPort: livePort }),
+    });
+    const profilesDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-profiles-'));
+    writeFileSync(
+      path.join(profilesDir, 'host.json'),
+      JSON.stringify({ instances: [{ name: 'drifty', expected: 'always_on', healthPort: profilePort }] }),
+      'utf8',
+    );
+    return { live, profiles: profilesDir };
+  }
+
+  it('flags profile healthPort ≠ live config.json healthPort as B-port drift', () => {
+    const { live, profiles } = makeDivergentRoots(4501, 4567);
+    const instanceResult = checkInstanceConfigs(live);
+    const healthResult = checkHealthProfiles(profiles);
+    const findings = checkHealthPortParity(instanceResult, healthResult);
+    expect(findings).toHaveLength(1);
+    const f = findings[0];
+    expect(f.category).toBe('B-port');
+    expect(f.instance).toBe('drifty');
+    expect(f.field).toBe('healthPort');
+    expect(f.message).toContain('profile=4501');
+    expect(f.message).toContain('live=4567');
+    expect(f.message).toContain('authority=runtime_config');
+  });
+
+  it('agreeing authorities produce no parity finding', () => {
+    const { live, profiles } = makeDivergentRoots(4567, 4567);
+    const findings = checkHealthPortParity(
+      checkInstanceConfigs(live),
+      checkHealthProfiles(profiles),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it('a profile port with no live counterpart is not drift (profile-only asset)', () => {
+    const live = makeRoot({ other: validChatConfig({ name: 'other', healthPort: 4567 }) });
+    const profilesDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-profiles-'));
+    writeFileSync(
+      path.join(profilesDir, 'host.json'),
+      JSON.stringify({ instances: [{ name: 'remote-only', expected: 'always_on', healthPort: 4501 }] }),
+      'utf8',
+    );
+    const findings = checkHealthPortParity(
+      checkInstanceConfigs(live),
+      checkHealthProfiles(profilesDir),
+    );
+    expect(findings).toEqual([]);
   });
 });

@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
-import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../../src/mcp/registry.ts';
+import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';
 import { captureObservation, upsertEntity } from '../../../src/core/substrate/entities.ts';
+import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 
 function tmpFile() { return join(tmpdir(), `sub-${randomBytes(8).toString('hex')}.db`); }
 function tmpDir() { return join(tmpdir(), `sub-vault-${randomBytes(8).toString('hex')}`); }
@@ -50,6 +51,7 @@ function registerDefaultTools(
     dbWrapper?: Database;
     observationConfidenceMin?: number;
     enableUrlWatch?: boolean;
+    clock?: Clock;
   } = {},
 ) {
   registerSubstrateTools(registry, {
@@ -65,7 +67,7 @@ function registerDefaultTools(
       sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.8, lookbackHours: 48, reviewByDays: 7 },
       watchTtl: { defaultHours: 24, maxHours: 72 },
     },
-  });
+  }, overrides.clock);
 }
 
 describe('substrate MCP tools', () => {
@@ -87,6 +89,16 @@ describe('substrate MCP tools', () => {
   it('registers all 21 tools', () => {
     const names = registry.listTools(adminSession).map(t => t.name);
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
+  });
+
+  it('every listed tool exports an MCP-valid object inputSchema (regression: list_trigger_runs refine wrapper dropped the whole tool list in strict MCP clients)', () => {
+    const listed = registry.listTools(adminSession);
+    const offenders = listed.filter(t => t.inputSchema.type !== 'object').map(t => t.name);
+    expect(offenders).toEqual([]);
+    const runs = listed.find(t => t.name === 'list_trigger_runs');
+    expect(runs?.inputSchema.type).toBe('object');
+    expect(Object.keys((runs?.inputSchema.properties as Record<string, unknown>) ?? {}).sort())
+      .toEqual(['bead_id', 'limit', 'trigger_id']);
   });
 
   it('R1: sensitive tools are LISTED (call-gate model) while read-only tools are never flagged sensitive', () => {
@@ -352,6 +364,25 @@ describe('substrate MCP tools', () => {
     expect(after.triggers[0].status).toBe('paused');
   });
 
+  it('extend_trigger reactivates a paused cron agent job through the registry', async () => {
+    const res = parseResult(await registry.call('create_agent_job', {
+      prompt: 'daily digest',
+      schedule: { kind: 'schedule.cron', expr: '30 8 * * *' },
+      report_chat: 'digest-report@s.whatsapp.net',
+    }, adminSession));
+    expect(parseResult(await registry.call('pause_trigger', { id: res.trigger_id }, adminSession))).toEqual({ ok: true });
+    const paused = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(paused.triggers[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+
+    const until = Math.floor(Date.now() / 1000) + 48 * 3600;
+    expect(parseResult(await registry.call('extend_trigger', { id: res.trigger_id, until }, adminSession))).toEqual({ ok: true });
+
+    const resumed = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
+    expect(resumed.triggers[0].next_fire_at).toBeGreaterThan(0);
+    // The agent job has no deadline, so resuming keeps it open-ended and ignores `until` (#3609).
+    expect(resumed.triggers[0]).toMatchObject({ status: 'active', terminal_at: null });
+  });
+
   it('create_agent_job supports one-shot at-time schedules', async () => {
     const fireAt = Math.floor(Date.now() / 1000) + 3600;
 
@@ -425,6 +456,23 @@ describe('substrate MCP tools', () => {
       ttl_hours: 200,
     }, adminSession));
     expect(res.terminal_at - now).toBeLessThanOrEqual(72 * 3600 + 5);
+  });
+
+  it('create_watch derives terminal_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {
+    // +1000s ahead of the wall clock keeps requestedTerminalAt below
+    // prepareTrigger's internal max-TTL clamp (72h), so the injected `now`
+    // survives to the stored terminal_at instead of being clamped away.
+    const t0ms = Date.now() + 1_000_000;
+    const r2 = new ToolRegistry();
+    registerDefaultTools(r2, db, vaultPath, { clock: fakeClock(t0ms) });
+
+    const res = parseResult(await r2.call('create_watch', {
+      source: 'poll.email',
+      criteria: { source: 'gmail', sender: 'sender-example-invalid' },
+      report_chat: 'watch-report@s.whatsapp.net',
+    }, adminSession));
+
+    expect(res.terminal_at).toBe(Math.floor(t0ms / 1000) + 24 * 3600);
   });
 
   it('extend_trigger updates terminal_at within policy', async () => {

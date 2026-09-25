@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { hostname } from 'node:os';
 import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
 const alertFns = vi.hoisted(() => ({
   emitAlert: vi.fn((): AlertEmissionResult => ({
@@ -49,6 +50,7 @@ function failedAlertResult(): AlertEmissionResult {
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   ...alertFns,
   emitAlertChecked: alertFns.emitAlert,
+  emitObservationChecked: vi.fn(() => true),
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 
@@ -147,6 +149,9 @@ function makeOperationalFallbackHealth(overrides: {
   providerExecutionActive?: boolean;
   providerExecutionPending?: number;
   providerExecutionOldestWaitMs?: number;
+  providerExecutionActiveAgeMs?: number;
+  providerExecutionActivePhase?: string;
+  providerExecutionProgressAgeMs?: number;
   recoveryOutstanding?: number;
   recoveryBlockedUnsafe?: number;
   recoveryQuarantinedDelivery?: number;
@@ -185,6 +190,9 @@ function makeOperationalFallbackHealth(overrides: {
           active: overrides.providerExecutionActive ?? false,
           pending: overrides.providerExecutionPending ?? 0,
           oldestWaitMs: overrides.providerExecutionOldestWaitMs ?? 0,
+          activeAgeMs: overrides.providerExecutionActiveAgeMs ?? 0,
+          activePhase: overrides.providerExecutionActivePhase ?? 'executing',
+          progressAgeMs: overrides.providerExecutionProgressAgeMs ?? 0,
           pressureActive: overrides.pressureActive ?? false,
         },
         turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
@@ -357,6 +365,8 @@ function relinkVerifiedAssetMatcher() {
   });
 }
 
+usePerTestBotErrorsMarkerIsolation();
+
 describe('HealthPoller', () => {
   let mockFetch: ReturnType<typeof vi.fn>;
 
@@ -490,7 +500,19 @@ describe('HealthPoller', () => {
 
   // Test 2: remote instance polled via fetch
   it('remote instance polled via fetch', async () => {
-    const remoteHealth = makeOnlineHealth({ uptime_seconds: 100 });
+    const remoteHealth = makeOnlineHealth({
+      uptime_seconds: 100,
+      event_loop: {
+        lag_p95_ms: 2.3,
+        raw_samples: {
+          available: true,
+          schema_version: 'health.event-loop-samples.v1',
+          path: '/health/event-loop-samples',
+          oldest_sequence: 1,
+          latest_sequence: 12,
+        },
+      },
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(remoteHealth),
@@ -510,6 +532,7 @@ describe('HealthPoller', () => {
     expect(status).toBeDefined();
     expect(status!.status).toBe('online');
     expect(status!.health).toEqual(remoteHealth);
+    expect(JSON.stringify(status!.health)).not.toContain('raw_recent');
     expect(status!.consecutiveFailures).toBe(0);
     expect(mockFetch).toHaveBeenCalledWith(
       'http://127.0.0.1:9100/health',
@@ -987,6 +1010,9 @@ describe('HealthPoller', () => {
         providerExecutionActive: true,
         providerExecutionPending: 4,
         providerExecutionOldestWaitMs: 87_000,
+        providerExecutionActiveAgeMs: 91_000,
+        providerExecutionActivePhase: 'terminalizing',
+        providerExecutionProgressAgeMs: 43_000,
         recoveryBlockedUnsafe: 6,
         recoveryQuarantinedDelivery: 1,
         controlPeerConfigured: false,
@@ -1009,6 +1035,9 @@ describe('HealthPoller', () => {
     expect(alertEvidence).toContain('provider_execution_active=true');
     expect(alertEvidence).toContain('provider_execution_pending=4');
     expect(alertEvidence).toContain('provider_execution_oldest_wait_ms=87000');
+    expect(alertEvidence).toContain('provider_execution_active_age_ms=91000');
+    expect(alertEvidence).toContain('provider_execution_active_phase=terminalizing');
+    expect(alertEvidence).toContain('provider_execution_progress_age_ms=43000');
     expect(alertEvidence).toContain('turn_recovery_blocked_unsafe=6');
     expect(alertEvidence).toContain('turn_recovery_quarantined_delivery=1');
     expect(alertEvidence).toContain('control_peer_configured=false');
@@ -1742,6 +1771,147 @@ describe('HealthPoller', () => {
     expect(logger.info).not.toHaveBeenCalledWith(
       expect.objectContaining({ source: 'instance_logged_out' }),
       'alert suppressed — rate limit (15min)',
+    );
+
+    poller.stop();
+  });
+
+  // ---- structured protocol-version capture, exercised through the real
+  // emission path (bond-revocation investigation, 2026-08-17).
+  //
+  // A parser-only suite cannot prove the field is wired: deleting the
+  // pushProtocolVersionEvidence call in appendLifecycleEvidence left the
+  // dedicated suite fully green. These three tests go through HealthPoller and
+  // assert on the evidence string actually handed to emitAlert, so removing
+  // that call turns them red.
+
+  it('emits the protocol version as integer components in real logged-out evidence', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { latestBaileysVersion: '2.3000.1043857760' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    for (const component of [
+      'baileys_protocol_version_major=2',
+      'baileys_protocol_version_minor=3000',
+      'baileys_protocol_version_patch=1043857760',
+    ]) {
+      expect(alertFns.emitAlert).toHaveBeenCalledWith(
+        'remote-1',
+        'instance_logged_out',
+        'whatsoup@remote-1 appears logged out',
+        expect.stringContaining(component),
+        'critical',
+        serverRevokedAssetMatcher(),
+      );
+    }
+
+    // The whole point of the change: the version must NOT be swallowed by the
+    // generic phone redactor, which is what `[REDACTED_PHONE]` indicated.
+    const evidence = alertFns.emitAlert.mock.calls
+      .filter((call: unknown[]) => call[1] === 'instance_logged_out')
+      .map((call: unknown[]) => String(call[3]))
+      .join('\n');
+    expect(evidence).not.toContain('baileys_protocol_version=absent');
+    expect(evidence).not.toContain('baileys_protocol_version=malformed');
+
+    poller.stop();
+  });
+
+  it('reports an unparseable protocol version as malformed, not absent', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { latestBaileysVersion: 'not-a-version' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('baileys_protocol_version=malformed'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
+
+    poller.stop();
+  });
+
+  it('reports a missing protocol version as absent, not malformed', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: { lastOpenAt: '2026-08-17T00:00:00.000Z' },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('baileys_protocol_version=absent'),
+      'critical',
+      serverRevokedAssetMatcher(),
     );
 
     poller.stop();
@@ -3661,6 +3831,10 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(poller.getStatus('remote-1')!.statusConfidence).toBe('confirmed');
+    // Reliability 4.3: the weak→explicit upgrade re-emits while the
+    // instance_logged_out source is still continuously active — the SAME open
+    // condition at higher confidence, not a fresh occurrence — so the emit
+    // carries the renotify marker and the flap detector must not count it.
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'instance_logged_out',
@@ -3668,6 +3842,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('last_status_code=401'),
       'critical',
       serverRevokedAssetMatcher(),
+      { renotify: true },
     );
 
     poller.stop();

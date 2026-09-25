@@ -14,6 +14,8 @@ import {
 } from "./git-input-core.ts";
 import type { ExactBlobV1 } from "./git-input-core.ts";
 
+const UINT8_ARRAY_FROM = Uint8Array.from.bind(Uint8Array);
+
 interface BlobPreflight {
   oid: string;
   byteLength: number;
@@ -173,7 +175,7 @@ export function readExactBlobsWithinAggregateBudget(
       oid: blob.oid,
       byteLength: blob.byteLength,
       contentSha256: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-      bytes: Uint8Array.from(content),
+      bytes: UINT8_ARRAY_FROM(content),
     });
   }
   return blobs;

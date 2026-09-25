@@ -26,11 +26,16 @@ Type=simple
 # common case (version already installed) install is a trivial no-op with no
 # fs writes. For the cold-boot case (version not present), concurrent
 # extracts to ~/.nvm/versions/node/vX.Y.Z/ can race. Risk is accepted: if an
-# install fails on one instance the systemd Restart=on-failure picks it up,
+# install fails on one instance the systemd Restart= policy picks it up,
 # by which point a sibling instance has typically completed the install.
 ExecStartPre=%h/.local/bin/whatsoup-ensure-node
 ExecStart=%h/.local/bin/whatsoup %i
-Restart=on-failure
+# `always` (not `on-failure`): a clean exit does not restart under on-failure,
+# which left a production instance down 3.5h on 2026-08-28 after an external SIGTERM
+# (clean exit 0, unit inactive, no restart, watchdog intent-skip). Deliberate
+# stay-down paths are unaffected: `systemctl stop` never triggers Restart=,
+# and exit 78 is held out via RestartPreventExitStatus below.
+Restart=always
 # Exit 78 is a deliberate terminal startup block (for example, an inspection
 # health-port collision). Keep the unit failed and alert once; never backoff-loop.
 RestartPreventExitStatus=78

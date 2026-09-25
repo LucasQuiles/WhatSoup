@@ -5,6 +5,8 @@ import { Check, Eye, EyeOff } from 'lucide-react'
 import { Field, RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 import { CHAT_API_KEY_SERVICE_OPTIONS } from '../../lib/providers'
+import { isRecord } from '../../lib/type-guards'
+import ProviderModelInput from '../ProviderModelInput'
 
 interface ModelAuthStepProps {
   data: Record<string, unknown>
@@ -12,28 +14,13 @@ interface ModelAuthStepProps {
   errors: Record<string, string>
 }
 
-const ANTHROPIC_MODELS = [
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-] as const
-
-const OPENAI_MODELS = [
-  { value: 'gpt-4.1', label: 'GPT-4.1' },
-  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini' },
-  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano' },
-] as const
-
-const MODEL_DEFAULTS = {
-  conversation: 'claude-sonnet-4-6',
-  extraction: 'claude-haiku-4-5-20251001',
-  validation: 'claude-haiku-4-5-20251001',
-  fallback: '',
-  openaiExtraction: '',
-  openaiValidation: '',
-} as const
-
-type ModelRole = keyof typeof MODEL_DEFAULTS
+type ModelRole =
+  | 'conversation'
+  | 'extraction'
+  | 'validation'
+  | 'fallback'
+  | 'openaiExtraction'
+  | 'openaiValidation'
 
 const ANTHROPIC_ROLES: { key: ModelRole; label: string }[] = [
   { key: 'conversation', label: 'Conversation' },
@@ -50,10 +37,6 @@ const OPENAI_ROLES: { key: ModelRole; label: string }[] = [
 const CHAT_OPENAI_PROVIDER_CONFIG = 'chatOptions.openaiProviderConfig' as const
 const CHAT_OPENAI_BASE_URL = `${CHAT_OPENAI_PROVIDER_CONFIG}.baseUrl` as const
 const CHAT_OPENAI_API_KEY_SERVICE = `${CHAT_OPENAI_PROVIDER_CONFIG}.apiKeyService` as const
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function readChatOpenAIProviderConfig(data: Record<string, unknown>): Record<string, unknown> {
   const chatOptions = isRecord(data.chatOptions) ? data.chatOptions : {}
@@ -94,7 +77,7 @@ function buildChatOpenAIProviderPatch(
 /* tabStyle removed — using .c-tab CSS class */
 
 const ModelAndKeyTabs: FC<{
-  models: Record<ModelRole, string>
+  models: Partial<Record<ModelRole, string>>
   onModelChange: (role: ModelRole, value: string) => void
   apiKey: string
   openaiKey: string
@@ -102,7 +85,18 @@ const ModelAndKeyTabs: FC<{
   onOpenaiKeyChange: (v: string) => void
   errors: Record<string, string>
   hideAnthropicKey?: boolean
-}> = ({ models, onModelChange, apiKey, openaiKey, onApiKeyChange, onOpenaiKeyChange, errors, hideAnthropicKey }) => {
+  anthropicCatalogueProvider?: 'anthropic-api' | 'claude-cli'
+}> = ({
+  models,
+  onModelChange,
+  apiKey,
+  openaiKey,
+  onApiKeyChange,
+  onOpenaiKeyChange,
+  errors,
+  hideAnthropicKey,
+  anthropicCatalogueProvider = 'anthropic-api',
+}) => {
   const [activeTab, setActiveTab] = useState<'anthropic' | 'openai' | 'local'>('anthropic')
 
   return (
@@ -117,19 +111,17 @@ const ModelAndKeyTabs: FC<{
       {/* Anthropic tab — canonical Field wires label↔select htmlFor (W2-S5) */}
       {activeTab === 'anthropic' && (
         <div role="tabpanel" id="tabpanel-anthropic" aria-labelledby="tab-anthropic" className="flex flex-col gap-[var(--sp-3)]">
-          {ANTHROPIC_ROLES.map(({ key, label }) => (
-            <Field key={key} label={label} confirmed>
+          {ANTHROPIC_ROLES.map(({ key, label }, index) => (
+            <Field key={key} label={label} confirmed={!!models[key]}>
               {(id) => (
-                <SelectInput
+                <ProviderModelInput
                   id={id}
-                  value={models[key]}
-                  onChange={(e) => onModelChange(key, e.target.value)}
-                  confirmed
-                >
-                  {ANTHROPIC_MODELS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </SelectInput>
+                  provider={anthropicCatalogueProvider}
+                  value={models[key] ?? ''}
+                  onChange={(value) => onModelChange(key, value)}
+                  confirmed={!!models[key]}
+                  showStatus={index === 0}
+                />
               )}
             </Field>
           ))}
@@ -149,20 +141,18 @@ const ModelAndKeyTabs: FC<{
       {/* OpenAI tab — canonical Field wires label↔select htmlFor (W2-S5) */}
       {activeTab === 'openai' && (
         <div role="tabpanel" id="tabpanel-openai" aria-labelledby="tab-openai" className="flex flex-col gap-[var(--sp-3)]">
-          {OPENAI_ROLES.map(({ key, label }) => (
+          {OPENAI_ROLES.map(({ key, label }, index) => (
             <Field key={key} label={label} confirmed={!!models[key]}>
               {(id) => (
-                <SelectInput
+                <ProviderModelInput
                   id={id}
-                  value={models[key]}
-                  onChange={(e) => onModelChange(key, e.target.value)}
+                  provider="openai-api"
+                  value={models[key] ?? ''}
+                  onChange={(value) => onModelChange(key, value)}
                   confirmed={!!models[key]}
-                >
-                  <option value="">None</option>
-                  {OPENAI_MODELS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </SelectInput>
+                  placeholder="None / runtime default, or type a model ID"
+                  showStatus={index === 0}
+                />
               )}
             </Field>
           ))}
@@ -257,7 +247,7 @@ const ChatView: FC<{
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
 }> = ({ data, onChange, errors }) => {
-  const models = (data.models as Record<ModelRole, string> | undefined) ?? { ...MODEL_DEFAULTS }
+  const models = isRecord(data.models) ? data.models as Partial<Record<ModelRole, string>> : {}
   const apiKey = (data.apiKey as string | undefined) ?? ''
   const openaiKey = (data.openaiKey as string | undefined) ?? ''
   const chatProviderConfig = readChatOpenAIProviderConfig(data)
@@ -265,7 +255,10 @@ const ChatView: FC<{
   const chatApiKeyService = typeof chatProviderConfig.apiKeyService === 'string' ? chatProviderConfig.apiKeyService : ''
 
   const handleModelChange = (role: ModelRole, value: string) => {
-    onChange({ models: { ...models, [role]: value } })
+    const next = { ...models }
+    if (value) next[role] = value
+    else delete next[role]
+    onChange({ models: next })
   }
 
   return (
@@ -334,13 +327,16 @@ const AgentView: FC<{
   onChange: (patch: Record<string, unknown>) => void
   errors: Record<string, string>
 }> = ({ data, onChange, errors }) => {
-  const models = (data.models as Record<ModelRole, string> | undefined) ?? { ...MODEL_DEFAULTS }
+  const models = isRecord(data.models) ? data.models as Partial<Record<ModelRole, string>> : {}
   const apiKey = (data.apiKey as string | undefined) ?? ''
   const openaiKey = (data.openaiKey as string | undefined) ?? ''
   const authMethod = (data.authMethod as 'api_key' | 'oauth' | undefined) ?? 'api_key'
 
   const handleModelChange = (role: ModelRole, value: string) => {
-    onChange({ models: { ...models, [role]: value } })
+    const next = { ...models }
+    if (value) next[role] = value
+    else delete next[role]
+    onChange({ models: next })
   }
 
   return (
@@ -388,6 +384,7 @@ const AgentView: FC<{
         onOpenaiKeyChange={(v) => onChange({ openaiKey: v })}
         errors={errors}
         hideAnthropicKey={authMethod === 'oauth'}
+        anthropicCatalogueProvider={authMethod === 'oauth' ? 'claude-cli' : 'anthropic-api'}
       />
     </div>
   )

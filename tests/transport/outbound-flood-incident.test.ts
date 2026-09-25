@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSourceChecked = vi.hoisted(() => vi.fn(() => true));
 
-vi.mock('../../src/lib/emit-alert.ts', () => ({ emitAlertChecked, clearAlertSourceChecked }));
+vi.mock('../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn(() => true), emitAlertChecked, clearAlertSourceChecked }));
 
 import { OutboundFloodIncidentLifecycle } from '../../src/transport/outbound-flood-incident.ts';
 import type { OutboundFloodRecordResult, OutboundFloodStats } from '../../src/transport/outbound-flood-detector.ts';

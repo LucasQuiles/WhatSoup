@@ -5,6 +5,7 @@ import {
   type TurnRecoveryOwnerIdentity,
 } from '../../../src/core/durability.ts';
 import { TurnRecoveryClaimFenceError } from '../../../src/core/turn-recovery-store.ts';
+import { ScopeBlockedByDurableRecoveryError } from '../../../src/runtimes/agent/turn-admission-errors.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -85,6 +86,86 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   afterEach(() => {
     db.close();
   });
+
+  /**
+   * Deadlines derived from the lease the store ACTUALLY wrote for this claim.
+   *
+   * Read it straight after the claim (the guard arms synchronously inside
+   * `scanOnce()`, and a later renewal overwrites the row), so the assertion is
+   * anchored to the real lease rather than to wall-clock arithmetic.
+   *
+   * `abortMarginMs` mirrors production's
+   * `min(15_000, max(250, floor(leaseMs / 4)))` in
+   * turn-recovery-supervisor.ts. Mirrored deliberately: this suite exists to
+   * pin the temporal invariant, so a silent change to the margin SHOULD fail
+   * here rather than quietly widen the window a replay may run past its lease.
+   */
+  function leaseDeadlines(
+    jobId: number,
+    leaseSeconds: number,
+  ): { expiresAtMs: number; safetyDeadlineMs: number } {
+    const recorded = durability.getTurnRecoveryJob(jobId)?.claim_expires_at;
+    if (!recorded) throw new Error('expected a claimed job carrying a lease expiry');
+    const expiresAtMs = Date.parse(`${recorded.replace(' ', 'T')}Z`);
+    if (!Number.isFinite(expiresAtMs)) throw new Error(`unparseable lease expiry: ${recorded}`);
+    const leaseMs = leaseSeconds * 1_000;
+    const abortMarginMs = Math.min(15_000, Math.max(250, Math.floor(leaseMs / 4)));
+    return { expiresAtMs, safetyDeadlineMs: expiresAtMs - abortMarginMs };
+  }
+
+  /**
+   * Advance fake time in bounded steps until `condition` holds.
+   *
+   * The lease guard's schedule is derived from `claim_expires_at`, which the
+   * store writes with SQLite's OWN clock (`datetime('now', ?)` in
+   * turn-recovery-store.ts) — a clock vitest's fake timers do not control,
+   * compared against a faked `Date.now()`. A hardcoded
+   * `advanceTimersByTimeAsync(N)` therefore encodes a silent assumption that
+   * the two clocks stay close enough for the whole renewal/abort schedule to
+   * land inside N. When that assumption breaks the guard's timers simply never
+   * come due: the job is claimed and dispatched, nothing is renewed, nothing
+   * is aborted, and the assertion fails as a bare "0 calls" with no clue why.
+   *
+   * An A/B under induced skew proves the mechanism: with a 3s skew the old
+   * hardcoded 2_600ms advance fails with `Number of calls: 0` while the
+   * condition-based wait passes. That signature matches the quality (25.x)
+   * failure of 2026-08-16, where this test logged ZERO renewal attempts and
+   * the passing lane logged three, with no other supervisor log line
+   * differing. What delayed that particular CI process is NOT established —
+   * the mechanism is proven, the original trigger remains unknown.
+   *
+   * Waiting on the observable the test actually asserts removes the timing
+   * constant entirely, and the exhausted budget throws a named error instead
+   * of leaving a misleading assertion failure. Callers still pin the temporal
+   * invariant via `leaseDeadlines`, so this cannot degrade "before the safety
+   * deadline" into "eventually".
+   *
+   * NB: `vi.useFakeTimers()` also fakes `process.hrtime`, so a busy-wait loop
+   * can never terminate here — induce real delay with `Atomics.wait`.
+   */
+  async function advanceUntil(
+    condition: () => boolean,
+    what: string,
+    budgetMs = 10_000,
+    stepMs = 50,
+  ): Promise<void> {
+    // Advance at most `budgetMs` in total. The final step is clamped to the
+    // remainder so the helper cannot overshoot its own stated bound for a
+    // `stepMs` that does not divide `budgetMs` — a helper that advertises a
+    // limit and then exceeds it is the same class of lie this suite exists to
+    // remove.
+    let advancedMs = 0;
+    while (advancedMs < budgetMs) {
+      if (condition()) return;
+      const step = Math.min(stepMs, budgetMs - advancedMs);
+      await vi.advanceTimersByTimeAsync(step);
+      advancedMs += step;
+    }
+    if (condition()) return;
+    throw new Error(
+      `${what} did not occur within ${budgetMs}ms of fake time (advanced ${advancedMs}ms)`,
+    );
+  }
 
   /**
    * Crashes one source turn (the BRICK queue-SLA alert) durably transferred to
@@ -189,9 +270,36 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
         excludeJobId !== undefined ? { excludeJobId } : undefined,
       )
     ) {
-      throw new Error('Runtime turn scope is blocked by outstanding durable recovery');
+      // The real admission gate's typed error (turn-admission-errors.ts) —
+      // constructing it here keeps this simulation from desynchronizing if
+      // the production message ever changes.
+      throw new ScopeBlockedByDurableRecoveryError();
     }
   }
+
+  it('advanceUntil never advances past the budget it advertises, for any step size', async () => {
+    vi.useFakeTimers();
+    try {
+      // A step that does NOT divide the budget is the case an `elapsed <= budget`
+      // loop gets wrong: it takes one step too many and overshoots the bound it
+      // just claimed in its own error message.
+      const start = Date.now();
+      let thrown: Error | null = null;
+      await advanceUntil(() => false, 'never-satisfied condition', 1_000, 300)
+        .catch((err: Error) => { thrown = err; });
+      const advanced = Date.now() - start;
+
+      expect(thrown).not.toBeNull();
+      expect(thrown!.message).toContain('never-satisfied condition');
+      expect(advanced).toBeLessThanOrEqual(1_000);
+
+      // And it must actually exhaust the budget rather than give up early —
+      // otherwise "not observed" would be indistinguishable from "not waited".
+      expect(advanced).toBe(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('claims and replays the crashed source exactly once while four followers stay blocked, then flips admission open on completion — no duplicate replay dispatch', async () => {
     const { jobId, conversationKey, deliveryJid, sourceInboundSeq } = crashOneSourceTurn();
@@ -466,15 +574,21 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('renews the lease while a long-running replay dispatch is pending (PRESTAGE-T4 point 7)', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId, conversationKey, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease' });
+      // Freeze after SQLite seeds next_attempt_at with its real clock so the
+      // supervisor's fake clock cannot classify this ready job as future work.
+      vi.useFakeTimers();
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim');
-      renewSpy.mockImplementation((renewJobId, owner, fence, options) => ({
-        ...originalRenew(renewJobId, owner, fence, options),
-        claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
-      }));
+      const renewAtMs: number[] = [];
+      renewSpy.mockImplementation((renewJobId, owner, fence, options) => {
+        renewAtMs.push(Date.now());
+        return {
+          ...originalRenew(renewJobId, owner, fence, options),
+          claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
+        };
+      });
 
       // Deferred, not a real setTimeout: the dispatch "completes" only when
       // this test explicitly releases it, after fake time has been advanced
@@ -486,9 +600,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
-        // leaseSeconds=3 -> renewal interval = max(1000, 1500) = 1500ms, so
-        // the first renewal fires with 1500ms of margin before the 3000ms
-        // lease would otherwise expire.
+        // leaseSeconds=3 requests a 3000ms lease, but do NOT read the
+        // schedule off that nominal figure: the store records the expiry with
+        // SQLite's `datetime('now', ?)`, which truncates to whole seconds, so
+        // the lease actually held is up to ~1s shorter (measured 2773ms on one
+        // local run). Production schedules the first renewal at half the
+        // RECORDED remaining time, so the real margin varies run to run.
+        // `leaseDeadlines()` reads that recorded value; assert against it
+        // rather than against 3000/1500.
         leaseSeconds: 3,
         freshOwnerIdentity: (): TurnRecoveryOwnerIdentity => ({
           logicalTurnId: 'brick-recovery-owner-lease',
@@ -503,10 +622,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scanPromise = supervisor.scanOnce();
-      // Flush the synchronous claim -> dispatchReplay() call chain so the
-      // renewal interval is armed before advancing fake time past it.
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => renewSpy.mock.calls.length >= 1, 'first lease renewal');
+
+      // Renewal must land with margin INSIDE the lease it holds, not merely
+      // "eventually" — otherwise the claim could lapse mid-replay and a second
+      // owner could pick the same job up.
+      expect(renewAtMs[0]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
       expect(renewSpy).toHaveBeenCalled();
       expect(supervisor.health().leaseRenewals).toBeGreaterThanOrEqual(1);
       expect(supervisor.health().leaseRenewalFailures).toBe(0);
@@ -524,18 +646,23 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('retries a transient renewal failure and resumes successful renewal while dispatch remains pending', async () => {
-    vi.useFakeTimers();
     try {
-      const { sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease-transient' });
+      const { jobId, sourceInboundSeq } = crashOneSourceTurn({ suffix: 'lease-transient' });
+      vi.useFakeTimers();
       const originalRenew = durability.renewTurnRecoveryClaim.bind(durability);
+      const renewAtMs: number[] = [];
       const renewSpy = vi.spyOn(durability, 'renewTurnRecoveryClaim')
         .mockImplementationOnce(() => {
+          renewAtMs.push(Date.now());
           throw new Error('temporary store availability failure');
         })
-        .mockImplementation((jobId, owner, fence, options) => ({
-          ...originalRenew(jobId, owner, fence, options),
-          claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
-        }));
+        .mockImplementation((renewJobId, owner, fence, options) => {
+          renewAtMs.push(Date.now());
+          return {
+            ...originalRenew(renewJobId, owner, fence, options),
+            claimExpiresAt: new Date(Date.now() + 3_000).toISOString(),
+          };
+        });
       let resolveDispatch: () => void = () => {};
       const dispatchGate = new Promise<void>((resolve) => { resolveDispatch = resolve; });
       const supervisor = new TurnRecoverySupervisor({
@@ -555,7 +682,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(1_800);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => renewSpy.mock.calls.length >= 2, 'renewal retry after transient failure');
+
+      // Both the failed attempt and the retry that recovers it must fall inside
+      // the safety margin — a retry that slips past it has already lost the lease.
+      expect(renewAtMs[0]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(renewAtMs[1]).toBeLessThanOrEqual(lease.safetyDeadlineMs);
 
       expect(renewSpy).toHaveBeenCalledTimes(2);
       expect(supervisor.health()).toMatchObject({
@@ -572,13 +705,17 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('aborts on confirmed claim-fence loss and never completes or requeues through the stale fence', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-fence-lost' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
-      const abort = vi.fn(async () => true);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return true;
+      });
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
@@ -600,7 +737,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       const result = await scan;
 
       expect(abort).toHaveBeenCalledWith('claim_fence_lost');
@@ -617,15 +761,19 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('aborts before expiry after repeated transient renewal failures and requeues only through the live fence', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-retry-exhausted' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new Error('store remains unavailable');
       });
       let resolveAbort: (proven: boolean) => void = () => {};
       const abortGate = new Promise<boolean>((resolve) => { resolveAbort = resolve; });
-      const abort = vi.fn(async () => abortGate);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return abortGate;
+      });
       let resolveDispatch: () => void = () => {};
       const dispatchGate = new Promise<void>((resolve) => { resolveDispatch = resolve; });
       const supervisor = new TurnRecoverySupervisor({
@@ -645,7 +793,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_600);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       expect(abort).toHaveBeenCalledWith('renewal_unavailable');
       expect(durability.getTurnRecoveryJob(jobId)?.state).toBe('claimed');
       let scanSettled = false;
@@ -676,13 +831,17 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
   });
 
   it('records an unproven abort distinctly and makes no completion or requeue claim', async () => {
-    vi.useFakeTimers();
     try {
       const { jobId } = crashOneSourceTurn({ suffix: 'lease-abort-failed' });
+      vi.useFakeTimers();
       vi.spyOn(durability, 'renewTurnRecoveryClaim').mockImplementation(() => {
         throw new TurnRecoveryClaimFenceError('claim owner changed');
       });
-      const abort = vi.fn(async () => false);
+      let abortAtMs: number | null = null;
+      const abort = vi.fn(async () => {
+        abortAtMs ??= Date.now();
+        return false;
+      });
       const supervisor = new TurnRecoverySupervisor({
         instanceName: 'brick-instance',
         durability: () => durability,
@@ -699,7 +858,14 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
       });
 
       const scan = supervisor.scanOnce();
-      await vi.advanceTimersByTimeAsync(2_000);
+      const lease = leaseDeadlines(jobId, 3);
+      await advanceUntil(() => abort.mock.calls.length > 0, 'cooperative replay abort');
+
+      // "Before expiry" is the invariant this test is named for: the guard must
+      // give up its replay with margin to spare, not merely at some point.
+      expect(abortAtMs).not.toBeNull();
+      expect(abortAtMs!).toBeLessThanOrEqual(lease.safetyDeadlineMs);
+      expect(abortAtMs!).toBeLessThan(lease.expiresAtMs);
       const result = await scan;
 
       expect(result).toMatchObject({ claimed: 1, completed: 0, requeued: 0 });
@@ -904,13 +1070,13 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     }
 
     it('a post-crash backlog of a full scan page, each replay taking ~1s, does not false-alarm during the startup grace window', async () => {
-      vi.useFakeTimers();
       try {
         const inboundSeqByJobId = new Map<number, number>();
         for (let i = 0; i < SCAN_PAGE_SIZE; i += 1) {
           const seeded = crashOneSourceTurn({ suffix: `backlog-${i}` });
           inboundSeqByJobId.set(seeded.jobId, seeded.sourceInboundSeq);
         }
+        vi.useFakeTimers();
 
         // Jobs in a scan page are awaited strictly sequentially (the
         // fair-scheduling loop in runScan()), so at most one dispatchReplay
@@ -998,7 +1164,6 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
     });
 
     it('a single legitimately slow replay spanning well past the old 45s budget does not false-alarm stale_success once the supervisor has an established healthy history', async () => {
-      vi.useFakeTimers();
       try {
         // Mutable, assigned only once the slow job is actually seeded below —
         // dispatchReplay is never invoked before then (the first scanOnce()
@@ -1034,6 +1199,7 @@ describe('TurnRecoverySupervisor — BRICK-LAB-shaped regression', () => {
 
         const seeded = crashOneSourceTurn({ suffix: 'slow-replay' });
         sourceInboundSeq = seeded.sourceInboundSeq;
+        vi.useFakeTimers();
 
         const emitAlertFixed = vi.fn(() => true);
         const deadmanFixed = new TurnRecoveryDeadman({
@@ -1120,6 +1286,7 @@ describe('TurnRecoverySupervisor — successful scan watermark', () => {
         orphanTransfers: 0,
         echoConflicts: 0,
         openRecoveries: 0,
+        blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
       }),
       recoverStaleTurnRecoveryJobs: () => ({ requeued: 0, exhausted: 0 }),
       getTurnRecoveryOriginalDeliveryStatus: vi.fn(),

@@ -30,6 +30,44 @@ export const FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS = 90;
 const FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS =
   FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * MS_PER_DAY;
 
+// This guard runs in the push gate of every lane and in CI, and its age checks
+// read the wall clock: on the day a date ages out, every push and every CI run
+// on every branch turns red with no code change (it happened on 2026-09-14).
+// A passing run therefore warns while this many days remain.
+export const FLEET_BOT_HARDENING_PARITY_WARNING_DAYS = 14;
+
+// Printed with every age failure and warning. The first remedy needs no runtime
+// evidence; without it the only advice was "refresh the runtime parity
+// evidence", which is an operator act, so lanes stalled on a date.
+export const FLEET_BOT_HARDENING_PARITY_STALE_REMEDY = [
+  'remedies, in order:',
+  '  1. a row still claims live proof older than the budget (any contributor): make the manifest say what is still'
+    + ' proven. Mark each such row `blocked`, give it a `nextAction`, remove its expired `verifiedAt` and receipt,'
+    + ' correct the summary counts, and date `updated` for that review.',
+  '  2. no row claims live proof any more (any contributor): the only dated claim left is `updated`, and it means'
+    + ' "these rows were reviewed on that day". Re-read every row against the fleet documents, write what the review'
+    + ' found into each row\'s evidence text, and only then date `updated`. A new date over unchanged row text is a'
+    + ' false record: this guard cannot tell the difference, a reviewer can.',
+  '  3. with new runtime evidence (an operator act): re-verify the bots against the live fleet and record fresh'
+    + ' `verifiedAt` dates and receipts. Only this restores `hardened`.',
+] as const;
+
+/**
+ * Null while at least one row carries a dated live proof. Otherwise the plain
+ * statement of what a green result then means: nothing about the running fleet.
+ * Printed only beside the expiry warning or a stale failure, where a reader is
+ * already deciding what to do; whether an all-unproven manifest should FAIL is a
+ * policy choice this guard does not make.
+ */
+export function fleetBotHardeningParityProofNotice(payload: unknown): string | null {
+  if (!isRecord(payload) || !Array.isArray(payload['rows'])) return null;
+  const rows = payload['rows'].filter(isRecord);
+  if (rows.some((row) => typeof row['verifiedAt'] === 'string')) return null;
+  return `NOTE fleet bot hardening parity: 0 of ${rows.length} row(s) carry a dated live proof. A passing result`
+    + ' currently proves no runtime hardening; `updated` only says when the rows were last reviewed (remedy 3'
+    + ' restores proof).';
+}
+
 export const REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES = [
   'turn-capability-health',
   'primary-model-usability-probe',
@@ -829,6 +867,71 @@ export function checkFleetBotHardeningParity(
   };
 }
 
+export interface FleetBotHardeningParityExpiry {
+  /** The dated claim that ages out first, e.g. `updated` or `rows[2].verifiedAt`. */
+  source: string;
+  date: string;
+  /** The instant after which the age check fails. A date-only claim fails from 00:00 UTC of that day. */
+  failsFrom: string;
+  /** Last UTC calendar day that lies wholly inside the budget. */
+  lastGoodDay: string;
+  /** Whole days left before `failsFrom`; negative once it has passed. */
+  daysRemaining: number;
+}
+
+/**
+ * When the manifest's dates next turn this guard red on their own. Reads the
+ * same three dated claims the age checks read; malformed dates are the age
+ * checks' findings, not this function's, so they are skipped here.
+ */
+export function fleetBotHardeningParityExpiry(
+  payload: unknown,
+  now: Date,
+): FleetBotHardeningParityExpiry | null {
+  if (!isRecord(payload)) return null;
+  const dated: Array<{ source: string; date: string; ms: number }> = [];
+  const note = (source: string, date: unknown, ms: number | null): void => {
+    if (typeof date === 'string' && ms !== null && !Number.isNaN(ms)) dated.push({ source, date, ms });
+  };
+  const updated = payload['updated'];
+  note('updated', updated, typeof updated === 'string' ? parseManifestDateMs(updated) : null);
+  const rows = Array.isArray(payload['rows']) ? payload['rows'] : [];
+  rows.forEach((row, index) => {
+    if (!isRecord(row)) return;
+    const verifiedAt = row['verifiedAt'];
+    note(`rows[${index}].verifiedAt`, verifiedAt,
+      typeof verifiedAt === 'string' ? parseManifestDateMs(verifiedAt) : null);
+    const receipt = row['receipt'];
+    const capturedAt = isRecord(receipt) ? receipt['capturedAt'] : undefined;
+    note(`rows[${index}].receipt.capturedAt`, capturedAt,
+      typeof capturedAt === 'string' && ISO_8601_TIMESTAMP_RE.test(capturedAt) ? Date.parse(capturedAt) : null);
+  });
+  if (dated.length === 0) return null;
+  const first = dated.reduce((earliest, entry) => (entry.ms < earliest.ms ? entry : earliest));
+  const expiresAtMs = first.ms + FLEET_BOT_HARDENING_PARITY_MAX_AGE_MS;
+  return {
+    source: first.source,
+    date: first.date,
+    failsFrom: new Date(expiresAtMs).toISOString(),
+    lastGoodDay: new Date(expiresAtMs - MS_PER_DAY).toISOString().slice(0, 10),
+    daysRemaining: Math.floor((expiresAtMs - now.getTime()) / MS_PER_DAY),
+  };
+}
+
+/**
+ * The line a passing run prints while the budget is about to run out; null otherwise.
+ * Only a passing run asks, so the claim has not aged out yet.
+ */
+export function fleetBotHardeningParityExpiryWarning(
+  expiry: FleetBotHardeningParityExpiry | null,
+): string | null {
+  if (expiry === null || expiry.daysRemaining > FLEET_BOT_HARDENING_PARITY_WARNING_DAYS) return null;
+  return `WARN fleet bot hardening parity: ${expiry.source} ${expiry.date} leaves the`
+    + ` ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day freshness budget in ${expiry.daysRemaining} day(s)`
+    + ` (last good day ${expiry.lastGoodDay}). From ${expiry.failsFrom} this guard fails every push and every`
+    + ' CI run on every branch until the manifest changes.';
+}
+
 function parseArgs(argv: string[]): { manifestPath: string; help: boolean } {
   let manifestPath = DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH;
   let help = false;
@@ -848,7 +951,11 @@ function parseArgs(argv: string[]): { manifestPath: string; help: boolean } {
   return { manifestPath, help };
 }
 
-export function run(argv = process.argv.slice(2), cwd = process.cwd()): FleetBotHardeningParityResult {
+export function run(
+  argv = process.argv.slice(2),
+  cwd = process.cwd(),
+  now: Date = new Date(),
+): FleetBotHardeningParityResult {
   const args = parseArgs(argv);
   if (args.help) {
     console.log(`Usage: check-fleet-bot-hardening-parity.ts [--manifest ${DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH}]`);
@@ -862,7 +969,18 @@ export function run(argv = process.argv.slice(2), cwd = process.cwd()): FleetBot
     };
   }
 
-  const result = checkFleetBotHardeningParity(cwd, args.manifestPath);
+  const result = checkFleetBotHardeningParity(cwd, args.manifestPath, now);
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(readFileSync(path.resolve(cwd, args.manifestPath), 'utf8'));
+  } catch {
+    // The check above has already reported an unreadable manifest; the advice below then says nothing.
+  }
+  const adviseOnStaleness = (): void => {
+    for (const line of FLEET_BOT_HARDENING_PARITY_STALE_REMEDY) console.error(line);
+    const notice = fleetBotHardeningParityProofNotice(payload);
+    if (notice !== null) console.error(notice);
+  };
   if (!result.ok) {
     console.error('fleet bot hardening parity guard failed');
     // Print the two sub-verdicts under separate headers (#1867 criterion 4)
@@ -877,9 +995,15 @@ export function run(argv = process.argv.slice(2), cwd = process.cwd()): FleetBot
     for (const item of result.runtimeParity.findings) {
       console.error(`  ${item.code}: ${item.message}`);
     }
+    if (result.runtimeParity.findings.some((item) => item.code.startsWith('stale-'))) adviseOnStaleness();
     process.exitCode = 1;
   } else {
     console.log(`fleet bot hardening parity guard passed (${result.rows} row(s), ${result.sourceAnchors} source anchor file(s))`);
+    const warning = fleetBotHardeningParityExpiryWarning(fleetBotHardeningParityExpiry(payload, now));
+    if (warning !== null) {
+      console.error(warning);
+      adviseOnStaleness();
+    }
   }
   return result;
 }

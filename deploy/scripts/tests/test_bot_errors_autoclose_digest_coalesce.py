@@ -16,10 +16,16 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
-import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -33,17 +39,7 @@ _ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_env():
-    saved = {k: os.environ.get(k) for k in _ENV_KEYS}
-    for k in _ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+_clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 
 def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
@@ -60,10 +56,7 @@ def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
     return mod
 
 
-def _capture_sends(mod) -> list[str]:
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
-    return sends
+_capture_sends = dispatcher_fixtures.capture_sends
 
 
 def _stale_tool_error(now: int, n: int) -> dict:
@@ -148,6 +141,74 @@ def test_window_elapsed_emits_single_digest(tmp_path):
     accum = _read_state(mod)["staleAutocloseDigest"]
     assert accum["pendingCount"] == 0  # reset after emit
     assert accum["lastDigestAt"] >= now
+
+
+# ---------------------------------------------------------------------------
+# T2a: a pending digest can become due on a quiet sweep. Its successful send
+#      must persist before the next process reloads the state.
+# ---------------------------------------------------------------------------
+
+def test_quiet_pending_digest_success_persists_and_does_not_resend_after_reload(tmp_path):
+    env = {"BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS": "3600"}
+    mod = _load(tmp_path, env)
+    now = int(time.time())
+    _write_state(
+        mod,
+        incidents={},
+        digest={
+            "firstPendingAt": now - 4000,
+            "lastDigestAt": now - 4000,
+            "pendingCount": 1,
+            "pendingKeys": ["host-a|instance-x|runtime-tool-error:provider-cli:old"],
+        },
+    )
+
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    assert len(sends) == 1
+    persisted = _read_state(mod)["staleAutocloseDigest"]
+    assert persisted["pendingCount"] == 0
+    assert persisted["pendingKeys"] == []
+    assert persisted["lastDigestAt"] >= now
+
+    reloaded = _load(tmp_path, env)
+    reloaded_sends = _capture_sends(reloaded)
+    sent, failed, err = reloaded.sweep_stale_incidents(reloaded.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    assert reloaded_sends == []
+
+
+# ---------------------------------------------------------------------------
+# T2b: an attempted quiet pending digest remains available after a failed send.
+# ---------------------------------------------------------------------------
+
+def test_quiet_pending_digest_failure_stays_pending_for_retry(tmp_path):
+    mod = _load(tmp_path, {"BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS": "3600"})
+    now = int(time.time())
+    _write_state(
+        mod,
+        incidents={},
+        digest={
+            "firstPendingAt": now - 4000,
+            "lastDigestAt": now - 4000,
+            "pendingCount": 1,
+            "pendingKeys": ["host-a|instance-x|runtime-tool-error:provider-cli:old"],
+        },
+    )
+
+    def _boom(text, *a, **k):
+        raise RuntimeError("whatsapp down")
+
+    mod.send_whatsapp = _boom  # type: ignore[assignment]
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is not None
+    persisted = _read_state(mod)["staleAutocloseDigest"]
+    assert persisted["pendingCount"] == 1
+    assert persisted["lastDigestAt"] == now - 4000
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
-  "captured_at": "2026-07-30T04:37:53+00:00",
-  "captured_at_sha": "d7399e4a4e97280cbab91d432e8a8e49d1c59950",
+  "captured_at": "2026-08-16T05:58:08+00:00",
+  "captured_at_sha": "6286d8d818cd2092e0c787e9f384fdcbd03497bb",
   "findings": [
     {
       "content_signature": "da9a6c104ed4baefc18af51a4351a9aa256d3462f7ba658917adc5664f4249f4",
@@ -66,6 +66,13 @@
       "signature": "191aca8e5bf4c7498de7313a7545464ee7d226ac92fcfc2582366c5b315dc6c2"
     },
     {
+      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
+      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
+      "line": 161,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1c5612655319551f1d8ee60fef61a730413c1c17fb431577311dde112a3e245c"
+    },
+    {
       "content_signature": "3e913a6d7b2e5b441177255842abe271135064ce2a99e06b10919f660c26bd13",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 1457,
@@ -78,13 +85,6 @@
       "line": 5434,
       "rule_id": "py-property-test-suggestion",
       "signature": "1f41a5700c73b65a3ffbd072d1ebea7425f31fca50cf4223fee35997022c408b"
-    },
-    {
-      "content_signature": "2176a895a02bb581744b922c2e30f383ffecfa76ff47769fd92868ae5f34cc45",
-      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
-      "line": 169,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "206c0a16b67eab79b4304b92869634a708871864f93d481d285d1b2b11a15480"
     },
     {
       "content_signature": "14eaaae25c1a7448c8e8c3d81d8e018a4d3fc31ae88577e15d6521b2bf065ef2",
@@ -113,6 +113,13 @@
       "line": 447,
       "rule_id": "py-property-test-suggestion",
       "signature": "3011183583b92fe8e012727b680169239993094f5bb99477c87a92b224fa2971"
+    },
+    {
+      "content_signature": "2176a895a02bb581744b922c2e30f383ffecfa76ff47769fd92868ae5f34cc45",
+      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
+      "line": 170,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "3132fa2456f27480ff8bd82e20153ab5f2009e3b57658d1e69c0a11dbb78faf4"
     },
     {
       "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
@@ -260,13 +267,6 @@
       "line": 340,
       "rule_id": "py-property-test-suggestion",
       "signature": "7a5cf3803267f0068d01a46792ed0c258a29eeeec2757999ee62eabfacde6f31"
-    },
-    {
-      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
-      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
-      "line": 160,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "7d933734ba3d8ca16beb36ec1771acd4f7d856d3a4c62e52858204bf0d3d884f"
     },
     {
       "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",

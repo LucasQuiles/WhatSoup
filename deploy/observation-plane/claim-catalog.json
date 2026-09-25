@@ -1,0 +1,252 @@
+{
+  "schema": "whatsoup.observation-claim-catalog",
+  "schema_version": "0.1",
+  "description": "Closed catalog of claims the observation plane may evaluate. Every envelope's claim_id must exist here. min_projection is the weakest health projection (or equivalent privilege) that may support a non-inconclusive verdict for the claim (a public projection never supports a privileged verdict). staleness_rule is claim-specific: flat legacy constants (30min producer / 2h fleet-ground-truth) are comparison inputs only, never authoritative; scheduler_deadline defers to the producer's scheduler-derived evidence-deadline semantics (expectedProbeDeadlineMs).",
+  "authority_tiers_ref": "authority-lattice.json",
+  "claims": [
+    {
+      "claim_id": "transport.http_liveness",
+      "family": "transport_liveness",
+      "subject_kind": "instance",
+      "min_projection": "public",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound", "note": "valid only for the observed response instant" },
+      "producing_adapters": ["public-liveness", "auth-health"],
+      "cannot_establish": ["identity.instance_name", "auth_bond.status", "provider.diagnostic_status", "release.executing_release"]
+    },
+    {
+      "claim_id": "identity.instance_name",
+      "family": "auth_diagnostics",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["auth-health"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "auth_bond.status",
+      "family": "auth_diagnostics",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["auth-health"],
+      "cannot_establish": ["incident.recovery_verified"]
+    },
+    {
+      "claim_id": "db.durability_status",
+      "family": "auth_diagnostics",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["auth-health"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "provider.diagnostic_status",
+      "family": "auth_diagnostics",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "scheduler_deadline", "note": "producer-owned freshness (expectedProbeDeadlineMs; the diagnostic body publishes the effective window as model_usable_freshness_ms); consumer-side flat windows are legacy comparison inputs only" },
+      "producing_adapters": ["auth-health"],
+      "cannot_establish": ["provider.functional_turn"]
+    },
+    {
+      "claim_id": "provider.functional_turn",
+      "family": "provider_functional",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "functional_turn",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "scheduler_deadline", "note": "a real turn in the serving context; top authority tier" },
+      "producing_adapters": ["provider-turn"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "delivery.provider_ack",
+      "family": "delivery",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "functional_turn",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "event_bound", "note": "monotonic transport-wide ack receipt (seam not yet landed)" },
+      "producing_adapters": ["delivery-ack"],
+      "producer_status": "pending_lane_2",
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "runtime.interpreter_capability",
+      "family": "interpreter_capability",
+      "subject_kind": "host",
+      "min_projection": "not_applicable",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "none",
+      "staleness_rule": { "kind": "fixed_window", "window_seconds": 86400, "note": "host toolchain churns slowly; re-observe daily or on install events" },
+      "producing_adapters": ["interpreter-capability"],
+      "cannot_establish": ["pins.role_consistency"]
+    },
+    {
+      "claim_id": "release.configured_target",
+      "family": "release_provenance",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "configured_presence",
+      "generation_binding": "config",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["release-drift"],
+      "cannot_establish": ["release.executing_release", "release.tree_conformance"]
+    },
+    {
+      "claim_id": "release.tree_conformance",
+      "family": "release_provenance",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "credential_visibility",
+      "generation_binding": "config",
+      "staleness_rule": { "kind": "event_bound", "note": "manifest-vs-tree comparison at observation instant; includes probe_pollution (F09)" },
+      "producing_adapters": ["release-drift"],
+      "cannot_establish": ["release.executing_release"]
+    },
+    {
+      "claim_id": "release.executing_release",
+      "family": "release_provenance",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound", "note": "live-PID cmd/cwd/openfiles + receipt; configured paths are a DIFFERENT claim (F10)" },
+      "producing_adapters": ["runtime-provenance"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "credential.visibility_in_context",
+      "family": "credential_visibility",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "credential_visibility",
+      "generation_binding": "credential",
+      "staleness_rule": { "kind": "event_bound", "note": "valid ONLY for the probed execution context; cannot contradict a context-equal functional turn (F16)" },
+      "producing_adapters": ["credential-visibility"],
+      "cannot_establish": ["provider.functional_turn", "provider.diagnostic_status"]
+    },
+    {
+      "claim_id": "plugin.effective_policy",
+      "family": "plugin_policy",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "configured_presence",
+      "generation_binding": "config",
+      "staleness_rule": { "kind": "event_bound", "note": "resolved through runtime settings/workspace semantics (F07): enabled_available | disabled_by_instance_policy | enabled_missing_installation" },
+      "producing_adapters": ["plugin-policy"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "service.supervision_state",
+      "family": "supervision",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["supervision"],
+      "cannot_establish": ["transport.http_liveness", "auth_bond.status"]
+    },
+    {
+      "claim_id": "component.conformance",
+      "family": "managed_component",
+      "subject_kind": "host",
+      "min_projection": "not_applicable",
+      "authority_tier": "credential_visibility",
+      "generation_binding": "config",
+      "staleness_rule": { "kind": "fixed_window", "window_seconds": 86400 },
+      "producing_adapters": ["release-drift", "supervision"],
+      "cannot_establish": ["release.executing_release"]
+    },
+    {
+      "claim_id": "pins.role_consistency",
+      "family": "pin_roles",
+      "subject_kind": "fleet",
+      "min_projection": "not_applicable",
+      "authority_tier": "declared_intent",
+      "generation_binding": "config",
+      "staleness_rule": { "kind": "event_bound", "note": "roles: application_runtime | managed_tool_runtime | compatible_inventory (F20); equality demanded only within a role" },
+      "producing_adapters": ["release-drift"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "incident.opened",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["legacy-events"],
+      "cannot_establish": ["incident.recovery_verified"]
+    },
+    {
+      "claim_id": "incident.still_open",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["legacy-events"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "incident.administratively_aged_out",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "not_applicable",
+      "authority_tier": "declared_intent",
+      "generation_binding": "none",
+      "staleness_rule": { "kind": "event_bound", "note": "an administrative close is NOT a recovery observation" },
+      "producing_adapters": ["legacy-events"],
+      "cannot_establish": ["incident.recovery_observed", "incident.recovery_verified"]
+    },
+    {
+      "claim_id": "incident.recovery_observed",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "event_bound" },
+      "producing_adapters": ["auth-health", "legacy-events"],
+      "cannot_establish": ["incident.recovery_verified"]
+    },
+    {
+      "claim_id": "incident.recovery_gate_satisfied",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "authenticated_diagnostic",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "event_bound", "note": "ALL clear-requirements met (e.g. post-bond send after credentials AND incident). clearRequirement_mismatch=true means this claim FAILS and recovery authority is withheld regardless of any announcement" },
+      "producing_adapters": ["auth-health", "legacy-events"],
+      "cannot_establish": []
+    },
+    {
+      "claim_id": "incident.recovery_verified",
+      "family": "incident_lifecycle",
+      "subject_kind": "instance",
+      "min_projection": "diagnostic",
+      "authority_tier": "functional_turn",
+      "generation_binding": "process+credential",
+      "staleness_rule": { "kind": "event_bound", "note": "requires incident.recovery_gate_satisfied = pass in the SAME generation; an announcement without the gate is legacy_false_recovery" },
+      "producing_adapters": ["auth-health"],
+      "requires": ["incident.recovery_gate_satisfied"],
+      "cannot_establish": []
+    }
+  ]
+}

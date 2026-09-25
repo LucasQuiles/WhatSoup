@@ -46,6 +46,11 @@ export class TurnCapabilityTracker {
   lastSuccessfulTurnAt: number | null = null;
   /** Provider that served the most recent successful user turn. */
   lastSuccessfulTurnProvider: string | null = null;
+  /** Model ref the serving session was frozen on for that turn (null =
+   *  unknown, or the session carried no explicit model — the provider
+   *  default). Lets health distinguish an exact-primary-route success from a
+   *  same-provider different-model one (e.g. a /model-pinned chat). */
+  lastSuccessfulTurnModel: string | null = null;
   /** In-process session object that produced the successful turn, if bound. */
   lastSuccessfulTurnSession: object | null = null;
   /** Opaque in-process binding for the exact session incarnation. */
@@ -58,11 +63,13 @@ export class TurnCapabilityTracker {
   /** A user turn completed successfully — stamp the time and clear the last error. */
   recordSuccess(
     provider: string | null,
+    model: string | null,
     session: object | null,
     sessionBinding: object | null,
   ): void {
     this.lastSuccessfulTurnAt = Date.now();
     this.lastSuccessfulTurnProvider = provider;
+    this.lastSuccessfulTurnModel = model;
     const hasBoundSession = session !== null && sessionBinding !== null;
     this.lastSuccessfulTurnSession = hasBoundSession ? session : null;
     this.lastSuccessfulTurnSessionBinding = hasBoundSession ? sessionBinding : null;

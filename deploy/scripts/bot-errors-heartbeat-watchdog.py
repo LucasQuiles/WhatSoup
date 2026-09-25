@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -24,9 +25,23 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_daily_health import daily_health_host_from_payload, normalize_hub_host
+from lib.bounded_jsonl import (
+    append_bounded_jsonl,
+    require_bounded_jsonl_commit,
+)
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.dm_roundtrip import (  # noqa: E402
+    RoundtripConfigError,
+    evaluate_target as dm_roundtrip_evaluate_target,
+    parse_roster as dm_roundtrip_parse_roster,
+)
+from lib.health_reader import (  # noqa: E402,F401 — PUBLIC_HEALTH_SCHEMA_PREFIX re-exported for consumers/tests
+    PUBLIC_HEALTH_SCHEMA_PREFIX,
+    health_body_is_disclosed,
+    instance_health_token,
+)
 from lib.queue_age import parse_queue_threshold, scan_directory, threshold_met
 from lib.controller_log import (
     ControllerLogContext,
@@ -94,9 +109,22 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "fleet_sentinel",
     "collector_roster",
     "browser_debug",
+    "wedge_signature",
+    "turn_failure_rate",
+    "supervision_deadman",
+    "clock_skew",
+    "dm_roundtrip",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Live instance-config tree (the runtime_config health-port authority). The
+# watchdog derives expected instances from the health profile; when a live
+# config.json disagrees on healthPort, the profile port is stale (#2342) and
+# probing it pages outage against the wrong address.
+INSTANCE_CONFIG_ROOT = Path(
+    os.environ.get("WHATSOUP_INSTANCE_CONFIG_ROOT")
+    or Path.home() / ".config" / "whatsoup" / "instances"
+)
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
@@ -497,35 +525,6 @@ def controller_log_fallback(line: str) -> None:
 MAX_HEARTBEAT_JSONL_BYTES = positive_env_int("BOT_ERRORS_HEARTBEAT_JSONL_MAX_BYTES", 50 * 1024 * 1024)
 
 
-def _trim_jsonl(path: Path, max_bytes: int) -> None:
-    """Trim oldest records from a JSONL file when it exceeds max_bytes."""
-    if not path.exists():
-        return
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return
-    if size <= max_bytes:
-        return
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except Exception:
-        return
-    kept: list[str] = []
-    total = 0
-    for line in reversed(lines):
-        encoded = line.encode("utf-8")
-        total += len(encoded)
-        kept.append(line)
-        if total > max_bytes:
-            if len(kept) > 1:
-                kept.pop()
-            break
-    kept.reverse()
-    if len(kept) < len(lines):
-        path.write_text("".join(kept), encoding="utf-8")
-
-
 def append_log(
     kind: str,
     payload: dict[str, Any],
@@ -541,11 +540,17 @@ def append_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(redacted_watchdog_payload(payload)),
-        append_record=lambda record: append_private_jsonl(path, record),
+        append_record=lambda record: require_bounded_jsonl_commit(
+            append_bounded_jsonl(
+                path,
+                record,
+                component="heartbeat_watchdog.heartbeat_log",
+                max_bytes=MAX_HEARTBEAT_JSONL_BYTES,
+            )
+        ),
         persist_health=persist_controller_log_health,
         emit_fallback=controller_log_fallback,
     )
-    _trim_jsonl(path, MAX_HEARTBEAT_JSONL_BYTES)
     return result
 
 
@@ -1105,6 +1110,38 @@ def monotonic_now_seconds() -> float:
     return time.clock_gettime(time.CLOCK_MONOTONIC)
 
 
+def stop_intent_dir() -> Path:
+    """Directory of operator-registered stop-intent markers (one file per unit)."""
+    override = os.environ.get("BOT_ERRORS_STOP_INTENT_DIR", "").strip()
+    if override:
+        return Path(override)
+    return state_root() / "stop-intents"
+
+
+def stop_intent_ttl_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_STOP_INTENT_TTL_SECONDS", "14400")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 14400.0
+    return max(0.0, value) if math.isfinite(value) else 14400.0
+
+
+def stop_intent_age_seconds(service: str) -> float | None:
+    """Age of the registered stop-intent marker for `service`; None when absent.
+
+    A clean exit is "planned" only while a marker registered before the stop is
+    younger than the TTL — Result=success alone is NOT intent: an external
+    SIGTERM produces a clean exit that would otherwise be misread as planned
+    (observed live 2026-08-28: a production line sat down 3.5h behind an intent-skip).
+    """
+    try:
+        mtime = (stop_intent_dir() / service).stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, float(now_epoch()) - mtime)
+
+
 def dry_service_intent() -> dict[str, dict[str, str]]:
     raw = os.environ.get("BOT_ERRORS_DRY_SERVICE_INTENT", "").strip()
     if not raw:
@@ -1175,6 +1212,8 @@ def classify_service_intent(
     props: dict[str, str],
     grace_seconds: float,
     monotonic_now: float,
+    stop_intent_age: float | None = None,
+    stop_intent_ttl: float | None = None,
 ) -> tuple[str, str]:
     active_state = props.get("ActiveState", "").strip().lower()
     sub_state = props.get("SubState", "").strip().lower()
@@ -1207,10 +1246,22 @@ def classify_service_intent(
 
     if active_state in {"inactive", "deactivating"}:
         if result in {"", "success"} and exec_status in {"", "0"}:
+            ttl = stop_intent_ttl if stop_intent_ttl is not None else stop_intent_ttl_seconds()
+            if stop_intent_age is not None and stop_intent_age <= ttl:
+                return (
+                    "planned",
+                    f"clean stop with registered intent: age={round(stop_intent_age, 1)}s "
+                    f"ttl={round(ttl, 1)}s ActiveState={active_state} SubState={sub_state or 'dead'}",
+                )
+            reason = (
+                "no stop-intent marker"
+                if stop_intent_age is None
+                else f"stop-intent marker expired: age={round(stop_intent_age, 1)}s > ttl={round(ttl, 1)}s"
+            )
             return (
-                "planned",
-                f"clean stop: ActiveState={active_state} SubState={sub_state or 'dead'} "
-                f"Result={result or 'success'}",
+                "unplanned_clean_stop",
+                f"clean stop without registered intent ({reason}): ActiveState={active_state} "
+                f"SubState={sub_state or 'dead'} Result={result or 'success'}",
             )
         return (
             "crash",
@@ -1264,7 +1315,13 @@ def local_service_problems() -> dict[str, str]:
             continue
         try:
             props = service_intent_properties(service)
-            classification, detail = classify_service_intent(props, grace, monotonic_now)
+            classification, detail = classify_service_intent(
+                props,
+                grace,
+                monotonic_now,
+                stop_intent_age=stop_intent_age_seconds(service),
+                stop_intent_ttl=stop_intent_ttl_seconds(),
+            )
         except Exception as exc:  # noqa: BLE001 - ambiguity must alert, not hide.
             problems[key] = (
                 f"local service intent check failed: service={service} instance={name} "
@@ -1275,11 +1332,375 @@ def local_service_problems() -> dict[str, str]:
             if classification != "active":
                 log_intent_skip(service, name, classification, detail)
             continue
+        if classification == "unplanned_clean_stop":
+            detail += f" register_intent={stop_intent_dir() / service}"
         problems[key] = (
             f"local service crash: service={service} instance={name} "
             f"intent={classification} {detail} expected=always_on profile={profile}"
         )
     return problems
+
+
+def wedge_nonterminal_age_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_WEDGE_NONTERMINAL_AGE_SECONDS", "900")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 900.0
+    return max(0.0, value) if math.isfinite(value) else 900.0
+
+
+def wedge_occurrence_grace_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_WEDGE_OCCURRENCE_GRACE_SECONDS", "3600")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 3600.0
+    return max(0.0, value) if math.isfinite(value) else 3600.0
+
+
+def wedge_db_root() -> Path:
+    override = os.environ.get("BOT_ERRORS_WEDGE_DB_ROOT", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "share" / "whatsoup" / "instances"
+
+
+def wedge_signature_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.1: read-only wedge-signature probe per expected instance.
+
+    Two signatures, from the confirmed scheduled-session wedge incidents:
+    1. a nonterminal inbound event older than the age threshold with younger
+       rows queued behind it in the same conversation;
+    2. a scheduled trigger occurrence stuck nonterminal past deadline + grace.
+
+    Dark by default: runs only when `wedge_signature` is explicitly listed in
+    BOT_ERRORS_WATCHDOG_CHECKS (it is NOT in DEFAULT_CHECKS). Read-only toward
+    the product runtime: SQLite is opened mode=ro with query_only ON, never
+    immutable=1 (the live database is WAL).
+    """
+    problems: dict[str, str] = {}
+    now = now_epoch()
+    age_threshold = wedge_nonterminal_age_seconds()
+    occ_grace = wedge_occurrence_grace_seconds()
+    for item in expected_local_services():
+        name = item["name"]
+        key = f"wedge:{name}"
+        db_path = wedge_db_root() / name / "bot.db"
+        if not db_path.exists():
+            problems[key] = f"wedge probe misconfigured: instance={name} database missing: {db_path}"
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('inbound_events','trigger_occurrences')"
+                    )
+                }
+                if not tables:
+                    problems[key] = (
+                        f"wedge probe found no lifecycle tables: instance={name} db={db_path}"
+                    )
+                    continue
+                wedged: list[tuple[int, str, str, int, int]] = []
+                if "inbound_events" in tables:
+                    rows = conn.execute(
+                        "SELECT r1.seq, r1.conversation_key, r1.processing_status, "
+                        "CAST(strftime('%s', r1.received_at) AS INTEGER), "
+                        "(SELECT COUNT(*) FROM inbound_events r2 "
+                        " WHERE r2.conversation_key = r1.conversation_key AND r2.seq > r1.seq) "
+                        "FROM inbound_events r1 "
+                        "WHERE r1.processing_status NOT IN ('complete', 'failed') "
+                        "ORDER BY r1.seq"
+                    ).fetchall()
+                    wedged = [
+                        row
+                        for row in rows
+                        if row[3] is not None and (now - row[3]) > age_threshold and row[4] > 0
+                    ]
+                stuck_occurrences: list[tuple[int, str, int]] = []
+                if "trigger_occurrences" in tables:
+                    stuck_occurrences = conn.execute(
+                        "SELECT id, state, scheduled_for FROM trigger_occurrences "
+                        "WHERE state IN ('pending', 'claimed', 'running') "
+                        "AND scheduled_for IS NOT NULL AND scheduled_for < ? "
+                        "ORDER BY id",
+                        (now - occ_grace,),
+                    ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            problems[key] = f"wedge probe failed: instance={name} error={str(exc)[:160]}"
+            continue
+        details = []
+        if wedged:
+            first = wedged[0]
+            details.append(
+                f"nonterminal inbound seq={first[0]} status={first[2]} "
+                f"age_seconds={now - first[3]} queued_behind={first[4]} "
+                f"wedged_count={len(wedged)}"
+            )
+        if stuck_occurrences:
+            occ = stuck_occurrences[0]
+            details.append(
+                f"stuck occurrence id={occ[0]} state={occ[1]} scheduled_for={occ[2]} "
+                f"overdue_seconds={now - int(occ[2])} stuck_count={len(stuck_occurrences)}"
+            )
+        if details:
+            problems[key] = f"wedge signature: instance={name} " + "; ".join(details)
+    return problems
+
+
+def turn_failure_window_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", 1800)
+
+
+def turn_failure_min_count() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MIN_COUNT", 3)
+
+
+def turn_failure_max_chats_reported() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MAX_CHATS", 5)
+
+
+TURN_FAILURE_PREFIXES = ("turn_failure:", "session_collision:", "turn_failure_probe:")
+
+
+def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map interactive conversation keys to session IDs also used by active
+    scheduled checkpoints. Interactive and scheduled work use separate
+    persistence namespaces; a shared session ID contradicts that isolation.
+    Read-only; unavailable schema propagates as an observation failure."""
+    rows = conn.execute(
+        "SELECT i.conversation_key, i.session_id "
+        "FROM session_checkpoints i "
+        "JOIN session_checkpoints s ON s.session_id = i.session_id "
+        "WHERE i.session_status = 'active' AND s.session_status = 'active' "
+        "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
+        "AND s.conversation_key LIKE '%::scheduled-agent-job' "
+        "AND i.session_id IS NOT NULL AND i.session_id <> ''"
+    ).fetchall()
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
+def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[str, str]:
+    """Per-instance terminal turn-failure-rate probe.
+
+    Sibling of :func:`wedge_signature_problems`, which by contract only fires on
+    NONTERMINAL inbound rows. Turns that error and are marked terminal ``failed``
+    (``inbound_events.processing_status='failed'``) drain cleanly and are
+    invisible to every other check: the process is up, WhatsApp is connected,
+    /health is 200, and the queue is empty — yet the chat is silently failing
+    every real turn. This probe alerts when a single conversation accumulates at
+    least BOT_ERRORS_TURN_FAILURE_MIN_COUNT terminal failures within
+    BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS, and enriches the packet with the
+    per-conversation ``failure_class`` split plus the scheduled/interactive
+    session-sharing collision when present.
+
+    Dark by default: runs only when ``turn_failure_rate`` is explicitly listed
+    in BOT_ERRORS_WATCHDOG_CHECKS. Read-only toward the product runtime: SQLite
+    is opened mode=ro with query_only ON (the live database is WAL)."""
+    problems: dict[str, str] = {}
+    now = now_epoch()
+    window = turn_failure_window_seconds()
+    min_count = turn_failure_min_count()
+    max_chats = turn_failure_max_chats_reported()
+    for item in expected_local_services():
+        name = item["name"]
+        key = f"turn_failure:{name}"
+        collision_key = f"session_collision:{name}"
+        probe_key = f"turn_failure_probe:{name}"
+        db_path = wedge_db_root() / name / "bot.db"
+        if not db_path.exists():
+            problems[probe_key] = (
+                f"turn-failure probe misconfigured: instance={name} database missing: {db_path}"
+            )
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                has_inbound = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='inbound_events'"
+                ).fetchone()
+                if not has_inbound:
+                    problems[probe_key] = (
+                        f"turn-failure probe found no inbound_events table: "
+                        f"instance={name} db={db_path}"
+                    )
+                    continue
+                rows = conn.execute(
+                    "SELECT conversation_key, "
+                    "COALESCE(failure_class, 'unknown') AS fc, COUNT(*) AS n "
+                    "FROM inbound_events "
+                    "WHERE processing_status = 'failed' "
+                    "AND received_at IS NOT NULL "
+                    "AND strftime('%s', received_at) IS NOT NULL "
+                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) BETWEEN 0 AND ? "
+                    "GROUP BY conversation_key, fc",
+                    (now, window),
+                ).fetchall()
+                collisions = session_collision_map(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            problems[probe_key] = (
+                f"turn-failure probe failed: instance={name} error={str(exc)[:160]}"
+            )
+            continue
+        # Both queries must succeed before this probe can authorize recovery.
+        # Instance evaluation by another check is not evidence for these keys.
+        if evaluated_keys is not None:
+            evaluated_keys.update((key, collision_key, probe_key))
+        # Active interactive and scheduled checkpoints use separate namespaces.
+        # Alert on a shared session ID independently of the failure-rate threshold.
+        if collisions:
+            collision_details = "; ".join(
+                "ck=[REDACTED CONVERSATION] shared_session_id=[REDACTED SESSION]"
+                for _ in sorted(collisions)[:max_chats]
+            )
+            problems[collision_key] = (
+                f"session-sharing collision: instance={name} "
+                f"affected_chats={len(collisions)} {collision_details}"
+            )
+        # Aggregate per conversation: total failures + failure_class split.
+        per_chat: dict[str, dict[str, int]] = {}
+        for conv_key, fc, n in rows:
+            bucket = per_chat.setdefault(str(conv_key), {})
+            bucket[str(fc)] = bucket.get(str(fc), 0) + int(n)
+        offending = [
+            (conv_key, sum(split.values()), split)
+            for conv_key, split in per_chat.items()
+            if sum(split.values()) >= min_count
+        ]
+        if not offending:
+            continue
+        offending.sort(key=lambda entry: entry[1], reverse=True)
+        details = []
+        for conv_key, total, split in offending[:max_chats]:
+            classes = ",".join(
+                f"{cls}:{count}"
+                for cls, count in sorted(split.items(), key=lambda kv: kv[1], reverse=True)
+            )
+            detail = f"ck=[REDACTED CONVERSATION] failed={total} classes={classes}"
+            if conv_key in collisions:
+                detail += " session_collision session_id=[REDACTED SESSION]"
+            details.append(detail)
+        problems[key] = (
+            f"turn-failure rate: instance={name} window_seconds={window} "
+            f"min_count={min_count} affected_chats={len(offending)} "
+            + "; ".join(details)
+        )
+    return problems
+
+
+def supervision_max_age_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS", "7200")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 7200.0
+    return max(0.0, value) if math.isfinite(value) else 7200.0
+
+
+def supervision_deadman_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.2: independent supervision-loop deadman.
+
+    Alerts when the supervision checkpoint pointer named by
+    BOT_ERRORS_SUPERVISION_POINTER has not advanced a generation (its
+    `moved_at_utc`) within BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS (default
+    2h). Dark by default: runs only when `supervision_deadman` is explicitly
+    listed in BOT_ERRORS_WATCHDOG_CHECKS; deploying it on a second host with
+    a mirrored pointer is a deployment act. Fail-closed: a missing path,
+    unreadable file, or absent timestamp alerts rather than staying quiet.
+    """
+    key = "supervision_deadman"
+    pointer = os.environ.get("BOT_ERRORS_SUPERVISION_POINTER", "").strip()
+    if not pointer:
+        return {key: "supervision deadman misconfigured: BOT_ERRORS_SUPERVISION_POINTER is not set"}
+    try:
+        payload = json.loads(Path(pointer).read_text())
+    except OSError as exc:
+        return {key: f"supervision checkpoint pointer unreadable: {pointer} error={str(exc)[:120]}"}
+    except json.JSONDecodeError as exc:
+        return {key: f"supervision checkpoint pointer malformed: {pointer} error={str(exc)[:120]}"}
+    moved = parse_iso_epoch(payload.get("moved_at_utc")) if isinstance(payload, dict) else None
+    if moved is None:
+        return {key: f"supervision checkpoint pointer missing moved_at_utc: {pointer}"}
+    age = now_epoch() - moved
+    max_age = supervision_max_age_seconds()
+    if age > max_age:
+        return {
+            key: f"supervision checkpoint stale: age_seconds={age} max={int(max_age)} pointer={pointer}"
+        }
+    return {}
+
+
+def clock_skew_allowance_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS", "5")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 5.0
+    return max(0.0, value) if math.isfinite(value) else 5.0
+
+
+def clock_reference_epoch() -> tuple[int | None, str]:
+    dry = os.environ.get("BOT_ERRORS_DRY_CLOCK_REFERENCE_EPOCH", "").strip()
+    if dry:
+        try:
+            return int(float(dry)), "dry"
+        except ValueError:
+            return None, f"invalid dry reference epoch={dry!r}"
+    url = os.environ.get("BOT_ERRORS_CLOCK_REFERENCE_URL", "").strip()
+    if not url:
+        return None, "BOT_ERRORS_CLOCK_REFERENCE_URL is not set"
+    try:
+        with urlopen(Request(url, method="HEAD"), timeout=5) as resp:
+            date_header = resp.headers.get("Date")
+    except HTTPError as exc:
+        # A 403/404/etc. still carries the origin's Date header, which is all
+        # the probe needs (first live run: Cloudflare answered urllib's HEAD
+        # with 403 and the probe paged "unreachable" against an exact clock).
+        date_header = exc.headers.get("Date") if exc.headers is not None else None
+        if not date_header:
+            return None, f"reference unreachable: HTTP {exc.code} without Date header"
+    except OSError as exc:
+        return None, f"reference unreachable: {str(exc)[:120]}"
+    if not date_header:
+        return None, "reference response carried no Date header"
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return int(parsedate_to_datetime(date_header).timestamp()), "http-date"
+    except (TypeError, ValueError):
+        return None, f"unparseable Date header: {date_header[:60]}"
+
+
+def clock_skew_problems() -> dict[str, str]:
+    """FLOS Stage 0 S0.3: recurring wall-clock skew probe with an allowance.
+
+    Compares host wall clock against a common reference (dry override for
+    tests; otherwise the Date header of BOT_ERRORS_CLOCK_REFERENCE_URL).
+    Dark by default; fail-closed when enabled without a usable reference.
+    """
+    key = "clock_skew"
+    ref, source = clock_reference_epoch()
+    if ref is None:
+        return {key: f"clock skew probe misconfigured or unreachable: {source}"}
+    skew = abs(now_epoch() - ref)
+    allowance = clock_skew_allowance_seconds()
+    if skew > allowance:
+        return {
+            key: f"clock skew beyond allowance: skew_seconds={skew} "
+            f"allowance={int(allowance)} source={source}"
+        }
+    return {}
 
 
 def local_health_timeout() -> float:
@@ -1327,6 +1748,18 @@ def dry_local_health_status(value: Any) -> tuple[int, str | None]:
         return 0, f"invalid dry local health status={value!r}"
 
 
+# /health answers HTTP 200 on both legs. With a valid instance health token it
+# returns the privileged diagnostic body; without one it returns a public
+# envelope carrying neither `whatsapp` nor `instance`. Verified live 2026-08-16
+# against a single production process: the unauthenticated legs reported
+# status "healthy" while the privileged body of that same process reported
+# "degraded" with a populated degradation_causes vector.
+# The discriminator (PUBLIC_HEALTH_SCHEMA_PREFIX), the token resolver
+# (instance_health_token), and the projection check (health_body_is_disclosed)
+# are the shared implementations in lib/health_reader.py — one discriminator
+# for every consumer, imported at the top of this file.
+
+
 def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
     url = f"http://127.0.0.1:{port}/health"
     dry = dry_local_health_responses()
@@ -1345,7 +1778,11 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
         if isinstance(entry, str):
             status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
             return status, status_error or entry, url
-    req = Request(url, method="GET")
+    headers = {}
+    token = instance_health_token(name)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, method="GET", headers=headers)
     attempts = local_health_retries() + 1
     last_failure: tuple[int, str, str] = (0, "no attempts", url)
     for attempt in range(attempts):
@@ -1383,6 +1820,21 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     surfaced as a token regardless of the HTTP status. Returns ([], {}) when the
     telemetry is clean (healthy instance).
     """
+    if not health_body_is_disclosed(payload):
+        # Do NOT fall through. The classifier below reads `whatsapp.connected`,
+        # which is absent here, so it would emit `connected=none` — a confident
+        # claim that this bot lost its WhatsApp bond, pointing the operator at a
+        # physical QR re-pair, when the truth is only that the probe was not
+        # authorized. Misattribution is worse than silence: name the real defect
+        # and say plainly that the bond and runtime are UNOBSERVED.
+        return (
+            [
+                "health_body_not_disclosed=public_envelope",
+                "probe_unauthorized=instance_health_token_missing_or_invalid",
+                "bond_and_runtime=unobserved",
+            ],
+            {"connection": {}, "bond_status": None},
+        )
     instance = payload.get("instance") if isinstance(payload.get("instance"), dict) else {}
     actual_name = instance.get("name") if isinstance(instance, dict) else None
     whatsapp = payload.get("whatsapp") if isinstance(payload.get("whatsapp"), dict) else {}
@@ -1454,6 +1906,22 @@ def local_instance_health_problems(
             continue
         name = str(item["name"])
         evaluated.add(name)
+        # #2342 health-port authority drift: profile port vs live config.json.
+        # A live healthPort that disagrees with the profile means the profile
+        # port is stale — classify the drift and inhibit the probe instead of
+        # paging outage against the misaddressed port. Missing live config (or
+        # missing live port) is a profile-only asset: probe the profile port.
+        live_cfg = load_json(INSTANCE_CONFIG_ROOT / name / "config.json")
+        live_port = live_cfg.get("healthPort") if live_cfg else None
+        if isinstance(live_port, bool) or not isinstance(live_port, int):
+            live_port = None
+        if live_port is not None and port != live_port:
+            problems[f"local_health:{name}"] = (
+                f"local health probe inhibited: instance={name} "
+                f"health_port_authority_drift profile={port} live={live_port} "
+                f"authority=runtime_config"
+            )
+            continue
         status, body, url = local_health_http_response(name, port)
         key = f"local_health:{name}"
         # Parse the telemetry REGARDLESS of status code. A server-side logout
@@ -2058,6 +2526,16 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("collector_roster")
     if "browser_debug" in checks:
         prefixes.append(BROWSER_DEBUG_PREFIX)
+    if "wedge_signature" in checks:
+        prefixes.append("wedge:")
+    if "turn_failure_rate" in checks:
+        prefixes.extend(TURN_FAILURE_PREFIXES)
+    if "supervision_deadman" in checks:
+        prefixes.append("supervision_deadman")
+    if "clock_skew" in checks:
+        prefixes.append("clock_skew")
+    if "dm_roundtrip" in checks:
+        prefixes.append("dm_roundtrip:")
     return prefixes
 
 
@@ -2065,7 +2543,70 @@ def key_in_active_scope(key: str, prefixes: list[str]) -> bool:
     return any(key == prefix or key.startswith(prefix) for prefix in prefixes)
 
 
-def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, evaluated_instances: set[str] | None = None) -> dict[str, str]:
+def dm_roundtrip_env_float(name: str, default: float) -> float:
+    """Positive finite float from env, else default (fail-safe on bad input)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def dm_roundtrip_problems() -> dict[str, str]:
+    """Active direct-DM round-trip liveness probe (layer 3, bead active-liveness-checks-fleet).
+
+    Per roster entry: send a sentinel to the instance's OWN jid over its MCP
+    socket, prove the send was accepted, then confirm the sentinel lands in that
+    instance's ``messages`` table as a ``fromMe`` echo -- end-to-end liveness that
+    a ``/health`` 200 cannot give. Does NOT prove the turn pipeline (Finding B).
+
+    Dark by default: runs only when ``dm_roundtrip`` is explicitly listed in
+    ``BOT_ERRORS_WATCHDOG_CHECKS`` (NOT in DEFAULT_CHECKS). Because the endpoints
+    (socket + own jid) are not auto-discoverable, the roster is explicit via
+    ``BOT_ERRORS_DM_ROUNDTRIP_ROSTER`` (JSON array of ``{name,socket,own_jid[,db]}``;
+    ``db`` defaults to ``wedge_db_root()/<name>/bot.db``). Enabled-but-unconfigured
+    fails loud as a config problem rather than silently probing nothing.
+    """
+    problems: dict[str, str] = {}
+    raw = os.environ.get("BOT_ERRORS_DM_ROUNDTRIP_ROSTER", "")
+    try:
+        targets = dm_roundtrip_parse_roster(
+            raw, default_db_for=lambda name: str(wedge_db_root() / name / "bot.db")
+        )
+    except RoundtripConfigError as exc:
+        problems["dm_roundtrip:config"] = (
+            f"dm_roundtrip enabled but roster invalid: {exc}. Set "
+            "BOT_ERRORS_DM_ROUNDTRIP_ROSTER to a JSON array of "
+            "{name,socket,own_jid[,db]}."
+        )
+        return problems
+    timeout = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_TIMEOUT_SECONDS", 15.0)
+    deadline = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_DEADLINE_SECONDS", 10.0)
+    poll = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_POLL_SECONDS", 0.5)
+    for target in targets:
+        problem = dm_roundtrip_evaluate_target(
+            target, timeout=timeout, deadline_s=deadline, poll_interval_s=poll
+        )
+        if problem:
+            problems[f"dm_roundtrip:{target.name}"] = problem
+    return problems
+
+
+def key_recovery_is_observed(key: str, evaluated_keys: set[str] | None) -> bool:
+    return not key.startswith(TURN_FAILURE_PREFIXES) or (
+        evaluated_keys is not None and key in evaluated_keys
+    )
+
+
+def collect_problems(
+    args: argparse.Namespace,
+    checks: set[str] | None = None,
+    evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
+) -> dict[str, str]:
     checks = checks if checks is not None else configured_checks()
     problems: dict[str, str] = {}
     if "q_loop" in checks:
@@ -2174,6 +2715,16 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         problems.update(local_instance_health_problems(evaluated_instances))
     if "browser_debug" in checks:
         problems.update(browser_debug_problems())
+    if "wedge_signature" in checks:
+        problems.update(wedge_signature_problems())
+    if "turn_failure_rate" in checks:
+        problems.update(turn_failure_rate_problems(evaluated_keys))
+    if "supervision_deadman" in checks:
+        problems.update(supervision_deadman_problems())
+    if "clock_skew" in checks:
+        problems.update(clock_skew_problems())
+    if "dm_roundtrip" in checks:
+        problems.update(dm_roundtrip_problems())
     return problems
 
 
@@ -2240,6 +2791,7 @@ def reconcile(
     session: Any = None,
     capability: Any = None,
     evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
 ) -> list[Path]:
     """Reconcile problems against open incidents and write outbox events.
 
@@ -2263,6 +2815,7 @@ def reconcile(
                 _compat_session,
                 _load.capability,
                 evaluated_instances,
+                evaluated_keys,
             )
     assert state is not None and capability is not None
     open_incidents: dict[str, Any] = state.setdefault("open", {})
@@ -2440,6 +2993,8 @@ def reconcile(
     for key in sorted(set(open_incidents) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
             continue
+        if not key_recovery_is_observed(key, evaluated_keys):
+            continue
         # #2431: constrain incident-clear to the evaluated instance set only.
         # An incident for a non-evaluated instance must survive the sweep so
         # that a removed/renamed instance does not silently lose its incident.
@@ -2508,11 +3063,13 @@ def reconcile(
             event_type="clear",
         ))
     for key in sorted(set(state["pendingStale"]) - set(problems)):
-        if key_in_active_scope(key, active_prefixes):
+        if key_in_active_scope(key, active_prefixes) and key_recovery_is_observed(key, evaluated_keys):
             state["pendingStale"].pop(key, None)
     rearm_seconds = watchdog_flap_rearm_seconds()
     for key in sorted(set(state["recentlyRecovered"]) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
+            continue
+        if not key_recovery_is_observed(key, evaluated_keys):
             continue
         record = state["recentlyRecovered"][key]
         if not isinstance(record, dict):
@@ -2595,6 +3152,10 @@ def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
         checks = configured_checks()
+        if "turn_failure_rate" in checks:
+            turn_failure_window_seconds()
+            turn_failure_min_count()
+            turn_failure_max_chats_reported()
     except ValueError as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded
@@ -2631,7 +3192,8 @@ def run_once(args: argparse.Namespace) -> int:
             _state = _load_result.payload
             _capability = _load_result.capability
             evaluated_instances: set[str] = set()
-            problems = collect_problems(args, checks, evaluated_instances)
+            evaluated_keys: set[str] = set()
+            problems = collect_problems(args, checks, evaluated_instances, evaluated_keys)
             written = reconcile(
                 problems,
                 active_reconcile_prefixes(checks),
@@ -2639,6 +3201,7 @@ def run_once(args: argparse.Namespace) -> int:
                 session,
                 _capability,
                 evaluated_instances,
+                evaluated_keys,
             )
             print(json.dumps({
                 "time": now_iso(),

@@ -12,6 +12,7 @@
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { clampTtl, normalizeUnixTimestampSeconds, nowUnixSec } from '../../../src/core/substrate/time.ts';
+import { fakeClock } from '../../../src/lib/clock.ts';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -46,6 +47,18 @@ describe('normalizeUnixTimestampSeconds', () => {
     expect(normalizeUnixTimestampSeconds('', 123)).toBe(123);
     expect(normalizeUnixTimestampSeconds('not-a-number', 123)).toBe(123);
     expect(normalizeUnixTimestampSeconds(Number.POSITIVE_INFINITY, 123)).toBe(123);
+  });
+
+  it('derives the absent-value fallback from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', () => {
+    const t0ms = 2_000_000_000_000; // distinctive future epoch (2033-05-18)
+    const fakeNowSec = Math.floor(t0ms / 1000);
+    // Omitted fallback must resolve through the injected clock's epoch. Reverted
+    // code evaluates the free nowUnixSec() default against the real 2026 wall
+    // clock (~1.77e9), never the distinctive ~2e9 value.
+    expect(normalizeUnixTimestampSeconds(undefined, undefined, fakeClock(t0ms))).toBe(fakeNowSec);
+    expect(normalizeUnixTimestampSeconds('', undefined, fakeClock(t0ms))).toBe(fakeNowSec);
+    expect(normalizeUnixTimestampSeconds('not-a-number', undefined, fakeClock(t0ms))).toBe(fakeNowSec);
+    expect(normalizeUnixTimestampSeconds(Number.POSITIVE_INFINITY, undefined, fakeClock(t0ms))).toBe(fakeNowSec);
   });
 });
 

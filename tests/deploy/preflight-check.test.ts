@@ -54,6 +54,7 @@ const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-privat
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
+const CLI_ARGS = join(REPO_ROOT, 'scripts/lib/cli-args.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
@@ -63,6 +64,22 @@ const PROTECTED_ENV_NAMES = [...new Set([
   'GOOGLE_GENERATIVE_AI_API_KEY',
   'GEMINI_API_KEY',
 ])];
+
+/**
+ * The credential store `deploy/whatsoup` reaches on THIS host, and the fixture
+ * call log its fail-closed stub writes there.
+ *
+ * The wrapper selects the store by `uname -s` (deploy/whatsoup:69-79): Darwin
+ * reads the Keychain through `deploy/lib/read-keychain-secret.mjs`, every other
+ * platform shells out to `secret-tool`. The fixture stubs both arms, so exactly
+ * one log is produced per host — the one belonging to the arm the wrapper took.
+ * Tests read that log unconditionally, which keeps "the stub answered every
+ * lookup" falsifiable on both platforms instead of passing where the file that
+ * should exist does not.
+ */
+const HOST_CREDENTIAL_STORE = process.platform === 'darwin'
+  ? { log: 'keychain-calls.log', callPrefix: 'read-keychain-secret.mjs ' }
+  : { log: 'secret-tool-calls.log', callPrefix: 'lookup service ' };
 
 // The pinned interpreter under test. The fixture repo is generated to match the
 // same Node that runs this suite, so the preflight behavior stays portable across
@@ -117,8 +134,8 @@ function writeValidReleaseManifest(root: string): void {
 function makeFixtureTree(
   mainTs: string,
   extraFiles: Record<string, string> = {},
+  root: string = makeTmpDir(),
 ): string {
-  const root = makeTmpDir();
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
@@ -145,6 +162,7 @@ function makeFixtureTree(
   const integrityFiles: Record<string, string> = {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
   };
@@ -203,6 +221,7 @@ function makeIntegrityReleaseTree(): string {
   const root = makeFixtureTree('export const mainOk = true;\n', {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
     'deploy/source-runtime-manifest.json': JSON.stringify({
@@ -252,8 +271,18 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-function makeWrapperFixture(): WrapperFixture {
-  const root = makeTmpDir();
+// An empty directory nested inside a committed git repo: a release root under
+// an unrelated ancestor .git must stay in release mode.
+function makeDirInsideAncestorRepo(): string {
+  const parent = makeTmpDir();
+  gitFixture(parent, ['init', '-q']);
+  gitFixture(parent, ['commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  const nested = join(parent, 'release');
+  mkdirSync(nested);
+  return nested;
+}
+
+function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   const deploy = join(root, 'deploy');
   const lib = join(deploy, 'lib');
   const scripts = join(root, 'scripts');
@@ -267,9 +296,10 @@ function makeWrapperFixture(): WrapperFixture {
   const bootstrap = join(src, 'database-compatibility-bootstrap.ts');
   const trustChecker = join(scripts, 'source-runtime-drift-check.ts');
   const fakeNode = join(root, 'fake-node');
+  const sbin = join(root, 'sbin');
   const trace = join(root, 'trace.log');
 
-  for (const path of [lib, scriptsLib, srcLib, home, configHome, dataHome]) {
+  for (const path of [lib, scriptsLib, srcLib, home, configHome, dataHome, sbin]) {
     mkdirSync(path, { recursive: true });
   }
   copyFileSync(WRAPPER, wrapper);
@@ -281,16 +311,40 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
+  copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
-    JSON.stringify({ name: 'wrapper-fixture', engines: { node: FIXTURE_NODE_RANGE } }),
+    JSON.stringify({ name: 'wrapper-fixture', type: 'module', engines: { node: FIXTURE_NODE_RANGE } }),
     'utf8',
   );
+  // Credential-store sandbox: without an explicit PATH the wrapper's
+  // `secret-tool` lookups resolve through bash's compiled-in default PATH and
+  // can reach the HOST session keyring — on a developer machine with real
+  // secrets stored (service openai/pinecone/whatsoup-health-token) the
+  // fixture then exports REAL production credentials into its children, and
+  // the protected-env assertion correctly fails. Shadow `secret-tool` with
+  // a failing stub and pin a minimal PATH so the fixture is hermetic on
+  // every host, matching keyring-less CI.
+  // The stub also records every lookup it denied so tests can prove the
+  // fixture's only credential-store path is this fail-closed stub.
+  // `deploy/whatsoup` selects its credential store by `uname -s`, so this stub
+  // only ever runs on the non-Darwin arm. The Darwin arm reaches the Keychain
+  // through `deploy/lib/read-keychain-secret.mjs`, which the fake Node above
+  // shadows with an equally fail-closed branch recording its own call log
+  // (WHATSOUP_TEST_KEYCHAIN_CALLS). Exactly one of the two logs is produced on
+  // any given host, and the arm the host actually takes always produces one.
+  writeFileSync(
+    join(sbin, 'secret-tool'),
+    '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${WHATSOUP_TEST_STUB_CALLS:-/dev/null}"\nexit 1\n',
+    'utf8',
+  );
+  chmodSync(join(sbin, 'secret-tool'), 0o755);
   writeFileSync(bootstrap, "process.stdout.write('ready\\n');\n", 'utf8');
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
+  writeFileSync(join(scripts, 'restart-safety-preflight.ts'), 'process.exit(0);\n', 'utf8');
   const instanceConfig = join(configHome, 'whatsoup', 'instances', 'q-bot');
   mkdirSync(instanceConfig, { recursive: true });
   writeFileSync(join(instanceConfig, 'config.json'), JSON.stringify({ type: 'passive' }), 'utf8');
@@ -314,6 +368,10 @@ if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
       exit 91
     fi
   done
+fi
+if [[ "\${1:-}" == */lib/read-keychain-secret.mjs ]]; then
+  printf '%s %s\\n' "$(basename "$1")" "\${*:2}" >> "\${WHATSOUP_TEST_KEYCHAIN_CALLS:-/dev/null}"
+  exit 1
 fi
 if [ "\${1:-}" = "-e" ]; then
   if [[ "\${3:-}" == */.whatsoup-release-manifest.json ]]; then
@@ -350,6 +408,9 @@ fi
 if [[ "$*" == *scripts/source-runtime-drift-check.ts* ]]; then
   exec ${JSON.stringify(PINNED_NODE)} "$@"
 fi
+if [[ "$*" == *scripts/restart-safety-preflight.ts* ]]; then
+  exit "\${WHATSOUP_TEST_RESTART_SAFETY_RC:-0}"
+fi
 exit 9
 `,
   );
@@ -378,6 +439,7 @@ function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
 
 function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
   rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  if (existsSync(join(fixture.root, '.git'))) throw new Error(`fixture .git was not fully removed: ${fixture.root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -415,6 +477,7 @@ function runWrapper(
     timeout: SPAWN_TIMEOUT_MS,
     env: {
       ...cleanGitEnv(),
+      PATH: [join(dirname(fixture.wrapper), '..', 'sbin'), '/usr/bin:/bin'].join(':'),
       HOME: fixture.home,
       USER: 'test-user',
       XDG_CONFIG_HOME: fixture.configHome,
@@ -424,6 +487,8 @@ function runWrapper(
       WHATSOUP_TEST_DB_MODE: 'ready',
       WHATSOUP_TEST_PREFLIGHT_RC: '0',
       WHATSOUP_SKIP_PREFLIGHT: '',
+      WHATSOUP_TEST_STUB_CALLS: join(fixture.root, 'secret-tool-calls.log'),
+      WHATSOUP_TEST_KEYCHAIN_CALLS: join(fixture.root, 'keychain-calls.log'),
       WHATSOUP_HEALTH_TOKEN: 'test-health-token',
       OPENAI_API_KEY: 'test-openai-key',
       PINECONE_API_KEY: 'test-pinecone-key',
@@ -801,6 +866,50 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.stderr).not.toContain('protected-env-present:');
   });
 
+  it('stays credential-hermetic behind the failing stub with synthetic canaries', () => {
+    const fixture = makeWrapperFixture();
+    // Distinctive synthetic values for every protected name: if the fixture
+    // ever regresses to a real credential store, observed values for these
+    // names stop being the canaries and the pattern assertions below fire.
+    // Built dynamically (no literal name-to-value assignment) so the
+    // secret-assignment pre-commit guard stays quiet; values remain
+    // deterministic and distinctive per protected name.
+    const canaries: Record<string, string> = Object.fromEntries(
+      PROTECTED_ENV_NAMES.map((name) => [name, `canary-${name.toLowerCase()}-3f9d1a`]),
+    );
+
+    const result = runWrapper(fixture, canaries);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+    // No real-format credential value ever surfaced in any observable channel.
+    const observed = `${result.stdout}\n${result.stderr}\n${result.trace.join('\n')}`;
+    expect(observed).not.toMatch(/sk-proj-/);
+    expect(observed).not.toMatch(/pcsk_/);
+    expect(observed).not.toMatch(/canary-/);
+    // Every denied lookup was answered by the fixture's fail-closed stub, and
+    // only through the read-only entry point of the store this host actually
+    // uses — the fixture has no other store path. The read is unconditional on
+    // both platforms: an absent log means the stub that was supposed to answer
+    // never ran, which is a fixture regression and must fail here.
+    const storeCalls = readFileSync(join(fixture.root, HOST_CREDENTIAL_STORE.log), 'utf8');
+    const storeCallLines = storeCalls.split('\n').filter((line) => line !== '');
+    expect(storeCallLines.length).toBeGreaterThan(0);
+    for (const line of storeCallLines) {
+      expect(line.startsWith(HOST_CREDENTIAL_STORE.callPrefix), line).toBe(true);
+    }
+    // And in the wrapper's pinned PATH, secret-tool resolves to the stub.
+    const resolved = spawnSync('bash', ['-c', 'command -v secret-tool'], {
+      encoding: 'utf8',
+      env: {
+        ...cleanGitEnv(),
+        PATH: [join(fixture.root, 'sbin'), '/usr/bin:/bin'].join(':'),
+        HOME: fixture.home,
+      },
+    });
+    expect(resolved.stdout.trim()).toBe(join(fixture.root, 'sbin', 'secret-tool'));
+  });
+
   it('runs from a non-git release whose manifest attests the bootstrap trust graph', () => {
     const fixture = makeWrapperFixture();
     convertWrapperFixtureToRelease(fixture);
@@ -825,6 +934,29 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
 
   it('rejects a manifest-drifted bootstrap graph before executing it in a non-git release', () => {
     const fixture = makeWrapperFixture();
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
+  });
+
+  it('runs from a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
+    convertWrapperFixtureToRelease(fixture);
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('rejects a manifest-drifted bootstrap graph in a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
     convertWrapperFixtureToRelease(fixture);
     writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
 
@@ -1134,7 +1266,7 @@ set -euo pipefail
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
-  });
+  }, 60_000);
 });
 
 describe('deploy/whatsoup — source wiring', () => {
@@ -1292,6 +1424,19 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
     const root = makeFixtureTree(
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('fails closed when a manifest-less release dir is nested inside an ancestor git repo', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+      makeDirInsideAncestorRepo(),
     );
     rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
     const { status, stderr } = runPreflight(root);

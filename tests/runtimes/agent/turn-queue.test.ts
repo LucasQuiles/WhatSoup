@@ -286,6 +286,24 @@ describe('TurnQueue', () => {
     expect(reasons).toEqual(['queue_halted']);
   });
 
+  it('latches an external halt before an active teardown can roll back and drain', async () => {
+    const failure = new Error('outbound queue poisoned during teardown');
+    const processed: QueuedTurn[] = [];
+    const queue = new TurnQueue();
+    const blocked = makeTurn({ text: 'blocked', inboundSeq: 4 });
+    expect(queue.enqueue(blocked)).toBe(true);
+    const teardown = queue.beginTeardown();
+
+    expect(() => queue.haltAndTakePendingTurns(failure)).toThrow(/teardown.*active/i);
+    expect(queue.isHalted).toBe(true);
+    expect(queue.rollbackFailedTeardown(teardown, [blocked])).toBe(true);
+
+    queue.setProcessor(async (turn) => { processed.push(turn); });
+    await expect(queue.idle()).rejects.toBe(failure);
+    expect(processed).toEqual([]);
+    expect(queue.pending).toBe(1);
+  });
+
   it('pending goes to 0 after all turns processed', async () => {
     const queue = new TurnQueue();
 

@@ -2,13 +2,14 @@
 // Media sending tool with filesystem boundary enforcement.
 
 import { z } from 'zod';
-import { existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, statSync, realpathSync } from 'node:fs';
 import { basename, extname, normalize } from 'node:path';
 import type { MessageRow } from '../../core/messages.ts';
 import { downloadMedia as coreDownloadMedia, writeTempFile } from '../../core/media-download.ts';
 import { extractRawMime, EXTENSION_MEDIA_MAP } from '../../core/media-mime.ts';
 import { extractQuotedMedia } from '../../core/quoted-media.ts';
-import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
+import { updateMediaPath } from '../../core/messages.ts';
+import { ensureStoredAudioTranscript } from '../../core/stored-audio-transcript.ts';
 import { createChildLogger } from '../../logger.ts';
 import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
@@ -431,83 +432,17 @@ export function registerMediaTools(
         return errorResult({ error: 'not_audio', message: `Message is type "${row.content_type}", not audio.` });
       }
 
-      // Check for cached transcription in content_text
-      if (row.content_text && row.content_text.length > 0) {
-        if (!row.content_text.includes('transcription unavailable')) {
-          return { transcription: row.content_text, cached: true };
-        }
+      const outcome = await ensureStoredAudioTranscript(db, row, async (buffer, mimeType) => {
+        const { transcribeAudio } = await import('../../runtimes/chat/providers/whisper.ts');
+        return transcribeAudio(buffer, mimeType);
+      });
+      if (outcome.status === 'cached') {
+        return { transcription: outcome.transcription, cached: true };
       }
-
-      // Also check structured content for existing transcription
-      if (row.content) {
-        try {
-          const parsed = JSON.parse(row.content);
-          if (parsed.transcription && !parsed.transcription.includes('transcription unavailable')) {
-            return { transcription: parsed.transcription, cached: true };
-          }
-        } catch { /* not JSON, continue */ }
+      if (outcome.status !== 'transcribed') {
+        return errorResult({ error: outcome.status, message: outcome.message });
       }
-
-      // Need audio data — try media_path first, then download_media fallback
-      let audioBuffer: Buffer | null = null;
-      let audioMime = 'audio/ogg';
-
-      if (row.media_path && existsSync(row.media_path)) {
-        audioBuffer = readFileSync(row.media_path) as unknown as Buffer;
-        const ext = row.media_path.split('.').pop()?.toLowerCase();
-        if (ext === 'mp3') audioMime = 'audio/mpeg';
-        else if (ext === 'm4a') audioMime = 'audio/mp4';
-        else if (ext === 'wav') audioMime = 'audio/wav';
-        else if (ext === 'webm') audioMime = 'audio/webm';
-      } else if (row.raw_message) {
-        let rawMsg: unknown;
-        try {
-          rawMsg = JSON.parse(row.raw_message);
-        } catch {
-          return errorResult({ error: 'no_audio_data', message: 'Cannot parse raw message data for audio download.' });
-        }
-
-        const mime = extractRawMime(rawMsg, 'audio') ?? 'audio/ogg';
-
-        const downloadFn = async (): Promise<Buffer> => {
-          const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
-          return downloadMediaMessage(rawMsg as any, 'buffer', {}) as Promise<Buffer>;
-        };
-
-        try {
-          const result = await coreDownloadMedia(downloadFn, mime);
-          if (result) {
-            audioBuffer = result.buffer;
-            audioMime = result.mimeType;
-
-            // Save to disk and persist path
-            const ext = mime.includes('ogg') ? 'ogg' : mime.includes('mp4') ? 'm4a' : 'webm';
-            const filePath = writeTempFile(result.buffer, ext);
-            updateMediaPath(db, messageId, filePath);
-          }
-        } catch (err) {
-          const msg = errorMessage(err);
-          if (/404|410|gone|expired/i.test(msg)) {
-            return errorResult({ error: 'media_expired', message: 'Audio media URL has expired.' });
-          }
-          return errorResult({ error: 'download_failed', message: 'Failed to download audio for transcription.' });
-        }
-      }
-
-      if (!audioBuffer) {
-        return errorResult({ error: 'no_audio_data', message: 'No audio data available. Media path missing and raw message unavailable.' });
-      }
-
-      // Transcribe via the shared transcription chain
-      const { transcribeAudio } = await import('../../runtimes/chat/providers/whisper.ts');
-      const transcription = await transcribeAudio(audioBuffer, audioMime);
-
-      if (!transcription || transcription.includes('transcription unavailable')) {
-        return errorResult({ error: 'transcription_failed', message: 'Transcription failed or is unavailable.' });
-      }
-
-      // Persist transcription
-      updateTranscription(db, messageId, transcription);
+      const transcription = outcome.transcription;
 
       // Extract duration from structured content if available
       let duration: number | null = null;

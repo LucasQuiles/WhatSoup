@@ -12,12 +12,19 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -31,18 +38,7 @@ TEST_ENV_KEYS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _clean_test_env():
-    """Remove test-specific env vars before each test and restore after."""
-    saved = {k: os.environ.get(k) for k in TEST_ENV_KEYS}
-    for k in TEST_ENV_KEYS:
-        os.environ.pop(k, None)
-    yield
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
+_clean_test_env = dispatcher_fixtures.make_env_scrub_fixture(TEST_ENV_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +72,10 @@ _mod = _load_module()
 # F5-a: next_backoff returns None at the cap
 # ---------------------------------------------------------------------------
 
+# These tests exercise email-fallback MECHANICS under a pytest tmp root. The
+# provenance gate refuses email for any dispatcher rooted in a test tmp dir by
+# design (the 2026-08-28 leak's tell), so it is disabled here explicitly; the
+# gate itself is covered by test_bot_errors_email_fallback_test_provenance.py.
 class TestNextBackoffCap:
     def test_returns_int_below_cap(self):
         mod = _load_module({"BOT_ERRORS_DELIVERY_MAX_ATTEMPTS": "5"})
@@ -318,6 +318,7 @@ class TestEmailFallbackUnavailableRecorded:
         event_path.chmod(0o600)
 
         with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
              patch.object(mod, "EMAIL_FALLBACK", "/nonexistent/email-fallback-xyz.sh"):
             ok, detail = mod.process_one(event_path, paths)
 
@@ -367,6 +368,7 @@ class TestEmailFallbackUnavailableRecorded:
         event_path.chmod(0o600)
 
         with patch.object(mod, "send_whatsapp", side_effect=RuntimeError("send fails")), \
+         patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
              patch.object(mod, "EMAIL_FALLBACK", str(fallback)):
             ok, detail = mod.process_one(event_path, paths)
 

@@ -14,6 +14,12 @@ export interface ProviderExecutionGateSnapshot {
   readonly active: boolean;
   readonly activeWorkKind: ProviderExecutionWorkKind | null;
   readonly activeScopeHash: string | null;
+  /** #2340: content-free holder freshness — age of the active hold (0 when idle). */
+  readonly activeAgeMs: number;
+  /** #2340: coarse lifecycle phase of the active hold ('executing' when idle — the documented idle sentinel). */
+  readonly activePhase: ProviderExecutionPhase;
+  /** #2340: ms since the holder last reported progress (0 when idle). */
+  readonly progressAgeMs: number;
   readonly pending: number;
   readonly oldestPendingWorkKind: ProviderExecutionWorkKind | null;
   readonly oldestPendingScopeHash: string | null;
@@ -27,6 +33,12 @@ export interface ProviderExecutionGateSnapshot {
 
 export type ProviderExecutionWorkKind = 'turn' | 'probe';
 
+/**
+ * #2340: coarse content-free lifecycle phase of the active hold. Starts at
+ * 'queued_to_spawn' on admit; the holder advances it via lease.setPhase().
+ */
+export type ProviderExecutionPhase = 'queued_to_spawn' | 'executing' | 'terminalizing' | 'cleanup';
+
 export interface ProviderExecutionWorkIdentity {
   readonly kind: ProviderExecutionWorkKind;
   readonly scopeHash: string;
@@ -34,6 +46,16 @@ export interface ProviderExecutionWorkIdentity {
 
 export interface ProviderExecutionLease {
   readonly waitMs: number;
+  /**
+   * #2340: report holder progress (resets progressAgeMs). No-op once this
+   * lease's generation has been superseded (released or handed off).
+   */
+  markProgress(): void;
+  /**
+   * #2340: advance the holder's lifecycle phase. No-op once this lease's
+   * generation has been superseded.
+   */
+  setPhase(phase: ProviderExecutionPhase): void;
   release(): void;
 }
 
@@ -61,6 +83,12 @@ export class ProviderExecutionGate {
   private readonly waiters: GateWaiter[] = [];
   private active = false;
   private activeWork: ProviderExecutionWorkIdentity | null = null;
+  // #2340: holder freshness state. Generation guards stale lease writes;
+  // 'executing' is both the construction default and the idle sentinel.
+  private activeGeneration = 0;
+  private activeStartedAt = 0;
+  private activePhase: ProviderExecutionPhase = 'executing';
+  private lastProgressAt = 0;
   private totalWaits = 0;
   private maxPending = 0;
   private lastWaitMs = 0;
@@ -89,6 +117,7 @@ export class ProviderExecutionGate {
     if (!this.active && this.waiters.length === 0) {
       this.active = true;
       this.activeWork = normalizeWorkIdentity(options.work);
+      this.beginHold();
       return Promise.resolve(this.createLease(0));
     }
 
@@ -113,14 +142,18 @@ export class ProviderExecutionGate {
 
   snapshot(): ProviderExecutionGateSnapshot {
     const oldest = this.waiters[0];
+    const now = this.now();
     return {
       active: this.active,
       activeWorkKind: this.activeWork?.kind ?? null,
       activeScopeHash: this.activeWork?.scopeHash ?? null,
+      activeAgeMs: this.active ? Math.max(0, now - this.activeStartedAt) : 0,
+      activePhase: this.active ? this.activePhase : 'executing',
+      progressAgeMs: this.active ? Math.max(0, now - this.lastProgressAt) : 0,
       pending: this.waiters.length,
       oldestPendingWorkKind: oldest?.work?.kind ?? null,
       oldestPendingScopeHash: oldest?.work?.scopeHash ?? null,
-      oldestWaitMs: oldest ? Math.max(0, this.now() - oldest.enqueuedAt) : 0,
+      oldestWaitMs: oldest ? Math.max(0, now - oldest.enqueuedAt) : 0,
       totalWaits: this.totalWaits,
       maxPending: this.maxPending,
       lastWaitMs: this.lastWaitMs,
@@ -129,10 +162,33 @@ export class ProviderExecutionGate {
     };
   }
 
+  /**
+   * #2340: atomically reset holder freshness for a newly admitted hold —
+   * bumping the generation first invalidates any prior lease's phase/progress
+   * writes before the new epoch starts.
+   */
+  private beginHold(): void {
+    this.activeGeneration += 1;
+    this.activeStartedAt = this.now();
+    this.lastProgressAt = this.activeStartedAt;
+    this.activePhase = 'queued_to_spawn';
+  }
+
   private createLease(waitMs: number): ProviderExecutionLease {
     let released = false;
+    const generation = this.activeGeneration;
+    const isCurrent = (): boolean =>
+      !released && generation === this.activeGeneration && this.active;
     return {
       waitMs,
+      markProgress: () => {
+        if (!isCurrent()) return;
+        this.lastProgressAt = this.now();
+      },
+      setPhase: (phase: ProviderExecutionPhase) => {
+        if (!isCurrent()) return;
+        this.activePhase = phase;
+      },
       release: () => {
         if (released) return;
         released = true;
@@ -145,6 +201,9 @@ export class ProviderExecutionGate {
     if (!this.active) return;
     this.active = false;
     this.activeWork = null;
+    this.activeStartedAt = 0;
+    this.lastProgressAt = 0;
+    this.activePhase = 'executing';
     this.grantNext();
     if (!this.active && this.waiters.length === 0) this.finishPressureEpisode();
   }
@@ -161,6 +220,7 @@ export class ProviderExecutionGate {
       this.active = true;
       this.activeWork = waiter.work;
       this.lastWaitMs = Math.max(0, this.now() - waiter.enqueuedAt);
+      this.beginHold();
       waiter.resolve(this.createLease(this.lastWaitMs));
     }
     this.armPressureTimer();
@@ -222,6 +282,9 @@ export function createProviderExecutionGate(instanceName: string): ProviderExecu
           `active=${snapshot.active}`,
           `active_work_kind=${snapshot.activeWorkKind ?? 'unknown'}`,
           `active_scope_hash=${snapshot.activeScopeHash ?? 'unknown'}`,
+          `active_age_ms=${snapshot.activeAgeMs}`,
+          `active_phase=${snapshot.activePhase}`,
+          `progress_age_ms=${snapshot.progressAgeMs}`,
           `pending=${snapshot.pending}`,
           `oldest_pending_work_kind=${snapshot.oldestPendingWorkKind ?? 'unknown'}`,
           `oldest_pending_scope_hash=${snapshot.oldestPendingScopeHash ?? 'unknown'}`,

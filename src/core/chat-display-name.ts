@@ -74,6 +74,9 @@ import { asNonEmptyString } from '../lib/type-guards.ts';
  * that arrive as full '@s.whatsapp.net' JIDs are unaffected by this cut.
  */
 const LID_SUSPECT_MIN_DIGITS = 12;
+/** Compiled once: LID_SUSPECT_MIN_DIGITS is a module constant, so the pattern
+ *  never varies and rebuilding it per call was pure waste. */
+const LID_SUSPECT_RE = new RegExp(`^\\d{${LID_SUSPECT_MIN_DIGITS},}$`);
 
 /** Non-empty trimmed string, else null — blank DB values are misses. */
 function nonEmpty(value: unknown): string | null {
@@ -298,7 +301,7 @@ function classifyRef(db: Database, ref: string): RefShape {
   if (/^\d+$/.test(local) && lidToPhone(db, local) !== null) {
     return lidShape(db, toLidJid(local), local); // bare KNOWN lid → lid-origin
   }
-  if (new RegExp(`^\\d{${LID_SUSPECT_MIN_DIGITS},}$`).test(local)) {
+  if (LID_SUSPECT_RE.test(local)) {
     // Unmapped 12+-digit bare ref: probable lid (see LID_SUSPECT_MIN_DIGITS).
     // Probe the lid-keyed rows; raw-ref fallback — never a fabricated phone.
     // The sibling-evidence fold applies here too: an observed

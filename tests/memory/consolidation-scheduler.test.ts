@@ -9,6 +9,7 @@ vi.mock('../../src/logger.ts', async () => {
 });
 
 import { Database } from '../../src/core/database.ts';
+import { type Clock, fakeClock } from '../../src/lib/clock.ts';
 import type { ConsolidationPinecone } from '../../src/memory/consolidation-cron.ts';
 import { MemoryConsolidationScheduler } from '../../src/memory/consolidation-scheduler.ts';
 import { ConsolidationRunStore } from '../../src/memory/consolidation-run-store.ts';
@@ -64,6 +65,7 @@ describe('MemoryConsolidationScheduler', () => {
     intervalMs?: number;
     totalRunTimeoutMs?: number;
     dryRun?: boolean;
+    clock?: Clock;
   } = {}): MemoryConsolidationScheduler {
     return new MemoryConsolidationScheduler(
       pinecone,
@@ -75,8 +77,112 @@ describe('MemoryConsolidationScheduler', () => {
         totalRunTimeoutMs: overrides.totalRunTimeoutMs ?? 30_000,
       },
       store,
+      overrides.clock,
     );
   }
+
+  it('stamps receipts from the injected clock, not the wall clock (#2200)', async () => {
+    // The point of the clock slice is determinism, not just a lower raw count:
+    // a scheduler that reads Date.now() directly cannot be driven to a known
+    // instant, so timing assertions have to approximate against real time.
+    // Pinning a far-past epoch makes wall-clock leakage unmistakable — no real
+    // clock can produce it.
+    const PINNED_MS = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+    const clock = fakeClock(PINNED_MS);
+    const interrupted = store.beginRun({
+      source: 'manual',
+      mode: 'live',
+      nowMs: PINNED_MS - 10_000,
+      leaseExpiresAtMs: PINNED_MS - 5_000,
+    });
+
+    const scheduler = createScheduler({ clock });
+    scheduler.start();
+    await flushAsync();
+
+    // start() calls store.abandonInterruptedRuns(<now>); the receipt it stamps
+    // must carry the injected instant. Reading Date.now() yields 2026, which
+    // is billions of ms away from PINNED_MS.
+    const row = db.raw.prepare(`
+      SELECT status, last_progress_at, completed_at
+      FROM memory_consolidation_runs WHERE run_id = ?
+    `).get(interrupted.runId) as {
+      status: string;
+      last_progress_at: number;
+      completed_at: number;
+    };
+
+    expect(row.status).toBe('abandoned');
+    expect(
+      { last_progress_at: row.last_progress_at, completed_at: row.completed_at },
+      'receipt was stamped from the wall clock, so the injected Clock is not actually consulted',
+    ).toEqual({ last_progress_at: PINNED_MS, completed_at: PINNED_MS });
+
+    await scheduler.stop();
+  });
+
+  it('threads the injected clock through into the run report (#2200)', async () => {
+    // Injecting a clock into the scheduler is only half the guarantee: the
+    // report itself is stamped inside runConsolidation, which keeps its own
+    // `options.now ?? Date.now` time source. If the scheduler does not pass
+    // its clock down, a caller can pin time and still get wall-clock
+    // timestamps back — an injection that stops at the boundary and quietly
+    // reports real time.
+    const PINNED_MS = 1_700_000_000_000;
+    const PINNED_ISO = new Date(PINNED_MS).toISOString();
+    const scheduler = createScheduler({ clock: fakeClock(PINNED_MS) });
+
+    const report = await scheduler.runOnce('manual');
+
+    expect(
+      { attemptedAt: report.attemptedAt, completedAt: report.completedAt },
+      'run report timestamps came from the wall clock, so the scheduler clock is not threaded into runConsolidation',
+    ).toEqual({ attemptedAt: PINNED_ISO, completedAt: PINNED_ISO });
+
+    await scheduler.stop();
+  });
+
+  it('stamps a COMPLETED run receipt from the injected clock (#2200)', async () => {
+    // The completion path is the scheduler's primary observable, and it is
+    // stamped separately from the abandon path: finalizeRun receives
+    // Date.parse(report.completedAt), so the receipt inherits whatever time
+    // source produced the report. Asserting only the abandon path (above)
+    // would leave the path that actually matters unproven — a falsifier
+    // narrower than the claim it appears to support.
+    const PINNED_MS = 1_700_000_000_000;
+    const scheduler = createScheduler({ clock: fakeClock(PINNED_MS) });
+
+    await scheduler.runOnce('manual');
+
+    const row = db.raw.prepare(`
+      SELECT status, attempted_at, completed_at, success_at
+      FROM memory_consolidation_runs
+      ORDER BY attempted_at DESC, run_id DESC LIMIT 1
+    `).get() as {
+      status: string;
+      attempted_at: number;
+      completed_at: number;
+      success_at: number | null;
+    };
+
+    // 'no_work' is the terminal status for an empty corpus — the finalize path
+    // that stamps the receipt is identical.
+    expect(row.status).toBe('no_work');
+    expect(
+      {
+        attempted_at: row.attempted_at,
+        completed_at: row.completed_at,
+        success_at: row.success_at,
+      },
+      'completion receipt carries wall-clock time, so the clock is not threaded through the completion path',
+    ).toEqual({
+      attempted_at: PINNED_MS,
+      completed_at: PINNED_MS,
+      success_at: PINNED_MS,
+    });
+
+    await scheduler.stop();
+  });
 
   it('abandons interrupted receipts, runs immediately, and keeps the interval alive', async () => {
     const interrupted = store.beginRun({

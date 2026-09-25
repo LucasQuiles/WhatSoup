@@ -2,7 +2,9 @@ import type { Database } from './database.ts';
 import { resolveDecryptionFailure } from './database.ts';
 import { withTransaction } from './db-tx.ts';
 import type { ContentType } from './types.ts';
-import { normalizeUnixTimestampSeconds, nowUnixSec } from './substrate/time.ts';
+import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
+import { type Clock, systemClock } from '../lib/clock.ts';
+import { mergeTranscriptionContent } from './audio-transcript-content.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -283,8 +285,15 @@ export function getUnprocessedCount(db: Database): number {
  * regardless of the receipt's age, and a receipt can only be deleted once its
  * message is gone, so a live message can never be orphaned by this.
  */
-export function deleteOldMessages(db: Database, retentionDays: number): number {
-  const cutoff = nowUnixSec() - retentionDays * 86400;
+export function deleteOldMessages(
+  db: Database,
+  retentionDays: number,
+  // Injectable so the retention cutoff can be driven to a known instant
+  // (#2200). Optional and defaulted, so this slice changes no existing call
+  // site.
+  clock: Clock = systemClock,
+): number {
+  const cutoff = clock.nowUnixSec() - retentionDays * 86400;
   const result = db.raw.prepare(
     'DELETE FROM messages WHERE timestamp < ?'
   ).run(cutoff);
@@ -378,15 +387,7 @@ export function updateTranscription(db: Database, messageId: string, transcripti
   // Read existing content to merge transcription into structured JSON
   const row = db.raw.prepare('SELECT content FROM messages WHERE message_id = ?')
     .get(messageId) as { content: string | null } | undefined;
-
-  let updatedContent: string;
-  try {
-    const parsed = JSON.parse(row?.content || '{}');
-    parsed.transcription = transcription;
-    updatedContent = JSON.stringify(parsed);
-  } catch {
-    updatedContent = JSON.stringify({ transcription });
-  }
+  const updatedContent = mergeTranscriptionContent(row?.content ?? null, transcription);
 
   db.raw.prepare('UPDATE messages SET content = ?, content_text = ? WHERE message_id = ?')
     .run(updatedContent, transcription, messageId);
