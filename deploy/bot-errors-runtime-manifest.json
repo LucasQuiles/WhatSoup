@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "7c9560246366e29274ca2a7afd684f2b21a1bba09d4824889b636fa8caa62ba3",
+      "sha256": "4028940513956245371a400c0881fee07600bb56c6f05a4933dc59849180c7c0",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -560,7 +560,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
+      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
