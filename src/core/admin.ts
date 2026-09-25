@@ -232,12 +232,21 @@ export async function handleAdminCommand(
 /** Find the admin's latest direct chat in the active transport namespace. */
 function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
-    'SELECT chat_jid FROM messages WHERE sender_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
+    'SELECT chat_jid FROM messages WHERE sender_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC',
   );
+  // #3566: an admin-authored GROUP row is never a direct chat, so it can never
+  // be the approval destination. Walk the same newest-first order and take the
+  // first non-group chat; isGroupJid covers WhatsApp and Signal groups.
+  const latestDirectChat = (senderJid: string): string | null => {
+    for (const row of msgStmt.iterate(senderJid) as Iterable<{ chat_jid: string }>) {
+      if (!isGroupJid(row.chat_jid)) return row.chat_jid;
+    }
+    return null;
+  };
 
   for (const identity of config.adminPhones) {
-    const row = msgStmt.get(resolveConfiguredAdminJid(config.transport, identity)) as { chat_jid: string } | undefined;
-    if (row) return row.chat_jid;
+    const chatJid = latestDirectChat(resolveConfiguredAdminJid(config.transport, identity));
+    if (chatJid !== null) return chatJid;
   }
 
   // LID identity is a Baileys-only delivery namespace. Other transports must
@@ -246,8 +255,8 @@ function resolveAdminChatJid(db: Database): string | null {
     const lidMap = getAllLidMappings(db);
     for (const [lid, mappedPhone] of lidMap) {
       if (isAdminPhone(mappedPhone, config.adminPhones)) {
-        const row = msgStmt.get(toLidJid(lid)) as { chat_jid: string } | undefined;
-        if (row) return row.chat_jid;
+        const chatJid = latestDirectChat(toLidJid(lid));
+        if (chatJid !== null) return chatJid;
       }
     }
   }
