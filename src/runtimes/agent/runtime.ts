@@ -6377,16 +6377,31 @@ export class AgentRuntime implements Runtime {
     if (!queue) throw new Error('Per-chat runtime turn has no outbound queue');
     context = this.runtimeTurnCoordinator.rebindRuntimeTurnForDispatch(context, session, mapKey);
     const contexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
-    if (contexts.length > 0) {
+    // A provider-fallback replay dispatches the very turn that still heads this
+    // FIFO: activation takes it from contexts[0] and marks it a continuation
+    // before the replay re-enters per-chat dispatch. Re-bind that held head in
+    // place (its admission evidence and completion already exist) instead of
+    // treating the turn as a conflicting owner of itself. Any other occupant
+    // is still a conflict.
+    const heldContinuation = contexts.length === 1
+      && contexts[0]!.identity.logicalTurnId === context.identity.logicalTurnId
+      && this.runtimeTurnCoordinator.isRuntimeTurnContinuation(contexts[0]!);
+    if (contexts.length > 0 && !heldContinuation) {
       throw new PerChatTurnFifoOwnerConflictError(mapKey);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
-    contexts.push(context);
+    if (heldContinuation) {
+      contexts[0] = context;
+    } else {
+      this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
+      contexts.push(context);
+    }
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
     this.perChatRuntimeTurnScopeRefs.set(
       context.identity.logicalTurnId,
       scopeRef ?? { value: mapKey },
     );
+    const existing = heldContinuation ? this.perChatRuntimeTurnCompletions.get(mapKey) : undefined;
+    if (existing) return existing;
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
