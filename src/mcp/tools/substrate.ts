@@ -614,7 +614,7 @@ export function registerSubstrateTools(
   registry.register({
     name: 'extend_trigger',
     sensitive: true,
-    description: 'Push trigger terminal_at forward (clamped to policy max). Admin only.',
+    description: 'Push trigger terminal_at forward (clamped to policy max); a paused trigger is also reactivated and becomes due immediately. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), until: z.number().int().positive() }),
