@@ -394,6 +394,34 @@ describe('host-admission terminal suspension', () => {
   });
 });
 
+describe('auto-compact start failure without runtime turn context', () => {
+  it('logs the throw under its own message and skips host suspension', () => {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as { runtimeTurnContext: ReturnType<typeof vi.fn> };
+    coordinator.runtimeTurnContext.mockReturnValue(null);
+    (harness.host.maybeStartAutoCompact as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('snapshot read failed');
+    });
+    logSink.length = 0;
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: 'done', isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(logSink.map((entry) => entry.msg)).toContain('auto-compact start threw after a terminal result with no runtime context');
+    expect(logSink.map((entry) => entry.msg)).not.toContain('host-admission terminal suspension threw');
+    expect(harness.session.suspendHostWorkAdmissionAfterTerminal).not.toHaveBeenCalled();
+  });
+});
+
 describe('journaled result without runtime turn context (invariant-violation path)', () => {
   it('releases only the provider request token attached by exact terminal admission', () => {
     const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
