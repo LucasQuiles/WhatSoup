@@ -177,6 +177,8 @@ vi.mock('../../../src/core/durability.ts', () => ({
 
 vi.mock('../../../src/core/conversation-key.ts', () => ({
   toConversationKey: vi.fn((jid: string) => jid),
+  // A well-formed per_chat checkpoint reaches the proactive-resume group check.
+  isGroupConversationKey: vi.fn(() => false),
   // runtime.ts derives its global scope-key constants from this at import time.
   GLOBAL_CONVERSATION_KEY: '__global__',
 }));
@@ -1034,6 +1036,60 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         // quarantine record carries it through verbatim
         provider: 'claude-cli',
         reason,
+      });
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
+    });
+
+    it('quarantines a well-formed completed identity that names an admission-rejected turn (#3295 S4)', async () => {
+      mockSession.spawnSession.mockClear();
+      // Well-formed per this file's toConversationKey mock (jid => jid): only
+      // the terminal lookup says the completed turn was rejected at admission.
+      const checkpoint = completedCheckpoint({
+        conversationKey: '15551230995@s.whatsapp.net',
+        deliveryJid: '15551230995@s.whatsapp.net',
+        deliveryNamespace: 's.whatsapp.net',
+        scope: 'per_chat',
+        sessionId: 'admission-rejected-proactive-session',
+      });
+      const db = {
+        assertWritableCompatibility: vi.fn(),
+        raw: {
+          exec: vi.fn(),
+          prepare: vi.fn((sql: string) => ({
+            run: vi.fn(),
+            get: vi.fn(() => (sql.includes("attempt_kind = 'admission_rejected'") ? { rejected: 1 } : undefined)),
+            all: vi.fn(() => []),
+          })),
+        },
+      } as unknown as Database;
+      const runtime = new AgentRuntime(db, makeMessenger(), 'test', {
+        sessionScope: 'per_chat',
+      });
+      const quarantine = vi.fn();
+      (runtime as unknown as { durability: unknown }).durability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: checkpoint.conversation_key },
+        ]),
+        getSessionCheckpoint: vi.fn(() => checkpoint),
+        quarantineCompletedDeliveryIdentityCheckpoint: quarantine,
+        upsertSessionCheckpoint: vi.fn(),
+      };
+
+      const mutableConfig = config as unknown as Record<string, unknown>;
+      mutableConfig.proactiveResumeOnStartup = true;
+      try {
+        await prepareRuntimeHome();
+        await runtime.start();
+      } finally {
+        delete mutableConfig.proactiveResumeOnStartup;
+      }
+
+      expect(quarantine).toHaveBeenCalledWith({
+        conversationKey: '15551230995@s.whatsapp.net',
+        providerSessionId: 'admission-rejected-proactive-session',
+        provider: 'claude-cli',
+        reason: 'invalid',
       });
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);

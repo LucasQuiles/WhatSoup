@@ -266,6 +266,9 @@ HEALTH_PROBE_TIMEOUT_SECONDS = positive_env_float("BOT_ERRORS_HEALTH_PROBE_TIMEO
 PRIMARY_PHONE_EXPIRY_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_EXPIRY_DAYS", 14)
 PRIMARY_PHONE_WARN_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_WARN_DAYS", 10)
 PRIMARY_PHONE_FAIL_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_FAIL_DAYS", 12)
+# Clock-skew allowance for a verification timestamp; the recorder refuses and
+# the evaluator rejects anything later than now plus this.
+PRIMARY_PHONE_FUTURE_SKEW_SECONDS = 300
 
 
 def kernel_release() -> str:
@@ -7861,7 +7864,7 @@ def write_primary_phone_verification(
     verified_epoch = parse_iso_epoch(verified_at)
     if verified_epoch is None:
         raise ValueError("verified-at must be an ISO timestamp or YYYY-MM-DD")
-    if verified_epoch > current_epoch() + 300:
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
         raise ValueError("verified-at cannot be more than 5 minutes in the future")
 
     path = primary_phone_verifications_path()
@@ -7968,6 +7971,14 @@ def primary_phone_verification_inventory(profile: dict[str, Any], item: dict[str
         prefix = "FAIL " if required else "WARN "
         return [
             f"{prefix}{line_base} verification_invalid "
+            f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
+        ]
+
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
+        # Without this, a future timestamp clamps to age 0 below and reads "fresh".
+        prefix = "FAIL " if required else "WARN "
+        return [
+            f"{prefix}{line_base} verification_invalid reason=future_dated "
             f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
         ]
 

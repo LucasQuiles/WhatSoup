@@ -125,6 +125,13 @@ function fallbackReasonForResultText(text: string): ProviderFallbackReason | nul
   return null;
 }
 
+// #3420: true when this result's text will reach enqueueResultText (non-error,
+// unclassified, not suppressed). endTurn then skips path C so held pre-tool
+// narration cannot claim the turn and make minimal mode drop the result.
+function resultTextWillBeEnqueued(event: Extract<AgentEvent, { type: 'result' }>, suppressed: boolean): boolean {
+  return !suppressed && event.isError !== true && isNonEmptyString(event.text) && classifyProviderFailure(event.text) === null;
+}
+
 function contextOverflowNotice(): string {
   return renderUserMessage('context-overflow', {
     hasContinuation: false,
@@ -354,7 +361,9 @@ tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
 // persistent session. Idempotent with the normal-path queue.flush().
-queue.endTurn();
+queue.endTurn({
+  resultTextPending: resultTextWillBeEnqueued(event, wasSilentCompact || (mapKey !== undefined && host.pendingPolls.questions.has(mapKey))),
+});
 // Provider-reported turn cost: log it beside the token counts and
 // accumulate it while a fallback window is active.
 host.recordTurnCostUsd(event);
@@ -982,7 +991,7 @@ tracker?.onTurnComplete();
 // Turn-end choke point: clear the typing indicator unconditionally so no
 // early-break branch below can leave 'composing' asserted into the idle
 // persistent session. Idempotent with the normal-path queue.flush().
-queue.endTurn();
+queue.endTurn({ resultTextPending: resultTextWillBeEnqueued(event, wasSilentCompact) });
 // Provider-reported turn cost: log it beside the token counts and
 // accumulate it while a fallback window is active.
 host.recordTurnCostUsd(event);
