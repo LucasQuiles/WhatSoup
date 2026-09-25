@@ -4178,6 +4178,12 @@ def next_backoff(attempts: int) -> int | None:
 # opposed to a permanent/content failure (unknown chat, malformed payload, target
 # mismatch). Transient failures are deferred and redelivered on transport
 # recovery; everything else still dead-letters at the permanent cap.
+#
+# The outbound governor's shed is included: it rejects a send locally, before
+# the provider call, as deliberate back-pressure. It must spend the transient
+# budget, not the permanent one. The text must equal OUTBOUND_GOVERNOR_SHED_LOG
+# in src/core/outbound-governor-shed.ts; a test asserts the two agree.
+OUTBOUND_GOVERNOR_SHED_SIGNATURE = "outbound governor ceiling exceeded"
 _TRANSIENT_TRANSPORT_SIGNATURES = (
     "temporarily disconnected",
     "try again in a moment",
@@ -4191,6 +4197,7 @@ _TRANSIENT_TRANSPORT_SIGNATURES = (
     "signal-cli connection closed",
     "signal-cli connection ended by peer",
     "signal-cli socket write failed",
+    OUTBOUND_GOVERNOR_SHED_SIGNATURE,
 )
 
 
