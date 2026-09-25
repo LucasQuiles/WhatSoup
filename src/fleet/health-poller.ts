@@ -20,8 +20,13 @@ import {
   createSilenceRegistryEpisodeStore,
   type SilenceRegistryEpisodeStorePort,
 } from './silence-registry-episode-store.ts';
-import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { hasExplicitAuthLossSignal, TERMINAL_AUTH_FAILURE_CLASSES as SHARED_TERMINAL_AUTH_FAILURE_CLASSES } from './auth-loss-signals.ts';
 import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
+  NO_RESTART_UNCONFIRMED_401_CLASSES,
+  readHealthDisconnectDecision,
+} from '../lib/disconnect-classification.ts';
 import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
 import type { StableAuthenticatedOpenSample } from './auth-loss-signal-resolver.ts';
@@ -36,13 +41,16 @@ import {
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
-const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
-  'pairing_required',
-  'serverside_logout_irreversible',
-]);
+// Logged out with no transport retry left: a confirmed removal, pairing, or an
+// unconfirmed 401 park. Only the first two are confirmed; see
+// NO_RESTART_UNCONFIRMED_401_CLASSES for the confidence split.
+const TERMINAL_AUTH_FAILURE_CLASSES = new Set<string>(SHARED_TERMINAL_AUTH_FAILURE_CLASSES);
+const UNCONFIRMED_401_AUTH_FAILURE_CLASSES = new Set<string>(NO_RESTART_UNCONFIRMED_401_CLASSES);
 const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
   'pairing_required',
   'serverside_logout_irreversible',
+  ...NO_RESTART_UNCONFIRMED_401_CLASSES,
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.ambiguous_401_reconnecting,
   'local_corruption_restorable',
   'local_corruption_unrestorable',
   'auth_bond_at_risk',
@@ -596,8 +604,12 @@ function classifyHealthSnapshot(
     accountJid === 'not connected' ||
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
-  const explicitAuthLossSignal =
-    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
+  const explicitAuthLossSignal = hasExplicitAuthLossSignal({
+    lastStatusCode,
+    lastDisconnectReason,
+    authFailureClass,
+    disconnectDecision: readHealthDisconnectDecision(connection),
+  });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
@@ -1368,24 +1380,36 @@ export class HealthPoller {
     const reconnectAttempts = nonNegativeIntegerValue(connection?.['reconnect_attempts']);
     const uptimeSeconds = this.readNumber(health['uptime_seconds']);
 
+    // A body that carries the transport's decision is authoritative: the raw
+    // 401 / loggedOut fields only decide for a legacy body without it.
+    const decisionReading = readHealthDisconnectDecision(connection);
+    const legacyBody = decisionReading.kind === 'absent';
     const explicit =
       TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass) ||
-      lastStatusCode === 401 ||
-      lastReason === 'loggedOut' ||
-      lastReason.includes('device_removed');
+      (legacyBody && (
+        lastStatusCode === 401 ||
+        lastReason === 'loggedOut' ||
+        lastReason.includes('device_removed')
+      ));
     if (explicit) {
       this.weakLoggedOutPolls.delete(name);
+      const unconfirmed401 = UNCONFIRMED_401_AUTH_FAILURE_CLASSES.has(authFailureClass);
       return {
         confirmed: true,
         weak: false,
         reason: 'explicit_auth_loss',
         failureCode: 'WA_AUTH_BOND_SERVER_REVOKED',
-        confidence: 'confirmed',
+        // The line is logged out either way; only a confirmed removal (or a
+        // legacy body that cannot say otherwise) earns 'confirmed'.
+        confidence: unconfirmed401 ? 'inferred' : 'confirmed',
         evidence: this.loggedOutEvidence(health, [
           `connected=${String(whatsapp?.['connected'])}`,
           `state=${String(connection?.['state'] ?? 'unknown')}`,
           `disconnect_class=${disconnectClass || 'unknown'}`,
           `auth_failure_class=${authFailureClass || 'unknown'}`,
+          `disconnect_classification=${
+            decisionReading.kind === 'classified' ? decisionReading.classification : decisionReading.kind
+          }`,
           `last_status_code=${String(lastStatusCode ?? 'unknown')}`,
           `last_disconnect_reason=${lastReason || 'unknown'}`,
           `reconnect_phase=${String(reconnectPhase ?? 'unknown')}`,
@@ -2175,7 +2199,9 @@ export class HealthPoller {
         `whatsoup@${name} appears logged out`,
         evidence,
         'critical',
-        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak, loggedOutFailureCode),
+        // An inferred (unconfirmed-401) logout reports a probable failure,
+        // not a confirmed server revocation.
+        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak || statusConfidence !== 'confirmed', loggedOutFailureCode),
       );
       this.trackActiveAlertSource(name, 'instance_logged_out', emitted);
       if (emitted) this.dropSupersededAlertSources(name, ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT);

@@ -1007,7 +1007,29 @@ journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOu
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
 
-**If logged out (credentials expired):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
+**A 401 is not proof the device was removed.** Read the authenticated health body's
+`whatsapp.connection.disconnect_decision` (the transport's own decision for the
+last close; `null` after a successful open or at process start) and
+`auth_failure_class`:
+
+| `disconnect_decision.classification` | `auth_failure_class` | HTTP | Meaning / action |
+|---|---|---|---|
+| `confirmed_device_removed` | `serverside_logout_irreversible` | 503 | The stream:error carried `conflict type="device_removed"`. The server removed the linked device; re-pair (§6.1) after owner approval. |
+| `ambiguous_401_reconnecting` | `auth_401_ambiguous_retrying` | 200 (degraded) | An inspected 401 without `device_removed`. The transport is spending its **one** bounded reconnect. Wait one poll. |
+| `ambiguous_401_parked` | `auth_401_ambiguous_parked` | 503 | A second ambiguous 401 after the bounded reconnect. The transport stopped; removal is **not** confirmed. Check the primary phone's Linked Devices before any re-pair. |
+| `uninspected_401_conservative_exit` | `auth_401_uninspected_exit` | 503 | A 401 whose stream:error node could not be inspected. Conservative exit; removal is **not** confirmed. Check Linked Devices first. |
+
+The parked and uninspected classes are no-restart for every watchdog (a restart
+would buy a fresh bounded retry, park again and loop). The decision is
+process-local: a restart starts with no decision and a fresh bounded retry. A
+health body without the `disconnect_decision` key comes from an older binary or a
+non-Baileys transport; consumers keep the old conservative rule for it (any
+401/`loggedOut` reads as `serverside_logout_irreversible`). The same fields are
+in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
+`conflict_inspected:`), whose title and `confidence` say whether removal was
+confirmed.
+
+**If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
 ```bash
