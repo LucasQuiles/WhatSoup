@@ -1,8 +1,8 @@
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import {
   inspectRestartSafety,
   runRestartSafetyPreflightCli,
@@ -228,9 +228,13 @@ describe('restart-safety preflight', () => {
     });
   });
 
-  it.each(['missing', 'wrong-instance', 'world-readable', 'symlink'])(
-    'blocks a missing database when the first-start marker is %s',
-    (variant) => {
+  // #3551: every variant runs under a restrictive and a conventional umask.
+  it.each(['missing', 'wrong-instance', 'world-readable', 'symlink']
+    .flatMap((variant) => [[variant, '077'], [variant, '022']]))(
+    'blocks a missing database when the first-start marker is %s (umask %s)',
+    (variant, umask) => {
+      const previousUmask = process.umask(umask);
+      onTestFinished(() => { process.umask(previousUmask); });
       const root = makeTempRoot();
       const dbPath = path.join(root, 'bot.db');
       const markerPath = path.join(root, '.initial-database-create-approved');
@@ -238,6 +242,8 @@ describe('restart-safety preflight', () => {
         writeFileSync(markerPath, 'another-bot\n', { mode: 0o600 });
       } else if (variant === 'world-readable') {
         writeFileSync(markerPath, 'new-bot\n', { mode: 0o644 });
+        chmodSync(markerPath, 0o644);
+        expect(lstatSync(markerPath).mode & 0o777).toBe(0o644);
       } else if (variant === 'symlink') {
         const target = path.join(root, 'marker-target');
         writeFileSync(target, 'new-bot\n', { mode: 0o600 });
