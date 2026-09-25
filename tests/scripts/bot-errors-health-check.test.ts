@@ -2753,7 +2753,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('type=passive healthPort=9100');
   });
 
-  it('fails explicit host profiles that omit active WhatSoup instance services', () => {
+  it('exempts the managed collector while failing undeclared active WhatSoup instance services', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const knownDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'known-bot');
     mkdirSync(knownDir, { recursive: true });
@@ -2770,7 +2770,7 @@ print(m.probe_health(9092))
         ...process.env,
         HOME: tmpRoot,
         BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet,com.whatsoup.bot-errors-j1-collector',
         BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
@@ -2802,6 +2802,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('FAIL profile_coverage_service personal: active service not declared in health profile');
     expect(event.evidence).toContain('service=com.whatsoup.personal config_exists=False');
     expect(event.evidence).not.toContain('profile_coverage_service whatsoup-fleet');
+    expect(event.evidence).not.toContain('profile_coverage_service bot-errors-j1-collector');
   });
 
   it('allows explicit host profiles to opt out of unprofiled config coverage during transitions', () => {
