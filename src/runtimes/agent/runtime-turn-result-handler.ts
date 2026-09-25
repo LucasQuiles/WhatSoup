@@ -742,7 +742,14 @@ if (runtimeContext) {
       queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
     }
   }
-  voice = { chatJid: chatJidForVoice, responseText, inboundContentType };
+  // #3613: the turn text still includes answers the client output policy
+  // withheld, so a voice reply of it would send withheld text as audio.
+  const clientOutputWithheld = queue.consumeClientOutputWithheld?.() ?? false;
+  voice = {
+    chatJid: chatJidForVoice,
+    responseText: clientOutputWithheld ? '' : responseText,
+    inboundContentType,
+  };
 }
 // Mirror the chat runtime: persist model_used + token counts on the
 // inbound message row so the messages table has the effective model for
@@ -1349,7 +1356,9 @@ if (runtimeContext) {
   // Capture voice reply context before flush (SP4)
   const chatJidForVoice = host.shared ? host.currentTurnChatJid : host.activeChatJid;
   const inboundContentType = host.currentTurnInboundContentType;
-  const responseText = wasSilentCompact ? '' : host.currentTurnAssistantText;
+  // #3613: never voice text the client output policy withheld (see scoped path).
+  const clientOutputWithheld = queue.consumeClientOutputWithheld?.() ?? false;
+  const responseText = wasSilentCompact || clientOutputWithheld ? '' : host.currentTurnAssistantText;
   // Reset per-turn voice state
   host.currentTurnInboundContentType = null;
   host.currentTurnAssistantText = '';

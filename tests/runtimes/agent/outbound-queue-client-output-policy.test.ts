@@ -164,7 +164,10 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     expect((warns[0]![0] as Record<string, unknown>)['violationCodes']).toEqual(['internal_artifact']);
   });
 
-  it('drops rejected streaming text and does not fire its commit callback', async () => {
+  it('drops rejected streaming text but still fires its commit callback', async () => {
+    // The runtime's commit bookkeeping means "the agent produced output this
+    // turn". Withheld output still counts: it blocks a fallback replay and the
+    // empty-turn fallback, as the policy decision satisfies the reply guarantee.
     const { queue, messenger } = makeQueue(registryFor(STRICT_POLICY));
     queue.setToolUpdateMode('minimal');
     const onCommit = vi.fn();
@@ -173,7 +176,85 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
-    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(policyCalls('warn')).toHaveLength(1);
+  });
+
+  it('counts a withheld answer in the turn evidence without creating an answer op', async () => {
+    const { queue } = makeQueue(registryFor(STRICT_POLICY));
+    queue.beginTurnEvidence('turn-withheld');
+
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    const evidence = await queue.flushTurnEvidence('turn-withheld');
+
+    expect(evidence.answerOpIds).toEqual([]);
+    expect(evidence.withheldAnswerCount).toBe(1);
+  });
+
+  it('reports zero withheld answers when the answer was admitted', async () => {
+    const { queue } = makeQueue(registryFor(STRICT_POLICY));
+    queue.beginTurnEvidence('turn-allowed');
+
+    queue.enqueueText('A plain answer.');
+    const evidence = await queue.flushTurnEvidence('turn-allowed');
+
+    expect(evidence.answerOpIds).toHaveLength(1);
+    expect(evidence.withheldAnswerCount).toBe(0);
+  });
+
+  it('exposes a withheld answer once through consumeClientOutputWithheld', async () => {
+    const { queue } = makeQueue(registryFor(STRICT_POLICY));
+
+    expect(queue.consumeClientOutputWithheld()).toBe(false);
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    await queue.flush();
+
+    expect(queue.consumeClientOutputWithheld()).toBe(true);
+    expect(queue.consumeClientOutputWithheld()).toBe(false);
+  });
+
+  it('clears the withheld flag when the turn is aborted', async () => {
+    const { queue } = makeQueue(registryFor(STRICT_POLICY));
+
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    await queue.flush();
+    queue.abortTurn();
+
+    expect(queue.consumeClientOutputWithheld()).toBe(false);
+  });
+
+  it('does not salvage deferred pre-tool narration after an answer was withheld', async () => {
+    const { queue, messenger } = makeQueue(registryFor(STRICT_POLICY));
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueStreamingText('Let me check the records first.');
+    queue.discardPreToolAssistantText();
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    queue.endTurn();
+    await queue.flush();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('lets a dropped placeholder take the rate-floor slot so repeated stalls log once', async () => {
+    const { queue, messenger } = makeQueue(registryFor({
+      ...STRICT_POLICY,
+      blockedTerms: [{ value: 'working', match: 'substring', caseSensitive: false }],
+    }));
+    const stall = {
+      type: 'operation_stalled' as const,
+      toolId: 'tool-1',
+      toolName: 'Bash',
+      category: 'running' as const,
+      elapsedMs: 65_000,
+    };
+
+    queue.enqueueProgressUpdate(stall, 'Bot');
+    queue.enqueueProgressUpdate({ ...stall, toolId: 'tool-2', elapsedMs: 70_000 }, 'Bot');
+    await vi.runAllTimersAsync();
+    await queue.flush();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
     expect(policyCalls('warn')).toHaveLength(1);
   });
 
@@ -210,6 +291,8 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const warns = policyCalls('warn');
     expect(warns).toHaveLength(1);
     expect((warns[0]![0] as Record<string, unknown>)['messageKind']).toBe('status');
+    // Only a withheld answer marks the turn; a status placeholder does not.
+    expect(queue.consumeClientOutputWithheld()).toBe(false);
   });
 
   it('sends an allowed message unchanged', async () => {

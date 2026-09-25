@@ -736,3 +736,77 @@ describe('global-path tool-activity capture-and-clear (2026-08-11 review)', () =
     expect(harness.host.singleTurnHadToolActivity).toBe(false);
   });
 });
+
+describe('client output policy withheld output never becomes a voice reply (#3613)', () => {
+  const WITHHELD_TEXT = 'answer text the client output policy withheld';
+
+  function completedHarness(withheld: boolean) {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as {
+      attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+    };
+    coordinator.attemptOutcomeForResult.mockImplementation(() => ({ kind: 'completed' as const }));
+    (harness.queue as unknown as { consumeClientOutputWithheld: () => boolean })
+      .consumeClientOutputWithheld = vi.fn(() => withheld);
+    return harness;
+  }
+
+  function voiceOf(harness: ReturnType<typeof makeHarness>): { responseText: string } | undefined {
+    const call = harness.finalizeRuntimeTurnContext.mock.calls[0] as unknown as
+      [{ voice?: { responseText: string } }] | undefined;
+    return call?.[0].voice;
+  }
+
+  it('scoped: drops the voice text when the queue withheld output this turn', () => {
+    const harness = completedHarness(true);
+    harness.host.perChatTurnText.set('15550190050', WITHHELD_TEXT);
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+    expect(voiceOf(harness)?.responseText ?? '').toBe('');
+  });
+
+  it('scoped: keeps the voice text when nothing was withheld', () => {
+    const harness = completedHarness(false);
+    harness.host.perChatTurnText.set('15550190050', WITHHELD_TEXT);
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(voiceOf(harness)?.responseText).toBe(WITHHELD_TEXT);
+  });
+
+  it('global: drops the voice text when the queue withheld output this turn', () => {
+    const harness = completedHarness(true);
+    harness.host.currentTurnAssistantText = WITHHELD_TEXT;
+
+    handleGlobalRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+    expect(voiceOf(harness)?.responseText ?? '').toBe('');
+  });
+});

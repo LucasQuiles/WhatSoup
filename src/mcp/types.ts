@@ -7,6 +7,7 @@ import {
   type ToolFailureCode,
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
+import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -315,6 +316,24 @@ export function toolError<T extends Record<string, unknown>>(
 
 export function errorResult(error: string) {
   return toolError({ error });
+}
+
+/**
+ * #3613: structured tool error for a send the client output policy withheld.
+ * It tells the agent the send did not happen and why, and never echoes the
+ * text. An evaluator failure reports no violation codes.
+ */
+export function clientOutputWithheldResult(
+  gate: Extract<ClientOutputGateResult, { admitted: false }>,
+) {
+  return toolError({
+    sent: false,
+    withheld: true,
+    reason: 'client_output_policy',
+    ...(gate.decision === 'rejected'
+      ? { violationCodes: [...gate.violationCodes] }
+      : { evaluationFailed: true }),
+  });
 }
 
 export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
