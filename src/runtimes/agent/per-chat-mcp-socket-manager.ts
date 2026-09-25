@@ -13,6 +13,7 @@ import { toConversationKey } from '../../core/conversation-key.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+import type { SessionTokenVerifier } from '../../mcp/caller-attribution.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
 
 interface PerChatMcpSocketManagerOptions {
@@ -21,6 +22,8 @@ interface PerChatMcpSocketManagerOptions {
   allowedRoot: string;
   conversationBound: boolean;
   resolveExecutingSession: (conversationIdentity: string) => ExecutingSessionContext;
+  /** #3421 step 1: verifies session tokens for caller attribution only. */
+  sessionTokens?: SessionTokenVerifier;
 }
 
 interface PerChatSocketResource {
@@ -127,6 +130,8 @@ export class PerChatMcpSocketManager {
           conversationKey: executing.conversationKey ?? toConversationKey(identity.value),
         };
       },
+      undefined,
+      { sessionTokens: this.options.sessionTokens },
     );
     let ownedSocket: { dev: number; ino: number } | undefined;
     let resource!: PerChatSocketResource;
