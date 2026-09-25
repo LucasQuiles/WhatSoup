@@ -167,6 +167,11 @@
       "reason": "passes env into the pure resolver at the call boundary (not a bypass)."
     },
     {
+      "file": "src/runtimes/agent/host-work-admission.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "single injectable host-env seam: the opt-in predicate and helper lookup default to it; tests inject their own env."
+    },
+    {
       "file": "src/runtimes/agent/provider-canary-proof.ts",
       "allowedUnmarkedSites": 6,
       "reason": "child-env forward for canary probe (explicit allow-list of ambient vars)."
