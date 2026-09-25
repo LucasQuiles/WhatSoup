@@ -6516,6 +6516,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 accum["pendingCount"] = 0
                 accum["firstPendingAt"] = 0
                 accum["lastDigestAt"] = current
+                changed = True
             except Exception as exc:
                 last_error = str(exc)
                 append_dispatch_log(paths, {

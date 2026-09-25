@@ -17,7 +17,7 @@
  * killed and reported), whereas a per-fixture `timeout` on a shared helper used by
  * dozens of unowned tests cannot be red-tested (git cannot be made to hang on demand).
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 
 import { SIGNAL } from '../src/lib/signals.ts';
@@ -44,7 +44,8 @@ export interface BoundedBatteryResult {
   /**
    * The exit code a caller should propagate: the child's own (or 128+signal when
    * signalled), 124 on timeout (GNU `timeout` convention), or 125 when INCONCLUSIVE
-   * (the group kill failed with a non-ESRCH error and the child could not be reaped).
+   * (the group kill failed with a non-ESRCH error and the child could not be proven
+   * reaped; an EPERM on a group with no live member counts as reaped, issue 3568).
    */
   wrappedExit: number;
   /** Non-fatal group-reap diagnostics (e.g. an EPERM that made the result inconclusive). */
@@ -70,6 +71,42 @@ export interface BoundedBatteryOptions {
    * cannot be arranged in-process (round-20 finding 4). Signature matches `process.kill`.
    */
   kill?: (pid: number, signal: NodeJS.Signals | number) => void;
+  /**
+   * Injected group-membership probe, consulted only when the group kill fails with EPERM
+   * (issue 3568). Defaults to `probeGroupMembership`, which reads `ps`.
+   */
+  probeGroup?: (pgid: number) => GroupMembership;
+}
+
+/**
+ * What a process group holds. `no-live-members` means every member is a zombie, or the group
+ * has none: nothing can still run. `unknown` means the probe could not tell, and is treated
+ * exactly like `live`.
+ */
+export type GroupMembership = 'live' | 'no-live-members' | 'unknown';
+
+/**
+ * Classify `ps -A -o pid=,pgid=,stat=` output for process group `pgid`. An empty or malformed
+ * listing is `unknown`, never `no-live-members`: a probe that cannot be read must not clear a
+ * group.
+ */
+export function classifyGroupMembership(psOutput: string, pgid: number): GroupMembership {
+  const lines = psOutput.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+  if (lines.length === 0) return 'unknown';
+  let live = false;
+  for (const line of lines) {
+    const [pidField, pgidField, stat] = line.split(/\s+/);
+    if (stat === undefined || !/^\d+$/.test(pidField ?? '') || !/^\d+$/.test(pgidField ?? '')) return 'unknown';
+    if (Number(pgidField) === pgid && !stat.startsWith('Z')) live = true;
+  }
+  return live ? 'live' : 'no-live-members';
+}
+
+/** Default membership probe: one bounded `ps` read. Any failure to read is `unknown`. */
+export function probeGroupMembership(pgid: number): GroupMembership {
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8', timeout: 5_000 });
+  if (ps.error !== undefined || ps.status !== 0) return 'unknown';
+  return classifyGroupMembership(ps.stdout, pgid);
 }
 
 /** How long to wait for the group to die after a kill before declaring the result inconclusive. */
@@ -81,8 +118,9 @@ const REAP_GRACE_MS = 5_000;
  * The ENTIRE group is SIGKILLed on the timeout AND reaped again on a NORMAL close, so a
  * grandchild that a naive runner would leave alive after the child's clean exit is swept
  * (round-18 finding 3). Group-kill errors are classified: `ESRCH` (nothing left to kill)
- * is success; any other error (e.g. `EPERM`) means the group could NOT be proven reaped —
- * the result is `inconclusive` (never a pass, never a code failure) after a bounded grace
+ * is success; `EPERM` is success only when the membership probe finds no live member
+ * (issue 3568); any other error, or an `EPERM` on a live or unprobeable group, means the
+ * group could NOT be proven reaped — the result is `inconclusive` (never a pass, never a code failure) after a bounded grace
  * timer, rather than an unbounded wait for a `close` that may never come. Signalled exits
  * map to `128 + signal`. A wrapper `SIGTERM`/`SIGINT` forwards a group kill so the detached
  * child does not outlive its parent.
@@ -109,6 +147,7 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     // caller must treat as inconclusive rather than silently swallow (the round-17 form
     // swallowed every error, turning an EPERM into an unbounded wait).
     const killSignal = options.kill ?? process.kill;
+    const probeGroup = options.probeGroup ?? probeGroupMembership;
     const killGroup = (): boolean => {
       if (pid === undefined) return true;
       try {
@@ -117,6 +156,19 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ESRCH') return true; // nothing left in the group — success
+        if (code === 'EPERM') {
+          // Issue 3568: after a SIGKILL, macOS can answer kill(-pgid) with EPERM while the
+          // group's members have exited but are not yet reaped. Zombies cannot run, so a group
+          // with no live member counts as reaped. A live member, or a probe that cannot tell,
+          // stays a reap failure.
+          const membership = probeGroup(pid);
+          if (membership === 'no-live-members') {
+            reapError = 'group kill failed: EPERM; the group has no live member (zombies only or empty), treated as reaped';
+            return true;
+          }
+          reapError = `group kill failed: EPERM; group membership probe: ${membership}`;
+          return false;
+        }
         reapError = `group kill failed: ${code ?? (err instanceof Error ? err.message : String(err))}`;
         return false;
       }
