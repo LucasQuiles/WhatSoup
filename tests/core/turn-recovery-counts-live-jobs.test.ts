@@ -106,9 +106,13 @@ describe('turn-recovery corrupt-link and echo-conflict counts cover live jobs on
     corruptTerminalScope(t.recordId);
 
     expect(jobState(t.jobId)).toEqual({ state: 'completed' });
+    // Every input to turn_recovery_degraded is zero, so the cause stays clear.
     expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
       outstanding: 0,
+      exhausted: 0,
+      openRecoveries: 0,
       corruptLinks: 0,
+      echoConflicts: 0,
       orphanTransfers: 0,
     });
   });
@@ -157,8 +161,12 @@ describe('turn-recovery corrupt-link and echo-conflict counts cover live jobs on
       state: 'completed',
       echo_conflict_reason: 'completed_job_source_conflict',
     });
+    // Every input to turn_recovery_degraded is zero, so the cause stays clear.
     expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
       outstanding: 0,
+      exhausted: 0,
+      openRecoveries: 0,
+      corruptLinks: 0,
       echoConflicts: 0,
     });
   });
