@@ -975,7 +975,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
       perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
       perChatInboundSeqQueue: Map<string, number[]>;
       perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
-      perChatRuntimeTurnCompletions: Map<string, { context: RuntimeTurnContext; promise: Promise<void> }>;
+      perChatRuntimeTurnCompletions: Map<string, { context: RuntimeTurnContext; promise: Promise<void>; resolve(): void }>;
       perChatTurnQueues: Map<string, TurnQueue>;
       chatQueues: Map<string, unknown>;
       pendingTurnText: Map<string, string>;
