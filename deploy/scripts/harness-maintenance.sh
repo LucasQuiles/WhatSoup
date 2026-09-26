@@ -120,6 +120,8 @@ SERVICE_MANAGER="${WHATSOUP_HARNESS_SERVICE_MANAGER:-$SERVICE_MANAGER_DEFAULT}"
 # shellcheck source=deploy/lib/bounded-exec.sh
 . "$REPO_ROOT/deploy/lib/bounded-exec.sh"
 LOOKUP_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_LOOKUP_TIMEOUT_SECS:-120}"
+INSTALL_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_INSTALL_TIMEOUT_SECS:-600}"
+VERSION_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_VERSION_TIMEOUT_SECS:-30}"
 STATE_WRITTEN=0
 
 log() {
@@ -944,16 +946,135 @@ NODE
     record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
     return 0
   fi
-  "$CLAUDE_NATIVE_LAUNCHER" install "$target" || true
-  after="$(claude_classify "$CLAUDE_NATIVE_LAUNCHER" || true)"
-  after="${after#*$'\t'}"
-  if [ "$after" != "$target" ]; then
-    record_event "claude" "rollback" "shared launcher did not point at $target after install" "$before" "$after" "$target"
-    send_alert "claude-update" "critical" "Agent CLI install failed" "Install of $target left the shared launcher at '${after:-none}'."
+  claude_install_transaction "$before" "$target"
+}
+
+# claude_fs <facts|cas> ...: filesystem facts and the link swap, done in node so each is a single
+# syscall-level operation rather than a chain of shell utilities.
+#   facts <path>                          -> "<readlink>\037<realpath>\037<sha256 of realpath>"
+#                                            (fields empty when unavailable)
+#   cas <link> <expected> <replacement>   -> exit 0 swapped and read back; 3 the link no longer
+#                                            points at <expected>; 4 read-back mismatch
+claude_fs() {
+  "$REPO_NODE_BIN" - "$@" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const [mode, ...args] = process.argv.slice(2);
+const safe = (f) => { try { return f(); } catch { return ''; } };
+if (mode === 'facts') {
+  const [file] = args;
+  const link = safe(() => fs.readlinkSync(file));
+  const real = safe(() => fs.realpathSync(file));
+  const digest = real && safe(() => (fs.statSync(real).isFile()
+    ? crypto.createHash('sha256').update(fs.readFileSync(real)).digest('hex') : ''));
+  process.stdout.write([link, real, digest].join('\x1f'));
+} else if (mode === 'cas') {
+  const [link, expected, replacement] = args;
+  if (safe(() => fs.readlinkSync(link)) !== expected) process.exit(3);
+  const tmp = path.join(path.dirname(link), `.${path.basename(link)}.rollback.${process.pid}`);
+  fs.symlinkSync(replacement, tmp);
+  if (safe(() => fs.readlinkSync(link)) !== expected) { fs.unlinkSync(tmp); process.exit(3); }
+  fs.renameSync(tmp, link);
+  process.exit(safe(() => fs.readlinkSync(link)) === replacement ? 0 : 4);
+} else {
+  process.exit(2);
+}
+NODE
+}
+
+# claude_postcheck <target>: after an install, every instance must again resolve the shared
+# launcher, the launcher must classify as native at <target>, and a bounded --version of that
+# verified native binary must exit 0 and report <target>. Prints a reason on failure.
+claude_postcheck() {
+  local target="$1" policy verdict kind version message facts real out rc=0
+  CLAUDE_CONSUMERS_FILE="$(mktemp "$TMP_DIR/claude-consumers-post.XXXXXX")"
+  if ! claude_service_inventory >/dev/null; then
+    echo "service inventory unavailable after install"
     return 1
   fi
-  record_event "claude" "updated" "installed the cooldown-eligible release through the shared launcher" "$before" "$after" "$target"
-  send_alert "claude-update" "info" "Agent CLI updated" "Agent CLI $before -> $after"
+  policy="$(claude_consumer_policy)"
+  IFS=$'\037' read -r verdict kind version message <<< "$policy"
+  if [ "$verdict" != proceed ] || [ "$kind" != native ] || [ "$version" != "$target" ]; then
+    echo "instances do not resolve a native $target through the launcher: $verdict $kind ${version:-none}: $message"
+    return 1
+  fi
+  facts="$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")"
+  IFS=$'\037' read -r _ real _ <<< "$facts"
+  if [ -z "$real" ]; then
+    echo "launcher does not resolve after install"
+    return 1
+  fi
+  whatsoup_run_bounded "$VERSION_TIMEOUT_SECS" "$real" --version >"$TMP_DIR/claude-version.out" 2>/dev/null </dev/null || rc=$?
+  out="$(parse_version < "$TMP_DIR/claude-version.out" || true)"
+  if [ "$rc" -ne 0 ] || [ "$out" != "$target" ]; then
+    echo "--version of $real returned rc=$rc version=${out:-none}"
+    return 1
+  fi
+}
+
+# claude_install_transaction <before> <target>
+#   0  installed and postchecked
+#   1  install failed and the previous binary was restored and verified
+#   2  the previous binary could not be verified before install (nothing was run)
+#   3  install failed and the rollback could not be verified: reconcile by hand
+claude_install_transaction() {
+  local before="$1" target="$2" facts prev_link prev_real prev_digest rc=0
+  local post_link post_real post_digest failure check rollback_rc
+  facts="$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")"
+  IFS=$'\037' read -r prev_link prev_real prev_digest <<< "$facts"
+  if [ -z "$prev_link" ] || [ -z "$prev_real" ] || [ -z "$prev_digest" ] || [ "${prev_real##*/}" != "$before" ]; then
+    record_event "claude" "unknown" "previous binary could not be verified before install (link=${prev_link:-none})" "$before" "" "$target"
+    send_alert "claude-update" "warning" "Agent CLI install not attempted" "The retained previous binary could not be verified, so no install was run."
+    return 2
+  fi
+
+  whatsoup_run_bounded "$INSTALL_TIMEOUT_SECS" "$prev_real" install "$target" \
+    >"$TMP_DIR/claude-install.log" 2>&1 </dev/null || rc=$?
+  record_event "claude" "install-attempted" "installer rc=$rc via $prev_real (sha256 $prev_digest)" "$before" "" "$target"
+
+  facts="$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")"
+  IFS=$'\037' read -r post_link post_real post_digest <<< "$facts"
+  failure=""
+  if [ "$rc" -ne 0 ]; then
+    failure="installer exited rc=$rc"
+  elif ! check="$(claude_postcheck "$target")"; then
+    failure="postcheck failed: $check"
+  fi
+  if [ -z "$failure" ]; then
+    record_event "claude" "updated" "installed $target at $post_real (sha256 $post_digest) and postchecked every instance" "$before" "$target" "$target"
+    send_alert "claude-update" "info" "Agent CLI updated" "Agent CLI $before -> $target"
+    return 0
+  fi
+
+  record_event "claude" "rollback-attempted" "$failure; restoring $prev_link" "$before" "" "$target"
+  # Restoration uses only the retained previous binary: it must still be the same file.
+  facts="$(claude_fs facts "$prev_real")"
+  IFS=$'\037' read -r _ _ check <<< "$facts"
+  if [ "$check" != "$prev_digest" ]; then
+    record_event "claude" "rollback-failed" "previous binary $prev_real is missing or changed (sha256 ${check:-none}); not reinstalled" "$before" "" "$target"
+    send_alert "claude-update" "critical" "Agent CLI rollback failed" "$failure. The previous binary is missing or changed, so the launcher was left as found. Reconcile by hand."
+    return 3
+  fi
+  if [ "$post_link" != "$prev_link" ]; then
+    rollback_rc=0
+    claude_fs cas "$CLAUDE_NATIVE_LAUNCHER" "$post_link" "$prev_link" || rollback_rc=$?
+    if [ "$rollback_rc" -ne 0 ]; then
+      record_event "claude" "rollback-failed" "launcher moved since the install (swap rc=$rollback_rc); left as found" "$before" "" "$target"
+      send_alert "claude-update" "critical" "Agent CLI rollback failed" "$failure. The launcher changed after the install, so it was not swapped back. Reconcile by hand."
+      return 3
+    fi
+  fi
+  facts="$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")"
+  IFS=$'\037' read -r post_link post_real post_digest <<< "$facts"
+  if [ "$post_link" != "$prev_link" ] || [ "$post_digest" != "$prev_digest" ]; then
+    record_event "claude" "rollback-failed" "launcher does not read back as the previous binary" "$before" "" "$target"
+    send_alert "claude-update" "critical" "Agent CLI rollback failed" "$failure. The launcher did not read back as the previous binary. Reconcile by hand."
+    return 3
+  fi
+  record_event "claude" "rollback-verified" "launcher restored to $prev_link (sha256 $prev_digest) after: $failure" "$before" "$before" "$target"
+  send_alert "claude-update" "critical" "Agent CLI install rolled back" "$failure. The previous binary was restored and verified."
+  return 1
 }
 
 update_codex() {

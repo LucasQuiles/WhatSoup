@@ -356,14 +356,15 @@ describe('per-instance service resolver (launchd)', () => {
     plainInstance(h, 'beta');
     const r = run(h);
     const consumer = events(r, 'claude-consumer');
-    expect(consumer.map((e) => e.status)).toEqual(['resolved', 'resolved']);
-    for (const e of consumer) expect(e.message).toContain(`${h.launcher} (native ${OLD})`);
+    // Two rounds: the inventory before the install and the postcheck re-resolution after it.
+    expect(consumer.map((e) => e.status)).toEqual(['resolved', 'resolved', 'resolved', 'resolved']);
+    for (const e of consumer.slice(0, 2)) expect(e.message).toContain(`${h.launcher} (native ${OLD})`);
+    for (const e of consumer.slice(2)) expect(e.message).toContain(`${h.launcher} (native ${TARGET})`);
     expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'updated', before: OLD, target: TARGET });
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, TARGET));
     const calls = fixtureCalls(h);
     const firstInstall = calls.findIndex((line) => line.includes(`install ${TARGET}`));
-    expect(firstInstall).toBeGreaterThanOrEqual(0);
-    expect(calls.slice(0, firstInstall)).toEqual([]);
+    expect(firstInstall).toBe(0);
   }, T);
 
   it.runIf(onDarwin)('records a com.whatsoup plist that is not a generated instance instead of dropping it silently', () => {
@@ -373,7 +374,7 @@ describe('per-instance service resolver (launchd)', () => {
     const r = run(h);
     const consumer = events(r, 'claude-consumer');
     expect(consumer.find((e) => e.status === 'skipped')?.message).toContain('com.whatsoup.helper.plist');
-    expect(consumer.filter((e) => e.status === 'resolved')).toHaveLength(1);
+    expect(consumer.filter((e) => e.status === 'resolved' && e.message.includes(`(native ${OLD})`))).toHaveLength(1);
   }, T);
 });
 
@@ -537,5 +538,93 @@ describe('bounded step runner and final state', () => {
     const alerts = readFileSync(h.alertLog, 'utf8').split('\n');
     expect(alerts.some((line) => line.includes('harness-maintenance:job') && line.includes('state write failed'))).toBe(true);
     expect(existsSync(path.join(h.home, 'elsewhere.json'))).toBe(false);
+  }, T);
+});
+
+function statuses(r: RunResult): string[] {
+  return events(r, 'claude').map((e) => e.status);
+}
+
+function installCalls(h: Harness): string[] {
+  return fixtureCalls(h).filter((line) => / install /.test(line));
+}
+
+describe.runIf(onDarwin)('install and rollback transaction', () => {
+  it('installs through the verified previous binary with an explicit target and postchecks the result', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    const r = run(h);
+    expect(r.status).toBe(0);
+    expect(statuses(r)).toEqual(['install-attempted', 'updated']);
+    expect(events(r, 'claude')[0]!.message).toContain('rc=0');
+    expect(events(r, 'claude')[1]!.message).toMatch(/sha256 [0-9a-f]{64}/);
+    // The installer ran from the verified native binary, then only the new binary answered --version.
+    expect(fixtureCalls(h)).toEqual([`${OLD} install ${TARGET}`, `${TARGET} --version`]);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, TARGET));
+  }, T);
+
+  it('rolls back nothing when a failed installer left the link alone, and still exits 1', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'fail');
+    const r = run(h);
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
+    expect(events(r, 'claude')[0]!.message).toContain('rc=1');
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+    expect(r.state?.status).toBe('degraded');
+    expect(r.status).toBe(1);
+  }, T);
+
+  it('restores the recorded link when the installer switched it and then failed', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'partial');
+    const r = run(h);
+    // The requested version is present, but a failed installer is still a failed attempt.
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+    expect(r.status).toBe(1);
+  }, T);
+
+  it('reports rollback-failed with exit 3 when the previous binary was pruned, and never reinstalls it', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'prune');
+    const r = run(h);
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-failed']);
+    expect(events(r, 'claude').at(-1)!.message).toContain('previous binary');
+    expect(installCalls(h)).toEqual([`${OLD} install ${TARGET}`]);
+    expect(r.state?.status).toBe('degraded');
+    expect(r.status).toBe(3);
+  }, T);
+
+  it('rolls back when the installer exits 0 without switching the link', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'noop');
+    const r = run(h);
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
+    expect(r.status).toBe(1);
+  }, T);
+
+  it('fails the postcheck when --version prints the target but exits nonzero', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    const r = run(h, [], { HM_FIXTURE_VERSION_RC: '1' });
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+    expect(r.status).toBe(1);
+  }, T);
+
+  it('bounds a hung installer and rolls back', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'hang');
+    const started = Date.now();
+    const r = run(h, [], { WHATSOUP_HARNESS_MAINTENANCE_INSTALL_TIMEOUT_SECS: '2' });
+    expect(Date.now() - started).toBeLessThan(40_000);
+    expect(events(r, 'claude')[0]!.message).toContain('rc=124');
+    expect(statuses(r).at(-1)).toBe('rollback-verified');
+    expect(r.status).toBe(1);
   }, T);
 });
