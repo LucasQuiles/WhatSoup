@@ -148,13 +148,16 @@ Each harness defines `current → update → smoke → rollback`:
 
 | Harness | Update | Smoke | Rollback |
 |---------|--------|-------|----------|
-| claude | `$HOME/.local/bin/claude install <target>`, where `<target>` is the newest release past the npm publish-age cooldown (`npm.cooldown_minutes`), never downgrading, and only when that path is the native installer's symlink into `~/.local/share/claude/versions/` (a wrapper, npm or other layout is reported as `unmanaged-layout` and left alone) | `$HOME/.local/bin/claude --version` parses and equals `<target>` (the binary the bot resolves first, per `deploy/lib/runtime-path.sh`) | `$HOME/.local/bin/claude install <prev>` |
+| claude | `<prev binary> install <target>`, run from the verified file `$HOME/.local/bin/claude` resolved to, where `<target>` is the newest release past the npm publish-age cooldown (`npm.cooldown_minutes`), never downgrading, and only when every service instance resolves that launcher and it is the native installer's symlink into `~/.local/share/claude/versions/` (a pin, unknown or missing instance holds; a wrapper, npm or other layout is reported as `unmanaged-layout` and left alone) | postcheck: every instance re-resolves the launcher, it classifies as native at `<target>`, and a bounded `--version` of that binary exits 0 reporting `<target>` | compare-and-swap the launcher link back to the verified previous binary; never a network reinstall (a missing or changed previous binary is `rollback-failed`, exit 3) |
 | codex | gated npm install to NVM node 24.13.0 global | `codex --version` via direct NVM binary (`CODEX_NO_DEFAULTS=1`) | `npm i -g @openai/codex@<prev> --ignore-scripts` |
 | opencode | `opencode upgrade` | `opencode --version` parses | `opencode upgrade <prev>` |
 
 The pre-update version is captured first. If the smoke check fails, the
 rollback runs and the failure is alerted. A long-running session keeps its
-loaded binary; only new spawns pick up the change.
+loaded binary; only new spawns pick up the change. The agent CLI can also
+update itself outside this job, so its cooldown is advisory; the
+`claude-update-path` probe observes that (see
+`docs/runbooks/host-maintenance.md`) and enforces nothing.
 
 ### Step 3 — Tier 2 discovery probes
 
@@ -172,6 +175,11 @@ findings. All are detect-only.
 
 The probe set and the apt curated list live in `deploy/managed-components.json`
 so the surface is extensible without editing the script.
+
+Under `--check` the `claude-plugins` and `mcp-servers` probes are not run
+(starting the agent CLI can refresh MCP authentication), and `local-bin` and
+`runtime` report paths without executing anything; the full boundary is in
+`docs/runbooks/host-maintenance.md`.
 
 ### Step 4 — Scheduling
 
