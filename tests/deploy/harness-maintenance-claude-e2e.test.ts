@@ -56,6 +56,11 @@ const FIXTURE_BEHAVIOUR = [
   'printf \'%s %s\\n\' "${self##*/}" "$*" >> "$HM_FIXTURE_LOG"',
   'case "$1" in',
   '  --version)',
+  '    if [ -f "$HM_FIXTURE_MODE" ] && [ "$(cat "$HM_FIXTURE_MODE")" = interlope ]; then',
+  '      # Another writer moves the launcher while the postcheck runs.',
+  '      cp "$self" "$HOME/.local/share/claude/versions/9.9.9" && ln -sfn "$HOME/.local/share/claude/versions/9.9.9" "$HOME/.local/bin/claude"',
+  '      exit 1',
+  '    fi',
   '    printf \'%s (agent CLI)\\n\' "${HM_FIXTURE_VERSION_TEXT:-${self##*/}}"',
   '    exit "${HM_FIXTURE_VERSION_RC:-0}" ;;',
   '  install)',
@@ -319,6 +324,16 @@ describe('harness-maintenance.sh agent CLI update, end to end', () => {
 const T = RUN_TIMEOUT_MS + 10_000;
 const onDarwin = process.platform === 'darwin';
 
+/**
+ * A plain instance under the systemd fake, so manager-independent behaviour runs on every
+ * platform: manager PATH without any claude, the pinned node, no prepend.
+ */
+function portableInstance(h: Harness, name: string): void {
+  writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+  systemdUnit(h, name, [`Environment=WHATSOUP_NODE=${process.execPath}`]);
+  h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+}
+
 function systemdUnit(h: Harness, name: string, show: string[]): void {
   const units = path.join(h.systemdDir, 'units');
   const prior = existsSync(units) ? readFileSync(units, 'utf8') : '';
@@ -492,18 +507,31 @@ describe('bounded step runner and final state', () => {
     expect(fixtureCalls(h)).toEqual([]);
   }, T);
 
-  it.runIf(onDarwin)('ends degraded with exit 1 when an instance binary is unknown', () => {
+  it('ends degraded with exit 1 when an instance binary is unknown', () => {
     const h = makeHarness();
-    writePlist(h, 'alpha', { WHATSOUP_NODE: process.execPath });
-    const r = run(h);
+    // No PATH in the unit and none in the manager environment.
+    systemdUnit(h, 'alpha', [`Environment=WHATSOUP_NODE=${process.execPath}`]);
+    const r = run(h, [], { WHATSOUP_HARNESS_SERVICE_MANAGER: 'systemd' });
     expect(events(r, 'claude').at(-1)?.status).toBe('unknown');
     expect(r.state?.status).toBe('degraded');
     expect(r.status).toBe(1);
   }, T);
 
-  it.runIf(onDarwin)('records a rejected update plan (exit 2) as held and keeps the job running', () => {
+  it('writes a degraded final state and exits 1 when the service binary is missing', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
+    rmSync(h.launcher);
+    const r = run(h);
+    expect(events(r, 'claude-consumer')[0]!.status).toBe('missing');
+    expect(events(r, 'claude').at(-1)?.status).toBe('missing');
+    expect(r.state?.status).toBe('degraded');
+    expect(r.status).toBe(1);
+    expect(fixtureCalls(h)).toEqual([]);
+  }, T);
+
+  it('records a rejected update plan (exit 2) as held and keeps the job running', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
     const manifest = customManifest(h, (m) => { m.npm.cooldown_minutes = 10080.5; });
     const r = run(h, [], { WHATSOUP_HARNESS_MAINTENANCE_MANIFEST: manifest });
     const last = events(r, 'claude').at(-1)!;
@@ -514,9 +542,9 @@ describe('bounded step runner and final state', () => {
     expect(fixtureCalls(h)).toEqual([]);
   }, T);
 
-  it.runIf(onDarwin)('bounds the publish-time lookup and holds without installing when it times out', () => {
+  it('bounds the publish-time lookup and holds without installing when it times out', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     const started = Date.now();
     const r = run(h, [], { HM_NPM_HANG: '1', WHATSOUP_HARNESS_MAINTENANCE_LOOKUP_TIMEOUT_SECS: '2' });
     expect(Date.now() - started).toBeLessThan(25_000);
@@ -549,10 +577,10 @@ function installCalls(h: Harness): string[] {
   return fixtureCalls(h).filter((line) => / install /.test(line));
 }
 
-describe.runIf(onDarwin)('install and rollback transaction', () => {
+describe('install and rollback transaction', () => {
   it('installs through the verified previous binary with an explicit target and postchecks the result', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     const r = run(h);
     expect(r.status).toBe(0);
     expect(statuses(r)).toEqual(['install-attempted', 'updated']);
@@ -565,7 +593,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('rolls back nothing when a failed installer left the link alone, and still exits 1', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     writeFileSync(h.modeFile, 'fail');
     const r = run(h);
     expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
@@ -577,7 +605,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('restores the recorded link when the installer switched it and then failed', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     writeFileSync(h.modeFile, 'partial');
     const r = run(h);
     // The requested version is present, but a failed installer is still a failed attempt.
@@ -588,7 +616,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('reports rollback-failed with exit 3 when the previous binary was pruned, and never reinstalls it', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     writeFileSync(h.modeFile, 'prune');
     const r = run(h);
     expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-failed']);
@@ -600,7 +628,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('rolls back when the installer exits 0 without switching the link', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     writeFileSync(h.modeFile, 'noop');
     const r = run(h);
     expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
@@ -609,7 +637,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('fails the postcheck when --version prints the target but exits nonzero', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     const r = run(h, [], { HM_FIXTURE_VERSION_RC: '1' });
     expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-verified']);
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
@@ -618,7 +646,7 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
 
   it('bounds a hung installer and rolls back', () => {
     const h = makeHarness();
-    plainInstance(h, 'alpha');
+    portableInstance(h, 'alpha');
     writeFileSync(h.modeFile, 'hang');
     const started = Date.now();
     const r = run(h, [], { WHATSOUP_HARNESS_MAINTENANCE_INSTALL_TIMEOUT_SECS: '2' });
@@ -626,5 +654,17 @@ describe.runIf(onDarwin)('install and rollback transaction', () => {
     expect(events(r, 'claude')[0]!.message).toContain('rc=124');
     expect(statuses(r).at(-1)).toBe('rollback-verified');
     expect(r.status).toBe(1);
+  }, T);
+
+  it('refuses to swap back a launcher that moved after the install, and exits 3', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    writeFileSync(h.modeFile, 'interlope');
+    const r = run(h);
+    expect(statuses(r)).toEqual(['install-attempted', 'rollback-attempted', 'rollback-failed']);
+    expect(events(r, 'claude').at(-1)!.message).toContain('moved since the install');
+    // Left where the other writer put it, not overwritten.
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, '9.9.9'));
+    expect(r.status).toBe(3);
   }, T);
 });
