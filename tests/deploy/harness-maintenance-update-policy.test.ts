@@ -125,8 +125,9 @@ describe('out-of-band launcher movement', () => {
     const endings: Array<[string, [string, string], number, string]> = [
       ['the run exits before its steps finish',
         ['  whatsoup_run_step "$results" manifest guard_manifest\n', '  exit 7\n'], 7, 'failed'],
-      ['a command outside any step fails',
-        ['  whatsoup_run_step "$results" manifest guard_manifest\n', '  false\n  whatsoup_run_step "$results" manifest guard_manifest\n'], 1, 'failed'],
+      // At the top level, where the error trap applies (functions do not inherit it).
+      ['a top-level command fails, through the error trap',
+        ['  exit "$rc"\n}\n\nmain\n', '  exit "$rc"\n}\n\nfalse\nmain\n'], 1, 'failed'],
       ['the baseline step itself fails',
         ['record_claude_launcher_baseline() {\n', 'record_claude_launcher_baseline() {\n  false\n'], 1, 'degraded'],
     ];
@@ -140,6 +141,9 @@ describe('out-of-band launcher movement', () => {
         const ended = run(h, [], {}, faultScript(h, [edit]));
         expect(ended.status).toBe(rc);
         expect(ended.state?.status).toBe(status);
+        if (label.includes('error trap')) {
+          expect(events(ended, 'harness-maintenance').map((e) => e.message)).toContain('unexpected failure rc=1');
+        }
         const carried = events(ended, 'claude-launcher');
         expect(carried.find((e) => e.status === 'baseline')?.after).toBe(kept.find((e) => e.status === 'baseline')!.after);
         expect(carried.find((e) => e.status === 'alert-history')?.after).toContain(path.join(h.versions, '2.1.281'));
