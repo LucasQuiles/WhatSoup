@@ -37,6 +37,7 @@ import {
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import { TerminalRecordInboundCloser } from './terminal-record-inbound-close.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 import {
@@ -571,6 +572,12 @@ export interface StuckInboundSweepResult {
    * claimed owning job driven to `exhausted` so the scope becomes admissible.
    */
   reclaimedRecoveryOwned: number;
+  /**
+   * Report-only: open inbound rows behind their own FINAL terminal record
+   * that `turn-recovery-operator close-inbound` could close (see
+   * terminal-record-inbound-close.ts). The sweep never closes them.
+   */
+  terminalRecordCloseCandidates: number;
 }
 
 export interface OutboundOpParams {
@@ -695,6 +702,7 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
   /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
@@ -1394,6 +1402,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.terminalRecordInboundCloser = new TerminalRecordInboundCloser(db.raw);
     this.capabilityObligations = new CapabilityObligationStore(db);
     this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
@@ -3308,13 +3317,16 @@ export class DurabilityEngine {
         job_id: number;
         job_state: string;
       }>;
+      const terminalRecordCloseCandidates = this.reportTerminalRecordCloseCandidates();
       if (
         echoed.length === 0 &&
         turnDone.length === 0 &&
         staleOpen.length === 0 &&
         recoveryOwned.length === 0
       ) {
-        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
+        return {
+          completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned, terminalRecordCloseCandidates,
+        };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -3379,6 +3391,7 @@ export class DurabilityEngine {
         completedTurnDone,
         failedStale,
         reclaimedRecoveryOwned,
+        terminalRecordCloseCandidates,
       };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
@@ -3397,6 +3410,23 @@ export class DurabilityEngine {
       }
       return result;
     });
+  }
+
+  /**
+   * Report-only: open inbound rows behind a final terminal record that an
+   * operator could close with `turn-recovery-operator close-inbound`. Each
+   * close is an operator decision, so the sweep writes nothing here — not the
+   * row, and no recovery evidence.
+   */
+  private reportTerminalRecordCloseCandidates(): number {
+    const seqs = this.terminalRecordInboundCloser.eligibleCandidates();
+    if (seqs.length > 0) {
+      log.warn(
+        { count: seqs.length, inboundSeqs: seqs },
+        'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
+      );
+    }
+    return seqs.length;
   }
 
   getHealthStats(): {

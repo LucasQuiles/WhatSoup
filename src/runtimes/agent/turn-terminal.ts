@@ -3,12 +3,9 @@ import {
   PROVIDER_FAILURE_KINDS,
   type ProviderFailureKind,
 } from './failure-taxonomy.ts';
-import {
-  admissionRejectInboundFailureClass,
-  type AdmissionRejectClass,
-} from '../../core/inbound-failure-class.ts';
+import type { AdmissionRejectClass } from '../../core/inbound-failure-class.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from '../../core/turn-recovery-contract.ts';
-import { CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON } from '../../core/turn-finalization-contract.ts';
+import { deriveTerminalInboundMutation } from '../../core/turn-finalization-contract.ts';
 import type {
   FinalizeTurnTerminalParams,
   TerminalInboundMutation,
@@ -160,6 +157,14 @@ export function shouldDisarmReplyGuarantee(
     result.inboundDisposition === 'finalized_no_reply_policy';
 }
 
+// admission_rejected carries its distinct subclass on the durable
+// attempt_failure_class column (#1750); absent stays null (legacy).
+function persistedAttemptFailureClass(outcome: AttemptOutcome): string | null {
+  if (outcome.kind === 'failed') return outcome.class;
+  if (outcome.kind === 'admission_rejected') return outcome.class ?? null;
+  return null;
+}
+
 export function toTurnTerminalPersistence(
   result: TurnTerminalResult,
   recoveryOwner?: RecoveryOwnerIdentity,
@@ -212,13 +217,7 @@ export function toTurnTerminalPersistence(
     managerId: result.identity.managerId,
     generation: result.identity.generation,
     attemptKind: result.attemptOutcome.kind,
-    // admission_rejected carries its distinct subclass on the durable
-    // attempt_failure_class column (#1750); absent stays null (legacy).
-    attemptFailureClass: result.attemptOutcome.kind === 'failed'
-      ? result.attemptOutcome.class
-      : result.attemptOutcome.kind === 'admission_rejected'
-        ? result.attemptOutcome.class ?? null
-        : null,
+    attemptFailureClass: persistedAttemptFailureClass(result.attemptOutcome),
     inboundDisposition: result.inboundDisposition,
     // not_sent collapses to the same persisted shape as 'none': the core
     // contract's failed_terminal invariant requires deliveryKind='none', and
@@ -247,16 +246,12 @@ export type TurnFinalizationPersistence = Pick<
 >;
 
 function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation | undefined {
-  const seq = result.identity.inboundSeq;
-
   switch (result.inboundDisposition) {
     case 'finalized_replied':
       if (result.deliveryEvidence.kind !== 'echoed') {
         throw new Error('finalized_replied requires echoed delivery evidence');
       }
-      return seq === null
-        ? undefined
-        : { kind: 'complete', seq, terminalReason: 'response_echoed' };
+      break;
     case 'finalized_no_reply_policy':
       if (
         result.attemptOutcome.kind !== 'suppressed_by_policy'
@@ -264,39 +259,25 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
       ) {
         throw new Error('finalized_no_reply_policy requires an explicit policy suppression');
       }
-      if (seq === null) return undefined;
-      return {
-        kind: 'complete',
-        seq,
-        terminalReason: result.attemptOutcome.kind === 'withheld_by_policy'
-          ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
-          : 'no_reply_policy',
-      };
-    case 'failed_terminal': {
+      break;
+    case 'failed_terminal':
       if (
         result.attemptOutcome.kind !== 'failed' &&
         result.attemptOutcome.kind !== 'admission_rejected'
       ) {
         throw new Error('failed_terminal requires a failed or admission-rejected attempt');
       }
-      if (seq === null) return undefined;
-      const failureClass = result.attemptOutcome.kind === 'admission_rejected'
-        ? admissionRejectInboundFailureClass(result.attemptOutcome.class)
-        : result.attemptOutcome.class === 'crash'
-          ? 'session_crash'
-          : result.attemptOutcome.class === 'operator_cancelled'
-            ? 'operator_cancelled'
-          : result.attemptOutcome.class === 'processor_throw'
-            ? 'processor_throw'
-            : result.attemptOutcome.class === 'unknown_terminal'
-              ? 'unknown'
-              : 'provider_failure';
-      return { kind: 'failed', seq, failureClass };
-    }
+      break;
     case 'transferred_to_recovery_owner':
     case 'unfinalized_retry_owned':
       return undefined;
   }
+  return deriveTerminalInboundMutation({
+    inboundSeq: result.identity.inboundSeq,
+    inboundDisposition: result.inboundDisposition,
+    attemptKind: result.attemptOutcome.kind,
+    attemptFailureClass: persistedAttemptFailureClass(result.attemptOutcome),
+  });
 }
 
 /**

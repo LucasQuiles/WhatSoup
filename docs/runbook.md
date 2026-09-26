@@ -1998,6 +1998,65 @@ a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `err
 chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
 `busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
 
+#### Close an open inbound left behind a final terminal record
+
+An inbound row can sit in `pending`, `processing` or `turn_done` while its `turn_terminal_records` row
+already says `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`. Live finalization
+writes both atomically, so only an older release leaves this state. The stuck-inbound sweep never
+closes such rows: it only reports them (bucket 5 in `docs/durability.md` §4.5, the
+`terminalRecordCloseCandidates` count and a log line with their seqs). Each close is an operator
+decision, taken for ONE named row with `turn-recovery-operator close-inbound`, which applies the same
+rules without the five-minute grace window.
+
+```bash
+# 1. Dry run (the default). Read-only: it never opens the migrating database layer, never migrates,
+#    and on a stopped instance creates no -wal/-shm files. Prints the record's disposition, the status
+#    it implies, whether the schema is current, and a digest.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ
+
+# 2. Back up the database, then apply, passing the digest the dry run printed.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ --apply --expect-digest DIGEST
+```
+
+The digest binds the apply to the dry run: it covers the database file identity (device and inode), the
+row, its terminal record and the exact status to be written. `--apply` refuses (`digest_mismatch`) if any
+of these changed, including when the same content sits in a different file. It also refuses unless the
+database is at exactly the schema this checkout knows (`schema_not_current`): apply never migrates, so an
+instance running an older release must be upgraded first. It opens the existing file without SQLite's
+create fallback and re-checks the file identity, schema, eligibility and digest inside its write
+transaction.
+
+The status comes from the terminal record, through the same mapping live finalization uses:
+`finalized_replied` closes `complete` with `response_echoed`, `finalized_no_reply_policy` closes
+`complete` with `no_reply_policy`, and `failed_terminal` closes `failed` with the record's failure class.
+The command refuses and exits `1`, changing no database row, when the row does not exist
+(`inbound_not_found`), has no terminal record (`no_terminal_record`) or more than one
+(`multiple_terminal_records`), when the record is not final (`non_final_disposition`, e.g.
+`transferred_to_recovery_owner`), when its identity does not match the row (`identity_mismatch`), when an
+`inbound_disposition_links` row or a `turn_recovery_jobs` row references the row (`disposition_link`,
+`recovery_job`), when its selected delivery op no longer proves the recorded delivery
+(`delivery_proof_invalid`: missing, belonging to another row, or no longer `echoed`), when the record
+fails the finalize contract (`record_contract_invalid`), or when the row is already closed with a
+different status (`closed_differently`). A rerun on a row already closed as its record implies prints
+`alreadyClosed: true` and exits `0`.
+
+When a close applies to a record with a selected delivery op, the same transaction also marks that op
+`is_terminal = 1`, as live finalization does.
+
+Every invocation, including a dry run and a refusal, appends one line to the audit receipt
+`turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that file is the only
+thing a dry run writes. Output and receipts carry only the inbound seq, record id, disposition, statuses
+and reason codes, never chat JIDs, conversation keys or message ids.
+
+Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
+nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
+row) but its audit receipt could not be appended — do not re-run; record the close from stdout.
+
+Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are already `failed` and
+parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
+inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
+closed by any tool.
+
 ### 7.7 Useful SQL Queries
 
 ```bash

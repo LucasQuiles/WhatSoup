@@ -231,7 +231,7 @@ export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
 ]);
 
 function expectedTerminalInboundFailureClass(
-  terminal: TurnTerminalPersistenceParams,
+  terminal: Pick<TurnTerminalPersistenceParams, 'attemptKind' | 'attemptFailureClass'>,
 ): InboundFailureClass {
   if (terminal.attemptKind === 'admission_rejected') {
     // Lockstep with turn-terminal.ts#toInboundMutation via the shared mapping:
@@ -250,6 +250,41 @@ function expectedTerminalInboundFailureClass(
   if (detailed === 'provider_stream_corrupt') return 'provider_failure';
   if (TERMINAL_PROVIDER_FAILURE_CLASSES.has(detailed)) return 'provider_failure';
   throw new Error('failed_terminal terminal disposition has an invalid attempt failure class');
+}
+
+/**
+ * The inbound mutation a terminal disposition implies, from its persisted
+ * axes alone. Shared by live finalization (turn-terminal.ts#toInboundMutation)
+ * and by reconciliation of an inbound left open behind a final terminal
+ * record, so both apply the same status. Undefined for dispositions that
+ * leave the inbound to another owner, and for terminals without an inbound.
+ */
+export function deriveTerminalInboundMutation(
+  terminal: Pick<
+    TurnTerminalPersistenceParams,
+    'inboundSeq' | 'inboundDisposition' | 'attemptKind' | 'attemptFailureClass'
+  >,
+): TerminalInboundMutation | undefined {
+  const seq = terminal.inboundSeq;
+  switch (terminal.inboundDisposition) {
+    case 'finalized_replied':
+      return seq === null ? undefined : { kind: 'complete', seq, terminalReason: 'response_echoed' };
+    case 'finalized_no_reply_policy':
+      if (seq === null) return undefined;
+      return {
+        kind: 'complete',
+        seq,
+        terminalReason: terminal.attemptKind === 'withheld_by_policy'
+          ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+          : 'no_reply_policy',
+      };
+    case 'failed_terminal':
+      return seq === null
+        ? undefined
+        : { kind: 'failed', seq, failureClass: expectedTerminalInboundFailureClass(terminal) };
+    default:
+      return undefined;
+  }
 }
 
 export const DELIVERY_STATUS_PROOF: Readonly<Record<string, string>> = {
