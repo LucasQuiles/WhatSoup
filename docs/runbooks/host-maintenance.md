@@ -58,7 +58,13 @@ The boundary is enforced by
 The nightly job updates the native agent CLI only when every service instance
 resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
-update. The target is the newest release older than `npm.cooldown_minutes`
+update. A launchd instance is any `com.whatsoup.<name>` plist that passes
+`<name>` as its argument; one started through a release's own
+`deploy/whatsoup` is resolved only when that wrapper and its PATH composition
+match this checkout byte for byte, and is `unknown` otherwise. On systemd the
+user manager environment, then `Environment=`, then `EnvironmentFiles=` are
+applied, as the launcher does. Finding no instance at all holds with a
+warning alert. The target is the newest release older than `npm.cooldown_minutes`
 (never a downgrade or prerelease). The install runs from the verified previous
 binary; a failed install or postcheck swaps the launcher link back to that
 binary (never a network reinstall) and still ends `degraded`. Event statuses
@@ -77,15 +83,27 @@ surface is its own event:
 
 | Component / status | Surface |
 |--------------------|---------|
-| `claude-launcher` `moved` / `appeared` / `disappeared` / `unchanged` / `first-observation` | The launcher as this run found it, before any install, against the previous run's `baseline` event. A change did not come from the job's install transaction (warning alert under `harness-maintenance:claude-launcher`; not sent in `--check`). |
-| `claude-update-policy` `instance` | Per instance: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` and a relocated `CLAUDE_CONFIG_DIR` from the service definition (launchd: plist on disk = next launch, the loaded job environment is not read; systemd: the loaded unit), and from that config directory's settings on disk: `installMethod`, `autoUpdates` and the settings `env` flags. Only set/unset is recorded, never a value. |
+| `claude-launcher` `moved` / `appeared` / `disappeared` / `unchanged` / `first-observation` | The launcher as this run found it, before any install, against the previous run's `baseline` event. A change did not come from the job's install transaction. A warning alert under `harness-maintenance:claude-launcher` is sent once per distinct new link target (the `alert-history` event remembers the last 20), naming the agent CLI updating itself as the probable cause when the policy summary is `advisory` or `none`; not sent in `--check`. |
+| `claude-update-policy` `instance` | Per instance: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` and a relocated `CLAUDE_CONFIG_DIR` from the service definition (launchd: plist on disk = next launch, the loaded job environment is not read; systemd: the loaded unit), and from that config directory's settings on disk: `installMethod`, `autoUpdates` and the settings `env` flags. Flags are `set` only for `1` or `true` (any case); any other value, including `0` and empty, is `set-unrecognized`. Values are never recorded. |
 | `claude-update-policy` `job-env` | This maintenance job's own environment. |
-| `claude-update-policy` `advisory` / `disabled` / `none` / `unknown` | Summary: which instances start the CLI without `DISABLE_UPDATES` (service environment or settings env). `DISABLE_AUTOUPDATER` alone is not counted. |
+| `claude-update-policy` `advisory` / `disabled` / `none` / `unknown` | Summary: `advisory` names the instances that start the CLI without `DISABLE_UPDATES` (service environment or settings env); `unknown` when an instance has an unrecognized value or unreadable settings and none is plainly unset. `DISABLE_AUTOUPDATER` alone is not counted. |
 | `claude-processes` `observed` | Count of this user's native-layout CLI processes and those running over 30 minutes. No command line is read or recorded. |
 
 A `moved` launcher or an `advisory` summary is a finding for the host owner.
 Disabling self-updates on a host is a separate, explicitly authorized change;
 this job never edits settings or service definitions.
+
+Known limit: the job reports the launcher (what the next launch runs) and
+process counts, not the executable each running session actually has loaded.
+A long-running session can keep an older binary after the launcher moves.
+
+### Plugin and MCP listings
+
+The scheduled run's `claude-plugins` and `mcp-servers` probes start the agent
+CLI found on the job's PATH only when the static classifier accepts it as the
+native layout, or as the npm package whose entry point is a node script.
+Anything else (a wrapper, an unknown script) is not executed and both events
+are `unknown` with the reason.
 
 ## Google Chrome (apt) upgrade
 

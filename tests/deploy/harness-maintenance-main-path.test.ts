@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -137,6 +137,38 @@ describe('--check on the main path', () => {
 });
 
 describe('native classification of the launcher target', () => {
+  it('still lists plugins and MCP servers through an accepted native launcher in a normal run', () => {
+    const h = harness();
+    const r = run(h);
+    expect(events(r, 'claude-plugins')[0]).toMatchObject({ status: 'ok' });
+    // Started through the launcher link, so the fixture sees argv[0] "claude".
+    expect(allFixtureCalls(h)).toContain('claude plugin list');
+  }, T);
+
+  it('lists plugins through an npm-layout launcher only when its interpreter is node', () => {
+    const h = harness();
+    const pkg = path.join(h.home, 'npm-global/lib/node_modules/@anthropic-ai/claude-code');
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@anthropic-ai/claude-code', version: '2.1.280' }));
+    const calls = path.join(h.home, 'npm-calls');
+    // Launcher-first PATH: the npm bin directory precedes ~/.local/bin for the job.
+    const bin = path.join(h.home, 'npm-global/bin');
+    mkdirSync(bin, { recursive: true });
+    writeExec(path.join(pkg, 'cli.js'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\n`);
+    symlinkSync(path.join(pkg, 'cli.js'), path.join(bin, 'claude'));
+    const r = run(h);
+    expect(events(r, 'claude-plugins')[0]).toMatchObject({ status: 'unknown' });
+    expect(existsSync(calls)).toBe(false);
+
+    // The same package with a node entry point is admitted.
+    rmSync(path.join(pkg, 'cli.js'));
+    writeExec(path.join(pkg, 'cli.js'),
+      `#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ') + '\\n');\n`);
+    const admitted = run(h);
+    expect(events(admitted, 'claude-plugins')[0]).toMatchObject({ status: 'ok' });
+    expect(readFileSync(calls, 'utf8')).toContain('plugin list');
+  }, T);
+
   it('does not treat an executable shebang script inside the versions directory as native', () => {
     const h = harness();
     // Same place and name the native installer uses, but a script, not a native executable.
@@ -148,10 +180,13 @@ describe('native classification of the launcher target', () => {
     expect(consumer.status).toBe('resolved');
     expect(consumer.message).not.toContain('(native');
     expect(claudeStatus(r)).toBe('unmanaged-layout');
-    // The update path never runs it: no installer and no version probe. (A normal run's tier-2
-    // probes still list plugins and MCP servers through whatever the job PATH resolves.)
-    const invoked = existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [];
-    expect(invoked.filter((line) => !/^(plugin|mcp) list$/.test(line))).toEqual([]);
+    // Nothing runs it: not the update path, and not the tier-2 plugin and MCP listings, which
+    // only start a launcher the static classifier accepted.
+    expect(existsSync(calls)).toBe(false);
+    for (const probe of ['claude-plugins', 'mcp-servers']) {
+      expect(events(r, probe)[0], probe).toMatchObject({ status: 'unknown' });
+      expect(events(r, probe)[0]!.message).toContain('not executed');
+    }
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
     // --check never executes it at all.
     rmSync(calls, { force: true });

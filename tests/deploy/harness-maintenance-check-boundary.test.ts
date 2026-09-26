@@ -35,6 +35,14 @@ import {
 // fixture), the npm-installed harnesses, local MCP binaries and runtime binaries. Two independent
 // oracles decide the result: the recorded invocations, and a snapshot of the temporary HOME taken
 // before and after the run. Only the permitted inspection artifacts may differ.
+//
+// Known limits of these oracles:
+// - The HOME snapshot sees writes under the temporary HOME only; a write elsewhere (the system
+//   temporary directory, an absolute path) is caught only if it goes through a recorded stub.
+// - The job's temporary directory comes from mktemp, which may ignore TMPDIR; its removal is
+//   checked through the npm cache directory placed inside it, not through TMPDIR being empty.
+// - The pinned node is the real one and is not recorded; writes it makes are seen only through
+//   the HOME snapshot.
 
 beforeAll(buildNativeFixture);
 afterAll(cleanupHarnesses);
@@ -153,10 +161,9 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     expect(path.basename(caches[0]!)).toBe('npm-cache');
     expect(existsSync(path.dirname(caches[0]!))).toBe(false);
 
-    // Oracle 2: the filesystem. Nothing outside the permitted artifacts changed, and the run's
-    // temporary directory is gone.
+    // Oracle 2: the filesystem. Nothing outside the permitted artifacts changed. (The temporary
+    // directory's removal is asserted above through the npm cache placed inside it.)
     expect(changedPaths(before, snapshot(h.home))).toEqual([]);
-    expect(readdirSync(path.join(h.home, 'tmp'))).toEqual([]);
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
   }, T);
 

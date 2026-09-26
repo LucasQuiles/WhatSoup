@@ -66,8 +66,28 @@ describe('out-of-band launcher movement', () => {
     expect(launcher[0]!.after).toContain(`link=${path.join(h.versions, '2.1.281')}`);
     const alerts = readFileSync(h.alertLog, 'utf8');
     expect(alerts).toContain('harness-maintenance:claude-launcher');
+    // No instance is known to disable self-updates, so that is named as the probable cause.
+    expect(alerts).toContain('probable cause: the agent CLI updating itself');
     // Observation never degrades the run.
     expect(r.state?.status).toBe('ok');
+  }, T);
+
+  it('alerts once per distinct launcher target, not again when a move returns to one already reported', () => {
+    const h = idleHarness();
+    const launcherAlerts = () => readFileSync(h.alertLog, 'utf8').split('\n')
+      .filter((line) => line.includes('harness-maintenance:claude-launcher')).length;
+    run(h);
+    repoint(h, '2.1.281');
+    run(h); // OLD -> 2.1.281: new target, alert
+    expect(launcherAlerts()).toBe(1);
+    repoint(h, OLD);
+    run(h); // 2.1.281 -> OLD: new target, alert
+    expect(launcherAlerts()).toBe(2);
+    repoint(h, '2.1.281');
+    const { launcher } = launcherEvents(h); // back to 2.1.281: already reported
+    expect(launcher[0]).toMatchObject({ status: 'moved' });
+    expect(launcher[0]!.message).toContain('already alerted');
+    expect(launcherAlerts()).toBe(2);
   }, T);
 
   it('reports a launcher removed between runs as disappeared', () => {
@@ -174,6 +194,26 @@ describe('agent CLI update policy surfaces', () => {
     expect(policy.find((e) => e.status === 'instance')!.message)
       .toContain('alpha via launchd (next launch; loaded job environment not read): DISABLE_UPDATES=set');
     expect(policy.at(-1)).toMatchObject({ status: 'disabled' });
+  }, T);
+
+  it('counts only truthy values as disabling updates; any other value is unrecognized and unknown', () => {
+    const h = makeHarness();
+    writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+    systemdUnit(h, 'alpha', [`Environment=WHATSOUP_NODE=${process.execPath} DISABLE_UPDATES=TRUE`]);
+    systemdUnit(h, 'beta', [`Environment=WHATSOUP_NODE=${process.execPath} DISABLE_UPDATES=0 DISABLE_AUTOUPDATER=`]);
+    h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+    writeJson(path.join(h.home, '.claude/settings.json'), { env: { DISABLE_AUTOUPDATER: 'false' } });
+    const r = run(h, ['--check'], { DISABLE_UPDATES: '0' });
+    const policy = events(r, 'claude-update-policy');
+    const instance = (name: string) => policy.find((e) => e.status === 'instance' && e.message.startsWith(`${name} `))!;
+    expect(instance('alpha').message).toContain('DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset');
+    expect(instance('beta').message).toContain('DISABLE_UPDATES=set-unrecognized DISABLE_AUTOUPDATER=set-unrecognized');
+    expect(instance('alpha').message).toContain('settings env DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set-unrecognized');
+    expect(policy.find((e) => e.status === 'job-env')!.message).toContain('DISABLE_UPDATES=set-unrecognized');
+    const summary = policy.at(-1)!;
+    expect(summary.status).toBe('unknown');
+    expect(summary.message).toContain('beta');
+    expect(summary.message).not.toContain('alpha');
   }, T);
 
   it('reports an unknown policy when the service definitions were not read this run', () => {

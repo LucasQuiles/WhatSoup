@@ -347,16 +347,39 @@ claude_consumer_record() {
   esac
 }
 
+# Stands for a variable that is not set at all, as opposed to one set to an empty value.
+UNSET_MARK=$'\001unset'
+
+# flag_class <value or UNSET_MARK or "?">: unset, set (only "1" or "true", any case), "?" (not
+# readable), or set-unrecognized for any other value, including "0" and empty. Values themselves
+# are never recorded.
+flag_class() {
+  local lower
+  case "$1" in
+    "$UNSET_MARK") echo unset ;;
+    "?") echo "?" ;;
+    *)
+      lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+      case "$lower" in
+        1|true) echo set ;;
+        *) echo set-unrecognized ;;
+      esac ;;
+  esac
+}
+
 # claude_instance_env_record <name> <manager> <surface> <config dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
-# Observation only (see observe_claude_update_policy). "?" in any value field means the service
-# environment could not be read; otherwise the two flags are stored as set/unset, never as values.
+# Observation only (see observe_claude_update_policy). Pass UNSET_MARK for an unset flag and "?"
+# in every value field when the service environment could not be read.
 claude_instance_env_record() {
-  local config="$4" updates="${5:+set}" autoupdater="${6:+set}"
+  local config="$4"
   case "$config" in *$'\n'*|*$'\037'*) config="?" ;; esac
-  [ "$5" = "?" ] && updates="?"
-  [ "$6" = "?" ] && autoupdater="?"
-  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "${updates:-unset}" "${autoupdater:-unset}" \
+  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "$(flag_class "$5")" "$(flag_class "$6")" \
     >> "$CLAUDE_INSTANCE_ENV_FILE"
+}
+
+# plist_flag <file> <key>: the value of an EnvironmentVariables entry, or UNSET_MARK when absent.
+plist_flag() {
+  plist_string "$1" "EnvironmentVariables.$2" || printf '%s' "$UNSET_MARK"
 }
 
 # claude_resolve_consumer <name> <manager> <inherited PATH> <prepend> <node>
@@ -474,8 +497,8 @@ claude_inventory_launchd() {
     node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
     claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" \
       "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
-      "$(plist_string "$file" EnvironmentVariables.DISABLE_UPDATES || true)" \
-      "$(plist_string "$file" EnvironmentVariables.DISABLE_AUTOUPDATER || true)"
+      "$(plist_flag "$file" DISABLE_UPDATES)" \
+      "$(plist_flag "$file" DISABLE_AUTOUPDATER)"
     if [ "$program" != "$HOME/.local/bin/whatsoup" ] && ! reason="$(release_wrapper_mismatch "$program")"; then
       claude_consumer_record "$name" launchd unknown "" "" "" "$reason"
       continue
@@ -581,7 +604,7 @@ claude_inventory_systemd() {
     name="${unit#whatsoup@}"
     name="${name%.service}"
     SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
-    SYSTEMD_ENV_UPDATES="" SYSTEMD_ENV_AUTOUPDATER="" SYSTEMD_ENV_CONFIG=""
+    SYSTEMD_ENV_UPDATES="$UNSET_MARK" SYSTEMD_ENV_AUTOUPDATER="$UNSET_MARK" SYSTEMD_ENV_CONFIG=""
     # Same precedence as the launcher composes (deploy/lib/runtime-path.sh): the user manager
     # environment first, then Environment=, then EnvironmentFiles=. A manager value this reader
     # cannot interpret, or a manager environment that cannot be read, makes the instance unknown:
@@ -1273,19 +1296,20 @@ claude_launcher_state() {
   fi
 }
 
-# claude_launcher_previous: the launcher baseline recorded by the previous run's final state, or
-# 1 when there is none. A symlinked state file is never followed.
+# claude_launcher_previous <status>: the `after` of the last claude-launcher event with <status>
+# (baseline or alert-history) in the previous run's final state, or 1 when there is none. A
+# symlinked state file is never followed.
 claude_launcher_previous() {
   if [ -L "$STATE_FILE" ] || [ ! -f "$STATE_FILE" ]; then
     return 1
   fi
-  "$REPO_NODE_BIN" - "$STATE_FILE" <<'NODE'
+  "$REPO_NODE_BIN" - "$STATE_FILE" "$1" <<'NODE'
 const fs = require('node:fs');
 try {
   const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const events = Array.isArray(state.events) ? state.events : [];
   const baseline = events
-    .filter((e) => e && e.component === 'claude-launcher' && e.status === 'baseline' && typeof e.after === 'string')
+    .filter((e) => e && e.component === 'claude-launcher' && e.status === process.argv[3] && typeof e.after === 'string')
     .at(-1);
   if (!baseline) process.exit(1);
   process.stdout.write(baseline.after);
@@ -1299,12 +1323,15 @@ NODE
 # it (before any install), then record the launcher after the update step as the next baseline.
 # A change between runs did not come from this job's install transaction.
 observe_claude_launcher() {
-  local start previous status now
+  local start previous status now history key seen summary cause
+  # Launcher link targets already alerted on (one per line, "absent" for a removed launcher,
+  # newest last, at most 20): a move is alerted once per distinct target, never again for it.
+  history="$(claude_launcher_previous alert-history || true)"
   if [ ! -f "$CLAUDE_LAUNCHER_START_FILE" ]; then
     record_event "claude-launcher" "unknown" "launcher facts could not be read at the start of this run"
   else
     start="$(claude_launcher_state "$(cat "$CLAUDE_LAUNCHER_START_FILE")")"
-    if previous="$(claude_launcher_previous)"; then
+    if previous="$(claude_launcher_previous baseline)"; then
       if [ "$previous" = "$start" ]; then
         status=unchanged
       elif [ "$start" = absent ]; then
@@ -1323,13 +1350,38 @@ observe_claude_launcher() {
       unchanged)
         record_event "claude-launcher" "$status" "launcher unchanged since the previous run" "$previous" "$start" ;;
       *)
-        record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown" "$previous" "$start"
-        send_alert "claude-launcher" "warning" "Agent CLI launcher changed outside the maintenance job" \
-          "$CLAUDE_NATIVE_LAUNCHER $status between runs: $previous -> $start. The release-age cooldown did not govern this change." ;;
+        # The link target the launcher moved to (its readlink), or "absent".
+        key="${start% sha256=*}"
+        key="${key#link=}"
+        if [ -n "$history" ] && printf '%s\n' "$history" | grep -Fxq -- "$key"; then
+          seen=1
+        else
+          seen=0
+        fi
+        case "$seen" in
+          1)
+            record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown; already alerted for this launcher target" "$previous" "$start" ;;
+          *)
+            record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown" "$previous" "$start"
+            summary="$(cat "$CLAUDE_POLICY_SUMMARY_FILE" 2>/dev/null || true)"
+            case "$summary" in
+              advisory|none) cause="the agent CLI updating itself (update policy summary: $summary)" ;;
+              *) cause="not determined (update policy summary: ${summary:-not observed})" ;;
+            esac
+            send_alert "claude-launcher" "warning" "Agent CLI launcher changed outside the maintenance job" \
+              "$CLAUDE_NATIVE_LAUNCHER $status between runs: $previous -> $start. The release-age cooldown did not govern this change; probable cause: $cause."
+            # Check mode sends no alert, so it records none.
+            if [ "$CHECK_ONLY" -eq 0 ]; then
+              history="$( { [ -z "$history" ] || printf '%s\n' "$history"; printf '%s\n' "$key"; } | tail -n 20)"
+            fi ;;
+        esac ;;
     esac
   fi
   now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
   record_event "claude-launcher" "baseline" "launcher after this run's update step; the next run compares against it" "" "$now"
+  if [ -n "$history" ]; then
+    record_event "claude-launcher" "alert-history" "launcher targets already alerted on" "" "$history"
+  fi
 }
 
 # claude_settings_policy <config dir, or empty for the default>: print
@@ -1355,26 +1407,38 @@ const installMethod = field(global, (g) => (g.installMethod === undefined ? 'abs
   : typeof g.installMethod === 'string' && /^[a-z0-9-]{1,32}$/.test(g.installMethod) ? g.installMethod : 'unrecognized'));
 const autoUpdates = field(global, (g) => (g.autoUpdates === undefined ? 'absent'
   : typeof g.autoUpdates === 'boolean' ? String(g.autoUpdates) : 'unrecognized'));
+// Same classes as the shell's flag_class: only "1" or "true" disables.
 const envFlag = (key) => field(settings, (s) => {
   const env = record(s.env);
-  return env[key] !== undefined && env[key] !== '' ? 'set' : 'unset';
+  if (env[key] === undefined) return 'unset';
+  return ['1', 'true'].includes(String(env[key]).toLowerCase()) ? 'set' : 'set-unrecognized';
 });
 process.stdout.write([installMethod, autoUpdates, envFlag('DISABLE_UPDATES'), envFlag('DISABLE_AUTOUPDATER')].join('\x1f'));
 NODE
 }
 
-# env_flag <name>: "set" when the variable is non-empty in this job's environment, else "unset".
+# env_flag <name>: flag_class of the variable in this job's environment.
 env_flag() {
-  if [ -n "${!1:-}" ]; then echo set; else echo unset; fi
+  if [ -z "${!1+x}" ]; then echo unset; else flag_class "${!1}"; fi
+}
+
+# The summary status, for the launcher observation's alert text.
+CLAUDE_POLICY_SUMMARY_FILE="$TMP_DIR/claude-policy-summary"
+
+# policy_summary <status> <message>
+policy_summary() {
+  record_event "claude-update-policy" "$1" "$2"
+  printf '%s\n' "$1" > "$CLAUDE_POLICY_SUMMARY_FILE"
 }
 
 observe_claude_update_policy() {
   local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto
-  local total=0 disabled=0 open=""
+  local total=0 disabled=0 open="" unknown="" config_dir_state=unset
+  [ -z "${CLAUDE_CONFIG_DIR:-}" ] || config_dir_state="set"
   record_event "claude-update-policy" "job-env" \
-    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$(env_flag CLAUDE_CONFIG_DIR)"
+    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$config_dir_state"
   if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
-    record_event "claude-update-policy" "unknown" "service definitions were not read this run, so no instance's update policy is known"
+    policy_summary "unknown" "service definitions were not read this run, so no instance's update policy is known"
     return 0
   fi
   while IFS=$'\037' read -r name manager surface config updates autoupdater; do
@@ -1382,7 +1446,7 @@ observe_claude_update_policy() {
     total=$((total + 1))
     if [ "$updates" = "?" ]; then
       record_event "claude-update-policy" "instance" "$name via $manager ($surface): service environment not readable"
-      open="$open $name"
+      unknown="$unknown $name"
       continue
     fi
     case "$config" in
@@ -1397,18 +1461,23 @@ observe_claude_update_policy() {
     IFS=$'\037' read -r method auto s_updates s_auto <<< "$settings"
     if [ "$updates" = set ] || [ "$s_updates" = set ]; then
       disabled=$((disabled + 1))
-    else
+    elif [ "$updates" = unset ] && [ "$s_updates" = unset ]; then
       open="$open $name"
+    else
+      # An unrecognized value, or settings that could not be read.
+      unknown="$unknown $name"
     fi
     record_event "claude-update-policy" "instance" \
       "$name via $manager ($surface): DISABLE_UPDATES=$updates DISABLE_AUTOUPDATER=$autoupdater; $config_label: installMethod=${method:-unknown} autoUpdates=${auto:-unknown}, settings env DISABLE_UPDATES=${s_updates:-unknown} DISABLE_AUTOUPDATER=${s_auto:-unknown}"
   done < "$CLAUDE_INSTANCE_ENV_FILE"
   if [ "$total" -eq 0 ]; then
-    record_event "claude-update-policy" "none" "no service instance was inventoried"
-  elif [ -z "$open" ]; then
-    record_event "claude-update-policy" "disabled" "all $total instances start the agent CLI with DISABLE_UPDATES set (service environment or settings env); observed, not enforced"
+    policy_summary "none" "no service instance was inventoried"
+  elif [ -n "$open" ]; then
+    policy_summary "advisory" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); the release-age cooldown is advisory for:$open${unknown:+; undetermined for:$unknown}. DISABLE_AUTOUPDATER alone is not counted. Observed, not enforced."
+  elif [ -n "$unknown" ]; then
+    policy_summary "unknown" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true; undetermined (unrecognized value or unreadable settings) for:$unknown. Observed, not enforced."
   else
-    record_event "claude-update-policy" "advisory" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set (service environment or settings env); the release-age cooldown is advisory for:$open. DISABLE_AUTOUPDATER alone is not counted. Observed, not enforced."
+    policy_summary "disabled" "all $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); observed, not enforced"
   fi
 }
 
@@ -1446,8 +1515,9 @@ observe_claude_processes() {
 }
 
 observe_claude_update_path() {
-  observe_claude_launcher
+  # The policy first: a launcher move alert names it as the probable cause.
   observe_claude_update_policy
+  observe_claude_launcher
   observe_claude_processes
 }
 
@@ -1619,15 +1689,57 @@ probe_runtime() {
   probe_command "$name" "$@"
 }
 
+# claude_probe_admission <bin>: 0 when the static classifier finds <bin> to be the native layout,
+# or the npm package whose entry point is a node script; otherwise 1 with the reason on stdout.
+# Nothing is executed to decide.
+claude_probe_admission() {
+  local out rc=0
+  out="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --claude-resolve --bin "$1" --home "$HOME" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "static classification failed"
+    return 1
+  fi
+  # shellcheck disable=SC2016 # a JavaScript program; ${...} is a JS template, not shell.
+  printf '%s' "$out" | "$REPO_NODE_BIN" -e '
+const fs = require("node:fs");
+let s = "";
+process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+  let r;
+  try { r = JSON.parse(s); } catch { console.log("classification unreadable"); process.exit(1); }
+  if (r.kind === "native") process.exit(0);
+  if (r.kind === "npm" && typeof r.resolved === "string") {
+    let head = "";
+    try {
+      const fd = fs.openSync(r.resolved, "r");
+      const buf = Buffer.alloc(256);
+      head = buf.subarray(0, fs.readSync(fd, buf, 0, 256, 0)).toString("latin1").split("\n")[0];
+      fs.closeSync(fd);
+    } catch {}
+    if (/^#!\s*(\/usr\/bin\/env\s+node|\/\S*\/node)\s*$/.test(head)) process.exit(0);
+    console.log("npm entry point is not a node script");
+    process.exit(1);
+  }
+  console.log(`classified as ${typeof r.kind === "string" ? r.kind : "unknown"}, not native or npm`);
+  process.exit(1);
+});'
+}
+
 probe_tier2() {
-  local systemctl_bin apt_bin
+  local systemctl_bin apt_bin launcher reason
   if [ "$CHECK_ONLY" -eq 1 ]; then
     # Listing plugins or MCP servers starts the agent CLI, which can refresh MCP authentication.
     record_event "claude-plugins" "skipped" "the agent CLI is not executed in check mode"
     record_event "mcp-servers" "skipped" "the agent CLI is not executed in check mode"
-  elif command -v claude >/dev/null 2>&1; then
-    probe_command "claude-plugins" claude plugin list
-    probe_command "mcp-servers" claude mcp list
+  elif launcher="$(command -v claude)"; then
+    # Only a launcher the static classifier accepts is started; anything else could be any script.
+    if reason="$(claude_probe_admission "$launcher")"; then
+      probe_command "claude-plugins" "$launcher" plugin list
+      probe_command "mcp-servers" "$launcher" mcp list
+    else
+      record_event "claude-plugins" "unknown" "$launcher not executed: $reason"
+      record_event "mcp-servers" "unknown" "$launcher not executed: $reason"
+    fi
   else
     record_event "claude-plugins" "skipped" "claude binary unavailable"
     record_event "mcp-servers" "skipped" "claude binary unavailable"
