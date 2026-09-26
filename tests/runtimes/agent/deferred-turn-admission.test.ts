@@ -1012,7 +1012,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
      * The transport delivers and echoes the next answer: the queue double's
      * evidence flush reports a real echoed outbound op, as OutboundQueue would.
      */
-    function echoNextAnswer(queue: QueueDouble, seq: number, jid: string): void {
+    function echoNextAnswer(queue: QueueDouble, seq: number, jid: string, beforeEvidence?: () => void): void {
       const opId = engine.createOutboundOp({
         conversationKey: toConversationKey(jid),
         chatJid: jid,
@@ -1025,7 +1025,10 @@ describe('deferred-turn admission (#3295 S2)', () => {
       engine.markSubmitted(opId, `wamid-c19-answer-${seq}`);
       engine.markEchoed(opId);
       (queue.flushTurnEvidence as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (turnId: string) => ({ turnId, answerOpIds: [opId], lifecycleOpIds: [], statusOpIds: [] }),
+        async (turnId: string) => {
+          beforeEvidence?.();
+          return { turnId, answerOpIds: [opId], lifecycleOpIds: [], statusOpIds: [] };
+        },
       );
     }
 
@@ -1243,6 +1246,41 @@ describe('deferred-turn admission (#3295 S2)', () => {
         .toMatch(/retained finalization\(s\) unresolved/);
     }
 
+    /** The runtime turn supervisor's retained (retry-owned) finalizations. */
+    function retainedFinalizations() {
+      const supervisor = (runtime as unknown as {
+        runtimeTurnSupervisor: { retained: Map<string, {
+          context: RuntimeTurnContext;
+          attemptOutcome: unknown;
+          failureStage: string;
+          mayAdvance: boolean;
+        }> };
+      }).runtimeTurnSupervisor;
+      return [...supervisor.retained.values()].map((retained) => ({
+        logicalTurnId: retained.context.identity.logicalTurnId,
+        attemptOutcome: retained.attemptOutcome,
+        failureStage: retained.failureStage,
+        mayAdvance: retained.mayAdvance,
+      }));
+    }
+
+    /**
+     * The record a contained escape leaves retained. The escape rejects the
+     * turn's completion; the per-chat processor then sees a turn that no longer
+     * heads its FIFO and re-finalizes it as an undispatched admission
+     * rejection. The inbound already holds a different durable terminal, so
+     * that write conflicts, becomes a non-advancing failure incident, and is
+     * retained for a retry that can never win.
+     */
+    function expectedRetainedRejection(logicalTurnId: string) {
+      return [{
+        logicalTurnId,
+        attemptOutcome: { kind: 'admission_rejected', class: 'pre_dispatch_error' },
+        failureStage: 'terminal_finalize',
+        mayAdvance: false,
+      }];
+    }
+
     function escapeAlerts(title: string): unknown[][] {
       return mockEmitAlertChecked.mock.calls.filter(
         (call) => call[1] === 'agent_turn_finalization_escaped' && call[2] === title,
@@ -1352,7 +1390,38 @@ describe('deferred-turn admission (#3295 S2)', () => {
         ]);
         expect(escapeAlerts('Displaced runtime turn has no owned completion')).toEqual([]);
         expect(unhandled.reasons).toEqual([]);
+        await vi.waitFor(() => expect(retainedFinalizations()).toEqual(expectedRetainedRejection(run.held.identity.logicalTurnId)));
         run.withdrawOther();
+        await expectShutdownToReportDegradedTurn();
+      } finally {
+        unhandled.stop();
+      }
+    });
+
+    it('comparison: a result-handler finalization that drifts after its durable terminal', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        makeRuntime({ sessionScope: 'per_chat' });
+        const { seq, session, mapKey, held } = await admitTurn(dmJid, 'wamid-c19-result-drift', 'c19 result drift question');
+        const queue = queueFor(dmJid);
+        // Injected damage: the FIFO under the live turn disappears while its
+        // ordinary (non-fallback) result is being finalized, after the result
+        // handler read the context and before the durable terminal is written.
+        echoNextAnswer(queue, seq, dmJid, () => {
+          lifecycle().perChatRuntimeTurnContexts.delete(mapKey);
+          lifecycle().perChatInboundSeqQueue.delete(mapKey);
+        });
+        session.emit({ type: 'result', text: 'c19 result drift answer' });
+
+        await vi.waitFor(() => expect(escapeAlerts('Runtime turn finalization escaped (per-chat)')).toHaveLength(1));
+        expect(unhandled.reasons).toEqual([]);
+        await vi.waitFor(() => expect(retainedFinalizations()).toEqual(expectedRetainedRejection(held.identity.logicalTurnId)));
+        // The durable terminal was written before the drift; the retained
+        // record is the processor's conflicting re-finalization, not the turn.
+        expect(status(seq)).toBe('complete');
+        expect(terminalRows(seq)).toEqual([{ attempt_kind: 'completed', attempt_failure_class: null }]);
+        // Same shutdown outcome as the fallback-continuation containment:
+        // pre-existing behaviour of an escaped per-chat finalization.
         await expectShutdownToReportDegradedTurn();
       } finally {
         unhandled.stop();
