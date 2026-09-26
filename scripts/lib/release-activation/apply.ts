@@ -3,6 +3,12 @@
  * the staged plists as one step, reload every label, verify from the executing
  * process, and roll back automatically on any failure.
  *
+ * The rollback starts the OLD binary, which refuses a database the new
+ * release already migrated. So the schema migration level is recorded before
+ * the switch and read again before any restore; if it changed, or cannot be
+ * read, the rollback stops with the new release in place and the operator
+ * restores the database backup by hand (`rollback-blocked-migrated`).
+ *
  * Verification never reads configuration. The instance passes only when its
  * NEW pid's argv names `<release>/src/bootstrap.ts` AND authenticated health
  * reports the release manifest's commit and a live WhatsApp connection. A
@@ -30,6 +36,7 @@ import {
 } from '../../../src/fleet/platform.ts';
 import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { backupSqliteConsistent } from '../sqlite-consistent-backup.ts';
+import { readSchemaMigrationLevel } from '../sqlite-schema-level.ts';
 import { type ActivationHost, classifyAuthenticatedHealth, type HealthObservation } from './host.ts';
 import {
   type ActivationContext,
@@ -55,12 +62,27 @@ export interface InstanceObservation {
   health: HealthObservation | null;
 }
 
+/**
+ * Schema migration level of the database before activation (read from the
+ * backup copy, which is exactly what a restore would put back) and, after a
+ * failure, of the live database. The old binary refuses a database above its
+ * own ceiling, so any change blocks the automatic rollback.
+ */
+export interface SchemaMigrationRecord {
+  before: number | null;
+  after: number | null;
+  afterError: string | null;
+  /** Where the rollback stopped because the level changed or could not be read. */
+  blockedAt: 'before-rollback' | 'after-instance-stop' | null;
+}
+
 export interface ApplyOutcome {
-  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified';
+  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated';
   backupPath: string | null;
   steps: StepRecord[];
   failure: string | null;
   verification: InstanceObservation | null;
+  schemaMigration: SchemaMigrationRecord;
   rollback: { steps: StepRecord[]; verified: boolean; observation: InstanceObservation | null } | null;
 }
 
@@ -107,16 +129,8 @@ export async function launchdState(host: ActivationHost, domain: string, label: 
   return { loaded: true, pid: match ? Number(match[1]) : null, definition: result.stdout };
 }
 
-/**
- * bootout → bounded wait for the old pid → bootstrap with bounded retry on the
- * transient error → kickstart -k. Returns a failure string, or null on success.
- */
-export async function reloadLabel(
-  host: ActivationHost,
-  context: ActivationContext,
-  label: string,
-  plistPath: string,
-): Promise<string | null> {
+/** bootout → bounded wait for the old pid to exit. Returns a failure string, or null once it is gone. */
+async function stopLabel(host: ActivationHost, context: ActivationContext, label: string): Promise<string | null> {
   const { domain } = context;
   const before = await launchdState(host, domain, label);
   if (before.loaded) {
@@ -132,6 +146,22 @@ export async function reloadLabel(
       return `${label}: old pid ${before.pid} still running ${context.args.exitTimeoutSeconds}s after bootout; refusing to bootstrap`;
     }
   }
+  return null;
+}
+
+/**
+ * bootout → bounded wait for the old pid → bootstrap with bounded retry on the
+ * transient error → kickstart -k. Returns a failure string, or null on success.
+ */
+export async function reloadLabel(
+  host: ActivationHost,
+  context: ActivationContext,
+  label: string,
+  plistPath: string,
+): Promise<string | null> {
+  const { domain } = context;
+  const stopFailure = await stopLabel(host, context, label);
+  if (stopFailure !== null) return stopFailure;
   for (let attempt = 1; ; attempt += 1) {
     const bootstrap = await host.exec('launchctl', ['bootstrap', domain, plistPath]);
     if (bootstrap.code === 0) break;
@@ -211,11 +241,34 @@ async function verifyAuxDefinitions(
   return null;
 }
 
+interface SchemaLevelCheck {
+  after: number | null;
+  afterError: string | null;
+  /** True when the level differs from `before` OR could not be read: unknown fails closed. */
+  changed: boolean;
+}
+
+function checkSchemaLevel(dbPath: string, before: number): SchemaLevelCheck {
+  try {
+    const after = readSchemaMigrationLevel(dbPath);
+    return { after, afterError: null, changed: after !== before };
+  } catch (error) {
+    return { after: null, afterError: error instanceof Error ? error.message : String(error), changed: true };
+  }
+}
+
+/**
+ * Stop the new instance, then restore and reload. The schema level is read
+ * again once the new process has exited, because a migration can commit
+ * between the caller's pre-rollback read and bootout; if it changed, nothing
+ * is restored and the old binary is never started (`blocked`).
+ */
 async function rollback(
   host: ActivationHost,
   context: ActivationContext,
   backupPath: string,
-): Promise<NonNullable<ApplyOutcome['rollback']>> {
+  schemaBefore: number,
+): Promise<NonNullable<ApplyOutcome['rollback']> & { blocked: SchemaLevelCheck | null }> {
   const steps: StepRecord[] = [];
   const attempt = async (step: string, action: () => Promise<string | null> | string | null): Promise<void> => {
     try {
@@ -225,6 +278,15 @@ async function rollback(
       steps.push({ step, ok: false, detail: error instanceof Error ? error.message : String(error) });
     }
   };
+  await attempt(`stop:${context.instanceLabel}`, () => stopLabel(host, context, context.instanceLabel));
+  if (!steps[0]!.ok) return { steps, verified: false, observation: null, blocked: null };
+  const recheck = checkSchemaLevel(context.dbPath, schemaBefore);
+  steps.push({
+    step: 'recheck-schema-level',
+    ok: !recheck.changed,
+    detail: recheck.afterError ?? `schema migration ${schemaBefore} -> ${recheck.after}`,
+  });
+  if (recheck.changed) return { steps, verified: false, observation: null, blocked: recheck };
   await attempt('restore-symlink', () => {
     repointSymlink(context.wrapperLink, readFileSync(path.join(backupPath, 'symlink.before'), 'utf8'));
     return null;
@@ -250,6 +312,7 @@ async function rollback(
     steps,
     verified: steps.every((entry) => entry.ok),
     observation: verification.observation,
+    blocked: null,
   };
 }
 
@@ -265,8 +328,9 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
     args.backupDir!,
     `activation-${context.newCommit!.slice(0, 12)}-${utcStamp(host.now())}`,
   );
+  const schemaMigration: SchemaMigrationRecord = { before: null, after: null, afterError: null, blockedAt: null };
   const refuse = (failure: string, recordedBackup: string | null): ApplyOutcome => ({
-    outcome: 'refused', backupPath: recordedBackup, steps, failure, verification: null, rollback: null,
+    outcome: 'refused', backupPath: recordedBackup, steps, failure, verification: null, schemaMigration, rollback: null,
   });
 
   // ---- backups and staged files (no live change) ----
@@ -276,6 +340,8 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
     steps.push({ step: 'create-backup-dir', ok: true });
     const db = await backupSqliteConsistent(context.dbPath, path.join(backupPath, 'bot.db'));
     steps.push({ step: 'backup-database', ok: true, detail: `quick_check ${db.quickCheck}, ${db.pages} pages` });
+    schemaMigration.before = readSchemaMigrationLevel(db.backupPath);
+    steps.push({ step: 'record-schema-level', ok: true, detail: `schema migration ${schemaMigration.before}` });
     writeFileSync(path.join(backupPath, 'symlink.before'), readlinkSync(context.wrapperLink), { mode: PRIVATE_FILE_MODE });
     steps.push({ step: 'record-symlink', ok: true });
     for (const entry of context.staged) {
@@ -346,15 +412,32 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
   }
 
   if (failure === null) {
-    return { outcome: 'activated', backupPath, steps, failure: null, verification, rollback: null };
+    return { outcome: 'activated', backupPath, steps, failure: null, verification, schemaMigration, rollback: null };
   }
-  const rolledBack = await rollback(host, context, backupPath);
+
+  // ---- roll back only onto a database the old binary will accept ----
+  const schemaBefore = schemaMigration.before!;
+  const gate = checkSchemaLevel(context.dbPath, schemaBefore);
+  schemaMigration.after = gate.after;
+  schemaMigration.afterError = gate.afterError;
+  if (gate.changed) {
+    schemaMigration.blockedAt = 'before-rollback';
+    return { outcome: 'rollback-blocked-migrated', backupPath, steps, failure, verification, schemaMigration, rollback: null };
+  }
+  const { blocked, ...rolledBack } = await rollback(host, context, backupPath, schemaBefore);
+  if (blocked !== null) {
+    schemaMigration.after = blocked.after;
+    schemaMigration.afterError = blocked.afterError;
+    schemaMigration.blockedAt = 'after-instance-stop';
+    return { outcome: 'rollback-blocked-migrated', backupPath, steps, failure, verification, schemaMigration, rollback: rolledBack };
+  }
   return {
     outcome: rolledBack.verified ? 'rolled-back' : 'rollback-unverified',
     backupPath,
     steps,
     failure,
     verification,
+    schemaMigration,
     rollback: rolledBack,
   };
 }

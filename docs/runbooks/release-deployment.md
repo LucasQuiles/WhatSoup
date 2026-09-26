@@ -161,8 +161,9 @@ npm --silent run release:activate -- \
   actions. It exits `0` only when every precondition holds. It runs the new
   release's renderers to capture their output, and writes nothing.
 - `--apply` re-checks every precondition, then:
-  1. takes a quick_check-verified SQLite backup, records `symlink.before`, and
-     copies and stages every plist into a mode-0700
+  1. takes a quick_check-verified SQLite backup, records the backup's schema
+     migration level (`schemaMigration.before` in the receipt), records
+     `symlink.before`, and copies and stages every plist into a mode-0700
      `<backup-dir>/activation-<commit12>-<utc>/`;
   2. switches the wrapper symlink and installs the staged plists;
   3. reloads each label with the reload sequence below;
@@ -172,8 +173,9 @@ npm --silent run release:activate -- \
      definition on the new release).
 
   Any failure after the switch restores the symlink and plists, reloads every
-  label, and verifies the rollback the same way. `receipt.json` in the backup
-  directory records the outcome.
+  label, and verifies the rollback the same way — unless the new release
+  changed the database schema (see "Rollback against a migrated database"
+  below). `receipt.json` in the backup directory records the outcome.
 
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
@@ -200,7 +202,10 @@ lies inside `--expect-current`.
 Exit codes: `0` plan ready, or activated and verified; `1` activation failed
 and the rollback was verified; `2` refused before any live change; `3`
 activation failed and the rollback could not be verified, so manual attention
-is required.
+is required; `4` activation failed and the automatic rollback was blocked
+because the new release changed the database schema migration level (or the
+level could not be read) — outcome `rollback-blocked-migrated`, manual database
+restore required.
 
 `kickstart -k` on an auxiliary timer runs that job once immediately; the plan
 lists it. The manual procedure below remains the reference for what the command
@@ -347,6 +352,52 @@ than as `.bak` files beside the plists. It checks `--expect-current` at plan
 time; it does not fall back to a manifest rollback path. Exit `3` means the
 automatic rollback could not be verified: restore by hand from that directory
 using the steps above.
+
+#### Rollback against a migrated database (exit `4`)
+
+The rollback starts the OLD binary, and the old binary refuses a database
+whose schema migration level is above its own ceiling
+(`DatabaseCompatibilityError` `future_schema`). A new release that migrated the
+database at startup and then failed verification would therefore leave the bot
+down after an ordinary rollback. `release:activate` does not restore the
+database automatically; it detects the case and stops:
+
+- Before rolling back it reads the live database's level (read-only) and
+  compares it with the level recorded from the backup. It reads again after the
+  new instance has been booted out and has exited, before restoring anything,
+  because a migration can commit during shutdown.
+- If the level changed, or cannot be read (fail closed), it does NOT restore
+  the symlink or plists and does NOT start the old release. The new release
+  stays in place: as verification left it (`blockedAt: before-rollback`), or
+  with its instance stopped (`blockedAt: after-instance-stop`).
+- It exits `4` with outcome `rollback-blocked-migrated`. `receipt.json` records
+  `schemaMigration.before`, `after` (or `afterError`) and `blockedAt`. stderr
+  prints both levels, the backup path, and the restore commands with this
+  host's paths filled in.
+
+**Data loss:** restoring the backup loses every message received after the
+backup was taken. The moved-aside live database is then the only copy of them;
+keep it. Restore only with approval naming the instance:
+
+```bash
+# 1. Stop every label the activation touched; the instance must be gone.
+launchctl bootout gui/"$(id -u)"/com.whatsoup.<instance>
+launchctl bootout gui/"$(id -u)"/<each aux label>
+launchctl print gui/"$(id -u)"/com.whatsoup.<instance>   # must fail: not loaded
+# 2. Move the live database and its sidecars aside together.
+aside=<db>.pre-restore-$(date -u +%Y%m%dT%H%M%SZ); mkdir -m 700 "$aside"
+mv <db> <db>-wal <db>-shm "$aside"/                       # -wal/-shm may be absent
+# 3. Restore the pre-activation backup.
+cp <backup>/bot.db <db> && chmod 600 <db>
+# 4. Repoint the wrapper symlink and the plists to the old release.
+ln -sfn "$(cat <backup>/symlink.before)" ~/.local/bin/whatsoup
+cp <backup>/<label>.plist ~/Library/LaunchAgents/<label>.plist   # every label
+# 5. Start every label, then verify from the executing process as above.
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/<label>.plist
+```
+
+Never leave a `-wal` or `-shm` file from the migrated database beside the
+restored `bot.db`.
 
 ## Drift Detection
 
