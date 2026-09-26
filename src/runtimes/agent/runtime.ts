@@ -10322,9 +10322,15 @@ export class AgentRuntime implements Runtime {
       queue,
       attemptOutcome: { kind: 'failed', class: 'processor_throw' },
       session: args.mapKey === undefined ? this.session : this.chatSessions.get(args.mapKey) ?? null,
-      // A replay refused because another turn owns the per-chat FIFO leaves
-      // this turn displaced from the head; retire it by its own identity.
-      ...(args.mapKey === undefined ? {} : { mapKey: args.mapKey, detachIfDisplaced: true }),
+      // Only a replay refused because another turn owns the per-chat FIFO
+      // leaves this turn displaced from the head; retire that one by its own
+      // identity. Any other failure keeps the head-relative drift checks.
+      ...(args.mapKey === undefined
+        ? {}
+        : {
+            mapKey: args.mapKey,
+            ...(error instanceof PerChatTurnFifoOwnerConflictError ? { detachIfDisplaced: true } : {}),
+          }),
       clearReplayOnSuccess: false,
     });
   }

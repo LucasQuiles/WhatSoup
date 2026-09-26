@@ -1160,12 +1160,20 @@ describe('deferred-turn admission (#3295 S2)', () => {
      * passed) let `occupy` put a different owner into the per-chat FIFO. The
      * other owner is itself a live continuation, so only the identity/occupancy
      * checks of replay admission can tell it apart from the held turn.
+     *
+     * Reachability: production holds at most ONE runtime context per key (the
+     * push in beginPerChatRuntimeTurn sits behind the owner-conflict refusal),
+     * and an admitted owner also takes the key's single completion slot. Only
+     * the sole-owner shape with `takeCompletionSlot` mirrors that. The
+     * two-entry shapes are injected containment probes for the displaced
+     * retirement branch; no production lifecycle produces them.
      */
     type FifoEntry = { context: RuntimeTurnContext; seq: number };
 
     async function replayAgainstOtherOwner(
       messageId: string,
       occupy: (held: FifoEntry, other: FifoEntry) => FifoEntry[],
+      options: { takeCompletionSlot?: boolean } = {},
     ) {
       makeRuntime({ sessionScope: 'per_chat' });
       const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, messageId, `${messageId} question`);
@@ -1177,29 +1185,64 @@ describe('deferred-turn admission (#3295 S2)', () => {
       }));
       primary.emit({ type: 'result', text: usageLimitText });
       await vi.waitFor(() => expect(releaseShutdown).toBeTypeOf('function'));
-      // The other owner is a separately journaled turn with its own inbound seq.
+      const { other, otherSeq } = injectOtherOwner(held, messageId);
+      const fifo = occupy({ context: held, seq }, { context: other, seq: otherSeq });
+      lifecycle().perChatRuntimeTurnContexts.set(mapKey, fifo.map((entry) => entry.context));
+      lifecycle().perChatInboundSeqQueue.set(mapKey, fifo.map((entry) => entry.seq));
+      const otherCompletion = options.takeCompletionSlot === true
+        ? lifecycle().runtimeTurnCoordinator.createRuntimeTurnCompletion(other)
+        : undefined;
+      if (otherCompletion) lifecycle().perChatRuntimeTurnCompletions.set(mapKey, otherCompletion);
+      let heldSettled = false;
+      void heldCompletion.promise.then(() => { heldSettled = true; }, () => { heldSettled = true; });
+      return {
+        seq, otherSeq, primary, mapKey, held, other, queue, heldCompletion, otherCompletion,
+        releaseShutdown: releaseShutdown!,
+        heldSettled: () => heldSettled,
+        /** Drop the injected owner so shutdown only sees runtime-owned state. */
+        withdrawOther: () => withdrawOtherOwner(mapKey, other),
+      };
+    }
+
+    /** A separately journaled turn, itself a live continuation, with its own seq. */
+    function injectOtherOwner(held: RuntimeTurnContext, messageId: string) {
       const otherSeq = engine.journalInbound(`${messageId}-other`, toConversationKey(dmJid), dmJid, 'agent');
       const other: RuntimeTurnContext = {
         ...held,
         identity: { ...held.identity, logicalTurnId: `${messageId}-other-owner`, inboundSeq: otherSeq },
       };
       expect(lifecycle().runtimeTurnCoordinator.beginRuntimeTurnContinuation(other)).toBe(true);
-      const fifo = occupy({ context: held, seq }, { context: other, seq: otherSeq });
-      lifecycle().perChatRuntimeTurnContexts.set(mapKey, fifo.map((entry) => entry.context));
-      lifecycle().perChatInboundSeqQueue.set(mapKey, fifo.map((entry) => entry.seq));
-      let heldSettled = false;
-      void heldCompletion.promise.then(() => { heldSettled = true; }, () => { heldSettled = true; });
-      return {
-        seq, otherSeq, primary, mapKey, held, other, queue,
-        releaseShutdown: releaseShutdown!,
-        heldSettled: () => heldSettled,
-        /** Drop the injected owner so shutdown only sees runtime-owned state. */
-        withdrawOther: () => {
-          lifecycle().perChatRuntimeTurnContexts.delete(mapKey);
-          lifecycle().perChatInboundSeqQueue.delete(mapKey);
-          lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
-        },
-      };
+      return { other, otherSeq };
+    }
+
+    function withdrawOtherOwner(mapKey: string, other: RuntimeTurnContext): void {
+      const state = lifecycle();
+      state.perChatRuntimeTurnContexts.delete(mapKey);
+      state.perChatInboundSeqQueue.delete(mapKey);
+      if (state.perChatRuntimeTurnCompletions.get(mapKey)?.context === other) {
+        state.perChatRuntimeTurnCompletions.delete(mapKey);
+      }
+      state.runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+    }
+
+    /**
+     * A contained drift leaves the turn degraded and its scope registered as
+     * stuck. Shutdown must then refuse to report a clean drain rather than hide
+     * it; assert that here so the shared afterEach does not re-run it.
+     */
+    async function expectShutdownToReportDegradedTurn(): Promise<void> {
+      const failure = await runtime.shutdown().then(() => null, (err: unknown) => err);
+      runtime = undefined as unknown as AgentRuntime;
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).message).toBe('AgentRuntime shutdown failed');
+      expect((failure as AggregateError).errors.map((err: unknown) => String(err)).join('\n'))
+        .toMatch(/retained finalization\(s\) unresolved/);
+    }
+
+    function escapeAlerts(title: string): unknown[][] {
+      return mockEmitAlertChecked.mock.calls.filter(
+        (call) => call[1] === 'agent_turn_finalization_escaped' && call[2] === title,
+      );
     }
 
     /** Records every unhandled rejection raised while a test runs. */
@@ -1249,19 +1292,106 @@ describe('deferred-turn admission (#3295 S2)', () => {
       expect(replayedAlerts()).toBe(0);
     }
 
-    it('still refuses the replay, and releases the held turn, when a different continuation took over the FIFO', async () => {
+    it('refuses the replay against a sole other owner and surfaces the held awaiter it cannot settle', async () => {
       const unhandled = captureUnhandledRejections();
       try {
-        const run = await replayAgainstOtherOwner('wamid-c19-conflict-head', (_held, other) => [other]);
+        // Production shape: the other owner holds the key's only FIFO entry and
+        // its single completion slot, so the held turn's completion is unreachable.
+        const run = await replayAgainstOtherOwner(
+          'wamid-c19-conflict-head',
+          (_held, other) => [other],
+          { takeCompletionSlot: true },
+        );
         run.releaseShutdown();
-        await expectHeldTurnReleasedAroundOtherOwner(run, unhandled);
+
+        await vi.waitFor(() => expect(unhandled.reasons.length > 0 || status(run.seq) === 'failed').toBe(true));
+        expect(unhandled.reasons).toEqual([]);
+        expect(terminalRows(run.seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
+        expectRefusedReplay(run.primary, run.queue);
+        // The retirement could not settle the held awaiter, and says so.
+        await vi.waitFor(() => expect(escapeAlerts('Displaced runtime turn has no owned completion')).toHaveLength(1));
+        expect(run.heldSettled()).toBe(false);
+        const state = lifecycle();
+        expect(state.perChatRuntimeTurnContexts.get(run.mapKey)).toEqual([run.other]);
+        expect(state.perChatInboundSeqQueue.get(run.mapKey)).toEqual([run.otherSeq]);
+        expect(state.perChatRuntimeTurnCompletions.get(run.mapKey)).toBe(run.otherCompletion);
+        expect(state.perChatRuntimeTurnScopeRefs.has(run.held.identity.logicalTurnId)).toBe(false);
+        expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(run.held)).toBe(false);
+        expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(run.other)).toBe(true);
+        expect(status(run.otherSeq)).toBe('processing');
         run.withdrawOther();
+        // Test hygiene only: release the stranded awaiter so shutdown can drain.
+        run.heldCompletion.resolve();
       } finally {
         unhandled.stop();
       }
     });
 
-    it('still refuses the replay, and releases the held turn, when a different owner heads the FIFO in front of it', async () => {
+    it('keeps the drift failure (contained and alerted) when the FIFO is empty at retirement', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        const run = await replayAgainstOtherOwner('wamid-c19-conflict-empty', (_held, other) => [other]);
+        // The conflict refused the replay; by the time its failure handler
+        // finalizes, the FIFO under this key is gone entirely.
+        run.queue.enqueueText.mockImplementation((text: string) => {
+          if (text !== failedReplayNotice) return;
+          lifecycle().perChatRuntimeTurnContexts.delete(run.mapKey);
+          lifecycle().perChatInboundSeqQueue.delete(run.mapKey);
+        });
+        run.releaseShutdown();
+
+        await vi.waitFor(() => expect(unhandled.reasons.length > 0 || run.heldSettled()).toBe(true));
+        expect(unhandled.reasons).toEqual([]);
+        expect(escapeAlerts('Runtime turn finalization escaped (fallback continuation)')).toEqual([
+          [expect.any(String), 'agent_turn_finalization_escaped', 'Runtime turn finalization escaped (fallback continuation)',
+            expect.stringContaining('Per-chat runtime turn FIFO drift'), 'warning'],
+        ]);
+        expect(escapeAlerts('Displaced runtime turn has no owned completion')).toEqual([]);
+        expect(unhandled.reasons).toEqual([]);
+        run.withdrawOther();
+        await expectShutdownToReportDegradedTurn();
+      } finally {
+        unhandled.stop();
+      }
+    });
+
+    it('does not retire a turn as displaced when its fallback fails for a reason other than the owner conflict', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        makeRuntime({ sessionScope: 'per_chat' });
+        const { mapKey, session: primary, held } = await admitTurn(dmJid, 'wamid-c19-crash-displaced', 'c19 crash question');
+        const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+        let heldSettled = false;
+        void heldCompletion.promise.then(() => { heldSettled = true; }, () => { heldSettled = true; });
+        const queue = queueFor(dmJid);
+        const replacement = await failOverToFallback(primary, queue);
+        expect(replacement.sendTurn).toHaveBeenCalledOnce();
+        // A different owner heads the FIFO, but the replay fails because the
+        // fallback provider crashed mid-turn, not because of that owner.
+        const { other, otherSeq } = injectOtherOwner(held, 'wamid-c19-crash-displaced');
+        lifecycle().perChatRuntimeTurnContexts.set(mapKey, [other]);
+        lifecycle().perChatInboundSeqQueue.set(mapKey, [otherSeq]);
+
+        replacement.failProviderTurn(new Error('c19 fallback provider exited mid-turn'));
+
+        await vi.waitFor(() => expect(unhandled.reasons.length > 0 || heldSettled).toBe(true));
+        expect(unhandled.reasons).toEqual([]);
+        expect(escapeAlerts('Runtime turn finalization escaped (fallback continuation)')).toEqual([
+          [expect.any(String), 'agent_turn_finalization_escaped', 'Runtime turn finalization escaped (fallback continuation)',
+            expect.stringContaining('Per-chat runtime turn FIFO drift'), 'warning'],
+        ]);
+        expect(escapeAlerts('Displaced runtime turn has no owned completion')).toEqual([]);
+        expect(lifecycle().perChatRuntimeTurnContexts.get(mapKey)).toEqual([other]);
+        expect(lifecycle().perChatInboundSeqQueue.get(mapKey)).toEqual([otherSeq]);
+        expect(unhandled.reasons).toEqual([]);
+        withdrawOtherOwner(mapKey, other);
+        await expectShutdownToReportDegradedTurn();
+      } finally {
+        unhandled.stop();
+      }
+    });
+
+    it('containment probe: releases the held turn by identity when an injected owner heads the FIFO in front of it', async () => {
       const unhandled = captureUnhandledRejections();
       try {
         const run = await replayAgainstOtherOwner('wamid-c19-conflict-behind', (held, other) => [other, held]);
@@ -1273,7 +1403,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
       }
     });
 
-    it('still refuses the replay when a different turn is queued behind the held head', async () => {
+    it('containment probe: still refuses the replay when an injected turn is queued behind the held head', async () => {
       const unhandled = captureUnhandledRejections();
       try {
         const run = await replayAgainstOtherOwner('wamid-c19-conflict-queued', (held, other) => [held, other]);

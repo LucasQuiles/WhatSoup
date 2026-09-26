@@ -1832,7 +1832,10 @@ async applyRuntimeTurnPostEffects(
       const seqs = this.host.perChatInboundSeqQueue.get(mapKey);
       const completion = this.host.perChatRuntimeTurnCompletions.get(mapKey);
       const notHead = contexts?.[0]?.identity.logicalTurnId !== context.identity.logicalTurnId;
-      if (!postEffects.admissionRejected && notHead && postEffects.detachIfDisplaced === true) {
+      // Displaced means a DIFFERENT turn really heads the FIFO. An empty or
+      // missing FIFO is drift, not displacement, and keeps failing loudly.
+      const otherHeads = contexts?.[0] !== undefined && notHead;
+      if (!postEffects.admissionRejected && otherHeads && postEffects.detachIfDisplaced === true) {
         // Another turn owns the head. Its slot, seq, and presentation state are
         // not ours to validate or advance; retire this turn by identity below.
         ledger.displaced = true;
@@ -1917,6 +1920,19 @@ async applyRuntimeTurnPostEffects(
       if (completion?.context.identity.logicalTurnId === context.identity.logicalTurnId) {
         this.host.perChatRuntimeTurnCompletions.delete(mapKey);
         completion.resolve();
+      } else {
+        // The key's single completion slot belongs to another turn, so this
+        // turn's awaiter cannot be reached from here. Keep that visible.
+        log.warn({ mapKey, scopeKey, logicalTurnId: context.identity.logicalTurnId },
+          'displaced runtime turn retired without an owned completion');
+        emitAlertChecked(
+          this.host.instanceName,
+          'agent_turn_finalization_escaped',
+          'Displaced runtime turn has no owned completion',
+          `mapKey=${mapKey} scope=${scopeKey} turn=${context.identity.logicalTurnId}`,
+          'warning',
+        );
+        this.registerStuckScope(scopeKey);
       }
       ledger.completionSettled = true;
     }
