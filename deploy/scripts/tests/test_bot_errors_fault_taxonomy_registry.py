@@ -48,6 +48,13 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "chronologyDelayedDispatches",
     "chronologyRecoveryReplayDispatches",
     "chronologyMaxQueueAgeSeconds",
+    "fallbackTurnsServed",
+    "fallbackTurnsEmpty",
+    "fallbackActivations",
+    "fallbackReverts",
+    "fallbackReplays",
+    "probeAttempts",
+    "failedEntryCount",
 )
 
 

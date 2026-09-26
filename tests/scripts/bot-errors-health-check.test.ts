@@ -5080,6 +5080,29 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_chronology_max_queue_age_seconds=23');
     });
 
+    it('labels the provider-fallback counters as diagnostic evidence without raising risk (#3586)', () => {
+      // Distinct value per field so a swapped label cannot pass.
+      const line = probeRuntimeAgent({
+        fallbackTurnsServed: 31,
+        fallbackTurnsEmpty: 32,
+        fallbackActivations: 33,
+        fallbackReverts: 34,
+        fallbackReplays: 35,
+        probeAttempts: 36,
+        failedEntryCount: 37,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_fallback_turns_served=31');
+      expect(line).toContain('runtime_agent_fallback_turns_empty=32');
+      expect(line).toContain('runtime_agent_fallback_activations=33');
+      expect(line).toContain('runtime_agent_fallback_reverts=34');
+      expect(line).toContain('runtime_agent_fallback_replays=35');
+      expect(line).toContain('runtime_agent_fallback_probe_attempts=36');
+      expect(line).toContain('runtime_agent_fallback_failed_entry_count=37');
+    });
+
     it('warns for declared current-risk signals and renders bounded backoff state', () => {
       const backoff = probeRuntimeAgent({
         autoCompactState: 'backoff',
