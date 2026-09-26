@@ -409,7 +409,7 @@ function entryClears(): unknown[][] {
 // live sibling model-a1); provider B has one.
 const SIBLING_CATALOGUE = ['minimax/model-a1', 'minimax/model-a2', 'xai/model-b1', 'deepseek/model-c1'];
 
-async function makeDiscoveryRuntime(): Promise<SweepView> {
+async function makeDiscoveryRuntime(catalogue: string[] = SIBLING_CATALOGUE): Promise<SweepView> {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
   config['agentFallbacks'] = undefined;
@@ -417,7 +417,7 @@ async function makeDiscoveryRuntime(): Promise<SweepView> {
   const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: 'primary-model',
     sessionScope: 'per_chat',
-    modelCatalogueListFn: (async () => ({ status: 'ok', ids: SIBLING_CATALOGUE })) as never,
+    modelCatalogueListFn: (async () => ({ status: 'ok', ids: [...catalogue] })) as never,
   });
   const view = sv(runtime);
   await view.fallback.refreshDiscoveredFallbackChain('boot');
@@ -549,6 +549,53 @@ describe('fallback_chain_entry_unhealthy incident lifecycle', () => {
     await view.fallback.runChainCanarySweep('scheduled');
 
     expect(entryAlerts()[0]?.[4]).toBe('critical');
+  });
+
+  it('(e) emits critical when the only canary-ok peer already failed a turn this window', async () => {
+    // A peer in failedKeys cannot be selected again this window, so it is not a
+    // healthy fallback even though its canary passes.
+    const view = sv(makeRuntime(STATIC_CHAIN));
+    view.fallbackChain.failedKeys.add(view.fallbackChain.entryKey(STATIC_CHAIN[1]!));
+    probeOutcomes({ 'minimax/model-a1': 'failed' });
+
+    await view.fallback.runChainCanarySweep('scheduled');
+
+    expect(entryAlerts()).toHaveLength(1);
+    expect(entryAlerts()[0]?.[4]).toBe('critical');
+  });
+
+  it('(f) stays open while the ACTIVE window entry is canary-dead even after it left the sweep set', async () => {
+    const view = await makeDiscoveryRuntime();
+    v(view as unknown as AgentRuntime).activateProviderFallback(null, 'usage-limit');
+    const active = v(view as unknown as AgentRuntime).fallbackWindow.activeEntry;
+    expect(active?.model).toBe('minimax/model-a2');
+
+    probeOutcomes({ 'minimax/model-a2': 'timeout' });
+    await view.fallback.runChainCanarySweep('scheduled');
+
+    // Discovery replaced it in the basis, but the window still serves on it.
+    expect(sweepSetModels(view)).not.toContain('minimax/model-a2');
+    expect(view.agentFallbacks.map((entry) => entry.model)).toContain('minimax/model-a2');
+    expect(entryAlerts()).toHaveLength(1);
+    expect(entryClears()).toHaveLength(0);
+  });
+
+  it('(g) re-opens when a still-dead entry re-enters the sweep set after a clear', async () => {
+    const catalogue = [...SIBLING_CATALOGUE];
+    const view = await makeDiscoveryRuntime(catalogue);
+    probeOutcomes({ 'minimax/model-a2': 'timeout' });
+    await view.fallback.runChainCanarySweep('scheduled');
+    expect(entryClears()).toHaveLength(1);
+
+    // The sibling disappears from the catalogue: the dead model is the only
+    // representative of its provider again and returns to the sweep set.
+    catalogue.splice(catalogue.indexOf('minimax/model-a1'), 1);
+    await view.fallback.runChainCanarySweep('scheduled');
+    expect(sweepSetModels(view)).toContain('minimax/model-a2');
+    await view.fallback.runChainCanarySweep('scheduled');
+
+    expect(entryAlerts()).toHaveLength(2);
+    expect(entryClears()).toHaveLength(1);
   });
 
   it('re-alerts when a failure record older than trustMs is followed by a fresh failure', async () => {

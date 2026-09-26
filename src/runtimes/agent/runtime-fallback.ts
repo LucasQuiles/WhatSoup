@@ -1288,7 +1288,9 @@ export class RuntimeFallbackCoordinator {
           this.chainCanaryConfig.timeoutMs,
         );
         this.chainCanary.set(key, { ...result, checkedAt: systemClock.now() });
-        if (result.status !== 'ok' && wasHealthy) {
+        // A still-dead entry must re-open a closed incident: it can re-enter the
+        // sweep set after a "left the sweep set" clear with its record still fresh.
+        if (result.status !== 'ok' && (wasHealthy || this.chainCanaryAlert !== 'open')) {
           newlyFailed.push({ entry, result });
         } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
           recovered = entry;
@@ -1323,15 +1325,15 @@ export class RuntimeFallbackCoordinator {
 
   /**
    * `warning` while the chain can still serve: another chain entry holds fresh
-   * canary-ok evidence and the window has not exhausted the chain. `critical`
-   * otherwise.
+   * canary-ok evidence, has not already failed a turn this window, and the
+   * window has not exhausted the chain. `critical` otherwise.
    */
   private chainCanaryAlertSeverity(failingKey: string): 'warning' | 'critical' {
     const chain = this.host.fallbackChain;
     if (chain.isExhausted(this.host.agentFallbacks)) return 'critical';
     const healthyPeer = this.host.agentFallbacks.some((entry) => {
       const key = chain.entryKey(entry);
-      return key !== failingKey && this.chainCanaryEvidence(key) === 'ok';
+      return key !== failingKey && !chain.failedKeys.has(key) && this.chainCanaryEvidence(key) === 'ok';
     });
     return healthyPeer ? 'warning' : 'critical';
   }
@@ -1342,12 +1344,15 @@ export class RuntimeFallbackCoordinator {
    * entry's recovery strands the incident when discovery replaces a failed
    * candidate: the replaced entry is never swept again. Fresh evidence (trust
    * TTL) is used so an entry whose probe is always skipped cannot hold the
-   * incident open on a stale record.
+   * incident open on a stale record. The chain in use is checked too: mid-window
+   * the active entry stays in agentFallbacks after discovery drops it from the
+   * basis, and it must not clear while it still serves turns dead.
    */
   private reconcileChainCanaryAlert(recovered: AgentFallbackEntry | null): void {
     if (this.chainCanaryAlert === 'closed') return;
     const sweepSet = this.chainCanarySweepEntries();
-    if (sweepSet.some((entry) => this.chainCanaryDead(this.host.fallbackChain.entryKey(entry)))) return;
+    const inUse = [...sweepSet, ...this.host.agentFallbacks];
+    if (inUse.some((entry) => this.chainCanaryDead(this.host.fallbackChain.entryKey(entry)))) return;
     let proof: string;
     if (this.chainCanaryAlert === 'unknown') proof = 'boot_reconcile';
     else if (recovered) proof = `canary_completion provider=${recovered.provider} model=${recovered.model ?? 'default'}`;
