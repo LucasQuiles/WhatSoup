@@ -2140,6 +2140,9 @@ describe('poller.ts uncovered-branch coverage', () => {
     // Pause dispatch was attempted (and swallowed) by the failing messenger.
     expect(calls).toHaveLength(1);
     expect(calls[0].text).toContain('consecutive failures');
+    // #3608: extend_trigger no longer resumes, so the notice must name resume_trigger.
+    expect(calls[0].text).toContain('resume with resume_trigger or recreate');
+    expect(calls[0].text).not.toContain('extend_trigger');
   });
 
   it('expireTrigger swallows an expiry-notification dispatch rejection via .catch (line 548)', async () => {

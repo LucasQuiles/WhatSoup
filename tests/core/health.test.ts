@@ -188,7 +188,7 @@ function makeDb(): Database {
 }
 
 function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps {
-  return {
+  const deps: HealthDeps = {
     db,
     connectionManager: {
       botJid: '15551230004@s.whatsapp.net',
@@ -210,6 +210,46 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
     accessMode: 'allowlist',
     ...overrides,
   };
+  if (deps.instanceType === 'agent' && deps.runtime?.getHealthSnapshot) {
+    const runtime = deps.runtime;
+    const getHealthSnapshot = runtime.getHealthSnapshot.bind(runtime);
+    deps.runtime = {
+      ...runtime,
+      getHealthSnapshot: () => {
+        const snapshot = getHealthSnapshot();
+        return {
+          ...snapshot,
+          details: {
+            degradedReasons: [],
+            recoveryBlockingReasons: [],
+            recoveryDebtReasons: [],
+            turnRecoveryBlockingOutstanding: 0,
+            turnRecoveryRetainedTerminal: 0,
+            turnRecoveryOpenRecoveries: 0,
+            turnRecoveryCorroboratedRetained: 0,
+            completedDeliveryIdentityBlocking: 0,
+            completedDeliveryIdentityRetained: 0,
+            completedDeliveryIdentityAdmissions: { nextAction: null },
+            ...snapshot.details,
+          },
+        };
+      },
+    };
+  }
+  if (deps.instanceType === 'agent' && !deps.durability) {
+    deps.durability = {
+      getHealthStats: () => ({
+        oldestMaybeSentAt: null,
+        deliveryAmbiguity: {
+          readable: true,
+          uncorroboratedAmbiguous: 0,
+          corroboratedRetained: 0,
+          oldestUncorroboratedAt: null,
+        },
+      }),
+    } as unknown as NonNullable<HealthDeps['durability']>;
+  }
+  return deps;
 }
 
 function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -606,6 +646,80 @@ describe('GET /health', () => {
       expect(status).toBe(200);
       expect(json.status).toBe('degraded');
       expect(json.durability.maybeSentOutbound).toBe(1);
+      expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('keeps a stale corroborated maybe_sent delivery as retained debt without degrading service', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const conversationKey = 'health-corroborated-conversation';
+    const deliveryJid = 'health-corroborated@g.us';
+    const inboundSeq = durability.journalInbound(
+      'health-corroborated-message',
+      conversationKey,
+      deliveryJid,
+      'agent',
+    );
+    const selectedOpId = durability.createOutboundOp({
+      conversationKey,
+      chatJid: deliveryJid,
+      opType: 'text',
+      payload: '{}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: inboundSeq,
+      isTerminal: true,
+    });
+    durability.markSending(selectedOpId);
+    durability.markMaybeSent(selectedOpId, 'transport result unknown');
+    db2.raw.prepare(
+      "UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?",
+    ).run(selectedOpId);
+    db2.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed
+      ) VALUES ('per_chat', ?, ?, ?, ?, 'health-corroborated-turn',
+                'health-corroborated-manager', 1, 'failed', 'failed_terminal',
+                'delivery_unknown', ?, 0)
+    `).run(conversationKey, deliveryJid, inboundSeq, inboundSeq, selectedOpId);
+    const corroboratingOpId = durability.createOutboundOp({
+      conversationKey,
+      chatJid: deliveryJid,
+      opType: 'text',
+      payload: '{}',
+      replayPolicy: 'unsafe',
+      sourceInboundSeq: inboundSeq,
+    });
+    durability.markSending(corroboratingOpId);
+    durability.markSubmitted(corroboratingOpId, 'WA_HEALTH_CORROBORATED');
+    durability.markEchoed(corroboratingOpId);
+    durability.postConnectRecovery();
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.status_reasons).toEqual([]);
+      expect(json.recovery_debt).toMatchObject({
+        open: true,
+        service_blocking: false,
+        attention: 'routine',
+        reasons: ['corroborated_delivery_retained'],
+        delivery: {
+          blocking_ambiguous: 0,
+          uncorroborated_ambiguous: 0,
+          corroborated_retained: 1,
+          oldest_uncorroborated_at: null,
+        },
+      });
       expect(json.durability.oldestMaybeSentAt).not.toBeNull();
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
@@ -1910,12 +2024,15 @@ describe('GET /health', () => {
           turnRecoveryCorruptLinks: 0,
           turnRecoveryEchoConflicts: 0,
           providerExecution: { pressureActive: false },
-          // the live ml-bot shape: frozen debt, nothing else wrong
+          // frozen debt with no classified next action: service-blocking
+          degradedReasons: ['completed_delivery_identity_debt'],
+          recoveryBlockingReasons: ['completed_delivery_identity_unclassified'],
+          completedDeliveryIdentityBlocking: 11,
           completedDeliveryIdentityAdmissions: {
             unresolvedCount: 11,
             oldestTransitionAt: '2026-08-12T05:34:35.000Z',
             maximumAttempts: 1,
-            nextAction: 'fresh_inbound',
+            nextAction: null,
           },
         },
       }),
@@ -1934,6 +2051,47 @@ describe('GET /health', () => {
     expect(json.degradation_causes).toContain('delivery_identity_debt');
     // the named cause replaces the unclassified fall-through — never both
     expect(json.degradation_causes).not.toContain('agent_runtime_degraded_unclassified');
+    db2.close();
+  });
+
+  it('keeps retained completed-delivery identity debt out of degradation causes', async () => {
+    // The live ml-bot shape (2026-08-16): frozen debt whose next action is a
+    // fresh inbound is retained recovery debt. It stays visible in
+    // recovery_debt but neither degrades status nor names a cause.
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'healthy',
+        details: {
+          recentCrashes: 0,
+          providerExecution: { pressureActive: false },
+          recoveryDebtReasons: ['completed_delivery_identity_fresh_inbound'],
+          completedDeliveryIdentityRetained: 11,
+          completedDeliveryIdentityAdmissions: {
+            unresolvedCount: 11,
+            oldestTransitionAt: '2026-08-12T05:34:35.000Z',
+            maximumAttempts: 1,
+            nextAction: 'fresh_inbound',
+          },
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('delivery_identity_debt');
+    expect(json.recovery_debt).toMatchObject({
+      open: true,
+      service_blocking: false,
+      completed_delivery_identity: { retained: 11, next_action: 'fresh_inbound' },
+    });
     db2.close();
   });
 
@@ -1998,6 +2156,8 @@ describe('GET /health', () => {
         status: 'degraded',
         details: {
           degradedReasons: ['turn_finalization_debt'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
           recentCrashes: 0,
           autoCompactActiveBackoffScopes: 0,
           turnFinalizationRetainedRetries: 0,
@@ -2489,12 +2649,35 @@ describe('GET /health', () => {
     expect(json.degradation_causes).toContain('continuity_gap_open');
     expect(json.recovery_debt).toEqual({
       open: true,
+      service_blocking: false,
+      attention: 'routine',
       reason: 'continuity_gap_open',
+      reasons: ['continuity_gap_open'],
       continuity: {
         readable: true,
         open: 2,
         unresolved: 1,
         ambiguous: 1,
+      },
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+      completed_delivery_identity: {
+        readable: true,
+        blocking: 0,
+        retained: 0,
+        next_action: null,
+      },
+      delivery: {
+        readable: true,
+        blocking_ambiguous: 0,
+        uncorroborated_ambiguous: 0,
+        corroborated_retained: 0,
+        oldest_uncorroborated_at: null,
       },
     });
     expect(json.continuity).toEqual({
@@ -2521,8 +2704,8 @@ describe('GET /health', () => {
     const { status, body } = await healthReq(port);
     const json = JSON.parse(body);
     expect(status).toBe(200);
-    // Unreadable continuity alone no longer flips status (#2973 Option A)
-    expect(json.status).toBe('healthy');
+    // Unreadable safety evidence fails closed even though readable open gaps are retained debt.
+    expect(json.status).toBe('degraded');
     expect(json.degradation_causes).toContain('continuity_gap_unreadable');
     expect(json.recovery_debt).toMatchObject({
       open: true,
@@ -2653,10 +2836,318 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('returns healthy on the next poll after a blocking recovery episode clears, without restart', async () => {
+    // runtime.turn_finalization_debt and recovery_debt_blocking are recomputed
+    // from durable state on every poll (DIRECTLY_REPROBED_STATUS_REASONS), so
+    // they never arm the #2280 latch: once the evidence reads non-blocking the
+    // same server process reports healthy, with retained debt still visible.
+    db.close();
+    const db2 = makeDb();
+    const turnCapability = {
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: Date.now(),
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+    const completeRecoveryDetails = (overrides: Record<string, unknown>) => ({
+      degradedReasons: [],
+      recoveryBlockingReasons: [],
+      recoveryDebtReasons: [],
+      turnRecoveryBlockingOutstanding: 0,
+      turnRecoveryRetainedTerminal: 0,
+      turnRecoveryOpenRecoveries: 0,
+      turnRecoveryCorroboratedRetained: 0,
+      completedDeliveryIdentityBlocking: 0,
+      completedDeliveryIdentityRetained: 0,
+      completedDeliveryIdentityAdmissions: { nextAction: null },
+      ...overrides,
+    });
+    const getHealthSnapshot = vi.fn()
+      .mockReturnValueOnce({
+        status: 'degraded',
+        details: completeRecoveryDetails({
+          degradedReasons: ['turn_finalization_debt'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
+          turnCapability,
+        }),
+      })
+      .mockReturnValueOnce({
+        status: 'healthy',
+        details: completeRecoveryDetails({
+          recoveryDebtReasons: ['historical_turn_catchup'],
+          turnRecoveryOpenRecoveries: 1,
+          turnCapability,
+        }),
+      })
+      .mockReturnValue({
+        status: 'healthy',
+        details: completeRecoveryDetails({ turnCapability }),
+      });
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: { getHealthSnapshot } as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const first = JSON.parse((await healthReq(port)).body);
+    const retained = JSON.parse((await healthReq(port)).body);
+    const clear = JSON.parse((await healthReq(port)).body);
+
+    expect(first).toMatchObject({
+      status: 'degraded',
+      recovery_debt: { open: true, service_blocking: true },
+    });
+    expect(first.status_reasons).toEqual(
+      expect.arrayContaining(['runtime.turn_finalization_debt', 'recovery_debt_blocking']),
+    );
+    expect(retained).toMatchObject({
+      status: 'healthy',
+      status_reasons: [],
+      recovery_debt: {
+        open: true,
+        service_blocking: false,
+        reasons: ['historical_turn_catchup'],
+      },
+    });
+    expect(retained.degradation_causes).not.toContain('turn_recovery_degraded');
+    expect(retained.degradation_causes).not.toContain('recovery_debt_blocking');
+    expect(retained.degradation_causes).not.toContain('degradation_silence_unproven');
+    expect(clear).toMatchObject({
+      status: 'healthy',
+      status_reasons: [],
+      recovery_debt: { open: false, service_blocking: false },
+    });
+    expect(getHealthSnapshot).toHaveBeenCalledTimes(3);
+    db2.close();
+  });
+
+  describe('recovery-debt reasons are directly re-probed, never latched (#2280)', () => {
+    const cleanTurnCapability = {
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsabilityStatus: 'usable',
+      lastSuccessfulTurnAt: Date.now(),
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    };
+
+    /** One long-lived server whose runtime snapshot and delivery evidence can
+     * change between polls: the latch is scoped to the server instance, so a
+     * fresh server per poll would reset exactly the state under test. */
+    async function openMutableAgent(): Promise<{
+      poll: () => Promise<Record<string, any>>;
+      setRuntime: (snapshot: { status: string; details: Record<string, unknown> }) => void;
+      setDeliveryReadable: (readable: boolean) => void;
+      close: () => void;
+    }> {
+      db.close();
+      const db2 = makeDb();
+      let runtimeSnapshot: { status: string; details: Record<string, unknown> } = {
+        status: 'healthy',
+        details: { turnCapability: cleanTurnCapability },
+      };
+      let deliveryReadable = true;
+      const deps = makeDeps(db2, {
+        instanceType: 'agent',
+        runtime: { getHealthSnapshot: () => runtimeSnapshot } as unknown as HealthDeps['runtime'],
+        durability: {
+          getHealthStats: () => ({
+            oldestMaybeSentAt: null,
+            deliveryAmbiguity: deliveryReadable
+              ? { readable: true, uncorroboratedAmbiguous: 0, corroboratedRetained: 0, oldestUncorroboratedAt: null }
+              : { readable: false },
+          }),
+        } as unknown as NonNullable<HealthDeps['durability']>,
+      });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(deps));
+      return {
+        poll: async () => JSON.parse((await healthReq(port)).body),
+        setRuntime: (snapshot) => { runtimeSnapshot = snapshot; },
+        setDeliveryReadable: (readable) => { deliveryReadable = readable; },
+        close: () => db2.close(),
+      };
+    }
+
+    it('returns healthy after a blocking completed-delivery identity episode clears', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'degraded',
+        details: {
+          turnCapability: cleanTurnCapability,
+          degradedReasons: ['completed_delivery_identity_debt'],
+          recoveryBlockingReasons: ['completed_delivery_identity_unclassified'],
+          completedDeliveryIdentityBlocking: 2,
+          completedDeliveryIdentityAdmissions: { unresolvedCount: 2, nextAction: null },
+        },
+      });
+      const blocked = await agent.poll();
+      expect(blocked.status).toBe('degraded');
+      expect(blocked.status_reasons).toEqual(expect.arrayContaining([
+        'runtime.completed_delivery_identity_debt',
+        'recovery_debt_blocking',
+      ]));
+
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      const repaired = await agent.poll();
+      expect(repaired.status, 'a repaired instance must not stay latched degraded').toBe('healthy');
+      expect(repaired.status_reasons).toEqual([]);
+      agent.close();
+    });
+
+    it('keeps unreadable recovery evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'healthy',
+        // A malformed gauge makes the runtime recovery evidence unreadable.
+        details: { turnCapability: cleanTurnCapability, recoveryBlockingReasons: null },
+      });
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = await agent.poll();
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reasons).toContain('recovery_evidence_unreadable');
+      }
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      expect((await agent.poll()).status).toBe('healthy');
+      agent.close();
+    });
+
+    it('keeps unreadable delivery evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      const agent = await openMutableAgent();
+      agent.setDeliveryReadable(false);
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = await agent.poll();
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reasons).toContain('delivery_evidence_unreadable');
+      }
+      agent.setDeliveryReadable(true);
+      expect((await agent.poll()).status).toBe('healthy');
+      agent.close();
+    });
+
+    it('keeps unreadable continuity evidence degraded with its own reason on every poll, then clears on repair', async () => {
+      db.raw.prepare(`
+        INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+        VALUES ('foreign-continuity-reprobe', 'operator', 'other_recovery_owner', 'Unrelated recovery work')
+      `).run();
+      db.raw.prepare(`
+        INSERT INTO recovery_runs (trigger, recovery_plan_id, status)
+        VALUES ('continuity_gap_absent', 'foreign-continuity-reprobe', 'started')
+      `).run();
+      for (let pollIndex = 0; pollIndex < 3; pollIndex += 1) {
+        const unreadable = JSON.parse((await healthReq(port)).body);
+        expect(unreadable.status).toBe('degraded');
+        expect(unreadable.status_reasons).toContain('recovery_debt_blocking');
+        expect(unreadable.status_reasons).not.toContain('degradation_silence_unproven');
+        expect(unreadable.recovery_debt.reason).toBe('continuity_gap_unreadable');
+      }
+      // recovery_plans is append-only; removing the foreign continuity run is
+      // what ends the foreign reservation the ledger reader refuses.
+      db.raw.prepare(`DELETE FROM recovery_runs WHERE recovery_plan_id = 'foreign-continuity-reprobe'`).run();
+      const repaired = JSON.parse((await healthReq(port)).body);
+      expect(repaired.status, 'a repaired ledger must not stay latched degraded').toBe('healthy');
+      expect(repaired.status_reasons).toEqual([]);
+    });
+
+    it('a silence-prone reason alongside the recovery reasons still arms, so the change removes no protection', async () => {
+      const agent = await openMutableAgent();
+      agent.setRuntime({
+        status: 'degraded',
+        details: {
+          turnCapability: cleanTurnCapability,
+          degradedReasons: ['turn_finalization_debt', 'turn_queue_halted'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          turnRecoveryBlockingOutstanding: 1,
+        },
+      });
+      const degraded = await agent.poll();
+      expect(degraded.status_reasons).toEqual(expect.arrayContaining([
+        'runtime.turn_finalization_debt',
+        'runtime.turn_queue_halted',
+        'recovery_debt_blocking',
+      ]));
+
+      agent.setRuntime({ status: 'healthy', details: { turnCapability: cleanTurnCapability } });
+      const afterRepair = await agent.poll();
+      expect(afterRepair.status, 'turn_queue_halted must still latch').toBe('degraded');
+      expect(afterRepair.status_reasons).toEqual(['degradation_silence_unproven']);
+      agent.close();
+    });
+  });
+
+  it.each([
+    ['an exhausted retained job', { turnRecoveryExhausted: 1, turnRecoveryRetainedTerminal: 1, recoveryDebtReasons: ['turn_recovery_terminal'] }],
+    ['a corroborated pending job', { turnRecoveryOutstanding: 1, turnRecoveryPending: 1, turnRecoveryCorroboratedRetained: 1, recoveryDebtReasons: ['corroborated_delivery_retained'] }],
+    ['an open historical catch-up', { turnRecoveryOpenRecoveries: 1, recoveryDebtReasons: ['historical_turn_catchup'] }],
+  ])('does not name turn_recovery_degraded for retained-only debt (%s) on a runtime degraded for another reason', async (_label, retained) => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          degradedReasons: ['recent_crashes'],
+          recentCrashes: 1,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 0,
+          turnRecoveryPending: 0,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          turnRecoveryOrphanTransfers: 0,
+          turnRecoveryBlockingOutstanding: 0,
+          turnRecoveryRetainedTerminal: 0,
+          turnRecoveryCorroboratedRetained: 0,
+          recoveryBlockingReasons: [],
+          completedDeliveryIdentityBlocking: 0,
+          completedDeliveryIdentityRetained: 0,
+          completedDeliveryIdentityAdmissions: { nextAction: null },
+          providerExecution: { pressureActive: false },
+          ...retained,
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const json = JSON.parse((await healthReq(port)).body);
+    expect(json.status).toBe('degraded');
+    expect(json.recovery_debt).toMatchObject({ open: true, service_blocking: false });
+    expect(json.status_reasons).not.toContain('runtime.turn_finalization_debt');
+    expect(json.degradation_causes).toContain('agent_recent_crashes');
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
+    // Every emitted cause with a registered reason twin carries that twin.
+    for (const cause of json.degradation_causes as string[]) {
+      const twins = HEALTH_DEGRADATION_CAUSE_REASON_TWINS[
+        cause as keyof typeof HEALTH_DEGRADATION_CAUSE_REASON_TWINS
+      ];
+      if (twins === undefined || twins === NO_REASON_TWIN) continue;
+      expect((twins as readonly string[]).some((reason) => json.status_reasons.includes(reason))).toBe(true);
+    }
+    db2.close();
+  });
+
   it('surfaces turn_recovery_degraded and provider_execution_pressure causes from runtime counters', async () => {
     const db2 = makeDb();
     let outstanding = 1;
     let exhausted = 0;
+    let corruptLinks = 0;
     let pressureActive = false;
     const fakeAgentRuntime = {
       getHealthSnapshot: () => ({
@@ -2667,10 +3158,18 @@ describe('GET /health', () => {
           turnFinalizationRetainedRetries: 0,
           turnFinalizationDegradedScopes: 0,
           turnRecoveryOutstanding: outstanding,
+          turnRecoveryBlockingOutstanding: outstanding,
           turnRecoveryExhausted: exhausted,
+          turnRecoveryRetainedTerminal: exhausted,
           turnRecoveryOpenRecoveries: 0,
-          turnRecoveryCorruptLinks: 0,
+          turnRecoveryCorruptLinks: corruptLinks,
           turnRecoveryEchoConflicts: 0,
+          // The runtime's own classification of the counters above.
+          recoveryBlockingReasons: [
+            ...(outstanding > 0 ? ['turn_recovery_actionable'] : []),
+            ...(corruptLinks > 0 ? ['turn_recovery_integrity'] : []),
+          ],
+          recoveryDebtReasons: exhausted > 0 ? ['turn_recovery_terminal'] : [],
           providerExecution: { pressureActive },
           turnCapability: {
             modelUsable: false,
@@ -2695,11 +3194,17 @@ describe('GET /health', () => {
     expect(json.degradation_causes).toContain('turn_recovery_degraded');
     expect(json.degradation_causes).not.toContain('provider_execution_pressure');
 
-    // Leg 2: a different positive counter (exhausted) flags the same cause.
+    // Leg 2: a different blocking counter (corrupt links) flags the same cause.
     outstanding = 0;
-    exhausted = 1;
+    corruptLinks = 1;
     json = JSON.parse((await healthReq(port)).body);
     expect(json.degradation_causes).toContain('turn_recovery_degraded');
+
+    // Leg 2b: exhausted jobs are retained terminal debt and never name it.
+    corruptLinks = 0;
+    exhausted = 1;
+    json = JSON.parse((await healthReq(port)).body);
+    expect(json.degradation_causes).not.toContain('turn_recovery_degraded');
 
     // Leg 3: counters clear, provider execution pressure flags its own cause.
     exhausted = 0;
@@ -3031,7 +3536,20 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.status).toBe('degraded');
     expect(json.runtime).toEqual({
-      agent: { sessions: 2, compact: { lastError: 'timeout' } },
+      agent: {
+        sessions: 2,
+        compact: { lastError: 'timeout' },
+        degradedReasons: [],
+        recoveryBlockingReasons: [],
+        recoveryDebtReasons: [],
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryRetainedTerminal: 0,
+        turnRecoveryOpenRecoveries: 0,
+        turnRecoveryCorroboratedRetained: 0,
+        completedDeliveryIdentityBlocking: 0,
+        completedDeliveryIdentityRetained: 0,
+        completedDeliveryIdentityAdmissions: { nextAction: null },
+      },
     });
     db2.close();
   });

@@ -9,13 +9,5 @@
   ],
   "sourcePrefixes": ["src/"],
   "excludedSuffixes": [".d.ts"],
-  "allowlist": [
-    {
-      "path": "src/core/client-output-policy.ts",
-      "owner": "LucasQuiles",
-      "reason": "evaluator lands unenforced under the owner's split ruling; enforcement wiring (T06) is a later PR",
-      "expiresOn": "2026-11-24",
-      "reentryCondition": "remove this record when the T06 enforcement PR adds a production caller of evaluateClientOutputPolicy, or on expiry"
-    }
-  ]
+  "allowlist": []
 }
