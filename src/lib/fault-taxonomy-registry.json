@@ -17,7 +17,9 @@
   ],
   "authFailureClasses": [
     "pairing_required",
-    "serverside_logout_irreversible"
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit"
   ],
   "failureDomains": {
     "agentFailureClasses": {
@@ -631,6 +633,62 @@
       "kind": "historical_maximum",
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackTurnsServed",
+      "label": "runtime_agent_fallback_turns_served",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackTurnsEmpty",
+      "label": "runtime_agent_fallback_turns_empty",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackActivations",
+      "label": "runtime_agent_fallback_activations",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackReverts",
+      "label": "runtime_agent_fallback_reverts",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackReplays",
+      "label": "runtime_agent_fallback_replays",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "probeAttempts",
+      "label": "runtime_agent_fallback_probe_attempts",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "failedEntryCount",
+      "label": "runtime_agent_fallback_failed_entry_count",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
       "test": "tests/runtimes/agent/health-snapshot.test.ts"
     }
   ],
@@ -1360,7 +1418,7 @@
       "test": "tests/runtimes/agent/fallback-usage-limit-cascade.test.ts"
     },
     "fallback_chain_entry_unhealthy": {
-      "disposition": "once_per_canary_health_transition_until_entry_recovers",
+      "disposition": "once_per_canary_health_transition_until_no_entry_in_current_sweep_set_is_failing",
       "owner": "src/runtimes/agent/runtime-fallback.ts",
       "test": "tests/runtimes/agent/fallback-chain-canary.test.ts"
     },

@@ -14,11 +14,15 @@ import type { FleetDbReader } from '../db-reader.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { hasExplicitAuthLossSignal } from '../auth-loss-signals.ts';
 import { projectClientOutputPolicyConfig } from '../../core/client-output-policy-config.ts';
+import { systemClock, type Clock } from '../../lib/clock.ts';
+import { readHealthDisconnectDecision } from '../../lib/disconnect-classification.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
   healthPoller: HealthPoller;
   dbReader: FleetDbReader;
+  /** #2200: cache expiry and the fallback-window check read this clock; defaults to systemClock. */
+  clock?: Clock;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,9 +108,9 @@ function cachedQuery<T>(
   cache: Map<string, { data: Observation<T>; cachedAt: number }>,
   key: string,
   ttl: number,
+  now: number,
   queryFn: () => Observation<T>,
 ): Observation<T> {
-  const now = Date.now();
   const cached = cache.get(key);
   if (cached && now - cached.cachedAt < ttl) return cached.data;
   const data = queryFn();
@@ -131,11 +135,11 @@ const messageStatsCache = new Map<string, { data: Observation<MessageStats>; cac
 const sessionCountCache = new Map<string, { data: Observation<number>; cachedAt: number }>();
 
 /** Total lifetime agent sessions — 60s cache. */
-function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<number> {
+function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance, nowMs: number): Observation<number> {
   // Structurally absent, not a failed read — session counts don't apply to
   // non-agent instances, so skip the DB entirely rather than probing it.
   if (inst.type !== 'agent') return { status: 'not_applicable', value: 0 };
-  return cachedQuery(sessionCountCache, inst.name, DAILY_CACHE_TTL, () => {
+  return cachedQuery(sessionCountCache, inst.name, DAILY_CACHE_TTL, nowMs, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       const row = db.prepare('SELECT COUNT(*) as cnt FROM agent_sessions').get() as { cnt: number } | undefined;
       return row?.cnt ?? 0;
@@ -149,8 +153,8 @@ function getTotalSessions(dbReader: FleetDbReader, inst: DiscoveredInstance): Ob
   });
 }
 
-function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<MessageStats> {
-  return cachedQuery(messageStatsCache, inst.name, DAILY_CACHE_TTL, () => {
+function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance, nowMs: number): Observation<MessageStats> {
+  return cachedQuery(messageStatsCache, inst.name, DAILY_CACHE_TTL, nowMs, () => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const startSec = Math.floor(startOfDay.getTime() / 1000);
@@ -213,8 +217,14 @@ function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedS
     : isNonEmptyString(accountJid)
       ? 'present'
       : 'unknown';
-  const explicitAuthLossSignal =
-    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
+  const explicitAuthLossSignal = hasExplicitAuthLossSignal({
+    lastStatusCode,
+    lastDisconnectReason,
+    authFailureClass,
+    disconnectDecision: readHealthDisconnectDecision(
+      dig(health, 'whatsapp', 'connection') ?? dig(health, 'connection'),
+    ),
+  });
   const evidence = [
     linkedEvidenceField('link_source', 'health'),
     linkedEvidenceField('health_status', healthStatus),
@@ -322,8 +332,8 @@ interface ChatCounts {
 
 const chatCountsCache = new Map<string, { data: Observation<ChatCounts>; cachedAt: number }>();
 
-function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<ChatCounts> {
-  return cachedQuery(chatCountsCache, inst.name, DAILY_CACHE_TTL, () => {
+function getChatCounts(dbReader: FleetDbReader, inst: DiscoveredInstance, nowMs: number): Observation<ChatCounts> {
+  return cachedQuery(chatCountsCache, inst.name, DAILY_CACHE_TTL, nowMs, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       const row = db.prepare(`
         SELECT
@@ -345,8 +355,8 @@ interface TokenStats {
 
 const tokenStatsCache = new Map<string, { data: Observation<TokenStats>; cachedAt: number }>();
 
-function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<TokenStats> {
-  return cachedQuery(tokenStatsCache, inst.name, DAILY_CACHE_TTL, () => {
+function getTokenStats(dbReader: FleetDbReader, inst: DiscoveredInstance, nowMs: number): Observation<TokenStats> {
+  return cachedQuery(tokenStatsCache, inst.name, DAILY_CACHE_TTL, nowMs, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       // Sum tokens from messages (chat runtime). #1879: a missing
       // input_tokens/output_tokens column (older schema) used to be caught
@@ -415,8 +425,8 @@ export function _resetLineCaches(): void {
 }
 
 /** Most recent message timestamp for an instance — 60s cache. */
-function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance): Observation<string | null> {
-  return cachedQuery(lastActiveCache, inst.name, DAILY_CACHE_TTL, () => {
+function getLastMessageTime(dbReader: FleetDbReader, inst: DiscoveredInstance, nowMs: number): Observation<string | null> {
+  return cachedQuery(lastActiveCache, inst.name, DAILY_CACHE_TTL, nowMs, () => {
     const result = dbReader.query(inst.name, inst.dbPath, (db) => {
       const row = db.prepare(
         'SELECT MAX(timestamp) as ts FROM messages WHERE deleted_at IS NULL'
@@ -560,16 +570,17 @@ export function handleGetLines(
   const instances = deps.discovery.getInstances() ?? new Map<string, DiscoveredInstance>();
   pruneLineCaches(new Set(instances.keys()));
   const statuses = deps.healthPoller.getStatuses();
+  const nowMs = (deps.clock ?? systemClock).now();
 
   const lines = Array.from(instances.values()).map((inst) => {
     const poll = statuses.get(inst.name);
-    const stats = getMessageStats(deps.dbReader, inst);
+    const stats = getMessageStats(deps.dbReader, inst, nowMs);
     const statsValue = stats.value ?? ZERO_MESSAGE_STATS;
     const todayCount = statsValue.sent + statsValue.received;
-    const totalSessions = getTotalSessions(deps.dbReader, inst);
-    const chatCounts = getChatCounts(deps.dbReader, inst);
-    const tokenStats = getTokenStats(deps.dbReader, inst);
-    const lastMessageTime = getLastMessageTime(deps.dbReader, inst);
+    const totalSessions = getTotalSessions(deps.dbReader, inst, nowMs);
+    const chatCounts = getChatCounts(deps.dbReader, inst, nowMs);
+    const tokenStats = getTokenStats(deps.dbReader, inst, nowMs);
+    const lastMessageTime = getLastMessageTime(deps.dbReader, inst, nowMs);
     return enrichInstance(inst, poll, { messagesToday: todayCount, messageStats: stats, totalSessions, chatCounts, tokenStats, lastMessageTime });
   });
 
@@ -592,8 +603,9 @@ export async function handleGetLine(
   const dbStats = deps.dbReader.getSummaryStats(instance.name, instance.dbPath);
 
   // Start with the enriched shape the console expects, then add detail fields
-  const stats = getMessageStats(deps.dbReader, instance);
-  const totalSessions = getTotalSessions(deps.dbReader, instance);
+  const nowMs = (deps.clock ?? systemClock).now();
+  const stats = getMessageStats(deps.dbReader, instance, nowMs);
+  const totalSessions = getTotalSessions(deps.dbReader, instance, nowMs);
   const enriched = enrichInstance(instance, poll, { messageStats: stats, totalSessions });
 
   let instanceConfig: Record<string, unknown> = {};
@@ -780,7 +792,7 @@ export async function handleGetLineProviderStatus(
   const health = poll?.health as Record<string, unknown> | null | undefined;
   const fallbackActiveUntilRaw = dig(health, 'instance', 'fallbackActiveUntil');
   const activeUntil = typeof fallbackActiveUntilRaw === 'number' ? fallbackActiveUntilRaw : null;
-  const active = activeUntil !== null && Date.now() < activeUntil;
+  const active = activeUntil !== null && (deps.clock ?? systemClock).now() < activeUntil;
   const effectiveProviderRaw = dig(health, 'instance', 'effectiveProvider');
   const fallbackReasonRaw = dig(health, 'instance', 'fallbackReason');
   const fallbackResetAtRaw = dig(health, 'instance', 'fallbackResetAt');

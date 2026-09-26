@@ -29,7 +29,10 @@ Verified on main:
 
 Meanwhile the terminal-logout decision is made and thrown away durably:
 `decideDisconnectAction` returns `{type:'exit', reason:'logged-out'}` on
-three terminal branches (`src/transport/auth-disconnect-policy.ts:50,53,56`),
+three terminal branches (`src/transport/auth-disconnect-policy.ts:50,53,56`;
+since 2026-09-25 each exit also carries `basis` —
+`device_removed` | `ambiguous_401_repeated` | `uninspected` — and only the
+first is a confirmed server removal),
 and the health surface already *detects* the missing latch —
 `src/fleet/health-poller.ts:471` and `src/fleet/routes/lines.ts:246` carry
 the reason strings `…_without_auth_loss_signal`. The system knows the row

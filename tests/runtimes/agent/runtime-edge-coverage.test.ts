@@ -1471,7 +1471,11 @@ describe('AgentRuntime edge coverage', () => {
     expect(state.handleCrashNotify).toHaveBeenCalledWith('fallback session crashed', 'group-edge@g.us');
 
     created.opts.onResumeFailed?.();
-    expect(state.handleResumeFailed).toHaveBeenCalledWith('group-edge@g.us');
+    // X1: the replacement names its exact manager (sandbox mode ignores the target).
+    expect(state.handleResumeFailed).toHaveBeenCalledWith('group-edge@g.us', {
+      mapKey: 'group-edge@g.us',
+      session: created.session,
+    });
 
     expect(state.deleteOwnedPerChatSession('group-edge@g.us', created.session)).toBe(true);
     expect(created.session.resolveGenerationOwnership()).toBeNull();

@@ -12,6 +12,7 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
 import * as silenceManager from './silence-manager.ts';
@@ -20,8 +21,13 @@ import {
   createSilenceRegistryEpisodeStore,
   type SilenceRegistryEpisodeStorePort,
 } from './silence-registry-episode-store.ts';
-import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { hasExplicitAuthLossSignal, TERMINAL_AUTH_FAILURE_CLASSES as SHARED_TERMINAL_AUTH_FAILURE_CLASSES } from './auth-loss-signals.ts';
 import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
+  NO_RESTART_UNCONFIRMED_401_CLASSES,
+  readHealthDisconnectDecision,
+} from '../lib/disconnect-classification.ts';
 import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
 import type { StableAuthenticatedOpenSample } from './auth-loss-signal-resolver.ts';
@@ -36,13 +42,16 @@ import {
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
-const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
-  'pairing_required',
-  'serverside_logout_irreversible',
-]);
+// Logged out with no transport retry left: a confirmed removal, pairing, or an
+// unconfirmed 401 park. Only the first two are confirmed; see
+// NO_RESTART_UNCONFIRMED_401_CLASSES for the confidence split.
+const TERMINAL_AUTH_FAILURE_CLASSES = new Set<string>(SHARED_TERMINAL_AUTH_FAILURE_CLASSES);
+const UNCONFIRMED_401_AUTH_FAILURE_CLASSES = new Set<string>(NO_RESTART_UNCONFIRMED_401_CLASSES);
 const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
   'pairing_required',
   'serverside_logout_irreversible',
+  ...NO_RESTART_UNCONFIRMED_401_CLASSES,
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.ambiguous_401_reconnecting,
   'local_corruption_restorable',
   'local_corruption_unrestorable',
   'auth_bond_at_risk',
@@ -340,6 +349,7 @@ function classifyDatabaseInspectionHealth(
   health: Record<string, unknown>,
   httpStatus: number | undefined,
   expectedInstanceName: string,
+  nowMs: number,
 ): HealthSnapshotClassification | null {
   if (health.service_mode !== 'inspection_only') return null;
 
@@ -354,7 +364,7 @@ function classifyDatabaseInspectionHealth(
   const code = stringValue(startupBlock?.code);
   const generatedAt = stringValue(health.generated_at);
   const generatedAtMs = generatedAt === null ? Number.NaN : Date.parse(generatedAt);
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   const latest = sqlite?.schema_migration_latest;
   const required = positiveIntegerValue(sqlite?.schema_migration_required);
   const futureLatest = nonNegativeIntegerValue(latest);
@@ -420,15 +430,19 @@ function classifyDatabaseInspectionHealth(
   };
 }
 
+// `nowMs` is the poller's injected clock reading (#2200): snapshot freshness
+// is judged against it, never against a raw wall-clock read.
 function classifyHealthSnapshot(
   health: Record<string, unknown>,
   expectedInstanceName: string,
-  httpStatus?: number,
+  httpStatus: number | undefined,
+  nowMs: number,
 ): HealthSnapshotClassification {
   const databaseInspection = classifyDatabaseInspectionHealth(
     health,
     httpStatus,
     expectedInstanceName,
+    nowMs,
   );
   if (databaseInspection !== null) return databaseInspection;
 
@@ -596,8 +610,12 @@ function classifyHealthSnapshot(
     accountJid === 'not connected' ||
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
-  const explicitAuthLossSignal =
-    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
+  const explicitAuthLossSignal = hasExplicitAuthLossSignal({
+    lastStatusCode,
+    lastDisconnectReason,
+    authFailureClass,
+    disconnectDecision: readHealthDisconnectDecision(connection),
+  });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
@@ -725,7 +743,7 @@ function classifyHealthSnapshot(
     };
   }
 
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   if (
     generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS ||
     generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
@@ -819,6 +837,8 @@ export class HealthPoller {
   // dbReader is null (no durable rows can exist to resolve).
   private readonly authLossTransition: AuthLossSignalTransitionController | null;
   private readonly authLossObserveWarned = new Set<string>();
+  /** #2200: every time read in the poller goes through this clock. */
+  private readonly clock: Clock;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -830,7 +850,9 @@ export class HealthPoller {
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
     hostName: string = hostname(),
     authLossQuietDwellSeconds = 300,
+    clock: Clock = systemClock,
   ) {
+    this.clock = clock;
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
@@ -976,7 +998,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endAlertSuppressionEpisode(key);
-    this.alertSuppressionEpisodes.set(key, { reason, since: Date.now(), count: 1, name, source });
+    this.alertSuppressionEpisodes.set(key, { reason, since: this.clock.now(), count: 1, name, source });
     log.info({ name, source, ...extra }, reason);
   }
 
@@ -996,7 +1018,7 @@ export class HealthPoller {
       name: open.name,
       source: open.source,
       suppressedObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
       reason: open.reason,
     }, 'alert suppression episode ended');
   }
@@ -1132,7 +1154,7 @@ export class HealthPoller {
         // itself.
         try {
           const health = this.getSelfHealth();
-          const classification = classifyHealthSnapshot(health, name);
+          const classification = classifyHealthSnapshot(health, name, undefined, this.clock.now());
           this.observeAuthRecoverySample(name, health);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
@@ -1205,7 +1227,7 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
-              const classification = classifyHealthSnapshot(failureHealth, name, res.status);
+              const classification = classifyHealthSnapshot(failureHealth, name, res.status, this.clock.now());
               this.observeAuthRecoverySample(name, failureHealth);
               if (
                 isNonOnlineClassification(classification) &&
@@ -1228,7 +1250,7 @@ export class HealthPoller {
         }
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
-        const classification = classifyHealthSnapshot(health, name, responseStatus);
+        const classification = classifyHealthSnapshot(health, name, responseStatus, this.clock.now());
         this.observeAuthRecoverySample(name, health);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
@@ -1368,24 +1390,36 @@ export class HealthPoller {
     const reconnectAttempts = nonNegativeIntegerValue(connection?.['reconnect_attempts']);
     const uptimeSeconds = this.readNumber(health['uptime_seconds']);
 
+    // A body that carries the transport's decision is authoritative: the raw
+    // 401 / loggedOut fields only decide for a legacy body without it.
+    const decisionReading = readHealthDisconnectDecision(connection);
+    const legacyBody = decisionReading.kind === 'absent';
     const explicit =
       TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass) ||
-      lastStatusCode === 401 ||
-      lastReason === 'loggedOut' ||
-      lastReason.includes('device_removed');
+      (legacyBody && (
+        lastStatusCode === 401 ||
+        lastReason === 'loggedOut' ||
+        lastReason.includes('device_removed')
+      ));
     if (explicit) {
       this.weakLoggedOutPolls.delete(name);
+      const unconfirmed401 = UNCONFIRMED_401_AUTH_FAILURE_CLASSES.has(authFailureClass);
       return {
         confirmed: true,
         weak: false,
         reason: 'explicit_auth_loss',
         failureCode: 'WA_AUTH_BOND_SERVER_REVOKED',
-        confidence: 'confirmed',
+        // The line is logged out either way; only a confirmed removal (or a
+        // legacy body that cannot say otherwise) earns 'confirmed'.
+        confidence: unconfirmed401 ? 'inferred' : 'confirmed',
         evidence: this.loggedOutEvidence(health, [
           `connected=${String(whatsapp?.['connected'])}`,
           `state=${String(connection?.['state'] ?? 'unknown')}`,
           `disconnect_class=${disconnectClass || 'unknown'}`,
           `auth_failure_class=${authFailureClass || 'unknown'}`,
+          `disconnect_classification=${
+            decisionReading.kind === 'classified' ? decisionReading.classification : decisionReading.kind
+          }`,
           `last_status_code=${String(lastStatusCode ?? 'unknown')}`,
           `last_disconnect_reason=${lastReason || 'unknown'}`,
           `reconnect_phase=${String(reconnectPhase ?? 'unknown')}`,
@@ -1514,12 +1548,16 @@ export class HealthPoller {
     existing: InstanceStatus | undefined,
     loggedOutWeak: boolean,
     loggedOutFailureCode: LoggedOutAlertFailureCode,
+    statusConfidence: StatusConfidence,
   ): boolean {
     if (prevStatus !== 'logged_out') return true;
     if (!this.hasConfirmedAlert(name, 'instance_logged_out')) return true;
+    // Re-emit only for an UPGRADE to a confirmed revocation. An unconfirmed
+    // 401 park stays inferred on every poll and must not re-page each time.
     return (
       existing?.status === 'logged_out'
       && existing.statusConfidence !== 'confirmed'
+      && statusConfidence === 'confirmed'
       && !loggedOutWeak
       && loggedOutFailureCode === 'WA_AUTH_BOND_SERVER_REVOKED'
     );
@@ -1794,7 +1832,7 @@ export class HealthPoller {
     health: Record<string, unknown>,
     baseEvidence: string,
   ): { shouldAlert: boolean; evidence: string; operationalFallback: boolean; providerCapacity: boolean } {
-    const now = Date.now();
+    const now = this.clock.now();
     const startedAt = this.healthBodyDegradedStartedAt.get(name) ?? now;
     this.healthBodyDegradedStartedAt.set(name, startedAt);
     const polls = (this.healthBodyDegradedPolls.get(name) ?? 0) + 1;
@@ -1967,7 +2005,7 @@ export class HealthPoller {
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
     const everReachable = existing?.everReachable === true || reached;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
     this.resetHealthBodyDegradedDebounce(name);
 
@@ -2009,7 +2047,7 @@ export class HealthPoller {
     }
 
     if (newStatus === 'unreachable' && everReachable && !this.unreachableAlerted.has(name)) {
-      const failureAgeMs = Date.now() - firstFailureAt;
+      const failureAgeMs = this.clock.now() - firstFailureAt;
       if (failureAgeMs < INSTANCE_UNREACHABLE_ALERT_DWELL_MS) {
         log.info({ name, failures, failureAgeMs, dwellMs: INSTANCE_UNREACHABLE_ALERT_DWELL_MS }, 'instance unreachable; waiting for sustained dwell before alert');
         return;
@@ -2054,9 +2092,9 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
-    const failureAgeMs = Date.now() - firstFailureAt;
+    const failureAgeMs = this.clock.now() - firstFailureAt;
     const staysUnreachable = existing?.status === 'unreachable';
     const evidence = [
       'reason=probe_aborted_before_connect',
@@ -2169,13 +2207,15 @@ export class HealthPoller {
 
     if (
       newStatus === 'logged_out'
-      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode)
+      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode, statusConfidence)
     ) {
       const emitted = this.maybeEmitAlert(name, 'instance_logged_out',
         `whatsoup@${name} appears logged out`,
         evidence,
         'critical',
-        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak, loggedOutFailureCode),
+        // An inferred (unconfirmed-401) logout reports a probable failure,
+        // not a confirmed server revocation.
+        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak || statusConfidence !== 'confirmed', loggedOutFailureCode),
       );
       this.trackActiveAlertSource(name, 'instance_logged_out', emitted);
       if (emitted) this.dropSupersededAlertSources(name, ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT);
@@ -2420,7 +2460,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endRecoveryClearWithholdingEpisode(key);
-    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: Date.now(), count: 1 });
+    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: this.clock.now(), count: 1 });
     log.info({ name, source, recoveryProofReason: reason }, RECOVERY_CLEAR_WITHHELD_MSG);
   }
 
@@ -2433,7 +2473,7 @@ export class HealthPoller {
       source: open.source,
       recoveryProofReason: open.reason,
       withheldObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
     }, RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG);
   }
 
@@ -2654,7 +2694,7 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassThrottle && lastAlertAt !== null) {
-      const elapsed = Date.now() - new Date(lastAlertAt).getTime();
+      const elapsed = this.clock.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
         this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
         return false;

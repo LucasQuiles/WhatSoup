@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "057dd1e02e9cb0ed3ee667cc2c1fbcfbdbf4441022ecf21ed972a88162dd1677",
+      "sha256": "411bd02c098d7b8bc9c7be2b70783e71572e29cf2e3813af96fe0866a4b4e32a",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "9a35bea63e1422fb438c37d963b8c57e121bd30c6bc4cbf4ff762a4edf54db24",
+      "sha256": "b31c793f2059d753230ddd005af5a3f885ad85647ed07e730f71d3c01708ca84",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -284,7 +284,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "fa46d8b0649b579e0f20c0a1fc9aeec38f0553d94bf2752349b9e7e800cdaad8",
+      "sha256": "5d154486c67270f587a2265761bb60e3e7d30f10c6de847cfaf39996f2a524f2",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -416,7 +416,7 @@
     },
     {
       "path": "deploy/scripts/fleet-ground-truth.py",
-      "sha256": "95754b92081bed28f73b2ab3411e2343e94d396b73cf7e3410fef09c5f0d3035",
+      "sha256": "6c0ea2252c1de4505c61d8a7fd26de80f78820bbaad2515aefaabfb5cd253c42",
       "mustContain": [
         "needs_physical_repair",
         "restart_will_not_fix",
@@ -560,7 +560,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
+      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -623,7 +623,7 @@
     },
     {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
+      "sha256": "5f51bcb3cfa473d9a9058dc835502125e55385e9254e1ebe7f3f267f66789871",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
@@ -837,7 +837,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "5a3fb2d24c27166e66984c099460e5f0121dbed467dd158b1522ff55cb0abe73",
+      "sha256": "e8f4c3adaaa20b5b0eac47acc1bf7efb55c7b5e57bf08e66f07e8992ca02dc72",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -855,6 +855,13 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "\"runtime_agent_fallback_turns_served\"",
+        "\"runtime_agent_fallback_turns_empty\"",
+        "\"runtime_agent_fallback_activations\"",
+        "\"runtime_agent_fallback_reverts\"",
+        "\"runtime_agent_fallback_replays\"",
+        "\"runtime_agent_fallback_probe_attempts\"",
+        "\"runtime_agent_fallback_failed_entry_count\"",
         "autoCompactActiveBackoffScopes",
         "agent_respawn_failed_clear_pending"
       ]

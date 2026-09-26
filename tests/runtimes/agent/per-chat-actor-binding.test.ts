@@ -655,6 +655,25 @@ describe('F-STICKY-ACTOR hardening: createSessionManager is the single wiring ch
     });
   });
 
+  it('#3421: mints a distinct live session token per SessionManager and gives the socket manager the same verifier', () => {
+    vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
+      .mockReturnValue({ mcpSocketPath: '/tmp/actor.sock', providerTransitionReady: Promise.resolve() });
+    const mock = SessionManager as unknown as ReturnType<typeof vi.fn>;
+    priv().createSessionManager(baseOpts());
+    const first = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionToken;
+    priv().createSessionManager(baseOpts());
+    const second = mock.mock.calls.at(-1)?.[0]?.whatsoupMcpSessionToken;
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(second).toMatch(/^[0-9a-f]{64}$/);
+    expect(second).not.toBe(first);
+    const internals = runtime as unknown as {
+      sessionTokens: { verify(token: unknown): boolean };
+      perChatMcpSocketManager: { options: { sessionTokens?: unknown } };
+    };
+    expect([internals.sessionTokens.verify(first), internals.sessionTokens.verify(second)]).toEqual([true, true]);
+    expect(internals.perChatMcpSocketManager.options.sessionTokens).toBe(internals.sessionTokens);
+  });
+
   it('fail-closed choke-point guard: an eligible per_chat claude-cli spawn that wires NO socket throws instead of silently using the shared global socket', () => {
     vi.spyOn(runtime as unknown as { wirePerChatActorSocket: Priv['wirePerChatActorSocket'] }, 'wirePerChatActorSocket')
       .mockReturnValue(undefined); // simulate a future path that bypasses wiring

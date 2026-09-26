@@ -111,6 +111,13 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import {
+  announceAdoption,
+  lazyCheckpointAdoption,
+  LazyRestoreScopes,
+  NO_CHECKPOINT_ADOPTION,
+  spawnForAdoption,
+} from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -203,6 +210,7 @@ import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
+import { QueuedTurnReceiptNotifier } from './runtime-queued-receipt.ts';
 import {
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
@@ -292,6 +300,7 @@ import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -880,6 +889,8 @@ export class AgentRuntime implements Runtime {
   private workspaceResources: Map<string, WorkspaceResource> = new Map();
   private readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   private globalMcpSocketPath: string | null = null;
+  /** #3421 step 1: one token per agent session, for caller attribution only. */
+  private readonly sessionTokens = new SessionTokenRegistry();
   private replyGuarantee: ReplyGuaranteeManager | null = null;
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
@@ -2151,6 +2162,7 @@ export class AgentRuntime implements Runtime {
     this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);
     // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
     this.deleteOwnedPerChatSession(mapKey, session);
+    this.lazyRestoreScopes.noteIdleEvicted(mapKey);
     // Tear down the chat's outbound queue too (mirrors every other session-removal
     // site). In per_chat mode the queue sweep never runs, so without this the queue
     // map grows one dead entry per evicted chat under a burst — undercutting the
@@ -2179,6 +2191,17 @@ export class AgentRuntime implements Runtime {
   private perChatRuntimeTurnCompletions = new Map<string, RuntimeTurnCompletion>();
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
   private perChatTurnQueues = new Map<string, TurnQueue>();
+  /**
+   * #2949 queued receipt. Sent out of band through sendTracked, never through
+   * the chat's outbound queue: mid-turn that queue belongs to the ACTIVE turn,
+   * and enqueueText there would count as that turn's visible answer.
+   */
+  private readonly queuedTurnReceipts = new QueuedTurnReceiptNotifier({
+    enabled: () => config.queuedTurnReceipt === true,
+    send: (chatJid, text) => sendTracked(
+      this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' },
+    ),
+  });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
   private pendingRecycle = this.routeRecycleLifecycle.pending;
@@ -2309,6 +2332,8 @@ export class AgentRuntime implements Runtime {
   // injection + pending-turn replay. Used to suppress context injection in any
   // concurrent sendTurnToSession call for the same chat, preventing double injection.
   private resumeFailedHandling: Set<string> = new Set();
+  // #3530: which lazily created per-chat managers may restore a checkpoint.
+  private readonly lazyRestoreScopes = new LazyRestoreScopes();
 
   // Global socket server (non-sandboxPerChat mode)
   private globalSocketServer: WhatSoupSocketServer | null = null;
@@ -2850,6 +2875,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
+      sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
@@ -4197,6 +4223,8 @@ export class AgentRuntime implements Runtime {
           this.registry,
           globalSession,
           () => this.resolveExecutingGlobalSession(),
+          undefined,
+          { sessionTokens: this.sessionTokens },
         );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -5622,7 +5650,17 @@ export class AgentRuntime implements Runtime {
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
-    return this.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, turn);
+    const admitted = this.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, turn);
+    // #2949: read the queue right after admission — an idle queue has already
+    // made this turn its active turn, so only a waiting turn gets a receipt.
+    this.queuedTurnReceipts.noteAdmission({
+      scope: this.sessionScope,
+      mapKey,
+      queue: this.perChatTurnQueues.get(mapKey),
+      turn,
+      admitted,
+    });
+    return admitted;
   }
 
   private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
@@ -5843,6 +5881,15 @@ export class AgentRuntime implements Runtime {
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
     if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
+      // #3530 successor: a never-started non-sandbox per_chat manager decides
+      // from its checkpoint what it may adopt (checkpoint-adoption.ts).
+      const adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
+        && effectiveMapKey !== undefined && !isScheduledAgentJobMapKey(effectiveMapKey)
+        && this.lazyRestoreScopes.isEligible(session)
+        ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
+        : NO_CHECKPOINT_ADOPTION;
+      if (dispatchCancelled()) return;
+      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -5864,7 +5911,10 @@ export class AgentRuntime implements Runtime {
       // process and its DB row. Mirrors handleNew() pattern.
       await session.shutdown();
       if (dispatchCancelled()) return;
-      await session.spawnSession();
+      const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
+        log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
+        this.sendDirect(chatJid, notice);
+      });
       spawnedForTurn = true;
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
@@ -5890,7 +5940,8 @@ export class AgentRuntime implements Runtime {
 
       // Fresh spawns merge recent context into the active turn; see context-handoff.ts.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
-      if (!resumeFailedOwnsContext) {
+      // A resumed session already holds its own context.
+      if (!resumeFailedOwnsContext && spawned.kind !== 'resume') {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
@@ -8591,6 +8642,7 @@ export class AgentRuntime implements Runtime {
         this.sessionOwnership.discardIfOwned(mapKey, current.managerId);
       }
       this.chatSessions.delete(mapKey);
+      if (mapped !== undefined) this.lazyRestoreScopes.noteRetired(mapKey);
       // Forget the chat's throttle history here, alongside the map entry the
       // sweep iterates. Deliberately OUTSIDE the `if (current)` above: the
       // throttle is keyed by mapKey, not by a manager id, and the eviction
@@ -9937,7 +9989,12 @@ export class AgentRuntime implements Runtime {
         this.handlePerChatCrash(currentMapKey, chatJid, info, session);
       },
       notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
-      onResumeFailed: () => this.handleResumeFailed(chatJid),
+      // X1: name the exact manager; without a target, non-sandbox per_chat
+      // falls through to the unset shared session and the refusal is silent.
+      onResumeFailed: () => this.handleResumeFailed(chatJid, {
+        mapKey: resolveSessionMapKey() ?? mapKey,
+        session,
+      }),
       eventToolScopeKey: toolScopeKey,
       routeOverride,
     });
@@ -10469,6 +10526,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
+      whatsoupMcpSessionToken: this.sessionTokens.mint(),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10615,6 +10673,8 @@ export class AgentRuntime implements Runtime {
               this.registry,
               chatSession,
               () => this.resolveExecutingSessionByMapKey(workspaceKey),
+              undefined,
+              { sessionTokens: this.sessionTokens },
             );
             socketServer.start();
             log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
@@ -10758,9 +10818,15 @@ export class AgentRuntime implements Runtime {
             : (msg) => {
                 this.handleCrashNotify(msg, chatJid, session);
               },
+          // X1: a lazily resumed session can be refused by the provider after spawn.
+          onResumeFailed: () => this.handleResumeFailed(chatJid, {
+            mapKey: resolveSessionMapKey() ?? initialMapKey,
+            session,
+          }),
           eventToolScopeKey: toolScopeKey,
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
+        this.lazyRestoreScopes.noteCreated(initialMapKey, session);
         this.setOwnedPerChatSession(initialMapKey, session);
         const perChatQ = this.createOutboundQueue(chatJid, 'per-chat session init');
         this.chatQueues.set(initialMapKey, perChatQ);
