@@ -53,7 +53,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "305ecd6eab9e0e58199744f33d7fd745d2eea153a3c3363a332bab86852e86c3",
+      "sha256": "c745aa37a3d78ba7e3ab6d3b4fb4cd5f766e3ae0947a1bf32cb32f6beb98ed07",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -73,7 +73,7 @@
     },
     {
       "path": "src/transport/auth-disconnect-policy.ts",
-      "sha256": "b34d45ee7bf3d0ccb6a5953f114a94b40da7b2ef2b08dddf1dce7ab177e5d781",
+      "sha256": "12918cb9943d62b5df6b8138934dbddced4d54a9670973070a5b4dba206d296a",
       "mustContain": [
         "decideDisconnectAction",
         "logged-out",
@@ -83,7 +83,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "fad5fe6408c4adf78677db3a115a3609168f177dffd97d37a2405445b6ad4aef",
+      "sha256": "17a143d9bd554c9b77bc13b073db454a18e7dbd6b99a7381c4c071b98d188df9",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",

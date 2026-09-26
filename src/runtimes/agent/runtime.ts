@@ -203,6 +203,7 @@ import { contextMessagesForTurn } from './context-handoff.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
+import { QueuedTurnReceiptNotifier } from './runtime-queued-receipt.ts';
 import {
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
@@ -292,6 +293,7 @@ import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -880,6 +882,8 @@ export class AgentRuntime implements Runtime {
   private workspaceResources: Map<string, WorkspaceResource> = new Map();
   private readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   private globalMcpSocketPath: string | null = null;
+  /** #3421 step 1: one token per agent session, for caller attribution only. */
+  private readonly sessionTokens = new SessionTokenRegistry();
   private replyGuarantee: ReplyGuaranteeManager | null = null;
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
@@ -2179,6 +2183,17 @@ export class AgentRuntime implements Runtime {
   private perChatRuntimeTurnCompletions = new Map<string, RuntimeTurnCompletion>();
   private readonly perChatRuntimeTurnScopeRefs = new Map<string, PerChatRuntimeScopeRef>();
   private perChatTurnQueues = new Map<string, TurnQueue>();
+  /**
+   * #2949 queued receipt. Sent out of band through sendTracked, never through
+   * the chat's outbound queue: mid-turn that queue belongs to the ACTIVE turn,
+   * and enqueueText there would count as that turn's visible answer.
+   */
+  private readonly queuedTurnReceipts = new QueuedTurnReceiptNotifier({
+    enabled: () => config.queuedTurnReceipt === true,
+    send: (chatJid, text) => sendTracked(
+      this.messenger, chatJid, text, this.durability ?? undefined, { replayPolicy: 'unsafe' },
+    ),
+  });
   /** Deferred and in-progress live-route recycle ownership by scope key. */
   private readonly routeRecycleLifecycle = new RouteRecycleLifecycle<SessionManager>();
   private pendingRecycle = this.routeRecycleLifecycle.pending;
@@ -2850,6 +2865,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
+      sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
@@ -4197,6 +4213,8 @@ export class AgentRuntime implements Runtime {
           this.registry,
           globalSession,
           () => this.resolveExecutingGlobalSession(),
+          undefined,
+          { sessionTokens: this.sessionTokens },
         );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -5622,7 +5640,17 @@ export class AgentRuntime implements Runtime {
   }
 
   private enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
-    return this.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, turn);
+    const admitted = this.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, turn);
+    // #2949: read the queue right after admission — an idle queue has already
+    // made this turn its active turn, so only a waiting turn gets a receipt.
+    this.queuedTurnReceipts.noteAdmission({
+      scope: this.sessionScope,
+      mapKey,
+      queue: this.perChatTurnQueues.get(mapKey),
+      turn,
+      admitted,
+    });
+    return admitted;
   }
 
   private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
@@ -10469,6 +10497,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
+      whatsoupMcpSessionToken: this.sessionTokens.mint(),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10615,6 +10644,8 @@ export class AgentRuntime implements Runtime {
               this.registry,
               chatSession,
               () => this.resolveExecutingSessionByMapKey(workspaceKey),
+              undefined,
+              { sessionTokens: this.sessionTokens },
             );
             socketServer.start();
             log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');
