@@ -1982,15 +1982,22 @@ fails the finalize contract (`record_contract_invalid`), or when the row is alre
 different status (`closed_differently`). A rerun on a row already closed as its record implies prints
 `alreadyClosed: true` and exits `0`.
 
+When a close applies to a record with a selected delivery op, the same transaction also marks that op
+`is_terminal = 1`, as live finalization does.
+
 Every invocation, including a dry run and a refusal, appends one line to the audit receipt
 `turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that file is the only
 thing a dry run writes. Output and receipts carry only the inbound seq, record id, disposition, statuses
 and reason codes, never chat JIDs, conversation keys or message ids.
 
+Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
+nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
+row) but its audit receipt could not be appended — do not re-run; record the close from stdout.
+
 Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are already `failed` and
 parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
-inbounds reclaimed by crash recovery). Those links are append-only and close through the operator
-catch-up procedures above, not through this command.
+inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
+closed by any tool.
 
 ### 7.7 Useful SQL Queries
 

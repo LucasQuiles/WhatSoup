@@ -80,7 +80,7 @@ describe('open inbound behind a final terminal record', () => {
   const close = (seq: number) => {
     const evaluation = closer.evaluate(seq);
     if (evaluation.verdict === 'eligible') {
-      withTransaction(db, () => closer.applyWithinCallerTransaction(evaluation.mutation));
+      withTransaction(db, () => closer.applyWithinCallerTransaction(evaluation));
     }
     return evaluation;
   };
@@ -234,6 +234,22 @@ describe('open inbound behind a final terminal record', () => {
 
     expect(evidenceRowCount()).toBe(before);
     expect(closer.evaluate(seq)).toMatchObject({ verdict: 'refused', reason: 'identity_mismatch' });
+  });
+
+  it('a replied close also marks the selected delivery op terminal, as live finalization does', () => {
+    const seq = journal();
+    finalize(seq, 'finalized_replied');
+    reopen(seq, 'processing');
+    // An older release could leave the selected op without its terminal mark.
+    const opId = (db.raw.prepare(
+      'SELECT delivery_op_id AS id FROM turn_terminal_records WHERE inbound_seq = ?',
+    ).get(seq) as { id: number }).id;
+    db.raw.prepare('UPDATE outbound_ops SET is_terminal = 0 WHERE id = ?').run(opId);
+
+    expect(close(seq).verdict).toBe('eligible');
+
+    expect(db.raw.prepare('SELECT is_terminal FROM outbound_ops WHERE id = ?').get(opId))
+      .toEqual({ is_terminal: 1 });
   });
 
   it('a close is idempotent: the second evaluation reports already_closed', () => {

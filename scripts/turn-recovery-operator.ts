@@ -38,7 +38,9 @@
  *     epochs, timestamps, and hashes only — never replay text, sender/chat
  *     identifiers, message ids, or group names.
  *   - every attempted and applied mutation appends a durable JSON-lines
- *     audit receipt next to the database (or --audit-file).
+ *     audit receipt next to the database (or --audit-file). A close-inbound
+ *     whose receipt append fails AFTER commit prints its applied result and
+ *     exits 3, distinct from a refusal (1).
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync } from 'node:fs';
@@ -187,6 +189,9 @@ function closeProjection(
 
 type EligibleClose = Extract<TerminalRecordInboundCloseEvaluation, { verdict: 'eligible' }>;
 
+/** close-inbound applied and committed, but its audit receipt could not be appended. */
+const AUDIT_RECEIPT_FAILED_EXIT = 3;
+
 /**
  * Binds an apply to the dry run that previewed it: the database file identity,
  * the row, its terminal record, and the exact status the close will write.
@@ -297,7 +302,7 @@ function closeInbound(args: Args, dbPath: string, auditPath: string): void {
       else if (recheck.verdict !== 'eligible') refusal = recheck.verdict === 'refused' ? recheck.reason : 'state_changed';
       else if (closeDigest(identity, recheck) !== args.expectDigest) refusal = 'digest_mismatch';
       else {
-        new TerminalRecordInboundCloser(raw).applyWithinCallerTransaction(recheck.mutation);
+        new TerminalRecordInboundCloser(raw).applyWithinCallerTransaction(recheck);
         closed = recheck;
       }
       raw.exec(refusal === undefined ? 'COMMIT' : 'ROLLBACK');
@@ -309,8 +314,18 @@ function closeInbound(args: Args, dbPath: string, auditPath: string): void {
     raw.close();
   }
   if (refusal !== undefined) refuse(refusal);
-  auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'applied' });
+  // The close is committed: report it before the receipt, so a failed append
+  // can never read as "nothing happened".
   console.log(JSON.stringify({ applied: true, closed: closeProjection(closed!) }, null, 2));
+  try {
+    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'applied' });
+  } catch (err) {
+    console.error(
+      `turn-recovery-operator: inbound seq ${seq} WAS closed, but the audit receipt not written: ` +
+      (err instanceof Error ? err.message : String(err)),
+    );
+    process.exit(AUDIT_RECEIPT_FAILED_EXIT);
+  }
 }
 
 function main(): void {

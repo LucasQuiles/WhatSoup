@@ -233,6 +233,21 @@ describe('turn-recovery-operator close-inbound', () => {
     }
   });
 
+  it('an apply whose audit append fails after commit still reports the close, with exit 3', () => {
+    const { seq, finalized } = seedStaleFailed('audit-fail', 'processing');
+    const { parsed } = dryRun(seq);
+    // A directory cannot be appended to, so the receipt write fails after COMMIT.
+    const unwritableAudit = path.dirname(dbPath);
+
+    const applied = run(['close-inbound', '--db', dbPath, '--seq', String(seq), '--apply',
+      '--expect-digest', String(parsed.digest), '--audit-file', unwritableAudit]);
+
+    expect(applied.status).toBe(3);
+    expect(JSON.parse(applied.stdout)).toMatchObject({ applied: true, closed: { seq, toStatus: 'failed' } });
+    expect(applied.stderr).toContain('audit receipt not written');
+    expect(inboundState(seq)).toEqual(finalized);
+  });
+
   it('refuses an open inbound with no terminal record', () => {
     let seq = 0;
     seed((_db, engine) => {

@@ -59,6 +59,8 @@ export type TerminalRecordInboundCloseEvaluation =
     readonly disposition: string;
     readonly fromStatus: string;
     readonly mutation: TerminalInboundMutation;
+    /** The record's selected delivery op, marked terminal with the close. */
+    readonly deliveryOpId: number | null;
   }
   | {
     readonly verdict: 'already_closed';
@@ -127,6 +129,7 @@ export class TerminalRecordInboundCloser {
   private readonly selectCandidates: PreparedStatement;
   private readonly closeComplete: PreparedStatement;
   private readonly closeFailed: PreparedStatement;
+  private readonly markDeliveryTerminal: PreparedStatement;
 
   constructor(raw: DatabaseSync) {
     this.selectInbound = raw.prepare(
@@ -187,6 +190,7 @@ export class TerminalRecordInboundCloser {
            terminal_reason = 'error', failure_class = ?
        WHERE seq = ? AND processing_status IN ('pending', 'processing', 'turn_done')`,
     );
+    this.markDeliveryTerminal = raw.prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`);
   }
 
   /** Bounded pre-filtered candidates, oldest first; each still goes through evaluate(). */
@@ -249,6 +253,7 @@ export class TerminalRecordInboundCloser {
       disposition: record.inbound_disposition,
       fromStatus: status,
       mutation,
+      deliveryOpId: record.delivery_op_id,
     };
   }
 
@@ -268,13 +273,23 @@ export class TerminalRecordInboundCloser {
       op.status === DELIVERY_STATUS_PROOF[record.delivery_kind];
   }
 
-  /** Apply an eligible close inside the caller's transaction. */
-  applyWithinCallerTransaction(mutation: TerminalInboundMutation): void {
+  /**
+   * Apply an eligible close inside the caller's transaction: the inbound
+   * status, plus the terminal mark live finalization puts on the selected
+   * delivery op in the same transaction.
+   */
+  applyWithinCallerTransaction(
+    close: Pick<Extract<TerminalRecordInboundCloseEvaluation, { verdict: 'eligible' }>, 'mutation' | 'deliveryOpId'>,
+  ): void {
+    const { mutation } = close;
     const result = mutation.kind === 'complete'
       ? this.closeComplete.run(mutation.terminalReason, mutation.seq)
       : this.closeFailed.run(mutation.failureClass, mutation.seq);
     if (result.changes !== 1) {
       throw new Error('Terminal-record inbound close did not update exactly one open row');
+    }
+    if (close.deliveryOpId !== null && this.markDeliveryTerminal.run(close.deliveryOpId).changes !== 1) {
+      throw new Error('Terminal-record inbound close could not mark its delivery op terminal');
     }
   }
 }
