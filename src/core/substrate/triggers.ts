@@ -4,10 +4,10 @@ import { z } from 'zod';
 import { clampTtl } from './time.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { writeBeadEvent } from './events.ts';
-import type { TriggerKind, TriggerRow, OnTerminal } from './types.ts';
+import type { TriggerKind, TriggerRow, TriggerStatus, OnTerminal } from './types.ts';
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
-import { queryAll } from '../../lib/db-query.ts';
+import { queryAll, queryOne } from '../../lib/db-query.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -258,27 +258,123 @@ export function pauseTrigger(db: DatabaseSync, id: number, args: { actor: string
   } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
 }
 
-export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }, clock: Clock = systemClock): void {
+export interface ExtendTriggerResult {
+  status: TriggerStatus;
+  terminal_at: number;
+}
+
+/**
+ * Deadline-only (#2417, #3608): moves terminal_at and nothing else. A paused
+ * trigger stays paused with next_fire_at NULL; resuming is resumeTrigger's job,
+ * so an operator can push a deadline without also making the trigger due.
+ */
+export function extendTrigger(db: DatabaseSync, id: number, args: { until: number; maxTtlHours: number; actor: string }, clock: Clock = systemClock): ExtendTriggerResult {
   const now = clock.nowUnixSec();
   if (args.until <= now) throw new Error(`extendTrigger: until must be in the future`);
-  const t = db.prepare(`SELECT bead_id, status, terminal_at FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status?: string; terminal_at: number | null } | undefined;
+  const t = db.prepare(`SELECT bead_id, status FROM bead_triggers WHERE id = ?`).get(id) as { bead_id: number; status: TriggerStatus } | undefined;
   if (!t) throw new Error(`trigger ${id} not found`);
-  // #3609: resuming a paused trigger that had no deadline must not give it one;
-  // `until` is ignored in that case. Every other extend clamps as before.
-  const keepOpenEnded = t.status === 'paused' && t.terminal_at === null;
-  const clamped = keepOpenEnded ? null : clampTtl(now, args.until, args.maxTtlHours);
+  const clamped = clampTtl(now, args.until, args.maxTtlHours);
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE bead_triggers SET terminal_at=?, updated_at=? WHERE id=?`).run(clamped, now, id);
-    // #2417: if the trigger was paused (e.g. trigger_forbidden_target retirement),
-    // reactivate it so the user's extend command also serves as a resume gesture.
-    // bead_triggers has no failure counter to reset (see schema.ts).
-    if (t.status === 'paused') {
-      db.prepare(`UPDATE bead_triggers SET status='active', next_fire_at=?, updated_at=? WHERE id=?`).run(now, now, id);
-    }
     writeBeadEvent(db, { beadId: t.bead_id, eventType: 'trigger_extended', actor: args.actor, payload: { trigger_id: id, terminal_at: clamped, was_paused: t.status === 'paused' }, at: now });
     db.exec('COMMIT');
   } catch (err) { try { db.exec('ROLLBACK'); } catch { /* best effort */ } throw err; }
+  return { status: t.status, terminal_at: clamped };
+}
+
+export interface ResumeTriggerArgs {
+  actor: string;
+  /** Make the trigger due now instead of at its next regular occurrence. */
+  fireNow?: boolean;
+  /** Optional new deadline, clamped like extendTrigger. Omitted = terminal_at unchanged. */
+  until?: number;
+  maxTtlHours: number;
+  /** Mirrors create_watch: a poll.url trigger cannot be resumed while url watches are disabled. */
+  enableUrlWatch?: boolean;
+}
+
+export interface ResumeTriggerResult {
+  /** false when the trigger was already active (idempotent no-op). */
+  resumed: boolean;
+  status: 'active';
+  next_fire_at: number | null;
+  terminal_at: number | null;
+  /** `reason` of the latest trigger_paused event (e.g. forbidden_target); null for a manual pause. */
+  paused_reason: string | null;
+}
+
+function latestPauseReason(db: DatabaseSync, beadId: number, triggerId: number): string | null {
+  const row = queryOne<{ reason: string | null }>(
+    db,
+    `SELECT json_extract(payload_json, '$.reason') AS reason FROM bead_events
+     WHERE bead_id = ? AND event_type = 'trigger_paused'
+       AND json_extract(payload_json, '$.trigger_id') = ?
+     ORDER BY id DESC LIMIT 1`,
+    beadId, triggerId,
+  );
+  return typeof row?.reason === 'string' ? row.reason : null;
+}
+
+/**
+ * #3608: the only way to reactivate a paused trigger. Re-validates the stored
+ * spec with the creation rules, schedules the next regular occurrence (not
+ * "now", so a daily job keeps its slot) unless fireNow is set, keeps
+ * terminal_at unless `until` is given, and records a distinct trigger_resumed
+ * event. The poller's failure counters read trigger_runs history, so a resumed
+ * trigger that fails again is re-paused on its next failure.
+ */
+export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerArgs, clock: Clock = systemClock): ResumeTriggerResult {
+  const now = clock.nowUnixSec();
+  const t = queryOne<TriggerRow>(db, `SELECT * FROM bead_triggers WHERE id = ?`, id);
+  if (!t) throw new Error(`trigger ${id} not found`);
+  if (t.status === 'active') {
+    return { resumed: false, status: 'active', next_fire_at: t.next_fire_at, terminal_at: t.terminal_at, paused_reason: null };
+  }
+  if (t.status !== 'paused') {
+    throw new Error(`resumeTrigger: trigger ${id} is ${t.status}; only a paused trigger can be resumed, recreate it instead`);
+  }
+  // Same target rules as creation: poll.shell was removed from creation, and
+  // poll.url is gated off unless the instance enables it.
+  if (t.kind === 'poll.shell') {
+    throw new Error(`resumeTrigger: trigger ${id} is a poll.shell watch, which can no longer be created or resumed`);
+  }
+  if (t.kind === 'poll.url' && !args.enableUrlWatch) {
+    throw new Error('resumeTrigger: url watch is disabled. Set advanced.enableUrlWatch: true in instance config to resume poll.url watches.');
+  }
+  const validated = validateTriggerSpec(t.kind, JSON.parse(t.spec_json));
+  let terminalAt = t.terminal_at;
+  if (args.until !== undefined) {
+    if (args.until <= now) throw new Error(`resumeTrigger: until must be in the future`);
+    terminalAt = clampTtl(now, args.until, args.maxTtlHours);
+  }
+  if (terminalAt !== null && terminalAt <= now) {
+    throw new Error(`resumeTrigger: trigger ${id} deadline has passed; pass until, or call extend_trigger first`);
+  }
+  const nextFireAt = args.fireNow && t.kind !== 'event.message'
+    ? now
+    : computeNextFireAt(t.kind, validated, now, t.interval_seconds);
+  const pausedReason = latestPauseReason(db, t.bead_id, id);
+  db.exec('BEGIN');
+  try {
+    const info = db.prepare(
+      `UPDATE bead_triggers SET status='active', next_fire_at=?, terminal_at=?, updated_at=?
+       WHERE id=? AND status='paused'`,
+    ).run(nextFireAt, terminalAt, now, id);
+    // The status guard makes the write conditional on the row read above; if
+    // another writer changed it in between, record nothing.
+    if (info.changes === 0) throw new Error(`resumeTrigger: trigger ${id} changed while resuming; retry`);
+    writeBeadEvent(db, {
+      beadId: t.bead_id, eventType: 'trigger_resumed', actor: args.actor,
+      payload: { trigger_id: id, next_fire_at: nextFireAt, terminal_at: terminalAt, fire_now: args.fireNow === true, paused_reason: pausedReason },
+      at: now,
+    });
+    db.exec('COMMIT');
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch { /* by design: ROLLBACK can fail when the transaction never opened; the original error is rethrown below */ }
+    throw err;
+  }
+  return { resumed: true, status: 'active', next_fire_at: nextFireAt, terminal_at: terminalAt, paused_reason: pausedReason };
 }
 
 /** Runtime helper for slice-3 poller. */

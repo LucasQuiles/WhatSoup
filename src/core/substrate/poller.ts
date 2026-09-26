@@ -1958,7 +1958,7 @@ export class TriggerPoller {
           `reportChatJid=${t.report_chat_jid}`,
           `consecutiveForbiddenRejects=${rejectCount}`,
           `retiredAt=${new Date(now * 1000).toISOString()}`,
-          'ref: #1745 — the target chat permanently rejects delivery (bot removed from the group); the trigger is paused so it stops looping and stops feeding the quarantine. Re-arm only after the bot is re-added, or delete the producing bead.',
+          'ref: #1745 — the target chat permanently rejects delivery (bot removed from the group); the trigger is paused so it stops looping and stops feeding the quarantine. Re-arm with resume_trigger only after the bot is re-added, or delete the producing bead.',
         ].join('\n'),
         'warning',
       );
@@ -2144,7 +2144,7 @@ function formatExpiryNotification(t: TriggerRow, reason: string): string {
 }
 
 function formatPauseNotification(t: TriggerRow, failureCount: number): string {
-  return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with extend_trigger or recreate.`;
+  return `*Watch paused* (trigger ${t.id}, bead ${t.bead_id}) — paused after ${failureCount} consecutive failures. Inspect via list_triggers; resume with resume_trigger or recreate.`;
 }
 
 function canonicalizeAllowedRoot(root: string): string {

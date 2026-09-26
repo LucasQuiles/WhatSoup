@@ -1762,6 +1762,20 @@ describe('agentOptions.nlRouting (F11)', () => {
   });
 });
 
+describe('agentOptions.queuedTurnReceipt (#2949 queued receipt)', () => {
+  it('rejects a non-boolean queuedTurnReceipt (a string "false" would silently leave the receipt on)', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'per_chat', queuedTurnReceipt: 'false' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.queuedTurnReceipt');
+    expect(result?.message).toContain('must be a boolean when provided');
+  });
+
+  it('accepts a boolean queuedTurnReceipt', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'per_chat', queuedTurnReceipt: false } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+});
+
 describe('agentOptions.nlRoutingTiers / nlRoutingEventsDir (slice-2 B2)', () => {
   it('rejects a non-object nlRoutingTiers', () => {
     const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingTiers: 'strongest' } });

@@ -6,7 +6,7 @@ import { unlinkSync, existsSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import {
-  createTrigger, listTriggers, pauseTrigger, extendTrigger,
+  createTrigger, listTriggers, pauseTrigger, extendTrigger, resumeTrigger,
   validateTriggerSpec, dueTriggers, isSafeSqliteSql, prepareTrigger,
   normalizeFireAtSeconds, MAX_REASONABLE_FIRE_AT_SEC,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
@@ -201,12 +201,11 @@ describe('triggers core', () => {
     expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBe(before.terminal_at);
   });
 
-  it('extendTrigger reactivates a paused trigger: status active, next_fire_at = now, event was_paused=true, terminal_at clamped', () => {
-    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume', ownerJid: 'mw', actor: 'u' });
+  it('extendTrigger on a paused trigger changes only the deadline: it stays paused and is never due (#3608, #2417)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'extend-paused', ownerJid: 'mw', actor: 'u' });
     const t0ms = 2_000_000_000_000;
     const clock = fakeClock(t0ms);
     const now = Math.floor(t0ms / 1000);
-    // A finite prior deadline: only an open-ended paused trigger keeps its lifetime (#3609).
     const t = createTrigger(db.raw, {
       beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
       reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: now + 3600, actor: 'u',
@@ -216,18 +215,18 @@ describe('triggers core', () => {
 
     extendTrigger(db.raw, t.id, { until: now + 10 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
 
-    const after = listTriggers(db.raw, { beadId: bead.id })[0];
-    expect(after.status).toBe('active');
-    expect(after.next_fire_at).toBe(now);
-    expect(after.terminal_at).toBe(now + 72 * 3600);
+    expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+      status: 'paused', next_fire_at: null, terminal_at: now + 72 * 3600,
+    });
+    expect(dueTriggers(db.raw, now + 86400, 10)).toEqual([]);
     const ev = db.raw.prepare(
       `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
     ).get(bead.id) as { payload_json: string };
     expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: now + 72 * 3600 });
   });
 
-  it('extendTrigger resumes a paused open-ended trigger without giving it a deadline (#3609)', () => {
-    const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume-open', ownerJid: 'mw', actor: 'u' });
+  it('extendTrigger on a paused open-ended trigger gives it the requested deadline and leaves it paused (#3608)', () => {
+    const bead = createBead(db.raw, { kind: 'agent_job', title: 'extend-open', ownerJid: 'mw', actor: 'u' });
     const t0ms = 2_000_000_000_000;
     const clock = fakeClock(t0ms);
     const now = Math.floor(t0ms / 1000);
@@ -235,19 +234,145 @@ describe('triggers core', () => {
       beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
       reportChatJid: 'report-example-invalid@s.whatsapp.net', requestedTerminalAt: null, actor: 'u',
     }, clock);
-    expect(listTriggers(db.raw, { beadId: bead.id })[0].terminal_at).toBeNull();
     pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
 
-    extendTrigger(db.raw, t.id, { until: now + 7 * 86400, maxTtlHours: 72, actor: 'u' }, clock);
+    extendTrigger(db.raw, t.id, { until: now + 7200, maxTtlHours: 72, actor: 'u' }, clock);
 
     expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
-      status: 'active', next_fire_at: now, terminal_at: null,
+      status: 'paused', next_fire_at: null, terminal_at: now + 7200,
     });
-    expect(dueTriggers(db.raw, now, 10).map((row) => row.id)).toEqual([t.id]);
-    const ev = db.raw.prepare(
-      `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = 'trigger_extended' ORDER BY id DESC LIMIT 1`,
-    ).get(bead.id) as { payload_json: string };
-    expect(JSON.parse(ev.payload_json)).toMatchObject({ trigger_id: t.id, was_paused: true, terminal_at: null });
+  });
+
+  describe('resumeTrigger (#3608)', () => {
+    const t0ms = 2_000_000_000_000;
+    const now = Math.floor(t0ms / 1000);
+    const clock = fakeClock(t0ms);
+
+    function pausedCron(opts: { terminalAt?: number | null; expr?: string } = {}) {
+      const bead = createBead(db.raw, { kind: 'agent_job', title: 'resume', ownerJid: 'mw', actor: 'u' });
+      const t = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'schedule.cron', spec: { expr: opts.expr ?? '30 8 * * *' },
+        reportChatJid: 'report-example-invalid@s.whatsapp.net',
+        requestedTerminalAt: opts.terminalAt === undefined ? null : opts.terminalAt, actor: 'u',
+      }, clock);
+      pauseTrigger(db.raw, t.id, { actor: 'u' }, clock);
+      return { bead, t };
+    }
+
+    function lastEvent(beadId: number, type: string): Record<string, unknown> | undefined {
+      const ev = db.raw.prepare(
+        `SELECT payload_json FROM bead_events WHERE bead_id = ? AND event_type = ? ORDER BY id DESC LIMIT 1`,
+      ).get(beadId, type) as { payload_json: string } | undefined;
+      return ev ? JSON.parse(ev.payload_json) : undefined;
+    }
+
+    it('schedules a paused daily cron trigger at its next regular occurrence, keeps its deadline, and records trigger_resumed', () => {
+      const { bead, t } = pausedCron({ terminalAt: now + 3600 * 48 });
+      const expectedNext = nextCronRun('30 8 * * *', now, 'UTC');
+      expect(expectedNext).toBeGreaterThan(now);
+
+      const res = resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock);
+
+      expect(res).toEqual({ resumed: true, status: 'active', next_fire_at: expectedNext, terminal_at: now + 3600 * 48, paused_reason: null });
+      expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({
+        status: 'active', next_fire_at: expectedNext, terminal_at: now + 3600 * 48,
+      });
+      // Not due at the moment of resume: the daily job keeps its slot.
+      expect(dueTriggers(db.raw, now, 10)).toEqual([]);
+      expect(lastEvent(bead.id, 'trigger_resumed')).toEqual({
+        trigger_id: t.id, next_fire_at: expectedNext, terminal_at: now + 3600 * 48, fire_now: false, paused_reason: null,
+      });
+    });
+
+    it('fire_now makes an open-ended trigger due immediately and keeps it open-ended (#3609 case)', () => {
+      const { bead, t } = pausedCron({ terminalAt: null });
+
+      const res = resumeTrigger(db.raw, t.id, { actor: 'u', fireNow: true, maxTtlHours: 72 }, clock);
+
+      expect(res).toMatchObject({ resumed: true, next_fire_at: now, terminal_at: null });
+      expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'active', next_fire_at: now, terminal_at: null });
+      expect(dueTriggers(db.raw, now, 10).map((row) => row.id)).toEqual([t.id]);
+    });
+
+    it('is idempotent on an active trigger: no write, no event, resumed=false', () => {
+      const bead = createBead(db.raw, { kind: 'agent_job', title: 'active', ownerJid: 'mw', actor: 'u' });
+      const t = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'schedule.cron', spec: { expr: '30 8 * * *' },
+        reportChatJid: 'report-example-invalid@s.whatsapp.net', actor: 'u',
+      }, clock);
+      const before = listTriggers(db.raw, { beadId: bead.id })[0];
+
+      const res = resumeTrigger(db.raw, t.id, { actor: 'u', fireNow: true, maxTtlHours: 72 }, fakeClock(t0ms + 60_000));
+
+      expect(res).toEqual({ resumed: false, status: 'active', next_fire_at: before.next_fire_at, terminal_at: before.terminal_at, paused_reason: null });
+      expect(listTriggers(db.raw, { beadId: bead.id })[0]).toEqual(before);
+      expect(lastEvent(bead.id, 'trigger_resumed')).toBeUndefined();
+    });
+
+    it('refuses expired and cancelled triggers and unknown ids', () => {
+      const { t } = pausedCron();
+      db.raw.prepare(`UPDATE bead_triggers SET status = 'expired' WHERE id = ?`).run(t.id);
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/is expired; only a paused trigger/);
+      db.raw.prepare(`UPDATE bead_triggers SET status = 'cancelled' WHERE id = ?`).run(t.id);
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/is cancelled; only a paused trigger/);
+      expect(() => resumeTrigger(db.raw, 999_999, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/trigger 999999 not found/);
+    });
+
+    it('refuses a passed deadline unless until is given, and clamps until to the policy max', () => {
+      const { bead, t } = pausedCron({ terminalAt: now - 60 });
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/deadline has passed/);
+      expect(listTriggers(db.raw, { beadId: bead.id })[0].status).toBe('paused');
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', until: now - 1, maxTtlHours: 72 }, clock)).toThrow(/until must be in the future/);
+
+      const res = resumeTrigger(db.raw, t.id, { actor: 'u', until: now + 10 * 86400, maxTtlHours: 72 }, clock);
+
+      expect(res).toMatchObject({ resumed: true, terminal_at: now + 72 * 3600 });
+      expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'active', terminal_at: now + 72 * 3600 });
+    });
+
+    it('reports the forbidden_target pause reason from the latest trigger_paused event', () => {
+      const { bead, t } = pausedCron();
+      db.raw.prepare(
+        `INSERT INTO bead_events (bead_id, event_type, payload_json, actor, created_at) VALUES (?, 'trigger_paused', ?, 'trigger-poller', ?)`,
+      ).run(bead.id, JSON.stringify({ trigger_id: t.id, reason: 'forbidden_target', reject_count: 3 }), now);
+
+      const res = resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock);
+
+      expect(res.paused_reason).toBe('forbidden_target');
+      expect(lastEvent(bead.id, 'trigger_resumed')).toMatchObject({ paused_reason: 'forbidden_target' });
+    });
+
+    it('applies the creation target rules: poll.url needs enableUrlWatch, poll.shell is refused, a corrupt spec is refused', () => {
+      const bead = createBead(db.raw, { kind: 'watch', title: 'w', ownerJid: 'mw', actor: 'u' });
+      const url = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'poll.url', spec: { url: 'https://example.com/feed', hash_mode: 'text' },
+        reportChatJid: 'c', requestedTerminalAt: now + 3600, maxTtlHours: 72, actor: 'u',
+      }, clock);
+      pauseTrigger(db.raw, url.id, { actor: 'u' }, clock);
+      expect(() => resumeTrigger(db.raw, url.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/url watch is disabled/);
+      expect(resumeTrigger(db.raw, url.id, { actor: 'u', maxTtlHours: 72, enableUrlWatch: true }, clock)).toMatchObject({ resumed: true });
+
+      const shell = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'poll.shell', spec: { argv: ['true'], fire_when: 'exit_zero' },
+        reportChatJid: 'c', requestedTerminalAt: now + 3600, maxTtlHours: 72, actor: 'u',
+      }, clock);
+      pauseTrigger(db.raw, shell.id, { actor: 'u' }, clock);
+      expect(() => resumeTrigger(db.raw, shell.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/poll\.shell/);
+
+      const { t } = pausedCron();
+      db.raw.prepare(`UPDATE bead_triggers SET spec_json = '{}' WHERE id = ?`).run(t.id);
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow();
+      expect(listTriggers(db.raw, {}).find((row) => row.id === t.id)?.status).toBe('paused');
+    });
+
+    it('rolls back the reactivation when event persistence fails', () => {
+      const { bead, t } = pausedCron();
+      db.raw.exec(`CREATE TRIGGER deny_resumed BEFORE INSERT ON bead_events WHEN NEW.event_type = 'trigger_resumed' BEGIN SELECT RAISE(ABORT, 'bead_events write denied'); END`);
+
+      expect(() => resumeTrigger(db.raw, t.id, { actor: 'u', maxTtlHours: 72 }, clock)).toThrow(/bead_events write denied/);
+
+      expect(listTriggers(db.raw, { beadId: bead.id })[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+    });
   });
 
   it('extendTrigger on an active trigger leaves status and next_fire_at untouched (was_paused=false)', () => {
