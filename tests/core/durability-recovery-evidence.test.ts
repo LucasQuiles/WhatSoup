@@ -647,8 +647,11 @@ describe('durable recovery evidence ordering', () => {
 
     const stats = freshEngine.getHealthStats();
 
-    expect(stats.maybeSentOutbound).toBe(1);
-    expect(stats.oldestMaybeSentAt).toBeNull();
+    // The raw count still reports the row; only the debt clock excludes it.
+    expect({
+      maybeSentOutbound: stats.maybeSentOutbound,
+      oldestMaybeSentAt: stats.oldestMaybeSentAt,
+    }).toEqual({ maybeSentOutbound: 1, oldestMaybeSentAt: null });
   });
 
   it('keeps an uncorroborated stale maybe_sent row on the health durability-debt clock beside a corroborated one', () => {
