@@ -281,7 +281,7 @@ export interface RunResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
-  state: { status: string; events: Array<Record<string, string>> } | null;
+  state: { status: string; mode: string; events: Array<Record<string, string>> } | null;
 }
 
 export function run(h: Harness, args: string[] = [], extraEnv: Record<string, string> = {}): RunResult {
