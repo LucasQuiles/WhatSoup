@@ -3468,6 +3468,7 @@ Schedule a text or media message to be sent later. In chat-scoped sessions the c
 | `Error` | `scheduled_at` is not a future timestamp |
 | `Error` | Neither `text` nor `filePath` provided |
 | `Error` | File not found, outside workspace root, too large (> 50 MB), or unsupported extension |
+| `Error` | The payload could never be sent, for example an empty media file (`Invalid scheduled payload: payload_undecodable shape=<class>`); no row is created |
 
 ---
 
@@ -3578,6 +3579,7 @@ Update a pending scheduled message. Can change time, text, or recurrence.
 | `Error` | Message is not in `pending` status |
 | `Error` | `scheduled_at` is not a future timestamp |
 | `Error` | Cron expression is invalid |
+| `Error` | The row as updated would hold a payload the scheduler could never send, for example empty `text`, or a time-only update on a row whose stored payload is invalid (`Invalid scheduled payload: payload_undecodable shape=<class>`); the row is unchanged |
 | `Error` | No fields to update |
 
 ---
