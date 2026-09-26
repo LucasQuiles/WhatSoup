@@ -116,6 +116,7 @@ const requiredPackageScripts = {
     'npm run guard:service-units',
     'npm run guard:insecure-tempfile',
     'npm run guard:zero-byte-tracked',
+    'npm run guard:sql-schema',
     'npm run guard:platform-patterns',
     'npm run guard:no-destructive-git',
     'npm run guard:catch-ratchet',
