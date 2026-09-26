@@ -170,7 +170,7 @@ message content, identities, or exporter payloads. `state` is one of `disabled`,
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 163 tools (160 always-registered + 3 conditionally-registered: `knowledge_search` when
+all 169 tools (166 always-registered + 3 conditionally-registered: `knowledge_search` when
 Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
 control-plane peer and is not in any sandbox mode, and `memory_write` when a Pinecone key and
 index are configured; see
@@ -208,9 +208,9 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
 | `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
 | `mcp:tools.audit` | 3 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends`, `maintain_outbound_audit`, `list_fact_export_queue` |
-| `mcp:tools.substrate` | 22 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities, aliases, activity timeline. Schema still settling. |
+| `mcp:tools.substrate` | 23 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities, aliases, activity timeline. Schema still settling. |
 
-> The 162nd canonical tool (`emit_heal_result`) is registered inline from
+> The 169th canonical tool (`emit_heal_result`) is registered inline from
 > [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts) rather than under
 > `src/mcp/tools/`, so it is intentionally absent from the per-module registry above.
 > See the [`runtime.ts (inline)` section of docs/tools.md](tools.md#runtimets-inline) for
@@ -361,6 +361,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |
 | `cli:npm.guard-insecure-tempfile` | `npm run guard:insecure-tempfile` | `package.json` | stable | active | Reject insecure temp-file creation in python + shell (tempfile.mktemp / mktemp import, /tmp write-target literals, shell redirect/tee to /tmp, unsafe mktemp templates) |
 | `cli:npm.guard-zero-byte-tracked` | `npm run guard:zero-byte-tracked` | `package.json` | stable | active | Block tracked files that carry no bytes (content silently truncated to 0); placeholders allowed by exact basename only (`.gitkeep`, `.keep`, `.placeholder`, `__init__.py`, `py.typed`); symlinks skipped; exits 2 INCONCLUSIVE when zero tracked files are examined |
+| `cli:npm.guard-sql-schema` | `npm run guard:sql-schema` | `package.json` | stable | active | Fail when an SQL literal under `src/` names a table or column the bot database lacks (#3610): the schema is built by executing every migration, the runtime store initializers and the static runtime DDL against an in-memory database, then SQLite `prepare` compiles each literal statement; templates with `${}` are skipped and counted; separate databases, migration files and named literals are listed with reasons in `scripts/sql-schema-guard.allowlist.json`, and an entry that matches nothing fails; exits 2 INCONCLUSIVE when zero source files or zero SQL literals are examined |
 | `cli:npm.guard-no-destructive-git` | `npm run guard:no-destructive-git` | `package.json` | stable | active | Block destructive git cleanup commands (clean -fdx, reset --hard, checkout/switch --force, push --force, branch -D, update-ref -d, stash clear, reflog expire, gc --prune, filter-branch/-repo) in committed shell/hook automation; escape hatch `# no-destructive-git:allow` |
 | `cli:npm.guard-png-estate` | `npm run guard:png-estate` | `package.json` | stable | active | Shrink-only ratchet on the tracked-PNG census (#2219): each tracked PNG at most its committed size in the per-path baseline, any PNG path outside that baseline at most 100 KiB, count and total bytes bounded by the baseline, artifacts/ must hold zero tracked PNGs; each reducing PR lowers the baselines in the same change |
 | `cli:npm.guard-png-estate-staged` | `npm run guard:png-estate:staged` | `package.json` | stable | active | Pre-commit half of the png-estate policy: reject any staged PNG under artifacts/ (untracked by policy) any staged in-place change that grows a tracked docs/screenshots/ PNG (a tracked screenshot may not grow), and any other staged new/changed PNG over 100 KiB (compress or host externally) |
