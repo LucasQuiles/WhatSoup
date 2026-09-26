@@ -383,7 +383,7 @@ function eligibleClaudeTarget(
   cooldownMinutes: number,
 ): EligibleTarget {
   if (!isRecord(versionTimes)) {
-    return { target: null, anomalies: ['publish-time metadata is not a JSON object'] };
+    return { target: null, anomalies: ['publish-time metadata is missing or not a JSON object'] };
   }
   const anomalies: string[] = [];
   let best: { version: string; parsed: Semver } | null = null;
@@ -464,6 +464,155 @@ export function claudeUpdatePlan({
   return { ...base, action: 'install', target, reason: `${current} -> ${target}` };
 }
 
+/** Error codes the agent CLI modes emit; exit 2 = the request was rejected, nothing was decided. */
+export type ClaudeCliErrorCode = 'INVALID_ARGUMENT' | 'EVIDENCE_MISSING' | 'UNEXPECTED';
+
+export interface ClaudeCliError {
+  action: 'error';
+  current: null;
+  target: null;
+  error: { code: ClaudeCliErrorCode; message: string };
+}
+
+export interface ClaudeCliOutcome {
+  exitCode: 0 | 2;
+  result: unknown;
+}
+
+class ClaudeCliRejection extends Error {
+  code: ClaudeCliErrorCode;
+
+  constructor(code: ClaudeCliErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Strict flag parser for the agent CLI modes: every flag is known, appears once, and takes a
+ * value unless it is the mode flag or --json. Only flags in `emptyAllowed` accept "" (the shell
+ * passes an empty --current when the service binary is missing).
+ */
+function parseClaudeCliArgs(
+  argv: string[],
+  modeFlag: string,
+  valueFlags: readonly string[],
+  emptyAllowed: readonly string[] = [],
+): Map<string, string | true> {
+  const parsed = new Map<string, string | true>();
+  const reject = (message: string): never => {
+    throw new ClaudeCliRejection('INVALID_ARGUMENT', message);
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (!arg.startsWith('--')) reject(`unexpected argument: ${arg}`);
+    const key = arg.slice(2);
+    if (parsed.has(key)) reject(`--${key} given more than once`);
+    if (key === modeFlag || key === 'json') {
+      parsed.set(key, true);
+      continue;
+    }
+    if (!valueFlags.includes(key)) reject(`unknown flag for --${modeFlag}: --${key}`);
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith('--')) reject(`missing value for --${key}`);
+    if (value === '' && !emptyAllowed.includes(key)) reject(`empty value for --${key}`);
+    parsed.set(key, value!);
+    i += 1;
+  }
+  return parsed;
+}
+
+function stringArg(args: Map<string, string | true>, key: string): string | undefined {
+  const value = args.get(key);
+  return typeof value === 'string' ? value : undefined;
+}
+
+function parseCliCooldown(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_COOLDOWN_MINUTES;
+  const value = /^\d{1,12}$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(value) || value < DEFAULT_COOLDOWN_MINUTES) {
+    throw new ClaudeCliRejection(
+      'INVALID_ARGUMENT',
+      `--cooldown-minutes must be an integer of at least ${DEFAULT_COOLDOWN_MINUTES}, got "${raw}"`,
+    );
+  }
+  return value;
+}
+
+function parseCliNow(raw: string | undefined): Date {
+  if (raw === undefined) return new Date();
+  const value = ISO_TIMESTAMP_RE.test(raw) ? new Date(raw) : new Date(Number.NaN);
+  if (Number.isNaN(value.getTime())) {
+    throw new ClaudeCliRejection('INVALID_ARGUMENT', `--now must be an ISO 8601 timestamp, got "${raw}"`);
+  }
+  return value;
+}
+
+function claudeCliError(err: unknown): ClaudeCliOutcome {
+  const code = err instanceof ClaudeCliRejection ? err.code : 'UNEXPECTED';
+  const message = err instanceof Error ? err.message : String(err);
+  const result: ClaudeCliError = { action: 'error', current: null, target: null, error: { code, message } };
+  return { exitCode: 2, result };
+}
+
+const CLAUDE_LAYOUTS: readonly ClaudeServiceLayout[] = ['native', 'wrapper', 'npm', 'other'];
+
+/**
+ * --claude-update-plan: exit 0 with the plan (any action), or exit 2 with action "error". An
+ * empty, absent or "none" --current is the missing action. A publish-time file that cannot be
+ * read is missing evidence; one that is not valid JSON is a metadata anomaly and holds.
+ */
+export function claudeUpdatePlanCli(argv: string[]): ClaudeCliOutcome {
+  try {
+    const args = parseClaudeCliArgs(
+      argv,
+      'claude-update-plan',
+      ['current', 'time-json', 'cooldown-minutes', 'layout', 'now'],
+      ['current'],
+    );
+    const timeJsonPath = stringArg(args, 'time-json');
+    if (timeJsonPath === undefined) throw new ClaudeCliRejection('INVALID_ARGUMENT', '--time-json is required');
+    const layout = stringArg(args, 'layout') ?? 'other';
+    if (!(CLAUDE_LAYOUTS as readonly string[]).includes(layout)) {
+      throw new ClaudeCliRejection('INVALID_ARGUMENT', '--layout must be native, wrapper, npm or other');
+    }
+    const cooldownMinutes = parseCliCooldown(stringArg(args, 'cooldown-minutes'));
+    const now = parseCliNow(stringArg(args, 'now'));
+    const currentArg = stringArg(args, 'current');
+    const current = currentArg === undefined || currentArg === '' || currentArg === 'none' ? null : currentArg;
+    let text: string;
+    try {
+      text = readFileSync(timeJsonPath, 'utf8');
+    } catch (err) {
+      throw new ClaudeCliRejection('EVIDENCE_MISSING', `cannot read --time-json: ${(err as Error).message}`);
+    }
+    let versionTimes: unknown;
+    try {
+      versionTimes = JSON.parse(text);
+    } catch {
+      versionTimes = undefined;
+    }
+    const result = claudeUpdatePlan({
+      current,
+      versionTimes,
+      now,
+      cooldownMinutes,
+      layout: layout as ClaudeServiceLayout,
+    });
+    return { exitCode: 0, result };
+  } catch (err) {
+    return claudeCliError(err);
+  }
+}
+
+function emitClaudeCliOutcome(outcome: ClaudeCliOutcome): unknown {
+  console.log(JSON.stringify(outcome.result));
+  if (outcome.exitCode !== 0) process.exitCode = outcome.exitCode;
+  return outcome.result;
+}
+
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const parsed: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -485,6 +634,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 }
 
 export function run(argv: string[] = process.argv.slice(2)): unknown {
+  if (argv.includes('--claude-update-plan')) return emitClaudeCliOutcome(claudeUpdatePlanCli(argv));
   const args = parseArgs(argv);
   if (args['npm-cooldown-config']) {
     const npmVersion = requireTrimmedString(args['npm-version'], '--npm-version');
@@ -528,23 +678,6 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else console.log(`${version} eligible=${result.eligible}`);
     if (!result.eligible) process.exitCode = 2;
-    return result;
-  }
-
-  if (args['claude-update-plan']) {
-    const timeJsonPath = requireTrimmedString(args['time-json'], '--time-json');
-    const layout = String(args.layout ?? 'other');
-    if (!['native', 'wrapper', 'npm', 'other'].includes(layout)) {
-      throw new Error('--layout must be native, wrapper, npm or other');
-    }
-    const result = claudeUpdatePlan({
-      current: args.current ? String(args.current) : null,
-      versionTimes: JSON.parse(readFileSync(timeJsonPath, 'utf8')) as Record<string, string>,
-      now: args.now ? new Date(String(args.now)) : new Date(),
-      cooldownMinutes: args['cooldown-minutes'] ? Number(args['cooldown-minutes']) : DEFAULT_COOLDOWN_MINUTES,
-      layout: layout as ClaudeServiceLayout,
-    });
-    console.log(JSON.stringify(result));
     return result;
   }
 
