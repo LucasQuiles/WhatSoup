@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
@@ -187,7 +189,11 @@ def test_entry_is_abandoned_after_max_attempts(tmp_path, monkeypatch):
     kinds = _kinds(paths)
     assert kinds.count("flap_resolve_abandoned") == 1, kinds
     assert kinds.count("flap_resolve_error") == 10, kinds
-    abandoned = [r for r in _records(paths) if r.get("recordKind") == "flap_resolve_abandoned"][0]
+    # The abandoned record precedes the final error line, so a failing error
+    # append cannot lose it.
+    assert kinds.index("flap_resolve_abandoned") == len(kinds) - 2, kinds
+    assert kinds[-1] == "flap_resolve_error", kinds
+    abandoned =[r for r in _records(paths) if r.get("recordKind") == "flap_resolve_abandoned"][0]
     # incidentKey is written but the controller log's metadata-only filter drops it.
     assert abandoned.get("details") == {"attempts": 10, "cumulativeCount": 7, "underlyingOpen": False}, abandoned
 
@@ -248,3 +254,78 @@ def test_log_growth_is_bounded_by_attempts_not_cycles(tmp_path, monkeypatch):
     assert kinds.count("flap_resolve_abandoned") == 1
     assert len(kinds) <= 11, len(kinds)
     assert _entry(mod, paths) is None
+
+
+def _inject_on_next_load(mod, monkeypatch, **fields) -> None:
+    """The durable writer refuses non-finite floats, so such a value can only
+    reach the sweep through a load (json.loads accepts NaN/Infinity) or an
+    in-memory payload. Inject it into the next load only."""
+    real_load = mod.load_incident_state
+    pending = [fields]
+
+    def _load_state(paths_arg, *args, **kwargs):
+        state = real_load(paths_arg, *args, **kwargs)
+        if pending:
+            state["flapState"][KEY].update(pending.pop())
+        return state
+
+    monkeypatch.setattr(mod, "load_incident_state", _load_state)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_non_finite_resolve_attempts_is_a_first_attempt(tmp_path, monkeypatch, value):
+    mod, _clock = _load(tmp_path / f"attempts-{value}", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+    _inject_on_next_load(mod, monkeypatch, resolveAttempts=value)
+    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    entry = _entry(mod, paths)
+    assert entry is not None
+    assert entry.get("resolveAttempts") == 1, entry
+    assert entry.get("nextResolveAt") == NOW + 30, entry
+
+
+def test_infinite_next_resolve_at_does_not_skip(tmp_path, monkeypatch):
+    mod, _clock = _load(tmp_path / "next-inf", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+    _inject_on_next_load(mod, monkeypatch, nextResolveAt=float("inf"))
+    delivered: list = []
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+
+    assert mod.sweep_flap_storms(paths) == (1, 0)
+    assert len(delivered) == 1
+    assert _entry(mod, paths) is None
+
+
+def test_backoff_resets_when_the_storm_retrips(tmp_path, monkeypatch):
+    mod, clock = _load(tmp_path / "retrip", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    for _ in range(3):
+        mod.sweep_flap_storms(paths)
+        clock.now = _entry(mod, paths).get("nextResolveAt", clock.now)
+    assert _entry(mod, paths).get("resolveAttempts") == 3
+
+    # The storm re-trips at storm rate: not resolvable, so the budget resets.
+    state = mod.load_incident_state(paths)
+    state["flapState"][KEY]["tripTimestamps"] = [clock.now - 3, clock.now - 2, clock.now - 1]
+    mod.save_incident_state(paths, state)
+    assert mod.flap_should_resolve(_entry(mod, paths), clock.now) is False, "precondition: not resolvable"
+    assert mod.sweep_flap_storms(paths) == (0, 0)
+    entry = _entry(mod, paths)
+    assert entry is not None
+    assert not {"resolveAttempts", "nextResolveAt", "lastResolveErrorAt"} & set(entry), entry
+
+    # Rate decays again: the next failure is attempt 1 of a fresh budget.
+    state = mod.load_incident_state(paths)
+    state["flapState"][KEY]["tripTimestamps"] = []
+    mod.save_incident_state(paths, state)
+    assert mod.flap_should_resolve(_entry(mod, paths), clock.now) is True, "precondition: resolvable"
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    entry = _entry(mod, paths)
+    assert entry.get("resolveAttempts") == 1, entry
+    assert entry.get("nextResolveAt") == clock.now + 30, entry

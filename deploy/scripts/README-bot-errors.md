@@ -524,6 +524,15 @@ bounded by the dispatcher's existing flap-storm machinery
 trips per 600s, collapses into one storm digest) rather than by holding this
 event open across a real recovery.
 
+When a storm's "resolved" notice fails to send, the dispatcher retries it with
+exponential backoff (`BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS`, default 30,
+doubling per failure up to `BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS`, default
+3600) instead of every cycle. After `BOT_ERRORS_FLAP_RESOLVE_MAX_ATTEMPTS`
+(default 10) failures it drops the storm entry and writes one
+`flap_resolve_abandoned` record to `dispatch.jsonl`. Dropping the entry also
+ends suppression of that storm's member alerts: they go through normal
+per-event handling again instead of being consolidated into the storm.
+
 One implication worth flagging for on-call: because `collector_remote_unreachable`
 (threshold 2) and `relay_host_down` (threshold 3) are different sources —
 and therefore different dispatcher incident keys — **one persistently dead

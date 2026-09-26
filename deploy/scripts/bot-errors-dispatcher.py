@@ -14,6 +14,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -277,7 +278,11 @@ FLAP_SEEN_EVENT_MAX_IDS = positive_env_int("BOT_ERRORS_FLAP_SEEN_EVENT_MAX_IDS",
 # cycle forever and dispatch.jsonl gained one error line per storm per cycle
 # (~12.5k failed sends on one host). Attempt n waits
 # min(BASE * 2**(n-1), MAX) seconds; after MAX_ATTEMPTS failures the entry is
-# dropped with one flap_resolve_abandoned record.
+# dropped with one flap_resolve_abandoned record. The backoff fields are cleared
+# whenever the storm is not resolvable, so the attempt budget is per resolve
+# phase. Keep FLAP_STABLE_SECONDS >= FLAP_RESOLVE_RETRY_MAX_SECONDS so one retry
+# wait never outlasts the stable period that gates the resolve.
+FLAP_RESOLVE_BACKOFF_FIELDS = ("resolveAttempts", "lastResolveErrorAt", "nextResolveAt")
 FLAP_RESOLVE_RETRY_BASE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS", 30)
 FLAP_RESOLVE_RETRY_MAX_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS", 3600)
 FLAP_RESOLVE_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_MAX_ATTEMPTS", 10)
@@ -6283,10 +6288,15 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     })
                 continue
             if flap_should_resolve(entry, now):
-                # A non-numeric value reads as 0 so a corrupt field cannot raise
-                # into the outer except and restore the per-cycle error line.
+                # A non-numeric or non-finite value reads as absent: raising here
+                # would restore the per-cycle error line, and Infinity would
+                # skip the resolve forever.
                 next_resolve_at = entry.get("nextResolveAt")
-                if isinstance(next_resolve_at, (int, float)) and now < next_resolve_at:
+                if (
+                    isinstance(next_resolve_at, (int, float))
+                    and math.isfinite(next_resolve_at)
+                    and now < next_resolve_at
+                ):
                     continue
                 open_incidents = incident_state.get("openIncidents")
                 # A resolve may only claim 'stable' when the source actually went
@@ -6304,7 +6314,8 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                 except Exception as exc:  # noqa: BLE001 - back off, never retry every cycle
                     errors += 1
                     prior = entry.get("resolveAttempts")
-                    attempts = (int(prior) if isinstance(prior, (int, float)) else 0) + 1
+                    finite_prior = isinstance(prior, (int, float)) and math.isfinite(prior)
+                    attempts = (int(prior) if finite_prior else 0) + 1
                     # State is updated before any log append so a failing append
                     # cannot lose the backoff.
                     changed = True
@@ -6325,7 +6336,8 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                             FLAP_RESOLVE_RETRY_MAX_SECONDS,
                         )
                         error_record["nextResolveAt"] = entry["nextResolveAt"]
-                    append_dispatch_log(paths, error_record)
+                    # The abandoned record goes first: it is the only trace of a
+                    # dropped entry, so a failing error-line append must not lose it.
                     if abandoned:
                         append_dispatch_log(paths, {
                             "type": "flap_resolve_abandoned",
@@ -6334,6 +6346,7 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                             "cumulativeCount": entry.get("cumulativeCount"),
                             "underlyingOpen": underlying_open,
                         })
+                    append_dispatch_log(paths, error_record)
                     continue
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
@@ -6344,6 +6357,13 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                 flap_state.pop(key, None)
                 resolved += 1
                 changed = True
+            else:
+                # Not resolvable (the storm re-tripped): clear any backoff so the
+                # next resolve phase starts with a fresh attempt budget.
+                for field in FLAP_RESOLVE_BACKOFF_FIELDS:
+                    if field in entry:
+                        entry.pop(field)
+                        changed = True
         except Exception as exc:  # noqa: BLE001 - one bad entry must not block the sweep
             errors += 1
             append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})
