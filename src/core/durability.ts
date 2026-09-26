@@ -463,8 +463,9 @@ function maybeSentDwellAtSql(prefix = ''): string {
  * no delivery corroboration is linked to it. The live reconcile selects only
  * these rows and leaves corroborated ones unchanged on purpose, so /health
  * durability debt must use the same predicate or it counts rows nothing will
- * ever clear. The alias is required: an unqualified `id` inside the subquery
- * would bind to the terminal record, not the outbound row.
+ * ever clear. The alias is required: both subquery tables have an `id`
+ * column, so SQLite rejects an unqualified `id` at prepare time as an
+ * ambiguous column name.
  */
 function maybeSentUncorroboratedSql(alias: `${string}.`): string {
   return `NOT EXISTS (
