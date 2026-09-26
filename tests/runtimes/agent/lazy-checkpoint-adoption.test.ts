@@ -251,7 +251,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       writeCheckpoint(PHONE, SCHEDULED_SID);
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith(OWN_SID, ownRow);
-      expect(spawnSpy).not.toHaveBeenCalledWith(SCHEDULED_SID, expect.anything());
+      expect(spawnSpy.mock.calls.flat()).not.toContain(SCHEDULED_SID);
       expect(notices).not.toHaveBeenCalled();
       // Repaired: the chat's checkpoint names its own session, and the
       // scheduled turn's completed identity no longer describes the chat.

@@ -17,6 +17,7 @@
  *   spawned, so the chat never gets a second live session.
  */
 import type { Database } from '../../core/database.ts';
+import { queryAll, queryOne } from '../../lib/db-query.ts';
 import { getResumableSessionForChat } from './session-db.ts';
 
 export const CHECKPOINT_NOT_RESTORED_NOTICE =
@@ -103,9 +104,11 @@ export function classifyCheckpointAdoption(
 ): CheckpointAdoption {
   const cp = input.checkpoint;
   if (!cp || cp.session_id === null || cp.session_status === 'ended') return NO_CHECKPOINT_ADOPTION;
-  const rows = db.raw.prepare(
+  const rows = queryAll<SessionRowView>(
+    db.raw,
     'SELECT id, workspace_key, status FROM agent_sessions WHERE session_id = ? ORDER BY id',
-  ).all(cp.session_id) as unknown as SessionRowView[];
+    cp.session_id,
+  );
   const own = rows.filter((row) => row.workspace_key === input.conversationKey);
   const resumable = getResumableSessionForChat(db, input.conversationKey, input.provider);
 
@@ -212,8 +215,11 @@ export async function lazyCheckpointAdoption(
     // lookup requires. The foreign session's completed identity is reset by
     // the upsert (session id changed); it never described this chat. The
     // next completed turn writes this session's full identity bundle.
-    const own = db.raw.prepare('SELECT transcript_path FROM agent_sessions WHERE id = ?')
-      .get(adoption.rowId) as { transcript_path: string | null } | undefined;
+    const own = queryOne<{ transcript_path: string | null }>(
+      db.raw,
+      'SELECT transcript_path FROM agent_sessions WHERE id = ?',
+      adoption.rowId,
+    );
     durability.upsertSessionCheckpoint(conversationKey, {
       sessionId: adoption.sessionId,
       sessionStatus: 'suspended',
