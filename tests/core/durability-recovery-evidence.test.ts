@@ -378,7 +378,7 @@ describe('durable recovery evidence ordering', () => {
       completedTurnDone: 0,
       failedStale: 1,
       reclaimedRecoveryOwned: 0,
-      closedFromTerminalRecord: 0,
+      terminalRecordCloseCandidates: 0,
     });
     expect(db.raw.prepare('SELECT plans, runs FROM recovery_order_audit').get())
       .toEqual({ plans: 1, runs: 1 });

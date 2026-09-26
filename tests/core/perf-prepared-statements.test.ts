@@ -93,11 +93,12 @@ describe('prepared statement caching', () => {
     // answer's delivery echo from one truly blocked by outstanding recovery. It
     // shares its FROM/WHERE text with hasOutstandingTurnRecoveryForScope, which
     // stays a distinct statement, so the store prepares one more, not two.)
-    // (+7 vs 154, sweep bucket 5: TerminalRecordInboundCloser — inbound,
-    // terminal-record, disposition-link and recovery-job probes, the bounded
-    // candidate scan, and the two guarded close updates — prepared once in the
-    // constructor and reused by every sweep and operator close.)
-    expect(prepareSpy).toHaveBeenCalledTimes(161);
+    // (+8 vs 154, report-only sweep bucket 5: TerminalRecordInboundCloser —
+    // inbound, terminal-record, disposition-link, recovery-job and delivery-op
+    // probes, the bounded candidate scan, and the two guarded close updates the
+    // operator CLI uses — prepared once in the constructor and reused by every
+    // sweep report.)
+    expect(prepareSpy).toHaveBeenCalledTimes(162);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

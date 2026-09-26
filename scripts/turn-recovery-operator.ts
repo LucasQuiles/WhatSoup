@@ -13,16 +13,23 @@
  *   show    --job N                      redacted detail + fence preview
  *   reassign --job N [--apply]           fenced blocked-owner reassignment
  *   promote --job N --evidence-type T --evidence-ref R [--apply]
- *   close-inbound --seq N [--apply]      close ONE open inbound left behind a
+ *   close-inbound --seq N [--apply --expect-digest D]
+ *                                        close ONE open inbound left behind a
  *                                        final terminal record, with the status
  *                                        that record implies (the sweep's rules)
  *
  * Safety posture:
  *   - dry-run is the DEFAULT for mutations; --apply is the explicit
  *     confirmation. Exactly one job (or inbound seq) per invocation — no bulk.
- *   - close-inbound refuses unless exactly one FINAL terminal record owns the
- *     row and no disposition link or recovery job touches it; a rerun on a row
- *     already closed as its record implies is a no-op report.
+ *   - close-inbound never opens the migrating Database wrapper. Its dry run
+ *     reads through a read-only handle (no migration, no sidecar creation on a
+ *     quiescent file) and prints a digest binding the database file identity,
+ *     the row, its record and the derived status. --apply requires that digest,
+ *     the exact current schema, and re-proves identity, schema, eligibility and
+ *     digest inside its write transaction. It refuses unless exactly one FINAL
+ *     terminal record owns the row with intact delivery proof and no
+ *     disposition link or recovery job touches it; a rerun on a row already
+ *     closed as its record implies is a no-op report.
  *   - promotion validates an allowlisted evidence type + bounded reference
  *     shape (a bare nonempty label is NOT acceptable evidence), and refuses
  *     when the conversation has journaled inbound activity newer than the
@@ -36,16 +43,28 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import { CliArgError, takeValue } from './lib/cli-args.ts';
 import type { TurnRecoveryJobRow } from '../src/core/turn-recovery-store.ts';
 import type { TerminalRecordInboundCloseEvaluation } from '../src/core/terminal-record-inbound-close.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../src/core/database-schema-version.ts';
+import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../src/lib/sqlite-constants.ts';
 
 // stdout is the CLI's data channel (JSON only) — silence the pino logger the
 // database/durability modules construct at import time, BEFORE importing them.
 process.env.LOG_LEVEL ??= 'silent';
 const { Database } = await import('../src/core/database.ts');
 const { DurabilityEngine } = await import('../src/core/durability.ts');
+const { TerminalRecordInboundCloser } = await import('../src/core/terminal-record-inbound-close.ts');
+const {
+  assertExistingRegularDatabase,
+  assertSameDatabaseFile,
+  assertSchema43Foundation,
+  openExistingWritableDatabase,
+} = await import('./close-recovery-catchup.ts');
 type DurabilityEngineT = InstanceType<typeof DurabilityEngine>;
+type FileIdentity = ReturnType<typeof assertExistingRegularDatabase>;
 
 // Evidence a promotion may cite. Provenance rule per type: the reference must
 // match the bounded shape AND the operator asserts, via the type itself, what
@@ -65,7 +84,8 @@ interface Args {
   command: string;
   db?: string;
   job?: number;
-  seq?: number;
+  seq?: string;
+  expectDigest?: string;
   afterId: number;
   limit: number;
   apply: boolean;
@@ -87,7 +107,8 @@ function parseArgs(argv: string[]): Args {
     switch (flag) {
       case '--db': args.db = next(); break;
       case '--job': args.job = Number.parseInt(next(), 10); break;
-      case '--seq': args.seq = Number.parseInt(next(), 10); break;
+      case '--seq': args.seq = next(); break;
+      case '--expect-digest': args.expectDigest = next(); break;
       case '--after-id': args.afterId = Number.parseInt(next(), 10); break;
       case '--limit': args.limit = Number.parseInt(next(), 10); break;
       case '--apply': args.apply = true; break;
@@ -164,15 +185,75 @@ function closeProjection(
   };
 }
 
-function closeInbound(engine: DurabilityEngineT, args: Args, auditPath: string): void {
-  const seq = args.seq;
-  if (seq === undefined || !Number.isSafeInteger(seq) || seq < 1) fail('--seq must be a positive integer');
-  const mode: 'dry-run' | 'apply' = args.apply ? 'apply' : 'dry-run';
-  const { evaluation, applied } = engine.closeInboundFromTerminalRecord(seq, { apply: args.apply });
-  if (evaluation.verdict === 'refused') {
-    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'refused', reason: evaluation.reason });
-    fail(`inbound seq ${seq} refused: ${evaluation.reason}`);
+type EligibleClose = Extract<TerminalRecordInboundCloseEvaluation, { verdict: 'eligible' }>;
+
+/**
+ * Binds an apply to the dry run that previewed it: the database file identity,
+ * the row, its terminal record, and the exact status the close will write.
+ */
+function closeDigest(identity: FileIdentity, evaluation: EligibleClose): string {
+  return createHash('sha256').update(JSON.stringify({
+    v: 1,
+    device: identity.device,
+    inode: identity.inode,
+    ...closeProjection(evaluation),
+  })).digest('hex');
+}
+
+function schemaVersion(raw: DatabaseSync): number {
+  const row = raw.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number | null };
+  return Number(row.version ?? 0);
+}
+
+/**
+ * A read-only handle that neither migrates nor, on a quiescent file, creates
+ * WAL sidecars: with no -wal/-shm present no other connection has the file
+ * open, so it is read as immutable; otherwise a plain read-only connection
+ * shares the live sidecars.
+ */
+function openReadOnly(dbPath: string): DatabaseSync {
+  if (existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-shm`)) {
+    return new DatabaseSync(dbPath, { readOnly: true });
   }
+  const url = pathToFileURL(dbPath);
+  url.searchParams.set('immutable', '1');
+  return new DatabaseSync(url.href, { readOnly: true });
+}
+
+function preflightClose(dbPath: string, seq: number): {
+  identity: FileIdentity;
+  evaluation: TerminalRecordInboundCloseEvaluation;
+  schema: number;
+} {
+  const identity = assertExistingRegularDatabase(dbPath);
+  const raw = openReadOnly(dbPath);
+  try {
+    assertSchema43Foundation(raw);
+    const evaluation = new TerminalRecordInboundCloser(raw).evaluate(seq);
+    const schema = schemaVersion(raw);
+    assertSameDatabaseFile(identity, assertExistingRegularDatabase(dbPath));
+    return { identity, evaluation, schema };
+  } finally {
+    raw.close();
+  }
+}
+
+function closeInbound(args: Args, dbPath: string, auditPath: string): void {
+  if (args.seq === undefined || !/^[1-9]\d*$/.test(args.seq) || !Number.isSafeInteger(Number(args.seq))) {
+    fail('--seq must be a positive integer');
+  }
+  const seq = Number(args.seq);
+  const mode: 'dry-run' | 'apply' = args.apply ? 'apply' : 'dry-run';
+  if (args.apply && (args.expectDigest === undefined || !/^[0-9a-f]{64}$/.test(args.expectDigest))) {
+    fail('--apply requires --expect-digest <the 64-hex digest a dry run printed>');
+  }
+  const refuse = (reason: string): never => {
+    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'refused', reason });
+    fail(`inbound seq ${seq} refused: ${reason}`);
+  };
+
+  const { identity, evaluation, schema } = preflightClose(dbPath, seq);
+  if (evaluation.verdict === 'refused') refuse(evaluation.reason);
   if (evaluation.verdict === 'already_closed') {
     auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'not-applied:already-closed' });
     console.log(JSON.stringify({
@@ -185,14 +266,51 @@ function closeInbound(engine: DurabilityEngineT, args: Args, auditPath: string):
     }, null, 2));
     return;
   }
-  auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: applied ? 'applied' : 'previewed' });
-  console.log(JSON.stringify(
-    applied
-      ? { applied: true, closed: closeProjection(evaluation) }
-      : { dryRun: true, wouldClose: closeProjection(evaluation) },
-    null,
-    2,
-  ));
+  const eligible = evaluation as EligibleClose;
+  const digest = closeDigest(identity, eligible);
+  if (!args.apply) {
+    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'previewed' });
+    console.log(JSON.stringify({
+      dryRun: true,
+      wouldClose: closeProjection(eligible),
+      digest,
+      schemaCurrent: schema === CURRENT_SCHEMA_MIGRATION,
+    }, null, 2));
+    return;
+  }
+  if (schema !== CURRENT_SCHEMA_MIGRATION) refuse('schema_not_current');
+  if (digest !== args.expectDigest) refuse('digest_mismatch');
+
+  // Re-prove everything on the connection and transaction that writes.
+  const raw = openExistingWritableDatabase(dbPath, identity);
+  let refusal: string | undefined;
+  let closed: EligibleClose | undefined;
+  try {
+    raw.exec(SQLITE_BUSY_TIMEOUT_PRAGMA);
+    raw.exec('PRAGMA foreign_keys = ON');
+    raw.exec('BEGIN IMMEDIATE');
+    try {
+      assertSameDatabaseFile(identity, assertExistingRegularDatabase(dbPath));
+      assertSchema43Foundation(raw);
+      const recheck = new TerminalRecordInboundCloser(raw).evaluate(seq);
+      if (schemaVersion(raw) !== CURRENT_SCHEMA_MIGRATION) refusal = 'schema_not_current';
+      else if (recheck.verdict !== 'eligible') refusal = recheck.verdict === 'refused' ? recheck.reason : 'state_changed';
+      else if (closeDigest(identity, recheck) !== args.expectDigest) refusal = 'digest_mismatch';
+      else {
+        new TerminalRecordInboundCloser(raw).applyWithinCallerTransaction(recheck.mutation);
+        closed = recheck;
+      }
+      raw.exec(refusal === undefined ? 'COMMIT' : 'ROLLBACK');
+    } catch (err) {
+      raw.exec('ROLLBACK');
+      throw err;
+    }
+  } finally {
+    raw.close();
+  }
+  if (refusal !== undefined) refuse(refusal);
+  auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'applied' });
+  console.log(JSON.stringify({ applied: true, closed: closeProjection(closed!) }, null, 2));
 }
 
 function main(): void {
@@ -204,15 +322,16 @@ function main(): void {
   if (!existsSync(args.db)) fail('database file does not exist');
   const auditPath = args.auditFile ?? path.join(path.dirname(args.db), 'turn-recovery-operator-audit.jsonl');
 
+  // Before the Database wrapper: opening it migrates the file.
+  if (args.command === 'close-inbound') {
+    closeInbound(args, args.db, auditPath);
+    return;
+  }
+
   const db = new Database(args.db);
   db.open();
   try {
     const engine = new DurabilityEngine(db);
-
-    if (args.command === 'close-inbound') {
-      closeInbound(engine, args, auditPath);
-      return;
-    }
 
     if (args.command === 'list') {
       if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 200) fail('--limit must be 1..200');
