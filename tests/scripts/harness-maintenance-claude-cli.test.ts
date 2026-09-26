@@ -102,7 +102,7 @@ describe('--claude-update-plan CLI contract', () => {
   });
 
   it('rejects a clock that is not an ISO 8601 timestamp', () => {
-    for (const value of ['', 'yesterday', '1758875400', '2026-13-45T00:00:00Z']) {
+    for (const value of ['', 'yesterday', '1758875400', '2026-13-45T00:00:00Z', '2026-02-30T00:00:00Z', '2026-09-26T24:00:00Z']) {
       expectRejected(runGuard(planArgs({ now: value })), 'INVALID_ARGUMENT');
     }
   });

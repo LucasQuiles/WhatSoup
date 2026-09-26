@@ -389,6 +389,36 @@ interface EligibleTarget {
   anomalies: string[];
 }
 
+const ISO_TIMESTAMP_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/**
+ * A strict ISO 8601 timestamp with a real calendar date and time, or null. `new Date()` alone
+ * accepts "2026" and "Sep 1 2026", rolls "2026-02-30" into March, and reads "T24:00" as the next
+ * day; each component is therefore round-tripped through Date.UTC and must come back unchanged.
+ */
+export function parseStrictIsoTimestamp(raw: unknown): Date | null {
+  if (typeof raw !== 'string') return null;
+  const match = ISO_TIMESTAMP_RE.exec(raw);
+  if (!match) return null;
+  const [year, month, day, hour, minute] = match.slice(1, 6).map(Number) as [number, number, number, number, number];
+  const second = Number(match[6] ?? '0');
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    probe.getUTCFullYear() !== year
+    || probe.getUTCMonth() !== month - 1
+    || probe.getUTCDate() !== day
+    || probe.getUTCHours() !== hour
+    || probe.getUTCMinutes() !== minute
+    || probe.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+  if (match[7] !== undefined && (Number(match[7]) > 23 || Number(match[8]) > 59)) return null;
+  const value = new Date(raw);
+  return Number.isNaN(value.getTime()) ? null : value;
+}
+
 /**
  * Newest plain release (no prerelease/build) past the cooldown, validated per version. Unlike
  * latestEligibleVersion() this never throws on bad metadata: it reports an anomaly for a release
@@ -407,10 +437,13 @@ function eligibleClaudeTarget(
   const anomalies: string[] = [];
   let best: { version: string; parsed: Semver } | null = null;
   for (const [version, publishedAt] of Object.entries(versionTimes)) {
+    // Keys that are not strict semver ("created", "modified", "v2.1.290", "2.1.290.1") are not
+    // candidates and are ignored, not anomalies: the installer takes strict versions only.
+    // Prereleases and build-metadata versions are never targets.
     const parsed = parseSemver(version);
     if (!parsed || parsed.prerelease.length > 0 || version.includes('+')) continue;
-    const published = typeof publishedAt === 'string' ? new Date(publishedAt) : null;
-    if (!published || Number.isNaN(published.getTime())) {
+    const published = parseStrictIsoTimestamp(publishedAt);
+    if (!published) {
       if (compareParsedSemver(parsed, current) > 0) {
         anomalies.push(`${version} has an invalid publish time`);
       }
@@ -507,8 +540,6 @@ class ClaudeCliRejection extends Error {
   }
 }
 
-const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-
 /**
  * Strict flag parser for the agent CLI modes: every flag is known, appears once, and takes a
  * value unless it is the mode flag or --json. Only flags in `emptyAllowed` accept "" (the shell
@@ -562,8 +593,8 @@ function parseCliCooldown(raw: string | undefined): number {
 
 function parseCliNow(raw: string | undefined): Date {
   if (raw === undefined) return new Date();
-  const value = ISO_TIMESTAMP_RE.test(raw) ? new Date(raw) : new Date(Number.NaN);
-  if (Number.isNaN(value.getTime())) {
+  const value = parseStrictIsoTimestamp(raw);
+  if (!value) {
     throw new ClaudeCliRejection('INVALID_ARGUMENT', `--now must be an ISO 8601 timestamp, got "${raw}"`);
   }
   return value;

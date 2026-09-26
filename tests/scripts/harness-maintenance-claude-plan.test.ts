@@ -155,3 +155,55 @@ describe('claudeUpdatePlan input validation', () => {
       .toThrow(/now/);
   });
 });
+
+describe('claudeUpdatePlan publish-time strictness', () => {
+  const COOLDOWN = 10080;
+  const cooldownAgo = (extraMs: number) => new Date(now.getTime() - COOLDOWN * 60_000 + extraMs).toISOString();
+
+  it('holds when a newer release has a publish time that is not a strict, real ISO timestamp', () => {
+    for (const bad of ['2026', 'Sep 1 2026', '2026-02-30T00:00:00Z', '2026-09-01', '2026-09-01T24:00:00Z', '2026-09-01T00:00:00+25:00']) {
+      const plan = claudeUpdatePlan({ current: '2.1.280', versionTimes: { ...times, '2.1.290': bad }, now, layout: 'native' });
+      expect(plan.action, bad).toBe('held');
+      expect(plan.anomalies, bad).toContain('2.1.290 has an invalid publish time');
+    }
+  });
+
+  it('accepts npm millisecond timestamps and explicit offsets', () => {
+    const plan = claudeUpdatePlan({
+      current: '2.1.280',
+      versionTimes: { ...times, '2.1.281': '2026-09-12T00:00:00.123Z', '2.1.284': '2026-09-01T02:00:00+02:00' },
+      now,
+      layout: 'native',
+    });
+    expect(plan).toMatchObject({ action: 'install', target: '2.1.284' });
+  });
+
+  it('treats a release published exactly one cooldown ago as eligible, and one millisecond later as not', () => {
+    const exact = claudeUpdatePlan({
+      current: '2.1.280', versionTimes: { ...times, '2.1.290': cooldownAgo(0) }, now, cooldownMinutes: COOLDOWN, layout: 'native',
+    });
+    expect(exact.target).toBe('2.1.290');
+    const late = claudeUpdatePlan({
+      current: '2.1.280', versionTimes: { ...times, '2.1.290': cooldownAgo(1) }, now, cooldownMinutes: COOLDOWN, layout: 'native',
+    });
+    expect(late.target).toBe('2.1.282');
+  });
+
+  it('never targets a version carrying build metadata', () => {
+    const plan = claudeUpdatePlan({
+      current: '2.1.280', versionTimes: { ...times, '2.1.290+build.7': '2026-09-01T00:00:00Z' }, now, layout: 'native',
+    });
+    expect(plan).toMatchObject({ action: 'install', target: '2.1.282' });
+  });
+
+  it('ignores version keys that are not strict semver rather than treating them as anomalies', () => {
+    const plan = claudeUpdatePlan({
+      current: '2.1.280',
+      versionTimes: { ...times, 'v2.1.290': '2026-09-01T00:00:00Z', '2.1.290.1': 'garbage' },
+      now,
+      layout: 'native',
+    });
+    expect(plan.anomalies).toBeUndefined();
+    expect(plan).toMatchObject({ action: 'install', target: '2.1.282' });
+  });
+});
