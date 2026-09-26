@@ -20,6 +20,12 @@ import { isFullyConnected, type HealthConnectionStateReader } from '../transport
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import {
+  auth401FailureClassFor,
+  formatDisconnectDecisionForHealth,
+  NO_RESTART_UNCONFIRMED_401_CLASSES,
+  type Auth401FailureClass,
+} from '../lib/disconnect-classification.ts';
+import {
   AUTH_BOND_READ_PERSISTENT_CLASS,
   DEFAULT_FRESH_INVALID_GRACE_MS,
   hasTransientAuthReadIssue,
@@ -930,7 +936,8 @@ export function modelEvidenceStaleWhileRelied(
 type AuthFailureClass =
   | 'none'
   | 'pairing_required'
-  | 'serverside_logout_irreversible'
+  // serverside_logout_irreversible plus the three unconfirmed-401 classes.
+  | Auth401FailureClass
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
   | 'auth_bond_at_risk'
@@ -944,7 +951,7 @@ type AuthFailureClass =
 
 type DisconnectClass =
   | 'none'
-  | 'serverside_logout_irreversible'
+  | Auth401FailureClass
   | 'duplicate_session_replaced'
   | 'multidevice_mismatch'
   | 'restart_required'
@@ -1078,18 +1085,32 @@ function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateS
   return ageMs >= 0 && ageMs < DEFAULT_FRESH_INVALID_GRACE_MS;
 }
 
-function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
-  const reason = connectionState.lastDisconnectReason ?? '';
-  if (
-    !isFullyConnected(connectionState)
-    && (
-      connectionState.lastStatusCode === 401
-      || reason === 'loggedOut'
-      || reason.includes('device_removed')
-    )
-  ) {
-    return 'serverside_logout_irreversible';
+/**
+ * The 401 class a disconnected snapshot reports, or null for none.
+ *
+ * A transport that carries its policy decision (`disconnectDecision` present,
+ * even null) is authoritative: only an observed device_removed conflict is
+ * `serverside_logout_irreversible`, and each unconfirmed 401 keeps its own
+ * class. A snapshot without the field comes from a transport that does not
+ * classify disconnects; for it the conservative legacy rule stands — any 401 /
+ * loggedOut / device_removed reason reads as irreversible — because nothing
+ * there can distinguish the cases and under-reporting a real removal is worse.
+ */
+function carried401Class(connectionState: ConnectionStateSnapshot): Auth401FailureClass | null {
+  if (isFullyConnected(connectionState)) return null;
+  const decision = connectionState.disconnectDecision;
+  if (decision !== undefined) {
+    return decision === null ? null : auth401FailureClassFor(decision.classification);
   }
+  const reason = connectionState.lastDisconnectReason ?? '';
+  return connectionState.lastStatusCode === 401 || reason === 'loggedOut' || reason.includes('device_removed')
+    ? 'serverside_logout_irreversible'
+    : null;
+}
+
+function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
+  const auth401Class = carried401Class(connectionState);
+  if (auth401Class !== null) return auth401Class;
 
   const lifecycle = connectionState.credentialLifecycle as Partial<ConnectionStateSnapshot['credentialLifecycle']> | undefined;
   const lastQrAt = lifecycle?.lastQrAt ? Date.parse(lifecycle.lastQrAt) : NaN;
@@ -1160,9 +1181,14 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
   const statusCode = connectionState.lastStatusCode ?? undefined;
   if (statusCode === undefined) return 'none';
 
+  const auth401Class = carried401Class(connectionState);
+  if (auth401Class !== null) return auth401Class;
   const action = decideDisconnectAction(statusCode);
   if (action.type === 'exit' && action.reason === 'logged-out') {
-    return 'serverside_logout_irreversible';
+    // Only reachable for a transport that carries a decision but whose
+    // decision is not a 401 one while the status code says 401 — an
+    // inconsistent snapshot. Name it unconfirmed rather than irreversible.
+    return 'auth_401_uninspected_exit';
   }
   if (action.type === 'reconnect') {
     if (action.reason === 'connection-replaced') return 'duplicate_session_replaced';
@@ -2185,9 +2211,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Enrichment staleness only matters if enrichment has actually run before
       // (instances without RAG/Pinecone never run enrichment — that's not degraded).
       const enrichmentIsStale = enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS;
+      // A parked or uninspected 401 is unhealthy (the transport stopped trying)
+      // without being a confirmed removal; the retrying class stays degraded.
       const authFailureIsUnhealthy =
         authFailureClass === 'pairing_required'
         || authFailureClass === 'serverside_logout_irreversible'
+        || (NO_RESTART_UNCONFIRMED_401_CLASSES as readonly string[]).includes(authFailureClass)
         || authFailureClass === 'local_corruption_unrestorable';
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
@@ -2887,6 +2916,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               : null,
             disconnect_class: disconnectClass,
             auth_failure_class: authFailureClass,
+            // The transport's own decision for the last close (null after an
+            // open). Omitted for transports that do not classify, which tells
+            // consumers to use their legacy status-code reading.
+            ...(connectionState.disconnectDecision !== undefined
+              ? { disconnect_decision: formatDisconnectDecisionForHealth(connectionState.disconnectDecision) }
+              : {}),
           },
           auth_bond: authBond,
           credential_lifecycle: connectionState.credentialLifecycle ?? null,

@@ -22,7 +22,7 @@
 ## Related Runbooks
 
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
-- [Release Snapshot Deployment](runbooks/release-deployment.md)
+- [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
 
 ---
@@ -1007,7 +1007,29 @@ journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOu
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
 
-**If logged out (credentials expired):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
+**A 401 is not proof the device was removed.** Read the authenticated health body's
+`whatsapp.connection.disconnect_decision` (the transport's own decision for the
+last close; `null` after a successful open or at process start) and
+`auth_failure_class`:
+
+| `disconnect_decision.classification` | `auth_failure_class` | HTTP | Meaning / action |
+|---|---|---|---|
+| `confirmed_device_removed` | `serverside_logout_irreversible` | 503 | The stream:error carried `conflict type="device_removed"`. The server removed the linked device; re-pair (§6.1) after owner approval. |
+| `ambiguous_401_reconnecting` | `auth_401_ambiguous_retrying` | 200 (degraded) | An inspected 401 without `device_removed`. The transport is spending its **one** bounded reconnect. Wait one poll. |
+| `ambiguous_401_parked` | `auth_401_ambiguous_parked` | 503 | A second ambiguous 401 after the bounded reconnect. The transport stopped; removal is **not** confirmed. Check the primary phone's Linked Devices before any re-pair. |
+| `uninspected_401_conservative_exit` | `auth_401_uninspected_exit` | 503 | A 401 whose stream:error node could not be inspected. Conservative exit; removal is **not** confirmed. Check Linked Devices first. |
+
+The parked and uninspected classes are no-restart for every watchdog (a restart
+would buy a fresh bounded retry, park again and loop). The decision is
+process-local: a restart starts with no decision and a fresh bounded retry. A
+health body without the `disconnect_decision` key comes from an older binary or a
+non-Baileys transport; consumers keep the old conservative rule for it (any
+401/`loggedOut` reads as `serverside_logout_irreversible`). The same fields are
+in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
+`conflict_inspected:`), whose title and `confidence` say whether removal was
+confirmed.
+
+**If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
 ```bash
@@ -1797,7 +1819,7 @@ The counts always reconcile: `total = open + closed`, `open = unresolved + ambig
 `closed = addressed + declined`. `unresolved` and `ambiguous` count only open gaps; an originally
 ambiguous gap that was later closed leaves `ambiguous` but stays in `ambiguous_total`. Only
 `open > 0` raises `continuity_gap_open`; `turn_recovery_degraded` is derived separately and a closure
-never clears it. A database that has not applied migration 65 reports `closure_ledger: "absent"`
+never clears it. A database that has not applied migration 66 reports `closure_ledger: "absent"`
 with `total`, `closed`, `addressed`, and `declined` set to `null` (its open counts are real; its
 closure history is unknown).
 
@@ -1810,7 +1832,7 @@ rows to force green health; close a gap only through `close-continuity-gap` belo
 
 #### Close a continuity gap (addressed or declined)
 
-`close-continuity-gap` appends one immutable row to `continuity_gap_closures` (migration 65) for one
+`close-continuity-gap` appends one immutable row to `continuity_gap_closures` (migration 66) for one
 recorded gap. It never sends, replays, admits, or edits the recorded plan or run; a closure cannot be
 updated or deleted. One gap has at most one closure, so decide the final disposition before applying.
 Deployment of this command does not authorize closing any existing gap: each closure needs its own
@@ -1946,7 +1968,7 @@ Apply takes `BEGIN IMMEDIATE`, re-checks the schema ceiling, re-reads and re-has
 file, re-verifies every database link and that the gap is still open, then appends the row or nothing.
 The same evidence again returns `decision: "already_closed"` with the same `operationId`. A different
 closure for an already-closed gap, a stale fingerprint, a changed transcript or decision, or a wrong
-conversation fails with no write. The command never runs migrations: a database without migration 65
+conversation fails with no write. The command never runs migrations: a database without migration 66
 reports `schema_not_migrated`.
 
 Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `already_closed`, `blocked`,
@@ -1956,9 +1978,9 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 65 rollback.** Migration 65 adds only the new table. After it is recorded, a binary whose
-ceiling is 64 refuses the database and will not write, so **binary-only rollback is unavailable**.
-Keep the 65-aware release for containment or forward repair. Restoring a pre-migration backup is an
+**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
+ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
+Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
 owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
 an older backup**: messages received after the upgrade would be lost.
 
@@ -1972,9 +1994,9 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at 64, this release migrates it to 65, and the old binary reopens
+The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
 it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
-("Database schema migration 65 exceeds binary ceiling 64; refusing writes") and every file in the
+("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
 work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
@@ -1982,7 +2004,7 @@ work directory, including the WAL and shared-memory sidecars, stayed byte-identi
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
 of pending source inbounds. It never sends or replays a message. The database must already exist
 and its migration ledger must be contiguous from 1 through the current migration, with at least 43
-entries; any later schema, including 65, is accepted. The command neither creates a database nor runs
+entries; any later schema, including 66, is accepted. The command neither creates a database nor runs
 migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
 links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
 those gaps.
@@ -2069,6 +2091,37 @@ database (dry-run previews taken before the loss will no longer match confirmed 
 back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
+
+#### Close every caught-up operator catch-up recovery (batch)
+
+`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
+conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
+rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
+later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
+closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
+adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
+reconciler's.
+
+```bash
+npm --silent run close-recovery-catchups -- \
+  --db "$DB" --actor operator:IDENTITY --evidence-ref evidence:REFERENCE
+```
+
+The dry run (the default) changes no database rows. It still creates the redaction salt file described
+above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
+usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
+If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
+and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
+repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
+budgets.
+
+Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
+`closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same
+keyed fingerprints as the single-group command (`planFingerprint`, `conversationFingerprint`,
+`catchupSeqFingerprint`), plus `nSourceSeqs`, `status` (`ready`, `closed`, `idempotent` or `skipped`), and
+a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `error`). Raw identifiers,
+chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
+`busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
 
 ### 7.7 Useful SQL Queries
 

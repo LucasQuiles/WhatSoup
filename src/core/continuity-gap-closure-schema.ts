@@ -1,4 +1,4 @@
-// Read side of the migration-65 continuity-gap closure ledger. Health and the
+// Read side of the migration-66 continuity-gap closure ledger. Health and the
 // closure command both read through here, so a malformed row fails every
 // reader the same way instead of being counted as zero debt.
 import { createHash } from 'node:crypto';
@@ -6,13 +6,13 @@ import type { DatabaseSync } from 'node:sqlite';
 import { queryAll } from '../lib/db-query.ts';
 
 export const CONTINUITY_GAP_CLOSURE_CONTRACT = 'continuity-gap-closure.v1';
-export const CONTINUITY_GAP_CLOSURE_MIGRATION = 65;
+export const CONTINUITY_GAP_CLOSURE_MIGRATION = 66;
 
 export type ContinuityGapDisposition = 'addressed' | 'declined';
 export type ContinuityGapProofKind = 'live_reissue' | 'sender_declined' | 'owner_declined';
 export type ContinuityGapOriginalClassification = 'absent' | 'observed_not_admitted' | 'ambiguous';
 
-/** One append-only closure row, in the exact column order of migration 65. */
+/** One append-only closure row, in the exact column order of migration 66. */
 export interface ContinuityGapClosureRecord {
   planId: string;
   contractVersion: typeof CONTINUITY_GAP_CLOSURE_CONTRACT;
@@ -149,7 +149,7 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T {
 }
 
 /**
- * Re-validates a stored row with the same rules migration 65 enforces. The
+ * Re-validates a stored row with the same rules migration 66 enforces. The
  * table can be recreated without its CHECKs (schema self-heal recreates tables
  * but not triggers), so the reader never trusts the constraints alone.
  */
@@ -196,7 +196,7 @@ export function closureRecordFromRow(row: ClosureRow): ContinuityGapClosureRecor
   return record;
 }
 
-/** Disposition ↔ proof shape, identical to the migration-65 CHECK. */
+/** Disposition ↔ proof shape, identical to the migration-66 CHECK. */
 export function assertClosureShape(record: ContinuityGapClosureRecord): void {
   const audio = record.originalContentType === 'audio';
   const ambiguousShape = (record.originalClassification === 'ambiguous')
@@ -235,7 +235,7 @@ function migrationRecorded(raw: DatabaseSync): boolean {
 
 /**
  * Returns every closure, validated, or `absent` for a database that never ran
- * migration 65. Throws when the table vanished after the migration was
+ * migration 66. Throws when the table vanished after the migration was
  * recorded, lost an append-only guard, or holds a malformed or duplicate row.
  */
 export function readContinuityGapClosureLedger(raw: DatabaseSync): ContinuityGapClosureLedger {
@@ -247,7 +247,7 @@ export function readContinuityGapClosureLedger(raw: DatabaseSync): ContinuityGap
   const hasTable = objects.some((object) => object.type === 'table');
   if (!hasTable) {
     if (migrationRecorded(raw)) {
-      throw new Error('continuity gap closure ledger is missing after migration 65');
+      throw new Error('continuity gap closure ledger is missing after migration 66');
     }
     return { state: 'absent' };
   }

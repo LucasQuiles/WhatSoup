@@ -487,7 +487,7 @@ describe('close-continuity-gap preview', () => {
     const fx = buildFixture();
     const raw = new DatabaseSync(fx.dbPath);
     raw.exec('DROP TABLE continuity_gap_closures');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 65').run();
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 66').run();
     raw.close();
     const snapshot = makeSnapshot(fx);
     const result = run(fx, { snapshot }, writeManifest(fx, 'old', addressed(fx, 1)));

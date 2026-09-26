@@ -340,7 +340,7 @@ function verifyOriginalReceipt(
   if (readContinuityGapClosureLedger(raw).state === 'absent') {
     throw blocked(
       'schema_not_migrated',
-      'Database has not applied migration 65; run the service binary to migrate it first',
+      'Database has not applied migration 66; run the service binary to migrate it first',
     );
   }
   const entry = readContinuityGapLedger(raw).find((row) => row.planId === manifest.planId);

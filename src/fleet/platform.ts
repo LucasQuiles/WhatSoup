@@ -27,8 +27,8 @@ import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
 const execFileAsync = promisify(execFile);
-const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
-const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
+export const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
+export const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Platform detection
@@ -364,7 +364,12 @@ function rollbackFailure(original: unknown, rollbacks: readonly unknown[]): Erro
   return new Error(`launchd reload failed: ${originalMessage}; rollback also failed: ${rollbackMessage}`);
 }
 
-function isTransientLaunchdBootstrapError(error: unknown): boolean {
+/**
+ * The bootstrap failure launchd returns while a booted-out job is still
+ * exiting. Exported with the retry bounds so release activation
+ * (scripts/lib/release-activation) retries the same error class the same way.
+ */
+export function isTransientLaunchdBootstrapError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const candidate = error as { code?: unknown; message?: unknown; stderr?: unknown };
   if (candidate.code === 5 || candidate.code === '5') return true;

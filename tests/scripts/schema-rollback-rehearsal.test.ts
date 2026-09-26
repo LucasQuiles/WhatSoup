@@ -1,5 +1,5 @@
 // The full rehearsal needs a second, older checkout and is run by hand (see
-// docs/runbook.md, "Schema 65 rollback"). These tests pin its safety rails.
+// docs/runbook.md, "Schema 66 rollback"). These tests pin its safety rails.
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 

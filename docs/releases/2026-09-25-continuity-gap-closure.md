@@ -24,10 +24,10 @@
 
 ## Behavioral changes
 
-- Schema migration 65 adds the append-only `continuity_gap_closures` table.
-  After it is recorded, a schema-64 binary refuses the database as
+- Schema migration 66 adds the append-only `continuity_gap_closures` table.
+  After it is recorded, a schema-65 binary refuses the database as
   `future_schema`. A binary-only rollback is therefore unavailable; keep the
-  65-aware release for containment or forward repair, and never overwrite a
+  66-aware release for containment or forward repair, and never overwrite a
   newer database with an older backup. `scripts/schema-rollback-rehearsal.ts`
   reproduces the refusal with two real checkouts on disposable files.
 - `declined` trusts only the protected placement of the per-instance policy
@@ -45,6 +45,6 @@
   `continuity_gap_open`. `turn_recovery_degraded` is derived separately and is
   never cleared by a closure.
 - `close-recovery-catchup` documentation is corrected. It requires a contiguous
-  migration ledger of at least 43 entries (any later schema, including 65, is
+  migration ledger of at least 43 entries (any later schema, including 66, is
   accepted), not an "exact schema 43" database. It still closes only admitted
   inbound sequences.

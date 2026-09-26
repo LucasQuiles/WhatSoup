@@ -88,7 +88,7 @@ export function signedClosure(
   return { ...unsigned, operationId: continuityGapClosureOperationId(unsigned) };
 }
 
-/** Test-owned SQL: the column list is part of the migration-65 contract. */
+/** Test-owned SQL: the column list is part of the migration-66 contract. */
 export function insertClosureRow(raw: DatabaseSync, record: ContinuityGapClosureRecord): void {
   raw.prepare(`
     INSERT INTO continuity_gap_closures (

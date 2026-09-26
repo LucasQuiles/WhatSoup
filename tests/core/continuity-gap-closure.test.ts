@@ -162,10 +162,10 @@ describe('continuity gap health with closures', () => {
     expectIdentities(health);
   });
 
-  it('a database that never ran migration 65 reports an absent closure ledger, not zero debt', () => {
+  it('a database that never ran migration 66 reports an absent closure ledger, not zero debt', () => {
     recordGaps(raw, [gapObservation(1, 'absent'), gapObservation(2, 'ambiguous')]);
     raw.exec('DROP TABLE continuity_gap_closures');
-    raw.prepare('DELETE FROM schema_migrations WHERE version = 65').run();
+    raw.prepare('DELETE FROM schema_migrations WHERE version = 66').run();
     expect(readContinuityGapHealth(raw)).toEqual({
       readable: true,
       closure_ledger: 'absent',
@@ -180,7 +180,7 @@ describe('continuity gap health with closures', () => {
     });
   });
 
-  it('a missing table after migration 65 was recorded is unreadable', () => {
+  it('a missing table after migration 66 was recorded is unreadable', () => {
     raw.exec('DROP TABLE continuity_gap_closures');
     expect(() => readContinuityGapHealth(raw)).toThrow(/closure ledger is missing/);
   });

@@ -38,7 +38,7 @@ export interface RecordContinuityGapsResult {
  * open = unresolved + ambiguous, closed = addressed + declined.
  * `ambiguous` counts only open, originally ambiguous gaps; `ambiguous_total`
  * counts every originally ambiguous gap, closed or not. A database that never
- * ran migration 65 reports `closure_ledger: 'absent'` with the closure buckets
+ * ran migration 66 reports `closure_ledger: 'absent'` with the closure buckets
  * and total null: its open counts are real, its closure history is unknown.
  */
 export type ContinuityGapHealth = {

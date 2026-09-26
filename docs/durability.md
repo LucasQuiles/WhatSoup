@@ -576,6 +576,18 @@ WHERE t.status = 'quarantined'
 ORDER BY t.id DESC;
 ```
 
+#### 5.2.1 Tool-call caller attribution (#3421)
+
+Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). The record is evidence only: no admission, authorization or reply depends on it. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
+
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
+```
+
+It writes `caller-attribution-<YYYY-MM-DD>.json` and prints its path. Retention deletes terminal rows after 30 days, so the window is capped at 30 days; run it inside that window. For a sensitive outside call, `outcome_code = 'success'` means it was admitted and `failure_code = 'authorization_denied'` means it was refused.
+
 ### 5.3 `recovery_runs` Table — Audit Trail
 
 `recovery_runs` records every invocation of both `preConnectRecovery()` and
@@ -1133,7 +1145,7 @@ manifest, or evidence value is written. Repeated recording is idempotent. `/heal
 present — see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes
 `continuity_gap_open` or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not
 send, replay, admit, or close work.
-Closure is a separate, append-only row in `continuity_gap_closures` (migration 65) keyed to the
+Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
 recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
 changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
 same conversation, its terminal delivery proof, an exact selected-context witness, and (for audio) bound
@@ -1187,6 +1199,13 @@ rewriting either durable disposition.
 | `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
 | `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
 | `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+| `caller_transport` | TEXT | Migration 65 (#3421). `socket` or `in_process` (the provider bridge). NULL for rows written before migration 65 or by a caller outside both. |
+| `caller_connection_id` | TEXT | Per-process random prefix plus the socket connection number. NULL for in-process calls. |
+| `caller_client_name`, `caller_client_version` | TEXT | The client's own `initialize.clientInfo`, printable ASCII only, at most 64 characters, else NULL. A label, never trusted. |
+| `caller_token_result` | TEXT | `match`, `mismatch` or `absent` for a socket caller's per-session token; `not_applicable` in process. |
+| `caller_turn_owned` | INTEGER | 1 when the call came from the executing turn's own helper (in process, or a matching session token), else 0. |
+| `caller_actor_source` | TEXT | `executing_turn` when the call resolved an actor from the executing turn, else `none`. |
+| `tool_sensitive` | INTEGER | 1 when the tool is marked sensitive (admin-only). |
 
 Migration 50 replaces historical input/result/error content with these markers without interpreting legacy prose. This is a logical live-schema scrub, not proof of physical erasure: old bytes may remain in SQLite free pages, WAL files, backups, or snapshots until separately approved compaction and backup-retirement work occurs.
 

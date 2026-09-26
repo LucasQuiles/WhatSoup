@@ -75,7 +75,7 @@ export function inspectContinuityGapClosure(
     throw new ContinuityGapClosureError(
       'blocked',
       'schema_not_migrated',
-      'Database has not applied migration 65; run the service binary to migrate it first',
+      'Database has not applied migration 66; run the service binary to migrate it first',
     );
   }
   const gap = readContinuityGapLedger(raw).find((entry) => entry.planId === record.planId);

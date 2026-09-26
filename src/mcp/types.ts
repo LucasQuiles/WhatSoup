@@ -4,6 +4,7 @@ import { toConversationKey } from '../core/conversation-key.ts';
 import {
   TOOL_FAILURE_CODES,
   TOOL_FAILURE_STAGES,
+  type ToolCallCallerEvidence,
   type ToolFailureCode,
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
@@ -74,7 +75,19 @@ export interface SessionContext {
   allowedRoot?: string;
   /** Abort signal tied to the MCP client connection. Fires when the client disconnects. */
   abortSignal?: AbortSignal;
+  /**
+   * #3421 step 1: who is on the other end of this session. Recorded on each
+   * tool_calls row; never read by any admission or authorization check.
+   * Replaced, never mutated, when the connection learns more about its client.
+   */
+  callerAttribution?: Readonly<CallerAttribution>;
 }
+
+/** The connection-level half of {@link ToolCallCallerEvidence}. */
+export type CallerAttribution = Pick<
+  ToolCallCallerEvidence,
+  'transport' | 'connectionId' | 'clientName' | 'clientVersion' | 'tokenResult'
+>;
 
 /** Mutable authorization and confinement fields resolved from the turn currently executing. */
 export interface ExecutingSessionContext {

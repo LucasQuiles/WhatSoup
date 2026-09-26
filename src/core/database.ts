@@ -57,6 +57,7 @@ import { runMigration62 as runMigration62Impl } from './database-migration-62.ts
 import { runMigration63 as runMigration63Impl } from './database-migration-63.ts';
 import { runMigration64 as runMigration64Impl } from './database-migration-64.ts';
 import { runMigration65 as runMigration65Impl } from './database-migration-65.ts';
+import { runMigration66 as runMigration66Impl } from './database-migration-66.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -849,6 +850,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [63, runMigration63],
   [64, runMigration64],
   [65, runMigration65],
+  [66, runMigration66],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1282,6 +1284,10 @@ function runMigration64(db: DatabaseSync): void {
 
 function runMigration65(db: DatabaseSync): void {
   runMigration65Impl(db);
+}
+
+function runMigration66(db: DatabaseSync): void {
+  runMigration66Impl(db);
 }
 
 function runMigration60(db: DatabaseSync): void {
