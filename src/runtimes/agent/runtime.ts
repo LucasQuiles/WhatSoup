@@ -10150,7 +10150,7 @@ export class AgentRuntime implements Runtime {
       });
       void this.dispatchFallbackReplay(
         {
-          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value, scopeRef }),
           runtimeContext,
           routeOverride,
         },
@@ -10249,6 +10249,7 @@ export class AgentRuntime implements Runtime {
       activation: ProviderFallbackActivation;
       chatJid: string;
       mapKey?: string;
+      scopeRef?: PerChatRuntimeScopeRef;
       oldSession: SessionManager | null;
       runtimeContext?: RuntimeTurnContext;
       routeOverride?: ResolvedReplayRoute;
@@ -10262,6 +10263,7 @@ export class AgentRuntime implements Runtime {
     await this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
+      ...(args.scopeRef === undefined ? {} : { scopeRef: args.scopeRef }),
       replayText,
       actorJid,
       purpose,
@@ -10317,8 +10319,14 @@ export class AgentRuntime implements Runtime {
       'Provider fallback replay failed',
       `provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'} reason=${args.activation.reason}`,
     );
+    // A replay that crossed the provider boundary re-bound the held head to the
+    // replacement session's owner (manager, generation, tool scope). Record the
+    // terminal under that owner; a replay refused before the rebind keeps the
+    // context captured at scheduling.
+    const head = args.mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0];
+    const finalContext = head?.identity.logicalTurnId === context.identity.logicalTurnId ? head : context;
     await this.finalizeRuntimeTurnContext({
-      context,
+      context: finalContext,
       queue,
       attemptOutcome: { kind: 'failed', class: 'processor_throw' },
       session: args.mapKey === undefined ? this.session : this.chatSessions.get(args.mapKey) ?? null,

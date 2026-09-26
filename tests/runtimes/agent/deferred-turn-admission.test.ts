@@ -26,7 +26,7 @@ import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-tur
 
 // ─── Hoisted provider-boundary doubles (scheduled-turn-lifecycle pattern) ───
 
-const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble } = vi.hoisted(() => {
+const { sessionDoubles, queueDoubles, sessionConstructHooks, resetDoubles, makeSessionDouble, makeQueueDouble } = vi.hoisted(() => {
   type SessionCtorOpts = {
     chatJid: string;
     persistenceConversationKey?: string;
@@ -147,13 +147,16 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
 
   const sessionDoubles: Array<ReturnType<typeof makeSessionDouble>> = [];
   const queueDoubles: Array<ReturnType<typeof makeQueueDouble>> = [];
+  /** One-shot setup applied to the next constructed session double, in order. */
+  const sessionConstructHooks: Array<(double: ReturnType<typeof makeSessionDouble>) => void> = [];
 
   function resetDoubles(): void {
     sessionDoubles.length = 0;
     queueDoubles.length = 0;
+    sessionConstructHooks.length = 0;
   }
 
-  return { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble };
+  return { sessionDoubles, queueDoubles, sessionConstructHooks, resetDoubles, makeSessionDouble, makeQueueDouble };
 });
 
 const { mockConfig, mockEmitAlertChecked } = vi.hoisted(() => ({
@@ -245,6 +248,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
   }) {
     const double = makeSessionDouble(opts);
     sessionDoubles.push(double);
+    sessionConstructHooks.shift()?.(double);
     return double;
   }),
   formatAge: vi.fn(() => 'now'),
@@ -1496,6 +1500,104 @@ describe('deferred-turn admission (#3295 S2)', () => {
       echoNextAnswer(liveQueue(lidCanonicalJid), next.seq, lidCanonicalJid);
       next.session.emit({ type: 'result', text: 'c19 retry answer' });
       await vi.waitFor(() => expect(status(next.seq)).toBe('complete'));
+    });
+
+    it('admits the replay under the live scope key when a rekey lands while the replacement spawns', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(lidJid, 'wamid-c19-spawn-rekey', 'c19 spawn rekey question');
+      expect(mapKey).toBe(lidJid);
+      const turnId = held.identity.logicalTurnId;
+      const heldScopeRef = lifecycle().perChatRuntimeTurnScopeRefs.get(turnId)!;
+      const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+      const queue = queueFor(lidJid);
+      // Hold the replacement session's spawn: the window after the replay has
+      // recreated the session and before it crosses the provider boundary.
+      let releaseSpawn: (() => void) | undefined;
+      sessionConstructHooks.push((replacement) => {
+        replacement.spawnSession.mockImplementationOnce(() => new Promise<void>((resolve) => {
+          releaseSpawn = () => { resolve(); };
+        }));
+      });
+      primary.emit({ type: 'result', text: usageLimitText });
+      await vi.waitFor(() => expect(releaseSpawn).toBeTypeOf('function'));
+
+      runtime.handleJidAliasChanged(toConversationKey(lidJid), lidCanonicalJid, false);
+      expect(heldScopeRef.value).toBe(lidCanonicalJid);
+      releaseSpawn!();
+
+      const replacement = sessionDoubles.find((candidate) => candidate !== primary)!;
+      await vi.waitFor(() => expect(
+        replacement.turnsSent.length > 0 || queue.enqueueText.mock.calls.some((call) => call[0] === failedReplayNotice),
+      ).toBe(true));
+      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+      // The held turn was re-bound under the live key, not re-admitted fresh
+      // under the retired one.
+      const state = lifecycle();
+      expect(state.perChatRuntimeTurnContexts.has(lidJid)).toBe(false);
+      expect(state.perChatRuntimeTurnCompletions.has(lidJid)).toBe(false);
+      expect(state.perChatRuntimeTurnContexts.get(lidCanonicalJid)?.map((context) => context.identity.logicalTurnId))
+        .toEqual([turnId]);
+      expect(state.perChatRuntimeTurnCompletions.get(lidCanonicalJid)).toBe(heldCompletion);
+      expect(state.perChatRuntimeTurnScopeRefs.get(turnId)).toBe(heldScopeRef);
+      expect(heldScopeRef.value).toBe(lidCanonicalJid);
+
+      echoNextAnswer(queue, seq, lidJid);
+      replacement.emit({ type: 'result', text: 'c19 spawn rekey answer' });
+      await expect(heldCompletion.promise).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'));
+    });
+
+    it('replaces the failed session under the live scope key when a rekey lands during its shutdown', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { session: primary, mapKey, held } = await admitTurn(lidJid, 'wamid-c19-shutdown-rekey', 'c19 shutdown rekey question');
+      expect(mapKey).toBe(lidJid);
+      const queue = queueFor(lidJid);
+      let releaseShutdown: (() => void) | undefined;
+      primary.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      }));
+      primary.emit({ type: 'result', text: usageLimitText });
+      await vi.waitFor(() => expect(releaseShutdown).toBeTypeOf('function'));
+
+      runtime.handleJidAliasChanged(toConversationKey(lidJid), lidCanonicalJid, false);
+      releaseShutdown!();
+
+      await vi.waitFor(() => expect(
+        sessionDoubles.some((candidate) => candidate !== primary && candidate.turnsSent.length > 0)
+        || queue.enqueueText.mock.calls.some((call) => call[0] === failedReplayNotice),
+      ).toBe(true));
+      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      const replacement = sessionDoubles.find((candidate) => candidate !== primary)!;
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+      expect((runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions.get(lidCanonicalJid))
+        .toBe(replacement);
+      expect(lifecycle().perChatRuntimeTurnContexts.has(lidJid)).toBe(false);
+      expect(lifecycle().perChatRuntimeTurnContexts.get(lidCanonicalJid)?.map((context) => context.identity.logicalTurnId))
+        .toEqual([held.identity.logicalTurnId]);
+    });
+
+    it('records the re-bound dispatch owner when a replay fails after the rebind', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, 'wamid-c19-owner', 'c19 owner question');
+      const queue = queueFor(dmJid);
+      const replacement = await failOverToFallback(primary, queue);
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+      const rebound = lifecycle().perChatRuntimeTurnContexts.get(mapKey)![0]!;
+      expect(rebound.identity.logicalTurnId).toBe(held.identity.logicalTurnId);
+      expect(rebound.identity.managerId).not.toBe(held.identity.managerId);
+
+      replacement.failProviderTurn(new Error('c19 fallback provider exited mid-turn'));
+
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+      expect(db.raw.prepare(
+        'SELECT logical_turn_id, manager_id, generation, attempt_failure_class FROM turn_terminal_records WHERE inbound_seq = ?',
+      ).all(seq)).toEqual([{
+        logical_turn_id: rebound.identity.logicalTurnId,
+        manager_id: rebound.identity.managerId,
+        generation: rebound.identity.generation,
+        attempt_failure_class: 'processor_throw',
+      }]);
     });
   });
 });

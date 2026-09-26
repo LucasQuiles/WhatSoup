@@ -27,6 +27,12 @@ export class FallbackReplayOwnershipChangedError extends FallbackReplayInvalidat
 export interface ProviderFallbackReplayArgs {
   chatJid: string;
   mapKey?: string;
+  /**
+   * The held turn's registered per-chat scope ref. A LID->phone rekey updates
+   * it in place, so the replay reads the live key from it at each step rather
+   * than the `mapKey` captured when the replay was scheduled.
+   */
+  scopeRef?: { value: string };
   replayText: string;
   actorJid?: string;
   purpose?: SessionContext['purpose'];
@@ -96,20 +102,22 @@ export async function replayTurnOnFallback(
   args: ProviderFallbackReplayArgs,
 ): Promise<void> {
   if (args.oldSession) await args.oldSession.shutdown(false);
+  const liveMapKey = (): string | undefined => args.scopeRef?.value ?? args.mapKey;
   let sourceStillOwned = true;
-  if (args.mapKey !== undefined && args.oldSession) {
+  const sourceMapKey = liveMapKey();
+  if (sourceMapKey !== undefined && args.oldSession) {
     // Clear the dead source before route revalidation. If the route drifted,
     // leaving this shutdown manager mapped would strand later turns on an
     // inactive session; the expected-owner guard preserves any newer session.
-    sourceStillOwned = host.discardPerChatSessionForFallback(args.mapKey, args.oldSession);
+    sourceStillOwned = host.discardPerChatSessionForFallback(sourceMapKey, args.oldSession);
     if (sourceStillOwned) {
-      host.perChatExecActorQueue.delete(args.mapKey);
+      host.perChatExecActorQueue.delete(sourceMapKey);
     }
-  } else if (args.mapKey !== undefined) {
+  } else if (sourceMapKey !== undefined) {
     // There is no owned source to guard in this legacy/no-session path, but
     // the replacement still must not inherit actors queued for the failed
     // turn. This preserves the established replay cleanup invariant.
-    host.perChatExecActorQueue.delete(args.mapKey);
+    host.perChatExecActorQueue.delete(sourceMapKey);
   } else if (args.oldSession) {
     sourceStillOwned = host.discardSingletonSessionForFallback(args.oldSession);
   }
@@ -129,20 +137,24 @@ export async function replayTurnOnFallback(
   ) {
     throw new FallbackReplayRouteChangedError();
   }
-  if (args.mapKey !== undefined) {
+  const replayMapKey = liveMapKey();
+  if (replayMapKey !== undefined) {
     host.recreatePerChatSessionForFallback(
-      args.mapKey,
+      replayMapKey,
       args.chatJid,
       args.actorJid,
       args.routeOverride,
     );
+    // Hand the live scope ref to admission: a rekey while the replacement
+    // spawns must re-bind the held turn under the new key, not re-admit it
+    // fresh under the retired one.
     await host.sendTurnPerChat(
       args.chatJid,
       args.replayText,
-      args.mapKey,
+      replayMapKey,
       args.actorJid,
       args.runtimeContext,
-      undefined,
+      args.scopeRef,
       undefined,
       undefined,
       'recovery_replay',
