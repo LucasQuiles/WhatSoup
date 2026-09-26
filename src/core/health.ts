@@ -874,8 +874,9 @@ const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 const TRANSIENT_SELF_CLEARING_TURN_ERROR_CLASSES = new Set(['empty-output', 'transient-network', 'server-error']);
 const TRANSIENT_TURN_ERROR_DEGRADE_DEBOUNCE_MS = MS_PER_MINUTE; // 1 minute
 const TRANSIENT_TURN_ERROR_STALE_MS = 15 * MS_PER_MINUTE; // 15 minutes
-// An ambiguous outbound delivery (maybe_sent) should resolve within the echo
-// timeout + a recovery cycle. One left unresolved past this window is a
+// An ambiguous outbound delivery (maybe_sent without delivery corroboration)
+// should resolve within the echo timeout + a recovery cycle. One left
+// unresolved past this window is a
 // long-lived continuity risk that must degrade /health rather than read green
 // (#1865). Generous enough not to flap on transient reconciliation.
 const DURABILITY_STALE_MAYBE_SENT_MS = 30 * MS_PER_MINUTE; // 30 minutes
@@ -2219,9 +2220,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
       // window is a long-lived continuity risk that /health must surface rather
-      // than read green (#1865). The durability query returns canonical SQLite
-      // UTC datetimes for the active ambiguity episode or a fail-closed stale
-      // sentinel, so normalize that bounded value before parsing.
+      // than read green (#1865). Only rows the live reconcile would still act on
+      // count: a maybe_sent row with delivery corroboration is left unchanged
+      // by design and never contributes. The durability query returns canonical
+      // SQLite UTC datetimes for the active ambiguity episode or a fail-closed
+      // stale sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
       const oldestMaybeSentMs =
         durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''

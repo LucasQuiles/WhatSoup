@@ -307,7 +307,11 @@ cannot monopolize the maintenance tick: confirmed echoes settle,
 `safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
-starve actionable debt. An empty scan creates no recovery plan or run. The
+starve actionable debt. The `/health` `durability_debt` cause uses the same
+exclusion: only a `maybe_sent` row without delivery corroboration can set its
+30-minute debt clock, so a preserved row never degrades health on its own.
+The raw `maybeSentOutbound` count still includes every `maybe_sent` row.
+An empty scan creates no recovery plan or run. The
 `pending` stage is then re-sent by the drainer (§4.4), which runs both on this
 same interval and immediately after each recovery pass.
 

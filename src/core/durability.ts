@@ -458,6 +458,23 @@ function maybeSentDwellAtSql(prefix = ''): string {
   END`;
 }
 
+/**
+ * The one predicate for a maybe_sent row that is still genuinely ambiguous:
+ * no delivery corroboration is linked to it. The live reconcile selects only
+ * these rows and leaves corroborated ones unchanged on purpose, so /health
+ * durability debt must use the same predicate or it counts rows nothing will
+ * ever clear. The alias is required: an unqualified `id` inside the subquery
+ * would bind to the terminal record, not the outbound row.
+ */
+function maybeSentUncorroboratedSql(alias: `${string}.`): string {
+  return `NOT EXISTS (
+             SELECT 1
+             FROM turn_terminal_records t
+             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
+             WHERE t.delivery_op_id = ${alias}id
+           )`;
+}
+
 export interface OutboundDeliveryIdentity {
   conversationKey: string;
   deliveryJid: string;
@@ -1078,12 +1095,7 @@ export class DurabilityEngine {
          FROM outbound_ops o
          WHERE o.status = 'maybe_sent'
            AND ${maybeSentDwellAtSql('o.')} < datetime('now', '-30 seconds')
-           AND NOT EXISTS (
-             SELECT 1
-             FROM turn_terminal_records t
-             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
-             WHERE t.delivery_op_id = o.id
-           )
+           AND ${maybeSentUncorroboratedSql('o.')}
          ORDER BY o.id ASC
          LIMIT 200`,
       ),
@@ -1257,9 +1269,14 @@ export class DurabilityEngine {
       ),
       // A current ambiguity episode owns its own dwell clock. Legacy rows use
       // the conservative receipt/queue fallback, while malformed chronology is
-      // deliberately stale so it cannot make health read fresh.
+      // deliberately stale so it cannot make health read fresh. Corroborated
+      // rows are excluded by the live reconcile's own predicate: reconcile
+      // leaves them unchanged, so counting them would be permanent debt.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
+        `SELECT MIN(${maybeSentDwellAtSql('o.')}) as at
+         FROM outbound_ops o
+         WHERE o.status = 'maybe_sent'
+           AND ${maybeSentUncorroboratedSql('o.')}`,
       ),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
