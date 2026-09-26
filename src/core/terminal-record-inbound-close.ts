@@ -21,6 +21,7 @@
  * handle without the migrating Database wrapper.
  */
 import type { DatabaseSync } from 'node:sqlite';
+import { allFromStatement } from '../lib/db-query.ts';
 import {
   deriveTerminalInboundMutation,
   DELIVERY_STATUS_PROOF,
@@ -208,7 +209,7 @@ export class TerminalRecordInboundCloser {
     if (!inbound) return { verdict: 'refused', seq, reason: 'inbound_not_found' };
     const status = inbound.processing_status;
 
-    const records = this.selectRecords.all(seq) as unknown as TurnTerminalRecordRow[];
+    const records = allFromStatement<TurnTerminalRecordRow>(this.selectRecords, seq);
     if (records.length === 0) return { verdict: 'refused', seq, reason: 'no_terminal_record', status };
     if (records.length > 1) {
       return { verdict: 'refused', seq, reason: 'multiple_terminal_records', status };
