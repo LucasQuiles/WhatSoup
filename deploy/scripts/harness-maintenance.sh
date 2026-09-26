@@ -26,10 +26,28 @@ usage() {
   cat <<'USAGE'
 Usage: harness-maintenance.sh [--check] [--json]
 
-  --check  Dry-run: validate, inventory, and report without mutating versions.
+  --check  Dry-run: validate, inventory, and report. Installs nothing, writes no
+           configuration, sends no alert, and executes no harness binary.
   --json   Print final state JSON to stdout.
 USAGE
 }
+
+# --check side-effect boundary (whole script; tested by
+# tests/deploy/harness-maintenance-check-boundary.test.ts).
+#
+# Permitted inspection artifacts: the state directory with its state.json and
+# run.log, and this run's temporary directory (removed on exit; npm's cache is
+# pointed into it). Permitted commands: the pinned node running this repo's own
+# scripts, plutil and read-only systemctl verbs (list-units, show-environment,
+# show, is-active), npm read-only verbs (--version, config get, view, ls),
+# apt list, and scripts/check-unit-drift.sh (file comparison only).
+#
+# Not permitted: any install or dry-run install, the npmrc merge or backup, an
+# alert, and executing any harness or wrapper binary found on a PATH (the agent
+# CLI, including its plugin and MCP listings, which can refresh MCP
+# authentication; codex; opencode; local MCP binaries; runtime --version
+# probes). Versions of npm-installed harnesses are read from package metadata;
+# anything else is reported by path only.
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -62,6 +80,11 @@ EVENTS_FILE="$TMP_DIR/events.ndjson"
 STATE_TMP="$TMP_DIR/state.json"
 STATE_FILE="$STATE_DIR/state.json"
 touch "$EVENTS_FILE"
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  # Even read-only npm verbs fill npm's cache; a check run keeps that write in
+  # its own temporary directory.
+  export npm_config_cache="$TMP_DIR/npm-cache"
+fi
 
 NVMRC_NODE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
 # Reuse the deploy wrapper's Node compatibility gate so the maintenance harness
@@ -538,10 +561,39 @@ npm_bin() {
   fi
 }
 
+# npm_package_version <bin> <package>: print the version from the package.json of <package> that
+# contains the resolved <bin>, without executing anything. Returns 1 when <bin> does not resolve
+# into that package (a native or hand-installed binary).
+npm_package_version() {
+  "$REPO_NODE_BIN" - "$1" "$2" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const [bin, name] = process.argv.slice(2);
+let dir;
+try { dir = path.dirname(fs.realpathSync(bin)); } catch { process.exit(1); }
+for (;;) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    if (pkg && pkg.name === name && typeof pkg.version === 'string' && /^[0-9A-Za-z.+-]{1,64}$/.test(pkg.version)) {
+      process.stdout.write(pkg.version);
+      process.exit(0);
+    }
+  } catch {}
+  const parent = path.dirname(dir);
+  if (parent === dir) process.exit(1);
+  dir = parent;
+}
+NODE
+}
+
 codex_current() {
   local bin
   bin="$(codex_bin)"
   if [ -z "$bin" ]; then
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    npm_package_version "$bin" @openai/codex || true
     return 0
   fi
   CODEX_NO_DEFAULTS=1 "$bin" --version 2>/dev/null | parse_version
@@ -559,6 +611,10 @@ opencode_current() {
   local bin
   bin="$(opencode_bin)"
   if [ -z "$bin" ]; then
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    npm_package_version "$bin" opencode-ai || true
     return 0
   fi
   "$bin" --version 2>/dev/null | parse_version
@@ -631,7 +687,7 @@ check_codex_npm_cooldown() {
     return 0
   fi
 
-  local expected_days min_version stderr_file npm_version smoke_dir smoke_rc
+  local expected_days min_version stderr_file npm_version smoke_dir smoke_rc=0 scope=""
   expected_days="$(manifest_npmrc_min_release_age_days)"
   min_version="$(manifest_codex_npm_min_version)"
   stderr_file="$(mktemp "$TMP_DIR/codex-npm-cooldown.stderr.XXXXXX")"
@@ -642,13 +698,18 @@ check_codex_npm_cooldown() {
   local version_rc=$?
   PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" config get min-release-age >/dev/null 2>>"$stderr_file"
   local config_rc=$?
-  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install is-number@7.0.0 \
-    --dry-run \
-    --ignore-scripts \
-    --package-lock=false \
-    --no-save \
-    --prefix "$smoke_dir" >/dev/null 2>>"$stderr_file"
-  smoke_rc=$?
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    # The verdict below then covers npm's version and configuration only.
+    scope=" (configuration only: the dry-run install smoke is not run in check mode)"
+  else
+    PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install is-number@7.0.0 \
+      --dry-run \
+      --ignore-scripts \
+      --package-lock=false \
+      --no-save \
+      --prefix "$smoke_dir" >/dev/null 2>>"$stderr_file"
+    smoke_rc=$?
+  fi
   set -e
 
   if [ "$version_rc" -ne 0 ] || [ -z "$npm_version" ]; then
@@ -679,12 +740,16 @@ check_codex_npm_cooldown() {
   local rc=$?
   set -e
 
+  if [ "$rc" -eq 0 ] && [ -n "$scope" ]; then
+    record_event "codex-npm-cooldown" "checked" "npm $npm_version is configured with min-release-age=${expected_days}d$scope"
+    return 0
+  fi
   if [ "$rc" -eq 0 ]; then
     record_event "codex-npm-cooldown" "ok" "npm $npm_version accepts min-release-age=${expected_days}d"
     return 0
   fi
   if [ "$rc" -eq 2 ]; then
-    record_event "codex-npm-cooldown" "degraded" "npm $npm_version: $out"
+    record_event "codex-npm-cooldown" "degraded" "npm $npm_version: $out$scope"
     send_alert "codex-cooldown-defense" "warning" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
     return 0
   fi
@@ -1080,6 +1145,10 @@ claude_install_transaction() {
 update_codex() {
   local before latest npm after
   before="$(codex_current)"
+  if [ -z "$before" ] && [ "$CHECK_ONLY" -eq 1 ] && [ -n "$(codex_bin)" ]; then
+    record_event "codex" "unknown" "codex is installed but not as an npm package, so check mode cannot read its version without executing it"
+    return 0
+  fi
   latest="$(npm_latest_version @openai/codex || true)"
   npm="$(npm_bin)"
   if [ -z "$before" ]; then
@@ -1118,6 +1187,10 @@ update_codex() {
 update_opencode() {
   local before after target
   before="$(opencode_current)"
+  if [ -z "$before" ] && [ "$CHECK_ONLY" -eq 1 ] && [ -n "$(opencode_bin)" ]; then
+    record_event "opencode" "unknown" "opencode is installed but not as an npm package, so check mode cannot read its version without executing it"
+    return 0
+  fi
   if [ -z "$before" ]; then
     target="$(npm_latest_eligible_version opencode-ai || true)"
     if [ -z "$target" ]; then
@@ -1190,6 +1263,10 @@ probe_local_bin() {
     record_event "local-bin:$bin" "missing" "$bin not found on PATH"
     return 0
   fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "local-bin:$bin" "present" "$path present; not executed in check mode"
+    return 0
+  fi
   case "$bin" in
     google-workspace-mcp|pinecone-mcp|whatsapp-mcp)
       record_event "local-bin:$bin" "present" "$path present; stdio MCP version probe skipped"
@@ -1216,8 +1293,30 @@ probe_local_bin() {
   fi
 }
 
+# probe_runtime <name> <command> [args...]: a runtime version probe; check mode reports the
+# resolved path only, because the first match on this job's PATH can be a user-installed wrapper.
+probe_runtime() {
+  local name="$1" path
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    path="$(command -v "$2" || true)"
+    if [ -n "$path" ]; then
+      record_event "$name" "present" "$path present; not executed in check mode"
+    else
+      record_event "$name" "missing" "$2 not found on PATH"
+    fi
+    return 0
+  fi
+  shift
+  probe_command "$name" "$@"
+}
+
 probe_tier2() {
-  if command -v claude >/dev/null 2>&1; then
+  local systemctl_bin apt_bin
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    # Listing plugins or MCP servers starts the agent CLI, which can refresh MCP authentication.
+    record_event "claude-plugins" "skipped" "the agent CLI is not executed in check mode"
+    record_event "mcp-servers" "skipped" "the agent CLI is not executed in check mode"
+  elif command -v claude >/dev/null 2>&1; then
     probe_command "claude-plugins" claude plugin list
     probe_command "mcp-servers" claude mcp list
   else
@@ -1238,14 +1337,15 @@ probe_tier2() {
     fi
   done
 
-  probe_command "runtime:node" node --version
-  probe_command "runtime:npm" npm --version
-  probe_command "runtime:python3" python3 --version
+  probe_runtime "runtime:node" node --version
+  probe_runtime "runtime:npm" npm --version
+  probe_runtime "runtime:python3" python3 --version
 
-  if command -v apt >/dev/null 2>&1; then
+  # Package and service manager tools come from the job's inherited PATH (see job_tool).
+  if apt_bin="$(job_tool apt)"; then
     set +e
     local apt_out
-    apt_out="$(apt list --upgradable 2>/dev/null | grep -E '^(gh|jq|ripgrep|sqlite3|git|ffmpeg|google-chrome-stable)/' || true)"
+    apt_out="$("$apt_bin" list --upgradable 2>/dev/null | grep -E '^(gh|jq|ripgrep|sqlite3|git|ffmpeg|google-chrome-stable)/' || true)"
     set -e
     if [ -n "$apt_out" ]; then
       record_event "apt" "drift" "$apt_out"
@@ -1256,11 +1356,11 @@ probe_tier2() {
     record_event "apt" "skipped" "apt unavailable"
   fi
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if systemctl_bin="$(job_tool systemctl)"; then
     for unit in whatsoup-fleet.service whatsoup-reply-guarantee.timer harness-maintenance.timer; do
       set +e
       local unit_state
-      unit_state="$(systemctl --user is-active "$unit" 2>&1)"
+      unit_state="$("$systemctl_bin" --user is-active "$unit" 2>&1)"
       local rc=$?
       set -e
       if [ "$rc" -eq 0 ]; then

@@ -1,0 +1,191 @@
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import {
+  OLD,
+  T,
+  TARGET,
+  allFixtureCalls,
+  buildNativeFixture,
+  cleanupHarnesses,
+  events,
+  makeHarness,
+  portableInstance,
+  run,
+  writeExec,
+  type Harness,
+} from './harness-maintenance-fixture-helper.ts';
+
+// The --check side-effect boundary for the whole maintenance script, not only the agent CLI step.
+//
+// Every command the job could mutate through is replaced by a stub that records its invocation:
+// the package manager, the service manager, the alert sender, the agent CLI (the compiled native
+// fixture), the npm-installed harnesses, local MCP binaries and runtime binaries. Two independent
+// oracles decide the result: the recorded invocations, and a snapshot of the temporary HOME taken
+// before and after the run. Only the permitted inspection artifacts may differ.
+
+beforeAll(buildNativeFixture);
+afterAll(cleanupHarnesses);
+
+// Read-only verbs a check run may use; anything else recorded by a stub is a boundary violation.
+const NPM_READ_ONLY = [/^--version$/, /^config get min-release-age$/, /^view \S+ (version|time --json)$/, /^ls -g --depth=0$/];
+const SYSTEMCTL_READ_ONLY = [/^--user list-units /, /^--user show-environment$/, /^--user show /, /^--user is-active /];
+const APT_READ_ONLY = [/^list --upgradable$/];
+
+/** A stub that records "<name> <args>"; exec.log collects commands a check run must never execute. */
+function recorder(h: Harness, name: string, log = 'exec.log'): string {
+  return ['#!/bin/sh', `printf '%s %s\\n' ${name} "$*" >> "${path.join(h.home, log)}"`, 'echo 0.0.1', 'exit 0', ''].join('\n');
+}
+
+/** An npm-layout package: <bin link> -> <root>/lib/node_modules/<pkg>/bin/<file>, with its package.json. */
+function npmPackage(h: Harness, root: string, pkg: string, version: string, binLink: string, name: string): void {
+  const pkgDir = path.join(root, 'lib/node_modules', pkg);
+  mkdirSync(path.join(pkgDir, 'bin'), { recursive: true });
+  writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: pkg, version }));
+  const entry = path.join(pkgDir, 'bin', name);
+  writeExec(entry, recorder(h, name));
+  mkdirSync(path.dirname(binLink), { recursive: true });
+  symlinkSync(entry, binLink);
+}
+
+/** A HOME with a stub for every executable the job can reach, and an agent CLI update pending. */
+function boundaryHarness(): Harness {
+  const h = makeHarness();
+  portableInstance(h, 'alpha');
+  // npm records its cache setting too, so a check run can be held to a throwaway cache.
+  writeExec(path.join(h.fakeBin, 'npm'), readFileSync(path.join(h.fakeBin, 'npm'), 'utf8')
+    .replace('printf \'%s\\n\' "$*" >> "$HM_NPM_LOG"', 'printf \'%s\\n\' "$*" >> "$HM_NPM_LOG"; printf \'%s\\n\' "${npm_config_cache:-unset}" >> "$HM_NPM_LOG.cache"'));
+  npmPackage(h, path.join(h.home, 'codex-node'), '@openai/codex', '0.1.0', path.join(h.fakeBin, 'codex'), 'codex');
+  npmPackage(h, path.join(h.home, 'npm-global'), 'opencode-ai', '1.0.0', path.join(h.home, 'npm-global/bin/opencode'), 'opencode');
+  for (const name of ['pinecone-mcp', 'playwright-mcp', 'python3']) writeExec(path.join(h.fakeBin, name), recorder(h, name));
+  writeExec(path.join(h.fakeBin, 'apt'), recorder(h, 'apt', 'apt.log'));
+  // A runtime binary on the job's rewritten PATH, ahead of the pinned node's directory.
+  writeExec(path.join(h.home, '.local/bin/node'), recorder(h, 'node'));
+  return h;
+}
+
+interface Entry { type: string; mode: number; size: number; digest: string; link: string }
+
+function snapshot(root: string): Map<string, Entry> {
+  const out = new Map<string, Entry>();
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const file = path.join(dir, name);
+      const st = lstatSync(file);
+      const type = st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other';
+      out.set(path.relative(root, file), {
+        type,
+        mode: st.mode,
+        size: type === 'file' ? st.size : 0,
+        digest: type === 'file' ? createHash('sha256').update(readFileSync(file)).digest('hex') : '',
+        link: type === 'link' ? readlinkSync(file) : '',
+      });
+      if (type === 'dir') walk(file);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+// The permitted inspection artifacts of a check run: the job's own state directory with its final
+// state and run log. The recorders' logs belong to the test, not to the job.
+const PERMITTED = new Set([
+  '.cache',
+  '.cache/whatsoup',
+  '.cache/whatsoup/harness-maintenance',
+  '.cache/whatsoup/harness-maintenance/state.json',
+  '.cache/whatsoup/harness-maintenance/run.log',
+]);
+const TEST_LOGS = new Set(['exec.log', 'apt.log', 'fixture.log', 'npm.log', 'npm.log.cache', 'alert.log', 'systemd-fixture/argv.log']);
+
+function changedPaths(before: Map<string, Entry>, after: Map<string, Entry>): string[] {
+  const changed: string[] = [];
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    if (PERMITTED.has(key) || TEST_LOGS.has(key)) continue;
+    if (JSON.stringify(before.get(key)) !== JSON.stringify(after.get(key))) changed.push(key);
+  }
+  return changed.sort();
+}
+
+function lines(file: string): string[] {
+  return existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+}
+
+function outside(recorded: string[], allowed: RegExp[]): string[] {
+  return recorded.filter((line) => !allowed.some((re) => re.test(line)));
+}
+
+describe('harness-maintenance.sh --check side-effect boundary', () => {
+  it('runs no mutator, no agent CLI and no wrapper, and writes only its own state', () => {
+    const h = boundaryHarness();
+    const before = snapshot(h.home);
+    const r = run(h, ['--check']);
+
+    expect(r.state?.mode, r.stderr).toBe('check');
+    // The agent CLI update is still planned, only not applied.
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'drift', before: OLD, target: TARGET });
+
+    // Oracle 1: recorded invocations.
+    expect(allFixtureCalls(h)).toEqual([]);
+    expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+    expect(lines(h.alertLog)).toEqual([]);
+    expect(outside(lines(h.npmLog), NPM_READ_ONLY)).toEqual([]);
+    expect(outside(lines(path.join(h.systemdDir, 'argv.log')), SYSTEMCTL_READ_ONLY)).toEqual([]);
+    const apt = lines(path.join(h.home, 'apt.log')).map((line) => line.replace(/^apt /, ''));
+    expect(apt).toEqual(['list --upgradable']);
+    expect(outside(apt, APT_READ_ONLY)).toEqual([]);
+    // npm's own cache is a write too: a check run points every npm call at one cache inside the
+    // run's temporary directory, which is gone once the run exits.
+    const caches = [...new Set(lines(`${h.npmLog}.cache`))];
+    expect(caches).toHaveLength(1);
+    expect(path.basename(caches[0]!)).toBe('npm-cache');
+    expect(existsSync(path.dirname(caches[0]!))).toBe(false);
+
+    // Oracle 2: the filesystem. Nothing outside the permitted artifacts changed, and the run's
+    // temporary directory is gone.
+    expect(changedPaths(before, snapshot(h.home))).toEqual([]);
+    expect(readdirSync(path.join(h.home, 'tmp'))).toEqual([]);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+  }, T);
+
+  it('reads the npm-installed harness versions from package metadata instead of running them', () => {
+    const h = boundaryHarness();
+    const r = run(h, ['--check']);
+    expect(events(r, 'codex')[0]).toMatchObject({ before: '0.1.0' });
+    expect(events(r, 'opencode')[0]).toMatchObject({ status: 'checked', before: '1.0.0' });
+    expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+  }, T);
+
+  it('reports an installed harness whose version is not statically readable as unknown, not missing', () => {
+    const h = boundaryHarness();
+    // A plain executable with no package metadata behind it.
+    const bin = path.join(h.home, 'npm-global/bin/opencode');
+    rmSync(bin);
+    writeExec(bin, recorder(h, 'opencode'));
+    const r = run(h, ['--check']);
+    expect(events(r, 'opencode')[0]).toMatchObject({ status: 'unknown' });
+    expect(events(r, 'opencode')[0]!.message).toContain('check mode');
+    expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+  }, T);
+
+  it('negative control: a normal run does reach the stubs, so the recorders can see a violation', () => {
+    const h = boundaryHarness();
+    const r = run(h);
+    expect(r.state?.mode).toBe('run');
+    expect(lines(h.npmLog).some((line) => line.startsWith('install '))).toBe(true);
+    expect(allFixtureCalls(h).some((line) => / install /.test(line))).toBe(true);
+    expect(lines(path.join(h.home, 'exec.log')).length).toBeGreaterThan(0);
+  }, T);
+});
