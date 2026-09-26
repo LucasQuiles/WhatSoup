@@ -40,7 +40,8 @@ USAGE
 # pointed into it). Permitted commands: the pinned node running this repo's own
 # scripts, plutil and read-only systemctl verbs (list-units, show-environment,
 # show, is-active), npm read-only verbs (--version, config get, view, ls),
-# apt list, and scripts/check-unit-drift.sh (file comparison only).
+# apt list, ps (uid, elapsed time and executable name only), and
+# scripts/check-unit-drift.sh (file comparison only).
 #
 # Not permitted: any install or dry-run install, the npmrc merge or backup, an
 # alert, and executing any harness or wrapper binary found on a PATH (the agent
@@ -128,6 +129,11 @@ export PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
 # service instance on this host resolves exactly this path (see
 # claude_service_inventory); any other layout or pin holds the update.
 CLAUDE_NATIVE_LAUNCHER="$HOME/.local/bin/claude"
+# Files shared between steps (each step runs in a subshell). The instance environment file holds
+# one line per inventoried instance and is rewritten by every inventory pass; it is absent when
+# the service manager could not be read. The start file holds the launcher's facts before any step.
+CLAUDE_INSTANCE_ENV_FILE="$TMP_DIR/claude-instance-env"
+CLAUDE_LAUNCHER_START_FILE="$TMP_DIR/claude-launcher.start"
 case "$(uname -s)" in
   Darwin) SERVICE_MANAGER_DEFAULT=launchd ;;
   *) SERVICE_MANAGER_DEFAULT=systemd ;;
@@ -341,6 +347,18 @@ claude_consumer_record() {
   esac
 }
 
+# claude_instance_env_record <name> <manager> <surface> <config dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
+# Observation only (see observe_claude_update_policy). "?" in any value field means the service
+# environment could not be read; otherwise the two flags are stored as set/unset, never as values.
+claude_instance_env_record() {
+  local config="$4" updates="${5:+set}" autoupdater="${6:+set}"
+  case "$config" in *$'\n'*|*$'\037'*) config="?" ;; esac
+  [ "$5" = "?" ] && updates="?"
+  [ "$6" = "?" ] && autoupdater="?"
+  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "${updates:-unset}" "${autoupdater:-unset}" \
+    >> "$CLAUDE_INSTANCE_ENV_FILE"
+}
+
 # claude_resolve_consumer <name> <manager> <inherited PATH> <prepend> <node>
 claude_resolve_consumer() {
   local name="$1" manager="$2" inherited="$3" prepend="$4" node="$5"
@@ -403,6 +421,10 @@ plist_string() {
   "$PLUTIL_BIN" -extract "$2" raw -o - "$1" 2>/dev/null
 }
 
+# What a plist read with plutil shows: the environment of the next launch. The loaded job's
+# environment would need `launchctl print`, which prints every value, so it is not read.
+LAUNCHD_ENV_SURFACE="next launch; loaded job environment not read"
+
 claude_inventory_launchd() {
   local dir="$HOME/Library/LaunchAgents" file name label program arg1 path_value prepend node
   PLUTIL_BIN="$(job_tool plutil)" || {
@@ -415,6 +437,7 @@ claude_inventory_launchd() {
     name="${name%.plist}"
     if ! "$PLUTIL_BIN" -lint "$file" >/dev/null 2>&1; then
       claude_consumer_record "$name" launchd unknown "" "" "" "$file is not a readable property list"
+      claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" "?" "?" "?"
       continue
     fi
     label="$(plist_string "$file" Label || true)"
@@ -427,6 +450,10 @@ claude_inventory_launchd() {
     path_value="$(plist_string "$file" EnvironmentVariables.PATH || true)"
     prepend="$(plist_string "$file" EnvironmentVariables.WHATSOUP_PATH_PREPEND || true)"
     node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
+    claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" \
+      "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
+      "$(plist_string "$file" EnvironmentVariables.DISABLE_UPDATES || true)" \
+      "$(plist_string "$file" EnvironmentVariables.DISABLE_AUTOUPDATER || true)"
     claude_resolve_consumer "$name" launchd "$path_value" "$prepend" "$node"
   done
 }
@@ -438,6 +465,16 @@ systemd_assign() {
   case "$1" in *=*) ;; *) return 1 ;; esac
   case "$key" in
     PATH|WHATSOUP_PATH_PREPEND|WHATSOUP_NODE) ;;
+    # Observed keys: only whether they are set matters, so a quoted value never makes the unit
+    # unreadable; a config directory that cannot be read literally is recorded as "?".
+    DISABLE_UPDATES) SYSTEMD_ENV_UPDATES="$value"; return 0 ;;
+    DISABLE_AUTOUPDATER) SYSTEMD_ENV_AUTOUPDATER="$value"; return 0 ;;
+    CLAUDE_CONFIG_DIR)
+      case "$value" in
+        *\"*|*\'*|*\\*|*\$*|*\`*) SYSTEMD_ENV_CONFIG="?" ;;
+        *) SYSTEMD_ENV_CONFIG="$value" ;;
+      esac
+      return 0 ;;
     *) return 0 ;;
   esac
   case "$value" in
@@ -487,6 +524,7 @@ systemd_environment_file() {
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) ;;
+      DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) ;;
       *) continue ;;
     esac
     systemd_assign "$line" || return 1
@@ -515,19 +553,29 @@ claude_inventory_systemd() {
     name="${unit#whatsoup@}"
     name="${name%.service}"
     SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
+    SYSTEMD_ENV_UPDATES="" SYSTEMD_ENV_AUTOUPDATER="" SYSTEMD_ENV_CONFIG=""
     if [ "$rc" -eq 0 ]; then
       while IFS= read -r line; do
-        case "$line" in PATH=*) systemd_assign "$line" || SYSTEMD_ENV_PATH="" ;; esac
+        case "$line" in
+          PATH=*) systemd_assign "$line" || SYSTEMD_ENV_PATH="" ;;
+          DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
+        esac
       done <<< "$manager_env"
     fi
     if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
       continue
     fi
     if ! systemd_unit_environment "$show"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "unit environment for $unit is not statically readable"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
       continue
     fi
+    # `systemctl show` reports the unit as loaded, which is also its next launch unless the unit
+    # file changed without a daemon-reload.
+    claude_instance_env_record "$name" systemd "loaded unit" \
+      "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
     claude_resolve_consumer "$name" systemd "$SYSTEMD_ENV_PATH" "$SYSTEMD_ENV_PREPEND" "$SYSTEMD_ENV_NODE"
   done <<< "$units"
 }
@@ -536,13 +584,18 @@ claude_inventory_systemd() {
 # (name, manager, status, bin, kind, configured version). Returns 1 with a reason on stdout when
 # the service manager itself cannot be read; zero instances is a successful empty inventory.
 claude_service_inventory() {
+  local rc=0
+  : > "$CLAUDE_INSTANCE_ENV_FILE"
   case "$SERVICE_MANAGER" in
-    launchd) claude_inventory_launchd ;;
-    systemd) claude_inventory_systemd ;;
+    launchd) claude_inventory_launchd || rc=$? ;;
+    systemd) claude_inventory_systemd || rc=$? ;;
     *)
       echo "unsupported service manager: $SERVICE_MANAGER"
-      return 1 ;;
+      rc=1 ;;
   esac
+  # An unreadable service manager is not an empty inventory.
+  [ "$rc" -eq 0 ] || rm -f "$CLAUDE_INSTANCE_ENV_FILE"
+  return "$rc"
 }
 
 codex_bin() {
@@ -1142,6 +1195,204 @@ claude_install_transaction() {
   return 1
 }
 
+# --- Agent CLI update policy observation ------------------------------------------------------
+#
+# The release-age cooldown governs only the installs this job makes. The agent CLI can also update
+# itself: a long-running session has been seen to replace the native launcher link on its own
+# schedule, and DISABLE_AUTOUPDATER did not stop that path while DISABLE_UPDATES did. This step
+# observes and reports; it changes no setting and enforces nothing. Each surface is reported on its
+# own: settings on disk, each instance's service environment, this job's environment, the live
+# launcher, and running CLI processes (counts only).
+
+# claude_launcher_state <facts>: "absent", or "link=<readlink or none> sha256=<digest or none>".
+claude_launcher_state() {
+  local link real digest
+  IFS=$'\037' read -r link real digest <<< "$1"
+  if [ -z "$link" ] && [ -z "$real" ]; then
+    echo absent
+  else
+    echo "link=${link:-none} sha256=${digest:-none}"
+  fi
+}
+
+# claude_launcher_previous: the launcher baseline recorded by the previous run's final state, or
+# 1 when there is none. A symlinked state file is never followed.
+claude_launcher_previous() {
+  if [ -L "$STATE_FILE" ] || [ ! -f "$STATE_FILE" ]; then
+    return 1
+  fi
+  "$REPO_NODE_BIN" - "$STATE_FILE" <<'NODE'
+const fs = require('node:fs');
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  const events = Array.isArray(state.events) ? state.events : [];
+  const baseline = events
+    .filter((e) => e && e.component === 'claude-launcher' && e.status === 'baseline' && typeof e.after === 'string')
+    .at(-1);
+  if (!baseline) process.exit(1);
+  process.stdout.write(baseline.after);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+# observe_claude_launcher: compare the previous run's baseline with the launcher as this run found
+# it (before any install), then record the launcher after the update step as the next baseline.
+# A change between runs did not come from this job's install transaction.
+observe_claude_launcher() {
+  local start previous status now
+  if [ ! -f "$CLAUDE_LAUNCHER_START_FILE" ]; then
+    record_event "claude-launcher" "unknown" "launcher facts could not be read at the start of this run"
+  else
+    start="$(claude_launcher_state "$(cat "$CLAUDE_LAUNCHER_START_FILE")")"
+    if previous="$(claude_launcher_previous)"; then
+      if [ "$previous" = "$start" ]; then
+        status=unchanged
+      elif [ "$start" = absent ]; then
+        status=disappeared
+      elif [ "$previous" = absent ]; then
+        status=appeared
+      else
+        status=moved
+      fi
+    else
+      status=first-observation
+    fi
+    case "$status" in
+      first-observation)
+        record_event "claude-launcher" "$status" "no launcher baseline from a previous run" "" "$start" ;;
+      unchanged)
+        record_event "claude-launcher" "$status" "launcher unchanged since the previous run" "$previous" "$start" ;;
+      *)
+        record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown" "$previous" "$start"
+        send_alert "claude-launcher" "warning" "Agent CLI launcher changed outside the maintenance job" \
+          "$CLAUDE_NATIVE_LAUNCHER $status between runs: $previous -> $start. The release-age cooldown did not govern this change." ;;
+    esac
+  fi
+  now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
+  record_event "claude-launcher" "baseline" "launcher after this run's update step; the next run compares against it" "" "$now"
+}
+
+# claude_settings_policy <config dir, or empty for the default>: print
+# "<installMethod>\037<autoUpdates>\037<settings env DISABLE_UPDATES>\037<settings env DISABLE_AUTOUPDATER>".
+# The global config file also holds account data; only these two keys are read from it.
+claude_settings_policy() {
+  "$REPO_NODE_BIN" - "$HOME" "$1" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const [home, dir] = process.argv.slice(2);
+const read = (file) => {
+  try {
+    return { ok: true, value: JSON.parse(fs.readFileSync(file, 'utf8')) };
+  } catch (err) {
+    return { ok: Boolean(err && err.code === 'ENOENT'), value: null };
+  }
+};
+const record = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+const field = (r, pick) => (r.ok ? pick(record(r.value)) : 'unreadable');
+const settings = read(path.join(dir || path.join(home, '.claude'), 'settings.json'));
+const global = read(dir ? path.join(dir, '.claude.json') : path.join(home, '.claude.json'));
+const installMethod = field(global, (g) => (g.installMethod === undefined ? 'absent'
+  : typeof g.installMethod === 'string' && /^[a-z0-9-]{1,32}$/.test(g.installMethod) ? g.installMethod : 'unrecognized'));
+const autoUpdates = field(global, (g) => (g.autoUpdates === undefined ? 'absent'
+  : typeof g.autoUpdates === 'boolean' ? String(g.autoUpdates) : 'unrecognized'));
+const envFlag = (key) => field(settings, (s) => {
+  const env = record(s.env);
+  return env[key] !== undefined && env[key] !== '' ? 'set' : 'unset';
+});
+process.stdout.write([installMethod, autoUpdates, envFlag('DISABLE_UPDATES'), envFlag('DISABLE_AUTOUPDATER')].join('\x1f'));
+NODE
+}
+
+# env_flag <name>: "set" when the variable is non-empty in this job's environment, else "unset".
+env_flag() {
+  if [ -n "${!1:-}" ]; then echo set; else echo unset; fi
+}
+
+observe_claude_update_policy() {
+  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto
+  local total=0 disabled=0 open=""
+  record_event "claude-update-policy" "job-env" \
+    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$(env_flag CLAUDE_CONFIG_DIR)"
+  if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
+    record_event "claude-update-policy" "unknown" "service definitions were not read this run, so no instance's update policy is known"
+    return 0
+  fi
+  while IFS=$'\037' read -r name manager surface config updates autoupdater; do
+    [ -n "$name" ] || continue
+    total=$((total + 1))
+    if [ "$updates" = "?" ]; then
+      record_event "claude-update-policy" "instance" "$name via $manager ($surface): service environment not readable"
+      open="$open $name"
+      continue
+    fi
+    case "$config" in
+      "") config_label="config default" ;;
+      "?") config_label="config set by the service, not readable" ;;
+      *) config_label="config set by the service" ;;
+    esac
+    settings=""
+    if [ "$config" != "?" ]; then
+      settings="$(claude_settings_policy "$config")" || settings=""
+    fi
+    IFS=$'\037' read -r method auto s_updates s_auto <<< "$settings"
+    if [ "$updates" = set ] || [ "$s_updates" = set ]; then
+      disabled=$((disabled + 1))
+    else
+      open="$open $name"
+    fi
+    record_event "claude-update-policy" "instance" \
+      "$name via $manager ($surface): DISABLE_UPDATES=$updates DISABLE_AUTOUPDATER=$autoupdater; $config_label: installMethod=${method:-unknown} autoUpdates=${auto:-unknown}, settings env DISABLE_UPDATES=${s_updates:-unknown} DISABLE_AUTOUPDATER=${s_auto:-unknown}"
+  done < "$CLAUDE_INSTANCE_ENV_FILE"
+  if [ "$total" -eq 0 ]; then
+    record_event "claude-update-policy" "none" "no service instance was inventoried"
+  elif [ -z "$open" ]; then
+    record_event "claude-update-policy" "disabled" "all $total instances start the agent CLI with DISABLE_UPDATES set (service environment or settings env); observed, not enforced"
+  else
+    record_event "claude-update-policy" "advisory" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set (service environment or settings env); the release-age cooldown is advisory for:$open. DISABLE_AUTOUPDATER alone is not counted. Observed, not enforced."
+  fi
+}
+
+# observe_claude_processes: count this user's native-layout agent CLI processes (process name
+# "claude" or a bare version filename) and those running over 30 minutes. Only the uid, elapsed
+# time and executable name are read, never a command line, and only the counts are recorded.
+observe_claude_processes() {
+  local ps_bin counts total long
+  if ! ps_bin="$(job_tool ps)"; then
+    record_event "claude-processes" "unknown" "ps not found on the job PATH"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # an awk program; $1..$3 are awk fields.
+  if ! counts="$("$ps_bin" -A -o uid= -o etime= -o comm= 2>/dev/null | awk -v uid="$EUID" '
+    $1 == uid {
+      comm = $0
+      sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+/, "", comm)
+      n = split(comm, parts, "/")
+      base = parts[n]
+      if (base != "claude" && base !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) next
+      total++
+      t = $2; days = 0; secs = 0
+      if (index(t, "-")) { split(t, dt, "-"); days = dt[1]; t = dt[2] }
+      k = split(t, hms, ":")
+      for (i = 1; i <= k; i++) secs = secs * 60 + hms[i]
+      if (secs + days * 86400 >= 1800) long++
+    }
+    END { printf "%d %d", total, long }')"; then
+    record_event "claude-processes" "unknown" "process listing failed"
+    return 0
+  fi
+  read -r total long <<< "$counts"
+  record_event "claude-processes" "observed" \
+    "$total agent CLI processes for this user, $long running longer than 30 minutes (native layout; counts only)"
+}
+
+observe_claude_update_path() {
+  observe_claude_launcher
+  observe_claude_update_policy
+  observe_claude_processes
+}
+
 update_codex() {
   local before latest npm after
   before="$(codex_current)"
@@ -1424,6 +1675,10 @@ main() {
   local results="$TMP_DIR/steps.tsv" rc=0
   : > "$results"
   log "starting mode=$MODE repo=$REPO_ROOT"
+  # The launcher as found, before any step can install: out-of-band movement is measured from here.
+  if claude_fs facts "$CLAUDE_NATIVE_LAUNCHER" >"$CLAUDE_LAUNCHER_START_FILE.partial" 2>/dev/null; then
+    mv "$CLAUDE_LAUNCHER_START_FILE.partial" "$CLAUDE_LAUNCHER_START_FILE"
+  fi
   # Each step is a plain statement: whatsoup_run_step must never run in a
   # tested context (see deploy/lib/step-runner.sh).
   whatsoup_run_step "$results" manifest guard_manifest
@@ -1440,6 +1695,9 @@ main() {
   else
     record_event "harness-maintenance" "skipped" "update steps skipped: the managed components manifest did not validate"
   fi
+  # After the agent CLI step, so its baseline includes this run's own install; before the probes,
+  # so a self-update the probes trigger shows up as movement on the next run.
+  whatsoup_run_step "$results" claude-update-path observe_claude_update_path
   whatsoup_run_step "$results" probes probe_tier2
   finish_run "$results" || rc=$?
   exit "$rc"
