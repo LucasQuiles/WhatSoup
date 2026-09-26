@@ -69,15 +69,6 @@ vi.mock('../../src/logger.ts', async () => {
 // runtimeAgentHealthSignals. Every other numeric key the runtime projects must
 // be registered, or the bot-errors health check drops it from its evidence.
 const UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS = new Set([
-  // Provider-fallback telemetry spread from getFallbackState(). Registering it
-  // is a separate decision, outside the X21 scope.
-  'fallbackTurnsServed',
-  'fallbackTurnsEmpty',
-  'probeAttempts',
-  'fallbackActivations',
-  'fallbackReverts',
-  'fallbackReplays',
-  'failedEntryCount',
   // A USD float; the checker's read_int drops non-integral values.
   'fallbackWindowCostUsd',
 ]);
@@ -191,6 +182,13 @@ describe('failure taxonomy cross-contract', () => {
       'chronologyDelayedDispatches',
       'chronologyRecoveryReplayDispatches',
       'chronologyMaxQueueAgeSeconds',
+      'fallbackTurnsServed',
+      'fallbackTurnsEmpty',
+      'fallbackActivations',
+      'fallbackReverts',
+      'fallbackReplays',
+      'probeAttempts',
+      'failedEntryCount',
     ] as const;
 
     expect(registry.schema).toBe('whatsoup-fault-taxonomy-registry-v3');

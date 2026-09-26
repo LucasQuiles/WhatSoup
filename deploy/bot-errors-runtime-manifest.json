@@ -840,7 +840,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "90482ff5822cadd031569c909cb88747e54ada8737bc336bd0b4a2ff568c85d5",
+      "sha256": "d628756d7fcecfc46219ad14fd0881e9886600772470d953c8a0959135f5fd77",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -858,6 +858,13 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "\"runtime_agent_fallback_turns_served\"",
+        "\"runtime_agent_fallback_turns_empty\"",
+        "\"runtime_agent_fallback_activations\"",
+        "\"runtime_agent_fallback_reverts\"",
+        "\"runtime_agent_fallback_replays\"",
+        "\"runtime_agent_fallback_probe_attempts\"",
+        "\"runtime_agent_fallback_failed_entry_count\"",
         "autoCompactActiveBackoffScopes",
         "agent_respawn_failed_clear_pending"
       ]
