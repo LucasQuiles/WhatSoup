@@ -297,6 +297,12 @@ def test_test_provenance_event_never_reaches_email_fallback(tmp_path: Path):
 
     assert fallback.call_count == 0
     assert "email_fallback_test_provenance_suppressed" in _dispatch_log_types(paths)
+    # #3458: the durable record names the reason class, and nothing else about
+    # the event.
+    suppressed = [r for r in _dispatch_log_records(paths) if r.get("type") == "email_fallback_test_provenance_suppressed"]
+    assert len(suppressed) == 1, suppressed
+    assert suppressed[0]["details"].get("reason") == "test_provenance", suppressed[0]
+    assert "eventId" not in suppressed[0]["details"], suppressed[0]
     outbox_files = list(paths["outbox"].glob("*.json"))
     assert outbox_files, "event must be requeued, not delivered by email"
     delivery = json.loads(outbox_files[0].read_text()).get("delivery", {})
@@ -336,15 +342,38 @@ def test_dispatcher_launched_under_pytest_root_never_reaches_email_fallback(tmp_
         mod.process_one(event_path, paths)
 
     assert fallback.call_count == 0
-    # The suppression IS recorded; the reason string is not. Controller-log
+    # #3458: the suppression is recorded with its reason class. Controller-log
     # details are projected onto a metadata-only allowlist
-    # (lib/controller_log.py: metadata_only_controller_details), and no gate
-    # reason -- "test_provenance", "test_leak", or "test_state_dir" -- is in it,
-    # so the durable record carries the attempt count only. That is unchanged
-    # from main; the reason itself is pinned at the unit level above.
+    # (lib/controller_log.py: metadata_only_controller_details), which admits
+    # the three gate reasons under the "reason" key only.
     suppressed = [r for r in _dispatch_log_records(paths) if r.get("type") == "email_fallback_test_provenance_suppressed"]
     assert len(suppressed) == 1, suppressed
     assert suppressed[0].get("details", {}).get("attempts", 0) >= 3, suppressed[0]
+    assert suppressed[0]["details"].get("reason") == "test_state_dir", suppressed[0]
+    assert "eventId" not in suppressed[0]["details"], suppressed[0]
+
+
+# #3458: the closed set of decision classes email_fallback_blocked_reason returns.
+_GATE_REASON_CLASSES = ("test_provenance", "test_leak", "test_state_dir")
+
+
+@pytest.mark.parametrize("reason", _GATE_REASON_CLASSES)
+def test_the_durable_suppression_record_keeps_each_reason_class(tmp_path: Path, reason: str):
+    # #3458: every reason email_fallback_blocked_reason can return reaches the
+    # durable dispatch log. test_leak is unreachable on the process_one route
+    # (the claim archives such events first), so the record is written the way
+    # process_one writes it.
+    mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
+    paths = mod.setup_dirs()
+    mod.append_dispatch_log(paths, {
+        "type": "email_fallback_test_provenance_suppressed",
+        "eventId": "evt-3458",
+        "reason": reason,
+        "attempts": 3,
+    })
+    records = [r for r in _dispatch_log_records(paths) if r.get("type") == "email_fallback_test_provenance_suppressed"]
+    assert len(records) == 1, records
+    assert records[0]["details"] == {"attempts": 3, "reason": reason}, records[0]
 
 
 def test_clean_event_still_uses_email_fallback(tmp_path: Path):
