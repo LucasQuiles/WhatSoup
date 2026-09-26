@@ -13,10 +13,16 @@
  *   show    --job N                      redacted detail + fence preview
  *   reassign --job N [--apply]           fenced blocked-owner reassignment
  *   promote --job N --evidence-type T --evidence-ref R [--apply]
+ *   close-inbound --seq N [--apply]      close ONE open inbound left behind a
+ *                                        final terminal record, with the status
+ *                                        that record implies (the sweep's rules)
  *
  * Safety posture:
  *   - dry-run is the DEFAULT for mutations; --apply is the explicit
- *     confirmation. Exactly one job per invocation — no bulk.
+ *     confirmation. Exactly one job (or inbound seq) per invocation — no bulk.
+ *   - close-inbound refuses unless exactly one FINAL terminal record owns the
+ *     row and no disposition link or recovery job touches it; a rerun on a row
+ *     already closed as its record implies is a no-op report.
  *   - promotion validates an allowlisted evidence type + bounded reference
  *     shape (a bare nonempty label is NOT acceptable evidence), and refuses
  *     when the conversation has journaled inbound activity newer than the
@@ -32,6 +38,7 @@ import { appendFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { CliArgError, takeValue } from './lib/cli-args.ts';
 import type { TurnRecoveryJobRow } from '../src/core/turn-recovery-store.ts';
+import type { TerminalRecordInboundCloseEvaluation } from '../src/core/terminal-record-inbound-close.ts';
 
 // stdout is the CLI's data channel (JSON only) — silence the pino logger the
 // database/durability modules construct at import time, BEFORE importing them.
@@ -58,6 +65,7 @@ interface Args {
   command: string;
   db?: string;
   job?: number;
+  seq?: number;
   afterId: number;
   limit: number;
   apply: boolean;
@@ -79,6 +87,7 @@ function parseArgs(argv: string[]): Args {
     switch (flag) {
       case '--db': args.db = next(); break;
       case '--job': args.job = Number.parseInt(next(), 10); break;
+      case '--seq': args.seq = Number.parseInt(next(), 10); break;
       case '--after-id': args.afterId = Number.parseInt(next(), 10); break;
       case '--limit': args.limit = Number.parseInt(next(), 10); break;
       case '--apply': args.apply = true; break;
@@ -110,7 +119,16 @@ function redactedJob(job: TurnRecoveryJobRow): Record<string, unknown> {
 
 function auditReceipt(
   auditPath: string,
-  entry: { action: string; jobId: number; mode: 'dry-run' | 'apply'; outcome: string; evidenceType?: string; proofHash?: string },
+  entry: {
+    action: string;
+    jobId?: number;
+    inboundSeq?: number;
+    mode: 'dry-run' | 'apply';
+    outcome: string;
+    reason?: string;
+    evidenceType?: string;
+    proofHash?: string;
+  },
 ): void {
   appendFileSync(auditPath, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
 }
@@ -129,10 +147,58 @@ function requireJob(engine: DurabilityEngineT, jobId: number | undefined): TurnR
   return job;
 }
 
+/** Content-free projection of a close: seq, record id, disposition, statuses. */
+function closeProjection(
+  evaluation: Extract<TerminalRecordInboundCloseEvaluation, { verdict: 'eligible' }>,
+): Record<string, unknown> {
+  const { mutation } = evaluation;
+  return {
+    seq: evaluation.seq,
+    recordId: evaluation.recordId,
+    disposition: evaluation.disposition,
+    fromStatus: evaluation.fromStatus,
+    toStatus: mutation.kind === 'complete' ? 'complete' : 'failed',
+    ...(mutation.kind === 'complete'
+      ? { terminalReason: mutation.terminalReason }
+      : { failureClass: mutation.failureClass }),
+  };
+}
+
+function closeInbound(engine: DurabilityEngineT, args: Args, auditPath: string): void {
+  const seq = args.seq;
+  if (seq === undefined || !Number.isSafeInteger(seq) || seq < 1) fail('--seq must be a positive integer');
+  const mode: 'dry-run' | 'apply' = args.apply ? 'apply' : 'dry-run';
+  const { evaluation, applied } = engine.closeInboundFromTerminalRecord(seq, { apply: args.apply });
+  if (evaluation.verdict === 'refused') {
+    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'refused', reason: evaluation.reason });
+    fail(`inbound seq ${seq} refused: ${evaluation.reason}`);
+  }
+  if (evaluation.verdict === 'already_closed') {
+    auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: 'not-applied:already-closed' });
+    console.log(JSON.stringify({
+      applied: false,
+      alreadyClosed: true,
+      seq,
+      recordId: evaluation.recordId,
+      disposition: evaluation.disposition,
+      status: evaluation.status,
+    }, null, 2));
+    return;
+  }
+  auditReceipt(auditPath, { action: 'close-inbound', inboundSeq: seq, mode, outcome: applied ? 'applied' : 'previewed' });
+  console.log(JSON.stringify(
+    applied
+      ? { applied: true, closed: closeProjection(evaluation) }
+      : { dryRun: true, wouldClose: closeProjection(evaluation) },
+    null,
+    2,
+  ));
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.command || !['list', 'show', 'reassign', 'promote'].includes(args.command)) {
-    fail('usage: turn-recovery-operator <list|show|reassign|promote> --db <path> [options]');
+  if (!args.command || !['list', 'show', 'reassign', 'promote', 'close-inbound'].includes(args.command)) {
+    fail('usage: turn-recovery-operator <list|show|reassign|promote|close-inbound> --db <path> [options]');
   }
   if (!args.db) fail('--db <instance dbPath> is required');
   if (!existsSync(args.db)) fail('database file does not exist');
@@ -142,6 +208,11 @@ function main(): void {
   db.open();
   try {
     const engine = new DurabilityEngine(db);
+
+    if (args.command === 'close-inbound') {
+      closeInbound(engine, args, auditPath);
+      return;
+    }
 
     if (args.command === 'list') {
       if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 200) fail('--limit must be 1..200');

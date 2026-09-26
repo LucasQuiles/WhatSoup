@@ -1940,6 +1940,36 @@ a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `err
 chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
 `busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
 
+#### Close an open inbound left behind a final terminal record
+
+An inbound row can sit in `pending`, `processing` or `turn_done` while its `turn_terminal_records` row
+already says `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`. Live finalization
+writes both atomically, so only an older release leaves this state. The stuck-inbound sweep closes such
+rows on its own (bucket 5 in `docs/durability.md` §4.5) once they are older than five minutes.
+`turn-recovery-operator close-inbound` applies the same rules to ONE named row, without the grace window.
+
+```bash
+# 1. Preview (the default). Prints the record's disposition and the status it implies.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ
+
+# 2. Back up the database, then apply.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ --apply
+```
+
+The status comes from the terminal record, through the same mapping live finalization uses:
+`finalized_replied` closes `complete` with `response_echoed`, `finalized_no_reply_policy` closes
+`complete` with `no_reply_policy`, and `failed_terminal` closes `failed` with the record's failure class.
+The command refuses and exits `1`, changing nothing, when the row does not exist (`inbound_not_found`),
+has no terminal record (`no_terminal_record`) or more than one (`multiple_terminal_records`), when the
+record is not final (`non_final_disposition`, e.g. `transferred_to_recovery_owner`), when its identity
+does not match the row (`identity_mismatch`), when an `inbound_disposition_links` row or a
+`turn_recovery_jobs` row references the row (`disposition_link`, `recovery_job`), when the record fails
+the finalize contract (`record_contract_invalid`), or when the row is already closed with a different
+status (`closed_differently`). A rerun on a row already closed as its record implies prints
+`alreadyClosed: true` and exits `0`. Output and the audit receipt (`turn-recovery-operator-audit.jsonl`
+next to the database, or `--audit-file`) carry only the inbound seq, record id, disposition and statuses,
+never chat JIDs, conversation keys or message ids.
+
 ### 7.7 Useful SQL Queries
 
 ```bash

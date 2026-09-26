@@ -398,7 +398,8 @@ final — live finalization writes that record and the inbound status atomically
 left only by an older release — and never a transferred or `unfinalized_retry_owned` record. The
 five buckets remain mutually exclusive and no row is disposed twice (an echoed terminal op
 without a record still routes to bucket 1). A bucket-5 candidate that fails any rule is logged
-and left open. Each SELECT is bounded to 200 rows so a
+and left open; `npm run turn-recovery-operator -- close-inbound` evaluates one named row with the
+same rules (see `docs/runbook.md`). Each SELECT is bounded to 200 rows so a
 large backlog drains over successive sweeps rather than in one long transaction. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
