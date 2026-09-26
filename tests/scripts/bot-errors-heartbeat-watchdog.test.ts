@@ -6,6 +6,21 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
 
+function canonicalRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: { readable: true, blocking_outstanding: 0, retained_terminal: 0, open_catchups: 1, corroborated_retained: 0 },
+    completed_delivery_identity: { readable: true, blocking: 0, retained: 0, next_action: null },
+    delivery: { readable: true, blocking_ambiguous: 0, uncorroborated_ambiguous: 0, corroborated_retained: 0, oldest_uncorroborated_at: null },
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
@@ -918,6 +933,7 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
           status: 200,
           body: {
             status: 'healthy',
+            recovery_debt: canonicalRecoveryDebt(),
             instance: { name: 'agent-alpha' },
             whatsapp: {
               connected: true,
@@ -931,6 +947,57 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
 
     expect(output).toContain('"problems": []');
     expect(() => readdirSync(join(tmpRoot, 'outbox'))).toThrow();
+  });
+
+  it.each([
+    [
+      'healthy blocking contradiction',
+      canonicalRecoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['turn_recovery_actionable'],
+        turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+      }),
+      'recovery_debt_status_contradiction',
+    ],
+    [
+      'malformed present debt',
+      { open: 'yes', service_blocking: false, attention: 'routine' },
+      'recovery_debt_invalid',
+    ],
+  ])('emits for %s', (_label, recoveryDebt, marker) => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    const profile = join(tmpRoot, 'health-profile.json');
+    writeFileSync(profile, JSON.stringify({
+      instances: [
+        { name: 'agent-alpha', expected: 'always_on', service: 'whatsoup-agent-alpha.service', healthPort: 9092 },
+      ],
+    }));
+
+    runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'local_instance_health',
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES: JSON.stringify({
+        'agent-alpha': {
+          status: 200,
+          body: {
+            status: 'healthy',
+            recovery_debt: recoveryDebt,
+            instance: { name: 'agent-alpha' },
+            whatsapp: {
+              connected: true,
+              connection: { state: 'connected', auth_failure_class: 'none' },
+              auth_bond: { status: 'present', issues: [] },
+            },
+          },
+        },
+      }),
+    });
+
+    const events = readOutboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.evidence).toContain(marker);
   });
 
   it('emits when a reachable instance reports degraded runtime health with clean transport', () => {
@@ -952,6 +1019,12 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
           body: {
             status: 'degraded',
             degradation_causes: ['finalization_debt', 'recovery_debt'],
+            recovery_debt: canonicalRecoveryDebt({
+              service_blocking: true,
+              attention: 'urgent',
+              reasons: ['turn_recovery_actionable'],
+              turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+            }),
             instance: { name: 'agent-alpha' },
             whatsapp: {
               connected: true,
@@ -971,6 +1044,8 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.evidence).toContain('local instance health failure: instance=agent-alpha');
     expect(events[0]!.evidence).toContain('health_status=degraded');
     expect(events[0]!.evidence).toContain('degradation_causes=finalization_debt,recovery_debt');
+    expect(events[0]!.evidence).not.toContain('recovery_debt_status_contradiction');
+    expect(events[0]!.evidence).not.toContain('recovery_debt_invalid');
     expect(events[0]!.evidence).not.toContain('auth_failure_class=');
   });
 

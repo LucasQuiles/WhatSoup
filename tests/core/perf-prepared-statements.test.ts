@@ -93,7 +93,9 @@ describe('prepared statement caching', () => {
     // answer's delivery echo from one truly blocked by outstanding recovery. It
     // shares its FROM/WHERE text with hasOutstandingTurnRecoveryForScope, which
     // stays a distinct statement, so the store prepares one more, not two.)
-    expect(prepareSpy).toHaveBeenCalledTimes(154);
+    // (+1 vs 154: the corroboration-aware delivery ambiguity health aggregate
+    // is prepared once and reused with the rest of the durability statements.)
+    expect(prepareSpy).toHaveBeenCalledTimes(155);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

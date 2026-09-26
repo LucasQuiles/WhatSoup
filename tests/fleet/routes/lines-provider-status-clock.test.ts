@@ -55,6 +55,7 @@ function statusWithFallbackUntil(activeUntil: number): InstanceStatus {
     lastAlertAt: null,
     silencedUntil: null,
     activeAlertSources: [],
+    recoveryDebt: null,
   };
 }
 

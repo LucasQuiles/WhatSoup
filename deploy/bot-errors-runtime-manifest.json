@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "b31c793f2059d753230ddd005af5a3f885ad85647ed07e730f71d3c01708ca84",
+      "sha256": "c93cb1009abb12e389c8b98193cb0a9fe3e465be4257925067d48823292016fb",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -279,12 +279,13 @@
         "path_starts_with_entries",
         "WHATSOUP_PATH_PREPEND",
         "provider_runtime_path_prepend_mismatch",
-        "provider_runtime_path_prepend_inconsistent"
+        "provider_runtime_path_prepend_inconsistent",
+        "health_recovery_debt_status_contradiction"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "639da62c82eb5e9ce51331ac4c59e9bbf60dfd35ea28ef835ee2cd6792236064",
+      "sha256": "f660de79c7a031f044c17a40785b76f98c36fe1245b5651057368e7e3ffc62d1",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -300,7 +301,8 @@
         "health_body_not_disclosed",
         "probe_unauthorized",
         "instance_health_token",
-        "PUBLIC_HEALTH_SCHEMA_PREFIX"
+        "PUBLIC_HEALTH_SCHEMA_PREFIX",
+        "recovery_debt_issue"
       ]
     },
     {
@@ -553,9 +555,10 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "0070609866af404964e2693fe6553ea3e5d1afccd048422704fd2893b80b8dcd",
+      "sha256": "856f8dacc62673133db4fad6f79ee1409182c59d71f75fc13806f7a8ce01233c",
       "mustContain": [
-        "def classify(d: object) -> str:"
+        "def classify(d: object) -> str:",
+        "def recovery_debt_issue(d: object) -> Optional[str]:"
       ]
     },
     {
@@ -837,7 +840,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "e8f4c3adaaa20b5b0eac47acc1bf7efb55c7b5e57bf08e66f07e8992ca02dc72",
+      "sha256": "fc1000f6abef4780bc6acfb1b10dd4a831b3446bfd193146fa19f2104dd349c6",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import {
+  validDeliveryCorroborationForJobSql,
+  validDeliveryCorroborationForTerminalSql,
+} from './delivery-corroboration-sql.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
@@ -221,6 +225,18 @@ export interface TurnRecoverySupervisorCounts {
   echoConflicts: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
+  /**
+   * Pending/claimed work that can still be acted on automatically, plus
+   * orphan transfers without valid later-echo proof.
+   */
+  blockingOutstanding?: number;
+  /** Terminal blocked/exhausted rows retained for operator audit. */
+  retainedTerminal?: number;
+  /**
+   * Pending/claimed rows and orphan transfers made unclaimable by valid
+   * later-echo proof. outstanding = blockingOutstanding + corroboratedRetained.
+   */
+  corroboratedRetained?: number;
   /**
    * Actionability split of `blockedUnsafe` (② of the continuity work,
    * docs/turn-recovery-continuity-reconciler.md). Synthetic self-turns
@@ -464,17 +480,22 @@ const RECOVERY_JOB_SELECT = `
   unixepoch(i.received_at) AS source_received_at_unix_seconds
 `;
 
+// Corroborated delivery (a later echoed op for the same source inbound,
+// conversation and destination) is retained audit debt, not outstanding work:
+// it must never block admission for its scope.
 const OUTSTANDING_RECOVERY_FOR_SCOPE_FROM = `
   FROM (
     SELECT j.scope, j.conversation_key, j.id AS job_id
     FROM turn_recovery_jobs j
     WHERE j.state IN ('pending', 'claimed')
+      AND NOT ${validDeliveryCorroborationForJobSql('j')}
     UNION ALL
     SELECT t.scope, t.conversation_key, j.id AS job_id
     FROM turn_terminal_records t
     LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
     WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
       AND j.id IS NULL
+      AND NOT ${validDeliveryCorroborationForTerminalSql('t')}
   ) outstanding
 `;
 const OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE = `
@@ -573,6 +594,7 @@ export class TurnRecoveryStore {
           AND state = 'pending'
           AND attempt_count < ${TURN_RECOVERY_MAX_ATTEMPTS}
           AND next_attempt_at <= datetime('now')
+          AND NOT ${validDeliveryCorroborationForJobSql('turn_recovery_jobs')}
         RETURNING *
       `),
       renewTurnRecoveryClaim: prepare(`
@@ -856,6 +878,7 @@ export class TurnRecoveryStore {
             j.state = 'pending'
             OR j.state = 'claimed'
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -869,6 +892,7 @@ export class TurnRecoveryStore {
             OR j.state = 'exhausted'
             OR (j.state = 'claimed' AND j.claim_expires_at <= datetime('now'))
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -877,7 +901,14 @@ export class TurnRecoveryStore {
       `),
       getTurnRecoverySupervisorCounts: prepare(`
         WITH orphan_transfers AS (
-          SELECT COUNT(*) AS count
+          -- corroborated: a later echoed op proves delivery, so the orphan is
+          -- retained audit debt that OUTSTANDING_RECOVERY_FOR_SCOPE_FROM also
+          -- excludes from admission; it stays integrity debt (corrupt_links).
+          SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN ${validDeliveryCorroborationForTerminalSql('terminal')} THEN 1 ELSE 0
+            END), 0) AS corroborated
           FROM turn_terminal_records terminal
           LEFT JOIN turn_recovery_jobs linked
             ON linked.terminal_record_id = terminal.id
@@ -948,6 +979,21 @@ export class TurnRecoveryStore {
           COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
             AS echo_conflicts,
           (SELECT count FROM open_recoveries) AS open_recoveries,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND NOT ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
+          END), 0) AS retained_terminal,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
             ELSE 0
@@ -1798,6 +1844,9 @@ export class TurnRecoveryStore {
       orphan_transfers: number;
       echo_conflicts: number;
       open_recoveries: number;
+      blocking_outstanding: number;
+      retained_terminal: number;
+      corroborated_retained: number;
       blocked_unsafe_synthetic: number;
       blocked_unsafe_superseded: number;
       blocked_unsafe_stranded: number;
@@ -1814,6 +1863,9 @@ export class TurnRecoveryStore {
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
       openRecoveries: row.open_recoveries,
+      blockingOutstanding: row.blocking_outstanding,
+      retainedTerminal: row.retained_terminal,
+      corroboratedRetained: row.corroborated_retained,
       blockedUnsafeSynthetic: row.blocked_unsafe_synthetic,
       blockedUnsafeSuperseded: row.blocked_unsafe_superseded,
       blockedUnsafeStranded: row.blocked_unsafe_stranded,
