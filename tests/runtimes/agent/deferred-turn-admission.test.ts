@@ -22,6 +22,7 @@ import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { systemClock } from '../../../src/lib/clock.ts';
 import type { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import type { RuntimeTurnCoordinator } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import type { RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
 // ─── Hoisted provider-boundary doubles (scheduled-turn-lifecycle pattern) ───
 
@@ -29,6 +30,7 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   type SessionCtorOpts = {
     chatJid: string;
     persistenceConversationKey?: string;
+    provider?: string;
     onEvent: (event: AgentEvent) => void;
     onCrash?: (info: unknown) => void;
     notifyUser?: (msg: string) => void;
@@ -37,6 +39,7 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   function makeSessionDouble(opts: SessionCtorOpts) {
     let active = false;
     let pendingResolve: (() => void) | null = null;
+    let pendingReject: ((err: unknown) => void) | null = null;
     let pendingPromise: Promise<void> = Promise.resolve();
     const double = {
       ctorOpts: opts,
@@ -47,19 +50,28 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
       emit(event: AgentEvent): void {
         opts.onEvent(event);
       },
+      /** The provider child dies mid-turn: the in-flight send rejects. */
+      failProviderTurn(err: unknown): void {
+        const reject = pendingReject;
+        pendingResolve = null;
+        pendingReject = null;
+        reject?.(err);
+      },
       spawnSession: vi.fn(async () => {
         active = true;
       }),
       sendTurn: vi.fn((input: unknown) => {
         double.turnsSent.push(input);
-        pendingPromise = new Promise<void>((resolve) => {
+        pendingPromise = new Promise<void>((resolve, reject) => {
           pendingResolve = resolve;
+          pendingReject = reject;
         });
         return pendingPromise;
       }),
       completeProviderTurn: vi.fn(() => {
         const resolve = pendingResolve;
         pendingResolve = null;
+        pendingReject = null;
         resolve?.();
       }),
       waitForProviderTurnToTerminalize: vi.fn(() => pendingPromise),
@@ -83,7 +95,8 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
       getDbRowId: vi.fn((): number | null => 1),
       setDurability: vi.fn(),
       bindGenerationOwnership: vi.fn(),
-      getProviderId: vi.fn(() => 'claude-cli'),
+      // The route the runtime spawned this session on, as a real manager reports.
+      getProviderId: vi.fn(() => opts.provider ?? 'claude-cli'),
       getModelRef: vi.fn(() => undefined),
     };
     return double;
@@ -934,5 +947,343 @@ describe('deferred-turn admission (#3295 S2)', () => {
     await queue.idle();
     expect(terminalRows(seq)).toEqual([{ attempt_kind: 'admission_rejected', attempt_failure_class: 'pre_dispatch_error' }]);
     expect(sessionDoubles.flatMap((session) => session.turnsSent)).toEqual([]);
+  });
+
+  // Per-chat provider-fallback replay, driven end to end: a journaled inbound is
+  // admitted through handleMessage, the primary provider reports a usage limit,
+  // and the REAL result handler activates the fallback, schedules the replay,
+  // recreates the session, and re-enters per-chat admission with the held turn.
+  // Nothing is pre-arranged in the FIFO, scope-ref, or completion maps.
+  describe('per-chat fallback replay lifecycle', () => {
+    const dmJid = '15550190901@s.whatsapp.net';
+    const lidJid = '15550190902@lid';
+    const lidCanonicalJid = '15550190902@s.whatsapp.net';
+    const usageLimitText = 'Claude usage limit reached. Your limit will reset at 3pm.';
+    const failedReplayNotice = '_The backup model could not continue this turn. Please try again._';
+    const fallbackConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbacks?: Array<{ provider: string; model?: string }>;
+    };
+
+    type SessionDouble = (typeof sessionDoubles)[number];
+    type QueueDouble = (typeof queueDoubles)[number];
+    type LifecycleState = {
+      perChatRuntimeTurnContexts: Map<string, RuntimeTurnContext[]>;
+      perChatInboundSeqQueue: Map<string, number[]>;
+      perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
+      perChatRuntimeTurnCompletions: Map<string, { context: RuntimeTurnContext; promise: Promise<void> }>;
+      perChatTurnQueues: Map<string, TurnQueue>;
+      chatQueues: Map<string, unknown>;
+      pendingTurnText: Map<string, string>;
+      runtimeTurnCoordinator: RuntimeTurnCoordinator;
+    };
+
+    function lifecycle(): LifecycleState {
+      return runtime as unknown as LifecycleState;
+    }
+
+    function providerText(input: unknown): string {
+      if (typeof input === 'string') return input;
+      const structured = input as { userText?: string; applicationContext?: readonly string[] };
+      return [...(structured.applicationContext ?? []), structured.userText ?? ''].join('\n');
+    }
+
+    function queueFor(jid: string): QueueDouble {
+      const queue = queueDoubles.find((candidate) => candidate.targetChatJid === jid);
+      expect(queue).toBeDefined();
+      return queue!;
+    }
+
+    function liveQueue(mapKey: string): QueueDouble {
+      const queue = lifecycle().chatQueues.get(mapKey) as QueueDouble | undefined;
+      expect(queue).toBeDefined();
+      return queue!;
+    }
+
+    function replayedAlerts(): number {
+      return mockEmitAlertChecked.mock.calls.filter((call) => call[1] === 'provider_fallback_replayed').length;
+    }
+
+    /**
+     * The transport delivers and echoes the next answer: the queue double's
+     * evidence flush reports a real echoed outbound op, as OutboundQueue would.
+     */
+    function echoNextAnswer(queue: QueueDouble, seq: number, jid: string): void {
+      const opId = engine.createOutboundOp({
+        conversationKey: toConversationKey(jid),
+        chatJid: jid,
+        opType: 'text',
+        payload: JSON.stringify({ text: 'fallback answer' }),
+        replayPolicy: 'safe',
+        sourceInboundSeq: seq,
+      });
+      engine.markSending(opId);
+      engine.markSubmitted(opId, `wamid-c19-answer-${seq}`);
+      engine.markEchoed(opId);
+      (queue.flushTurnEvidence as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (turnId: string) => ({ turnId, answerOpIds: [opId], lifecycleOpIds: [], statusOpIds: [] }),
+      );
+    }
+
+    /** Journal one DM inbound and wait until the live provider turn holds it. */
+    async function admitTurn(jid: string, messageId: string, content: string) {
+      const seq = engine.journalInbound(messageId, toConversationKey(jid), jid, 'agent');
+      await runtime.handleMessage(makeMsg({ messageId, chatJid: jid, isGroup: false, content, inboundSeq: seq }));
+      let session: SessionDouble | undefined;
+      await vi.waitFor(() => {
+        session = sessionDoubles.find((candidate) => candidate.turnInFlight
+          && candidate.turnsSent.some((input) => providerText(input).includes(content)));
+        expect(session).toBeDefined();
+      });
+      const [mapKey, contexts] = [...lifecycle().perChatRuntimeTurnContexts.entries()]
+        .find(([, list]) => list[0]?.identity.inboundSeq === seq)!;
+      return { seq, session: session!, mapKey, held: contexts[0]! };
+    }
+
+    /**
+     * Report a usage limit on the primary and wait until the replay either
+     * reached the replacement provider or gave up with the failure notice.
+     */
+    async function failOverToFallback(primary: SessionDouble, queue: QueueDouble): Promise<SessionDouble> {
+      primary.emit({ type: 'result', text: usageLimitText });
+      let replacement: SessionDouble | undefined;
+      await vi.waitFor(() => {
+        replacement = sessionDoubles.find((candidate) => candidate !== primary);
+        expect(replacement).toBeDefined();
+        expect(
+          replacement!.turnsSent.length > 0
+          || queue.enqueueText.mock.calls.some((call) => call[0] === failedReplayNotice),
+        ).toBe(true);
+      });
+      return replacement!;
+    }
+
+    beforeEach(() => {
+      fallbackConfig.agentProvider = 'claude-cli';
+      fallbackConfig.agentFallbacks = [{ provider: 'codex-cli' }];
+    });
+
+    afterEach(() => {
+      delete fallbackConfig.agentProvider;
+      delete fallbackConfig.agentFallbacks;
+    });
+
+    it('re-binds the same held turn when its fallback replay re-enters per-chat admission', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, 'wamid-c19-rebind', 'c19 rebind question');
+      const turnId = held.identity.logicalTurnId;
+      const heldScopeRef = lifecycle().perChatRuntimeTurnScopeRefs.get(turnId);
+      const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey);
+      expect(heldScopeRef).toEqual({ value: mapKey });
+      expect(heldCompletion?.context.identity.logicalTurnId).toBe(turnId);
+      const queue = queueFor(dmJid);
+
+      const replacement = await failOverToFallback(primary, queue);
+
+      expect(replacement.ctorOpts.provider).toBe('codex-cli');
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+      const replayed = providerText(replacement.turnsSent[0]);
+      expect(replayed).toContain('temporarily standing in for the primary model');
+      expect(replayed).toContain('c19 rebind question');
+      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      // The held head is re-bound in place: one FIFO entry, same turn and seq,
+      // and the scope ref and completion other holders captured are kept.
+      const contexts = lifecycle().perChatRuntimeTurnContexts.get(mapKey);
+      expect(contexts).toHaveLength(1);
+      expect(contexts![0]!.identity.logicalTurnId).toBe(turnId);
+      expect(contexts![0]!.identity.inboundSeq).toBe(seq);
+      expect(lifecycle().perChatInboundSeqQueue.get(mapKey)).toEqual([seq]);
+      expect(lifecycle().perChatRuntimeTurnScopeRefs.get(turnId)).toBe(heldScopeRef);
+      expect(lifecycle().perChatRuntimeTurnCompletions.get(mapKey)).toBe(heldCompletion);
+      expect(status(seq)).toBe('processing');
+    });
+
+    it('settles the held completion and finalizes the inbound once the fallback answers', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, 'wamid-c19-settle', 'c19 settle question');
+      const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+      const turnQueue = lifecycle().perChatTurnQueues.get(mapKey)!;
+      const queue = queueFor(dmJid);
+      const replacement = await failOverToFallback(primary, queue);
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+
+      echoNextAnswer(queue, seq, dmJid);
+      replacement.emit({ type: 'result', text: 'c19 fallback answer' });
+
+      await expect(heldCompletion.promise).resolves.toBeUndefined();
+      await turnQueue.idle();
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'));
+      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'completed', attempt_failure_class: null }]);
+      expect(queue.enqueueResultText).toHaveBeenCalledWith(expect.stringContaining('c19 fallback answer'));
+      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(replayedAlerts()).toBe(1);
+      expect(lifecycle().runtimeTurnCoordinator.isRuntimeTurnContinuation(held)).toBe(false);
+    });
+
+    it('leaves no FIFO entry, scope ref, or completion behind and serves the next inbound', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, 'wamid-c19-cleanup', 'c19 cleanup question');
+      const turnQueue = lifecycle().perChatTurnQueues.get(mapKey)!;
+      const queue = queueFor(dmJid);
+      const replacement = await failOverToFallback(primary, queue);
+      echoNextAnswer(queue, seq, dmJid);
+      replacement.emit({ type: 'result', text: 'c19 cleanup answer' });
+      await turnQueue.idle();
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'));
+
+      const state = lifecycle();
+      expect(state.perChatRuntimeTurnContexts.has(mapKey)).toBe(false);
+      expect(state.perChatInboundSeqQueue.has(mapKey)).toBe(false);
+      expect(state.perChatRuntimeTurnScopeRefs.has(held.identity.logicalTurnId)).toBe(false);
+      expect(state.perChatRuntimeTurnCompletions.has(mapKey)).toBe(false);
+      expect(state.pendingTurnText.has(mapKey)).toBe(false);
+      expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(held)).toBe(false);
+
+      // The FIFO is free again: the next inbound is admitted on the same scope
+      // and finalizes on its own turn.
+      const next = await admitTurn(dmJid, 'wamid-c19-next', 'c19 follow-up question');
+      expect(next.session).not.toBe(primary);
+      expect(next.mapKey).toBe(mapKey);
+      expect(next.held.identity.logicalTurnId).not.toBe(held.identity.logicalTurnId);
+      echoNextAnswer(liveQueue(mapKey), next.seq, dmJid);
+      next.session.emit({ type: 'result', text: 'c19 follow-up answer' });
+      await lifecycle().perChatTurnQueues.get(mapKey)!.idle();
+      await vi.waitFor(() => expect(status(next.seq)).toBe('complete'));
+      expect(state.perChatRuntimeTurnContexts.has(mapKey)).toBe(false);
+      expect(state.perChatRuntimeTurnScopeRefs.size).toBe(0);
+      expect(state.perChatRuntimeTurnCompletions.size).toBe(0);
+    });
+
+    /**
+     * Fail the primary over, and while the replay waits on the failed primary's
+     * shutdown (after scheduling, so the scheduler's own context checks have
+     * passed) let `occupy` put a different owner into the per-chat FIFO. The
+     * other owner is itself a live continuation, so only the identity/occupancy
+     * checks of replay admission can tell it apart from the held turn.
+     */
+    async function replayAgainstOtherOwner(
+      messageId: string,
+      occupy: (held: RuntimeTurnContext, other: RuntimeTurnContext) => RuntimeTurnContext[],
+    ) {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, messageId, `${messageId} question`);
+      const queue = queueFor(dmJid);
+      let releaseShutdown: (() => void) | undefined;
+      primary.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        releaseShutdown = resolve;
+      }));
+      primary.emit({ type: 'result', text: usageLimitText });
+      await vi.waitFor(() => expect(releaseShutdown).toBeTypeOf('function'));
+      const other: RuntimeTurnContext = {
+        ...held,
+        identity: { ...held.identity, logicalTurnId: `${messageId}-other-owner` },
+      };
+      expect(lifecycle().runtimeTurnCoordinator.beginRuntimeTurnContinuation(other)).toBe(true);
+      lifecycle().perChatRuntimeTurnContexts.set(mapKey, occupy(held, other));
+      return { seq, primary, mapKey, held, other, queue, releaseShutdown: releaseShutdown! };
+    }
+
+    function expectRefusedReplay(primary: SessionDouble, queue: QueueDouble): void {
+      const replacement = sessionDoubles.find((candidate) => candidate !== primary);
+      expect(replacement?.sendTurn).not.toHaveBeenCalled();
+      expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice);
+      expect(mockEmitAlertChecked).toHaveBeenCalledWith(
+        expect.any(String),
+        'runtime_provider_fallback_replay_failed',
+        'Provider fallback replay failed',
+        expect.stringContaining('provider=codex-cli'),
+      );
+      expect(replayedAlerts()).toBe(0);
+    }
+
+    it('still refuses the replay when a different continuation heads the per-chat FIFO', async () => {
+      const { seq, primary, mapKey, held, other, queue, releaseShutdown } = await replayAgainstOtherOwner(
+        'wamid-c19-conflict-head',
+        (_held, otherOwner) => [otherOwner],
+      );
+      const withdrawn: RuntimeTurnContext[][] = [];
+      // Once the refusal is announced, withdraw the injected owner so the held
+      // turn's failure finalization sees its own FIFO slot again (finalizing it
+      // under a foreign head escapes as an unhandled FIFO-drift rejection; that
+      // is a separate failure-path gap, not what this refusal case pins).
+      queue.enqueueText.mockImplementation((text: string) => {
+        if (text !== failedReplayNotice) return;
+        withdrawn.push(lifecycle().perChatRuntimeTurnContexts.get(mapKey) ?? []);
+        lifecycle().perChatRuntimeTurnContexts.set(mapKey, [held]);
+      });
+
+      releaseShutdown();
+
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+      expectRefusedReplay(primary, queue);
+      // The foreign head was still in place, untouched, when the replay was refused.
+      expect(withdrawn).toEqual([[other]]);
+      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
+      lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+    });
+
+    it('still refuses the replay when a different turn is queued behind the held head', async () => {
+      const { seq, primary, mapKey, held, other, queue, releaseShutdown } = await replayAgainstOtherOwner(
+        'wamid-c19-conflict-queued',
+        (heldTurn, otherOwner) => [heldTurn, otherOwner],
+      );
+
+      releaseShutdown();
+
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+      expectRefusedReplay(primary, queue);
+      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
+      // Only the held turn left the FIFO; the other owner was not re-bound or dropped.
+      expect(lifecycle().perChatRuntimeTurnContexts.get(mapKey)).toEqual([other]);
+      expect(lifecycle().perChatRuntimeTurnScopeRefs.has(held.identity.logicalTurnId)).toBe(false);
+      lifecycle().perChatRuntimeTurnContexts.delete(mapKey);
+      lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+    });
+
+    it('releases the turn on the rekeyed scope when the replay fails after a mid-replay rekey', async () => {
+      makeRuntime({ sessionScope: 'per_chat' });
+      const { seq, session: primary, mapKey, held } = await admitTurn(lidJid, 'wamid-c19-rekey', 'c19 rekey question');
+      expect(mapKey).toBe(lidJid);
+      const turnId = held.identity.logicalTurnId;
+      const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+      const turnQueue = lifecycle().perChatTurnQueues.get(mapKey)!;
+      const queue = queueFor(lidJid);
+      const replacement = await failOverToFallback(primary, queue);
+      expect(replacement.sendTurn).toHaveBeenCalledOnce();
+
+      // LID -> phone resolution lands while the fallback provider is working.
+      runtime.handleJidAliasChanged(toConversationKey(lidJid), lidCanonicalJid, false);
+      expect(lifecycle().chatQueues.get(lidCanonicalJid)).toBe(queue);
+      expect(lifecycle().perChatRuntimeTurnScopeRefs.get(turnId)?.value).toBe(lidCanonicalJid);
+
+      replacement.failProviderTurn(new Error('c19 fallback provider exited mid-turn'));
+
+      await vi.waitFor(() => expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice));
+      await expect(heldCompletion.promise).resolves.toBeUndefined();
+      await turnQueue.idle();
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
+      // Terminal, not stranded in `processing`: the user was told to resend, no
+      // answer was delivered, and no automatic recovery job owns the turn.
+      expect(db.raw.prepare(
+        'SELECT inbound_disposition, delivery_kind FROM turn_terminal_records WHERE inbound_seq = ?',
+      ).all(seq)).toEqual([{ inbound_disposition: 'failed_terminal', delivery_kind: 'none' }]);
+      expect(db.raw.prepare('SELECT id FROM turn_recovery_jobs WHERE source_inbound_seq = ?').all(seq)).toEqual([]);
+      const state = lifecycle();
+      for (const key of [lidJid, lidCanonicalJid]) {
+        expect(state.perChatRuntimeTurnContexts.has(key)).toBe(false);
+        expect(state.perChatInboundSeqQueue.has(key)).toBe(false);
+        expect(state.perChatRuntimeTurnCompletions.has(key)).toBe(false);
+      }
+      expect(state.perChatRuntimeTurnScopeRefs.has(turnId)).toBe(false);
+      expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(held)).toBe(false);
+
+      // The chat is not wedged: its next inbound is admitted and answered.
+      const next = await admitTurn(lidCanonicalJid, 'wamid-c19-after-failure', 'c19 retry question');
+      expect(next.mapKey).toBe(lidCanonicalJid);
+      echoNextAnswer(liveQueue(lidCanonicalJid), next.seq, lidCanonicalJid);
+      next.session.emit({ type: 'result', text: 'c19 retry answer' });
+      await vi.waitFor(() => expect(status(next.seq)).toBe('complete'));
+    });
   });
 });
