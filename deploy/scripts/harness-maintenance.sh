@@ -1504,36 +1504,57 @@ record_claude_launcher_baseline() {
   fi
 }
 
+# Managed settings apply to every config directory and take precedence over the files in it.
+case "$SERVICE_MANAGER_DEFAULT" in
+  launchd) CLAUDE_MANAGED_SETTINGS_DEFAULT="/Library/Application Support/ClaudeCode/managed-settings.json" ;;
+  *) CLAUDE_MANAGED_SETTINGS_DEFAULT="/etc/claude-code/managed-settings.json" ;;
+esac
+CLAUDE_MANAGED_SETTINGS_FILE="${WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE:-$CLAUDE_MANAGED_SETTINGS_DEFAULT}"
+
 # claude_settings_policy <config dir, or empty for the default>: print
-# "<installMethod>\037<autoUpdates>\037<settings env DISABLE_UPDATES>\037<settings env DISABLE_AUTOUPDATER>".
-# The global config file also holds account data; only these two keys are read from it.
+# "<installMethod>\037<autoUpdates>\037<settings env DISABLE_UPDATES>\037<settings env DISABLE_AUTOUPDATER>\037<files>".
+# The env flags come from managed settings, then settings.local.json, then settings.json: the first
+# that sets a key decides it, and any of them that exists but cannot be parsed makes both
+# unreadable. <files> names the settings files present. The global config file also holds account
+# data; only installMethod and autoUpdates are read from it.
 claude_settings_policy() {
-  "$REPO_NODE_BIN" - "$HOME" "$1" <<'NODE'
+  "$REPO_NODE_BIN" - "$HOME" "$1" "$CLAUDE_MANAGED_SETTINGS_FILE" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
-const [home, dir] = process.argv.slice(2);
+const [home, dir, managedFile] = process.argv.slice(2);
 const read = (file) => {
   try {
-    return { ok: true, value: JSON.parse(fs.readFileSync(file, 'utf8')) };
+    return { ok: true, present: true, value: JSON.parse(fs.readFileSync(file, 'utf8')) };
   } catch (err) {
-    return { ok: Boolean(err && err.code === 'ENOENT'), value: null };
+    const absent = Boolean(err && err.code === 'ENOENT');
+    return { ok: absent, present: !absent, value: null };
   }
 };
 const record = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
 const field = (r, pick) => (r.ok ? pick(record(r.value)) : 'unreadable');
-const settings = read(path.join(dir || path.join(home, '.claude'), 'settings.json'));
+const configDir = dir || path.join(home, '.claude');
+// Highest precedence first.
+const layers = [
+  ['managed', managedFile],
+  ['settings.local.json', path.join(configDir, 'settings.local.json')],
+  ['settings.json', path.join(configDir, 'settings.json')],
+].filter(([, file]) => file).map(([name, file]) => ({ name, ...read(file) }));
 const global = read(dir ? path.join(dir, '.claude.json') : path.join(home, '.claude.json'));
 const installMethod = field(global, (g) => (g.installMethod === undefined ? 'absent'
   : typeof g.installMethod === 'string' && /^[a-z0-9-]{1,32}$/.test(g.installMethod) ? g.installMethod : 'unrecognized'));
 const autoUpdates = field(global, (g) => (g.autoUpdates === undefined ? 'absent'
   : typeof g.autoUpdates === 'boolean' ? String(g.autoUpdates) : 'unrecognized'));
 // Same classes as the shell's flag_class: only "1" or "true" disables.
-const envFlag = (key) => field(settings, (s) => {
-  const env = record(s.env);
-  if (env[key] === undefined) return 'unset';
-  return ['1', 'true'].includes(String(env[key]).toLowerCase()) ? 'set' : 'set-unrecognized';
-});
-process.stdout.write([installMethod, autoUpdates, envFlag('DISABLE_UPDATES'), envFlag('DISABLE_AUTOUPDATER')].join('\x1f'));
+const envFlag = (key) => {
+  if (layers.some((l) => !l.ok)) return 'unreadable';
+  for (const layer of layers) {
+    const env = record(record(layer.value).env);
+    if (env[key] !== undefined) return ['1', 'true'].includes(String(env[key]).toLowerCase()) ? 'set' : 'set-unrecognized';
+  }
+  return 'unset';
+};
+const files = layers.filter((l) => l.present).map((l) => l.name).join('+') || 'none';
+process.stdout.write([installMethod, autoUpdates, envFlag('DISABLE_UPDATES'), envFlag('DISABLE_AUTOUPDATER'), files].join('\x1f'));
 NODE
 }
 
@@ -1552,7 +1573,7 @@ policy_summary() {
 }
 
 observe_claude_update_policy() {
-  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto
+  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto s_files
   local total=0 disabled=0 open="" unknown="" config_dir_state=unset
   [ -z "${CLAUDE_CONFIG_DIR:-}" ] || config_dir_state="set"
   record_event "claude-update-policy" "job-env" \
@@ -1578,7 +1599,7 @@ observe_claude_update_policy() {
     if [ "$config" != "?" ]; then
       settings="$(claude_settings_policy "$config")" || settings=""
     fi
-    IFS=$'\037' read -r method auto s_updates s_auto <<< "$settings"
+    IFS=$'\037' read -r method auto s_updates s_auto s_files <<< "$settings"
     if [ "$updates" = set ] || [ "$s_updates" = set ]; then
       disabled=$((disabled + 1))
     elif [ "$updates" = unset ] && [ "$s_updates" = unset ]; then
@@ -1588,7 +1609,7 @@ observe_claude_update_policy() {
       unknown="$unknown $name"
     fi
     record_event "claude-update-policy" "instance" \
-      "$name via $manager ($surface): DISABLE_UPDATES=$updates DISABLE_AUTOUPDATER=$autoupdater; $config_label: installMethod=${method:-unknown} autoUpdates=${auto:-unknown}, settings env DISABLE_UPDATES=${s_updates:-unknown} DISABLE_AUTOUPDATER=${s_auto:-unknown}"
+      "$name via $manager ($surface): DISABLE_UPDATES=$updates DISABLE_AUTOUPDATER=$autoupdater; $config_label: installMethod=${method:-unknown} autoUpdates=${auto:-unknown}, settings env DISABLE_UPDATES=${s_updates:-unknown} DISABLE_AUTOUPDATER=${s_auto:-unknown}; settings files: ${s_files:-unknown}"
   done < "$CLAUDE_INSTANCE_ENV_FILE"
   if [ "$total" -eq 0 ]; then
     policy_summary "none" "no service instance was inventoried"

@@ -97,7 +97,7 @@
         "surfaces": [
           "launcher movement between runs and during this job's plugin and MCP listing (claude-launcher)",
           "service environment per instance: DISABLE_UPDATES, DISABLE_AUTOUPDATER, CLAUDE_CONFIG_DIR as set/unset (claude-update-policy)",
-          "settings on disk per config directory: installMethod, autoUpdates, settings env flags (claude-update-policy)",
+          "settings on disk per config directory: installMethod, autoUpdates, settings env flags from managed settings, settings.local.json and settings.json (claude-update-policy)",
           "this job's environment (claude-update-policy)",
           "running CLI processes for this user, counts only (claude-processes)"
         ],

@@ -290,6 +290,39 @@ describe('agent CLI update policy surfaces', () => {
     expect(summary.message).not.toContain('alpha');
   }, T);
 
+  it('reads settings.local.json over settings.json, and managed settings over both', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    writeJson(path.join(h.home, '.claude/settings.json'), { env: { DISABLE_UPDATES: '0' } });
+    writeJson(path.join(h.home, '.claude/settings.local.json'), { env: { DISABLE_UPDATES: 'true' } });
+    const local = events(run(h, ['--check']), 'claude-update-policy');
+    expect(local.find((e) => e.status === 'instance')!.message)
+      .toContain('settings env DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset; settings files: settings.local.json+settings.json');
+    expect(local.at(-1)).toMatchObject({ status: 'disabled' });
+
+    // Managed settings apply to every config directory and take precedence.
+    const managed = path.join(h.home, 'managed-settings.json');
+    writeJson(managed, { env: { DISABLE_UPDATES: '0' } });
+    const overridden = events(run(h, ['--check'], { WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE: managed }), 'claude-update-policy');
+    expect(overridden.find((e) => e.status === 'instance')!.message)
+      .toContain('settings env DISABLE_UPDATES=set-unrecognized DISABLE_AUTOUPDATER=unset; settings files: managed+settings.local.json+settings.json');
+    expect(overridden.at(-1)).toMatchObject({ status: 'unknown' });
+  }, T);
+
+  it('reports settings that cannot be parsed as unreadable, never as unset', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    mkdirSync(path.join(h.home, '.claude'), { recursive: true });
+    writeFileSync(path.join(h.home, '.claude/settings.json'), '{not json');
+    writeFileSync(path.join(h.home, '.claude.json'), '[1,2]');
+    const policy = events(run(h, ['--check']), 'claude-update-policy');
+    const instance = policy.find((e) => e.status === 'instance')!;
+    expect(instance.message).toContain('settings env DISABLE_UPDATES=unreadable DISABLE_AUTOUPDATER=unreadable');
+    // An array is readable JSON but not a config object: its keys read as absent.
+    expect(instance.message).toContain('installMethod=absent autoUpdates=absent');
+    expect(policy.at(-1)).toMatchObject({ status: 'unknown' });
+  }, T);
+
   it('reports an unknown policy when the service definitions were not read this run', () => {
     const h = idleHarness();
     const manifest = path.join(h.home, 'broken-manifest.json');

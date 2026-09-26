@@ -227,6 +227,8 @@ export function makeHarness(): Harness {
     WHATSOUP_ALERT_BIN: path.join(fakeBin, 'alert'),
     WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX: path.join(home, 'npm-global'),
     WHATSOUP_HARNESS_SERVICE_MANAGER: 'launchd',
+    // The host's own managed settings file must not leak into a test.
+    WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE: path.join(home, 'no-managed-settings.json'),
     HM_FIXTURE_SCRIPT: behaviour,
     HM_FIXTURE_LOG: h.fixtureLog,
     HM_FIXTURE_MODE: h.modeFile,
