@@ -17,7 +17,7 @@ import {
   assertMutableBeadFields, activityFeed,
 } from '../../core/substrate/beads.ts';
 import {
-  createTrigger, listTriggers, listTriggerRunsRedacted, pauseTrigger, extendTrigger, prepareTrigger,
+  createTrigger, listTriggers, listTriggerRunsRedacted, pauseTrigger, extendTrigger, resumeTrigger, prepareTrigger,
 } from '../../core/substrate/triggers.ts';
 import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import {
@@ -614,18 +614,54 @@ export function registerSubstrateTools(
   registry.register({
     name: 'extend_trigger',
     sensitive: true,
-    description: 'Push trigger terminal_at forward (clamped to policy max); a paused trigger is also reactivated and becomes due immediately. Admin only.',
+    description: 'Push trigger terminal_at forward (clamped to policy max). Changes only the deadline: a paused trigger stays paused, and the result then carries status "paused" with a hint to call resume_trigger. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({ id: z.number().int().positive(), until: z.number().int().positive() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
       const p = raw as { id: number; until: number };
-      // #2417: extend_trigger also reactivates paused triggers and emits
-      // idempotent recovery clear.
-      extendTrigger(deps.db, p.id, { until: p.until, maxTtlHours: deps.memory.watchTtl.maxHours, actor: 'user' });
-      clearAlertSourceChecked(deps.instanceName, 'trigger_forbidden_target');
+      // #3608: deadline-only, per #2417. Resuming is resume_trigger's job.
+      const res = extendTrigger(deps.db, p.id, { until: p.until, maxTtlHours: deps.memory.watchTtl.maxHours, actor: 'user' });
+      if (res.status === 'paused') {
+        return {
+          ok: true,
+          status: 'paused',
+          terminal_at: res.terminal_at,
+          hint: `trigger ${p.id} remains paused; call resume_trigger to reactivate it`,
+        };
+      }
       return { ok: true };
+    },
+  });
+
+  registry.register({
+    name: 'resume_trigger',
+    sensitive: true,
+    description: 'Reactivate a paused trigger. Re-validates the stored spec with the creation rules, schedules the next regular occurrence (fire_now makes it due immediately), keeps terminal_at unless until is given (clamped to policy max), and records a trigger_resumed event. Resuming a trigger paused for a forbidden report chat clears the trigger_forbidden_target alert. An already-active trigger is left unchanged (resumed: false); expired or cancelled triggers are refused. Admin only.',
+    scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
+    schema: z.object({
+      id: z.number().int().positive(),
+      fire_now: z.boolean().optional(),
+      until: z.number().int().positive().optional(),
+    }),
+    handler: async (raw, session) => {
+      assertAdmin(deps, session);
+      const p = raw as { id: number; fire_now?: boolean; until?: number };
+      const res = resumeTrigger(deps.db, p.id, {
+        actor: 'user',
+        fireNow: p.fire_now,
+        until: p.until,
+        maxTtlHours: deps.memory.watchTtl.maxHours,
+        enableUrlWatch: deps.enableUrlWatch,
+      }, clock);
+      // #2417: the forbidden-target retirement's recovery clear rides the
+      // resume that actually reactivates such a trigger.
+      if (res.resumed && res.paused_reason === 'forbidden_target') {
+        clearAlertSourceChecked(deps.instanceName, 'trigger_forbidden_target');
+      }
+      return { ok: true, ...res };
     },
   });
 

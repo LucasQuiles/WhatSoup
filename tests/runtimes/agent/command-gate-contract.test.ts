@@ -347,7 +347,7 @@ import {
   runStopCommand,
   isStopTeardownInFlight,
 } from '../../../src/runtimes/agent/runtime-stop-command.ts';
-import { GLOBAL_CONVERSATION_KEY } from '../../../src/core/conversation-key.ts';
+import { GLOBAL_CONVERSATION_KEY, toConversationKey } from '../../../src/core/conversation-key.ts';
 import { COMMAND_REGISTRY } from '../../../src/runtimes/agent/command-registry.ts';
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
@@ -693,6 +693,130 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       releaseTurn();
     }
   });
+
+  async function expectStopCancellationDurability(scope: Extract<Scope, 'per_chat' | 'shared'>): Promise<void> {
+    // Exercise both production TurnQueue owners with a real durability engine:
+    // the first work item is published to the provider and the second remains
+    // queued when an operator sends /stop. Both terminal rows must retain the
+    // cancellation class; neither may collapse to the legacy classless
+    // admission `unknown` nor the genuine-crash `session_crash`.
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = makeRuntime(scope, db, messenger);
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    let releaseTurn: () => void = () => {};
+    let activeWork: Promise<void> | undefined;
+    let pendingWork: Promise<void> | undefined;
+    let stopWork: Promise<void> | undefined;
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+
+    const readTerminal = (seq: number) => ({
+      inbound: duraDb.raw.prepare(
+        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
+      ).get(seq),
+      terminal: duraDb.raw.prepare(
+        `SELECT attempt_kind, attempt_failure_class, inbound_disposition,
+                delivery_kind, reply_guarantee_disarmed
+           FROM turn_terminal_records WHERE inbound_seq = ?`,
+      ).get(seq),
+    });
+
+    const pendingRuntimeTurns = (): number | undefined => (
+      scope === 'per_chat'
+        ? (runtime as unknown as { perChatTurnQueues: Map<string, { pending: number }> })
+          .perChatTurnQueues.get(DM_CHAT)?.pending
+        : (runtime as unknown as { turnQueue: { pending: number } }).turnQueue.pending
+    );
+
+    try {
+      const activeSeq = durability.journalInbound(
+        'm-stop-active', toConversationKey(DM_CHAT), DM_CHAT, 'agent',
+      );
+      activeWork = runtime.handleMessage(makeMsg({
+        messageId: 'm-stop-active', content: 'active work', senderJid: ADMIN_WA, inboundSeq: activeSeq,
+      }));
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+      if (scope === 'per_chat') {
+        expect(mockSession.sendTurn).toHaveBeenCalledWith('active work');
+      } else {
+        // Shared runtime wraps user text with participant metadata before it
+        // crosses the provider boundary; prove the active work is still this
+        // test's turn without coupling the cancellation assertion to that
+        // separate prompt-shaping contract.
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.objectContaining({
+          userText: 'active work',
+        }));
+      }
+
+      const pendingSeq = durability.journalInbound(
+        'm-stop-pending', toConversationKey(DM_CHAT), DM_CHAT, 'agent',
+      );
+      pendingWork = runtime.handleMessage(makeMsg({
+        messageId: 'm-stop-pending', content: 'queued work', senderJid: ADMIN_WA, inboundSeq: pendingSeq,
+      }));
+      await vi.waitFor(() => expect(pendingRuntimeTurns()).toBe(1));
+
+      stopWork = runtime.handleMessage(makeMsg({
+        messageId: 'm-stop-control', content: '/stop', senderJid: ADMIN_WA,
+      }));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((call) => String(call[1] ?? ''))
+          .some((message) => message.includes('/stop received mid-turn')),
+      ).toBe(true));
+      // The queue receipt is the teardown's first irreversible action.  Wait
+      // for it before releasing the provider so its ordinary completion cannot
+      // win the terminal race this test is meant to exercise.
+      await vi.waitFor(() => expect(pendingRuntimeTurns()).toBe(0));
+      releaseTurn();
+      await stopWork;
+      await activeWork;
+      await pendingWork;
+
+      await vi.waitFor(() => {
+        expect(readTerminal(activeSeq).terminal).toBeDefined();
+        expect(readTerminal(pendingSeq).terminal).toBeDefined();
+      });
+
+      const expected = {
+        inbound: {
+          processing_status: 'failed',
+          terminal_reason: 'error',
+          failure_class: 'operator_cancelled',
+        },
+        terminal: {
+          attempt_kind: 'failed',
+          attempt_failure_class: 'operator_cancelled',
+          inbound_disposition: 'failed_terminal',
+          delivery_kind: 'none',
+          reply_guarantee_disarmed: 0,
+        },
+      };
+      expect(readTerminal(activeSeq)).toEqual(expected);
+      expect(readTerminal(pendingSeq)).toEqual(expected);
+      expect(readTerminal(activeSeq).inbound).not.toMatchObject({ failure_class: 'unknown' });
+      expect(readTerminal(pendingSeq).inbound).not.toMatchObject({ failure_class: 'session_crash' });
+    } finally {
+      releaseTurn();
+      await Promise.allSettled([activeWork, pendingWork, stopWork].filter(
+        (work): work is Promise<void> => work !== undefined,
+      ));
+      await runtime.shutdown();
+      duraDb.close();
+    }
+  }
+
+  it.each(['per_chat', 'shared'] as const)(
+    '#2445: a mid-turn /stop durably classifies active and queued %s work as operator_cancelled',
+    async (scope) => {
+      await expectStopCancellationDurability(scope);
+    },
+  );
 
   it('#2949 N1: a mid-turn compound /stop refuses the body instead of dispatching it', async () => {
     // Registration gave /stop a compound-body path it never had as forwarded

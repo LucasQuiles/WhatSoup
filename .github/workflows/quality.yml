@@ -320,6 +320,9 @@ jobs:
       - name: Zero-byte tracked file guard
         run: npm run guard:zero-byte-tracked
 
+      - name: SQL literal schema guard
+        run: npm run guard:sql-schema
+
       - name: Hardcoded /tmp/ path guard
         run: npm run guard:hardcoded-tmpdir
 

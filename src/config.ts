@@ -31,6 +31,8 @@ import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR } from './lib/time-units.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
+import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
+import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -460,6 +462,16 @@ let bootstrapConfig: RuntimeBootstrapConfig | null = null;
 if (instanceRaw) {
   bootstrapConfig = parseRuntimeBootstrapConfig(instanceRaw);
   instance = bootstrapConfig.raw;
+}
+
+const clientOutputPolicySource = getLoadedInstanceConfigOrNull() ?? instance;
+const parsedClientOutputPolicies = parseClientOutputPoliciesForInstance(
+  clientOutputPolicySource ?? {},
+);
+if (!parsedClientOutputPolicies.ok) {
+  throw new ConfigValidationError(
+    `${parsedClientOutputPolicies.error.field} ${parsedClientOutputPolicies.error.reason}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,6 +1223,8 @@ function configCapabilityObligations() {
 }
 
 export const config = {
+  clientOutputPolicies: parsedClientOutputPolicies.registry,
+
   // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
   // with a malformed body fails startup as EX_CONFIG — never a partial activation.
   capabilityObligations: configCapabilityObligations(),
@@ -1225,6 +1239,10 @@ export const config = {
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.
   nlRouting: resolvedAgentOptions['nlRouting'] === true,
+  // #2949 queued receipt: a per_chat message that waits behind a running turn
+  // gets one "queued behind the current task" notice (per-chat cooldown).
+  // Default ON; `agentOptions.queuedTurnReceipt: false` turns it off.
+  queuedTurnReceipt: resolvedAgentOptions['queuedTurnReceipt'] !== false,
   // Intent→provider tier map for NL routing ('strongest'/'fastest'). Unset
   // tiers resolve to the default route honestly — never a hidden opinion.
   nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,

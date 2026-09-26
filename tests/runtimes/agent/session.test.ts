@@ -696,6 +696,38 @@ describe('SessionManager', () => {
     expect(callArgs[1]).toContain('bypassPermissions');
   });
 
+  // #3421 step 1: the session's MCP helpers inherit its token from the child env,
+  // on both the persistent spawn and the spawn-per-turn path.
+  it('hands the session token to the persistent child and to each spawn-per-turn child', async () => {
+    const persistent = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionToken: 'session-token-persistent',
+    });
+    await persistent.spawnSession();
+    const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    vi.mocked(spawn).mockClear();
+    const perTurn = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSessionToken: 'session-token-per-turn',
+    });
+    await perTurn.spawnSession();
+    void perTurn.sendTurn('hello').catch(() => {});
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+    const perTurnEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
@@ -7571,6 +7603,81 @@ describe('session.ts uncovered-branch coverage', () => {
 
     secondChild._closeCb?.(0, null);
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it.each(['stdout', 'stderr'] as const)('reports OpenCode %s diagnostic progress and ignores stale-child output after handoff', async (stream) => {
+    let now = 20_000;
+    const firstChild = makeMockChild(12011);
+    const secondChild = makeMockChild(12012);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    try {
+      const gate = new ProviderExecutionGate({ now: () => now });
+      const first = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'first-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      const second = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: 'second-progress@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      await first.spawnSession();
+      await second.spawnSession();
+
+      await first.sendTurn('first');
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('first-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_010;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'first live progress' },
+      })}\n`));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      now = 20_015;
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=tool-running\n'));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      const secondTurn = second.sendTurn('second');
+      await Promise.resolve();
+      now = 20_020;
+      firstChild._closeCb?.(0, null);
+      await secondTurn;
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('second-progress@s.whatsapp.net'),
+        activePhase: 'executing',
+        progressAgeMs: 0,
+      });
+
+      now = 20_030;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        type: 'text', part: { text: 'stale progress' },
+      })}\n`));
+      firstChild[stream].emit('data', Buffer.from('timestamp=2026-09-21T00:00:00Z level=INFO progress=stale-tool\n'));
+      expect(gate.snapshot()).toMatchObject({
+        activePhase: 'executing',
+        progressAgeMs: 10,
+      });
+
+      secondChild._closeCb?.(0, null);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.mocked(spawn).mockReset();
+    }
   });
 
   it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {

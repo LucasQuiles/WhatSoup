@@ -22,7 +22,7 @@
 ## Related Runbooks
 
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
-- [Release Snapshot Deployment](runbooks/release-deployment.md)
+- [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
 
 ---
@@ -1021,7 +1021,29 @@ journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOu
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
 
-**If logged out (credentials expired):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
+**A 401 is not proof the device was removed.** Read the authenticated health body's
+`whatsapp.connection.disconnect_decision` (the transport's own decision for the
+last close; `null` after a successful open or at process start) and
+`auth_failure_class`:
+
+| `disconnect_decision.classification` | `auth_failure_class` | HTTP | Meaning / action |
+|---|---|---|---|
+| `confirmed_device_removed` | `serverside_logout_irreversible` | 503 | The stream:error carried `conflict type="device_removed"`. The server removed the linked device; re-pair (§6.1) after owner approval. |
+| `ambiguous_401_reconnecting` | `auth_401_ambiguous_retrying` | 200 (degraded) | An inspected 401 without `device_removed`. The transport is spending its **one** bounded reconnect. Wait one poll. |
+| `ambiguous_401_parked` | `auth_401_ambiguous_parked` | 503 | A second ambiguous 401 after the bounded reconnect. The transport stopped; removal is **not** confirmed. Check the primary phone's Linked Devices before any re-pair. |
+| `uninspected_401_conservative_exit` | `auth_401_uninspected_exit` | 503 | A 401 whose stream:error node could not be inspected. Conservative exit; removal is **not** confirmed. Check Linked Devices first. |
+
+The parked and uninspected classes are no-restart for every watchdog (a restart
+would buy a fresh bounded retry, park again and loop). The decision is
+process-local: a restart starts with no decision and a fresh bounded retry. A
+health body without the `disconnect_decision` key comes from an older binary or a
+non-Baileys transport; consumers keep the old conservative rule for it (any
+401/`loggedOut` reads as `serverside_logout_irreversible`). The same fields are
+in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
+`conflict_inspected:`), whose title and `confidence` say whether removal was
+confirmed.
+
+**If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
 ```bash
@@ -1900,6 +1922,37 @@ database (dry-run previews taken before the loss will no longer match confirmed 
 back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
+
+#### Close every caught-up operator catch-up recovery (batch)
+
+`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
+conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
+rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
+later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
+closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
+adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
+reconciler's.
+
+```bash
+npm --silent run close-recovery-catchups -- \
+  --db "$DB" --actor operator:IDENTITY --evidence-ref evidence:REFERENCE
+```
+
+The dry run (the default) changes no database rows. It still creates the redaction salt file described
+above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
+usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
+If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
+and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
+repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
+budgets.
+
+Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
+`closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same
+keyed fingerprints as the single-group command (`planFingerprint`, `conversationFingerprint`,
+`catchupSeqFingerprint`), plus `nSourceSeqs`, `status` (`ready`, `closed`, `idempotent` or `skipped`), and
+a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `error`). Raw identifiers,
+chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
+`busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
 
 ### 7.7 Useful SQL Queries
 

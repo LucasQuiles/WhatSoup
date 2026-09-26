@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// Only the recovery clear is observed; every other emit-alert export stays real.
+const clearAlertSourceCheckedMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/emit-alert.ts')>()),
+  clearAlertSourceChecked: clearAlertSourceCheckedMock,
+}));
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -18,7 +25,7 @@ const EXPECTED_TOOLS = [
   'create_agent_job', 'create_watch', 'capture_task', 'capture_observation',
   'list_beads', 'get_activity', 'get_bead', 'update_bead', 'complete_bead', 'cancel_bead',
   'approve_proposal', 'reject_proposal',
-  'list_triggers', 'list_trigger_runs', 'pause_trigger', 'extend_trigger',
+  'list_triggers', 'list_trigger_runs', 'pause_trigger', 'extend_trigger', 'resume_trigger',
   'get_profile', 'list_entities', 'add_alias', 'merge_entities', 'forget_observation',
   'regenerate_vault',
 ];
@@ -26,7 +33,7 @@ const EXPECTED_TOOLS = [
 const SENSITIVE_TOOLS = [
   'create_agent_job', 'create_watch', 'regenerate_vault', 'capture_task', 'capture_observation',
   'update_bead', 'complete_bead', 'cancel_bead', 'approve_proposal', 'reject_proposal',
-  'pause_trigger', 'extend_trigger', 'add_alias', 'merge_entities', 'forget_observation',
+  'pause_trigger', 'extend_trigger', 'resume_trigger', 'add_alias', 'merge_entities', 'forget_observation',
 ];
 const READ_TOOLS = ['list_beads', 'get_activity', 'get_bead', 'list_triggers', 'list_trigger_runs', 'get_profile', 'list_entities'];
 
@@ -74,6 +81,7 @@ describe('substrate MCP tools', () => {
   let dbPath: string; let vaultPath: string; let db: Database; let registry: ToolRegistry;
 
   beforeEach(() => {
+    clearAlertSourceCheckedMock.mockClear();
     dbPath = tmpFile();
     vaultPath = tmpDir();
     db = new Database(dbPath); db.open();
@@ -86,7 +94,7 @@ describe('substrate MCP tools', () => {
     if (existsSync(vaultPath)) rmSync(vaultPath, { recursive: true, force: true });
   });
 
-  it('registers all 21 tools', () => {
+  it('registers all 23 tools', () => {
     const names = registry.listTools(adminSession).map(t => t.name);
     for (const name of EXPECTED_TOOLS) expect(names).toContain(name);
   });
@@ -364,7 +372,7 @@ describe('substrate MCP tools', () => {
     expect(after.triggers[0].status).toBe('paused');
   });
 
-  it('extend_trigger reactivates a paused cron agent job through the registry', async () => {
+  async function pausedDigestJob() {
     const res = parseResult(await registry.call('create_agent_job', {
       prompt: 'daily digest',
       schedule: { kind: 'schedule.cron', expr: '30 8 * * *' },
@@ -373,14 +381,81 @@ describe('substrate MCP tools', () => {
     expect(parseResult(await registry.call('pause_trigger', { id: res.trigger_id }, adminSession))).toEqual({ ok: true });
     const paused = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
     expect(paused.triggers[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+    return res as { bead_id: number; trigger_id: number };
+  }
 
+  it('extend_trigger on a paused trigger moves only the deadline and points at resume_trigger (#3608)', async () => {
+    const job = await pausedDigestJob();
     const until = Math.floor(Date.now() / 1000) + 48 * 3600;
-    expect(parseResult(await registry.call('extend_trigger', { id: res.trigger_id, until }, adminSession))).toEqual({ ok: true });
 
-    const resumed = parseResult(await registry.call('list_triggers', { bead_id: res.bead_id }, adminSession));
-    expect(resumed.triggers[0].status).toBe('active');
-    expect(resumed.triggers[0].next_fire_at).toBeGreaterThan(0);
-    expect(resumed.triggers[0].terminal_at).toBe(until);
+    const out = parseResult(await registry.call('extend_trigger', { id: job.trigger_id, until }, adminSession));
+
+    expect(out).toEqual({
+      ok: true, status: 'paused', terminal_at: until,
+      hint: `trigger ${job.trigger_id} remains paused; call resume_trigger to reactivate it`,
+    });
+    const after = parseResult(await registry.call('list_triggers', { bead_id: job.bead_id }, adminSession));
+    expect(after.triggers[0]).toMatchObject({ status: 'paused', next_fire_at: null, terminal_at: until });
+    expect(clearAlertSourceCheckedMock).not.toHaveBeenCalled();
+  });
+
+  it('resume_trigger reactivates a paused cron agent job at its next regular slot and keeps it open-ended (#3608, #3609)', async () => {
+    const job = await pausedDigestJob();
+    const before = Math.floor(Date.now() / 1000);
+
+    const out = parseResult(await registry.call('resume_trigger', { id: job.trigger_id }, adminSession));
+
+    expect(out).toMatchObject({ ok: true, resumed: true, status: 'active', terminal_at: null, paused_reason: null });
+    expect(out.next_fire_at).toBeGreaterThan(before);
+    const after = parseResult(await registry.call('list_triggers', { bead_id: job.bead_id }, adminSession));
+    expect(after.triggers[0]).toMatchObject({ status: 'active', next_fire_at: out.next_fire_at, terminal_at: null });
+    // A manual pause is not a forbidden-target retirement, so no alert clear.
+    expect(clearAlertSourceCheckedMock).not.toHaveBeenCalled();
+  });
+
+  it('resume_trigger is idempotent on an active trigger', async () => {
+    const job = await pausedDigestJob();
+    const first = parseResult(await registry.call('resume_trigger', { id: job.trigger_id, fire_now: true }, adminSession));
+    expect(first).toMatchObject({ resumed: true });
+
+    const second = parseResult(await registry.call('resume_trigger', { id: job.trigger_id, fire_now: true }, adminSession));
+
+    expect(second).toEqual({
+      ok: true, resumed: false, status: 'active',
+      next_fire_at: first.next_fire_at, terminal_at: null, paused_reason: null,
+    });
+  });
+
+  it('resume_trigger clears the trigger_forbidden_target alert only when it resumes a forbidden-target retirement', async () => {
+    const job = await pausedDigestJob();
+    db.raw.prepare(
+      `INSERT INTO bead_events (bead_id, event_type, payload_json, actor, created_at) VALUES (?, 'trigger_paused', ?, 'trigger-poller', ?)`,
+    ).run(job.bead_id, JSON.stringify({ trigger_id: job.trigger_id, reason: 'forbidden_target' }), Math.floor(Date.now() / 1000));
+
+    const out = parseResult(await registry.call('resume_trigger', { id: job.trigger_id }, adminSession));
+
+    expect(out).toMatchObject({ resumed: true, paused_reason: 'forbidden_target' });
+    expect(clearAlertSourceCheckedMock).toHaveBeenCalledTimes(1);
+    expect(clearAlertSourceCheckedMock).toHaveBeenCalledWith('test', 'trigger_forbidden_target');
+  });
+
+  it('resume_trigger is admin gated like extend_trigger and leaves the trigger paused for a guest', async () => {
+    const job = await pausedDigestJob();
+    const until = Math.floor(Date.now() / 1000) + 3600;
+
+    const resume = await registry.call('resume_trigger', { id: job.trigger_id }, guestSession);
+    const extend = await registry.call('extend_trigger', { id: job.trigger_id, until }, guestSession);
+
+    expect(resume.isError).toBe(true);
+    expect(resume.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('resume_trigger'));
+    expect(extend.content[0].text).toBe(ADMIN_REQUIRED_DENIAL('extend_trigger'));
+    const after = parseResult(await registry.call('list_triggers', { bead_id: job.bead_id }, adminSession));
+    expect(after.triggers[0]).toMatchObject({ status: 'paused', next_fire_at: null });
+  });
+
+  it('resume_trigger rejects malformed input through the Zod schema', async () => {
+    const res = await registry.call('resume_trigger', { id: 1, fire_now: 'yes' }, adminSession);
+    expect(res.isError).toBe(true);
   });
 
   it('create_agent_job supports one-shot at-time schedules', async () => {
