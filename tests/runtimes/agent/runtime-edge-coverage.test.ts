@@ -1901,6 +1901,63 @@ describe('AgentRuntime edge coverage', () => {
     expect(replacementQueue.enqueueText).not.toHaveBeenCalled();
   });
 
+  it('routes a failed per-chat fallback replay through the scope ref a rekey updated, even when none was registered', async () => {
+    // The held turn has no registered scope ref. The scheduler must register the
+    // one it creates, so replay admission keeps it and a rekey during the replay
+    // reaches the failure path; otherwise the failure resolves a retired key,
+    // finds no queue, and leaves the turn degraded with its completion unsettled.
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime) as unknown as RuntimeView & {
+      perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
+      pendingTurnText: Map<string, string>;
+      pendingTurnActorJid: Map<string, string>;
+    };
+    installDurabilityStub(runtime);
+    const mapKey = 'rekey-source-edge@s.whatsapp.net';
+    const rekeyedMapKey = 'rekey-target-edge@s.whatsapp.net';
+    const sourceQueue = makeQueue(mapKey);
+    const rekeyedQueue = makeQueue(rekeyedMapKey);
+    state.chatQueues.set(mapKey, sourceQueue);
+    state.chatQueues.set(rekeyedMapKey, rekeyedQueue);
+    const replayText = 'retry the unregistered per-chat turn';
+    const held = runtimeContext('per_chat', mapKey, sourceQueue.targetChatJid, 51, 'turn-unregistered-ref', {}, replayText);
+    state.perChatRuntimeTurnContexts.set(mapKey, [held]);
+    state.perChatInboundSeqQueue.set(mapKey, [51]);
+    state.pendingTurnText.set(mapKey, replayText);
+    state.pendingTurnActorJid.set(mapKey, 'sender-edge@s.whatsapp.net');
+    expect(state.perChatRuntimeTurnScopeRefs.has(held.identity.logicalTurnId)).toBe(false);
+    state.replayTurnOnFallback = vi.fn(async () => {
+      // A LID->phone rekey mid-replay: per-chat state moves to the canonical key
+      // and every registered scope ref is updated in place.
+      const registered = state.perChatRuntimeTurnScopeRefs.get(held.identity.logicalTurnId);
+      if (registered) registered.value = rekeyedMapKey;
+      state.perChatRuntimeTurnContexts.set(rekeyedMapKey, state.perChatRuntimeTurnContexts.get(mapKey)!);
+      state.perChatRuntimeTurnContexts.delete(mapKey);
+      state.perChatInboundSeqQueue.set(rekeyedMapKey, state.perChatInboundSeqQueue.get(mapKey)!);
+      state.perChatInboundSeqQueue.delete(mapKey);
+      throw new FallbackReplayOwnershipChangedError();
+    });
+    const activation = state.activateProviderFallback(null, 'usage-limit');
+    expect(activation).not.toBeNull();
+
+    expect(state.scheduleFallbackReplay({
+      activation: activation!,
+      chatJid: sourceQueue.targetChatJid,
+      mapKey,
+      oldSession: null,
+    })).toBe(true);
+    // The primary result handler consumes the continuation deferral after
+    // scheduling (production order); only then may the failure path finalize.
+    (state as unknown as {
+      runtimeTurnCoordinator: { consumeRuntimeTurnContinuationDeferral(context: RuntimeTurnContext): boolean };
+    }).runtimeTurnCoordinator.consumeRuntimeTurnContinuationDeferral(held);
+
+    await vi.waitFor(() => expect(rekeyedQueue.enqueueText).toHaveBeenCalledWith(
+      '_The backup model could not continue this turn. Please try again._',
+    ));
+    expect(sourceQueue.enqueueText).not.toHaveBeenCalled();
+  });
+
   it('runs a control repair turn and escalates on timeout', async () => {
     mockConfig.controlPeers = new Map([['loops', '15550000001']]);
     mockConfig.adminPhones = new Set(['15550000002']);

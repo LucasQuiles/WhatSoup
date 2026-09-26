@@ -6432,16 +6432,38 @@ export class AgentRuntime implements Runtime {
     if (!queue) throw new Error('Per-chat runtime turn has no outbound queue');
     context = this.runtimeTurnCoordinator.rebindRuntimeTurnForDispatch(context, session, mapKey);
     const contexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
-    if (contexts.length > 0) {
+    // A provider-fallback replay dispatches the very turn that still heads this
+    // FIFO: activation takes it from contexts[0] and marks it a continuation
+    // before the replay re-enters per-chat dispatch. Re-bind that held head in
+    // place (its admission evidence and completion already exist) instead of
+    // treating the turn as a conflicting owner of itself. Any other occupant
+    // is still a conflict.
+    const heldContinuation = contexts.length === 1
+      && contexts[0]!.identity.logicalTurnId === context.identity.logicalTurnId
+      && this.runtimeTurnCoordinator.isRuntimeTurnContinuation(contexts[0]!);
+    if (contexts.length > 0 && !heldContinuation) {
       throw new PerChatTurnFifoOwnerConflictError(mapKey);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
-    contexts.push(context);
+    if (heldContinuation) {
+      contexts[0] = context;
+    } else {
+      this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
+      contexts.push(context);
+    }
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
-    this.perChatRuntimeTurnScopeRefs.set(
-      context.identity.logicalTurnId,
-      scopeRef ?? { value: mapKey },
-    );
+    // A held continuation keeps its registered scope ref: the fallback failure
+    // path captured that object, so a later rekey must keep reaching it.
+    const registeredScopeRef = heldContinuation
+      ? this.perChatRuntimeTurnScopeRefs.get(context.identity.logicalTurnId)
+      : undefined;
+    if (registeredScopeRef === undefined) {
+      this.perChatRuntimeTurnScopeRefs.set(
+        context.identity.logicalTurnId,
+        scopeRef ?? { value: mapKey },
+      );
+    }
+    const existing = heldContinuation ? this.perChatRuntimeTurnCompletions.get(mapKey) : undefined;
+    if (existing) return existing;
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
@@ -10175,11 +10197,20 @@ export class AgentRuntime implements Runtime {
         }, 'refusing fallback replay with mismatched captured turn context');
         return false;
       }
-      const scopeRef = args.mapKey === undefined
-        ? undefined
-        : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
-          ?? { value: args.mapKey };
       if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      let scopeRef: PerChatRuntimeScopeRef | undefined;
+      if (args.mapKey !== undefined) {
+        scopeRef = this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId);
+        if (scopeRef === undefined) {
+          // Register the ref this replay's failure path will read, so replay
+          // admission of the held turn keeps THIS object and a rekey during the
+          // replay is visible to the failure path (a fresh, unregistered ref
+          // would keep the retired key and strand the turn). Finalization of the
+          // held turn deletes it by logical turn id, as for any registered ref.
+          scopeRef = { value: args.mapKey };
+          this.perChatRuntimeTurnScopeRefs.set(runtimeContext.identity.logicalTurnId, scopeRef);
+        }
+      }
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(runtimeContext, (result) => {
         if (result.terminal.attemptOutcome.kind !== 'completed') return;
         this.fallbackMetrics.recordReplay();
