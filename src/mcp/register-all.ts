@@ -209,13 +209,17 @@ export function registerAllTools(
     dbWrapper: db, adminPhones: config.adminPhones,
     internalPeerJids: config.internalPeerJids,
     fallbackActive: options.fallbackActive,
+    clientOutputPolicies: config.clientOutputPolicies,
   }));
   runModule('media', true, () => mediaTools.registerMediaTools(registry, {
     connection, db, adminPhones: config.adminPhones,
     internalPeerJids: config.internalPeerJids,
     fallbackActive: options.fallbackActive,
+    clientOutputPolicies: config.clientOutputPolicies,
   }));
-  runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
+  runModule('voice', true, () => voiceTools.registerVoiceTools(registry, {
+    connection, db, clientOutputPolicies: config.clientOutputPolicies,
+  }));
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));
   runModule('status', true, () => statusTools.registerStatusTools(registry, { db, getSock }));
   runModule('scheduling', true, () => schedulingTools.registerSchedulingTools(registry, { db }));

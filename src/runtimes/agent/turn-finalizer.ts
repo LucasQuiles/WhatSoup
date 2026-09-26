@@ -38,7 +38,16 @@ export type RuntimeTurnFinalizerDurability = Pick<
 };
 
 export type RuntimeAnswerEvidence =
-  | { readonly kind: 'ready'; readonly opIds: readonly number[] }
+  | {
+    readonly kind: 'ready';
+    readonly opIds: readonly number[];
+    /**
+     * #3613: answers the client output policy withheld this turn. Absent
+     * means none. A completed turn with no answer op and a withheld answer
+     * ends as withheld_by_policy instead of an unknown terminal failure.
+     */
+    readonly withheldAnswerCount?: number;
+  }
   | { readonly kind: 'failed' };
 
 export interface FinalizeRuntimeTurnParams {
@@ -187,7 +196,10 @@ function deriveInboundDisposition(
   if (deliveryEvidence.kind === 'not_sent') {
     return 'failed_terminal';
   }
-  if (attemptOutcome.kind === 'suppressed_by_policy' && deliveryEvidence.kind === 'none') {
+  if (
+    (attemptOutcome.kind === 'suppressed_by_policy' || attemptOutcome.kind === 'withheld_by_policy')
+    && deliveryEvidence.kind === 'none'
+  ) {
     return 'finalized_no_reply_policy';
   }
   if (attemptOutcome.kind === 'failed' && deliveryEvidence.kind === 'none') {
@@ -334,11 +346,20 @@ export function finalizeRuntimeTurn(
   }
 
   try {
+    // #3613: a completed turn whose only answers the client output policy
+    // withheld is a deliberate terminal outcome, not an empty turn. It
+    // finalizes as finalized_no_reply_policy: no recovery job, no breach alert,
+    // no continuity candidate, and the reply guarantee is disarmed.
+    const withheldAnswerCount = params.answerEvidence.withheldAnswerCount ?? 0;
     const attemptOutcome: AttemptOutcome =
       params.attemptOutcome.kind === 'completed' &&
-      (deliveryEvidence.kind === 'none' || deliveryEvidence.kind === 'not_sent')
-        ? { kind: 'failed', class: 'unknown_terminal' }
-        : params.attemptOutcome;
+      deliveryEvidence.kind === 'none' &&
+      withheldAnswerCount > 0
+        ? { kind: 'withheld_by_policy' }
+        : params.attemptOutcome.kind === 'completed' &&
+          (deliveryEvidence.kind === 'none' || deliveryEvidence.kind === 'not_sent')
+          ? { kind: 'failed', class: 'unknown_terminal' }
+          : params.attemptOutcome;
     const terminal: TurnTerminalResult = {
       identity: params.identity,
       attemptOutcome,

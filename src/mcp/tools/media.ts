@@ -14,7 +14,16 @@ import { createChildLogger } from '../../logger.ts';
 import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
-import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type SessionContext } from '../types.ts';
+import {
+  assertConversationAccess,
+  clientOutputWithheldResult,
+  isPathWithinAllowedRoot,
+  toolError,
+  type SessionContext,
+} from '../types.ts';
+import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
+import { enforceClientOutputPolicyForChat } from '../../core/client-output-policy-gate.ts';
+import { canonicalConversationKey } from '../../core/access-list.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
@@ -59,6 +68,11 @@ export interface MediaDeps {
    * (treats as active — full scrub) rather than silently elevating.
    */
   fallbackActive?: () => boolean;
+  /**
+   * #3613: per-conversation client output policies. When set, send_media
+   * withholds a send whose caption the target conversation's policy rejects.
+   */
+  clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +174,20 @@ export function registerMediaTools(
       const caption = rawCaption !== undefined
         ? redactInternalArtifacts(rawCaption, captionAudience).text
         : rawCaption;
+      // #3613: only the caption is text the policy can judge; media without a
+      // caption is not evaluated.
+      if (rawCaption !== undefined && caption !== undefined) {
+        const captionPolicyGate = enforceClientOutputPolicyForChat({
+          registry: deps.clientOutputPolicies,
+          chatJid,
+          resolveConversationKey: (jid) => canonicalConversationKey(jid, db),
+          sourceText: rawCaption,
+          finalText: caption,
+          messageKind: 'send_media',
+          log,
+        });
+        if (!captionPolicyGate.admitted) return clientOutputWithheldResult(captionPolicyGate);
+      }
       const filenameOverride = params['filename'] as string | undefined;
       const ptt = params['ptt'] as boolean | undefined;
       const seconds = params['seconds'] as number | undefined;
