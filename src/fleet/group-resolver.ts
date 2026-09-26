@@ -18,6 +18,7 @@ import { conversationKeyToJid } from '../core/conversation-key.ts';
 import type { DiscoveredInstance } from './discovery.ts';
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_MINUTE } from '../lib/time-units.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 
 const log = createChildLogger('fleet:group-resolver');
 
@@ -63,14 +64,16 @@ export function __pruneAttemptedCacheForTests(now: number): void {
 /**
  * Queue background resolution for groups missing names.
  * Non-blocking — returns immediately, backfill runs async.
+ * The retry window is judged against `clock` (#2200), defaulting to systemClock.
  */
 export function resolveGroupNames(
   instance: DiscoveredInstance,
   groupKeys: string[],
+  clock: Clock = systemClock,
 ): void {
   if (groupKeys.length === 0) return;
 
-  const now = Date.now();
+  const now = clock.now();
   if (now - lastPruneAt > PRUNE_INTERVAL_MS) {
     pruneAttemptedCache(now);
     lastPruneAt = now;
