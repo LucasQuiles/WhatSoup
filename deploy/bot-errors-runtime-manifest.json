@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "411bd02c098d7b8bc9c7be2b70783e71572e29cf2e3813af96fe0866a4b4e32a",
+      "sha256": "7f485693259cf6a4d1dad7c9aafed20925b3e9dfcecfe642fb43171190f5836c",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -284,7 +284,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "5d154486c67270f587a2265761bb60e3e7d30f10c6de847cfaf39996f2a524f2",
+      "sha256": "639da62c82eb5e9ce51331ac4c59e9bbf60dfd35ea28ef835ee2cd6792236064",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
