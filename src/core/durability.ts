@@ -34,6 +34,10 @@ import {
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import {
+  TerminalRecordInboundCloser,
+  type TerminalRecordInboundCloseEvaluation,
+} from './terminal-record-inbound-close.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 import {
@@ -568,6 +572,11 @@ export interface StuckInboundSweepResult {
    * claimed owning job driven to `exhausted` so the scope becomes admissible.
    */
   reclaimedRecoveryOwned: number;
+  /**
+   * Open inbound rows closed from their own FINAL terminal record (see
+   * terminal-record-inbound-close.ts): the status that record implies.
+   */
+  closedFromTerminalRecord: number;
 }
 
 export interface OutboundOpParams {
@@ -691,6 +700,7 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
   /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
@@ -1368,6 +1378,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.terminalRecordInboundCloser = new TerminalRecordInboundCloser(db);
     this.capabilityObligations = new CapabilityObligationStore(db);
     this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
@@ -3269,6 +3280,7 @@ export class DurabilityEngine {
       let completedTurnDone = 0;
       let failedStale = 0;
       let reclaimedRecoveryOwned = 0;
+      let closedFromTerminalRecord = 0;
 
       const echoed = this.statements.getOpenInboundWithEchoedTerminal.all() as Array<{ seq: number }>;
       const turnDone = this.statements.getStaleTurnDoneNoSuccess.all() as Array<{ seq: number }>;
@@ -3282,13 +3294,17 @@ export class DurabilityEngine {
         job_id: number;
         job_state: string;
       }>;
+      const recordClosable = this.terminalRecordInboundCloser.candidates();
       if (
         echoed.length === 0 &&
         turnDone.length === 0 &&
         staleOpen.length === 0 &&
-        recoveryOwned.length === 0
+        recoveryOwned.length === 0 &&
+        recordClosable.length === 0
       ) {
-        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
+        return {
+          completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned, closedFromTerminalRecord,
+        };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -3348,11 +3364,25 @@ export class DurabilityEngine {
         reclaimedRecoveryOwned += 1;
       }
 
+      for (const seq of recordClosable) {
+        const evaluation = this.terminalRecordInboundCloser.evaluate(seq);
+        if (evaluation.verdict !== 'eligible') {
+          log.warn(
+            { inboundSeq: seq, verdict: evaluation.verdict, reason: 'reason' in evaluation ? evaluation.reason : undefined },
+            'sweepStuckInbound: open inbound behind a final terminal record left untouched',
+          );
+          continue;
+        }
+        this.terminalRecordInboundCloser.applyWithinCallerTransaction(evaluation.mutation);
+        closedFromTerminalRecord += 1;
+      }
+
       const result: StuckInboundSweepResult = {
         completedEchoed,
         completedTurnDone,
         failedStale,
         reclaimedRecoveryOwned,
+        closedFromTerminalRecord,
       };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
@@ -3365,11 +3395,32 @@ export class DurabilityEngine {
         completedEchoed > 0 ||
         completedTurnDone > 0 ||
         failedStale > 0 ||
-        reclaimedRecoveryOwned > 0
+        reclaimedRecoveryOwned > 0 ||
+        closedFromTerminalRecord > 0
       ) {
         log.info(result, 'sweepStuckInbound: finalized stuck inbound rows');
       }
       return result;
+    });
+  }
+
+  /**
+   * Operator close for ONE open inbound left behind a final terminal record.
+   * Evaluates with the sweep's rules (no grace window: the operator names the
+   * row) and, only when `apply` is set and the row is eligible, applies the
+   * status the record implies. Evaluation and write share one transaction.
+   */
+  closeInboundFromTerminalRecord(
+    seq: number,
+    options: { apply: boolean },
+  ): { evaluation: TerminalRecordInboundCloseEvaluation; applied: boolean } {
+    return withImmediateTransaction(this.db, () => {
+      const evaluation = this.terminalRecordInboundCloser.evaluate(seq);
+      if (evaluation.verdict !== 'eligible' || !options.apply) {
+        return { evaluation, applied: false };
+      }
+      this.terminalRecordInboundCloser.applyWithinCallerTransaction(evaluation.mutation);
+      return { evaluation, applied: true };
     });
   }
 

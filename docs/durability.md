@@ -380,7 +380,7 @@ missed (the QR-102 ordering strand), or a turn that finished with no reply and n
 finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
-**15 minutes**, and reconciles four buckets in a single transaction:
+**15 minutes**, and reconciles five buckets in a single transaction:
 
 | Bucket | Selection | Disposition |
 |---|---|---|
@@ -388,12 +388,17 @@ pre-connect recovery. It is wired in `main.ts` to run once at startup and then e
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
+| 5. Open behind a final terminal record | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal` and whose identity matches the inbound; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | the status that record implies, derived by the same mapping live finalization uses (`deriveTerminalInboundMutation`) and validated by the finalize contract: `complete` with `response_echoed` / `no_reply_policy`, or `failed` with the record's failure class |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
 Bucket 4 is the exact inverse: it selects **only** inbound rows owning such a terminal record
-whose delivery can never echo-settle, so the four buckets remain mutually exclusive and no row is
-disposed twice (an echoed terminal op still routes to bucket 1). Each SELECT is bounded to 200 rows so a
+whose delivery can never echo-settle. Bucket 5 selects only rows whose single terminal record is
+final — live finalization writes that record and the inbound status atomically, so such a row is
+left only by an older release — and never a transferred or `unfinalized_retry_owned` record. The
+five buckets remain mutually exclusive and no row is disposed twice (an echoed terminal op
+without a record still routes to bucket 1). A bucket-5 candidate that fails any rule is logged
+and left open. Each SELECT is bounded to 200 rows so a
 large backlog drains over successive sweeps rather than in one long transaction. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
