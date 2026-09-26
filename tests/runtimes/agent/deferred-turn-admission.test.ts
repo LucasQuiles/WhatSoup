@@ -1161,12 +1161,15 @@ describe('deferred-turn admission (#3295 S2)', () => {
      * other owner is itself a live continuation, so only the identity/occupancy
      * checks of replay admission can tell it apart from the held turn.
      */
+    type FifoEntry = { context: RuntimeTurnContext; seq: number };
+
     async function replayAgainstOtherOwner(
       messageId: string,
-      occupy: (held: RuntimeTurnContext, other: RuntimeTurnContext) => RuntimeTurnContext[],
+      occupy: (held: FifoEntry, other: FifoEntry) => FifoEntry[],
     ) {
       makeRuntime({ sessionScope: 'per_chat' });
       const { seq, session: primary, mapKey, held } = await admitTurn(dmJid, messageId, `${messageId} question`);
+      const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
       const queue = queueFor(dmJid);
       let releaseShutdown: (() => void) | undefined;
       primary.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -1174,13 +1177,63 @@ describe('deferred-turn admission (#3295 S2)', () => {
       }));
       primary.emit({ type: 'result', text: usageLimitText });
       await vi.waitFor(() => expect(releaseShutdown).toBeTypeOf('function'));
+      // The other owner is a separately journaled turn with its own inbound seq.
+      const otherSeq = engine.journalInbound(`${messageId}-other`, toConversationKey(dmJid), dmJid, 'agent');
       const other: RuntimeTurnContext = {
         ...held,
-        identity: { ...held.identity, logicalTurnId: `${messageId}-other-owner` },
+        identity: { ...held.identity, logicalTurnId: `${messageId}-other-owner`, inboundSeq: otherSeq },
       };
       expect(lifecycle().runtimeTurnCoordinator.beginRuntimeTurnContinuation(other)).toBe(true);
-      lifecycle().perChatRuntimeTurnContexts.set(mapKey, occupy(held, other));
-      return { seq, primary, mapKey, held, other, queue, releaseShutdown: releaseShutdown! };
+      const fifo = occupy({ context: held, seq }, { context: other, seq: otherSeq });
+      lifecycle().perChatRuntimeTurnContexts.set(mapKey, fifo.map((entry) => entry.context));
+      lifecycle().perChatInboundSeqQueue.set(mapKey, fifo.map((entry) => entry.seq));
+      let heldSettled = false;
+      void heldCompletion.promise.then(() => { heldSettled = true; }, () => { heldSettled = true; });
+      return {
+        seq, otherSeq, primary, mapKey, held, other, queue,
+        releaseShutdown: releaseShutdown!,
+        heldSettled: () => heldSettled,
+        /** Drop the injected owner so shutdown only sees runtime-owned state. */
+        withdrawOther: () => {
+          lifecycle().perChatRuntimeTurnContexts.delete(mapKey);
+          lifecycle().perChatInboundSeqQueue.delete(mapKey);
+          lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+        },
+      };
+    }
+
+    /** Records every unhandled rejection raised while a test runs. */
+    function captureUnhandledRejections(): { reasons: unknown[]; stop(): void } {
+      const reasons: unknown[] = [];
+      const listener = (reason: unknown): void => { reasons.push(reason); };
+      process.on('unhandledRejection', listener);
+      return { reasons, stop: () => { process.off('unhandledRejection', listener); } };
+    }
+
+    /**
+     * The refused replay's failure handler must terminalize the held turn and
+     * settle its completion without an unhandled rejection, leaving the other
+     * owner's FIFO slot, seq, and continuation exactly as they were.
+     */
+    async function expectHeldTurnReleasedAroundOtherOwner(
+      run: Awaited<ReturnType<typeof replayAgainstOtherOwner>>,
+      unhandled: { reasons: unknown[] },
+    ): Promise<void> {
+      await vi.waitFor(() => expect(unhandled.reasons.length > 0 || run.heldSettled()).toBe(true));
+      expect(unhandled.reasons).toEqual([]);
+      expect(run.heldSettled()).toBe(true);
+      await vi.waitFor(() => expect(status(run.seq)).toBe('failed'));
+      expect(terminalRows(run.seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
+      expectRefusedReplay(run.primary, run.queue);
+      const state = lifecycle();
+      expect(state.perChatRuntimeTurnContexts.get(run.mapKey)).toEqual([run.other]);
+      expect(state.perChatInboundSeqQueue.get(run.mapKey)).toEqual([run.otherSeq]);
+      expect(state.perChatRuntimeTurnScopeRefs.has(run.held.identity.logicalTurnId)).toBe(false);
+      expect(state.perChatRuntimeTurnCompletions.has(run.mapKey)).toBe(false);
+      expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(run.held)).toBe(false);
+      expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(run.other)).toBe(true);
+      expect(status(run.otherSeq)).toBe('processing');
+      expect(terminalRows(run.otherSeq)).toEqual([]);
     }
 
     function expectRefusedReplay(primary: SessionDouble, queue: QueueDouble): void {
@@ -1196,48 +1249,77 @@ describe('deferred-turn admission (#3295 S2)', () => {
       expect(replayedAlerts()).toBe(0);
     }
 
-    it('still refuses the replay when a different continuation heads the per-chat FIFO', async () => {
-      const { seq, primary, mapKey, held, other, queue, releaseShutdown } = await replayAgainstOtherOwner(
-        'wamid-c19-conflict-head',
-        (_held, otherOwner) => [otherOwner],
-      );
-      const withdrawn: RuntimeTurnContext[][] = [];
-      // Once the refusal is announced, withdraw the injected owner so the held
-      // turn's failure finalization sees its own FIFO slot again (finalizing it
-      // under a foreign head escapes as an unhandled FIFO-drift rejection; that
-      // is a separate failure-path gap, not what this refusal case pins).
-      queue.enqueueText.mockImplementation((text: string) => {
-        if (text !== failedReplayNotice) return;
-        withdrawn.push(lifecycle().perChatRuntimeTurnContexts.get(mapKey) ?? []);
-        lifecycle().perChatRuntimeTurnContexts.set(mapKey, [held]);
-      });
+    it('still refuses the replay, and releases the held turn, when a different continuation took over the FIFO', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        const run = await replayAgainstOtherOwner('wamid-c19-conflict-head', (_held, other) => [other]);
+        run.releaseShutdown();
+        await expectHeldTurnReleasedAroundOtherOwner(run, unhandled);
+        run.withdrawOther();
+      } finally {
+        unhandled.stop();
+      }
+    });
 
-      releaseShutdown();
-
-      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
-      expectRefusedReplay(primary, queue);
-      // The foreign head was still in place, untouched, when the replay was refused.
-      expect(withdrawn).toEqual([[other]]);
-      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
-      lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+    it('still refuses the replay, and releases the held turn, when a different owner heads the FIFO in front of it', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        const run = await replayAgainstOtherOwner('wamid-c19-conflict-behind', (held, other) => [other, held]);
+        run.releaseShutdown();
+        await expectHeldTurnReleasedAroundOtherOwner(run, unhandled);
+        run.withdrawOther();
+      } finally {
+        unhandled.stop();
+      }
     });
 
     it('still refuses the replay when a different turn is queued behind the held head', async () => {
-      const { seq, primary, mapKey, held, other, queue, releaseShutdown } = await replayAgainstOtherOwner(
-        'wamid-c19-conflict-queued',
-        (heldTurn, otherOwner) => [heldTurn, otherOwner],
-      );
+      const unhandled = captureUnhandledRejections();
+      try {
+        const run = await replayAgainstOtherOwner('wamid-c19-conflict-queued', (held, other) => [held, other]);
+        run.releaseShutdown();
+        await expectHeldTurnReleasedAroundOtherOwner(run, unhandled);
+        run.withdrawOther();
+      } finally {
+        unhandled.stop();
+      }
+    });
 
-      releaseShutdown();
+    it('contains a failure finalization that throws instead of raising an unhandled rejection', async () => {
+      const unhandled = captureUnhandledRejections();
+      try {
+        makeRuntime({ sessionScope: 'per_chat' });
+        const { seq, session: primary, mapKey } = await admitTurn(dmJid, 'wamid-c19-escape', 'c19 escape question');
+        const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+        let heldSettled = false;
+        void heldCompletion.promise.then(() => { heldSettled = true; }, () => { heldSettled = true; });
+        const queue = queueFor(dmJid);
+        const replacement = await failOverToFallback(primary, queue);
+        expect(replacement.sendTurn).toHaveBeenCalledOnce();
+        // The failure handler's finalization faults once (e.g. a storage error).
+        const finalize = vi.spyOn(lifecycle().runtimeTurnCoordinator, 'finalizeRuntimeTurnContext')
+          .mockRejectedValueOnce(new Error('c19 injected finalization fault'));
 
-      await vi.waitFor(() => expect(status(seq)).toBe('failed'));
-      expectRefusedReplay(primary, queue);
-      expect(terminalRows(seq)).toEqual([{ attempt_kind: 'failed', attempt_failure_class: 'processor_throw' }]);
-      // Only the held turn left the FIFO; the other owner was not re-bound or dropped.
-      expect(lifecycle().perChatRuntimeTurnContexts.get(mapKey)).toEqual([other]);
-      expect(lifecycle().perChatRuntimeTurnScopeRefs.has(held.identity.logicalTurnId)).toBe(false);
-      lifecycle().perChatRuntimeTurnContexts.delete(mapKey);
-      lifecycle().runtimeTurnCoordinator.finishRuntimeTurnContinuation(other);
+        replacement.failProviderTurn(new Error('c19 fallback provider exited mid-turn'));
+
+        await vi.waitFor(() => expect(unhandled.reasons.length > 0 || heldSettled).toBe(true));
+        expect(unhandled.reasons).toEqual([]);
+        expect(finalize).toHaveBeenCalled();
+        expect(mockEmitAlertChecked).toHaveBeenCalledWith(
+          expect.any(String),
+          'agent_turn_finalization_escaped',
+          'Runtime turn finalization escaped (fallback continuation)',
+          expect.stringContaining('c19 injected finalization fault'),
+          'warning',
+        );
+        // The held turn's awaiter was released, so the per-chat processor's own
+        // failure path terminalizes the inbound instead of leaving it processing.
+        await vi.waitFor(() => expect(status(seq)).toBe('failed'));
+        await lifecycle().perChatTurnQueues.get(mapKey)!.idle();
+        expect(unhandled.reasons).toEqual([]);
+      } finally {
+        unhandled.stop();
+      }
     });
 
     it('releases the turn on the rekeyed scope when the replay fails after a mid-replay rekey', async () => {

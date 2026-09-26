@@ -10161,7 +10161,25 @@ export class AgentRuntime implements Runtime {
         scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
         runtimeContext,
         err,
-      ));
+      )).catch((err: unknown) => {
+        // A rejection escaping here is a process-fatal unhandledRejection
+        // (main.ts). Contain it the way the result handler contains an escaped
+        // finalization: degrade, release this turn's awaiter, alert, register.
+        const mapKey = scopeRef?.value;
+        const scopeKey = this.runtimeTurnCoordinator.runtimeTurnScopeKey(runtimeContext);
+        this.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
+        this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err, mapKey, runtimeContext);
+        log.error({ err, errorMessage: errorMessage(err), mapKey, scopeKey },
+          'fallback continuation failure finalization escaped');
+        emitAlertChecked(
+          this.instanceName,
+          'agent_turn_finalization_escaped',
+          'Runtime turn finalization escaped (fallback continuation)',
+          `mapKey=${mapKey ?? 'none'} scope=${scopeKey} err=${errorMessage(err)}`,
+          'warning',
+        );
+        this.runtimeTurnCoordinator.registerStuckScope(scopeKey);
+      });
     } else {
       void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid, purpose)
         .then(() => {
@@ -10304,7 +10322,9 @@ export class AgentRuntime implements Runtime {
       queue,
       attemptOutcome: { kind: 'failed', class: 'processor_throw' },
       session: args.mapKey === undefined ? this.session : this.chatSessions.get(args.mapKey) ?? null,
-      ...(args.mapKey === undefined ? {} : { mapKey: args.mapKey }),
+      // A replay refused because another turn owns the per-chat FIFO leaves
+      // this turn displaced from the head; retire it by its own identity.
+      ...(args.mapKey === undefined ? {} : { mapKey: args.mapKey, detachIfDisplaced: true }),
       clearReplayOnSuccess: false,
     });
   }
