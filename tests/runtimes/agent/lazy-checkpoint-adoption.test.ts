@@ -322,4 +322,39 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(providerTurnText()).toContain('fixture earlier question about the deposit');
     });
   });
+
+  describe('decision 65 O4: an ambiguous live owner fails closed with a notice', () => {
+    const MAY_BE_RUNNING = '_This chat\'s previous session may still be running_ — not starting a second one. Try again in a few minutes.';
+    const cases: Array<[string, () => void]> = [
+      ['active row', () => { insertRow(OWN_SID, PHONE, 'active'); }],
+      ['duplicate row', () => { insertRow(OWN_SID, PHONE, 'suspended'); insertRow(OWN_SID, PHONE, 'suspended'); }],
+      ['other active namespace', () => { insertRow(OWN_SID, PHONE, 'suspended'); insertRow(OWN_SID, 'other-namespace', 'active'); }],
+    ];
+
+    it.each(cases)('%s: no spawn, no second live session, and a notice', async (_label, arrange) => {
+      arrange();
+      writeCheckpoint(PHONE, OWN_SID);
+      const beforeRows = rows();
+      const beforeCheckpoint = engine.getSessionCheckpoint(PHONE);
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('CHECKPOINT_ADOPTION_REFUSED');
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(providerSend).not.toHaveBeenCalled();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, MAY_BE_RUNNING);
+      expect([...view.chatSessions.values()].filter((s) => s.getStatus().active)).toEqual([]);
+      expect(rows()).toEqual(beforeRows);
+      expect(engine.getSessionCheckpoint(PHONE)).toEqual(beforeCheckpoint);
+    });
+
+    it('scope pin: an active row that exists only in another namespace is a foreign checkpoint, not a live owner of this chat', async () => {
+      insertRow(SCHEDULED_SID, SCHEDULED, 'active');
+      writeCheckpoint(PHONE, SCHEDULED_SID);
+      const { spawnSpy } = await firstTurn();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+  });
 });

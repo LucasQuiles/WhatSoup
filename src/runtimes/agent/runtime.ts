@@ -111,7 +111,12 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
-import { lazyCheckpointAdoption, NO_CHECKPOINT_ADOPTION, spawnForAdoption } from './checkpoint-adoption.ts';
+import {
+  announceAdoption,
+  lazyCheckpointAdoption,
+  NO_CHECKPOINT_ADOPTION,
+  spawnForAdoption,
+} from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -5856,7 +5861,7 @@ export class AgentRuntime implements Runtime {
         && effectiveMapKey !== undefined && !isScheduledAgentJobMapKey(effectiveMapKey)
         ? lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
         : NO_CHECKPOINT_ADOPTION;
-      if (adoption.kind === 'fresh_with_notice') this.sendDirect(chatJid, adoption.notice);
+      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
