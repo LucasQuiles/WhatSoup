@@ -170,7 +170,7 @@ message content, identities, or exporter payloads. `state` is one of `disabled`,
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 163 tools (160 always-registered + 3 conditionally-registered: `knowledge_search` when
+all 169 tools (166 always-registered + 3 conditionally-registered: `knowledge_search` when
 Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
 control-plane peer and is not in any sandbox mode, and `memory_write` when a Pinecone key and
 index are configured; see
@@ -208,9 +208,9 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
 | `mcp:tools.scheduling` | 5 | [`src/mcp/tools/scheduling.ts`](../src/mcp/tools/scheduling.ts) | stable | active | `schedule_message`, `list_scheduled`, `get_scheduled`, `update_scheduled`, `cancel_scheduled` |
 | `mcp:tools.audit` | 3 | [`src/mcp/tools/audit.ts`](../src/mcp/tools/audit.ts) | stable | active | `read_outbound_sends`, `maintain_outbound_audit`, `list_fact_export_queue` |
-| `mcp:tools.substrate` | 22 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities, aliases, activity timeline. Schema still settling. |
+| `mcp:tools.substrate` | 23 | [`src/mcp/tools/substrate.ts`](../src/mcp/tools/substrate.ts) | beta | active | Agent substrate: beads, watches, triggers, vault, observations, entities, aliases, activity timeline. Schema still settling. |
 
-> The 162nd canonical tool (`emit_heal_result`) is registered inline from
+> The 169th canonical tool (`emit_heal_result`) is registered inline from
 > [`src/runtimes/agent/runtime.ts`](../src/runtimes/agent/runtime.ts) rather than under
 > `src/mcp/tools/`, so it is intentionally absent from the per-module registry above.
 > See the [`runtime.ts (inline)` section of docs/tools.md](tools.md#runtimets-inline) for
