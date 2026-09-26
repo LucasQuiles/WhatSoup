@@ -86,6 +86,11 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import {
+  toTurnFinalizationPersistence,
+  toTurnRecoveryJobPersistence,
+  type TurnTerminalResult,
+} from '../../src/runtimes/agent/turn-terminal.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 import { config } from '../../src/config.ts';
 import { emitHealReport, resetDeliveryUnavailableLatch } from '../../src/core/heal.ts';
@@ -607,6 +612,66 @@ describe('GET /health', () => {
       expect(json.status).toBe('degraded');
       expect(json.durability.maybeSentOutbound).toBe(1);
       expect(json.durability.oldestMaybeSentAt).not.toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+      db2.close();
+    }
+  });
+
+  it('keeps health free of durability debt when the only stale maybe_sent row is corroborated', async () => {
+    const db2 = makeDb();
+    const durability = new DurabilityEngine(db2);
+    const conversationKey = 'corroborated-debt-chat';
+    const deliveryJid = 'corroborated-debt-chat@g.us';
+    const inboundSeq = durability.journalInbound('corroborated-debt-source', conversationKey, deliveryJid, 'agent');
+    const selectedId = durability.createOutboundOp({
+      conversationKey, chatJid: deliveryJid, opType: 'text', payload: '{"text":"selected"}',
+      sourceInboundSeq: inboundSeq, replayPolicy: 'unsafe',
+    });
+    durability.markSending(selectedId);
+    durability.markMaybeSent(selectedId, 'echo_timeout');
+    const owner = { logicalTurnId: 'corroborated-debt-owner', managerId: 'corroborated-debt-manager', generation: 2 };
+    const result: TurnTerminalResult = {
+      identity: {
+        scope: 'per_chat', conversationKey, deliveryJid, inboundSeq,
+        logicalTurnId: 'corroborated-debt-turn', managerId: 'corroborated-debt-manager', generation: 1,
+      },
+      attemptOutcome: { kind: 'failed', class: 'unknown_terminal' },
+      inboundDisposition: 'transferred_to_recovery_owner',
+      deliveryEvidence: { kind: 'delivery_unknown', opId: selectedId },
+    };
+    durability.finalizeTurnTerminal({
+      ...toTurnFinalizationPersistence(result, owner),
+      recoveryJob: toTurnRecoveryJobPersistence(result, owner, {
+        sourceMessageId: 'corroborated-debt-source', receivedAtUnixSeconds: 1_780_000_000,
+        replaySafe: false, senderJid: 'corroborated-debt-sender@s.whatsapp.net', senderName: null,
+        text: 'corroborated debt source', isGroup: true, groupName: 'corroborated-debt',
+      }),
+    });
+    // A later reply for the same source echoed, which corroborates delivery.
+    const laterId = durability.createOutboundOp({
+      conversationKey, chatJid: deliveryJid, opType: 'text', payload: '{"text":"later"}',
+      sourceInboundSeq: inboundSeq, replayPolicy: 'unsafe',
+    });
+    durability.markSending(laterId);
+    durability.markSubmitted(laterId, 'WA_CORROBORATED_DEBT_LATER');
+    durability.markEchoed(laterId);
+    durability.postConnectRecovery();
+    expect(db2.raw.prepare('SELECT COUNT(*) AS count FROM turn_delivery_corroboration').get())
+      .toEqual({ count: 1 });
+    db2.raw
+      .prepare(`UPDATE outbound_ops SET ambiguity_at = datetime('now', '-3600 seconds') WHERE id = ?`)
+      .run(selectedId);
+
+    const { server: server2, port: port2 } = await buildTestServer(makeDeps(db2, { durability }));
+    try {
+      const { status, body } = await healthReq(port2);
+      const json = JSON.parse(body);
+      expect(status).toBe(200);
+      expect(json.durability.maybeSentOutbound).toBe(1);
+      expect(json.durability.oldestMaybeSentAt).toBeNull();
+      expect(json.degradation_causes ?? []).not.toContain('durability_debt');
+      expect(json.status_reasons ?? []).not.toContain('durability_delivery_debt');
     } finally {
       await new Promise<void>((resolve) => server2.close(() => resolve()));
       db2.close();
