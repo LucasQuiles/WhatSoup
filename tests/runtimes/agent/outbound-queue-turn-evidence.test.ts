@@ -75,6 +75,7 @@ describe('OutboundQueue turn delivery evidence', () => {
       answerOpIds: [1],
       lifecycleOpIds: [],
       statusOpIds: [],
+      withheldAnswerCount: 0,
     });
   });
 
@@ -265,8 +266,8 @@ describe('OutboundQueue turn delivery evidence', () => {
     const outcome = await joined;
 
     expect(outcome).toEqual([
-      { turnId: 'turn-concurrent', answerOpIds: [1], lifecycleOpIds: [], statusOpIds: [] },
-      { turnId: 'turn-concurrent', answerOpIds: [1], lifecycleOpIds: [], statusOpIds: [] },
+      { turnId: 'turn-concurrent', answerOpIds: [1], lifecycleOpIds: [], statusOpIds: [], withheldAnswerCount: 0 },
+      { turnId: 'turn-concurrent', answerOpIds: [1], lifecycleOpIds: [], statusOpIds: [], withheldAnswerCount: 0 },
     ]);
     if (Array.isArray(outcome)) {
       expect(outcome[0]).not.toBe(outcome[1]);
@@ -285,6 +286,7 @@ describe('OutboundQueue turn delivery evidence', () => {
       answerOpIds: [],
       lifecycleOpIds: [],
       statusOpIds: [],
+      withheldAnswerCount: 0,
     });
     expect(Object.isFrozen(evidence)).toBe(true);
     expect(Object.isFrozen(evidence.answerOpIds)).toBe(true);
@@ -398,6 +400,7 @@ describe('OutboundQueue turn delivery evidence', () => {
       answerOpIds: [1],
       lifecycleOpIds: [],
       statusOpIds: [],
+      withheldAnswerCount: 0,
     });
   });
 });
