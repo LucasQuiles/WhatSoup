@@ -286,6 +286,16 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
   }, T);
 
+  it('keeps a relative PATH entry a check-mode limit: a normal run still resolves and probes', () => {
+    const h = boundaryHarness();
+    rmSync(path.join(h.home, 'npm-global/bin/opencode'));
+    const r = run(h, [], { PATH: `relative-bin:${h.env.PATH}` });
+    for (const component of ['local-bin:playwright-mcp', 'opencode']) {
+      expect(events(r, component).at(-1)?.message ?? '', component).not.toContain('relative PATH entry');
+    }
+    expect(lines(path.join(h.home, 'exec.log'))).toContain('playwright-mcp --version');
+  }, T);
+
   it('exits 1 before any step without a usable node, leaving no state and no temporary directory', () => {
     const h = boundaryHarness();
     const systemTmp = mkdtempSync(path.join(tmpdir(), 'hm-systmp-'));

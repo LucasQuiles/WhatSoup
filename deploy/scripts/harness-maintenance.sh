@@ -1671,8 +1671,9 @@ env_flag() {
   if [ -z "${!1+x}" ]; then echo unset; else flag_class "${!1}"; fi
 }
 
-# Settings sources the agent CLI also honours that this job does not read. Missing them mostly
-# errs toward reporting updates open (advisory) where they are in fact disabled.
+# Settings sources the agent CLI also honours that this job does not read. The error can go either
+# way: they can disable updates reported open, and project settings, applied after user settings,
+# can reopen updates reported disabled.
 SETTINGS_NOT_READ="Not read: project-level settings in each instance's workspace, the macOS com.anthropic.claudecode preference domain, remote-managed settings."
 
 # The summary status, for the launcher observation's alert text.
@@ -2113,6 +2114,8 @@ finish_run() {
     record_event "harness-maintenance" "degraded" "steps did not complete cleanly:$failed"
     send_alert "job" "warning" "Harness maintenance degraded" "Steps did not complete cleanly:$failed. See $RUN_LOG"
   fi
+  # A failed baseline step leaves no baseline: keep the previous one and the alert history.
+  carry_launcher_state_if_defined
   if ! finalize_state "$status"; then
     [ "$worst" -ne 0 ] || worst=1
   fi

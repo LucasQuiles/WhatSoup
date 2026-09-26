@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -120,19 +120,42 @@ describe('out-of-band launcher movement', () => {
       }, T);
     }
 
-    it('when the run exits before its steps finish', () => {
+    // Each way a run can end without its own baseline: an explicit exit (the exit trap), a failure
+    // outside any step (the error trap), and a failed baseline step (the normal final state).
+    const endings: Array<[string, [string, string], number, string]> = [
+      ['the run exits before its steps finish',
+        ['  whatsoup_run_step "$results" manifest guard_manifest\n', '  exit 7\n'], 7, 'failed'],
+      ['a command outside any step fails',
+        ['  whatsoup_run_step "$results" manifest guard_manifest\n', '  false\n  whatsoup_run_step "$results" manifest guard_manifest\n'], 1, 'failed'],
+      ['the baseline step itself fails',
+        ['record_claude_launcher_baseline() {\n', 'record_claude_launcher_baseline() {\n  false\n'], 1, 'degraded'],
+    ];
+    for (const [label, edit, rc, status] of endings) {
+      it(`keeps an alerted move reported when ${label}`, () => {
+        const h = idleHarness();
+        run(h);
+        repoint(h, '2.1.281');
+        run(h); // alerted: 2.1.281 is in the alert history, and the baseline
+        const kept = launcherEvents(h).launcher;
+        const ended = run(h, [], {}, faultScript(h, [edit]));
+        expect(ended.status).toBe(rc);
+        expect(ended.state?.status).toBe(status);
+        const carried = events(ended, 'claude-launcher');
+        expect(carried.find((e) => e.status === 'baseline')?.after).toBe(kept.find((e) => e.status === 'baseline')!.after);
+        expect(carried.find((e) => e.status === 'alert-history')?.after).toContain(path.join(h.versions, '2.1.281'));
+        expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'unchanged' });
+        expect(launcherAlerts(h)).toBe(1);
+      }, T);
+    }
+
+    it('alerts exactly once a move made after a run whose baseline step failed', () => {
       const h = idleHarness();
       run(h);
+      const failed = run(h, [], {}, faultScript(h, [endings[2]![1]]));
+      expect(failed.state?.status).toBe('degraded');
       repoint(h, '2.1.281');
-      run(h); // alerted: 2.1.281 is in the alert history, and the baseline
-      const kept = launcherEvents(h).launcher;
-      const exited = run(h, [], {}, faultScript(h, [['  whatsoup_run_step "$results" manifest guard_manifest\n', '  exit 7\n']]));
-      expect(exited.status).toBe(7);
-      expect(exited.state?.status).toBe('failed');
-      const carried = events(exited, 'claude-launcher');
-      expect(carried.find((e) => e.status === 'baseline')?.after).toBe(kept.find((e) => e.status === 'baseline')!.after);
-      expect(carried.find((e) => e.status === 'alert-history')?.after).toContain(path.join(h.versions, '2.1.281'));
-      expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'unchanged' });
+      expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'moved' });
+      launcherEvents(h);
       expect(launcherAlerts(h)).toBe(1);
     }, T);
   });
@@ -405,6 +428,21 @@ describe('agent CLI update policy surfaces', () => {
     const summary = events(run(h, ['--check']), 'claude-update-policy').at(-1)!;
     expect(summary.status).toBe('unknown');
     expect(summary.message).toContain('alpha');
+  }, T);
+
+  it('reports an unreadable managed drop-in directory as unreadable settings', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    const dropIns = path.join(h.home, 'managed-settings.d');
+    writeJson(path.join(dropIns, '10-disable.json'), { env: { DISABLE_UPDATES: '1' } });
+    chmodSync(dropIns, 0o000);
+    try {
+      const policy = events(run(h, ['--check']), 'claude-update-policy');
+      expect(policy.find((e) => e.status === 'instance')!.message).toContain('settings env DISABLE_UPDATES=unreadable');
+      expect(policy.at(-1)).toMatchObject({ status: 'unknown' });
+    } finally {
+      chmodSync(dropIns, 0o755);
+    }
   }, T);
 
   it('reports settings that cannot be parsed as unreadable, never as unset', () => {
