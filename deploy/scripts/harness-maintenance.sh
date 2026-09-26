@@ -1319,14 +1319,48 @@ try {
 NODE
 }
 
-# observe_claude_launcher: compare the previous run's baseline with the launcher as this run found
-# it (before any install), then record the launcher after the update step as the next baseline.
-# A change between runs did not come from this job's install transaction.
-observe_claude_launcher() {
-  local start previous status now history key seen summary cause
-  # Launcher link targets already alerted on (one per line, "absent" for a removed launcher,
-  # newest last, at most 20): a move is alerted once per distinct target, never again for it.
+# Launcher link targets already alerted on (one per line, "absent" for a removed launcher, newest
+# last, at most 20): a move is alerted once per distinct target, never again for it. Kept in a file
+# because the observation and the baseline are separate steps, each in its own subshell.
+CLAUDE_LAUNCHER_HISTORY_FILE="$TMP_DIR/claude-launcher.history"
+# The launcher after the update step and before the probes, for the baseline step to compare with.
+CLAUDE_LAUNCHER_PREPROBE_FILE="$TMP_DIR/claude-launcher.preprobe"
+
+# launcher_target_key <state>: the link target a launcher state points at, or "absent".
+launcher_target_key() {
+  local key="${1% sha256=*}"
+  printf '%s\n' "${key#link=}"
+}
+
+# load_launcher_history: seed the history file from the previous run's final state.
+load_launcher_history() {
+  local history
   history="$(claude_launcher_previous alert-history || true)"
+  if [ -n "$history" ]; then
+    printf '%s\n' "$history" > "$CLAUDE_LAUNCHER_HISTORY_FILE"
+  else
+    : > "$CLAUDE_LAUNCHER_HISTORY_FILE"
+  fi
+}
+
+launcher_target_alerted() {
+  grep -Fxq -- "$1" "$CLAUDE_LAUNCHER_HISTORY_FILE" 2>/dev/null
+}
+
+# launcher_target_remember <key>: check mode sends no alert, so it records none.
+launcher_target_remember() {
+  local history
+  [ "$CHECK_ONLY" -eq 0 ] || return 0
+  history="$( { cat "$CLAUDE_LAUNCHER_HISTORY_FILE" 2>/dev/null || true; printf '%s\n' "$1"; } | tail -n 20)"
+  printf '%s\n' "$history" > "$CLAUDE_LAUNCHER_HISTORY_FILE"
+}
+
+# observe_claude_launcher: compare the last normal run's baseline with the launcher as this run
+# found it (before any install). A change between runs did not come from this job's install
+# transaction. The next baseline is taken after the probes (record_claude_launcher_baseline).
+observe_claude_launcher() {
+  local start previous status now key summary cause
+  load_launcher_history
   if [ ! -f "$CLAUDE_LAUNCHER_START_FILE" ]; then
     record_event "claude-launcher" "unknown" "launcher facts could not be read at the start of this run"
   else
@@ -1351,34 +1385,59 @@ observe_claude_launcher() {
         record_event "claude-launcher" "$status" "launcher unchanged since the previous run" "$previous" "$start" ;;
       *)
         # The link target the launcher moved to (its readlink), or "absent".
-        key="${start% sha256=*}"
-        key="${key#link=}"
-        if [ -n "$history" ] && printf '%s\n' "$history" | grep -Fxq -- "$key"; then
-          seen=1
+        key="$(launcher_target_key "$start")"
+        if launcher_target_alerted "$key"; then
+          record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown; already alerted for this launcher target" "$previous" "$start"
         else
-          seen=0
-        fi
-        case "$seen" in
-          1)
-            record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown; already alerted for this launcher target" "$previous" "$start" ;;
-          *)
-            record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown" "$previous" "$start"
-            summary="$(cat "$CLAUDE_POLICY_SUMMARY_FILE" 2>/dev/null || true)"
-            case "$summary" in
-              advisory|none) cause="the agent CLI updating itself (update policy summary: $summary)" ;;
-              *) cause="not determined (update policy summary: ${summary:-not observed})" ;;
-            esac
-            send_alert "claude-launcher" "warning" "Agent CLI launcher changed outside the maintenance job" \
-              "$CLAUDE_NATIVE_LAUNCHER $status between runs: $previous -> $start. The release-age cooldown did not govern this change; probable cause: $cause."
-            # Check mode sends no alert, so it records none.
-            if [ "$CHECK_ONLY" -eq 0 ]; then
-              history="$( { [ -z "$history" ] || printf '%s\n' "$history"; printf '%s\n' "$key"; } | tail -n 20)"
-            fi ;;
-        esac ;;
+          record_event "claude-launcher" "$status" "launcher changed between runs, outside this job's install transaction and its release-age cooldown" "$previous" "$start"
+          summary="$(cat "$CLAUDE_POLICY_SUMMARY_FILE" 2>/dev/null || true)"
+          case "$summary" in
+            advisory|none) cause="the agent CLI updating itself (update policy summary: $summary)" ;;
+            *) cause="not determined (update policy summary: ${summary:-not observed})" ;;
+          esac
+          send_alert "claude-launcher" "warning" "Agent CLI launcher changed outside the maintenance job" \
+            "$CLAUDE_NATIVE_LAUNCHER $status between runs: $previous -> $start. The release-age cooldown did not govern this change; probable cause: $cause."
+          launcher_target_remember "$key"
+        fi ;;
     esac
   fi
   now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
-  record_event "claude-launcher" "baseline" "launcher after this run's update step; the next run compares against it" "" "$now"
+  printf '%s\n' "$now" > "$CLAUDE_LAUNCHER_PREPROBE_FILE"
+}
+
+# record_claude_launcher_baseline: the baseline the next run compares against, taken after the
+# probes. In a normal run the launcher is first compared with how it stood before the probes: the
+# plugin and MCP listing starts the agent CLI, which can update itself, and such a move is
+# attributed to this job rather than reported by the next run as a change outside it. Check mode
+# never advances the baseline: it records what it saw under another status and carries the last
+# normal run's baseline forward, so a move seen only by a check run is still alerted by the next
+# normal run.
+record_claude_launcher_baseline() {
+  local before now previous key history
+  now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
+  # Without the observation step's file (it failed), the history comes from the previous state.
+  [ -f "$CLAUDE_LAUNCHER_HISTORY_FILE" ] || load_launcher_history
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "claude-launcher" "check-observation" "launcher as this check run left it; check mode does not advance the baseline" "" "$now"
+    if previous="$(claude_launcher_previous baseline)"; then
+      record_event "claude-launcher" "baseline" "the last normal run's baseline, carried forward unchanged by check mode" "" "$previous"
+    fi
+  else
+    before="$(cat "$CLAUDE_LAUNCHER_PREPROBE_FILE" 2>/dev/null || true)"
+    if [ -n "$before" ] && [ "$before" != "$now" ]; then
+      key="$(launcher_target_key "$now")"
+      if launcher_target_alerted "$key"; then
+        record_event "claude-launcher" "moved-during-probes" "launcher changed while this job's probes ran the agent CLI; already alerted for this launcher target" "$before" "$now"
+      else
+        record_event "claude-launcher" "moved-during-probes" "launcher changed while this job's probes ran the agent CLI" "$before" "$now"
+        send_alert "claude-launcher" "warning" "Agent CLI launcher changed while the maintenance job ran the agent CLI" \
+          "$CLAUDE_NATIVE_LAUNCHER changed during this job's plugin and MCP listing: $before -> $now. The agent CLI probably updated itself when the job started it; the release-age cooldown did not govern this change."
+        launcher_target_remember "$key"
+      fi
+    fi
+    record_event "claude-launcher" "baseline" "launcher after this run's update step and probes; the next run compares against it" "" "$now"
+  fi
+  history="$(cat "$CLAUDE_LAUNCHER_HISTORY_FILE" 2>/dev/null || true)"
   if [ -n "$history" ]; then
     record_event "claude-launcher" "alert-history" "launcher targets already alerted on" "" "$history"
   fi
@@ -1865,10 +1924,11 @@ main() {
   else
     record_event "harness-maintenance" "skipped" "update steps skipped: the managed components manifest did not validate"
   fi
-  # After the agent CLI step, so its baseline includes this run's own install; before the probes,
-  # so a self-update the probes trigger shows up as movement on the next run.
+  # After the agent CLI step, so this run's own install is not movement; the baseline follows the
+  # probes, so a self-update the listing triggers is attributed to this job, not to the next run.
   whatsoup_run_step "$results" claude-update-path observe_claude_update_path
   whatsoup_run_step "$results" probes probe_tier2
+  whatsoup_run_step "$results" claude-launcher record_claude_launcher_baseline
   finish_run "$results" || rc=$?
   exit "$rc"
 }

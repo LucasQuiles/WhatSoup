@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
+  DAY_MS,
   OLD,
   T,
   TARGET,
@@ -41,6 +42,13 @@ function launcherEvents(h: Harness, args: string[] = []) {
   return { r, launcher: events(r, 'claude-launcher') };
 }
 
+/** Alerts sent under the launcher-movement source. */
+function launcherAlerts(h: Harness): number {
+  if (!existsSync(h.alertLog)) return 0;
+  return readFileSync(h.alertLog, 'utf8').split('\n')
+    .filter((line) => line.includes('harness-maintenance:claude-launcher')).length;
+}
+
 function repoint(h: Harness, version: string): void {
   installNative(h, version);
   rmSync(h.launcher);
@@ -74,20 +82,18 @@ describe('out-of-band launcher movement', () => {
 
   it('alerts once per distinct launcher target, not again when a move returns to one already reported', () => {
     const h = idleHarness();
-    const launcherAlerts = () => readFileSync(h.alertLog, 'utf8').split('\n')
-      .filter((line) => line.includes('harness-maintenance:claude-launcher')).length;
     run(h);
     repoint(h, '2.1.281');
     run(h); // OLD -> 2.1.281: new target, alert
-    expect(launcherAlerts()).toBe(1);
+    expect(launcherAlerts(h)).toBe(1);
     repoint(h, OLD);
     run(h); // 2.1.281 -> OLD: new target, alert
-    expect(launcherAlerts()).toBe(2);
+    expect(launcherAlerts(h)).toBe(2);
     repoint(h, '2.1.281');
     const { launcher } = launcherEvents(h); // back to 2.1.281: already reported
     expect(launcher[0]).toMatchObject({ status: 'moved' });
     expect(launcher[0]!.message).toContain('already alerted');
-    expect(launcherAlerts()).toBe(2);
+    expect(launcherAlerts(h)).toBe(2);
   }, T);
 
   it('reports a launcher removed between runs as disappeared', () => {
@@ -101,8 +107,15 @@ describe('out-of-band launcher movement', () => {
   it('does not report the job\'s own install as movement on the next run', () => {
     const h = makeHarness();
     portableInstance(h, 'alpha');
-    // Baseline at OLD without installing, then a run that installs TARGET itself.
-    run(h, ['--check']);
+    // A normal run that finds no cooldown-eligible release takes the baseline at OLD without
+    // installing; with the publish times restored, the next run installs TARGET itself.
+    const times = readFileSync(h.env.HM_NPM_TIME!, 'utf8');
+    writeFileSync(h.env.HM_NPM_TIME!, JSON.stringify({
+      [OLD]: new Date(Date.now() - 30 * DAY_MS).toISOString(),
+      [TARGET]: new Date(Date.now() - 2 * DAY_MS).toISOString(),
+    }));
+    expect(events(run(h), 'claude').at(-1)?.status).toBe('current');
+    writeFileSync(h.env.HM_NPM_TIME!, times);
     const { r: second, launcher } = launcherEvents(h);
     expect(events(second, 'claude').at(-1)?.status).toBe('updated');
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, TARGET));
@@ -115,11 +128,72 @@ describe('out-of-band launcher movement', () => {
 
   it('observes movement in check mode too, without alerting', () => {
     const h = idleHarness();
-    run(h, ['--check']);
+    run(h);
     repoint(h, '2.1.281');
     const { launcher } = launcherEvents(h, ['--check']);
     expect(launcher[0]).toMatchObject({ status: 'moved' });
-    expect(() => readFileSync(h.alertLog, 'utf8')).toThrow();
+    expect(launcherAlerts(h)).toBe(0);
+  }, T);
+
+  it('keeps the run-mode baseline through a check run, so the next normal run still alerts the move', () => {
+    const h = idleHarness();
+    run(h);
+    repoint(h, '2.1.281');
+    run(h, ['--check']);
+    const { launcher } = launcherEvents(h);
+    expect(launcher[0]).toMatchObject({ status: 'moved' });
+    expect(launcherAlerts(h)).toBe(1);
+  }, T);
+
+  it('keeps the run-mode baseline through two check runs in a row', () => {
+    const h = idleHarness();
+    run(h);
+    repoint(h, '2.1.281');
+    run(h, ['--check']);
+    run(h, ['--check']);
+    run(h);
+    expect(launcherAlerts(h)).toBe(1);
+  }, T);
+
+  it('keeps the alerted launcher targets through a check run', () => {
+    const h = idleHarness();
+    run(h);
+    repoint(h, '2.1.281');
+    run(h); // alert for 2.1.281
+    repoint(h, OLD);
+    run(h); // alert for OLD
+    repoint(h, '2.1.281');
+    run(h, ['--check']);
+    const { launcher } = launcherEvents(h); // 2.1.281 was already alerted
+    expect(launcher[0]!.message).toContain('already alerted');
+    expect(launcherAlerts(h)).toBe(2);
+  }, T);
+
+  it('never creates a baseline in check mode', () => {
+    const h = idleHarness();
+    const { launcher: checked } = launcherEvents(h, ['--check']);
+    expect(checked.map((e) => e.status)).toEqual(['first-observation', 'check-observation']);
+    expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'first-observation' });
+  }, T);
+
+  it('attributes a launcher move during the job\'s own agent CLI listing to the job, and baselines after it', () => {
+    const h = idleHarness();
+    writeFileSync(h.modeFile, 'selfupdate');
+    const { launcher } = launcherEvents(h);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, '9.9.9'));
+    const during = launcher.find((e) => e.status === 'moved-during-probes')!;
+    expect(during.before).toContain(`link=${path.join(h.versions, OLD)}`);
+    expect(during.after).toContain(`link=${path.join(h.versions, '9.9.9')}`);
+    expect(launcher.filter((e) => e.status === 'baseline').at(-1)!.after)
+      .toContain(`link=${path.join(h.versions, '9.9.9')}`);
+    const alerts = readFileSync(h.alertLog, 'utf8');
+    expect(alerts).toContain('changed while the maintenance job ran the agent CLI');
+    expect(alerts).not.toContain('outside the maintenance job');
+    expect(launcherAlerts(h)).toBe(1);
+    // The next run finds the launcher where this run left it: no between-runs move is reported.
+    writeFileSync(h.modeFile, 'ok');
+    expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'unchanged' });
+    expect(launcherAlerts(h)).toBe(1);
   }, T);
 });
 
