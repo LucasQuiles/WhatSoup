@@ -44,6 +44,8 @@ const TOKEN = 'f'.repeat(64);
 const HEALTH_PORT = 19_090;
 const TARGET_URL = 'https://example.invalid/fabricated/repo.git';
 const UID = 4242;
+/** Schema migration level of the fixture database; the old release's ceiling. */
+const FIXTURE_SCHEMA = 64;
 
 interface Fixture {
   base: string;
@@ -139,9 +141,35 @@ function installFixture(): Fixture {
   const dbPath = path.join(dataDir, 'bot.db');
   const db = new DatabaseSync(dbPath);
   db.exec("CREATE TABLE fixture (value TEXT); INSERT INTO fixture VALUES ('before-activation');");
+  db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec(`INSERT INTO schema_migrations (version) VALUES (${FIXTURE_SCHEMA - 1}), (${FIXTURE_SCHEMA})`);
   db.close();
 
   return { base, home, oldRelease, newRelease, wrapperLink, launchAgents, dbPath, backupDir: path.join(base, 'backups') };
+}
+
+/** What the new release's startup migration does to the live database. */
+function migrateFixture(dbPath: string, version: number): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`INSERT OR IGNORE INTO schema_migrations (version) VALUES (${version})`);
+  } finally {
+    db.close();
+  }
+}
+
+/** The level an old-release binary would see, or null when it cannot open the database at all. */
+function fixtureSchemaLevel(dbPath: string): number | null {
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return Number((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** Paths, modes, content hashes and link targets of every entry under `root`. */
@@ -172,14 +200,28 @@ interface WorldOptions {
   stuckPids?: Set<number>;
   /** Override the instance argv the new process gets (default: from the wrapper symlink). */
   instanceArgv?: (releaseRoot: string) => string;
-  /** Override the health response for the instance (default: healthy for the running release). */
-  health?: (runningRoot: string | null) => { status: number; body: string };
+  /**
+   * Override the health response for the instance. `fallback` is the default:
+   * healthy for the running release, except that an old-release process
+   * against a database above FIXTURE_SCHEMA (or one it cannot open) refuses
+   * to start, as a DatabaseCompatibilityError `future_schema` does.
+   */
+  health?: (
+    runningRoot: string | null,
+    fallback: () => { status: number; body: string },
+  ) => { status: number; body: string };
+  /** Runs when an instance process starts on `root` (a new release migrating at startup). */
+  onInstanceStart?: (root: string) => void;
+  /** Runs when an instance process on `root` exits (a migration committed during shutdown). */
+  onInstanceExit?: (root: string, via: 'bootout' | 'kickstart') => void;
   platform?: NodeJS.Platform;
 }
 
 class SimulatedLaunchd {
   readonly calls: string[][] = [];
   readonly tokensSeen: string[] = [];
+  /** Release root of every instance process started, in order. */
+  readonly instanceStarts: string[] = [];
   private readonly loaded = new Map<string, { pid: number; definition: string; root: string | null }>();
   private readonly alive = new Set<number>();
   private readonly argv = new Map<number, string>();
@@ -208,13 +250,32 @@ class SimulatedLaunchd {
     if (root !== null) {
       this.argv.set(pid, this.options.instanceArgv?.(root)
         ?? `/opt/node/bin/node --experimental-strip-types ${root}/src/bootstrap.ts ${INSTANCE}`);
+      this.instanceStarts.push(root);
+      this.options.onInstanceStart?.(root);
     }
     this.loaded.set(label, { pid, definition, root });
     return pid;
   }
 
-  private exit(pid: number): void {
-    if (!this.options.stuckPids?.has(pid)) this.alive.delete(pid);
+  private exit(pid: number, root: string | null, via: 'bootout' | 'kickstart'): void {
+    if (this.options.stuckPids?.has(pid) || !this.alive.has(pid)) return;
+    this.alive.delete(pid);
+    if (root !== null) this.options.onInstanceExit?.(root, via);
+  }
+
+  /** Release roots the instance ran on, collapsing the restart `kickstart -k` adds after each bootstrap. */
+  releasesStarted(): string[] {
+    return this.instanceStarts.filter((root, index) => index === 0 || this.instanceStarts[index - 1] !== root);
+  }
+
+  private defaultHealth(root: string | null): { status: number; body: string } {
+    if (root === null) throw new Error('connection refused');
+    if (root === this.fixture.oldRelease) {
+      const level = fixtureSchemaLevel(this.fixture.dbPath);
+      if (level === null || level > FIXTURE_SCHEMA) throw new Error('connection refused');
+    }
+    const commit = root === this.fixture.newRelease ? NEW_COMMIT : OLD_COMMIT;
+    return { status: 200, body: JSON.stringify({ instance: { commit }, whatsapp: { connected: true } }) };
   }
 
   private labelOf(target: string): string {
@@ -242,10 +303,8 @@ class SimulatedLaunchd {
         this.tokensSeen.push(token);
         const job = this.loaded.get(INSTANCE_LABEL);
         const root = job && this.alive.has(job.pid) ? job.root : null;
-        if (this.options.health) return this.options.health(root);
-        if (root === null) throw new Error('connection refused');
-        const commit = root === this.fixture.newRelease ? NEW_COMMIT : OLD_COMMIT;
-        return { status: 200, body: JSON.stringify({ instance: { commit }, whatsapp: { connected: true } }) };
+        if (this.options.health) return this.options.health(root, () => this.defaultHealth(root));
+        return this.defaultHealth(root);
       },
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
@@ -260,7 +319,7 @@ class SimulatedLaunchd {
           if (verb === 'bootout') {
             const label = this.labelOf(rest[0]!);
             const job = this.loaded.get(label);
-            if (job) this.exit(job.pid);
+            if (job) this.exit(job.pid, job.root, 'bootout');
             this.loaded.delete(label);
             return ok();
           }
@@ -278,7 +337,7 @@ class SimulatedLaunchd {
             const label = this.labelOf(rest[1]!);
             const job = this.loaded.get(label);
             if (!job) return { code: 113, stdout: '', stderr: 'Could not find service' };
-            this.exit(job.pid);
+            this.exit(job.pid, job.root, 'kickstart');
             this.start(label, job.definition);
             return ok();
           }
@@ -411,7 +470,7 @@ describe('release:activate --plan', () => {
     expect(plists[0]!.edits).toEqual([`WorkingDirectory: ${fixture.oldRelease} -> ${fixture.newRelease}`]);
     const steps = (result.json.actions as Array<{ step: string }>).map((action) => action.step);
     expect(steps).toEqual([
-      'create-backup-dir', 'backup-database', 'record-symlink', 'backup-plists', 'write-staged-plists',
+      'create-backup-dir', 'backup-database', 'record-schema-level', 'record-symlink', 'backup-plists', 'write-staged-plists',
       'switch-symlink', 'install-plists', 'reload', 'reload', 'reload', 'verify', 'rollback-on-failure',
     ]);
     expect(result.stdout).not.toContain(TOKEN);
@@ -593,6 +652,127 @@ describe('release:activate --apply', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackUnverified);
     expect(result.json.verification).toMatchObject({ health: { projection: 'unobserved' } });
     expect(result.json.rollback).toMatchObject({ verified: false });
+  });
+});
+
+describe('release:activate --apply: rollback against a migrated database', () => {
+  const notConnectedOnNew = (root: string | null, fallback: () => { status: number; body: string }) => (
+    root === fixture.newRelease
+      ? { status: 200, body: JSON.stringify({ instance: { commit: NEW_COMMIT }, whatsapp: { connected: false } }) }
+      : fallback()
+  );
+
+  function instancePlistsAreStaged(): void {
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.newRelease, 'deploy', 'whatsoup'));
+    expect(readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8'))
+      .toContain(`<string>${fixture.newRelease}</string>`);
+    for (const label of [TIMER_LABEL, DRIFT_LABEL]) {
+      const installed = readFileSync(path.join(fixture.launchAgents, `${label}.plist`), 'utf8');
+      expect(installed).toContain(`${fixture.newRelease}/`);
+      expect(installed).not.toContain(`${fixture.oldRelease}/`);
+    }
+  }
+
+  function expectOperatorMessage(stderr: string, backup: string, levels: { before: string; after: string }): void {
+    expect(stderr).toContain(`before activation: ${levels.before}`);
+    expect(stderr).toContain(`after failure: ${levels.after}`);
+    expect(stderr).toContain(path.join(backup, 'bot.db'));
+    expect(stderr).toContain(`launchctl bootout gui/${UID}/${INSTANCE_LABEL}`);
+    expect(stderr).toContain(`cp ${path.join(backup, 'bot.db')} ${fixture.dbPath}`);
+    expect(stderr).toContain(`ln -sfn ${path.join(fixture.oldRelease, 'deploy', 'whatsoup')} ${fixture.wrapperLink}`);
+    expect(stderr).toContain(`cp ${path.join(backup, `${TIMER_LABEL}.plist`)} ${path.join(fixture.launchAgents, `${TIMER_LABEL}.plist`)}`);
+    expect(stderr).toContain(`launchctl bootstrap gui/${UID} ${path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`)}`);
+    expect(stderr).toMatch(/messages received after the backup .* lost/i);
+  }
+
+  it('(a) runs the verified rollback when the schema level is unchanged, and records both levels', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: notConnectedOnNew });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+    expect(result.json.outcome).toBe('rolled-back');
+    expect(result.json.schemaMigration).toEqual({
+      before: FIXTURE_SCHEMA, after: FIXTURE_SCHEMA, afterError: null, blockedAt: null,
+    });
+    expect(result.json.rollback).toMatchObject({ verified: true });
+    expect(world.releasesStarted()).toEqual([fixture.oldRelease, fixture.newRelease, fixture.oldRelease]);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+  });
+
+  it('(b) stops without restoring when the new release advanced the schema, and exits with the distinct code', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: notConnectedOnNew,
+      onInstanceStart: (root) => { if (root === fixture.newRelease) migrateFixture(fixture.dbPath, FIXTURE_SCHEMA + 1); },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
+    expect(result.json.outcome).toBe('rollback-blocked-migrated');
+    expect(result.json.schemaMigration).toEqual({
+      before: FIXTURE_SCHEMA, after: FIXTURE_SCHEMA + 1, afterError: null, blockedAt: 'before-rollback',
+    });
+    expect(result.json.rollback).toBeNull();
+    // The old binary never started again, and nothing was restored.
+    expect(world.releasesStarted()).toEqual([fixture.oldRelease, fixture.newRelease]);
+    instancePlistsAreStaged();
+    const backup = onlyBackup(fixture);
+    expect(result.json.backupPath).toBe(backup);
+    expectOperatorMessage(result.stderr, backup, { before: String(FIXTURE_SCHEMA), after: String(FIXTURE_SCHEMA + 1) });
+    expect(result.stderr).toContain('left in place');
+    expect(JSON.parse(readFileSync(path.join(backup, 'receipt.json'), 'utf8'))).toMatchObject({
+      outcome: 'rollback-blocked-migrated',
+    });
+  });
+
+  it('(c) fails closed when the schema level cannot be read after the failure', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: notConnectedOnNew,
+      onInstanceStart: (root) => { if (root === fixture.newRelease) writeFileSync(fixture.dbPath, 'not a sqlite database'); },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
+    expect(result.json.outcome).toBe('rollback-blocked-migrated');
+    const schema = result.json.schemaMigration as Record<string, unknown>;
+    expect(schema).toMatchObject({ before: FIXTURE_SCHEMA, after: null, blockedAt: 'before-rollback' });
+    expect(schema.afterError).toEqual(expect.any(String));
+    expect(world.releasesStarted()).toEqual([fixture.oldRelease, fixture.newRelease]);
+    instancePlistsAreStaged();
+    expectOperatorMessage(result.stderr, onlyBackup(fixture), { before: String(FIXTURE_SCHEMA), after: 'unreadable' });
+  });
+
+  it('(d) records the pre-activation schema level in receipt.json on success', async () => {
+    const world = new SimulatedLaunchd(fixture);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    const receipt = JSON.parse(readFileSync(path.join(onlyBackup(fixture), 'receipt.json'), 'utf8')) as Record<string, unknown>;
+    expect(receipt.schemaMigration).toEqual({ before: FIXTURE_SCHEMA, after: null, afterError: null, blockedAt: null });
+  });
+
+  it('(e) re-checks after the new instance has exited, catching a migration that committed during shutdown', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: notConnectedOnNew,
+      onInstanceExit: (root, via) => {
+        if (root === fixture.newRelease && via === 'bootout') migrateFixture(fixture.dbPath, FIXTURE_SCHEMA + 1);
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
+    expect(result.json.schemaMigration).toEqual({
+      before: FIXTURE_SCHEMA, after: FIXTURE_SCHEMA + 1, afterError: null, blockedAt: 'after-instance-stop',
+    });
+    expect(world.releasesStarted()).toEqual([fixture.oldRelease, fixture.newRelease]);
+    expect(world.loadedDefinition(INSTANCE_LABEL)).toBeNull();
+    instancePlistsAreStaged();
+    expectOperatorMessage(result.stderr, onlyBackup(fixture), { before: String(FIXTURE_SCHEMA), after: String(FIXTURE_SCHEMA + 1) });
+    expect(result.stderr).toContain('is stopped');
   });
 });
 
