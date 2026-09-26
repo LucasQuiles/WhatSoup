@@ -615,6 +615,15 @@ file:
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
 ```
 
+For a release switch (wrapper symlink plus instance and auxiliary plists), use
+`npm run release:activate` (see
+[release-deployment.md → Activating a release](release-deployment.md#activating-a-release)).
+It applies this whole sequence to every label it switches: bootout, a bounded
+wait for the old pid to exit, bootstrap with the bounded transient-error retry,
+then `kickstart -k`. It runs the same launchctl verbs, so the session hazards
+above still apply to where you run it from. The manual commands in this section
+remain the fallback reference.
+
 ### Generated-instance restart-policy migration
 
 Generated instance plists restart both nonzero application exits and
