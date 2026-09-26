@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 # The job's own PATH as the service manager gave it, and the user-writable directories where

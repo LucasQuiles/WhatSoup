@@ -40,7 +40,9 @@ a live host (it does make read-only registry requests, below):
 - **Writes only** its state directory (`state.json`, `run.log`) and a
   temporary directory removed on exit; npm's cache is pointed into that
   temporary directory.
-- **Runs only** the pinned node on this repo's scripts, `plutil`, read-only
+- **Runs only** a node on this repo's scripts (`WHATSOUP_NODE_BIN` if set,
+  otherwise the `.nvmrc` version under `~/.nvm`; if that is absent, the first
+  `node` on the job's `PATH`, with a warning), `plutil`, read-only
   `systemctl` verbs (`list-units`, `show-environment`, `show`, `is-active`),
   read-only verbs of the pinned npm (`--version`, `config get`, `view`, `ls`),
   `apt list`, `ps` (uid, elapsed time and executable name only),
@@ -48,7 +50,9 @@ a live host (it does make read-only registry requests, below):
   Every command comes from the job's own `PATH` with `~/.local/bin`, the
   npm-global bin directory and relative entries removed, so nothing placed
   there can shadow a helper. Binaries in those directories are still reported,
-  by path.
+  by path. Other entries of the job's `PATH` stay, including
+  `/opt/homebrew/bin`, which on macOS is writable by the user who owns
+  Homebrew: a file placed there can still shadow a helper.
 - **Uses only the pinned npm** (`WHATSOUP_CODEX_NODE_BIN_DIR`, by default the
   `.nvmrc` node's `bin`). If it is absent, the npm checks are skipped and
   reported `unknown` with the reason; no other npm on any `PATH`, and no other
@@ -73,20 +77,23 @@ The nightly job updates the native agent CLI only when every service instance
 resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
-`<name>` as its argument. Every instance, launchd or systemd, is resolved only
-when the wrapper it starts through, followed through symlinks, and the files
-that tree composes the PATH and picks the node from (`deploy/lib/runtime-path.sh`,
-`deploy/lib/resolve-node.sh`, `.nvmrc`) match this checkout byte for byte, and
-is `unknown` otherwise. The comparison fails closed: an instance on an older
-release whose wrapper differs only in lines unrelated to the PATH still holds
-the update. Run the maintenance job from the same release as the instances.
-This includes the installed `~/.local/bin/whatsoup` link: its target, not the
-link, selects the tree, so a link repointed at a different release or checkout
-holds the update. On systemd the unit is assumed to start through that link,
-as `deploy/whatsoup@.service` does; an `ExecStart` override is not read. On systemd the
-user manager environment, then `Environment=`, then `EnvironmentFiles=` are
-applied, as the launcher does. Finding no instance at all holds with a
-warning alert. The target is the newest release older than `npm.cooldown_minutes`
+`<name>` as its argument; a systemd instance is any `whatsoup@<name>` unit,
+assumed to start through the installed `~/.local/bin/whatsoup` link as
+`deploy/whatsoup@.service` does (an `ExecStart` override is not read).
+
+Every instance is resolved only when the wrapper it starts through, followed
+through symlinks, and the files that tree composes the PATH and picks the node
+from (`deploy/lib/runtime-path.sh`, `deploy/lib/resolve-node.sh`, `.nvmrc`)
+match this checkout byte for byte; otherwise it is `unknown`. For the installed
+link, its target, not the link, selects the tree, so a link repointed at a
+different release or checkout holds the update. The comparison fails closed:
+an instance on an older release whose wrapper differs only in lines unrelated
+to the PATH still holds. Run the maintenance job from the same release as the
+instances.
+
+On systemd the user manager environment, then `Environment=`, then
+`EnvironmentFiles=` are applied, as the launcher does. Finding no instance at
+all holds with a warning alert. The target is the newest release older than `npm.cooldown_minutes`
 (never a downgrade or prerelease). The install runs from the verified previous
 binary; a failed install or postcheck swaps the launcher link back to that
 binary (never a network reinstall) and still ends `degraded`. Event statuses
@@ -118,9 +125,14 @@ A `moved` launcher or an `advisory` summary is a finding for the host owner.
 Disabling self-updates on a host is a separate, explicitly authorized change;
 this job never edits settings or service definitions.
 
-Known limit: the job reports the launcher (what the next launch runs) and
-process counts, not the executable each running session actually has loaded.
-A long-running session can keep an older binary after the launcher moves.
+Known limits:
+
+- The job reports the launcher (what the next launch runs) and process counts,
+  not the executable each running session actually has loaded. A long-running
+  session can keep an older binary after the launcher moves.
+- `state.json` is not locked. Two runs at once (a scheduled run and a manual
+  `--check`) each replace it whole, and the later write wins, so the other
+  run's launcher observation can be lost.
 
 ### Plugin and MCP listings
 

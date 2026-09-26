@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   OLD,
+  SCRIPT,
   T,
   TARGET,
   allFixtureCalls,
@@ -265,6 +266,10 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
       expect(events(r, `npm-global:${version}`)[0], version).toMatchObject({ status: 'skipped' });
     }
   }, T);
+
+  it('starts bash from a fixed path, not from the PATH it will clean', () => {
+    expect(readFileSync(SCRIPT, 'utf8').split('\n')[0]).toBe('#!/bin/bash');
+  });
 
   it('reports a binary behind a relative PATH entry as unknown, not missing, and runs nothing', () => {
     const h = boundaryHarness();
