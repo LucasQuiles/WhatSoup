@@ -28,7 +28,7 @@ Every message that enters the bot's processing pipeline is written to `inbound_e
 
 The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
 
-An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
+An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`, and so does a completed turn whose answers the client output policy withheld (attempt kind `withheld_by_policy`, #3613); a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
 ### 2.2 Outbound Operations Journal (`outbound_ops`)
 
@@ -115,7 +115,7 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
-| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`) winner |
+| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`, or `client_output_withheld` for a policy-withheld answer) winner |
 | `processing` / `turn_done` | `failed` | `finalizeTurnTerminal()` — one atomic `failed_terminal` winner with its bounded failure class |
 | `processing` / `turn_done` | unchanged (recovery-owned) | `finalizeTurnTerminal()` — no inbound mutation; the linked recovery job and selected unresolved delivery become the durable owner in the same transaction, and later proof settles the source |
 | open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
@@ -1141,10 +1141,14 @@ After that dry run, `record-continuity-manifest --confirm-record` can persist on
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
 manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
 `total`/`open`/`unresolved`/`ambiguous`/`ambiguous_total`/`closed`/`addressed`/`declined` counts in a
-`continuity` block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are
-present — see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes
-`continuity_gap_open` or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not
-send, replay, admit, or close work.
+`continuity` block; the open/unresolved/ambiguous counts of that same reading feed the normalized
+`recovery_debt` projection, whose `continuity` part keeps its four-field shape. Readable retained
+obligations use `open=true`, `service_blocking=false`, and `attention="routine"` without changing an
+otherwise healthy service status. Unreadable or actionable recovery evidence uses
+`service_blocking=true`, `attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6.
+Compatibility `degradation_causes` may still include continuity reason codes for diagnostic consumers,
+but those codes are not independently an outage verdict. The recorder does not send, replay, admit,
+or close work.
 Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
 recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
 changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
@@ -1152,16 +1156,16 @@ same conversation, its terminal delivery proof, an exact selected-context witnes
 media and transcript hashes; `declined` needs an owner-approved `continuity-closure-authority.v1`
 policy and a transport-verified decision inbound. Only `open > 0` keeps `continuity_gap_open` and the
 continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
-unreadable (counts `null`), never zero. `turn_recovery_degraded` is derived independently and is not
-cleared by a closure.
+unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
+`turn_recovery_degraded` is derived independently and is not cleared by a closure.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
@@ -1253,6 +1257,28 @@ contradictory identity fails closed; the runtime never appends a guessed namespa
 conversation key. When the runtime knows an exact `session_id`, lifecycle status changes
 update every checkpoint row for that ID so all conversations attached to a shared session
 move together.
+
+Non-sandbox `per_chat` lazy adoption (`src/runtimes/agent/checkpoint-adoption.ts`, #3530):
+the first turn of a chat manager that has not yet started reads the chat's checkpoint and
+the `agent_sessions` rows carrying its `session_id`. This applies only when the chat has no
+resident manager: the first manager after a restart, or the one after idle eviction. It
+reads the rows only after the previous provider for the chat has stopped. A manager that
+replaces one this process retired on purpose keeps the fresh spawn: route recycle, `/new`,
+crash cleanup, or a provider-fallback stand-in. Scheduled-job map keys are excluded and
+start fresh.
+- **Own session, resumable:** the manager resumes that exact row.
+- **Foreign checkpoint:** the session has rows only in another namespace, for example a
+  scheduled job's row written before #3570. The runtime never adopts it. It recovers the
+  chat's own newest resumable session and re-points the checkpoint at it, which clears the
+  foreign completed identity. The next completed turn writes the recovered session's full
+  bundle. With no own session, the chat starts fresh with a notice.
+- **Own session, not resumable:** the row is missing, crashed or quarantined, or the session
+  layer refuses the resume at spawn. The chat starts fresh with the notice "_Previous session
+  could not be restored_", and recent chat messages are merged into the turn.
+- **A live owner may exist:** the own row is `active`, the session has duplicate own rows, or
+  it is also `active` in another namespace. The turn fails closed with
+  `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
+  running. No session is spawned, so the chat never gets a second live session.
 
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,

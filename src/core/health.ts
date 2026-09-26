@@ -13,6 +13,7 @@ import {
   type ContinuityGapHealth,
   type ContinuityGapHealthUnreadable,
 } from './continuity-gap-ledger.ts';
+import { normalizeRecoveryDebt } from './recovery-debt.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
@@ -296,16 +297,36 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     runtime reason disappears only after the shared alert clear is accepted.
  *     Health itself re-attempts that clear while no abandonment or exhaustion
  *     owns the source, so an accepted retry is immediately re-probed as clean.
+ *   - `recovery_debt_blocking` is the normalized recovery_debt verdict,
+ *     recomputed on every evaluation from the continuity ledger, the durable
+ *     turn-recovery and completed-delivery-identity gauges, and the delivery
+ *     ambiguity aggregate. Unreadable or contradictory evidence of any of the
+ *     three is itself service-blocking, so the reason stays present on every
+ *     poll while evidence is unreadable and disappears only when a fresh read
+ *     proves the debt non-blocking.
+ *   - `runtime.turn_finalization_debt` is recomputed on every snapshot from
+ *     the supervisor's live retained finalizations and the durable
+ *     turn-recovery counts (runtimeRecoveryDegradation); missing or malformed
+ *     counts surface as recovery_evidence_unreadable under
+ *     recovery_debt_blocking, never as silence.
+ *   - `runtime.completed_delivery_identity_debt` is recomputed on every
+ *     snapshot from the durable completed-delivery identity admissions; it
+ *     clears when the blocking count reaches zero, and an unreadable count
+ *     fails closed under recovery_debt_blocking the same way.
  *
  * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
- * in an unrelated chat proves nothing about a per-chat ownership map — so a
- * latch carrying one could never be released by the only release channel that
- * exists, and the instance would report degraded until process restart even
- * after the runtime had repaired itself and its own snapshot read healthy. */
+ * in an unrelated chat proves nothing about a per-chat ownership map or a
+ * durable recovery ledger — so a latch carrying one could never be released
+ * by the only release channel that exists, and the instance would report
+ * degraded until process restart even after the runtime had repaired itself
+ * and its own snapshot read healthy. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',
+  'recovery_debt_blocking',
+  'runtime.turn_finalization_debt',
+  'runtime.completed_delivery_identity_debt',
 ]);
 
 /** The primary route the latch release compares a receipt against: the
@@ -490,6 +511,7 @@ export type HealthDegradationCause =
   | 'database_retention_failed'
   | 'continuity_gap_unreadable'
   | 'continuity_gap_open'
+  | 'recovery_debt_blocking'
   | 'schema_future'
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
@@ -546,7 +568,7 @@ export interface HealthDegradationCauseRegistryEntry {
  * SAME condition pushes — /health reports degradation under two vocabularies
  * (ordered reasons supporting the aggregate status; typed causes that alerts
  * and flap detection key on) and several conditions reach the wire under
- * different names in the two, the clearest being runtimeTurnRecoveryIsDegraded:
+ * different names in the two, the clearest being blocking turn recovery (runtimeRecoveryDegradation):
  * `runtime.turn_finalization_debt` as a reason, `turn_recovery_degraded` as a
  * cause. `ensureStatusReasonFloor` (#3316) only guarantees a reason EXISTS;
  * this is the cross-reference that says which one. Live strings are never
@@ -587,12 +609,15 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   database_retention_failed: { reasonTwins: ['database_retention_failed'] },
   continuity_gap_unreadable: { reasonTwins: NO_REASON_TWIN },
   continuity_gap_open: { reasonTwins: NO_REASON_TWIN },
+  // The normalized recovery_debt verdict: service-blocking debt (including
+  // unreadable or contradictory recovery evidence) can never read healthy.
+  recovery_debt_blocking: { reasonTwins: ['recovery_debt_blocking'] },
   schema_future: { reasonTwins: ['schema_future'] },
   schema_not_ready: { reasonTwins: ['schema_not_ready'] },
   pending_polls_unreadable: { reasonTwins: ['pending_polls_unreadable'] },
   // agent runtime — each cause is keyed from a runtime detail counter whose
   // companion degradedReason reaches the reason vector as `runtime.<reason>`.
-  // runtimeTurnRecoveryIsDegraded pushes ONE reason for finalization debt AND
+  // Blocking turn recovery (runtimeRecoveryDegradation) pushes ONE reason for finalization debt AND
   // recovery debt; the cause vector splits the same predicate into two names.
   agent_recent_crashes: { reasonTwins: ['runtime.recent_crashes'] },
   agent_auto_compact_backoff: { reasonTwins: ['runtime.auto_compact_backoff'] },
@@ -2225,9 +2250,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // UTC datetimes for the active ambiguity episode or a fail-closed stale
       // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
+      const oldestUncorroboratedMaybeSentAt =
+        durabilityStats?.deliveryAmbiguity?.oldestUncorroboratedAt ?? null;
       const oldestMaybeSentMs =
-        durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
-          ? Date.parse(durabilityStats.oldestMaybeSentAt.replace(' ', 'T') + 'Z')
+        oldestUncorroboratedMaybeSentAt !== '' && oldestUncorroboratedMaybeSentAt !== null
+          ? Date.parse(oldestUncorroboratedMaybeSentAt.replace(' ', 'T') + 'Z')
           : Number.NaN;
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
@@ -2237,18 +2264,43 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         CONTINUITY_GAP_HEALTH_UNREADABLE,
         'failed to read continuity gap ledger',
       );
-      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
-      const recoveryDebt: {
-        open: boolean;
-        reason: 'continuity_gap_open' | 'continuity_gap_unreadable' | null;
-        continuity: typeof continuity;
-      } = {
-        open: continuityIsDegraded,
-        reason: continuityIsDegraded
-          ? (continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable')
-          : null,
-        continuity,
+      const zeroRuntimeRecoveryDetails = {
+        recoveryBlockingReasons: [],
+        recoveryDebtReasons: [],
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryRetainedTerminal: 0,
+        turnRecoveryOpenRecoveries: 0,
+        turnRecoveryCorroboratedRetained: 0,
+        completedDeliveryIdentityBlocking: 0,
+        completedDeliveryIdentityRetained: 0,
+        completedDeliveryIdentityAdmissions: { nextAction: null },
       };
+      const zeroDeliveryAmbiguity = {
+        readable: true,
+        uncorroboratedAmbiguous: 0,
+        corroboratedRetained: 0,
+        oldestUncorroboratedAt: null,
+      };
+      const recoveryDebt = normalizeRecoveryDebt({
+        continuity,
+        runtime: deps.instanceType === 'agent'
+          ? {
+              readable: runtimeSnapshot !== null,
+              details: runtimeSnapshot?.details ?? null,
+            }
+          : { readable: true, details: zeroRuntimeRecoveryDetails },
+        durability: deps.durability
+          ? {
+              readable: durabilityStats !== null,
+              deliveryBlocking: durabilityDebtIsDegraded,
+              deliveryAmbiguity: durabilityStats?.deliveryAmbiguity ?? null,
+            }
+          : {
+              readable: true,
+              deliveryBlocking: false,
+              deliveryAmbiguity: zeroDeliveryAmbiguity,
+            },
+      });
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
@@ -2308,6 +2360,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
+        if (recoveryDebt.service_blocking) statusReasons.push('recovery_debt_blocking');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
         // #2280: silence from child processes is not proof of recovery.
         // If statusReasons is empty but the instance was recently degraded,
@@ -2670,6 +2723,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (databaseRetentionFailed) addDegradationCause('database_retention_failed');
       if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
       else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
+      if (recoveryDebt.service_blocking) addDegradationCause('recovery_debt_blocking');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -2693,13 +2747,30 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       ) {
         addDegradationCause('turn_finalization_degraded');
       }
-      if (
-        positiveRuntimeCounter('turnRecoveryOutstanding')
-        || positiveRuntimeCounter('turnRecoveryExhausted')
-        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
-        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
-        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
-      ) {
+      // turn_recovery_degraded names BLOCKING turn recovery only: the same
+      // classification (runtimeRecoveryDegradation) that pushes its
+      // runtime.turn_finalization_debt twin. Retained debt (exhausted,
+      // corroborated or historical catch-up rows) stays in recovery_debt and
+      // never names this cause. A runtime without the classification falls
+      // back to the blocking gauge plus the integrity counters.
+      const turnRecoveryBlockingReasons = new Set([
+        'turn_recovery_actionable',
+        'turn_recovery_integrity',
+        'turn_recovery_unclassified',
+      ]);
+      const runtimeRecoveryBlockingReasons = runtimeDetails?.['recoveryBlockingReasons'];
+      const turnRecoveryBlocking = Array.isArray(runtimeRecoveryBlockingReasons)
+        ? runtimeRecoveryBlockingReasons.some(
+          (reason) => turnRecoveryBlockingReasons.has(reason as string),
+        )
+        : (
+          typeof runtimeDetails?.['turnRecoveryBlockingOutstanding'] === 'number'
+            ? positiveRuntimeCounter('turnRecoveryBlockingOutstanding')
+            : positiveRuntimeCounter('turnRecoveryOutstanding')
+        )
+          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+          || positiveRuntimeCounter('turnRecoveryEchoConflicts');
+      if (agentRuntimeStatus === 'degraded' && turnRecoveryBlocking) {
         addDegradationCause('turn_recovery_degraded');
       }
       if (runtimeProviderExecution?.['pressureActive'] === true) {
@@ -2709,11 +2780,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // degraded while the cause fell through to _unclassified — the real
       // reason lived only in status_reasons, invisible to alerts/flap keying
       // (fleet-flapping root-cause, 2026-08-16). Name it.
-      const identityAdmissions = runtimeDetails?.['completedDeliveryIdentityAdmissions'] as
-        | Record<string, unknown>
-        | undefined;
-      const identityDebtCount = identityAdmissions?.['unresolvedCount'];
-      if (typeof identityDebtCount === 'number' && Number.isFinite(identityDebtCount) && identityDebtCount > 0) {
+      // Only BLOCKING identity debt (no fresh-inbound or operator next action)
+      // is named: retained identity debt stays in recovery_debt, matching the
+      // runtime.completed_delivery_identity_debt reason twin.
+      if (positiveRuntimeCounter('completedDeliveryIdentityBlocking')) {
         addDegradationCause('delivery_identity_debt');
       }
       if (

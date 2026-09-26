@@ -8,6 +8,7 @@ import {
   type AdmissionRejectClass,
 } from '../../core/inbound-failure-class.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from '../../core/turn-recovery-contract.ts';
+import { CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON } from '../../core/turn-finalization-contract.ts';
 import type {
   FinalizeTurnTerminalParams,
   TerminalInboundMutation,
@@ -57,6 +58,12 @@ export type AttemptOutcome =
     readonly class: ProviderFailureKind | NonProviderTerminalFailureClass;
   }
   | { readonly kind: 'suppressed_by_policy' }
+  /**
+   * #3613: the attempt completed but the client output policy withheld every
+   * answer. Terminal by design: finalized_no_reply_policy, never recovered or
+   * replayed, and persisted as withheld rather than as a sent reply.
+   */
+  | { readonly kind: 'withheld_by_policy' }
   | {
     readonly kind: 'admission_rejected';
     /**
@@ -251,12 +258,20 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
         ? undefined
         : { kind: 'complete', seq, terminalReason: 'response_echoed' };
     case 'finalized_no_reply_policy':
-      if (result.attemptOutcome.kind !== 'suppressed_by_policy') {
+      if (
+        result.attemptOutcome.kind !== 'suppressed_by_policy'
+        && result.attemptOutcome.kind !== 'withheld_by_policy'
+      ) {
         throw new Error('finalized_no_reply_policy requires an explicit policy suppression');
       }
-      return seq === null
-        ? undefined
-        : { kind: 'complete', seq, terminalReason: 'no_reply_policy' };
+      if (seq === null) return undefined;
+      return {
+        kind: 'complete',
+        seq,
+        terminalReason: result.attemptOutcome.kind === 'withheld_by_policy'
+          ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+          : 'no_reply_policy',
+      };
     case 'failed_terminal': {
       if (
         result.attemptOutcome.kind !== 'failed' &&

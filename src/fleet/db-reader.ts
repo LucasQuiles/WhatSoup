@@ -4,6 +4,7 @@ import { buildSafeFtsMatchQuery } from '../lib/sql-fts.ts';
 import { queryAll, queryOne } from '../lib/db-query.ts';
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_HOUR } from '../lib/time-units.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 
 const log = createChildLogger('fleet:db-reader');
 
@@ -162,10 +163,13 @@ const READ_ONLY_DATABASE_OPTIONS: ConstructorParameters<typeof DatabaseSync>[1] 
 export class FleetDbReader {
   private selfName: string;
   private selfDb: DatabaseSync;
+  /** #2200: the metrics window and its hour buckets are derived from this clock. */
+  private readonly clock: Clock;
 
-  constructor(selfName: string, selfDb: DatabaseSync) {
+  constructor(selfName: string, selfDb: DatabaseSync, clock: Clock = systemClock) {
     this.selfName = selfName;
     this.selfDb = selfDb;
+    this.clock = clock;
   }
 
   /**
@@ -457,7 +461,8 @@ export class FleetDbReader {
     providers: string[];
   }> {
     const rangeHours = opts.range === '24h' ? 24 : opts.range === '7d' ? 168 : 720;
-    const cutoff = new Date(Date.now() - rangeHours * MS_PER_HOUR).toISOString();
+    const nowMs = this.clock.now();
+    const cutoff = new Date(nowMs - rangeHours * MS_PER_HOUR).toISOString();
 
     return this.query(name, dbPath, (db) => {
       // Read all 9 metrics from metrics_hourly
@@ -483,7 +488,7 @@ export class FleetDbReader {
       }
 
       // Generate full bucket sequence (densification)
-      const nowHour = new Date(Date.now());
+      const nowHour = new Date(nowMs);
       nowHour.setUTCMinutes(0, 0, 0);
       const bucketSequence: string[] = [];
       for (let i = rangeHours - 1; i >= 0; i--) {

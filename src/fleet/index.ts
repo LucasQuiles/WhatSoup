@@ -10,6 +10,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import { defaultIncidentDbPath, openIncidentDb } from './incidents/db.ts';
 import { IncidentStore } from './incidents/store.ts';
 import { ProducerStore } from './incidents/producers.ts';
@@ -97,6 +98,8 @@ export interface FleetDeps {
    * canonical XDG path. The fleet server owns the returned handle: start()
    * probes it once, stop() closes it exactly once. */
   openIncidentDatabase?: () => DatabaseSync;
+  /** #2200: clock for the recorded start time and /livez uptime; defaults to systemClock. */
+  clock?: Clock;
 }
 
 export interface RouteDeps {
@@ -493,7 +496,7 @@ export function createFleetServer(deps: FleetDeps) {
   }
 
   const staticHandler = createStaticHandler(distDir, getVersion);
-  const livenessHandler = createLivenessHandler({ selfName: deps.selfName, startedAtMs: Date.now() });
+  const livenessHandler = createLivenessHandler({ selfName: deps.selfName, startedAtMs: (deps.clock ?? systemClock).now(), clock: deps.clock });
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };

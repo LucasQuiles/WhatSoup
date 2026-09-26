@@ -60,6 +60,16 @@ _CONTROLLER_STATE_REASONS = frozenset(
         "retention_exhausted",
     }
 )
+# #3458: the decision classes email_fallback_blocked_reason returns. They are
+# admitted under the "reason" key only, so the durable dispatch log names which
+# provenance gate decided without making the strings safe under any other key.
+_PROVENANCE_GATE_REASONS = frozenset(
+    {
+        "test_provenance",
+        "test_leak",
+        "test_state_dir",
+    }
+)
 _SAFE_DETAIL_STRING_VALUES = frozenset(
     {
         "1_64",
@@ -259,6 +269,7 @@ def metadata_only_controller_details(value: Mapping[str, Any]) -> dict[str, Any]
                         and (
                             reason in _SAFE_DETAIL_STRING_VALUES
                             or reason in _CONTROLLER_STATE_REASONS
+                            or reason in _PROVENANCE_GATE_REASONS
                         )
                     ):
                         projected[key] = reason

@@ -343,9 +343,21 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
     turnRecoveryEchoConflicts: 0,
+    turnRecoveryBlockingOutstanding: 0,
+    turnRecoveryRetainedTerminal: 0,
+    turnRecoveryCorroboratedRetained: 0,
     turnRecoveryBlockedUnsafeSynthetic: 0,
     turnRecoveryBlockedUnsafeSuperseded: 0,
     turnRecoveryBlockedUnsafeStranded: 0,
+  };
+}
+
+function expectedRecoveryClassificationDetails(): Record<string, unknown> {
+  return {
+    recoveryBlockingReasons: [],
+    recoveryDebtReasons: [],
+    completedDeliveryIdentityBlocking: 0,
+    completedDeliveryIdentityRetained: 0,
   };
 }
 
@@ -497,6 +509,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -549,6 +562,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -598,6 +612,41 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
       chronologyDelayedDispatches: 21,
       chronologyRecoveryReplayDispatches: 22,
       chronologyMaxQueueAgeSeconds: 23,
+    });
+  });
+
+  it('projects each registered provider-fallback counter onto its own health field (#3586)', () => {
+    // Writes the runtime's real fallback state, so the getFallbackState()
+    // mapping itself is exercised. Distinct value per field so a swapped
+    // mapping cannot pass.
+    const internals = runtime as unknown as {
+      fallbackMetrics: {
+        turnsServed: number;
+        turnsEmpty: number;
+        activations: number;
+        reverts: number;
+        replays: number;
+      };
+      fallbackProbeAttempts: number;
+      fallbackChain: { failedKeys: Set<string> };
+    };
+    internals.fallbackMetrics.turnsServed = 31;
+    internals.fallbackMetrics.turnsEmpty = 32;
+    internals.fallbackMetrics.activations = 33;
+    internals.fallbackMetrics.reverts = 34;
+    internals.fallbackMetrics.replays = 35;
+    internals.fallbackProbeAttempts = 36;
+    internals.fallbackChain.failedKeys.add('provider-a:model-a');
+    internals.fallbackChain.failedKeys.add('provider-b:model-b');
+
+    expect(runtime.getHealthSnapshot().details).toMatchObject({
+      fallbackTurnsServed: 31,
+      fallbackTurnsEmpty: 32,
+      fallbackActivations: 33,
+      fallbackReverts: 34,
+      fallbackReplays: 35,
+      probeAttempts: 36,
+      failedEntryCount: 2,
     });
   });
 
@@ -890,6 +939,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),

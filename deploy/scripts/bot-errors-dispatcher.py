@@ -804,6 +804,75 @@ def event_text(event: dict[str, Any], key: str) -> str:
     return alert_text(event.get(key) or "")
 
 
+# Readable headlines for confined content (display only).
+#
+# A confined summary renders as "<class> - <n> chars - digest <8hex>", which names
+# neither the bot nor the failure. The event's `instance` and `source` are short
+# codes set in producer code, not alert content, so a headline built from them
+# crosses no confinement boundary. The digest stays in the headline (and the full
+# confined rendering stays in the body) so operators can still correlate. Identity
+# paths (event_fingerprint_text, storm_fingerprint, incident_key) never call this.
+_CONFINED_DISPLAY_RE = re.compile(
+    r"\b(?P<cls>[A-Za-z][A-Za-z0-9_]{0,63}) - (?P<length>\d{1,9}) chars - digest (?P<digest>[0-9a-f]{8})\b"
+)
+_SAFE_ALERT_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+_UNINFORMATIVE_FAILURE_CLASSES = frozenset({"unknown", "none"})
+
+# Fixed, reviewed wording per producer source. Constants, never event content.
+SOURCE_HEADLINES: dict[str, str] = {
+    "primary_model_unusable": "primary model unusable",
+    "provider_fallback_activated": "provider fallback activated",
+    "fallback_chain_entry_unhealthy": "fallback chain entry unhealthy",
+    "agent_turn_admission_rejected": "agent turn admission rejected",
+    "agent_reply_guarantee_breach": "reply guarantee breached",
+    "agent_turn_usage_unavailable": "turn usage data unavailable",
+    "credential_identity_unverifiable": "credential identity cannot be verified",
+    "bead_proposal_backlog": "bead proposal backlog",
+    "health_body_degraded": "health degraded",
+    "outbound_flood": "outbound flood threshold tripped",
+    "outbound_delivery_ambiguous": "outbound delivery ambiguous",
+    "inbound_message_dropped": "inbound message dropped",
+    "whatsapp_device_bond_lost": "WhatsApp linked-device bond lost",
+    "instance_logged_out": "WhatsApp session logged out",
+}
+
+
+def safe_alert_label(value: Any) -> str | None:
+    """Return value when it is a short code-shaped label, else None."""
+    if not isinstance(value, str) or not _SAFE_ALERT_LABEL_RE.match(value):
+        return None
+    return value
+
+
+def source_headline(source: Any) -> str:
+    label = safe_alert_label(source)
+    if label is None:
+        return "alert"
+    return SOURCE_HEADLINES.get(label) or re.sub(r"[_:.-]+", " ", label).strip()
+
+
+def readable_confined_text(text: str, instance: Any, source: Any) -> str:
+    """Replace each confined rendering in text with '<instance>: <cause> [digest x]'."""
+    if not text or " chars - digest " not in text:
+        return text
+    inst = safe_alert_label(instance)
+
+    def replace(match: re.Match[str]) -> str:
+        cls = match.group("cls")
+        head = f"{inst}: " if inst else ""
+        head += source_headline(source)
+        if cls.lower() not in _UNINFORMATIVE_FAILURE_CLASSES:
+            head += f" ({cls})"
+        return f"{head} [digest {match.group('digest')}]"
+
+    return _CONFINED_DISPLAY_RE.sub(replace, text)
+
+
+def event_display_summary(event: dict[str, Any]) -> str:
+    """Operator headline text for an event's summary (display only)."""
+    return readable_confined_text(event_text(event, "summary"), event.get("instance"), event.get("source"))
+
+
 def event_fingerprint_text(event: dict[str, Any], key: str) -> str:
     """Render one alert-content field for IDENTITY, carrying the full digest.
 
@@ -3621,20 +3690,20 @@ def append_still_open_context(
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
         if "still-open digest" not in event_text(event, "summary").lower():
-            event["summary"] = f"Still-open digest, awaiting physical action: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Still-open digest, awaiting physical action: {event_display_summary(event) or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
         if "awaiting physical" not in event_text(event, "summary").lower():
-            event["summary"] = f"Awaiting physical action: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Awaiting physical action: {event_display_summary(event) or key}"
     elif escalated:
         event["severity"] = "critical"
         if "escalated" not in event_text(event, "summary").lower():
-            event["summary"] = f"ESCALATED still open: {event_text(event, 'summary') or key}"
+            event["summary"] = f"ESCALATED still open: {event_display_summary(event) or key}"
     elif digest:
         if "still-open digest" not in event_text(event, "summary").lower():
-            event["summary"] = f"Still-open digest: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Still-open digest: {event_display_summary(event) or key}"
     elif "still open" not in event_text(event, "summary").lower():
-        event["summary"] = f"Still open: {event_text(event, 'summary') or key}"
+        event["summary"] = f"Still open: {event_display_summary(event) or key}"
 
 
 def truncate(value: Any, limit: int) -> str:
@@ -4065,7 +4134,11 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT WARNING"
     else:
         title = "BOT ERROR"
-    summary = truncate(redact(event_text(event, "summary") or "unspecified bot error").replace("@", " at "), 220)
+    raw_summary = event_text(event, "summary")
+    display_summary = event_display_summary(event)
+    summary = truncate(redact(display_summary or "unspecified bot error").replace("@", " at "), 220)
+    # Keep the confined rendering visible for correlation when the headline replaced it.
+    confined_summary = raw_summary if display_summary != raw_summary else None
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
@@ -4086,6 +4159,7 @@ def format_event(event: dict[str, Any]) -> str:
 
     identity_lines = [
         f"{title} - {summary}",
+        event_line("summary_confined", confined_summary),
         event_line("severity", event.get("severity")),
         event_line("machine", event.get("machine")),
         event_line("instance", event.get("instance")),
@@ -4191,6 +4265,12 @@ def next_backoff(attempts: int) -> int | None:
 # opposed to a permanent/content failure (unknown chat, malformed payload, target
 # mismatch). Transient failures are deferred and redelivered on transport
 # recovery; everything else still dead-letters at the permanent cap.
+#
+# The outbound governor's shed is included: it rejects a send locally, before
+# the provider call, as deliberate back-pressure. It must spend the transient
+# budget, not the permanent one. The text must equal OUTBOUND_GOVERNOR_SHED_LOG
+# in src/core/outbound-governor-shed.ts; a test asserts the two agree.
+OUTBOUND_GOVERNOR_SHED_SIGNATURE = "outbound governor ceiling exceeded"
 _TRANSIENT_TRANSPORT_SIGNATURES = (
     "temporarily disconnected",
     "try again in a moment",
@@ -4204,6 +4284,7 @@ _TRANSIENT_TRANSPORT_SIGNATURES = (
     "signal-cli connection closed",
     "signal-cli connection ended by peer",
     "signal-cli socket write failed",
+    OUTBOUND_GOVERNOR_SHED_SIGNATURE,
 )
 
 
@@ -5679,7 +5760,10 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     if last_stale_failed and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS:
         return None
 
-    summary = alert_text(record.get("lastSummary")) or key
+    key_fields = incident_event_fields_from_key(key)
+    summary = readable_confined_text(
+        alert_text(record.get("lastSummary")), key_fields.get("instance"), key_fields.get("source")
+    ) or key
     if awaiting_physical:
         title = f"Stale incident digest, awaiting physical action: {summary}"
         action = physical_action_text()
@@ -6054,6 +6138,11 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
     }
 
 
+# The storm-lifecycle fields flap_evaluate writes. flap_scan_outbox restores
+# exactly these when a storm send raises; the trip fields are left advanced.
+FLAP_STORM_LIFECYCLE_FIELDS = ("stormAt", "stormSeverity", "lastStormEmitAt", "cadenceStep")
+
+
 def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
     event currently in the outbox, keyed by incident_key, and emit consolidated
@@ -6108,9 +6197,25 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
                 continue
             entry = record_flap_trip(flap_state, key, now)
             changed = True
+            # #3479: flap_evaluate advances the storm lifecycle before the
+            # send. If the send itself raises, undo that advance so the emit
+            # watermark never records an alert that did not go out (and no
+            # member event is suppressed on its behalf). The trip recorded
+            # above still counts. A send that succeeded keeps its lifecycle
+            # even if the dispatch-log append after it fails; rolling back
+            # then would re-emit a delivered alert.
+            storm_before = {field: entry[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in entry}
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
-                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                try:
+                    send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                except Exception:
+                    for field in FLAP_STORM_LIFECYCLE_FIELDS:
+                        if field in storm_before:
+                            entry[field] = storm_before[field]
+                        else:
+                            entry.pop(field, None)
+                    raise
                 emitted += 1
                 append_dispatch_log(paths, {
                     "type": "flap_storm",

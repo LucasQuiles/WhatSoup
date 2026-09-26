@@ -118,6 +118,7 @@
         "database_retention_failed",
         "continuity_gap_unreadable",
         "continuity_gap_open",
+        "recovery_debt_blocking",
         "schema_future",
         "schema_not_ready",
         "pending_polls_unreadable",
@@ -423,8 +424,48 @@
       "field": "turnRecoveryOutstanding",
       "label": "runtime_agent_turn_recovery_outstanding",
       "kind": "active_episode_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryBlockingOutstanding",
+      "label": "runtime_agent_turn_recovery_blocking_outstanding",
+      "kind": "active_episode_count",
       "currentHealthEffect": "positive_is_risk",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryRetainedTerminal",
+      "label": "runtime_agent_turn_recovery_retained_terminal",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryCorroboratedRetained",
+      "label": "runtime_agent_turn_recovery_corroborated_retained",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "completedDeliveryIdentityBlocking",
+      "label": "runtime_agent_completed_delivery_identity_blocking",
+      "kind": "active_episode_count",
+      "currentHealthEffect": "positive_is_risk",
+      "owner": "src/runtimes/agent/runtime.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "completedDeliveryIdentityRetained",
+      "label": "runtime_agent_completed_delivery_identity_retained",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
@@ -479,7 +520,7 @@
       "field": "turnRecoveryExhausted",
       "label": "runtime_agent_turn_recovery_exhausted",
       "kind": "active_episode_count",
-      "currentHealthEffect": "positive_is_risk",
+      "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
@@ -487,7 +528,7 @@
       "field": "turnRecoveryOpenRecoveries",
       "label": "runtime_agent_turn_recovery_open_recoveries",
       "kind": "active_episode_count",
-      "currentHealthEffect": "positive_is_risk",
+      "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
@@ -633,6 +674,62 @@
       "kind": "historical_maximum",
       "currentHealthEffect": "diagnostic_only",
       "owner": "src/runtimes/agent/turn-chronology.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackTurnsServed",
+      "label": "runtime_agent_fallback_turns_served",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackTurnsEmpty",
+      "label": "runtime_agent_fallback_turns_empty",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackActivations",
+      "label": "runtime_agent_fallback_activations",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackReverts",
+      "label": "runtime_agent_fallback_reverts",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "fallbackReplays",
+      "label": "runtime_agent_fallback_replays",
+      "kind": "cumulative_total",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/fallback-window-metrics.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "probeAttempts",
+      "label": "runtime_agent_fallback_probe_attempts",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/health-snapshot.test.ts"
+    },
+    {
+      "field": "failedEntryCount",
+      "label": "runtime_agent_fallback_failed_entry_count",
+      "kind": "current_gauge",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
       "test": "tests/runtimes/agent/health-snapshot.test.ts"
     }
   ],
@@ -931,6 +1028,14 @@
         "clearPredicate": "cause absent from the next accepted health body degradation vector",
         "requiresCorroborationBeforePaging": false
       },
+      "recovery_debt_blocking": {
+        "family": "durability",
+        "impactTier": "hold",
+        "notification": "warning",
+        "rootOwner": "durability_engine",
+        "clearPredicate": "recovery_debt.service_blocking false on the next accepted health body",
+        "requiresCorroborationBeforePaging": false
+      },
       "schema_future": {
         "family": "schema",
         "impactTier": "page",
@@ -1144,6 +1249,11 @@
       "disposition": "cause_aware_hold_class_held_while_connected_else_visible_outage",
       "owner": "deploy/scripts/bot-errors-dispatcher.py",
       "test": "deploy/scripts/tests/test_bot_errors_transient_tiering.py"
+    },
+    "recovery_debt_attention": {
+      "disposition": "non_paging_operator_recovery_debt",
+      "owner": "src/fleet/health-poller.ts",
+      "test": "tests/fleet/health-poller.test.ts"
     },
     "provider_fallback_capacity": {
       "disposition": "non_paging_while_fallback_is_proven_serving",
@@ -1362,7 +1472,7 @@
       "test": "tests/runtimes/agent/fallback-usage-limit-cascade.test.ts"
     },
     "fallback_chain_entry_unhealthy": {
-      "disposition": "once_per_canary_health_transition_until_entry_recovers",
+      "disposition": "once_per_canary_health_transition_until_no_entry_in_current_sweep_set_is_failing",
       "owner": "src/runtimes/agent/runtime-fallback.ts",
       "test": "tests/runtimes/agent/fallback-chain-canary.test.ts"
     },
