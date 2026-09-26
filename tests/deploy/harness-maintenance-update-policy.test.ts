@@ -367,23 +367,44 @@ describe('agent CLI update policy surfaces', () => {
     expect(summary.message).not.toContain('alpha');
   }, T);
 
-  it('reads settings.local.json over settings.json, and managed settings over both', () => {
+  it('ignores settings.local.json, which the agent CLI reads only per project', () => {
     const h = makeHarness();
     portableInstance(h, 'alpha');
-    writeJson(path.join(h.home, '.claude/settings.json'), { env: { DISABLE_UPDATES: '0' } });
     writeJson(path.join(h.home, '.claude/settings.local.json'), { env: { DISABLE_UPDATES: 'true' } });
-    const local = events(run(h, ['--check']), 'claude-update-policy');
-    expect(local.find((e) => e.status === 'instance')!.message)
-      .toContain('settings env DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset; settings files: settings.local.json+settings.json');
-    expect(local.at(-1)).toMatchObject({ status: 'disabled' });
+    const policy = events(run(h, ['--check']), 'claude-update-policy');
+    expect(policy.find((e) => e.status === 'instance')!.message)
+      .toContain('settings env DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=unset; settings files: none');
+    expect(policy.at(-1)).toMatchObject({ status: 'advisory' });
+    // What is not read is named, so an advisory summary is read as possibly understated.
+    expect(policy.at(-1)!.message).toContain('Not read:');
+    expect(policy.at(-1)!.message).toContain('com.anthropic.claudecode');
+  }, T);
 
-    // Managed settings apply to every config directory and take precedence.
-    const managed = path.join(h.home, 'managed-settings.json');
+  it('lets managed drop-ins override the managed file in lexical order, and managed settings override settings.json', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    const managed = path.join(h.home, 'no-managed-settings.json');
+    const dropIns = path.join(h.home, 'managed-settings.d');
+    writeJson(path.join(h.home, '.claude/settings.json'), { env: { DISABLE_UPDATES: 'false' } });
     writeJson(managed, { env: { DISABLE_UPDATES: '0' } });
-    const overridden = events(run(h, ['--check'], { WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE: managed }), 'claude-update-policy');
-    expect(overridden.find((e) => e.status === 'instance')!.message)
-      .toContain('settings env DISABLE_UPDATES=set-unrecognized DISABLE_AUTOUPDATER=unset; settings files: managed+settings.local.json+settings.json');
-    expect(overridden.at(-1)).toMatchObject({ status: 'unknown' });
+    writeJson(path.join(dropIns, '10-disable.json'), { env: { DISABLE_UPDATES: '1' } });
+    const instance = () => events(run(h, ['--check']), 'claude-update-policy').find((e) => e.status === 'instance')!.message;
+    expect(instance()).toContain(
+      'settings env DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset; settings files: managed+managed-settings.d/10-disable.json+settings.json');
+    // A later drop-in wins.
+    writeJson(path.join(dropIns, '20-reenable.json'), { env: { DISABLE_UPDATES: 'false' } });
+    expect(instance()).toContain('settings env DISABLE_UPDATES=set-unrecognized');
+  }, T);
+
+  it('lets settings.json override the service environment', () => {
+    const h = makeHarness();
+    writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+    systemdUnit(h, 'alpha', [`Environment=WHATSOUP_NODE=${process.execPath} DISABLE_UPDATES=1`]);
+    h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+    writeJson(path.join(h.home, '.claude/settings.json'), { env: { DISABLE_UPDATES: '0' } });
+    const summary = events(run(h, ['--check']), 'claude-update-policy').at(-1)!;
+    expect(summary.status).toBe('unknown');
+    expect(summary.message).toContain('alpha');
   }, T);
 
   it('reports settings that cannot be parsed as unreadable, never as unset', () => {

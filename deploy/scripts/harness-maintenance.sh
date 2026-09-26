@@ -1584,10 +1584,12 @@ CLAUDE_MANAGED_SETTINGS_FILE="${WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE:-$CLAUDE_
 
 # claude_settings_policy <config dir, or empty for the default>: print
 # "<installMethod>\037<autoUpdates>\037<settings env DISABLE_UPDATES>\037<settings env DISABLE_AUTOUPDATER>\037<files>".
-# The env flags come from managed settings, then settings.local.json, then settings.json: the first
-# that sets a key decides it, and any of them that exists but cannot be parsed makes both
-# unreadable. <files> names the settings files present. The global config file also holds account
-# data; only installMethod and autoUpdates are read from it.
+# The env flags come from managed settings (the managed file, then each managed-settings.d drop-in
+# in lexical order, a later one overriding an earlier one), then <config dir>/settings.json: the
+# first that sets a key decides it, and any of them that exists but cannot be parsed makes both
+# unreadable. settings.local.json is not a source here: the agent CLI reads it per project. <files>
+# names the settings files present. The global config file also holds account data; only
+# installMethod and autoUpdates are read from it.
 claude_settings_policy() {
   "$REPO_NODE_BIN" - "$HOME" "$1" "$CLAUDE_MANAGED_SETTINGS_FILE" <<'NODE'
 const fs = require('node:fs');
@@ -1604,12 +1606,26 @@ const read = (file) => {
 const record = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
 const field = (r, pick) => (r.ok ? pick(record(r.value)) : 'unreadable');
 const configDir = dir || path.join(home, '.claude');
-// Highest precedence first.
-const layers = [
-  ['managed', managedFile],
-  ['settings.local.json', path.join(configDir, 'settings.local.json')],
+const dropInDir = managedFile ? path.join(path.dirname(managedFile), 'managed-settings.d') : '';
+let dropIns = [];
+let dropInsReadable = true;
+if (dropInDir) {
+  try {
+    dropIns = fs.readdirSync(dropInDir).filter((f) => f.endsWith('.json') && !f.startsWith('.')).sort();
+  } catch (err) {
+    dropInsReadable = Boolean(err && err.code === 'ENOENT');
+  }
+}
+// In reading order: the managed file, its drop-ins, then the config directory's settings.
+const readOrder = [
+  ...(managedFile ? [['managed', managedFile]] : []),
+  ...dropIns.map((f) => [`managed-settings.d/${f}`, path.join(dropInDir, f)]),
   ['settings.json', path.join(configDir, 'settings.json')],
-].filter(([, file]) => file).map(([name, file]) => ({ name, ...read(file) }));
+].map(([name, file]) => ({ name, ...read(file) }));
+if (!dropInsReadable) readOrder.push({ name: 'managed-settings.d', ok: false, present: true, value: null });
+// Highest precedence first: the last managed layer read, back to the managed file, then settings.json.
+const managedLayers = readOrder.filter((l) => l.name !== 'settings.json').reverse();
+const layers = [...managedLayers, ...readOrder.filter((l) => l.name === 'settings.json')];
 const global = read(dir ? path.join(dir, '.claude.json') : path.join(home, '.claude.json'));
 const installMethod = field(global, (g) => (g.installMethod === undefined ? 'absent'
   : typeof g.installMethod === 'string' && /^[a-z0-9-]{1,32}$/.test(g.installMethod) ? g.installMethod : 'unrecognized'));
@@ -1624,7 +1640,7 @@ const envFlag = (key) => {
   }
   return 'unset';
 };
-const files = layers.filter((l) => l.present).map((l) => l.name).join('+') || 'none';
+const files = readOrder.filter((l) => l.present).map((l) => l.name).join('+') || 'none';
 process.stdout.write([installMethod, autoUpdates, envFlag('DISABLE_UPDATES'), envFlag('DISABLE_AUTOUPDATER'), files].join('\x1f'));
 NODE
 }
@@ -1633,6 +1649,10 @@ NODE
 env_flag() {
   if [ -z "${!1+x}" ]; then echo unset; else flag_class "${!1}"; fi
 }
+
+# Settings sources the agent CLI also honours that this job does not read. Missing them mostly
+# errs toward reporting updates open (advisory) where they are in fact disabled.
+SETTINGS_NOT_READ="Not read: project-level settings in each instance's workspace, the macOS com.anthropic.claudecode preference domain, remote-managed settings."
 
 # The summary status, for the launcher observation's alert text.
 CLAUDE_POLICY_SUMMARY_FILE="$TMP_DIR/claude-policy-summary"
@@ -1644,7 +1664,7 @@ policy_summary() {
 }
 
 observe_claude_update_policy() {
-  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto s_files
+  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto s_files effective
   local total=0 disabled=0 open="" unknown="" config_dir_state=unset
   [ -z "${CLAUDE_CONFIG_DIR:-}" ] || config_dir_state="set"
   record_event "claude-update-policy" "job-env" \
@@ -1671,25 +1691,28 @@ observe_claude_update_policy() {
       settings="$(claude_settings_policy "$config")" || settings=""
     fi
     IFS=$'\037' read -r method auto s_updates s_auto s_files <<< "$settings"
-    if [ "$updates" = set ] || [ "$s_updates" = set ]; then
-      disabled=$((disabled + 1))
-    elif [ "$updates" = unset ] && [ "$s_updates" = unset ]; then
-      open="$open $name"
-    else
+    # A settings env value overrides the service environment; only an unset one leaves it to decide.
+    case "$s_updates" in
+      unset) effective="$updates" ;;
+      *) effective="$s_updates" ;;
+    esac
+    case "$effective" in
+      set) disabled=$((disabled + 1)) ;;
+      unset) open="$open $name" ;;
       # An unrecognized value, or settings that could not be read.
-      unknown="$unknown $name"
-    fi
+      *) unknown="$unknown $name" ;;
+    esac
     record_event "claude-update-policy" "instance" \
       "$name via $manager ($surface): DISABLE_UPDATES=$updates DISABLE_AUTOUPDATER=$autoupdater; $config_label: installMethod=${method:-unknown} autoUpdates=${auto:-unknown}, settings env DISABLE_UPDATES=${s_updates:-unknown} DISABLE_AUTOUPDATER=${s_auto:-unknown}; settings files: ${s_files:-unknown}"
   done < "$CLAUDE_INSTANCE_ENV_FILE"
   if [ "$total" -eq 0 ]; then
     policy_summary "none" "no service instance was inventoried"
   elif [ -n "$open" ]; then
-    policy_summary "advisory" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); the release-age cooldown is advisory for:$open${unknown:+; undetermined for:$unknown}. DISABLE_AUTOUPDATER alone is not counted. Observed, not enforced."
+    policy_summary "advisory" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); the release-age cooldown is advisory for:$open${unknown:+; undetermined for:$unknown}. DISABLE_AUTOUPDATER alone is not counted. $SETTINGS_NOT_READ Observed, not enforced."
   elif [ -n "$unknown" ]; then
-    policy_summary "unknown" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true; undetermined (unrecognized value or unreadable settings) for:$unknown. Observed, not enforced."
+    policy_summary "unknown" "$disabled of $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true; undetermined (unrecognized value or unreadable settings) for:$unknown. $SETTINGS_NOT_READ Observed, not enforced."
   else
-    policy_summary "disabled" "all $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); observed, not enforced"
+    policy_summary "disabled" "all $total instances start the agent CLI with DISABLE_UPDATES set to 1 or true (service environment or settings env); observed, not enforced. $SETTINGS_NOT_READ"
   fi
 }
 
