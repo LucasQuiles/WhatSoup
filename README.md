@@ -28,7 +28,7 @@ KPI cards with sparklines, three fleet-wide charts (message volume, token usage 
 
 ### Line Detail — Metrics
 
-Per-instance metrics with stacked bar chart, active hours heatmap (7-day weekly pattern or 30-day per-date grid), and tabbed token/session detail views. Nine tabs: Summary, Mode, Pipeline, Access, History, Logs, Metrics, Scheduled, Groups.
+Per-instance metrics with stacked bar chart, active hours heatmap (7-day weekly pattern or 30-day per-date grid), and tabbed token/session detail views. Nine tabs: Summary, Mode, Pipeline, Access, History, Logs, Metrics, Checkpoints, Approvals; instances with a global MCP socket also get Scheduled and Groups.
 
 ![Line Detail Metrics](docs/screenshots/line-detail-metrics.png)
 
@@ -183,7 +183,7 @@ src/
 console/
   src/
     components/   30+ React components (modals, cards, badges, charts, forms, wizards)
-    pages/        6 lazy-loaded pages (SoupKitchen, LineDetail, Inbox, Metrics, Operator, Landing); `/ops` redirects to `/operator`
+    pages/        11 lazy-loaded pages (SoupKitchen, LineDetail, Inbox, Deployments, Settings, Hatch, Operator, Landing, Agents, SkillsHub, DreamLab); Operator renders at `/ops`, `/operator` redirects to `/ops`, and `/metrics` redirects to `/ops?tab=metrics`
     hooks/        React Query data hooks, WebSocket realtime, toast system
     lib/          API client with mock fallback, chart utils, formatting
     index.css     Design system — @theme tokens, @layer base/utilities, component classes
