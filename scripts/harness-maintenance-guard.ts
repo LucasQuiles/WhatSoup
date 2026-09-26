@@ -286,13 +286,64 @@ export function latestEligibleVersion(
   };
 }
 
+export type ClaudeServiceLayout = 'native' | 'wrapper' | 'npm' | 'other';
+
+export interface ClaudeUpdatePlan {
+  action: 'missing' | 'held' | 'current' | 'unmanaged-layout' | 'install';
+  current: string | null;
+  target: string | null;
+  cooldownMinutes: number;
+  reason: string;
+}
+
+/**
+ * Decide the Claude CLI update for the binary the bot service resolves. The target is the newest
+ * release past the publish-age cooldown (never a floating "latest"); nothing is ever downgraded;
+ * and the native installer only runs when the service path is its own symlink layout, because on a
+ * wrapper or npm layout `claude install` can repoint ~/.local/bin/claude past the wrapper.
+ */
+export function claudeUpdatePlan({
+  current,
+  versionTimes,
+  now = new Date(),
+  cooldownMinutes = DEFAULT_COOLDOWN_MINUTES,
+  layout,
+}: {
+  current: string | null;
+  versionTimes: Record<string, string>;
+  now?: Date;
+  cooldownMinutes?: number;
+  layout: ClaudeServiceLayout;
+}): ClaudeUpdatePlan {
+  const base = { current, cooldownMinutes };
+  if (!current) {
+    return { ...base, action: 'missing', target: null, reason: 'service claude binary not found or not runnable' };
+  }
+  const target = latestEligibleVersion(versionTimes, now, cooldownMinutes).version;
+  if (!target) {
+    return { ...base, action: 'held', target: null, reason: 'no release is past the publish-age cooldown' };
+  }
+  if (/^\d+\.\d+\.\d+$/.test(current) && compareVersion(current, target) >= 0) {
+    return { ...base, action: 'current', target, reason: `service claude ${current} >= eligible ${target}` };
+  }
+  if (layout !== 'native') {
+    return {
+      ...base,
+      action: 'unmanaged-layout',
+      target,
+      reason: `service claude is a ${layout} layout; the native installer could overwrite it`,
+    };
+  }
+  return { ...base, action: 'install', target, reason: `${current} -> ${target}` };
+}
+
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const parsed: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'json' || key === 'npm-cooldown-config' || key === 'latest-eligible-version') {
+    if (key === 'json' || key === 'npm-cooldown-config' || key === 'latest-eligible-version' || key === 'claude-update-plan') {
       parsed[key] = true;
       continue;
     }
@@ -350,6 +401,23 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else console.log(`${version} eligible=${result.eligible}`);
     if (!result.eligible) process.exitCode = 2;
+    return result;
+  }
+
+  if (args['claude-update-plan']) {
+    const timeJsonPath = requireTrimmedString(args['time-json'], '--time-json');
+    const layout = String(args.layout ?? 'other');
+    if (!['native', 'wrapper', 'npm', 'other'].includes(layout)) {
+      throw new Error('--layout must be native, wrapper, npm or other');
+    }
+    const result = claudeUpdatePlan({
+      current: args.current ? String(args.current) : null,
+      versionTimes: JSON.parse(readFileSync(timeJsonPath, 'utf8')) as Record<string, string>,
+      now: args.now ? new Date(String(args.now)) : new Date(),
+      cooldownMinutes: args['cooldown-minutes'] ? Number(args['cooldown-minutes']) : DEFAULT_COOLDOWN_MINUTES,
+      layout: layout as ClaudeServiceLayout,
+    });
+    console.log(JSON.stringify(result));
     return result;
   }
 

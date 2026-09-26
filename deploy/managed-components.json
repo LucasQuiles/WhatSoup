@@ -20,7 +20,7 @@
       "update": [
         "claude",
         "install",
-        "latest"
+        "{target}"
       ],
       "rollback": [
         "claude",
