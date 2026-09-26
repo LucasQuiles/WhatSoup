@@ -4546,6 +4546,14 @@ export class SessionManager {
   }
 
   /**
+   * The previous provider's teardown barrier for this conversation, the one
+   * spawnSession awaits. Settles immediately when there is none.
+   */
+  providerTransitionSettled(): Promise<void> {
+    return this.providerTransitionReady ?? Promise.resolve();
+  }
+
+  /**
    * Reasoning effort this session was actually spawned with (null = none /
    * provider default, OR a provider with no native reasoning control at
    * all). Shares providerConfigEffort with the `--effort` argv builder, so
