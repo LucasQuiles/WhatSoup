@@ -218,15 +218,20 @@ export interface TurnRecoverySupervisorCounts {
   quarantinedDelivery: number;
   /**
    * Broken proof links on live jobs (not completed or exhausted) plus orphan
-   * transfers. Residue on a finished job no longer raises health.
+   * transfers. Residue on a finished job is in `corruptLinksSettled` instead.
    */
   corruptLinks: number;
   orphanTransfers: number;
   /**
-   * Late-echo contradictions on live jobs only. A completed job keeps its
-   * durable `echo_conflict_at` evidence but is not counted here.
+   * Late-echo contradictions on live jobs only. A completed or exhausted job
+   * keeps its durable `echo_conflict_at` evidence and is counted in
+   * `echoConflictsSettled` instead.
    */
   echoConflicts: number;
+  /** Broken proof links on completed or exhausted jobs. Diagnostic only. */
+  corruptLinksSettled: number;
+  /** Late-echo contradictions on completed or exhausted jobs. Diagnostic only. */
+  echoConflictsSettled: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
   /**
@@ -466,6 +471,39 @@ const VALID_RECOVERY_JOB_FROM = `
    AND o.conversation_key = j.conversation_key
    AND o.chat_jid = j.delivery_jid
 `;
+
+/** Job states that are finished recovery work: residue on them never pages. */
+const SETTLED_RECOVERY_JOB_STATES_SQL = "('completed', 'exhausted')";
+
+/**
+ * True when a supervisor-count row's job no longer links to a matching
+ * transferred terminal record, source inbound, and selected delivery. The
+ * joins are LEFT joins aliased `t`, `i` and `o`, so a missing row reads NULL.
+ */
+const RECOVERY_JOB_LINK_BROKEN_SQL = `NOT (
+              t.id IS NOT NULL
+              AND t.inbound_disposition = 'transferred_to_recovery_owner'
+              AND t.scope = j.scope
+              AND t.inbound_seq_key = j.source_inbound_seq_key
+              AND t.inbound_seq = j.source_inbound_seq
+              AND t.logical_turn_id = j.source_logical_turn_id
+              AND t.manager_id = j.source_manager_id
+              AND t.generation = j.source_generation
+              AND t.conversation_key = j.conversation_key
+              AND t.delivery_jid = j.delivery_jid
+              AND t.recovery_owner_logical_turn_id = j.owner_logical_turn_id
+              AND t.recovery_owner_manager_id = j.owner_manager_id
+              AND t.recovery_owner_generation = j.owner_generation
+              AND t.delivery_kind IN ('enqueued', 'flushed', 'delivery_unknown')
+              AND i.seq IS NOT NULL
+              AND i.message_id = j.source_message_id
+              AND i.conversation_key = j.conversation_key
+              AND i.chat_jid = j.delivery_jid
+              AND o.id IS NOT NULL
+              AND o.conversation_key = j.conversation_key
+              AND o.chat_jid = j.delivery_jid
+              AND o.source_inbound_seq = j.source_inbound_seq
+            )`;
 
 const RECOVERY_JOB_SELECT = `
   j.*,
@@ -926,42 +964,29 @@ export class TurnRecoveryStore {
             WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
             ELSE 0
           END), 0) AS quarantined_delivery,
-          -- corrupt_links and echo_conflicts describe live recovery work only.
-          -- A completed or exhausted job is no longer a trap, and the
-          -- exhausted state already raises health through its own counter.
-          -- Orphan transfers have no job row, so they are added unfiltered.
+          -- corrupt_links and echo_conflicts describe live recovery work only
+          -- and feed turn_recovery_degraded. A completed or exhausted job is
+          -- no longer a trap (exhausted already raises health through its own
+          -- counter), so its residue moves to the diagnostic-only *_settled
+          -- counters. Orphan transfers have no job row, so they are added to
+          -- corrupt_links unfiltered.
           COALESCE(SUM(CASE
-            WHEN j.state IN ('completed', 'exhausted') THEN 0
-            WHEN NOT (
-              t.id IS NOT NULL
-              AND t.inbound_disposition = 'transferred_to_recovery_owner'
-              AND t.scope = j.scope
-              AND t.inbound_seq_key = j.source_inbound_seq_key
-              AND t.inbound_seq = j.source_inbound_seq
-              AND t.logical_turn_id = j.source_logical_turn_id
-              AND t.manager_id = j.source_manager_id
-              AND t.generation = j.source_generation
-              AND t.conversation_key = j.conversation_key
-              AND t.delivery_jid = j.delivery_jid
-              AND t.recovery_owner_logical_turn_id = j.owner_logical_turn_id
-              AND t.recovery_owner_manager_id = j.owner_manager_id
-              AND t.recovery_owner_generation = j.owner_generation
-              AND t.delivery_kind IN ('enqueued', 'flushed', 'delivery_unknown')
-              AND i.seq IS NOT NULL
-              AND i.message_id = j.source_message_id
-              AND i.conversation_key = j.conversation_key
-              AND i.chat_jid = j.delivery_jid
-              AND o.id IS NOT NULL
-              AND o.conversation_key = j.conversation_key
-              AND o.chat_jid = j.delivery_jid
-              AND o.source_inbound_seq = j.source_inbound_seq
-            ) THEN 1 ELSE 0
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
           END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
+          END), 0) AS corrupt_links_settled,
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
           COALESCE(SUM(CASE
-            WHEN j.state NOT IN ('completed', 'exhausted') AND j.echo_conflict_at IS NOT NULL THEN 1
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
             ELSE 0
           END), 0) AS echo_conflicts,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts_settled,
           (SELECT count FROM open_recoveries) AS open_recoveries,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
@@ -1812,6 +1837,8 @@ export class TurnRecoveryStore {
       corrupt_links: number;
       orphan_transfers: number;
       echo_conflicts: number;
+      corrupt_links_settled: number;
+      echo_conflicts_settled: number;
       open_recoveries: number;
       blocked_unsafe_synthetic: number;
       blocked_unsafe_superseded: number;
@@ -1828,6 +1855,8 @@ export class TurnRecoveryStore {
       corruptLinks: row.corrupt_links,
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
+      corruptLinksSettled: row.corrupt_links_settled,
+      echoConflictsSettled: row.echo_conflicts_settled,
       openRecoveries: row.open_recoveries,
       blockedUnsafeSynthetic: row.blocked_unsafe_synthetic,
       blockedUnsafeSuperseded: row.blocked_unsafe_superseded,

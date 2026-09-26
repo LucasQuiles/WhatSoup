@@ -34,6 +34,8 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "turnRecoveryCorruptLinks",
     "turnRecoveryOrphanTransfers",
     "turnRecoveryEchoConflicts",
+    "turnRecoveryCorruptLinksSettled",
+    "turnRecoveryEchoConflictsSettled",
     "turnFinalizationRetainedRetries",
     "turnFinalizationRetryAttempts",
     "turnFinalizationRetryRecoveries",
