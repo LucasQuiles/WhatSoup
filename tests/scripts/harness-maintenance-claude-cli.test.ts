@@ -26,7 +26,8 @@ function runGuard(args: string[]): CliResult {
     ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', guard, ...args],
     { cwd: repoRoot, encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL' },
   );
-  const lines = child.stdout.split('\n').filter((line) => line.trim() !== '');
+  // Only the single terminating newline is removed: a blank line anywhere is a contract breach.
+  const lines = child.stdout === '' ? [] : child.stdout.replace(/\n$/, '').split('\n');
   return {
     status: child.status,
     lines,

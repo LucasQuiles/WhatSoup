@@ -945,7 +945,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'json' || key === 'npm-cooldown-config' || key === 'latest-eligible-version' || key === 'claude-update-plan') {
+    if (key === 'json' || key === 'npm-cooldown-config' || key === 'latest-eligible-version') {
       parsed[key] = true;
       continue;
     }
