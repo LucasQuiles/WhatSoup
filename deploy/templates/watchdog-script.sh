@@ -997,7 +997,7 @@ if service_mode == "inspection_only":
     sys.exit(1)
 
 # Terminal auth failures cannot be fixed by a restart — the bond is gone
-# server-side (device_removed / 401), pairing is required, or the local auth
+# server-side (a 401 carrying device_removed), pairing is required, or the local auth
 # store is unrestorably corrupt. Kicking the bot here only replays the
 # cold-start burst against a dead bond every cooldown window (the restart-loop
 # risk on a logged-out instance, e.g. ml-bot/mini8). Stop and wait for a human
@@ -1014,9 +1014,17 @@ if service_mode == "inspection_only":
 # recovery that could work. This list is an allowlist, so the fall-through is
 # automatic; it is named here because a future editor tempted to add it should
 # read this first.
+#
+# The two auth_401_* classes are logged out WITHOUT a confirmed device_removed
+# node: the transport already spent its one bounded reconnect (parked) or could
+# not inspect the stream:error (uninspected). A restart would buy a fresh retry,
+# park again and loop, so they are no-restart here too — but they are not
+# confirmed server revocation; the class in the log line says which it was.
 TERMINAL_AUTH_FAILURES = (
     "pairing_required",
     "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
     "local_corruption_unrestorable",
 )
 if auth_failure_class in TERMINAL_AUTH_FAILURES:

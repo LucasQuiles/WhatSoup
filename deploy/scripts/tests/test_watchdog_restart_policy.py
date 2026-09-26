@@ -903,6 +903,12 @@ class TestTerminalAuthFailureNoRestart:
     def test_local_corruption_unrestorable_no_restart(self):
         assert _run_decision(self._logged_out("local_corruption_unrestorable")) == 4
 
+    def test_unconfirmed_401_park_and_uninspected_exit_do_not_restart_loop(self):
+        # Not confirmed revocation, but the transport has already stopped: a
+        # restart would buy a fresh bounded retry, park again and loop.
+        assert _run_decision(self._logged_out("auth_401_ambiguous_parked")) == 4
+        assert _run_decision(self._logged_out("auth_401_uninspected_exit")) == 4
+
     def test_non_terminal_auth_failure_still_restarts_on_liveness(self):
         # Guard against over-suppression: a non-terminal class ('none') with a
         # hard-down connection must STILL restart — the terminal branch must not

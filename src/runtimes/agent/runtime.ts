@@ -296,6 +296,7 @@ import { EgressProxy } from './egress-proxy.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
+import { SessionTokenRegistry } from '../../mcp/caller-attribution.ts';
 import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -884,6 +885,8 @@ export class AgentRuntime implements Runtime {
   private workspaceResources: Map<string, WorkspaceResource> = new Map();
   private readonly perChatMcpSocketManager: PerChatMcpSocketManager;
   private globalMcpSocketPath: string | null = null;
+  /** #3421 step 1: one token per agent session, for caller attribution only. */
+  private readonly sessionTokens = new SessionTokenRegistry();
   private replyGuarantee: ReplyGuaranteeManager | null = null;
   private turnQueue: TurnQueue;
   private currentTurnChatJid: string | null = null;
@@ -2854,6 +2857,7 @@ export class AgentRuntime implements Runtime {
       get allowedRoot() { return getAllowedRoot(); },
       conversationBound: this.perChatConversationBound,
       resolveExecutingSession: (mapKey) => this.resolveExecutingSessionByMapKey(mapKey),
+      sessionTokens: this.sessionTokens,
     });
     this.catalogueSnapshot = createCatalogueSnapshotCache();
 
@@ -4201,6 +4205,8 @@ export class AgentRuntime implements Runtime {
           this.registry,
           globalSession,
           () => this.resolveExecutingGlobalSession(),
+          undefined,
+          { sessionTokens: this.sessionTokens },
         );
         this.globalSocketServer.start();
         this.globalMcpSocketPath = socketPath;
@@ -10486,6 +10492,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
+      whatsoupMcpSessionToken: this.sessionTokens.mint(),
       providerTransitionReady,
       handoffSystemBlock: this.buildHandoffSystemBlock(sessionConversationKey, route ? route.provider : this.effectiveProvider),
       degradedCapabilitiesBlock: managedLoopDegraded
@@ -10632,6 +10639,8 @@ export class AgentRuntime implements Runtime {
               this.registry,
               chatSession,
               () => this.resolveExecutingSessionByMapKey(workspaceKey),
+              undefined,
+              { sessionTokens: this.sessionTokens },
             );
             socketServer.start();
             log.info({ socketPath, workspaceKey }, 'chat-scoped WhatSoup socket server started');

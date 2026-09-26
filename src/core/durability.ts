@@ -66,6 +66,7 @@ import {
   normalizeToolDurabilityGroup,
   TOOL_INPUT_MARKER,
   TOOL_RESULT_MARKERS,
+  type ToolCallCallerEvidence,
   type ToolCompletionEvidence,
 } from './durability-evidence-contract.ts';
 import {
@@ -918,10 +919,14 @@ export class DurabilityEngine {
            conversation_key, session_checkpoint_id, tool_name, tool_group,
            tool_input, status, replay_policy, outcome_code,
            retry_disposition, operator_action, evidence_coverage,
-           logical_turn_id, source_inbound_seq
+           logical_turn_id, source_inbound_seq,
+           caller_transport, caller_connection_id, caller_client_name,
+           caller_client_version, caller_token_result, caller_turn_owned,
+           caller_actor_source, tool_sensitive
          )
          VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
-                 'not_applicable', 'none', 'complete', ?, ?)`,
+                 'not_applicable', 'none', 'complete', ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
@@ -2421,6 +2426,8 @@ export class DurabilityEngine {
     checkpointId?: number,
     /** AS-04 turn correlation, captured at the single writer (registry.call). */
     correlation?: { logicalTurnId: string; inboundSeq: number | null } | null,
+    /** #3421 step 1: who made the call. Absent means the columns stay NULL. */
+    caller?: ToolCallCallerEvidence | null,
   ): number {
     const result = this.statements.recordToolCall.run(
       conversationKey,
@@ -2431,6 +2438,14 @@ export class DurabilityEngine {
       replayPolicy,
       correlation?.logicalTurnId ?? null,
       correlation?.inboundSeq ?? null,
+      caller?.transport ?? null,
+      caller?.connectionId ?? null,
+      caller?.clientName ?? null,
+      caller?.clientVersion ?? null,
+      caller?.tokenResult ?? null,
+      caller ? (caller.turnOwned ? 1 : 0) : null,
+      caller?.actorSource ?? null,
+      caller ? (caller.toolSensitive ? 1 : 0) : null,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');

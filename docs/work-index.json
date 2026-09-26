@@ -1706,8 +1706,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-30",
-      "size_bytes": 83159
+      "last_modified": "2026-09-25",
+      "size_bytes": 83225
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1719,8 +1719,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-30",
-      "size_bytes": 114724
+      "last_modified": "2026-09-25",
+      "size_bytes": 114790
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1732,8 +1732,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-08-30",
-      "size_bytes": 62102
+      "last_modified": "2026-09-25",
+      "size_bytes": 62168
     }
   ],
   "cross_tree_topics": {
