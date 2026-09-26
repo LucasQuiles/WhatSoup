@@ -2,7 +2,7 @@
 
 **Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`; migrations 47 through 52 are already consumed, and the current branch advances the schema to migration 53 for outbound-quarantine disposition and retirement receipts. Provider-lifecycle implementation remains blocked on the forward migration-54 terminal-recovery prerequisite
 
-**Schema allocation:** current canonical schema is migration 65; bounded terminal recovery/canonical `not_sent` is forward migration 66; the provider-event lifecycle ledger is migration 67. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, and migration 65 by the tool-call caller-attribution columns (#3421), so the still-unpublished forward allocations move to migrations 66 and 67.
+**Schema allocation:** current canonical schema is migration 66; bounded terminal recovery/canonical `not_sent` is forward migration 67; the provider-event lifecycle ledger is migration 68. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, migration 65 by the tool-call caller-attribution columns (#3421), and migration 66 by the append-only continuity-gap closure ledger (#3638), so the still-unpublished forward allocations move to migrations 67 and 68.
 
 ## Context
 
@@ -109,7 +109,7 @@ provider-content replay path.
 
 #### DES-003: Add a child receipt ledger inside `DurabilityEngine`
 - **Traces-from:** REQ-002, REQ-004, REQ-006, CON-002, CON-004, CON-007
-- **Rationale:** Migration 67 adds one empty activation marker table plus nine
+- **Rationale:** Migration 68 adds one empty activation marker table plus nine
   content-free lifecycle tables: `provider_request_attempts`, immutable
   `provider_attempt_handoffs`, `provider_request_segments`,
   `provider_continuation_obligations`, `provider_event_receipts`, append-only
@@ -431,9 +431,9 @@ provider-content replay path.
   settles consumed only from terminal already-effectful proof, otherwise quarantine/
   failed uncertainty. Canonical `not_sent` is a distinct pre-send-rejection operation
   status and terminal evidence retains the exact op ID/status proof; generic
-  `failed_permanent` is not. Migration 66 enables aggregate no-send only for proved
+  `failed_permanent` is not. Migration 67 enables aggregate no-send only for proved
   single-op answers; pre-lifecycle multi-op answers remain uncertain because they lack
-  a sealed expected set. Migration 67 may prove multi-op no-send only from an immutable
+  a sealed expected set. Migration 68 may prove multi-op no-send only from an immutable
   complete effect plan where every expected sibling is not-sent—missing, late-created,
   echoed, or ambiguous siblings dominate. No-send never clears an
   independent provider/tool/lifecycle replay veto. A receipt in a mixed/shared plan settles consumed only

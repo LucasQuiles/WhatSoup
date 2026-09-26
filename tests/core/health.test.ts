@@ -85,6 +85,12 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 
 import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
 import { recordContinuityGaps } from '../../src/core/continuity-gap-ledger.ts';
+import {
+  gapObservation,
+  insertClosureRow,
+  recordGaps,
+  signedClosure,
+} from './_helpers/continuity-gap-closure.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
 import { config } from '../../src/config.ts';
@@ -2487,22 +2493,20 @@ describe('GET /health', () => {
     // Continuity gaps alone no longer flip status to degraded (#2973 Option A)
     expect(json.status).toBe('healthy');
     expect(json.degradation_causes).toContain('continuity_gap_open');
-    expect(json.recovery_debt).toEqual({
-      open: true,
-      reason: 'continuity_gap_open',
-      continuity: {
-        readable: true,
-        open: 2,
-        unresolved: 1,
-        ambiguous: 1,
-      },
-    });
-    expect(json.continuity).toEqual({
+    const continuity = {
       readable: true,
+      closure_ledger: 'present',
+      total: 2,
       open: 2,
       unresolved: 1,
       ambiguous: 1,
-    });
+      ambiguous_total: 1,
+      closed: 0,
+      addressed: 0,
+      declined: 0,
+    };
+    expect(json.recovery_debt).toEqual({ open: true, reason: 'continuity_gap_open', continuity });
+    expect(json.continuity).toEqual(continuity);
     expect(body).not.toContain('continuity-gap:v1:');
     expect(body).not.toContain('a'.repeat(64));
   });
@@ -2528,11 +2532,18 @@ describe('GET /health', () => {
       open: true,
       reason: 'continuity_gap_unreadable',
     });
+    // Unreadable claims no count at all — never a fabricated zero.
     expect(json.continuity).toEqual({
       readable: false,
-      open: 0,
-      unresolved: 0,
-      ambiguous: 0,
+      closure_ledger: null,
+      total: null,
+      open: null,
+      unresolved: null,
+      ambiguous: null,
+      ambiguous_total: null,
+      closed: null,
+      addressed: null,
+      declined: null,
     });
     expect(body).not.toContain('foreign-continuity-state');
     expect(body).not.toContain('other_recovery_owner');
@@ -2650,6 +2661,53 @@ describe('GET /health', () => {
     });
     expect(json.recovery_debt).toMatchObject({ open: true, reason: 'continuity_gap_open' });
     expect(json.degradation_causes).toContain('continuity_gap_open');
+    db2.close();
+  });
+
+  it('a closed continuity gap clears continuity_gap_open but never turn_recovery_degraded', async () => {
+    const db2 = makeDb();
+    const gap = gapObservation(1, 'absent');
+    recordGaps(db2.raw, [gap]);
+    insertClosureRow(db2.raw, signedClosure(gap));
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          recentCrashes: 0,
+          autoCompactActiveBackoffScopes: 0,
+          turnFinalizationRetainedRetries: 0,
+          turnFinalizationDegradedScopes: 0,
+          turnRecoveryOutstanding: 1,
+          turnRecoveryExhausted: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          providerExecution: { pressureActive: false },
+          turnCapability: {
+            modelUsable: true,
+            modelUsableStale: false,
+            modelUsabilityStatus: 'ok',
+            lastSuccessfulTurnAt: Date.now() - 1_000,
+            lastTurnErrorClass: null,
+            lastTurnErrorAt: null,
+          },
+        },
+      }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const json = JSON.parse((await healthReq(port)).body);
+    expect(json.continuity).toMatchObject({
+      readable: true, total: 1, open: 0, closed: 1, addressed: 1, declined: 0,
+    });
+    expect(json.recovery_debt).toMatchObject({ open: false, reason: null });
+    expect(json.degradation_causes).not.toContain('continuity_gap_open');
+    expect(json.degradation_causes).toContain('turn_recovery_degraded');
     db2.close();
   });
 

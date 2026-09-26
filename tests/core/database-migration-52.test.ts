@@ -62,7 +62,7 @@ describe('migration 52 outbound ambiguity episodes', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      expect(CURRENT_SCHEMA_MIGRATION).toBe(65);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(66);
       expect(db.raw.prepare(
         'SELECT version FROM schema_migrations WHERE version = 52',
       ).get()).toEqual({ version: 52 });

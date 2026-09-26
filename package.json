@@ -30,6 +30,7 @@
     "prepare-recovered-audio": "bash scripts/run-with-pinned-node.sh scripts/prepare-recovered-audio.ts",
     "close-recovery-catchup": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts",
     "close-recovery-catchups": "bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchups.ts",
+    "close-continuity-gap": "bash scripts/run-with-pinned-node.sh scripts/close-continuity-gap.ts",
     "turn-recovery-operator": "bash scripts/run-with-pinned-node.sh scripts/turn-recovery-operator.ts",
     "fleet-silence-reset": "bash scripts/run-with-pinned-node.sh scripts/fleet-silence-reset.ts",
     "validate-private-operation-record": "bash scripts/run-with-pinned-node.sh scripts/validate-private-operation-record.ts",
