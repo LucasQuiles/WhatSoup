@@ -2010,7 +2010,30 @@ Per-instance command-surface policy overlay (W1-T9b): `{ "disabled": ["<command>
 
 Optional per-conversation output policies for an agent instance. Only `type: "agent"` instances on the Baileys transport accept the field; any other instance type or transport fails validation. An absent field means no policies. An explicit `null` is rejected.
 
-> **Not enforced yet.** WhatSoup parses, validates, stores and redacts these policies, but no send path evaluates them. A configured policy does not block or change any outbound message today. Enforcement lands in a later change.
+**Enforcement.** Every agent send path checks each message against the target conversation's policy before sending it. A message that breaks the policy is withheld. It is never rewritten, and no outbound operation is recorded for it. Conversations without a policy are not affected. The internal-artifact check reads the text before redaction; the other checks read the final text.
+
+- **Agent outbound queue.** It checks each logical message before splitting it into chunks. This covers assistant replies, streamed text, tool-update batches and progress placeholders. A withheld placeholder still takes the rate-floor slot, so repeated stalls log once per floor window.
+- **MCP tools.** `send_message`, `reply_message`, `edit_message`, `send_poll` (question and options judged together), `send_media` (the caption only) and `send_voice_reply` (before synthesis) withhold the send. The tool returns an error result to the agent: `{ "sent": false, "withheld": true, "reason": "client_output_policy", "violationCodes": [...] }`. It never echoes the text. An evaluator error returns `evaluationFailed: true` instead of `violationCodes`.
+
+Each withheld message leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
+
+- `operation`: `client_output_policy`
+- `decision`: `rejected`
+- `conversationKey`: the canonical conversation key
+- `reason`: `client_output_policy`
+- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`
+- `messageKind`: `answer`, `lifecycle` or `status` from the queue, or the tool name from an MCP tool
+
+If the evaluator throws for a conversation that has a policy, the message is also withheld. The error-level line has `decision: "error"` and `errorName` instead of `reason` and `violationCodes`.
+
+**Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
+
+Not covered:
+
+- The redirect status send, which goes to the separate status JID, and the fixed "could not be delivered" notice are not checked.
+- `authorization` is parsed but not yet checked.
+- Matching is exact on the canonical conversation key. A chat whose key stays an unresolved LID does not match a policy keyed by phone number.
+- An automatic voice reply of admitted text is not checked again as one combined message.
 
 ```json
 "clientOutputPolicies": [

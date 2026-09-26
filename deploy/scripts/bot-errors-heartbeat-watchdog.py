@@ -170,6 +170,39 @@ def watchdog_renotify_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", 6 * 60 * 60)
 
 
+def watchdog_renotify_max_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS", 24 * 60 * 60)
+
+
+def renotify_interval_seconds(unchanged_renotifies: int) -> int:
+    """Renotify interval after ``unchanged_renotifies`` escalated re-sends of
+    the same evidence: base, 2x base, 4x base, ... capped at
+    BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS. The base is the floor, so a max
+    set below the base can never make re-sends more frequent."""
+    base = watchdog_renotify_seconds()
+    backed_off = base * (2 ** min(max(0, unchanged_renotifies), 32))
+    return max(base, min(backed_off, watchdog_renotify_max_seconds()))
+
+
+# Evidence values that move on their own while the condition is unchanged
+# (the deadman's age_seconds grows every cycle). Counts are NOT normalized: a
+# count that changes is new information.
+_EVIDENCE_ISO_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_EVIDENCE_VOLATILE_FIELD = re.compile(
+    r"\b([A-Za-z_]*(?:age|Age)[A-Za-z_]*|[A-Za-z_]*(?:_seconds|Seconds|_at|At|_utc))="
+    r"(?:<ts>|[0-9][0-9.]*)"
+)
+
+
+def evidence_fingerprint(evidence: str) -> str:
+    """Stable identity of an incident's evidence for renotify backoff."""
+    normalized = _EVIDENCE_ISO_TIMESTAMP.sub("<ts>", str(evidence))
+    normalized = _EVIDENCE_VOLATILE_FIELD.sub(r"\1=<v>", normalized)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def watchdog_escalate_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", 24 * 60 * 60)
 
@@ -200,6 +233,10 @@ Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
 Q_LOOP_AWAITING_Q_KEY = "q_loop:awaiting_q"
 BROWSER_DEBUG_PREFIX = "browser_debug:"
 BROWSER_DEBUG_PROBE_KEY = f"{BROWSER_DEBUG_PREFIX}probe"
+# Interactive and scheduled work sharing a session id is a structural state
+# that persists until someone rotates the session; it pages once on open and
+# re-sends as a warning.
+SESSION_COLLISION_PREFIX = "session_collision:"
 
 # q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
 # capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
@@ -240,14 +277,17 @@ def is_nonpaging_incident_key(key: str) -> bool:
     return is_capacity_incident_key(key) or is_browser_debug_incident_key(key)
 
 
-def incident_severity(key: str, escalated: bool) -> str:
+def incident_severity(key: str, escalated: bool, *, renotify: bool = False) -> str:
     """Severity for an incident, capping non-paging signals at ``warning``.
 
     Genuine failures escalate to ``critical`` when ``escalated`` is set, but a
     capacity event or resource-observation warning must never page critical
-    regardless of age or suppression count.
+    regardless of age or suppression count. A session collision opens
+    critical once; its renotifies are warnings.
     """
     if is_nonpaging_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
+        return "warning"
+    if renotify and key.startswith(SESSION_COLLISION_PREFIX):
         return "warning"
     return "critical" if escalated else "warning"
 
@@ -280,6 +320,7 @@ def incident_requested_action(key: str, *, persistent: bool = False) -> str:
 
 def validate_thresholds() -> None:
     watchdog_renotify_seconds()
+    watchdog_renotify_max_seconds()
     watchdog_escalate_seconds()
     watchdog_escalate_suppressed()
     watchdog_recovery_confirmations()
@@ -2355,10 +2396,35 @@ def _browser_debug_port(args: list[str]) -> int | None:
     return None
 
 
+def _browser_identity_hash(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
 def _browser_profile_hash(args: list[str], debug_port: int) -> str:
     profile = next((arg.partition("=")[2] for arg in args if arg.startswith("--user-data-dir=")), "")
     identity = profile or f"debug-port:{debug_port}"
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return _browser_identity_hash(identity)
+
+
+def browser_debug_owned_profile_hashes() -> set[str]:
+    """Profile hashes of debug browsers an owner keeps alive on purpose.
+
+    BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED is a comma-separated list of
+    ``--user-data-dir`` paths (for example a scheduled watcher's keep-alive
+    CDP Chrome). Matching uses the same hash as the incident key, so the path
+    itself never leaves the host. Empty or unset keeps every debug browser in
+    scope.
+    """
+    owned: set[str] = set()
+    for part in os.environ.get("BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED", "").split(","):
+        path = part.strip()
+        if not path:
+            continue
+        owned.add(_browser_identity_hash(path))
+        stripped = path.rstrip("/")
+        if stripped:
+            owned.add(_browser_identity_hash(stripped))
+    return owned
 
 
 def _established_debug_connections(ports: set[int]) -> tuple[dict[int, int], str | None]:
@@ -2434,6 +2500,9 @@ def browser_debug_snapshot() -> tuple[list[dict[str, Any]], str | None]:
 
 def browser_debug_problems() -> dict[str, str]:
     rows, scan_error = browser_debug_snapshot()
+    owned = browser_debug_owned_profile_hashes()
+    if owned:
+        rows = [row for row in rows if str(row["profileHash"]) not in owned]
     min_age = browser_debug_min_age_seconds()
     min_rss = browser_debug_min_rss_mb()
     qualifying = [
@@ -2837,6 +2906,17 @@ def reconcile(
             open_incidents.pop(key, None)
         if key in open_incidents:
             incident = open_incidents[key]
+            # State written before the backoff fields existed has no
+            # lastNotifiedEvidence; the previous lastEvidence is the best
+            # record of what was last said.
+            notified_evidence = incident.get("lastNotifiedEvidence")
+            if not isinstance(notified_evidence, str):
+                previous_evidence = incident.get("lastEvidence")
+                notified_evidence = previous_evidence if isinstance(previous_evidence, str) else None
+            evidence_unchanged = notified_evidence is not None and (
+                evidence_fingerprint(notified_evidence) == evidence_fingerprint(redacted_evidence)
+            )
+            unchanged_renotifies = int_or_zero(incident.get("renotifyCount")) if evidence_unchanged else 0
             incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
             incident["lastSeenAt"] = now_iso(current)
             incident["lastEvidence"] = redacted_evidence
@@ -2853,11 +2933,16 @@ def reconcile(
             # when they are old or repeatedly observed.
             if is_nonpaging_incident_key(key):
                 escalated = False
-            should_renotify = since_notify >= watchdog_renotify_seconds()
+            # Escalated incidents saying the same thing back off (6 h, 12 h,
+            # 24 h, capped); changed evidence falls back to the base interval.
+            renotify_interval = renotify_interval_seconds(unchanged_renotifies if escalated else 0)
+            should_renotify = since_notify >= renotify_interval
             if should_renotify:
                 incident["lastNotifiedAt"] = now_iso(current)
                 incident["lastNotificationSuppressed"] = suppressed
-                severity = incident_severity(key, escalated)
+                incident["lastNotifiedEvidence"] = redacted_evidence
+                incident["renotifyCount"] = unchanged_renotifies + 1 if (escalated and evidence_unchanged) else 0
+                severity = incident_severity(key, escalated, renotify=True)
                 label = "escalated" if escalated else "still open"
                 append_log(
                     "renotify_open",
@@ -2866,6 +2951,9 @@ def reconcile(
                         "suppressed": suppressed,
                         "ageSeconds": age_seconds,
                         "sinceLastNotifySeconds": since_notify,
+                        "renotifyIntervalSeconds": renotify_interval,
+                        "renotifyCount": incident["renotifyCount"],
+                        "evidenceChanged": not evidence_unchanged,
                         "escalated": escalated,
                         "evidence": evidence,
                     },
@@ -2881,6 +2969,9 @@ def reconcile(
                         f"age_seconds={age_seconds}",
                         f"suppressed_duplicates={suppressed}",
                         f"last_notified={now_iso(last_notified)}",
+                        f"evidence_changed={str(not evidence_unchanged).lower()}",
+                        f"renotify_count={incident['renotifyCount']}",
+                        f"next_renotify_seconds={renotify_interval_seconds(incident['renotifyCount'] if escalated else 0)}",
                         evidence,
                         f"watchdog_state={watchdog_state_path()}",
                         f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
@@ -2924,6 +3015,13 @@ def reconcile(
                     "ageSeconds": int_or_zero(flap_record.get("ageSeconds")),
                     "flapCount": flap_count,
                 }
+                if first_reopen:
+                    open_incidents[key]["lastNotifiedEvidence"] = redacted_evidence
+                    open_incidents[key]["renotifyCount"] = 0
+                else:
+                    for carried in ("lastNotifiedEvidence", "renotifyCount"):
+                        if carried in flap_record:
+                            open_incidents[key][carried] = flap_record[carried]
                 if first_reopen:
                     append_log(
                         "flap_reopen_alert",
@@ -2982,6 +3080,8 @@ def reconcile(
             "lastSeenAt": now_iso(current),
             "lastNotifiedAt": now_iso(current),
             "lastEvidence": redacted_evidence,
+            "lastNotifiedEvidence": redacted_evidence,
+            "renotifyCount": 0,
             "suppressed": 0,
         }
         new_summary = open_incident_summary(key)
@@ -3042,6 +3142,9 @@ def reconcile(
             "recoveryObservations": recovery_observations,
             "holdNotice": flap_count > 0,
         }
+        for carried in ("lastNotifiedEvidence", "renotifyCount"):
+            if carried in incident:
+                state["recentlyRecovered"][key][carried] = incident[carried]
         if flap_count > 0:
             # A flapping incident's recovery is provisional: inside the re-arm
             # window the same condition reopens silently, so announcing each

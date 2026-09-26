@@ -3,8 +3,11 @@
 
 import { z } from 'zod';
 import type { ToolRegistry } from '../registry.ts';
-import { toolError, type SessionContext } from '../types.ts';
+import { clientOutputWithheldResult, toolError, type SessionContext } from '../types.ts';
 import type { Database } from '../../core/database.ts';
+import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
+import { enforceClientOutputPolicyForChat } from '../../core/client-output-policy-gate.ts';
+import { canonicalConversationKey } from '../../core/access-list.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
@@ -25,6 +28,11 @@ function errorResult(error: string, message: string) {
 export interface VoiceDeps {
   connection: RuntimeConnection;
   db: Database;
+  /**
+   * #3613: per-conversation client output policies. When set, text the target
+   * conversation's policy rejects is never synthesized or sent.
+   */
+  clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +72,19 @@ export function registerVoiceTools(
       if (!chatJid) {
         return errorResult('no_target', 'No delivery JID in session context.');
       }
+
+      // #3613: judge the text before it is synthesized, so withheld text never
+      // leaves the process, even as audio.
+      const policyGate = enforceClientOutputPolicyForChat({
+        registry: deps.clientOutputPolicies,
+        chatJid,
+        resolveConversationKey: (jid) => canonicalConversationKey(jid, deps.db),
+        sourceText: text,
+        finalText: text,
+        messageKind: 'send_voice_reply',
+        log,
+      });
+      if (!policyGate.admitted) return clientOutputWithheldResult(policyGate);
 
       // Synthesize speech
       let result;

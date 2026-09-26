@@ -1472,7 +1472,7 @@
       "test": "tests/runtimes/agent/fallback-usage-limit-cascade.test.ts"
     },
     "fallback_chain_entry_unhealthy": {
-      "disposition": "once_per_canary_health_transition_until_entry_recovers",
+      "disposition": "once_per_canary_health_transition_until_no_entry_in_current_sweep_set_is_failing",
       "owner": "src/runtimes/agent/runtime-fallback.ts",
       "test": "tests/runtimes/agent/fallback-chain-canary.test.ts"
     },
