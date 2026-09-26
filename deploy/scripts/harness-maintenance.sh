@@ -305,6 +305,7 @@ on_error() {
   trap - ERR
   record_event "harness-maintenance" "failed" "unexpected failure rc=$rc" || true
   if [ "$STATE_WRITTEN" -eq 0 ]; then
+    carry_launcher_state_if_defined
     finalize_state "failed" || true
   fi
   send_alert "job" "warning" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
@@ -318,9 +319,18 @@ on_exit() {
   trap - ERR
   if [ "$STATE_WRITTEN" -eq 0 ]; then
     record_event "harness-maintenance" "failed" "exited before writing a final state rc=$rc" || true
+    carry_launcher_state_if_defined
     finalize_state "failed" || true
   fi
   rm -rf "$TMP_DIR"
+}
+
+# A failed final state replaces the previous one: keep its launcher baseline and alert history.
+# (An exit during setup can come before the function is defined.)
+carry_launcher_state_if_defined() {
+  if declare -F carry_launcher_state_on_exit >/dev/null; then
+    carry_launcher_state_on_exit || true
+  fi
 }
 trap on_error ERR
 trap on_exit EXIT
@@ -1409,6 +1419,8 @@ NODE
 CLAUDE_LAUNCHER_HISTORY_FILE="$TMP_DIR/claude-launcher.history"
 # The launcher after the update step and before the probes, for the baseline step to compare with.
 CLAUDE_LAUNCHER_PREPROBE_FILE="$TMP_DIR/claude-launcher.preprobe"
+# Present once the probes have started the agent CLI for its plugin listing.
+CLAUDE_LISTING_RAN_FILE="$TMP_DIR/claude-listing-ran"
 
 # launcher_target_key <state>: the link target a launcher state points at, or "absent".
 launcher_target_key() {
@@ -1484,47 +1496,83 @@ observe_claude_launcher() {
           launcher_target_remember "$key"
         fi ;;
     esac
+    # Written last, and only for a completed comparison: the baseline step advances the baseline
+    # only when it finds this file.
+    now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
+    printf '%s\n' "$now" > "$CLAUDE_LAUNCHER_PREPROBE_FILE"
   fi
-  now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
-  printf '%s\n' "$now" > "$CLAUDE_LAUNCHER_PREPROBE_FILE"
+}
+
+# carry_launcher_baseline <why>: record the last normal run's baseline unchanged (when there is one)
+# instead of the launcher as it is now, so a move this run did not compare is still compared, and
+# alerted, by the next run that does.
+carry_launcher_baseline() {
+  local previous
+  if previous="$(claude_launcher_previous baseline)"; then
+    record_event "claude-launcher" "baseline" "the last normal run's baseline, carried forward unchanged: $1" "" "$previous"
+  fi
+}
+
+record_launcher_history() {
+  local history
+  history="$(cat "$CLAUDE_LAUNCHER_HISTORY_FILE" 2>/dev/null || true)"
+  if [ -n "$history" ]; then
+    record_event "claude-launcher" "alert-history" "launcher targets already alerted on" "" "$history"
+  fi
+}
+
+# carry_launcher_state_on_exit: for a run that ends before its baseline step, carry the baseline
+# and alert history into the failed final state, so they are not lost with it.
+carry_launcher_state_on_exit() {
+  if grep -Fq '"component":"claude-launcher","status":"baseline"' "$EVENTS_FILE" 2>/dev/null; then
+    return 0
+  fi
+  [ -f "$CLAUDE_LAUNCHER_HISTORY_FILE" ] || load_launcher_history
+  carry_launcher_baseline "the run ended before its launcher baseline step"
+  record_launcher_history
 }
 
 # record_claude_launcher_baseline: the baseline the next run compares against, taken after the
 # probes. In a normal run the launcher is first compared with how it stood before the probes: the
-# plugin and MCP listing starts the agent CLI, which can update itself, and such a move is
-# attributed to this job rather than reported by the next run as a change outside it. Check mode
-# never advances the baseline: it records what it saw under another status and carries the last
-# normal run's baseline forward, so a move seen only by a check run is still alerted by the next
-# normal run.
+# plugin and MCP listing can start the agent CLI, which can update itself, and such a move is
+# attributed to this job rather than reported by the next run as a change outside it. The baseline
+# advances only in a normal run whose launcher comparison completed. Check mode, and a normal run
+# whose comparison did not complete, record what they saw under another status and carry the last
+# normal run's baseline forward, so a move they did not alert is still alerted by the next run.
 record_claude_launcher_baseline() {
-  local before now previous key history
+  local before now key cause summary
   now="$(claude_launcher_state "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")")"
   # Without the observation step's file (it failed), the history comes from the previous state.
   [ -f "$CLAUDE_LAUNCHER_HISTORY_FILE" ] || load_launcher_history
   if [ "$CHECK_ONLY" -eq 1 ]; then
     record_event "claude-launcher" "check-observation" "launcher as this check run left it; check mode does not advance the baseline" "" "$now"
-    if previous="$(claude_launcher_previous baseline)"; then
-      record_event "claude-launcher" "baseline" "the last normal run's baseline, carried forward unchanged by check mode" "" "$previous"
-    fi
+    carry_launcher_baseline "check mode"
+  elif [ ! -f "$CLAUDE_LAUNCHER_PREPROBE_FILE" ]; then
+    record_event "claude-launcher" "observation-incomplete" "this run did not complete its launcher comparison; the baseline is not advanced" "" "$now"
+    carry_launcher_baseline "this run's launcher comparison did not complete"
   else
-    before="$(cat "$CLAUDE_LAUNCHER_PREPROBE_FILE" 2>/dev/null || true)"
-    if [ -n "$before" ] && [ "$before" != "$now" ]; then
+    before="$(cat "$CLAUDE_LAUNCHER_PREPROBE_FILE")"
+    if [ "$before" != "$now" ]; then
+      if [ -f "$CLAUDE_LISTING_RAN_FILE" ]; then
+        cause="while this job's plugin and MCP listing ran the agent CLI"
+        summary="Agent CLI launcher changed while the maintenance job ran the agent CLI"
+      else
+        cause="during this job's probes, which did not start the agent CLI"
+        summary="Agent CLI launcher changed during the maintenance job's probes"
+      fi
       key="$(launcher_target_key "$now")"
       if launcher_target_alerted "$key"; then
-        record_event "claude-launcher" "moved-during-probes" "launcher changed while this job's probes ran the agent CLI; already alerted for this launcher target" "$before" "$now"
+        record_event "claude-launcher" "moved-during-probes" "launcher changed $cause; already alerted for this launcher target" "$before" "$now"
       else
-        record_event "claude-launcher" "moved-during-probes" "launcher changed while this job's probes ran the agent CLI" "$before" "$now"
-        send_alert "claude-launcher" "warning" "Agent CLI launcher changed while the maintenance job ran the agent CLI" \
-          "$CLAUDE_NATIVE_LAUNCHER changed during this job's plugin and MCP listing: $before -> $now. The agent CLI probably updated itself when the job started it; the release-age cooldown did not govern this change."
+        record_event "claude-launcher" "moved-during-probes" "launcher changed $cause" "$before" "$now"
+        send_alert "claude-launcher" "warning" "$summary" \
+          "$CLAUDE_NATIVE_LAUNCHER changed $cause: $before -> $now. The release-age cooldown did not govern this change."
         launcher_target_remember "$key"
       fi
     fi
     record_event "claude-launcher" "baseline" "launcher after this run's update step and probes; the next run compares against it" "" "$now"
   fi
-  history="$(cat "$CLAUDE_LAUNCHER_HISTORY_FILE" 2>/dev/null || true)"
-  if [ -n "$history" ]; then
-    record_event "claude-launcher" "alert-history" "launcher targets already alerted on" "" "$history"
-  fi
+  record_launcher_history
 }
 
 # Managed settings apply to every config directory and take precedence over the files in it.
@@ -1904,6 +1952,7 @@ probe_tier2() {
   elif launcher="$(command -v claude)"; then
     # Only a launcher the static classifier accepts is started; anything else could be any script.
     if reason="$(claude_probe_admission "$launcher")"; then
+      : > "$CLAUDE_LISTING_RAN_FILE"
       probe_command "claude-plugins" "$launcher" plugin list
       probe_command "mcp-servers" "$launcher" mcp list
     else

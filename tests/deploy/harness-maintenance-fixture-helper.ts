@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -300,8 +301,32 @@ export interface RunResult {
   state: { status: string; mode: string; events: Array<Record<string, string>> } | null;
 }
 
-export function run(h: Harness, args: string[] = [], extraEnv: Record<string, string> = {}): RunResult {
-  const result = spawnSync('/bin/bash', [SCRIPT, ...args], {
+/**
+ * A mirror of this checkout whose maintenance script has `edits` applied (each `from` must occur
+ * exactly once), for injecting a fault into one step. Every other file is a symlink into the
+ * checkout, so the mirror's wrapper and libraries are byte-identical to it. Returns the script.
+ */
+export function faultScript(h: Harness, edits: Array<[string, string]>): string {
+  const root = mkdtempSync(path.join(h.home, 'fault-tree-'));
+  const mirror = (from: string, to: string, keep: string): void => {
+    mkdirSync(to, { recursive: true });
+    for (const name of readdirSync(from)) if (name !== keep) symlinkSync(path.join(from, name), path.join(to, name));
+  };
+  mirror(REPO, root, 'deploy');
+  mirror(path.join(REPO, 'deploy'), path.join(root, 'deploy'), 'scripts');
+  mirror(path.join(REPO, 'deploy/scripts'), path.join(root, 'deploy/scripts'), 'harness-maintenance.sh');
+  let text = readFileSync(SCRIPT, 'utf8');
+  for (const [from, to] of edits) {
+    if (text.split(from).length !== 2) throw new Error(`fault edit does not match exactly once: ${from}`);
+    text = text.replace(from, to);
+  }
+  const script = path.join(root, 'deploy/scripts/harness-maintenance.sh');
+  writeFileSync(script, text);
+  return script;
+}
+
+export function run(h: Harness, args: string[] = [], extraEnv: Record<string, string> = {}, script = SCRIPT): RunResult {
+  const result = spawnSync('/bin/bash', [script, ...args], {
     cwd: h.home,
     encoding: 'utf8',
     // spawnSync blocks the event loop, so vitest's own timeout cannot interrupt

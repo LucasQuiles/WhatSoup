@@ -10,6 +10,7 @@ import {
   buildNativeFixture,
   cleanupHarnesses,
   events,
+  faultScript,
   installNative,
   makeHarness,
   portableInstance,
@@ -94,6 +95,63 @@ describe('out-of-band launcher movement', () => {
     expect(launcher[0]).toMatchObject({ status: 'moved' });
     expect(launcher[0]!.message).toContain('already alerted');
     expect(launcherAlerts(h)).toBe(2);
+  }, T);
+
+  describe('a normal run whose launcher observation did not complete carries the baseline forward', () => {
+    const cases: Array<[string, Array<[string, string]>]> = [
+      ['the observation step fails', [['observe_claude_update_path() {\n', 'observe_claude_update_path() {\n  false\n']]],
+      ['the launcher facts were not captured at the start', [[
+        '  if claude_fs facts "$CLAUDE_NATIVE_LAUNCHER" >"$CLAUDE_LAUNCHER_START_FILE.partial" 2>/dev/null; then',
+        '  if false; then',
+      ]]],
+    ];
+    for (const [label, edits] of cases) {
+      it(`when ${label}`, () => {
+        const h = idleHarness();
+        run(h);
+        const baseline = launcherEvents(h).launcher.find((e) => e.status === 'baseline')!.after;
+        repoint(h, '2.1.281');
+        const faulty = events(run(h, [], {}, faultScript(h, edits)), 'claude-launcher');
+        expect(faulty.find((e) => e.status === 'baseline')?.after).toBe(baseline);
+        expect(launcherAlerts(h)).toBe(0);
+        // The move is still compared against the carried baseline, and alerted, on the next run.
+        expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'moved' });
+        expect(launcherAlerts(h)).toBe(1);
+      }, T);
+    }
+
+    it('when the run exits before its steps finish', () => {
+      const h = idleHarness();
+      run(h);
+      repoint(h, '2.1.281');
+      run(h); // alerted: 2.1.281 is in the alert history, and the baseline
+      const kept = launcherEvents(h).launcher;
+      const exited = run(h, [], {}, faultScript(h, [['  whatsoup_run_step "$results" manifest guard_manifest\n', '  exit 7\n']]));
+      expect(exited.status).toBe(7);
+      expect(exited.state?.status).toBe('failed');
+      const carried = events(exited, 'claude-launcher');
+      expect(carried.find((e) => e.status === 'baseline')?.after).toBe(kept.find((e) => e.status === 'baseline')!.after);
+      expect(carried.find((e) => e.status === 'alert-history')?.after).toContain(path.join(h.versions, '2.1.281'));
+      expect(launcherEvents(h).launcher[0]).toMatchObject({ status: 'unchanged' });
+      expect(launcherAlerts(h)).toBe(1);
+    }, T);
+  });
+
+  it('names the agent CLI as running during the probes only when the job actually started it', () => {
+    const h = idleHarness();
+    // A launcher the classifier does not accept, so the listing never starts it, and a probe binary
+    // that moves the launcher when the job asks it for its version.
+    rmSync(path.join(h.versions, OLD));
+    writeExec(path.join(h.versions, OLD), '#!/bin/sh\nexit 0\n');
+    installNative(h, '9.9.9');
+    writeExec(path.join(h.fakeBin, 'playwright-mcp'),
+      `#!/bin/sh\nln -sfn "${path.join(h.versions, '9.9.9')}" "${h.launcher}"\necho 1.0.0\n`);
+    const { launcher } = launcherEvents(h);
+    const during = launcher.find((e) => e.status === 'moved-during-probes')!;
+    expect(during.message).not.toContain('ran the agent CLI');
+    const alerts = readFileSync(h.alertLog, 'utf8');
+    expect(alerts).toContain('changed during the maintenance job\'s probes');
+    expect(alerts).not.toContain('ran the agent CLI');
   }, T);
 
   it('never follows a symlinked state file for the baseline', () => {
