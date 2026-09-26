@@ -1245,6 +1245,28 @@ conversation key. When the runtime knows an exact `session_id`, lifecycle status
 update every checkpoint row for that ID so all conversations attached to a shared session
 move together.
 
+Non-sandbox `per_chat` lazy adoption (`src/runtimes/agent/checkpoint-adoption.ts`, #3530):
+the first turn of a chat manager that has not yet started reads the chat's checkpoint and
+the `agent_sessions` rows carrying its `session_id`. This applies only when the chat has no
+resident manager: the first manager after a restart, or the one after idle eviction. It
+reads the rows only after the previous provider for the chat has stopped. A manager that
+replaces one this process retired on purpose keeps the fresh spawn: route recycle, `/new`,
+crash cleanup, or a provider-fallback stand-in. Scheduled-job map keys are excluded and
+start fresh.
+- **Own session, resumable:** the manager resumes that exact row.
+- **Foreign checkpoint:** the session has rows only in another namespace, for example a
+  scheduled job's row written before #3570. The runtime never adopts it. It recovers the
+  chat's own newest resumable session and re-points the checkpoint at it, which clears the
+  foreign completed identity. The next completed turn writes the recovered session's full
+  bundle. With no own session, the chat starts fresh with a notice.
+- **Own session, not resumable:** the row is missing, crashed or quarantined, or the session
+  layer refuses the resume at spawn. The chat starts fresh with the notice "_Previous session
+  could not be restored_", and recent chat messages are merged into the turn.
+- **A live owner may exist:** the own row is `active`, the session has duplicate own rows, or
+  it is also `active` in another namespace. The turn fails closed with
+  `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
+  running. No session is spawned, so the chat never gets a second live session.
+
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,
 delivery, and completed-turn identity while making the new lifecycle active. If persistence
