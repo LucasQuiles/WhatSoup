@@ -1,6 +1,7 @@
 import {
   closeSync,
   constants as fsConstants,
+  fstatSync,
   lstatSync,
   openSync,
   readFileSync,
@@ -684,6 +685,8 @@ export interface ClaudeExecutableClassification {
   configuredVersionSource: 'native-path' | 'package-json' | null;
   observedVersion: null;
   wrapperTarget?: string;
+  /** For the npm layout: the package.json that identified it (nearest owner below node_modules). */
+  packageJson?: string;
   target?: ClaudeExecutableClassification;
   reasons: string[];
 }
@@ -696,8 +699,23 @@ const NATIVE_MAGIC = [
   Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF
   Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), // Mach-O 64-bit
   Buffer.from([0xce, 0xfa, 0xed, 0xfe]), // Mach-O 32-bit
-  Buffer.from([0xca, 0xfe, 0xba, 0xbe]), // Mach-O universal
 ];
+const FAT_MAGIC = [
+  Buffer.from([0xca, 0xfe, 0xba, 0xbe]), // Mach-O universal
+  Buffer.from([0xca, 0xfe, 0xba, 0xbf]), // Mach-O universal, 64-bit offsets
+];
+// A universal binary's second word is its architecture count. A Java class file shares the
+// cafebabe magic, but its second word is minor<<16 | major with major >= 45, so a small count
+// separates the two.
+const FAT_MAX_ARCHS = 20;
+
+function isNativeHead(head: Buffer): boolean {
+  const magic = head.subarray(0, 4);
+  if (NATIVE_MAGIC.some((m) => magic.equals(m))) return true;
+  if (!FAT_MAGIC.some((m) => magic.equals(m)) || head.length < 8) return false;
+  const archs = head.readUInt32BE(4);
+  return archs >= 1 && archs <= FAT_MAX_ARCHS;
+}
 const WRAPPER_SHEBANG_RE = /^#!\s*(?:\/bin\/sh|\/bin\/bash|\/usr\/bin\/bash|\/usr\/bin\/env\s+(?:ba)?sh)\s*$/;
 const WRAPPER_EXEC_RE = /^exec\s+("?)(\/[A-Za-z0-9._\/+@-]+)\1(?:\s+"\$@")?$/;
 
@@ -718,10 +736,16 @@ function errnoCode(err: unknown): string | undefined {
   return isRecord(err) ? asNonEmptyString(err.code) : undefined;
 }
 
-/** Reads at most `limit` bytes of a regular file; O_NONBLOCK keeps a swapped-in FIFO from hanging. */
-function readHead(file: string, limit: number): Buffer {
+/**
+ * Reads at most `limit` bytes of `file`, or null when the opened file is not the regular file
+ * `expected` described (it was swapped between the stat and the open). O_NONBLOCK keeps a
+ * swapped-in FIFO from hanging; the fstat comparison catches every other swap.
+ */
+function readHead(file: string, limit: number, expected: Stats): Buffer | null {
   const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
   try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) return null;
     const buffer = Buffer.alloc(limit);
     const bytes = readSync(fd, buffer, 0, limit, 0);
     return buffer.subarray(0, bytes);
@@ -730,37 +754,61 @@ function readHead(file: string, limit: number): Buffer {
   }
 }
 
-/** Owner must be trusted, and neither the entry nor its directory may be world-writable (sticky dirs excepted). */
+/** Text of a regular file opened without blocking, or null when it is absent or not a regular file. */
+function readRegularText(file: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The entry's owner must be trusted and the entry not world-writable; then every ancestor
+ * directory of its real parent, up to the root, must be trusted-owned and not world-writable
+ * unless sticky. A writable grandparent lets anyone rename the whole subtree away.
+ */
 function untrustedReason(entry: string, trustedUids: readonly number[]): string | null {
   const own = lstatSync(entry);
   if (!trustedUids.includes(own.uid)) return `${entry} is owned by untrusted uid ${own.uid}`;
   if (!own.isSymbolicLink() && (own.mode & 0o002) !== 0) return `${entry} is world-writable`;
-  const dir = statSync(path.dirname(entry));
-  if (!trustedUids.includes(dir.uid)) return `${path.dirname(entry)} is owned by untrusted uid ${dir.uid}`;
-  if ((dir.mode & 0o002) !== 0 && (dir.mode & 0o1000) === 0) {
-    return `${path.dirname(entry)} is world-writable without the sticky bit`;
+  let dir = realpathSync(path.dirname(entry));
+  for (;;) {
+    const info = statSync(dir);
+    if (!trustedUids.includes(info.uid)) return `${dir} is owned by untrusted uid ${info.uid}`;
+    if ((info.mode & 0o002) !== 0 && (info.mode & 0o1000) === 0) {
+      return `${dir} is world-writable without the sticky bit`;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
-  return null;
 }
 
 /** package.json of the package that owns `file`; the walk stops at a node_modules boundary. */
-function owningPackage(file: string): { name: unknown; version: unknown } | null {
+function owningPackage(file: string): { name: unknown; version: unknown; manifest: string } | null {
   let dir = path.dirname(file);
   for (let level = 0; level < PACKAGE_WALK_MAX_LEVELS; level += 1) {
     if (path.basename(dir) === 'node_modules') return null;
     const manifest = path.join(dir, 'package.json');
-    let text: string | null = null;
-    try {
-      if (statSync(manifest).isFile()) text = readFileSync(manifest, 'utf8');
-    } catch (err) {
-      if (errnoCode(err) !== 'ENOENT' && errnoCode(err) !== 'ENOTDIR') throw err;
-    }
+    const text = readRegularText(manifest);
     if (text !== null) {
       try {
         const parsed: unknown = JSON.parse(text);
-        return isRecord(parsed) ? { name: parsed.name, version: parsed.version } : { name: null, version: null };
+        return isRecord(parsed)
+          ? { name: parsed.name, version: parsed.version, manifest }
+          : { name: null, version: null, manifest };
       } catch {
-        return { name: null, version: null };
+        return { name: null, version: null, manifest };
       }
     }
     const parent = path.dirname(dir);
@@ -785,19 +833,41 @@ function nativeVersionsDir(home: string): string | null {
  * must hold an ELF or Mach-O file), an owning npm package.json (before any shebang test), and
  * finally a wrapper script whose only command is `exec /abs/path "$@"`.
  */
-export function classifyClaudeExecutable({
-  bin,
-  home,
-  maxHops = CLAUDE_RESOLVE_MAX_HOPS,
-  trustedUids = [process.getuid?.() ?? 0, 0],
-  allowWrapper = true,
-}: {
+interface ClassifyOptions {
   bin: string;
   home: string;
   maxHops?: number;
   trustedUids?: readonly number[];
   allowWrapper?: boolean;
-}): ClaudeExecutableClassification {
+}
+
+export function classifyClaudeExecutable(options: ClassifyOptions): ClaudeExecutableClassification {
+  try {
+    return classifyUnguarded(options);
+  } catch (err) {
+    // A loop in a directory component surfaces as ELOOP from any path syscall, not as a link hop.
+    if (errnoCode(err) !== 'ELOOP') throw err;
+    return {
+      kind: 'link-loop',
+      layout: LAYOUT_BY_KIND['link-loop'],
+      bin: options.bin,
+      chain: [options.bin],
+      resolved: null,
+      configuredVersion: null,
+      configuredVersionSource: null,
+      observedVersion: null,
+      reasons: [`a path component of ${options.bin} is a link loop`],
+    };
+  }
+}
+
+function classifyUnguarded({
+  bin,
+  home,
+  maxHops = CLAUDE_RESOLVE_MAX_HOPS,
+  trustedUids = [process.getuid?.() ?? 0, 0],
+  allowWrapper = true,
+}: ClassifyOptions): ClaudeExecutableClassification {
   const chain: string[] = [bin];
   const reasons: string[] = [];
   const done = (
@@ -863,11 +933,15 @@ export function classifyClaudeExecutable({
     return done('not-executable', { resolved });
   }
 
-  const head = readHead(resolved, WRAPPER_MAX_BYTES + 1);
+  const head = readHead(resolved, WRAPPER_MAX_BYTES + 1, stat);
+  if (head === null) {
+    reasons.push(`${resolved} changed between inspection and open`);
+    return done('other', { resolved });
+  }
   const versionsDir = nativeVersionsDir(home);
   if (versionsDir !== null && path.dirname(resolved) === versionsDir) {
     const name = path.basename(resolved);
-    if (parseSemver(name) && NATIVE_MAGIC.some((magic) => head.subarray(0, 4).equals(magic))) {
+    if (parseSemver(name) && isNativeHead(head)) {
       return done('native', { resolved, configuredVersion: name, configuredVersionSource: 'native-path' });
     }
     reasons.push(`${resolved} is in the native versions directory but is not a native executable`);
@@ -882,6 +956,7 @@ export function classifyClaudeExecutable({
       resolved,
       configuredVersion: version,
       configuredVersionSource: version === null ? null : 'package-json',
+      packageJson: pkg.manifest,
     });
   }
 

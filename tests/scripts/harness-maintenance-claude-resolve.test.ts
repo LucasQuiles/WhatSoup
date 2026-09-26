@@ -135,6 +135,19 @@ describe('--claude-resolve native layout', () => {
     expect(result.layout).toBe('other');
   });
 
+  it('accepts Mach-O fat headers, 32- and 64-bit, with a sane architecture count', () => {
+    const fat32 = file(path.join(versions, '2.1.292'), Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]), Buffer.alloc(56)]));
+    const fat64 = file(path.join(versions, '2.1.293'), Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbf, 0, 0, 0, 2]), Buffer.alloc(56)]));
+    expect(classify(link(path.join(home, 'fat32', 'claude'), fat32)).kind).toBe('native');
+    expect(classify(link(path.join(home, 'fat64', 'claude'), fat64)).kind).toBe('native');
+  });
+
+  it('does not accept a Java class file, which shares the cafebabe magic, as native', () => {
+    // Java 8 class file: magic, minor 0, major 52 (0x34).
+    const javaClass = file(path.join(versions, '2.1.294'), Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34]), Buffer.alloc(56)]));
+    expect(classify(link(path.join(home, 'javaclass', 'claude'), javaClass)).kind).not.toBe('native');
+  });
+
   it('reports a non-executable native file as not-executable', () => {
     const plain = file(path.join(versions, '2.1.291'), NATIVE_BYTES, 0o644);
     expect(classify(link(path.join(home, 'noexec', 'claude'), plain)).kind).toBe('not-executable');
@@ -150,17 +163,29 @@ describe('--claude-resolve link failures', () => {
     expect(classify(link(path.join(home, 'broken', 'claude'), path.join(root, 'nowhere'))).kind).toBe('broken-link');
   });
 
-  it('reports a link cycle as link-loop', () => {
+  it('reports a link cycle as link-loop, with a cycle reason', () => {
     const a = path.join(home, 'loop', 'a');
     link(path.join(home, 'loop', 'b'), a);
     link(a, path.join(home, 'loop', 'b'));
-    expect(classify(a).kind).toBe('link-loop');
+    const result = classify(a);
+    expect(result.kind).toBe('link-loop');
+    expect(String(result.reasons)).toMatch(/link cycle/);
+    expect(String(result.reasons)).not.toMatch(/link hops/);
   });
 
-  it('bounds a long acyclic chain as link-loop', () => {
+  it('bounds a long acyclic chain as link-loop, with a hop-bound reason', () => {
     let target = path.join(versions, '2.1.282');
     for (let i = 0; i < 50; i += 1) target = link(path.join(home, 'long', `l${i}`), target);
-    expect(classify(target).kind).toBe('link-loop');
+    const result = classify(target);
+    expect(result.kind).toBe('link-loop');
+    expect(String(result.reasons)).toMatch(/more than \d+ link hops/);
+    expect(String(result.reasons)).not.toMatch(/link cycle/);
+  });
+
+  it('reports a loop in a directory component as link-loop, not an unexpected error', () => {
+    const loopDir = path.join(home, 'dirloop', 'x');
+    link(loopDir, loopDir);
+    expect(classify(path.join(loopDir, 'claude')).kind).toBe('link-loop');
   });
 
   it('classifies a FIFO as other without blocking', () => {
@@ -184,6 +209,7 @@ describe('--claude-resolve npm and wrapper layouts', () => {
       configuredVersion: '2.1.200',
       configuredVersionSource: 'package-json',
       observedVersion: null,
+      packageJson: path.join(root, 'npm', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'package.json'),
     });
   });
 
@@ -221,6 +247,23 @@ describe('--claude-resolve trust', () => {
     const target = file(path.join(home, 'wwdir', 'native'), NATIVE_BYTES);
     chmodSync(path.dirname(target), 0o777);
     expect(classify(target).kind).toBe('untrusted');
+  });
+
+  it('marks a target under a world-writable, non-sticky ancestor further up as untrusted', () => {
+    const target = file(path.join(home, 'wwgp', 'mid', 'leaf', 'native'), NATIVE_BYTES);
+    chmodSync(path.join(home, 'wwgp'), 0o777);
+    const result = classify(target);
+    chmodSync(path.join(home, 'wwgp'), 0o755);
+    expect(result.kind).toBe('untrusted');
+    expect(String(result.reasons)).toContain(path.join(home, 'wwgp'));
+  });
+
+  it('marks a link hop under a world-writable, non-sticky ancestor as untrusted', () => {
+    const hop = link(path.join(home, 'wwhop', 'deep', 'claude'), path.join(versions, '2.1.282'));
+    chmodSync(path.join(home, 'wwhop'), 0o777);
+    const result = classify(hop);
+    chmodSync(path.join(home, 'wwhop'), 0o755);
+    expect(result.kind).toBe('untrusted');
   });
 
   it('marks a target owned by an untrusted user as untrusted', () => {
