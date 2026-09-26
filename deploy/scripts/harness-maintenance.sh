@@ -509,7 +509,7 @@ LAUNCHD_ENV_SURFACE="next launch; loaded job environment not read"
 # PATH composition are byte-identical to this checkout's, so an instance started through it resolves
 # the agent CLI exactly as claude_resolve_consumer computes. Otherwise 1 with the reason on stdout.
 release_wrapper_mismatch() {
-  local wrapper="$1" root
+  local wrapper="$1" root file
   case "$wrapper" in
     /*/deploy/whatsoup) ;;
     *)
@@ -517,11 +517,18 @@ release_wrapper_mismatch() {
       return 1 ;;
   esac
   root="${wrapper%/deploy/whatsoup}"
-  if [ ! -f "$wrapper" ] || ! cmp -s "$wrapper" "$REPO_ROOT/deploy/whatsoup" \
-    || ! cmp -s "$root/deploy/lib/runtime-path.sh" "$REPO_ROOT/deploy/lib/runtime-path.sh"; then
-    echo "instance runs release wrapper $wrapper, which is missing or differs from this checkout, so its PATH composition cannot be verified"
+  if [ ! -f "$wrapper" ]; then
+    echo "instance runs release wrapper $wrapper, which is missing, so its PATH composition cannot be verified"
     return 1
   fi
+  # The wrapper and every file it composes the PATH and picks the node from. Byte for byte, so a
+  # tree that differs only in unrelated lines also holds: fail closed.
+  for file in deploy/whatsoup deploy/lib/runtime-path.sh deploy/lib/resolve-node.sh .nvmrc; do
+    if ! cmp -s "$root/$file" "$REPO_ROOT/$file"; then
+      echo "instance runs release wrapper $wrapper, whose $file is missing or differs from this checkout, so its PATH composition cannot be verified"
+      return 1
+    fi
+  done
 }
 
 # The installed instance wrapper. deploy/setup.sh links it into a checkout, and a release switch

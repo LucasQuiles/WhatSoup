@@ -41,14 +41,20 @@ function alerts(h: Harness): string {
   }
 }
 
-/** A release directory whose wrapper and PATH composition are copies of this repo's. */
-function release(h: Harness, name: string, identical = true): string {
+/**
+ * A release directory whose wrapper and the files it composes PATH and node from are copies of this
+ * repo's; `identical` false changes runtime-path.sh, and `differ` names another file to change.
+ */
+function release(h: Harness, name: string, identical = true, differ?: string): string {
   const dir = path.join(h.home, 'releases', name);
   mkdirSync(path.join(dir, 'deploy/lib'), { recursive: true });
   copyFileSync(path.join(REPO, 'deploy/whatsoup'), path.join(dir, 'deploy/whatsoup'));
   chmodSync(path.join(dir, 'deploy/whatsoup'), 0o755);
-  const composition = readFileSync(path.join(REPO, 'deploy/lib/runtime-path.sh'), 'utf8');
-  writeFileSync(path.join(dir, 'deploy/lib/runtime-path.sh'), identical ? composition : `${composition}\n# changed\n`);
+  for (const file of ['deploy/lib/runtime-path.sh', 'deploy/lib/resolve-node.sh', '.nvmrc']) {
+    const text = readFileSync(path.join(REPO, file), 'utf8');
+    const changed = file === differ || (file === 'deploy/lib/runtime-path.sh' && !identical);
+    writeFileSync(path.join(dir, file), changed ? `${text}\n# changed\n` : text);
+  }
   return path.join(dir, 'deploy/whatsoup');
 }
 
@@ -145,6 +151,16 @@ describe('the installed wrapper link', () => {
     rmSync(path.join(h.home, '.local/bin/whatsoup'));
     expectHeldUnknown(h, run(h), path.join(h.home, '.local/bin/whatsoup'));
   }, T);
+
+  for (const file of ['.nvmrc', 'deploy/lib/resolve-node.sh']) {
+    it(`treats a tree whose ${file} differs as unknown`, () => {
+      const h = makeHarness();
+      portableInstance(h, 'alpha');
+      const wrapper = release(h, 'r1', true, file);
+      relink(h, wrapper);
+      expectHeldUnknown(h, run(h), wrapper);
+    }, T);
+  }
 
   it('still installs when the wrapper link points at a tree identical to this checkout', () => {
     const h = makeHarness();

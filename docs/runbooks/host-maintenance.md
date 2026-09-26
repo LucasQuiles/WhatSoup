@@ -74,8 +74,12 @@ resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
 `<name>` as its argument. Every instance, launchd or systemd, is resolved only
-when the wrapper it starts through, followed through symlinks, and that tree's
-PATH composition match this checkout byte for byte, and is `unknown` otherwise.
+when the wrapper it starts through, followed through symlinks, and the files
+that tree composes the PATH and picks the node from (`deploy/lib/runtime-path.sh`,
+`deploy/lib/resolve-node.sh`, `.nvmrc`) match this checkout byte for byte, and
+is `unknown` otherwise. The comparison fails closed: an instance on an older
+release whose wrapper differs only in lines unrelated to the PATH still holds
+the update. Run the maintenance job from the same release as the instances.
 This includes the installed `~/.local/bin/whatsoup` link: its target, not the
 link, selects the tree, so a link repointed at a different release or checkout
 holds the update. On systemd the unit is assumed to start through that link,
