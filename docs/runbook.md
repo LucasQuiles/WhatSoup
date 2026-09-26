@@ -2422,7 +2422,7 @@ Key log patterns to monitor:
 
 ## AskUserQuestion Poll Bridge
 
-When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
+When an agent subprocess calls `AskUserQuestion` in a per-chat session (DM or group), the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with soft/hard expiry timers and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
 
 ### Pending poll state
 
@@ -2436,13 +2436,13 @@ If a user reports they voted but the agent didn't respond:
 2. If `pollVoteFailed` fired, the runtime should have sent a text fallback — check for `"poll vote failure switched AskUserQuestion to text fallback"` in logs
 3. If the service restarted between poll send and vote, the pending state is rehydrated from the `pending_polls` table at startup, so the poll should still be live (unless its hard close time elapsed during downtime, in which case it is pruned and the chat is notified)
 
-### Nudge timer
+### Expiry
 
-Pending polls send a gentle reminder ("Still waiting on your answer") every 2 hours. There is no hard expiry — polls persist until answered or the session is cleaned up. The nudge timer is `unref`'d and does not block shutdown.
+There is no reminder nudge. Soft expiry fires at the poll's `timeoutMs` (default 1 h via `pollResolution.defaultTimeoutMs`): an unanswered poll switches to a numbered text fallback, while `majority-after-timeout` and `admin-wins` resolve from the recorded votes. Hard expiry fires at `timeoutMs * 2`: the runtime sends "This decision has expired — please re-trigger when ready." for unanswered questions and clears the poll. Both timers are `unref`'d and do not block shutdown.
 
-### Group chats
+### Groups and shared sessions
 
-AskUserQuestion poll injection is disabled in group chats. The runtime falls through to normal provider handling (agent asks as text). This is by design — AskUserQuestion is a single-answer turn-unblock protocol incompatible with multi-voter group semantics.
+Per-chat group sessions use the poll bridge too; the instance-level `pollResolution.defaultStrategy` (default `first-vote-wins`) picks the group resolution strategy. Shared/global sessions fall through to normal provider handling (agent asks as text). See [runbooks/agent-decision-polls.md](runbooks/agent-decision-polls.md) for the full contract and trigger matrix.
 
 ---
 
