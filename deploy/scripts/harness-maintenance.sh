@@ -425,8 +425,27 @@ plist_string() {
 # environment would need `launchctl print`, which prints every value, so it is not read.
 LAUNCHD_ENV_SURFACE="next launch; loaded job environment not read"
 
+# release_wrapper_mismatch <argv0>: 0 when <argv0> is a release's deploy/whatsoup whose wrapper and
+# PATH composition are byte-identical to this checkout's, so an instance started through it resolves
+# the agent CLI exactly as claude_resolve_consumer computes. Otherwise 1 with the reason on stdout.
+release_wrapper_mismatch() {
+  local wrapper="$1" root
+  case "$wrapper" in
+    /*/deploy/whatsoup) ;;
+    *)
+      echo "instance runs $wrapper, which is neither the installed wrapper nor a release wrapper"
+      return 1 ;;
+  esac
+  root="${wrapper%/deploy/whatsoup}"
+  if [ ! -f "$wrapper" ] || ! cmp -s "$wrapper" "$REPO_ROOT/deploy/whatsoup" \
+    || ! cmp -s "$root/deploy/lib/runtime-path.sh" "$REPO_ROOT/deploy/lib/runtime-path.sh"; then
+    echo "instance runs release wrapper $wrapper, which is missing or differs from this checkout, so its PATH composition cannot be verified"
+    return 1
+  fi
+}
+
 claude_inventory_launchd() {
-  local dir="$HOME/Library/LaunchAgents" file name label program arg1 path_value prepend node
+  local dir="$HOME/Library/LaunchAgents" file name label program arg1 path_value prepend node reason
   PLUTIL_BIN="$(job_tool plutil)" || {
     echo "plutil not found on the job PATH"
     return 1
@@ -443,8 +462,11 @@ claude_inventory_launchd() {
     label="$(plist_string "$file" Label || true)"
     program="$(plist_string "$file" ProgramArguments.0 || true)"
     arg1="$(plist_string "$file" ProgramArguments.1 || true)"
-    if [ "$label" != "com.whatsoup.$name" ] || [ "$program" != "$HOME/.local/bin/whatsoup" ] || [ "$arg1" != "$name" ]; then
-      record_event "claude-consumer" "skipped" "${file##*/} is not a generated instance plist (label or program differs)"
+    # An instance is identified by its label and instance-name argument, whatever it executes: the
+    # release activation can point ProgramArguments[0] at a release's own wrapper. Other
+    # com.whatsoup jobs (maintenance timers, watchdogs) do not pass their own name and are skipped.
+    if [ "$label" != "com.whatsoup.$name" ] || [ "$arg1" != "$name" ]; then
+      record_event "claude-consumer" "skipped" "${file##*/} is not an instance plist (label or instance argument differs)"
       continue
     fi
     path_value="$(plist_string "$file" EnvironmentVariables.PATH || true)"
@@ -454,6 +476,10 @@ claude_inventory_launchd() {
       "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
       "$(plist_string "$file" EnvironmentVariables.DISABLE_UPDATES || true)" \
       "$(plist_string "$file" EnvironmentVariables.DISABLE_AUTOUPDATER || true)"
+    if [ "$program" != "$HOME/.local/bin/whatsoup" ] && ! reason="$(release_wrapper_mismatch "$program")"; then
+      claude_consumer_record "$name" launchd unknown "" "" "" "$reason"
+      continue
+    fi
     claude_resolve_consumer "$name" launchd "$path_value" "$prepend" "$node"
   done
 }
@@ -522,6 +548,8 @@ systemd_unit_environment() {
 systemd_environment_file() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
+    # systemd ignores leading whitespace on an assignment line.
+    line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in
       PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) ;;
       DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) ;;
@@ -532,7 +560,7 @@ systemd_environment_file() {
 }
 
 claude_inventory_systemd() {
-  local units unit name show manager_env rc=0
+  local units unit name show manager_env manager_unreadable rc=0
   SYSTEMCTL_BIN="$(job_tool systemctl)" || {
     echo "systemctl not found on the job PATH"
     return 1
@@ -554,13 +582,24 @@ claude_inventory_systemd() {
     name="${name%.service}"
     SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
     SYSTEMD_ENV_UPDATES="" SYSTEMD_ENV_AUTOUPDATER="" SYSTEMD_ENV_CONFIG=""
+    # Same precedence as the launcher composes (deploy/lib/runtime-path.sh): the user manager
+    # environment first, then Environment=, then EnvironmentFiles=. A manager value this reader
+    # cannot interpret, or a manager environment that cannot be read, makes the instance unknown:
+    # a dropped prepend would hide a pin.
+    manager_unreadable=0
+    [ "$rc" -eq 0 ] || manager_unreadable=1
     if [ "$rc" -eq 0 ]; then
       while IFS= read -r line; do
         case "$line" in
-          PATH=*) systemd_assign "$line" || SYSTEMD_ENV_PATH="" ;;
+          PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) systemd_assign "$line" || manager_unreadable=1 ;;
           DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
         esac
       done <<< "$manager_env"
+    fi
+    if [ "$manager_unreadable" -eq 1 ]; then
+      claude_consumer_record "$name" systemd unknown "" "" "" "user manager environment is not statically readable"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      continue
     fi
     if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
@@ -969,6 +1008,9 @@ update_claude() {
       case "$message" in
         *"other than the shared launcher"*)
           send_alert "claude-update" "warning" "Agent CLI update held by an instance pin" "$message" ;;
+        # Zero instances can also mean the inventory missed them; never hold that silently.
+        *"no service instance"*)
+          send_alert "claude-update" "warning" "Agent CLI update held: no service instance found" "$message" ;;
       esac
       return 0 ;;
     missing)
@@ -1072,7 +1114,8 @@ NODE
 #   facts <path>                          -> "<readlink>\037<realpath>\037<sha256 of realpath>"
 #                                            (fields empty when unavailable)
 #   cas <link> <expected> <replacement>   -> exit 0 swapped and read back; 3 the link no longer
-#                                            points at <expected>; 4 read-back mismatch
+#                                            points at <expected>; 4 read-back mismatch; 5 the
+#                                            swap itself failed (e.g. directory not writable)
 claude_fs() {
   "$REPO_NODE_BIN" - "$@" <<'NODE'
 const fs = require('node:fs');
@@ -1091,9 +1134,14 @@ if (mode === 'facts') {
   const [link, expected, replacement] = args;
   if (safe(() => fs.readlinkSync(link)) !== expected) process.exit(3);
   const tmp = path.join(path.dirname(link), `.${path.basename(link)}.rollback.${process.pid}`);
-  fs.symlinkSync(replacement, tmp);
-  if (safe(() => fs.readlinkSync(link)) !== expected) { fs.unlinkSync(tmp); process.exit(3); }
-  fs.renameSync(tmp, link);
+  try {
+    fs.symlinkSync(replacement, tmp);
+    if (safe(() => fs.readlinkSync(link)) !== expected) { fs.unlinkSync(tmp); process.exit(3); }
+    fs.renameSync(tmp, link);
+  } catch {
+    safe(() => fs.unlinkSync(tmp));
+    process.exit(5);
+  }
   process.exit(safe(() => fs.readlinkSync(link)) === replacement ? 0 : 4);
 } else {
   process.exit(2);
@@ -1105,7 +1153,7 @@ NODE
 # launcher, the launcher must classify as native at <target>, and a bounded --version of that
 # verified native binary must exit 0 and report <target>. Prints a reason on failure.
 claude_postcheck() {
-  local target="$1" policy verdict kind version message facts real out rc=0
+  local target="$1" policy verdict kind version message facts real digest out rc=0
   CLAUDE_CONSUMERS_FILE="$(mktemp "$TMP_DIR/claude-consumers-post.XXXXXX")"
   if ! claude_service_inventory >/dev/null; then
     echo "service inventory unavailable after install"
@@ -1118,8 +1166,8 @@ claude_postcheck() {
     return 1
   fi
   facts="$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")"
-  IFS=$'\037' read -r _ real _ <<< "$facts"
-  if [ -z "$real" ]; then
+  IFS=$'\037' read -r _ real digest <<< "$facts"
+  if [ -z "$real" ] || [ -z "$digest" ]; then
     echo "launcher does not resolve after install"
     return 1
   fi
@@ -1127,6 +1175,12 @@ claude_postcheck() {
   out="$(parse_version < "$TMP_DIR/claude-version.out" || true)"
   if [ "$rc" -ne 0 ] || [ "$out" != "$target" ]; then
     echo "--version of $real returned rc=$rc version=${out:-none}"
+    return 1
+  fi
+  # The answer only vouches for the binary it came from: the launcher must still resolve to the
+  # same file with the same digest.
+  if [ "$(claude_fs facts "$CLAUDE_NATIVE_LAUNCHER")" != "$facts" ]; then
+    echo "launcher changed while --version ran (was $real sha256 $digest)"
     return 1
   fi
 }
@@ -1177,9 +1231,13 @@ claude_install_transaction() {
   if [ "$post_link" != "$prev_link" ]; then
     rollback_rc=0
     claude_fs cas "$CLAUDE_NATIVE_LAUNCHER" "$post_link" "$prev_link" || rollback_rc=$?
-    if [ "$rollback_rc" -ne 0 ]; then
+    if [ "$rollback_rc" -eq 3 ]; then
       record_event "claude" "rollback-failed" "launcher moved since the install (swap rc=$rollback_rc); left as found" "$before" "" "$target"
       send_alert "claude-update" "critical" "Agent CLI rollback failed" "$failure. The launcher changed after the install, so it was not swapped back. Reconcile by hand."
+      return 3
+    elif [ "$rollback_rc" -ne 0 ]; then
+      record_event "claude" "rollback-failed" "launcher link swap failed (rc=$rollback_rc); launcher left as the install left it" "$before" "" "$target"
+      send_alert "claude-update" "critical" "Agent CLI rollback failed" "$failure. Swapping the launcher link back failed (rc=$rollback_rc). Reconcile by hand."
       return 3
     fi
   fi
