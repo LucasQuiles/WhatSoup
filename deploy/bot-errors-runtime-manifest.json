@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c98aa48ce7820439ecc9446a657d2eb122c04d08691c3e493768ec1964a0d04b",
+      "sha256": "7f485693259cf6a4d1dad7c9aafed20925b3e9dfcecfe642fb43171190f5836c",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -560,7 +560,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
+      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -837,7 +837,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "4d9348358719eab33d74ea6b76c4e51d3f58b35865d9f9a5b017388b97ae74f6",
+      "sha256": "51da2db2bdd6411d480b1563659334079c1b6ba66a9728bbe321c3c84f23d007",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -855,6 +855,13 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "\"runtime_agent_fallback_turns_served\"",
+        "\"runtime_agent_fallback_turns_empty\"",
+        "\"runtime_agent_fallback_activations\"",
+        "\"runtime_agent_fallback_reverts\"",
+        "\"runtime_agent_fallback_replays\"",
+        "\"runtime_agent_fallback_probe_attempts\"",
+        "\"runtime_agent_fallback_failed_entry_count\"",
         "autoCompactActiveBackoffScopes",
         "agent_respawn_failed_clear_pending"
       ]
