@@ -350,11 +350,44 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     });
 
     it('scope pin: an active row that exists only in another namespace is a foreign checkpoint, not a live owner of this chat', async () => {
+      // Pins scope only: passes before and after the O4 change.
       insertRow(SCHEDULED_SID, SCHEDULED, 'active');
       writeCheckpoint(PHONE, SCHEDULED_SID);
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+  });
+
+  describe('X1: non-sandbox per_chat managers route a provider resume refusal to their own chat', () => {
+    // A provider can refuse a resumed session after spawn (exit 1, no init);
+    // SessionManager then calls onResumeFailed. Without a target,
+    // handleResumeFailed falls back to the shared single-mode session, which
+    // non-sandbox per_chat never sets, so the refusal was silent.
+    function resumeFailedCallback(session: SessionManager): (() => void) | undefined {
+      return (session as unknown as { onResumeFailed?: () => void }).onResumeFailed;
+    }
+    function captureHandleResumeFailed() {
+      const handle = vi.fn();
+      (runtime as unknown as { handleResumeFailed: typeof handle }).handleResumeFailed = handle;
+      return handle;
+    }
+
+    it('the lazily created per-chat manager passes its map key and itself', () => {
+      const handle = captureHandleResumeFailed();
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      resumeFailedCallback(session)?.();
+      expect(handle).toHaveBeenCalledExactlyOnceWith(JID, { mapKey: JID, session });
+    });
+
+    it('the per-chat fallback replacement manager passes its map key and itself', () => {
+      const handle = captureHandleResumeFailed();
+      (runtime as unknown as { recreatePerChatSessionForFallback(mapKey: string, chatJid: string): void })
+        .recreatePerChatSessionForFallback(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      resumeFailedCallback(session)?.();
+      expect(handle).toHaveBeenCalledExactlyOnceWith(JID, { mapKey: JID, session });
     });
   });
 });

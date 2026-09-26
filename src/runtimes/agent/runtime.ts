@@ -9960,7 +9960,12 @@ export class AgentRuntime implements Runtime {
         this.handlePerChatCrash(currentMapKey, chatJid, info, session);
       },
       notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
-      onResumeFailed: () => this.handleResumeFailed(chatJid),
+      // X1: name the exact manager; without a target, non-sandbox per_chat
+      // falls through to the unset shared session and the refusal is silent.
+      onResumeFailed: () => this.handleResumeFailed(chatJid, {
+        mapKey: resolveSessionMapKey() ?? mapKey,
+        session,
+      }),
       eventToolScopeKey: toolScopeKey,
       routeOverride,
     });
@@ -10784,6 +10789,11 @@ export class AgentRuntime implements Runtime {
             : (msg) => {
                 this.handleCrashNotify(msg, chatJid, session);
               },
+          // X1: a lazily resumed session can be refused by the provider after spawn.
+          onResumeFailed: () => this.handleResumeFailed(chatJid, {
+            mapKey: resolveSessionMapKey() ?? initialMapKey,
+            session,
+          }),
           eventToolScopeKey: toolScopeKey,
         });
         log.info({ chatJid, mapKey: initialMapKey, sessionScope: this.sessionScope }, 'created per-chat session manager');
