@@ -111,6 +111,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import { lazyCheckpointAdoption, NO_CHECKPOINT_ADOPTION } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -5849,6 +5850,13 @@ export class AgentRuntime implements Runtime {
     let contextPreamble: string | null = null;
     const wasInactive = !session.getStatus().active;
     if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
+      // #3530 successor: a never-started non-sandbox per_chat manager decides
+      // from its checkpoint what it may adopt (checkpoint-adoption.ts).
+      const adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
+        && effectiveMapKey !== undefined && !isScheduledAgentJobMapKey(effectiveMapKey)
+        ? lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
+        : NO_CHECKPOINT_ADOPTION;
+      if (adoption.kind === 'fresh_with_notice') this.sendDirect(chatJid, adoption.notice);
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -5870,7 +5878,8 @@ export class AgentRuntime implements Runtime {
       // process and its DB row. Mirrors handleNew() pattern.
       await session.shutdown();
       if (dispatchCancelled()) return;
-      await session.spawnSession();
+      if (adoption.kind === 'resume') await session.spawnSession(adoption.sessionId, adoption.rowId);
+      else await session.spawnSession();
       spawnedForTurn = true;
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
@@ -5896,7 +5905,8 @@ export class AgentRuntime implements Runtime {
 
       // Fresh spawns merge recent context into the active turn; see context-handoff.ts.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
-      if (!resumeFailedOwnsContext) {
+      // A resumed session already holds its own context.
+      if (!resumeFailedOwnsContext && adoption.kind !== 'resume') {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
