@@ -52,6 +52,38 @@ export interface CheckpointAdoptionManager {
   getDbRowId(): number | null;
   getProviderId(): string;
   getStatus(): { startedAt: string | null; sessionId: string | null };
+  providerTransitionSettled?(): Promise<void>;
+}
+
+/**
+ * Which new managers may restore a checkpoint. Adoption restores a chat that
+ * has no resident manager: the first manager after a restart, or the one after
+ * idle eviction. A manager replacing one this process retired on purpose
+ * (route recycle, /new, crash cleanup, provider fallback) keeps main's fresh
+ * spawn, because that handoff chose a fresh session.
+ */
+export class LazyRestoreScopes {
+  private readonly handedOff = new Set<string>();
+  private readonly eligible = new WeakSet<object>();
+
+  /** Every removal of a per-chat manager. */
+  noteRetired(mapKey: string): void {
+    this.handedOff.add(mapKey);
+  }
+
+  /** Idle eviction suspends a resumable session; its chat may restore it. */
+  noteIdleEvicted(mapKey: string): void {
+    this.handedOff.delete(mapKey);
+  }
+
+  /** A manager built by the ordinary per-chat creation path. */
+  noteCreated(mapKey: string, session: object): void {
+    if (!this.handedOff.has(mapKey)) this.eligible.add(session);
+  }
+
+  isEligible(session: object): boolean {
+    return this.eligible.has(session);
+  }
 }
 
 interface SessionRowView {
@@ -139,9 +171,12 @@ export async function spawnForAdoption(
 
 /**
  * Adoption for the first spawn of a per-chat manager. A manager that already
- * started in this process keeps main's fresh-spawn behaviour.
+ * started in this process keeps main's fresh-spawn behaviour. The rows are
+ * read only after the previous provider for this chat has stopped, so a
+ * session still shutting down after idle eviction is not mistaken for a live
+ * owner.
  */
-export function lazyCheckpointAdoption(
+export async function lazyCheckpointAdoption(
   db: Database,
   durability: {
     getSessionCheckpoint(conversationKey: string): CheckpointAdoptionCheckpoint | undefined;
@@ -152,7 +187,14 @@ export function lazyCheckpointAdoption(
   },
   session: CheckpointAdoptionManager,
   conversationKey: string,
-): CheckpointAdoption {
+): Promise<CheckpointAdoption> {
+  try {
+    await session.providerTransitionSettled?.();
+  } catch {
+    // The previous child's stop is unproven; spawnSession refuses on the
+    // same barrier, so keep main's path and let it report.
+    return NO_CHECKPOINT_ADOPTION;
+  }
   const status = session.getStatus();
   if (session.getDbRowId() !== null || status.startedAt !== null || status.sessionId !== null) {
     return NO_CHECKPOINT_ADOPTION;

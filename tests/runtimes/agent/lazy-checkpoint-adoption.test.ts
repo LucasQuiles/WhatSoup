@@ -349,6 +349,42 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(engine.getSessionCheckpoint(PHONE)).toEqual(beforeCheckpoint);
     });
 
+    it('through the real admission path: the refused turn terminalizes, is not queued for replay, and the chat keeps serving', async () => {
+      insertRow(OWN_SID, PHONE, 'active');
+      writeCheckpoint(PHONE, OWN_SID);
+      const seq = engine.journalInbound('fixture-o4-admitted', PHONE, JID, 'agent');
+      const inboundStatus = () => (db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?')
+        .get(seq) as { processing_status: string }).processing_status;
+      void runtime.handleMessage({
+        messageId: 'fixture-o4-admitted', chatJid: JID, senderJid: JID, senderName: 'Test User',
+        content: 'fixture o4 question', contentText: null, contentType: 'text', isFromMe: false,
+        isGroup: false, mentionedJids: [], timestamp: Date.now(), quotedMessageId: null,
+        isResponseWorthy: true, inboundSeq: seq,
+      });
+      await vi.waitFor(() => expect(inboundStatus()).not.toBe('processing'), { timeout: 4_000 });
+      // Terminal, not replayed, no halt or crash signal, one specific notice.
+      expect(inboundStatus()).toBe('failed');
+      expect(db.raw.prepare('SELECT state FROM turn_recovery_jobs WHERE source_inbound_seq = ?').all(seq)).toEqual([]);
+      expect((runtime.getHealthSnapshot().details as { degradedReasons?: string[] }).degradedReasons).toEqual([]);
+      expect(notices.mock.calls).toEqual([[JID, MAY_BE_RUNNING]]);
+      expect(providerSend).not.toHaveBeenCalled();
+      const queue = (runtime as unknown as { chatQueues: Map<string, ReturnType<typeof makeQueueDouble>> }).chatQueues.get(JID)!;
+      expect(queue.enqueueText).not.toHaveBeenCalled();
+
+      // Once the ambiguity clears (the live owner suspended), the same chat serves again.
+      db.raw.prepare("UPDATE agent_sessions SET status = 'suspended' WHERE session_id = ?").run(OWN_SID);
+      const next = engine.journalInbound('fixture-o4-after', PHONE, JID, 'agent');
+      void runtime.handleMessage({
+        messageId: 'fixture-o4-after', chatJid: JID, senderJid: JID, senderName: 'Test User',
+        content: 'fixture o4 follow-up', contentText: null, contentType: 'text', isFromMe: false,
+        isGroup: false, mentionedJids: [], timestamp: Date.now(), quotedMessageId: null,
+        isResponseWorthy: true, inboundSeq: next,
+      });
+      await vi.waitFor(() => expect(providerSend).toHaveBeenCalledTimes(1), { timeout: 4_000 });
+      expect(view.chatSessions.get(JID)!.getDbRowId()).toBe(1);
+      expect(notices).toHaveBeenCalledTimes(1);
+    });
+
     it('scope pin: an active row that exists only in another namespace is a foreign checkpoint, not a live owner of this chat', async () => {
       // Pins scope only: passes before and after the O4 change.
       insertRow(SCHEDULED_SID, SCHEDULED, 'active');
@@ -356,6 +392,72 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+  });
+
+  describe('scope: adoption restores a chat with no resident manager, never an in-process handoff', () => {
+    type HandoffView = {
+      recreatePerChatSessionForFallback(mapKey: string, chatJid: string): void;
+      deleteOwnedPerChatSession(mapKey: string, expected?: SessionManager): boolean;
+      evictIdleSession(mapKey: string, session: SessionManager, reason: string): void;
+    };
+    const handoff = () => runtime as unknown as HandoffView;
+
+    it('a provider-fallback stand-in keeps main\'s fresh spawn with no restore notice', async () => {
+      insertRow(OWN_SID, PHONE, 'crashed');
+      writeCheckpoint(PHONE, OWN_SID);
+      handoff().recreatePerChatSessionForFallback(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('a manager retired by an in-process handoff (recycle, /new, crash cleanup) is followed by main\'s fresh spawn', async () => {
+      insertRow(OWN_SID, PHONE, 'suspended');
+      writeCheckpoint(PHONE, OWN_SID);
+      const { session: first } = await firstTurn();
+      expect(first.getStatus().active).toBe(true);
+      handoff().deleteOwnedPerChatSession(JID, first);
+      view.ensureSessionAndQueueSync(JID, JID);
+      const second = view.chatSessions.get(JID)!;
+      expect(second).not.toBe(first);
+      const spawnSpy = vi.spyOn(second, 'spawnSession');
+      await view.sendTurnToSession(second, JID, 'fixture next turn', JID);
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('a message right after idle eviction waits for the evicted session to suspend, then resumes it', async () => {
+      const ownRow = insertRow(OWN_SID, PHONE, 'suspended');
+      writeCheckpoint(PHONE, OWN_SID);
+      const { session: first } = await firstTurn();
+      expect(first.getStatus().active).toBe(true);
+      // Hold the evicted session's shutdown open, so its row still reads
+      // 'active' while the next message is admitted.
+      let releaseShutdown!: () => void;
+      const shutdownGate = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+      const realShutdown = first.shutdown.bind(first);
+      vi.spyOn(first, 'shutdown').mockImplementation(async (suspend?: boolean) => {
+        await shutdownGate;
+        return realShutdown(suspend);
+      });
+      handoff().evictIdleSession(JID, first, 'idle-ttl');
+      view.ensureSessionAndQueueSync(JID, JID);
+      const second = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(second, 'spawnSession');
+      let turnError: unknown = null;
+      const turn = view.sendTurnToSession(second, JID, 'fixture next turn', JID)
+        .catch((err: unknown) => { turnError = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(turnError).toBeNull();
+      expect(spawnSpy).not.toHaveBeenCalled();
+      releaseShutdown();
+      await turn;
+      expect(turnError).toBeNull();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith(OWN_SID, ownRow);
+      expect(notices).not.toHaveBeenCalled();
     });
   });
 
