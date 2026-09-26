@@ -148,7 +148,7 @@ Each harness defines `current → update → smoke → rollback`:
 
 | Harness | Update | Smoke | Rollback |
 |---------|--------|-------|----------|
-| claude | `claude install latest` | `claude --version` parses | `claude install <prev>` |
+| claude | `$HOME/.local/bin/claude install <target>`, where `<target>` is the newest release past the npm publish-age cooldown (`npm.cooldown_minutes`), never downgrading, and only when that path is the native installer's symlink into `~/.local/share/claude/versions/` (a wrapper, npm or other layout is reported as `unmanaged-layout` and left alone) | `$HOME/.local/bin/claude --version` parses and equals `<target>` (the binary the bot resolves first, per `deploy/lib/runtime-path.sh`) | `$HOME/.local/bin/claude install <prev>` |
 | codex | gated npm install to NVM node 24.13.0 global | `codex --version` via direct NVM binary (`CODEX_NO_DEFAULTS=1`) | `npm i -g @openai/codex@<prev> --ignore-scripts` |
 | opencode | `opencode upgrade` | `opencode --version` parses | `opencode upgrade <prev>` |
 

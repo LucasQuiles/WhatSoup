@@ -97,6 +97,10 @@ PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
 PROBE_OUTPUT_LINES="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_OUTPUT_LINES:-200}"
 REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
 export PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
+# The claude the bot actually spawns: deploy/lib/runtime-path.sh puts $HOME/.local/bin first on the
+# bot's PATH. Checking the shell's `claude` instead let a wrapper keep serving an old binary while
+# this job logged "updated" every night.
+CLAUDE_SERVICE_BIN="${WHATSOUP_CLAUDE_SERVICE_BIN:-$HOME/.local/bin/claude}"
 
 log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
@@ -215,7 +219,24 @@ command_version() {
 }
 
 claude_current() {
-  command_version claude --version || true
+  [ -x "$CLAUDE_SERVICE_BIN" ] || return 0
+  "$CLAUDE_SERVICE_BIN" --version 2>/dev/null | parse_version || true
+}
+
+# native = the installer's own layout (a symlink into ~/.local/share/claude/versions/); anything
+# else is left alone because `claude install` can repoint the path past a wrapper.
+claude_service_layout() {
+  if [ ! -e "$CLAUDE_SERVICE_BIN" ]; then
+    echo other
+  elif [ -L "$CLAUDE_SERVICE_BIN" ] && case "$(readlink "$CLAUDE_SERVICE_BIN")" in */.local/share/claude/versions/*) true ;; *) false ;; esac; then
+    echo native
+  elif head -c 2 "$CLAUDE_SERVICE_BIN" 2>/dev/null | grep -q '#!'; then
+    echo wrapper
+  elif case "$(_resolve_symlinks "$CLAUDE_SERVICE_BIN")" in */node_modules/@anthropic-ai/*) true ;; *) false ;; esac; then
+    echo npm
+  else
+    echo other
+  fi
 }
 
 codex_bin() {
@@ -261,7 +282,7 @@ opencode_current() {
 }
 
 smoke_claude() {
-  command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1
+  [ -x "$CLAUDE_SERVICE_BIN" ] && "$CLAUDE_SERVICE_BIN" --version >/dev/null 2>&1
 }
 
 smoke_codex() {
@@ -491,36 +512,55 @@ audit_npm_global() {
 }
 
 update_claude() {
-  local before latest after
+  local before after target action layout plan npm time_json
   before="$(claude_current)"
-  latest="$(npm_latest_version @anthropic-ai/claude-code || true)"
-  if [ -z "$before" ]; then
-    record_event "claude" "missing" "claude binary not found"
-    send_alert "claude-update" "warning" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
+  layout="$(claude_service_layout)"
+  npm="$(npm_bin)"
+  time_json="$TMP_DIR/npm-time-claude.json"
+  if [ -z "$npm" ] || ! PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view @anthropic-ai/claude-code time --json >"$time_json" 2>/dev/null; then
+    record_event "claude" "unknown" "npm publish-time lookup failed" "$before"
+    send_alert "claude-update" "warning" "Claude version lookup failed" "The maintenance job could not read Claude CLI publish times, so it cannot apply the release-age cooldown."
     return 0
   fi
-  if [ -z "$latest" ]; then
-    record_event "claude" "unknown" "latest version lookup failed" "$before"
-    send_alert "claude-update" "warning" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
-    return 0
-  fi
-  if [ "$before" = "$latest" ]; then
-    record_event "claude" "current" "already at latest" "$before" "$before" "$latest"
-    return 0
-  fi
+  plan="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --claude-update-plan --current "${before:-}" --time-json "$time_json" \
+    --cooldown-minutes "$(manifest_npm_cooldown_minutes)" --layout "$layout" 2>/dev/null | tail -n 1)"
+  action="$(printf '%s' "$plan" | "$REPO_NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).action)}catch{console.log("")}})')"
+  target="$(printf '%s' "$plan" | "$REPO_NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).target??"")}catch{console.log("")}})')"
+  case "$action" in
+    missing)
+      record_event "claude" "missing" "service claude binary not found: $CLAUDE_SERVICE_BIN"
+      send_alert "claude-update" "warning" "Claude harness missing" "The maintenance job could not run the bot's claude binary at $CLAUDE_SERVICE_BIN."
+      return 0 ;;
+    held)
+      record_event "claude" "held" "no Claude CLI release is past the publish-age cooldown" "$before"
+      return 0 ;;
+    current)
+      record_event "claude" "current" "service claude is at or past the newest cooldown-eligible release" "$before" "$before" "$target"
+      return 0 ;;
+    unmanaged-layout)
+      record_event "claude" "unmanaged-layout" "service claude is a $layout layout; native installer not run" "$before" "$before" "$target"
+      send_alert "claude-update" "warning" "Claude harness not on the native layout" "The bot's claude ($CLAUDE_SERVICE_BIN) is a $layout layout, so the native installer was not run. Eligible release: $target; serving: $before."
+      return 0 ;;
+    install) ;;
+    *)
+      record_event "claude" "unknown" "update plan unreadable" "$before"
+      send_alert "claude-update" "warning" "Claude update plan failed" "The maintenance job could not compute a Claude CLI update plan."
+      return 0 ;;
+  esac
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    record_event "claude" "drift" "update available" "$before" "$before" "$latest"
+    record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
     return 0
   fi
-  claude install latest
-  if ! smoke_claude; then
-    claude install "$before" || true
-    record_event "claude" "rollback" "smoke failed after update; rollback attempted" "$before" "" "$latest"
-    send_alert "claude-update" "critical" "Claude harness rollback" "Update to $latest failed smoke check; rollback to $before attempted."
+  "$CLAUDE_SERVICE_BIN" install "$target" || true
+  after="$(claude_current)"
+  if ! smoke_claude || [ "$after" != "$target" ]; then
+    "$CLAUDE_SERVICE_BIN" install "$before" || true
+    record_event "claude" "rollback" "service claude did not report $target after install; rollback attempted" "$before" "$after" "$target"
+    send_alert "claude-update" "critical" "Claude harness rollback" "Install of $target left the bot's claude at '${after:-none}'; rollback to $before attempted."
     return 1
   fi
-  after="$(claude_current)"
-  record_event "claude" "updated" "updated and smoke checked" "$before" "$after" "$latest"
+  record_event "claude" "updated" "installed cooldown-eligible release and smoke checked the service binary" "$before" "$after" "$target"
   send_alert "claude-update" "info" "Claude harness updated" "Claude CLI $before -> $after"
 }
 
