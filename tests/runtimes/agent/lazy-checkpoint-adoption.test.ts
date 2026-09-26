@@ -271,4 +271,55 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         .toEqual(before.filter((r) => (r as { workspace_key: string }).workspace_key === SCHEDULED));
     });
   });
+
+  describe('decision 65 O3: an own-namespace checkpoint with no resumable row starts fresh with a notice and recovers context', () => {
+    function storedMessage(content: string) {
+      return {
+        pk: 1, chatJid: JID, conversationKey: PHONE, senderJid: JID, senderName: 'Test User',
+        messageId: 'stored-' + content, content, contentType: 'text', isFromMe: false,
+        timestamp: Math.floor(Date.now() / 1000) - 60, quotedMessageId: null,
+        enrichmentProcessedAt: null, enrichmentRetries: 0, createdAt: new Date().toISOString(),
+        mediaPath: null, contentText: content,
+      };
+    }
+    function providerTurnText(): string {
+      return JSON.stringify(providerSend.mock.calls);
+    }
+
+    it('a missing same-namespace row gives a notice and recovers context', async () => {
+      writeCheckpoint(PHONE, OWN_SID);
+      recentMessages.rows = [storedMessage('fixture earlier question about the invoice')];
+      const { spawnSpy } = await firstTurn();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerTurnText()).toContain('fixture earlier question about the invoice');
+    });
+
+    it('an own row that is no longer resumable gives a notice and recovers context', async () => {
+      insertRow(OWN_SID, PHONE, 'crashed');
+      writeCheckpoint(PHONE, OWN_SID);
+      recentMessages.rows = [storedMessage('fixture earlier question about the lease')];
+      const { spawnSpy } = await firstTurn();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerTurnText()).toContain('fixture earlier question about the lease');
+    });
+
+    it('a resume refused at spawn falls back to a fresh session with a notice and recovered context', async () => {
+      const ownRow = insertRow(OWN_SID, PHONE, 'suspended');
+      writeCheckpoint(PHONE, OWN_SID);
+      recentMessages.rows = [storedMessage('fixture earlier question about the deposit')];
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const realSpawn = session.spawnSession.bind(session);
+      const spawnSpy = vi.spyOn(session, 'spawnSession').mockImplementation(async (resumeId?: string, rowId?: number) => {
+        if (resumeId !== undefined) throw new Error('fixture resume refused');
+        return realSpawn(resumeId, rowId);
+      });
+      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      expect(spawnSpy.mock.calls).toEqual([[OWN_SID, ownRow], []]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerTurnText()).toContain('fixture earlier question about the deposit');
+    });
+  });
 });

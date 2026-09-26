@@ -7,6 +7,10 @@
  * - Decision 15 part 2: a checkpoint whose session belongs to another
  *   namespace is never adopted. The chat recovers its own newest resumable
  *   session; otherwise it starts fresh with a notice.
+ * - Decision 65 O3: an own-namespace checkpoint with no resumable session row
+ *   starts fresh with a notice. The fresh spawn merges recent chat messages
+ *   into the turn, which is the context recovery. A resume refused at spawn
+ *   takes the same path.
  */
 import type { Database } from '../../core/database.ts';
 import { getResumableSessionForChat } from './session-db.ts';
@@ -17,7 +21,11 @@ export const CHECKPOINT_NOT_RESTORED_NOTICE =
 export type CheckpointAdoption =
   | { kind: 'none' }
   | { kind: 'resume'; rowId: number; sessionId: string; recoveredOwn: boolean }
-  | { kind: 'fresh_with_notice'; reason: 'foreign_checkpoint'; notice: string };
+  | {
+    kind: 'fresh_with_notice';
+    reason: 'foreign_checkpoint' | 'own_row_not_resumable' | 'resume_refused';
+    notice: string;
+  };
 
 export const NO_CHECKPOINT_ADOPTION: CheckpointAdoption = { kind: 'none' };
 
@@ -66,7 +74,32 @@ export function classifyCheckpointAdoption(
   if (resumable && resumable.session_id === cp.session_id) {
     return { kind: 'resume', rowId: resumable.id, sessionId: resumable.session_id, recoveredOwn: false };
   }
-  return NO_CHECKPOINT_ADOPTION;
+  // Decision 65 O3: this chat's own context is gone; say so, never silently.
+  return { kind: 'fresh_with_notice', reason: 'own_row_not_resumable', notice: CHECKPOINT_NOT_RESTORED_NOTICE };
+}
+
+/**
+ * Spawn for the adoption. A resume the session layer refuses (row or route
+ * checks in spawnSession) falls back to a fresh spawn and reports the notice.
+ * Returns the adoption that actually happened.
+ */
+export async function spawnForAdoption(
+  session: { spawnSession(resumeSessionId?: string, existingRowId?: number): Promise<void> },
+  adoption: CheckpointAdoption,
+  onResumeRefused: (err: unknown, notice: string) => void,
+): Promise<CheckpointAdoption> {
+  if (adoption.kind !== 'resume') {
+    await session.spawnSession();
+    return adoption;
+  }
+  try {
+    await session.spawnSession(adoption.sessionId, adoption.rowId);
+    return adoption;
+  } catch (err) {
+    onResumeRefused(err, CHECKPOINT_NOT_RESTORED_NOTICE);
+    await session.spawnSession();
+    return { kind: 'fresh_with_notice', reason: 'resume_refused', notice: CHECKPOINT_NOT_RESTORED_NOTICE };
+  }
 }
 
 /**

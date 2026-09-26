@@ -111,7 +111,7 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
-import { lazyCheckpointAdoption, NO_CHECKPOINT_ADOPTION } from './checkpoint-adoption.ts';
+import { lazyCheckpointAdoption, NO_CHECKPOINT_ADOPTION, spawnForAdoption } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
 import {
@@ -5878,8 +5878,10 @@ export class AgentRuntime implements Runtime {
       // process and its DB row. Mirrors handleNew() pattern.
       await session.shutdown();
       if (dispatchCancelled()) return;
-      if (adoption.kind === 'resume') await session.spawnSession(adoption.sessionId, adoption.rowId);
-      else await session.spawnSession();
+      const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
+        log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
+        this.sendDirect(chatJid, notice);
+      });
       spawnedForTurn = true;
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
@@ -5906,7 +5908,7 @@ export class AgentRuntime implements Runtime {
       // Fresh spawns merge recent context into the active turn; see context-handoff.ts.
       const resumeFailedOwnsContext = mapKeyForChat !== undefined && this.resumeFailedHandling.has(mapKeyForChat);
       // A resumed session already holds its own context.
-      if (!resumeFailedOwnsContext && adoption.kind !== 'resume') {
+      if (!resumeFailedOwnsContext && spawned.kind !== 'resume') {
         try {
           const convKey = canonicalConversationKey(chatJid, this.db);
           const recent = contextMessagesForTurn(getRecentMessages(this.db, convKey, 20), text, actorJid);
