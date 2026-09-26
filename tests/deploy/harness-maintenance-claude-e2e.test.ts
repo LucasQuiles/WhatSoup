@@ -83,7 +83,7 @@ const FAKE_NPM = [
   'case "$*" in',
   '  --version) echo 10.9.0 ;;',
   '  "config get min-release-age") echo 7 ;;',
-  '  "view @anthropic-ai/claude-code time --json") cat "$HM_NPM_TIME" ;;',
+  '  "view @anthropic-ai/claude-code time --json") [ -n "${HM_NPM_HANG:-}" ] && sleep 30; cat "$HM_NPM_TIME" ;;',
   '  *" time --json") echo "{}" ;;',
   '  "view "*" version") exit 1 ;;',
   'esac',
@@ -464,5 +464,78 @@ describe('shared-binary consumer and pin policy', () => {
     const r = run(h);
     expect(events(r, 'claude').at(-1)?.status).toBe('unmanaged-layout');
     expect(fixtureCalls(h)).toEqual([]);
+  }, T);
+});
+
+function customManifest(h: Harness, mutate: (m: Record<string, any>) => void): string {
+  const manifest = JSON.parse(readFileSync(path.join(REPO, 'deploy/managed-components.json'), 'utf8'));
+  mutate(manifest);
+  const file = path.join(h.home, 'manifest.json');
+  writeFileSync(file, JSON.stringify(manifest));
+  return file;
+}
+
+describe('bounded step runner and final state', () => {
+  it('keeps running independent steps after a failed step and ends degraded with exit 1', () => {
+    const h = makeHarness();
+    const manifest = path.join(h.home, 'broken-manifest.json');
+    writeFileSync(manifest, '{"schema_version": 2}');
+    const r = run(h, [], { WHATSOUP_HARNESS_MAINTENANCE_MANIFEST: manifest });
+    expect(r.status).toBe(1);
+    expect(r.state?.status).toBe('degraded');
+    // The probes are independent of the manifest and still ran.
+    expect(events(r, 'apt')).toHaveLength(1);
+    // Updates depend on a valid manifest and were skipped, not attempted.
+    expect(events(r, 'claude')).toEqual([]);
+    expect(events(r, 'harness-maintenance').map((e) => e.status)).toContain('skipped');
+    expect(fixtureCalls(h)).toEqual([]);
+  }, T);
+
+  it.runIf(onDarwin)('ends degraded with exit 1 when an instance binary is unknown', () => {
+    const h = makeHarness();
+    writePlist(h, 'alpha', { WHATSOUP_NODE: process.execPath });
+    const r = run(h);
+    expect(events(r, 'claude').at(-1)?.status).toBe('unknown');
+    expect(r.state?.status).toBe('degraded');
+    expect(r.status).toBe(1);
+  }, T);
+
+  it.runIf(onDarwin)('records a rejected update plan (exit 2) as held and keeps the job running', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    const manifest = customManifest(h, (m) => { m.npm.cooldown_minutes = 10080.5; });
+    const r = run(h, [], { WHATSOUP_HARNESS_MAINTENANCE_MANIFEST: manifest });
+    const last = events(r, 'claude').at(-1)!;
+    expect(last.status).toBe('held');
+    expect(last.message).toContain('INVALID_ARGUMENT');
+    expect(events(r, 'apt')).toHaveLength(1);
+    expect(r.state?.status).toBe('degraded');
+    expect(fixtureCalls(h)).toEqual([]);
+  }, T);
+
+  it.runIf(onDarwin)('bounds the publish-time lookup and holds without installing when it times out', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    const started = Date.now();
+    const r = run(h, [], { HM_NPM_HANG: '1', WHATSOUP_HARNESS_MAINTENANCE_LOOKUP_TIMEOUT_SECS: '2' });
+    expect(Date.now() - started).toBeLessThan(25_000);
+    const last = events(r, 'claude').at(-1)!;
+    expect(last.status).toBe('unknown');
+    expect(last.message).toContain('timed out');
+    expect(fixtureCalls(h)).toEqual([]);
+    expect(r.state?.status).toBe('degraded');
+  }, T);
+
+  it('surfaces a final state write failure on its own, with an alert and exit 1', () => {
+    const h = makeHarness();
+    const stateDir = path.join(h.home, '.cache/whatsoup/harness-maintenance');
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    symlinkSync(path.join(h.home, 'elsewhere.json'), path.join(stateDir, 'state.json'));
+    const r = run(h);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('state write failed');
+    const alerts = readFileSync(h.alertLog, 'utf8').split('\n');
+    expect(alerts.some((line) => line.includes('harness-maintenance:job') && line.includes('state write failed'))).toBe(true);
+    expect(existsSync(path.join(h.home, 'elsewhere.json'))).toBe(false);
   }, T);
 });

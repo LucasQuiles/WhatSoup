@@ -112,6 +112,15 @@ esac
 SERVICE_MANAGER="${WHATSOUP_HARNESS_SERVICE_MANAGER:-$SERVICE_MANAGER_DEFAULT}"
 # shellcheck source=deploy/lib/runtime-path.sh
 . "$REPO_ROOT/deploy/lib/runtime-path.sh"
+# shellcheck source=deploy/lib/step-runner.sh
+. "$REPO_ROOT/deploy/lib/step-runner.sh"
+# External calls that can hang (registry lookups, the installer, a version
+# probe) run under the repo's portable supervisor: stock macOS has no
+# timeout(1), and the launchd job must not depend on one being installed.
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$REPO_ROOT/deploy/lib/bounded-exec.sh"
+LOOKUP_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_LOOKUP_TIMEOUT_SECS:-120}"
+STATE_WRITTEN=0
 
 log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
@@ -138,9 +147,13 @@ record_event() {
   log "$1 [$2] $3"
 }
 
+# Returns nonzero instead of exiting so the caller can surface a failed write on
+# its own. Each step checks its status explicitly because callers run it in a
+# tested context, where errexit does not apply.
 write_state() {
   local status="$1"
-  "$REPO_NODE_BIN" - "$EVENTS_FILE" "$STATE_TMP" "$status" "$MODE" <<'NODE'
+  rm -f "$STATE_TMP" || return 1
+  "$REPO_NODE_BIN" - "$EVENTS_FILE" "$STATE_TMP" "$status" "$MODE" <<'NODE' || return 1
 const fs = require('node:fs');
 const [eventsPath, outPath, status, mode] = process.argv.slice(2);
 const lines = fs.readFileSync(eventsPath, 'utf8').split(/\n/).filter(Boolean);
@@ -162,12 +175,26 @@ NODE
   if [ -L "$STATE_FILE" ]; then
     echo "harness maintenance state target is a symlink; refusing to overwrite: $STATE_FILE" >&2
     rm -f "$STATE_TMP"
-    exit 1
+    return 1
   fi
-  mv "$STATE_TMP" "$STATE_FILE"
-  chmod 600 "$STATE_FILE"
+  mv "$STATE_TMP" "$STATE_FILE" || return 1
+  chmod 600 "$STATE_FILE" || return 1
   if [ "$JSON_OUT" -eq 1 ]; then
-    cat "$STATE_FILE"
+    cat "$STATE_FILE" || return 1
+  fi
+}
+
+# finalize_state <status>: the one final state write for a run. A failed write
+# is reported separately (log line and alert), so it can never pass for the
+# run's own outcome.
+finalize_state() {
+  local status="$1" rc=0
+  STATE_WRITTEN=1
+  write_state "$status" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "state write failed rc=$rc for status=$status: $STATE_FILE"
+    send_alert "job" "critical" "Harness maintenance state write failed" "The final status '$status' could not be written (rc=$rc). See $RUN_LOG"
+    return 1
   fi
 }
 
@@ -204,17 +231,31 @@ send_alert() {
   fi
 }
 
+# A failure outside any step (the steps run under whatsoup_run_step).
 on_error() {
   local rc=$?
   trap - ERR
-  record_event "harness-maintenance" "failed" "unexpected failure rc=$rc"
-  write_state "failed" || true
+  record_event "harness-maintenance" "failed" "unexpected failure rc=$rc" || true
+  if [ "$STATE_WRITTEN" -eq 0 ]; then
+    finalize_state "failed" || true
+  fi
   send_alert "job" "warning" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
-  rm -rf "$TMP_DIR"
   exit "$rc"
 }
+
+# Any exit that reaches here without a final state (an explicit exit, a signal)
+# still records one before the temporary directory goes away.
+on_exit() {
+  local rc=$?
+  trap - ERR
+  if [ "$STATE_WRITTEN" -eq 0 ]; then
+    record_event "harness-maintenance" "failed" "exited before writing a final state rc=$rc" || true
+    finalize_state "failed" || true
+  fi
+  rm -rf "$TMP_DIR"
+}
 trap on_error ERR
-trap 'rm -rf "$TMP_DIR"' EXIT
+trap on_exit EXIT
 
 parse_version() {
   grep -Eo '[0-9]+(\.[0-9]+){1,2}([-+._a-zA-Z0-9]*)?' | head -n 1
@@ -797,7 +838,7 @@ update_claude() {
   if [ "$rc" -ne 0 ]; then
     record_event "claude" "unknown" "service inventory unavailable: $(head -n 5 "$inventory_error")"
     send_alert "claude-update" "warning" "Agent CLI inventory failed" "The maintenance job could not read the service manager, so no agent CLI update was attempted. $(head -n 5 "$inventory_error")"
-    return 0
+    return 2
   fi
   policy="$(claude_consumer_policy)"
   IFS=$'\037' read -r verdict kind before message <<< "$policy"
@@ -813,11 +854,11 @@ update_claude() {
     missing)
       record_event "claude" "missing" "$message"
       send_alert "claude-update" "warning" "Agent CLI missing for a service instance" "$message"
-      return 0 ;;
+      return 2 ;;
     *)
       record_event "claude" "unknown" "$message"
       send_alert "claude-update" "warning" "Agent CLI update held: unknown instance binary" "$message"
-      return 0 ;;
+      return 2 ;;
   esac
   case "$kind" in
     native) layout=native ;;
@@ -828,15 +869,27 @@ update_claude() {
     *)
       record_event "claude" "unknown" "shared launcher classified as $kind" "$before"
       send_alert "claude-update" "warning" "Agent CLI update held: launcher unusable" "The shared launcher classified as $kind."
-      return 0 ;;
+      return 2 ;;
   esac
 
   npm="$(npm_bin)"
   time_json="$TMP_DIR/npm-time-claude.json"
-  if [ -z "$npm" ] || ! PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view @anthropic-ai/claude-code time --json >"$time_json" 2>/dev/null; then
-    record_event "claude" "unknown" "npm publish-time lookup failed" "$before"
-    send_alert "claude-update" "warning" "Agent CLI version lookup failed" "The maintenance job could not read agent CLI publish times, so it cannot apply the release-age cooldown."
-    return 0
+  rc=0
+  if [ -z "$npm" ]; then
+    rc=127
+  else
+    whatsoup_run_bounded "$LOOKUP_TIMEOUT_SECS" env PATH="$CODX_NODE_BIN_DIR:$PATH" \
+      "$npm" view @anthropic-ai/claude-code time --json >"$time_json" 2>/dev/null </dev/null || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ]; then
+      reason="npm publish-time lookup timed out after ${LOOKUP_TIMEOUT_SECS}s"
+    else
+      reason="npm publish-time lookup failed rc=$rc"
+    fi
+    record_event "claude" "unknown" "$reason" "$before"
+    send_alert "claude-update" "warning" "Agent CLI version lookup failed" "The maintenance job could not read agent CLI publish times, so it cannot apply the release-age cooldown. $reason"
+    return 2
   fi
   plan_file="$TMP_DIR/claude-plan.json"
   plan_rc=0
@@ -864,14 +917,14 @@ NODE
     error)
       record_event "claude" "held" "update plan rejected: $reason" "$before"
       send_alert "claude-update" "warning" "Agent CLI update plan rejected" "$reason"
-      return 0 ;;
+      return 2 ;;
     missing)
       record_event "claude" "missing" "planner reported no current version: $reason" "$before"
-      return 0 ;;
+      return 2 ;;
     unknown)
       record_event "claude" "unknown" "planner could not read the current version: $reason" "$before"
       send_alert "claude-update" "warning" "Agent CLI version unknown" "$reason"
-      return 0 ;;
+      return 2 ;;
     held)
       record_event "claude" "held" "$reason" "$before"
       return 0 ;;
@@ -885,7 +938,7 @@ NODE
     *)
       record_event "claude" "unknown" "update plan unreadable (rc=$plan_rc)" "$before"
       send_alert "claude-update" "warning" "Agent CLI update plan failed" "The maintenance job could not compute an agent CLI update plan (rc=$plan_rc)."
-      return 0 ;;
+      return 2 ;;
   esac
   if [ "$CHECK_ONLY" -eq 1 ]; then
     record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
@@ -1117,17 +1170,58 @@ probe_tier2() {
   fi
 }
 
+# finish_run: aggregate the recorded step results (not variables a step set),
+# write the one final state, and return the job's exit code:
+#   0  every step returned 0
+#   1  a step failed or was inconclusive, or the final state could not be written
+#   3  a step reported a partial mutation that needs reconciliation
+finish_run() {
+  local results="$1" name rc worst=0 failed="" status=ok
+  while IFS=$'\t' read -r name rc; do
+    [ -n "$name" ] || continue
+    [ "$rc" = 0 ] && continue
+    failed="$failed $name=$rc"
+    if [ "$rc" = 3 ]; then
+      worst=3
+    elif [ "$worst" -eq 0 ]; then
+      worst=1
+    fi
+  done < "$results"
+  if [ -n "$failed" ]; then
+    status=degraded
+    record_event "harness-maintenance" "degraded" "steps did not complete cleanly:$failed"
+    send_alert "job" "warning" "Harness maintenance degraded" "Steps did not complete cleanly:$failed. See $RUN_LOG"
+  fi
+  if ! finalize_state "$status"; then
+    [ "$worst" -ne 0 ] || worst=1
+  fi
+  log "complete status=$status exit=$worst state=$STATE_FILE"
+  return "$worst"
+}
+
 main() {
+  local results="$TMP_DIR/steps.tsv" rc=0
+  : > "$results"
   log "starting mode=$MODE repo=$REPO_ROOT"
-  guard_manifest
-  apply_npmrc
-  check_codex_npm_cooldown
-  update_claude
-  update_codex
-  update_opencode
-  probe_tier2
-  write_state "ok"
-  log "complete state=$STATE_FILE"
+  # Each step is a plain statement: whatsoup_run_step must never run in a
+  # tested context (see deploy/lib/step-runner.sh).
+  whatsoup_run_step "$results" manifest guard_manifest
+  if [ "$(whatsoup_step_rc "$results" manifest)" = 0 ]; then
+    whatsoup_run_step "$results" npmrc apply_npmrc
+    whatsoup_run_step "$results" codex-npm-cooldown check_codex_npm_cooldown
+    whatsoup_run_step "$results" claude update_claude
+    if [ "$(whatsoup_step_rc "$results" npmrc)" = 0 ]; then
+      whatsoup_run_step "$results" codex update_codex
+      whatsoup_run_step "$results" opencode update_opencode
+    else
+      record_event "harness-maintenance" "skipped" "npm updates skipped: the hardened npmrc was not applied"
+    fi
+  else
+    record_event "harness-maintenance" "skipped" "update steps skipped: the managed components manifest did not validate"
+  fi
+  whatsoup_run_step "$results" probes probe_tier2
+  finish_run "$results" || rc=$?
+  exit "$rc"
 }
 
 main
