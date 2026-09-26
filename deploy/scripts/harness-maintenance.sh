@@ -108,7 +108,8 @@ done
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 RUN_LOG="$STATE_DIR/run.log"
-TMP_DIR="$(mktemp -d)"
+# An explicit template: mktemp -d alone ignores TMPDIR on macOS.
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/harness-maintenance.XXXXXX")"
 EVENTS_FILE="$TMP_DIR/events.ndjson"
 STATE_TMP="$TMP_DIR/state.json"
 STATE_FILE="$STATE_DIR/state.json"
@@ -139,6 +140,8 @@ elif [ ! -x "$REPO_NODE_BIN" ]; then
 fi
 if ! whatsoup_validate_node_compatibility "$REPO_ROOT" "$REPO_NODE_BIN"; then
   echo "FATAL: Node is required to run harness maintenance guards" >&2
+  # Before the exit trap exists, so the temporary directory is removed here.
+  rm -rf "$TMP_DIR"
   exit 1
 fi
 if [ "$REPO_NODE_BIN_SOURCE" = "path" ] && ! whatsoup_check_node_pin "$REPO_ROOT" "$REPO_NODE_BIN"; then

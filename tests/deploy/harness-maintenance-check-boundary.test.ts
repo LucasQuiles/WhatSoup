@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -10,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -37,15 +39,21 @@ import {
 // before and after the run. Only the permitted inspection artifacts may differ.
 //
 // Known limits of these oracles:
-// - The HOME snapshot sees writes under the temporary HOME only; a write elsewhere (the system
-//   temporary directory, an absolute path) is caught only if it goes through a recorded stub.
-// - The job's temporary directory comes from mktemp, which may ignore TMPDIR; its removal is
-//   checked through the npm cache directory placed inside it, not through TMPDIR being empty.
+// - The snapshots cover the temporary HOME and a TMPDIR placed outside it (where mktemp and the
+//   bounded-exec control files go on a real host); a write to any other absolute path, such as a
+//   state directory overridden outside HOME, is caught only if it goes through a recorded stub.
+// - The job's temporary directory is checked to be inside that TMPDIR through the npm cache
+//   directory placed in it, and its removal through the TMPDIR snapshot.
 // - The pinned node is the real one and is not recorded; writes it makes are seen only through
 //   the HOME snapshot.
 
+const systemTmps: string[] = [];
+
 beforeAll(buildNativeFixture);
-afterAll(cleanupHarnesses);
+afterAll(() => {
+  cleanupHarnesses();
+  for (const dir of systemTmps) rmSync(dir, { recursive: true, force: true });
+});
 
 // Read-only verbs a check run may use; anything else recorded by a stub is a boundary violation.
 const NPM_READ_ONLY = [/^--version$/, /^config get min-release-age$/, /^view \S+ (version|time --json)$/, /^ls -g --depth=0$/];
@@ -145,8 +153,13 @@ function outside(recorded: string[], allowed: RegExp[]): string[] {
 describe('harness-maintenance.sh --check side-effect boundary', () => {
   it('runs no mutator, no agent CLI and no wrapper, and writes only its own state', () => {
     const h = boundaryHarness();
+    // A temporary directory outside HOME, as on a real host, where the run's own temporary
+    // directory and the bounded-exec control files are created.
+    const systemTmp = mkdtempSync(path.join(tmpdir(), 'hm-systmp-'));
+    systemTmps.push(systemTmp);
     const before = snapshot(h.home);
-    const r = run(h, ['--check']);
+    const tmpBefore = snapshot(systemTmp);
+    const r = run(h, ['--check'], { TMPDIR: systemTmp });
 
     expect(r.state?.mode, r.stderr).toBe('check');
     // The agent CLI update is still planned, only not applied.
@@ -172,6 +185,9 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     // directory's removal is asserted above through the npm cache placed inside it.)
     expect(changedPaths(before, snapshot(h.home))).toEqual([]);
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+    // Oracle 3: the temporary directory outside HOME is left exactly as found.
+    expect(path.dirname(path.dirname(caches[0]!))).toBe(systemTmp);
+    expect(changedPaths(tmpBefore, snapshot(systemTmp))).toEqual([]);
   }, T);
 
   it('reads the npm-installed harness versions from package metadata instead of running them', () => {
@@ -248,6 +264,18 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     for (const version of ['24.13.0', '24.15.0']) {
       expect(events(r, `npm-global:${version}`)[0], version).toMatchObject({ status: 'skipped' });
     }
+  }, T);
+
+  it('exits 1 before any step without a usable node, leaving no state and no temporary directory', () => {
+    const h = boundaryHarness();
+    const systemTmp = mkdtempSync(path.join(tmpdir(), 'hm-systmp-'));
+    systemTmps.push(systemTmp);
+    const tmpBefore = snapshot(systemTmp);
+    const r = run(h, ['--check'], { TMPDIR: systemTmp, WHATSOUP_NODE_BIN: path.join(h.home, 'no-such-node') });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('FATAL: Node is required');
+    expect(r.state).toBeNull();
+    expect(changedPaths(tmpBefore, snapshot(systemTmp))).toEqual([]);
   }, T);
 
   it('negative control: a normal run does reach the stubs, so the recorders can see a violation', () => {

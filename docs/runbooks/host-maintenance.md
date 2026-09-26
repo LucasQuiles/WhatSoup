@@ -27,7 +27,10 @@ Every run, scheduled or ad hoc, writes its final state to
 `~/.cache/whatsoup/harness-maintenance/state.json` (one event per finding) and
 appends to `run.log` beside it. Exit codes: `0` every step clean, `1` a step
 failed or was inconclusive (the state is `degraded`) or the state could not be
-written, `3` a partial agent CLI install that needs reconciliation by hand.
+written, `2` an unknown argument (nothing runs), `3` a partial agent CLI install
+that needs reconciliation by hand. An exit `1` with `FATAL: Node is required`
+on stderr comes before any step: no usable node was found, and no state is
+written, so `state.json` still holds the previous run's.
 
 ### What `--check` does and does not do
 
