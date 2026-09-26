@@ -109,7 +109,23 @@ function makeDeps(db: Database, runtimeSnapshot: { status: string; details: Reco
     instanceType: 'agent',
     accessMode: 'allowlist',
     runtime: {
-      getHealthSnapshot: () => runtimeSnapshot,
+      // Complete, clean recovery-debt evidence: missing fields fail closed as
+      // recovery_evidence_unreadable, which is not what these tests exercise.
+      getHealthSnapshot: () => ({
+        ...runtimeSnapshot,
+        details: {
+          recoveryBlockingReasons: [],
+          recoveryDebtReasons: [],
+          turnRecoveryBlockingOutstanding: 0,
+          turnRecoveryRetainedTerminal: 0,
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryCorroboratedRetained: 0,
+          completedDeliveryIdentityBlocking: 0,
+          completedDeliveryIdentityRetained: 0,
+          completedDeliveryIdentityAdmissions: { nextAction: null },
+          ...runtimeSnapshot.details,
+        },
+      }),
       getFallbackState: () => null,
     } as unknown as HealthDeps['runtime'],
   };

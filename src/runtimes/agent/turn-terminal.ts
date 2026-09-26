@@ -55,6 +55,12 @@ export type AttemptOutcome =
     readonly class: ProviderFailureKind | NonProviderTerminalFailureClass;
   }
   | { readonly kind: 'suppressed_by_policy' }
+  /**
+   * #3613: the attempt completed but the client output policy withheld every
+   * answer. Terminal by design: finalized_no_reply_policy, never recovered or
+   * replayed, and persisted as withheld rather than as a sent reply.
+   */
+  | { readonly kind: 'withheld_by_policy' }
   | {
     readonly kind: 'admission_rejected';
     /**
@@ -247,7 +253,10 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
       }
       break;
     case 'finalized_no_reply_policy':
-      if (result.attemptOutcome.kind !== 'suppressed_by_policy') {
+      if (
+        result.attemptOutcome.kind !== 'suppressed_by_policy'
+        && result.attemptOutcome.kind !== 'withheld_by_policy'
+      ) {
         throw new Error('finalized_no_reply_policy requires an explicit policy suppression');
       }
       break;

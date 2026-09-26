@@ -17,6 +17,14 @@ import type {
   TurnRecoveryJobPersistenceParams,
 } from './turn-recovery-store.ts';
 
+/**
+ * #3613: inbound completion reason for a turn whose answers the client output
+ * policy withheld. Paired only with attempt kind `withheld_by_policy` under the
+ * `finalized_no_reply_policy` disposition. The columns are free text, so this
+ * needs no migration.
+ */
+export const CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON = 'client_output_withheld';
+
 export interface SessionCheckpointFields {
   sessionId?: string;
   transcriptPath?: string;
@@ -262,7 +270,14 @@ export function deriveTerminalInboundMutation(
     case 'finalized_replied':
       return seq === null ? undefined : { kind: 'complete', seq, terminalReason: 'response_echoed' };
     case 'finalized_no_reply_policy':
-      return seq === null ? undefined : { kind: 'complete', seq, terminalReason: 'no_reply_policy' };
+      if (seq === null) return undefined;
+      return {
+        kind: 'complete',
+        seq,
+        terminalReason: terminal.attemptKind === 'withheld_by_policy'
+          ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+          : 'no_reply_policy',
+      };
     case 'failed_terminal':
       return seq === null
         ? undefined
@@ -340,7 +355,7 @@ export function normalizeFinalizeTurnTerminalParams(
       throw new Error('Terminal attempt axis has an incoherent failure class');
     }
   } else if (
-    !['completed', 'suppressed_by_policy'].includes(terminal.attemptKind) ||
+    !['completed', 'suppressed_by_policy', 'withheld_by_policy'].includes(terminal.attemptKind) ||
     terminal.attemptFailureClass !== null
   ) {
     throw new Error('Terminal attempt axis has an incoherent failure class');
@@ -385,13 +400,18 @@ export function normalizeFinalizeTurnTerminalParams(
         );
       }
       break;
-    case 'finalized_no_reply_policy':
+    case 'finalized_no_reply_policy': {
+      // #3613: a policy-withheld answer completes with its own reason so the
+      // record says the output was withheld, not that no reply was due.
+      const expectedReason = terminal.attemptKind === 'withheld_by_policy'
+        ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+        : 'no_reply_policy';
       if (
-        terminal.attemptKind !== 'suppressed_by_policy' ||
+        (terminal.attemptKind !== 'suppressed_by_policy' && terminal.attemptKind !== 'withheld_by_policy') ||
         terminal.deliveryKind !== 'none' ||
         (requiresInboundMutation && (
           inbound?.kind !== 'complete' ||
-          inbound.terminalReason !== 'no_reply_policy'
+          inbound.terminalReason !== expectedReason
         )) ||
         (!requiresInboundMutation && inbound !== undefined)
       ) {
@@ -400,6 +420,7 @@ export function normalizeFinalizeTurnTerminalParams(
         );
       }
       break;
+    }
     case 'failed_terminal': {
       const expectedFailureClass = expectedTerminalInboundFailureClass(terminal);
       if (

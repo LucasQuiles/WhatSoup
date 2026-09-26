@@ -98,7 +98,9 @@ describe('prepared statement caching', () => {
     // probes, the bounded candidate scan, and the two guarded close updates plus
     // the delivery-op terminal mark the operator CLI uses — prepared once in the
     // constructor and reused by every sweep report.)
-    expect(prepareSpy).toHaveBeenCalledTimes(163);
+    // (+1: the corroboration-aware delivery ambiguity health aggregate is
+    // prepared once and reused with the rest of the durability statements.)
+    expect(prepareSpy).toHaveBeenCalledTimes(164);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

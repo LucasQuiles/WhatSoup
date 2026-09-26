@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "f1185877beabcc894d3f932dd0d527c3a7aba0ae816efab1607350aa87e7614a",
+      "sha256": "7f485693259cf6a4d1dad7c9aafed20925b3e9dfcecfe642fb43171190f5836c",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "b31c793f2059d753230ddd005af5a3f885ad85647ed07e730f71d3c01708ca84",
+      "sha256": "c93cb1009abb12e389c8b98193cb0a9fe3e465be4257925067d48823292016fb",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -279,12 +279,13 @@
         "path_starts_with_entries",
         "WHATSOUP_PATH_PREPEND",
         "provider_runtime_path_prepend_mismatch",
-        "provider_runtime_path_prepend_inconsistent"
+        "provider_runtime_path_prepend_inconsistent",
+        "health_recovery_debt_status_contradiction"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "5d154486c67270f587a2265761bb60e3e7d30f10c6de847cfaf39996f2a524f2",
+      "sha256": "f660de79c7a031f044c17a40785b76f98c36fe1245b5651057368e7e3ffc62d1",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -300,7 +301,8 @@
         "health_body_not_disclosed",
         "probe_unauthorized",
         "instance_health_token",
-        "PUBLIC_HEALTH_SCHEMA_PREFIX"
+        "PUBLIC_HEALTH_SCHEMA_PREFIX",
+        "recovery_debt_issue"
       ]
     },
     {
@@ -553,14 +555,15 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "0070609866af404964e2693fe6553ea3e5d1afccd048422704fd2893b80b8dcd",
+      "sha256": "856f8dacc62673133db4fad6f79ee1409182c59d71f75fc13806f7a8ce01233c",
       "mustContain": [
-        "def classify(d: object) -> str:"
+        "def classify(d: object) -> str:",
+        "def recovery_debt_issue(d: object) -> Optional[str]:"
       ]
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
+      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -837,7 +840,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "4d9348358719eab33d74ea6b76c4e51d3f58b35865d9f9a5b017388b97ae74f6",
+      "sha256": "fc1000f6abef4780bc6acfb1b10dd4a831b3446bfd193146fa19f2104dd349c6",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -855,6 +858,13 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "\"runtime_agent_fallback_turns_served\"",
+        "\"runtime_agent_fallback_turns_empty\"",
+        "\"runtime_agent_fallback_activations\"",
+        "\"runtime_agent_fallback_reverts\"",
+        "\"runtime_agent_fallback_replays\"",
+        "\"runtime_agent_fallback_probe_attempts\"",
+        "\"runtime_agent_fallback_failed_entry_count\"",
         "autoCompactActiveBackoffScopes",
         "agent_respawn_failed_clear_pending"
       ]

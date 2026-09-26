@@ -69,15 +69,6 @@ vi.mock('../../src/logger.ts', async () => {
 // runtimeAgentHealthSignals. Every other numeric key the runtime projects must
 // be registered, or the bot-errors health check drops it from its evidence.
 const UNREGISTERED_NUMERIC_AGENT_HEALTH_FIELDS = new Set([
-  // Provider-fallback telemetry spread from getFallbackState(). Registering it
-  // is a separate decision, outside the X21 scope.
-  'fallbackTurnsServed',
-  'fallbackTurnsEmpty',
-  'probeAttempts',
-  'fallbackActivations',
-  'fallbackReverts',
-  'fallbackReplays',
-  'failedEntryCount',
   // A USD float; the checker's read_int drops non-integral values.
   'fallbackWindowCostUsd',
 ]);
@@ -160,6 +151,11 @@ describe('failure taxonomy cross-contract', () => {
       'autoCompactWorstCurrentBackoffTier',
       'turnFinalizationDegradedScopes',
       'turnRecoveryOutstanding',
+      'turnRecoveryBlockingOutstanding',
+      'turnRecoveryRetainedTerminal',
+      'turnRecoveryCorroboratedRetained',
+      'completedDeliveryIdentityBlocking',
+      'completedDeliveryIdentityRetained',
       'turnRecoveryPending',
       'turnRecoveryExpiredClaimed',
       'turnRecoveryBlockedUnsafe',
@@ -186,6 +182,13 @@ describe('failure taxonomy cross-contract', () => {
       'chronologyDelayedDispatches',
       'chronologyRecoveryReplayDispatches',
       'chronologyMaxQueueAgeSeconds',
+      'fallbackTurnsServed',
+      'fallbackTurnsEmpty',
+      'fallbackActivations',
+      'fallbackReverts',
+      'fallbackReplays',
+      'probeAttempts',
+      'failedEntryCount',
     ] as const;
 
     expect(registry.schema).toBe('whatsoup-fault-taxonomy-registry-v3');
@@ -205,6 +208,28 @@ describe('failure taxonomy cross-contract', () => {
       ]));
     expect(new Set(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => entry.currentHealthEffect)))
       .toEqual(new Set(['positive_is_risk', 'diagnostic_only']));
+    const effects = Object.fromEntries(RUNTIME_AGENT_HEALTH_SIGNALS.map((entry) => [
+      entry.field,
+      entry.currentHealthEffect,
+    ]));
+    expect(effects).toMatchObject({
+      turnRecoveryOutstanding: 'diagnostic_only',
+      turnRecoveryBlockingOutstanding: 'positive_is_risk',
+      turnRecoveryRetainedTerminal: 'diagnostic_only',
+      turnRecoveryCorroboratedRetained: 'diagnostic_only',
+      completedDeliveryIdentityBlocking: 'positive_is_risk',
+      completedDeliveryIdentityRetained: 'diagnostic_only',
+      turnRecoveryExhausted: 'diagnostic_only',
+      turnRecoveryOpenRecoveries: 'diagnostic_only',
+    });
+  });
+
+  it('registers recovery debt attention as a non-paging fleet-owned source', () => {
+    expect(registry.sourceDispositions['recovery_debt_attention']).toEqual({
+      disposition: 'non_paging_operator_recovery_debt',
+      owner: 'src/fleet/health-poller.ts',
+      test: 'tests/fleet/health-poller.test.ts',
+    });
   });
 
   it('registers every numeric turn-recovery health field the runtime projects', () => {
