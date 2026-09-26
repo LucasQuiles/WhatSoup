@@ -453,6 +453,25 @@ describe('shared-binary consumer and pin policy', () => {
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
   }, T);
 
+  it('holds when an instance reaches a native version through a link outside the launcher directory', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    const other = path.join(h.home, 'elsewhere/bin');
+    mkdirSync(other, { recursive: true, mode: 0o755 });
+    symlinkSync(path.join(h.versions, OLD), path.join(other, 'claude'));
+    // Only the prepend outranks ~/.local/bin in the launcher's composition.
+    systemdUnit(h, 'beta', [`Environment=WHATSOUP_PATH_PREPEND=${other} WHATSOUP_NODE=${process.execPath}`]);
+    const r = run(h);
+    const beta = events(r, 'claude-consumer').find((e) => e.message.startsWith('beta'))!;
+    // It is native, but not the installer-managed launcher, so it is a pin.
+    expect(beta.message).toContain(`${other}/claude (native ${OLD})`);
+    const last = events(r, 'claude').at(-1)!;
+    expect(last.status).toBe('held');
+    expect(last.message).toContain(`beta=${other}/claude`);
+    expect(fixtureCalls(h)).toEqual([]);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+  }, T);
+
   it.runIf(onDarwin)('holds when one instance is unknown even if the others resolve the launcher', () => {
     const h = makeHarness();
     plainInstance(h, 'alpha');
