@@ -73,9 +73,13 @@ The nightly job updates the native agent CLI only when every service instance
 resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
-`<name>` as its argument; one started through a release's own
-`deploy/whatsoup` is resolved only when that wrapper and its PATH composition
-match this checkout byte for byte, and is `unknown` otherwise. On systemd the
+`<name>` as its argument. Every instance, launchd or systemd, is resolved only
+when the wrapper it starts through, followed through symlinks, and that tree's
+PATH composition match this checkout byte for byte, and is `unknown` otherwise.
+This includes the installed `~/.local/bin/whatsoup` link: its target, not the
+link, selects the tree, so a link repointed at a different release or checkout
+holds the update. On systemd the unit is assumed to start through that link,
+as `deploy/whatsoup@.service` does; an `ExecStart` override is not read. On systemd the
 user manager environment, then `Environment=`, then `EnvironmentFiles=` are
 applied, as the launcher does. Finding no instance at all holds with a
 warning alert. The target is the newest release older than `npm.cooldown_minutes`

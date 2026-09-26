@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -101,6 +101,59 @@ describe('launchd instances in the release-wrapper form', () => {
     expect(consumer.find((e) => e.message.includes('com.whatsoup.harness-maintenance.plist'))?.status).toBe('skipped');
     expect(consumer.filter((e) => e.status === 'unknown')).toEqual([]);
     expect(events(r, 'claude').at(-1)?.status).toBe('updated');
+  }, T);
+});
+
+describe('the installed wrapper link', () => {
+  /** Point ~/.local/bin/whatsoup at another tree's wrapper, as a release switch does. */
+  function relink(h: Harness, wrapper: string): void {
+    const link = path.join(h.home, '.local/bin/whatsoup');
+    rmSync(link);
+    symlinkSync(wrapper, link);
+  }
+
+  function expectHeldUnknown(h: Harness, r: ReturnType<typeof run>, wrapper: string): void {
+    const alpha = events(r, 'claude-consumer').find((e) => e.message.startsWith('alpha'))!;
+    expect(alpha.status).toBe('unknown');
+    expect(alpha.message).toContain(wrapper);
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'unknown' });
+    expect(fixtureCalls(h)).toEqual([]);
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+    expect(r.state?.status).toBe('degraded');
+    expect(r.status).toBe(1);
+  }
+
+  it.runIf(onDarwin)('verifies the tree the launchd wrapper link points at, not the link', () => {
+    const h = makeHarness();
+    plainInstance(h, 'alpha');
+    const wrapper = release(h, 'r1', false);
+    relink(h, wrapper);
+    expectHeldUnknown(h, run(h), wrapper);
+  }, T);
+
+  it('verifies the tree the systemd wrapper link points at, not the link', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    const wrapper = release(h, 'r1', false);
+    relink(h, wrapper);
+    expectHeldUnknown(h, run(h), wrapper);
+  }, T);
+
+  it('reports an absent wrapper link as unknown', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    rmSync(path.join(h.home, '.local/bin/whatsoup'));
+    expectHeldUnknown(h, run(h), path.join(h.home, '.local/bin/whatsoup'));
+  }, T);
+
+  it('still installs when the wrapper link points at a tree identical to this checkout', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    relink(h, release(h, 'r1'));
+    const r = run(h);
+    expect(events(r, 'claude-consumer')[0]).toMatchObject({ status: 'resolved' });
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'updated' });
+    expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, TARGET));
   }, T);
 });
 

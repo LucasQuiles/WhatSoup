@@ -514,6 +514,19 @@ release_wrapper_mismatch() {
   fi
 }
 
+# The installed instance wrapper. deploy/setup.sh links it into a checkout, and a release switch
+# repoints it, so the link's target, not the link, selects the tree an instance runs.
+INSTALLED_WRAPPER="$HOME/.local/bin/whatsoup"
+
+# instance_wrapper_mismatch <argv0>: release_wrapper_mismatch on the file <argv0> resolves to.
+instance_wrapper_mismatch() {
+  if [ ! -e "$1" ]; then
+    echo "instance runs $1, which does not exist"
+    return 1
+  fi
+  release_wrapper_mismatch "$(_resolve_symlinks "$1")"
+}
+
 claude_inventory_launchd() {
   local dir="$HOME/Library/LaunchAgents" file name label program arg1 path_value prepend node reason
   PLUTIL_BIN="$(job_tool plutil)" || {
@@ -546,7 +559,7 @@ claude_inventory_launchd() {
       "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
       "$(plist_flag "$file" DISABLE_UPDATES)" \
       "$(plist_flag "$file" DISABLE_AUTOUPDATER)"
-    if [ "$program" != "$HOME/.local/bin/whatsoup" ] && ! reason="$(release_wrapper_mismatch "$program")"; then
+    if ! reason="$(instance_wrapper_mismatch "$program")"; then
       claude_consumer_record "$name" launchd unknown "" "" "" "$reason"
       continue
     fi
@@ -630,7 +643,7 @@ systemd_environment_file() {
 }
 
 claude_inventory_systemd() {
-  local units unit name show manager_env manager_unreadable rc=0
+  local units unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
   SYSTEMCTL_BIN="$(job_tool systemctl)" || {
     echo "systemctl not found on the job PATH"
     return 1
@@ -640,6 +653,9 @@ claude_inventory_systemd() {
     echo "systemctl list-units failed rc=$rc"
     return 1
   fi
+  # The instance template starts every unit through the installed wrapper (deploy/whatsoup@.service).
+  wrapper_ok=1
+  wrapper_reason="$(instance_wrapper_mismatch "$INSTALLED_WRAPPER")" || wrapper_ok=0
   rc=0
   manager_env="$("$SYSTEMCTL_BIN" --user show-environment 2>/dev/null)" || rc=$?
   while IFS= read -r unit; do
@@ -685,6 +701,10 @@ claude_inventory_systemd() {
     # file changed without a daemon-reload.
     claude_instance_env_record "$name" systemd "loaded unit" \
       "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
+    if [ "$wrapper_ok" -eq 0 ]; then
+      claude_consumer_record "$name" systemd unknown "" "" "" "$wrapper_reason"
+      continue
+    fi
     claude_resolve_consumer "$name" systemd "$SYSTEMD_ENV_PATH" "$SYSTEMD_ENV_PREPEND" "$SYSTEMD_ENV_NODE"
   done <<< "$units"
 }

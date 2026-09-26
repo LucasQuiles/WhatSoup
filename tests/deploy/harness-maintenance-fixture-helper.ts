@@ -206,6 +206,8 @@ export function makeHarness(): Harness {
   writeExec(path.join(fakeBin, 'systemctl'), FAKE_SYSTEMCTL);
   installNative(h, OLD);
   symlinkSync(path.join(versions, OLD), h.launcher);
+  // The installed instance wrapper, linked into this checkout as deploy/setup.sh links it.
+  symlinkSync(path.join(REPO, 'deploy/whatsoup'), path.join(localBin, 'whatsoup'));
 
   const now = Date.now();
   const timeJson = path.join(home, 'npm-time.json');
