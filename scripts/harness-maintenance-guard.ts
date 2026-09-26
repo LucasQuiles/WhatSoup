@@ -1,6 +1,25 @@
-import { readFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  readSync,
+  realpathSync,
+  statSync,
+  type Stats,
+} from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isRecord, requireNumber, requireRecord, requireString } from '../src/lib/type-guards.ts';
+import {
+  asNonEmptyString,
+  isNonEmptyString,
+  isRecord,
+  requireNumber,
+  requireRecord,
+  requireString,
+} from '../src/lib/type-guards.ts';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
 export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
@@ -607,6 +626,282 @@ export function claudeUpdatePlanCli(argv: string[]): ClaudeCliOutcome {
   }
 }
 
+export type ClaudeExecutableKind =
+  | 'missing'
+  | 'broken-link'
+  | 'link-loop'
+  | 'untrusted'
+  | 'not-executable'
+  | 'native'
+  | 'npm'
+  | 'wrapper'
+  | 'wrapper-unresolved'
+  | 'other';
+
+/**
+ * Static classification of the service binary. `configuredVersion` comes from the native version
+ * path or the npm package.json and is what the layout is configured to run; it is never an
+ * observed runtime version, so `observedVersion` is always null here.
+ */
+export interface ClaudeExecutableClassification {
+  kind: ClaudeExecutableKind;
+  layout: ClaudeServiceLayout;
+  bin: string;
+  chain: string[];
+  resolved: string | null;
+  configuredVersion: string | null;
+  configuredVersionSource: 'native-path' | 'package-json' | null;
+  observedVersion: null;
+  wrapperTarget?: string;
+  target?: ClaudeExecutableClassification;
+  reasons: string[];
+}
+
+export const CLAUDE_RESOLVE_MAX_HOPS = 32;
+const CLAUDE_NPM_PACKAGE = '@anthropic-ai/claude-code';
+const WRAPPER_MAX_BYTES = 64 * 1024;
+const PACKAGE_WALK_MAX_LEVELS = 6;
+const NATIVE_MAGIC = [
+  Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF
+  Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), // Mach-O 64-bit
+  Buffer.from([0xce, 0xfa, 0xed, 0xfe]), // Mach-O 32-bit
+  Buffer.from([0xca, 0xfe, 0xba, 0xbe]), // Mach-O universal
+];
+const WRAPPER_SHEBANG_RE = /^#!\s*(?:\/bin\/sh|\/bin\/bash|\/usr\/bin\/bash|\/usr\/bin\/env\s+(?:ba)?sh)\s*$/;
+const WRAPPER_EXEC_RE = /^exec\s+("?)(\/[A-Za-z0-9._\/+@-]+)\1(?:\s+"\$@")?$/;
+
+const LAYOUT_BY_KIND: Record<ClaudeExecutableKind, ClaudeServiceLayout> = {
+  missing: 'other',
+  'broken-link': 'other',
+  'link-loop': 'other',
+  untrusted: 'other',
+  'not-executable': 'other',
+  native: 'native',
+  npm: 'npm',
+  wrapper: 'wrapper',
+  'wrapper-unresolved': 'wrapper',
+  other: 'other',
+};
+
+function errnoCode(err: unknown): string | undefined {
+  return isRecord(err) ? asNonEmptyString(err.code) : undefined;
+}
+
+/** Reads at most `limit` bytes of a regular file; O_NONBLOCK keeps a swapped-in FIFO from hanging. */
+function readHead(file: string, limit: number): Buffer {
+  const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
+  try {
+    const buffer = Buffer.alloc(limit);
+    const bytes = readSync(fd, buffer, 0, limit, 0);
+    return buffer.subarray(0, bytes);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Owner must be trusted, and neither the entry nor its directory may be world-writable (sticky dirs excepted). */
+function untrustedReason(entry: string, trustedUids: readonly number[]): string | null {
+  const own = lstatSync(entry);
+  if (!trustedUids.includes(own.uid)) return `${entry} is owned by untrusted uid ${own.uid}`;
+  if (!own.isSymbolicLink() && (own.mode & 0o002) !== 0) return `${entry} is world-writable`;
+  const dir = statSync(path.dirname(entry));
+  if (!trustedUids.includes(dir.uid)) return `${path.dirname(entry)} is owned by untrusted uid ${dir.uid}`;
+  if ((dir.mode & 0o002) !== 0 && (dir.mode & 0o1000) === 0) {
+    return `${path.dirname(entry)} is world-writable without the sticky bit`;
+  }
+  return null;
+}
+
+/** package.json of the package that owns `file`; the walk stops at a node_modules boundary. */
+function owningPackage(file: string): { name: unknown; version: unknown } | null {
+  let dir = path.dirname(file);
+  for (let level = 0; level < PACKAGE_WALK_MAX_LEVELS; level += 1) {
+    if (path.basename(dir) === 'node_modules') return null;
+    const manifest = path.join(dir, 'package.json');
+    let text: string | null = null;
+    try {
+      if (statSync(manifest).isFile()) text = readFileSync(manifest, 'utf8');
+    } catch (err) {
+      if (errnoCode(err) !== 'ENOENT' && errnoCode(err) !== 'ENOTDIR') throw err;
+    }
+    if (text !== null) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        return isRecord(parsed) ? { name: parsed.name, version: parsed.version } : { name: null, version: null };
+      } catch {
+        return { name: null, version: null };
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+function nativeVersionsDir(home: string): string | null {
+  try {
+    return realpathSync(path.join(home, '.local', 'share', 'claude', 'versions'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classify the executable at `bin` without executing anything: follow the link chain (relative
+ * targets resolve against the real directory holding the link; loops and chains longer than
+ * maxHops are link-loop), then check trust, the executable bit, the native versions path (which
+ * must hold an ELF or Mach-O file), an owning npm package.json (before any shebang test), and
+ * finally a wrapper script whose only command is `exec /abs/path "$@"`.
+ */
+export function classifyClaudeExecutable({
+  bin,
+  home,
+  maxHops = CLAUDE_RESOLVE_MAX_HOPS,
+  trustedUids = [process.getuid?.() ?? 0, 0],
+  allowWrapper = true,
+}: {
+  bin: string;
+  home: string;
+  maxHops?: number;
+  trustedUids?: readonly number[];
+  allowWrapper?: boolean;
+}): ClaudeExecutableClassification {
+  const chain: string[] = [bin];
+  const reasons: string[] = [];
+  const done = (
+    kind: ClaudeExecutableKind,
+    extra: Partial<ClaudeExecutableClassification> = {},
+  ): ClaudeExecutableClassification => ({
+    kind,
+    layout: LAYOUT_BY_KIND[kind],
+    bin,
+    chain,
+    resolved: null,
+    configuredVersion: null,
+    configuredVersionSource: null,
+    observedVersion: null,
+    reasons,
+    ...extra,
+  });
+
+  let current = bin;
+  const seen = new Set<string>();
+  for (;;) {
+    let info: Stats;
+    try {
+      info = lstatSync(current);
+    } catch (err) {
+      const code = errnoCode(err);
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      reasons.push(`${current} does not exist`);
+      return done(chain.length === 1 ? 'missing' : 'broken-link');
+    }
+    if (!info.isSymbolicLink()) break;
+    const trust = untrustedReason(current, trustedUids);
+    if (trust) {
+      reasons.push(trust);
+      return done('untrusted');
+    }
+    const linkTarget = readlinkSync(current);
+    const next = path.isAbsolute(linkTarget)
+      ? linkTarget
+      : path.resolve(realpathSync(path.dirname(current)), linkTarget);
+    if (seen.has(next) || chain.length > maxHops) {
+      reasons.push(seen.has(next) ? `link cycle at ${next}` : `more than ${maxHops} link hops`);
+      return done('link-loop');
+    }
+    seen.add(current);
+    chain.push(next);
+    current = next;
+  }
+
+  const resolved = realpathSync(current);
+  const stat = statSync(resolved);
+  if (!stat.isFile()) {
+    reasons.push(`${resolved} is not a regular file`);
+    return done('other', { resolved });
+  }
+  const trust = untrustedReason(resolved, trustedUids);
+  if (trust) {
+    reasons.push(trust);
+    return done('untrusted', { resolved });
+  }
+  if ((stat.mode & 0o111) === 0) {
+    reasons.push(`${resolved} is not executable`);
+    return done('not-executable', { resolved });
+  }
+
+  const head = readHead(resolved, WRAPPER_MAX_BYTES + 1);
+  const versionsDir = nativeVersionsDir(home);
+  if (versionsDir !== null && path.dirname(resolved) === versionsDir) {
+    const name = path.basename(resolved);
+    if (parseSemver(name) && NATIVE_MAGIC.some((magic) => head.subarray(0, 4).equals(magic))) {
+      return done('native', { resolved, configuredVersion: name, configuredVersionSource: 'native-path' });
+    }
+    reasons.push(`${resolved} is in the native versions directory but is not a native executable`);
+    return done('other', { resolved });
+  }
+
+  const pkg = owningPackage(resolved);
+  if (pkg && pkg.name === CLAUDE_NPM_PACKAGE) {
+    const version = isNonEmptyString(pkg.version) && parseSemver(pkg.version) ? pkg.version : null;
+    if (version === null) reasons.push('npm package.json has no strict semver version');
+    return done('npm', {
+      resolved,
+      configuredVersion: version,
+      configuredVersionSource: version === null ? null : 'package-json',
+    });
+  }
+
+  if (head.subarray(0, 2).toString('latin1') !== '#!') {
+    reasons.push(`${resolved} is neither a native, npm nor script layout`);
+    return done('other', { resolved });
+  }
+  if (!allowWrapper) {
+    reasons.push('wrapper target is itself a script');
+    return done('wrapper-unresolved', { resolved });
+  }
+  if (head.length > WRAPPER_MAX_BYTES) {
+    reasons.push('wrapper script is too large to inspect');
+    return done('wrapper-unresolved', { resolved });
+  }
+  const lines = head.toString('utf8').split(/\r?\n/);
+  const commands = lines.slice(1).map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('#'));
+  const exec = commands.length === 1 ? WRAPPER_EXEC_RE.exec(commands[0]!) : null;
+  if (!WRAPPER_SHEBANG_RE.test(lines[0] ?? '') || !exec) {
+    reasons.push('wrapper is not a single `exec /abs/path "$@"` script');
+    return done('wrapper-unresolved', { resolved });
+  }
+  const wrapperTarget = exec[2]!;
+  const target = classifyClaudeExecutable({
+    bin: wrapperTarget,
+    home,
+    maxHops: Math.max(0, maxHops - chain.length),
+    trustedUids,
+    allowWrapper: false,
+  });
+  return done('wrapper', { resolved, wrapperTarget, target });
+}
+
+/** --claude-resolve: exit 0 with the classification, or exit 2 with action "error". */
+export function claudeResolveCli(argv: string[]): ClaudeCliOutcome {
+  try {
+    const args = parseClaudeCliArgs(argv, 'claude-resolve', ['bin', 'home']);
+    const bin = stringArg(args, 'bin');
+    const home = stringArg(args, 'home');
+    if (bin === undefined || !path.isAbsolute(bin)) {
+      throw new ClaudeCliRejection('INVALID_ARGUMENT', '--bin must be an absolute path');
+    }
+    if (home === undefined || !path.isAbsolute(home)) {
+      throw new ClaudeCliRejection('INVALID_ARGUMENT', '--home must be an absolute path');
+    }
+    return { exitCode: 0, result: classifyClaudeExecutable({ bin, home }) };
+  } catch (err) {
+    return claudeCliError(err);
+  }
+}
+
 function emitClaudeCliOutcome(outcome: ClaudeCliOutcome): unknown {
   console.log(JSON.stringify(outcome.result));
   if (outcome.exitCode !== 0) process.exitCode = outcome.exitCode;
@@ -635,6 +930,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 
 export function run(argv: string[] = process.argv.slice(2)): unknown {
   if (argv.includes('--claude-update-plan')) return emitClaudeCliOutcome(claudeUpdatePlanCli(argv));
+  if (argv.includes('--claude-resolve')) return emitClaudeCliOutcome(claudeResolveCli(argv));
   const args = parseArgs(argv);
   if (args['npm-cooldown-config']) {
     const npmVersion = requireTrimmedString(args['npm-version'], '--npm-version');
