@@ -1123,6 +1123,9 @@ also scans a bounded set of already-echoed exact links, closing the crash gap be
 truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
 failed source, delivery truth is not rolled back: the completed job retains its original
 completion proof and records a durable `echo_conflict_at`/reason for operator review.
+The `/health` echo-conflict and corrupt-link counters count only live jobs, so a conflict
+recorded on a completed job stays on the row without degrading health. Orphan transfers,
+which have no job row, always count as corrupt links.
 
 Database triggers keep every linked source inbound and selected outbound proof immutable and
 retained while its job exists, including completed jobs. Retention selects only an old

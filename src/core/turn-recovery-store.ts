@@ -216,8 +216,16 @@ export interface TurnRecoverySupervisorCounts {
   expiredClaimed: number;
   exhausted: number;
   quarantinedDelivery: number;
+  /**
+   * Broken proof links on live jobs (not completed or exhausted) plus orphan
+   * transfers. Residue on a finished job no longer raises health.
+   */
   corruptLinks: number;
   orphanTransfers: number;
+  /**
+   * Late-echo contradictions on live jobs only. A completed job keeps its
+   * durable `echo_conflict_at` evidence but is not counted here.
+   */
   echoConflicts: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
@@ -918,7 +926,12 @@ export class TurnRecoveryStore {
             WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
             ELSE 0
           END), 0) AS quarantined_delivery,
+          -- corrupt_links and echo_conflicts describe live recovery work only.
+          -- A completed or exhausted job is no longer a trap, and the
+          -- exhausted state already raises health through its own counter.
+          -- Orphan transfers have no job row, so they are added unfiltered.
           COALESCE(SUM(CASE
+            WHEN j.state IN ('completed', 'exhausted') THEN 0
             WHEN NOT (
               t.id IS NOT NULL
               AND t.inbound_disposition = 'transferred_to_recovery_owner'
@@ -945,8 +958,10 @@ export class TurnRecoveryStore {
             ) THEN 1 ELSE 0
           END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
-          COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-            AS echo_conflicts,
+          COALESCE(SUM(CASE
+            WHEN j.state NOT IN ('completed', 'exhausted') AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts,
           (SELECT count FROM open_recoveries) AS open_recoveries,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
