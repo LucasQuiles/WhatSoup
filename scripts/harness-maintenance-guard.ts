@@ -286,21 +286,135 @@ export function latestEligibleVersion(
   };
 }
 
+/**
+ * A publish time this far ahead of the job clock is treated as a metadata or clock anomaly and
+ * holds the update; smaller leads are ordinary clock skew between the registry and this host.
+ */
+export const PUBLISH_TIME_SKEW_MINUTES = 5;
+
+export interface Semver {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: Array<string | number>;
+}
+
+const SEMVER_IDENT = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+const SEMVER_RE = new RegExp(
+  `^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)` +
+    `(?:-(${SEMVER_IDENT}(?:\\.${SEMVER_IDENT})*))?` +
+    `(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
+);
+
+/**
+ * Strict semver 2.0.0 parse. Returns null for anything looser (a leading "v", missing or extra
+ * components, leading zeros), so a version the planner cannot order is never installed over.
+ * compareVersion() above keeps its lenient contract for the npm-version callers.
+ */
+export function parseSemver(version: string): Semver | null {
+  if (typeof version !== 'string' || version.length > 256) return null;
+  const match = SEMVER_RE.exec(version);
+  if (!match) return null;
+  const [major, minor, patch] = [match[1], match[2], match[3]].map(Number);
+  if (![major, minor, patch].every(Number.isSafeInteger)) return null;
+  const prerelease = match[4]
+    ? match[4].split('.').map((part) => (/^\d+$/.test(part) ? Number(part) : part))
+    : [];
+  return { major: major!, minor: minor!, patch: patch!, prerelease };
+}
+
+function compareParsedSemver(left: Semver, right: Semver): number {
+  for (const key of ['major', 'minor', 'patch'] as const) {
+    if (left[key] !== right[key]) return left[key] > right[key] ? 1 : -1;
+  }
+  // A release ranks above any of its prereleases.
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return Math.sign(right.prerelease.length - left.prerelease.length);
+  }
+  const max = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let i = 0; i < max; i += 1) {
+    const a = left.prerelease[i];
+    const b = right.prerelease[i];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    if (a === b) continue;
+    if (typeof a === 'number' && typeof b === 'number') return a > b ? 1 : -1;
+    if (typeof a === 'number') return -1;
+    if (typeof b === 'number') return 1;
+    return a > b ? 1 : -1;
+  }
+  return 0;
+}
+
+/** Semver precedence of two strict versions; throws if either is not strict semver. */
+export function compareSemver(left: string, right: string): number {
+  const a = parseSemver(left);
+  const b = parseSemver(right);
+  if (!a || !b) throw new Error(`not a strict semver version: ${a ? right : left}`);
+  return compareParsedSemver(a, b);
+}
+
 export type ClaudeServiceLayout = 'native' | 'wrapper' | 'npm' | 'other';
 
 export interface ClaudeUpdatePlan {
-  action: 'missing' | 'held' | 'current' | 'unmanaged-layout' | 'install';
+  action: 'missing' | 'unknown' | 'held' | 'current' | 'unmanaged-layout' | 'install';
   current: string | null;
   target: string | null;
   cooldownMinutes: number;
   reason: string;
+  anomalies?: string[];
+}
+
+interface EligibleTarget {
+  target: string | null;
+  anomalies: string[];
 }
 
 /**
- * Decide the Claude CLI update for the binary the bot service resolves. The target is the newest
- * release past the publish-age cooldown (never a floating "latest"); nothing is ever downgraded;
- * and the native installer only runs when the service path is its own symlink layout, because on a
- * wrapper or npm layout `claude install` can repoint ~/.local/bin/claude past the wrapper.
+ * Newest plain release (no prerelease/build) past the cooldown, validated per version. Unlike
+ * latestEligibleVersion() this never throws on bad metadata: it reports an anomaly for a release
+ * newer than the current one whose publish time is missing or invalid, and for any publish time
+ * further in the future than PUBLISH_TIME_SKEW_MINUTES. Any anomaly holds the update.
+ */
+function eligibleClaudeTarget(
+  versionTimes: unknown,
+  current: Semver,
+  now: Date,
+  cooldownMinutes: number,
+): EligibleTarget {
+  if (!isRecord(versionTimes)) {
+    return { target: null, anomalies: ['publish-time metadata is not a JSON object'] };
+  }
+  const anomalies: string[] = [];
+  let best: { version: string; parsed: Semver } | null = null;
+  for (const [version, publishedAt] of Object.entries(versionTimes)) {
+    const parsed = parseSemver(version);
+    if (!parsed || parsed.prerelease.length > 0 || version.includes('+')) continue;
+    const published = typeof publishedAt === 'string' ? new Date(publishedAt) : null;
+    if (!published || Number.isNaN(published.getTime())) {
+      if (compareParsedSemver(parsed, current) > 0) {
+        anomalies.push(`${version} has an invalid publish time`);
+      }
+      continue;
+    }
+    const ageMinutes = (now.getTime() - published.getTime()) / 60000;
+    if (ageMinutes < -PUBLISH_TIME_SKEW_MINUTES) {
+      anomalies.push(`${version} publish time is in the future`);
+      continue;
+    }
+    if (ageMinutes < cooldownMinutes) continue;
+    if (!best || compareParsedSemver(parsed, best.parsed) > 0) best = { version, parsed };
+  }
+  return { target: best?.version ?? null, anomalies };
+}
+
+/**
+ * Decide the agent CLI update for the binary the bot service resolves. Order:
+ * missing -> unknown -> held -> unmanaged-layout -> current -> install.
+ * The target is the newest plain release past the publish-age cooldown (never a floating tag or
+ * a prerelease); nothing is ever downgraded; a current version that is not strict semver never
+ * installs; and the native installer only runs on its own symlink layout, because on a wrapper or
+ * npm layout the installer can repoint ~/.local/bin past the wrapper.
  */
 export function claudeUpdatePlan({
   current,
@@ -310,29 +424,42 @@ export function claudeUpdatePlan({
   layout,
 }: {
   current: string | null;
-  versionTimes: Record<string, string>;
+  versionTimes: unknown;
   now?: Date;
   cooldownMinutes?: number;
   layout: ClaudeServiceLayout;
 }): ClaudeUpdatePlan {
-  const base = { current, cooldownMinutes };
-  if (!current) {
-    return { ...base, action: 'missing', target: null, reason: 'service claude binary not found or not runnable' };
+  if (typeof cooldownMinutes !== 'number' || !Number.isFinite(cooldownMinutes) || cooldownMinutes < 0) {
+    throw new Error(`cooldownMinutes must be a finite non-negative number, got ${cooldownMinutes}`);
   }
-  const target = latestEligibleVersion(versionTimes, now, cooldownMinutes).version;
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new Error('now must be a valid Date');
+  }
+  const base = { current: current || null, cooldownMinutes };
+  if (!current) {
+    return { ...base, action: 'missing', target: null, reason: 'service agent CLI binary not found or not runnable' };
+  }
+  const parsedCurrent = parseSemver(current);
+  if (!parsedCurrent) {
+    return { ...base, action: 'unknown', target: null, reason: `current version is not strict semver: ${current}` };
+  }
+  const { target, anomalies } = eligibleClaudeTarget(versionTimes, parsedCurrent, now, cooldownMinutes);
+  if (anomalies.length > 0) {
+    return { ...base, action: 'held', target: null, reason: 'publish-time metadata anomaly', anomalies };
+  }
   if (!target) {
     return { ...base, action: 'held', target: null, reason: 'no release is past the publish-age cooldown' };
-  }
-  if (/^\d+\.\d+\.\d+$/.test(current) && compareVersion(current, target) >= 0) {
-    return { ...base, action: 'current', target, reason: `service claude ${current} >= eligible ${target}` };
   }
   if (layout !== 'native') {
     return {
       ...base,
       action: 'unmanaged-layout',
       target,
-      reason: `service claude is a ${layout} layout; the native installer could overwrite it`,
+      reason: `service binary is a ${layout} layout; the native installer could overwrite it`,
     };
+  }
+  if (compareSemver(current, target) >= 0) {
+    return { ...base, action: 'current', target, reason: `service version ${current} >= eligible ${target}` };
   }
   return { ...base, action: 'install', target, reason: `${current} -> ${target}` };
 }
