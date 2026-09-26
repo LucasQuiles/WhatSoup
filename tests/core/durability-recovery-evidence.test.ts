@@ -594,6 +594,12 @@ describe('durable recovery evidence ordering', () => {
     expect(db.raw.prepare(
       'SELECT COUNT(*) AS count FROM outbound_ops WHERE source_inbound_seq = ?',
     ).get(INCIDENT_INBOUND_SEQ)).toEqual(sourceCountBefore);
+    expect(freshEngine.getHealthStats().deliveryAmbiguity).toEqual({
+      readable: true,
+      uncorroboratedAmbiguous: 0,
+      corroboratedRetained: 1,
+      oldestUncorroboratedAt: null,
+    });
     expect(db.raw.prepare(`
       SELECT evidence_ref
       FROM turn_delivery_corroboration
@@ -630,54 +636,6 @@ describe('durable recovery evidence ordering', () => {
     expect(db.raw.prepare(
       'SELECT COUNT(*) AS count FROM recovery_runs',
     ).get()).toEqual(before);
-  });
-
-  // Health durability debt must use the live reconcile's own ambiguity
-  // predicate: a corroborated maybe_sent row is deliberately never reconciled,
-  // so counting it would pin /health degraded with no clearing path.
-  it('excludes a corroborated maybe_sent row from the health durability-debt clock', () => {
-    seedIncident();
-    const freshEngine = new DurabilityEngine(db);
-    freshEngine.postConnectRecovery();
-    db.raw.prepare(
-      "UPDATE outbound_ops SET ambiguity_at = '2000-01-01 00:00:00' WHERE id = ?",
-    ).run(INCIDENT_SELECTED_OP_ID);
-    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?')
-      .get(INCIDENT_SELECTED_OP_ID)).toEqual({ status: 'maybe_sent' });
-
-    const stats = freshEngine.getHealthStats();
-
-    // The raw count still reports the row; only the debt clock excludes it.
-    expect({
-      maybeSentOutbound: stats.maybeSentOutbound,
-      oldestMaybeSentAt: stats.oldestMaybeSentAt,
-    }).toEqual({ maybeSentOutbound: 1, oldestMaybeSentAt: null });
-  });
-
-  it('keeps an uncorroborated stale maybe_sent row on the health durability-debt clock beside a corroborated one', () => {
-    seedIncident();
-    const freshEngine = new DurabilityEngine(db);
-    freshEngine.postConnectRecovery();
-    db.raw.prepare(
-      "UPDATE outbound_ops SET ambiguity_at = '2000-01-01 00:00:00' WHERE id = ?",
-    ).run(INCIDENT_SELECTED_OP_ID);
-    const ambiguousId = freshEngine.createOutboundOp({
-      conversationKey: 'uncorroborated-chat',
-      chatJid: 'uncorroborated-chat@g.us',
-      opType: 'text',
-      payload: '{}',
-      replayPolicy: 'unsafe',
-    });
-    freshEngine.markSending(ambiguousId);
-    freshEngine.markMaybeSent(ambiguousId, 'echo_timeout');
-    db.raw.prepare(
-      "UPDATE outbound_ops SET ambiguity_at = '2001-01-01 00:00:00' WHERE id = ?",
-    ).run(ambiguousId);
-
-    const stats = freshEngine.getHealthStats();
-
-    expect(stats.maybeSentOutbound).toBe(2);
-    expect(stats.oldestMaybeSentAt).toBe('2001-01-01 00:00:00');
   });
 
   it('starts post-connect plan and run before any corroboration or outbound mutation', () => {

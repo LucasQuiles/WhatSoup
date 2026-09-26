@@ -375,6 +375,9 @@ export interface TurnRecoveryHealthDetails {
   /** Settled residue on completed or exhausted jobs; diagnostic only, never degrades. */
   readonly turnRecoveryCorruptLinksSettled: number;
   readonly turnRecoveryEchoConflictsSettled: number;
+  readonly turnRecoveryBlockingOutstanding: number;
+  readonly turnRecoveryRetainedTerminal: number;
+  readonly turnRecoveryCorroboratedRetained: number;
   /** blockedUnsafe split — see TurnRecoverySupervisorCounts.blockedUnsafeSynthetic. */
   readonly turnRecoveryBlockedUnsafeSynthetic: number;
   readonly turnRecoveryBlockedUnsafeSuperseded: number;
@@ -408,6 +411,10 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
     turnRecoveryCorruptLinksSettled: counts.corruptLinksSettled ?? 0,
     turnRecoveryEchoConflictsSettled: counts.echoConflictsSettled ?? 0,
+    turnRecoveryBlockingOutstanding: counts.blockingOutstanding ?? counts.outstanding,
+    turnRecoveryRetainedTerminal: counts.retainedTerminal
+      ?? counts.blockedUnsafe + counts.exhausted,
+    turnRecoveryCorroboratedRetained: counts.corroboratedRetained ?? 0,
     turnRecoveryBlockedUnsafeSynthetic: counts.blockedUnsafeSynthetic ?? 0,
     turnRecoveryBlockedUnsafeSuperseded: counts.blockedUnsafeSuperseded ?? 0,
     turnRecoveryBlockedUnsafeStranded: counts.blockedUnsafeStranded ?? 0,

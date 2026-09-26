@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
+import {
+  validDeliveryCorroborationForJobSql,
+  validDeliveryCorroborationForTerminalSql,
+} from './delivery-corroboration-sql.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
@@ -216,24 +220,29 @@ export interface TurnRecoverySupervisorCounts {
   expiredClaimed: number;
   exhausted: number;
   quarantinedDelivery: number;
-  /**
-   * Broken proof links on live jobs (not completed or exhausted) plus orphan
-   * transfers. Residue on a finished job is in `corruptLinksSettled` instead.
-   */
+  /** Broken links on live jobs plus orphan transfers; finished jobs: corruptLinksSettled. */
   corruptLinks: number;
   orphanTransfers: number;
-  /**
-   * Late-echo contradictions on live jobs only. A completed or exhausted job
-   * keeps its durable `echo_conflict_at` evidence and is counted in
-   * `echoConflictsSettled` instead.
-   */
+  /** Late-echo contradictions on live jobs; finished jobs: echoConflictsSettled. */
   echoConflicts: number;
   /** Broken proof links on completed or exhausted jobs. Diagnostic only. */
-  corruptLinksSettled: number;
+  corruptLinksSettled?: number;
   /** Late-echo contradictions on completed or exhausted jobs. Diagnostic only. */
-  echoConflictsSettled: number;
+  echoConflictsSettled?: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
+  /**
+   * Pending/claimed work that can still be acted on automatically, plus
+   * orphan transfers without valid later-echo proof.
+   */
+  blockingOutstanding?: number;
+  /** Terminal blocked/exhausted rows retained for operator audit. */
+  retainedTerminal?: number;
+  /**
+   * Pending/claimed rows and orphan transfers made unclaimable by valid
+   * later-echo proof. outstanding = blockingOutstanding + corroboratedRetained.
+   */
+  corroboratedRetained?: number;
   /**
    * Actionability split of `blockedUnsafe` (② of the continuity work,
    * docs/turn-recovery-continuity-reconciler.md). Synthetic self-turns
@@ -475,11 +484,7 @@ const VALID_RECOVERY_JOB_FROM = `
 /** Job states that are finished recovery work: residue on them never pages. */
 const SETTLED_RECOVERY_JOB_STATES_SQL = "('completed', 'exhausted')";
 
-/**
- * True when a supervisor-count row's job no longer links to a matching
- * transferred terminal record, source inbound, and selected delivery. The
- * joins are LEFT joins aliased `t`, `i` and `o`, so a missing row reads NULL.
- */
+/** A supervisor-count job whose LEFT-joined `t`/`i`/`o` proof no longer matches. */
 const RECOVERY_JOB_LINK_BROKEN_SQL = `NOT (
               t.id IS NOT NULL
               AND t.inbound_disposition = 'transferred_to_recovery_owner'
@@ -510,17 +515,22 @@ const RECOVERY_JOB_SELECT = `
   unixepoch(i.received_at) AS source_received_at_unix_seconds
 `;
 
+// Corroborated delivery (a later echoed op for the same source inbound,
+// conversation and destination) is retained audit debt, not outstanding work:
+// it must never block admission for its scope.
 const OUTSTANDING_RECOVERY_FOR_SCOPE_FROM = `
   FROM (
     SELECT j.scope, j.conversation_key, j.id AS job_id
     FROM turn_recovery_jobs j
     WHERE j.state IN ('pending', 'claimed')
+      AND NOT ${validDeliveryCorroborationForJobSql('j')}
     UNION ALL
     SELECT t.scope, t.conversation_key, j.id AS job_id
     FROM turn_terminal_records t
     LEFT JOIN turn_recovery_jobs j ON j.terminal_record_id = t.id
     WHERE t.inbound_disposition = 'transferred_to_recovery_owner'
       AND j.id IS NULL
+      AND NOT ${validDeliveryCorroborationForTerminalSql('t')}
   ) outstanding
 `;
 const OUTSTANDING_RECOVERY_FOR_SCOPE_WHERE = `
@@ -619,6 +629,7 @@ export class TurnRecoveryStore {
           AND state = 'pending'
           AND attempt_count < ${TURN_RECOVERY_MAX_ATTEMPTS}
           AND next_attempt_at <= datetime('now')
+          AND NOT ${validDeliveryCorroborationForJobSql('turn_recovery_jobs')}
         RETURNING *
       `),
       renewTurnRecoveryClaim: prepare(`
@@ -902,6 +913,7 @@ export class TurnRecoveryStore {
             j.state = 'pending'
             OR j.state = 'claimed'
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -915,6 +927,7 @@ export class TurnRecoveryStore {
             OR j.state = 'exhausted'
             OR (j.state = 'claimed' AND j.claim_expires_at <= datetime('now'))
           )
+          AND NOT ${validDeliveryCorroborationForJobSql('j')}
         ORDER BY j.id ASC
         LIMIT ?
       `),
@@ -923,7 +936,14 @@ export class TurnRecoveryStore {
       `),
       getTurnRecoverySupervisorCounts: prepare(`
         WITH orphan_transfers AS (
-          SELECT COUNT(*) AS count
+          -- corroborated: a later echoed op proves delivery, so the orphan is
+          -- retained audit debt that OUTSTANDING_RECOVERY_FOR_SCOPE_FROM also
+          -- excludes from admission; it stays integrity debt (corrupt_links).
+          SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(CASE
+              WHEN ${validDeliveryCorroborationForTerminalSql('terminal')} THEN 1 ELSE 0
+            END), 0) AS corroborated
           FROM turn_terminal_records terminal
           LEFT JOIN turn_recovery_jobs linked
             ON linked.terminal_record_id = terminal.id
@@ -964,12 +984,9 @@ export class TurnRecoveryStore {
             WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
             ELSE 0
           END), 0) AS quarantined_delivery,
-          -- corrupt_links and echo_conflicts describe live recovery work only
-          -- and feed turn_recovery_degraded. A completed or exhausted job is
-          -- no longer a trap (exhausted already raises health through its own
-          -- counter), so its residue moves to the diagnostic-only *_settled
-          -- counters. Orphan transfers have no job row, so they are added to
-          -- corrupt_links unfiltered.
+          -- Live jobs only feed turn_recovery_integrity; completed/exhausted
+          -- residue goes to the diagnostic *_settled counters. Orphan transfers
+          -- have no job row, so corrupt_links adds them unfiltered.
           COALESCE(SUM(CASE
             WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
             ELSE 0
@@ -988,6 +1005,21 @@ export class TurnRecoveryStore {
             ELSE 0
           END), 0) AS echo_conflicts_settled,
           (SELECT count FROM open_recoveries) AS open_recoveries,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND NOT ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT count - corroborated FROM orphan_transfers) AS blocking_outstanding,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('blocked_unsafe', 'exhausted') THEN 1 ELSE 0
+          END), 0) AS retained_terminal,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ('pending', 'claimed')
+              AND ${validDeliveryCorroborationForJobSql('j')}
+            THEN 1 ELSE 0
+          END), 0)
+            + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
             ELSE 0
@@ -1840,6 +1872,9 @@ export class TurnRecoveryStore {
       corrupt_links_settled: number;
       echo_conflicts_settled: number;
       open_recoveries: number;
+      blocking_outstanding: number;
+      retained_terminal: number;
+      corroborated_retained: number;
       blocked_unsafe_synthetic: number;
       blocked_unsafe_superseded: number;
       blocked_unsafe_stranded: number;
@@ -1858,6 +1893,9 @@ export class TurnRecoveryStore {
       corruptLinksSettled: row.corrupt_links_settled,
       echoConflictsSettled: row.echo_conflicts_settled,
       openRecoveries: row.open_recoveries,
+      blockingOutstanding: row.blocking_outstanding,
+      retainedTerminal: row.retained_terminal,
+      corroboratedRetained: row.corroborated_retained,
       blockedUnsafeSynthetic: row.blocked_unsafe_synthetic,
       blockedUnsafeSuperseded: row.blocked_unsafe_superseded,
       blockedUnsafeStranded: row.blocked_unsafe_stranded,

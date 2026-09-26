@@ -80,6 +80,7 @@ export function isLineConnectivityUnknown(line: LineInstance): boolean {
 export function computeKpis(lines: LineInstance[]): {
   connected: number;
   needAttention: number;
+  recoveryDebtLines: number;
   unread: number;
   agentSessions: number;
   totalSent: number;
@@ -111,6 +112,7 @@ export function computeKpis(lines: LineInstance[]): {
 } {
   let connected = 0;
   let needAttention = 0;
+  let recoveryDebtLines = 0;
   let unread = 0;
   let agentSessions = 0;
   let totalSent = 0;
@@ -132,6 +134,10 @@ export function computeKpis(lines: LineInstance[]): {
     if (statusNeedsAttention(line.status) || line.error) {
       needAttention++;
     }
+    // recoveryDebt is carried forward from the last good poll through
+    // failure paths, like the health body below, so a stale line's debt is
+    // not live evidence and is not counted.
+    if (!line.stale && line.recoveryDebt?.open === true) recoveryDebtLines++;
 
     // Freshness gate (#1762 remediation 2): when `stale`, `health` is carried
     // forward from an older successful poll (enrichInstance, src/fleet/routes/
@@ -164,6 +170,7 @@ export function computeKpis(lines: LineInstance[]): {
   return {
     connected,
     needAttention,
+    recoveryDebtLines,
     unread,
     agentSessions,
     totalSent,

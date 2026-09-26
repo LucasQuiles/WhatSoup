@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import {
+  validDeliveryCorroboratedSelectedOpsSql,
+} from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import { DeferredTurnStore } from './deferred-turn-store.ts';
@@ -458,24 +461,6 @@ function maybeSentDwellAtSql(prefix = ''): string {
   END`;
 }
 
-/**
- * The one predicate for a maybe_sent row that is still genuinely ambiguous:
- * no delivery corroboration is linked to it. The live reconcile selects only
- * these rows and leaves corroborated ones unchanged on purpose, so /health
- * durability debt must use the same predicate or it counts rows nothing will
- * ever clear. The alias is required: both subquery tables have an `id`
- * column, so SQLite rejects an unqualified `id` at prepare time as an
- * ambiguous column name.
- */
-function maybeSentUncorroboratedSql(alias: `${string}.`): string {
-  return `NOT EXISTS (
-             SELECT 1
-             FROM turn_terminal_records t
-             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
-             WHERE t.delivery_op_id = ${alias}id
-           )`;
-}
-
 export interface OutboundDeliveryIdentity {
   conversationKey: string;
   deliveryJid: string;
@@ -697,6 +682,7 @@ type DurabilityStatements = {
   getQuarantineClearContributorCounts: PreparedStatement;
   getMaybeSentOutboundCount: PreparedStatement;
   getOldestMaybeSentSubmittedAt: PreparedStatement;
+  getMaybeSentDeliveryAmbiguityHealth: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   getCompletedDeliveryIdentityAdmissionHealth: PreparedStatement;
@@ -1096,7 +1082,12 @@ export class DurabilityEngine {
          FROM outbound_ops o
          WHERE o.status = 'maybe_sent'
            AND ${maybeSentDwellAtSql('o.')} < datetime('now', '-30 seconds')
-           AND ${maybeSentUncorroboratedSql('o.')}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM turn_terminal_records t
+             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
+             WHERE t.delivery_op_id = o.id
+           )
          ORDER BY o.id ASC
          LIMIT 200`,
       ),
@@ -1270,15 +1261,32 @@ export class DurabilityEngine {
       ),
       // A current ambiguity episode owns its own dwell clock. Legacy rows use
       // the conservative receipt/queue fallback, while malformed chronology is
-      // deliberately stale so it cannot make health read fresh. Corroborated
-      // rows are excluded by the live reconcile's own predicate: reconcile
-      // leaves them unchanged, so counting them would be permanent debt.
+      // deliberately stale so it cannot make health read fresh.
       getOldestMaybeSentSubmittedAt: prepare(
-        `SELECT MIN(${maybeSentDwellAtSql('o.')}) as at
-         FROM outbound_ops o
-         WHERE o.status = 'maybe_sent'
-           AND ${maybeSentUncorroboratedSql('o.')}`,
+        `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      getMaybeSentDeliveryAmbiguityHealth: prepare(`
+        WITH valid_corroborated_selected AS (
+          ${validDeliveryCorroboratedSelectedOpsSql()}
+        )
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 0
+            ELSE 1
+          END), 0) AS uncorroborated_ambiguous,
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS corroborated_retained,
+          MIN(CASE
+            WHEN proof.selected_op_id IS NULL
+            THEN ${maybeSentDwellAtSql('o.')}
+            ELSE NULL
+          END) AS oldest_uncorroborated_at
+        FROM outbound_ops o
+        LEFT JOIN valid_corroborated_selected proof ON proof.selected_op_id = o.id
+        WHERE o.status = 'maybe_sent'
+      `),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
          FROM outbound_ops
@@ -3396,6 +3404,12 @@ export class DurabilityEngine {
     quarantinedOutbound: number;
     maybeSentOutbound: number;
     oldestMaybeSentAt: string | null;
+    deliveryAmbiguity: {
+      readable: true;
+      uncorroboratedAmbiguous: number;
+      corroboratedRetained: number;
+      oldestUncorroboratedAt: string | null;
+    };
     outboundFailureEvidence: OutboundFailureHealthProjection;
     outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection;
     lastRecoveryAt: string | null;
@@ -3407,6 +3421,11 @@ export class DurabilityEngine {
     const oldestMaybeSent = this.statements.getOldestMaybeSentSubmittedAt.get() as
       | { at: string | null }
       | undefined;
+    const deliveryAmbiguity = this.statements.getMaybeSentDeliveryAmbiguityHealth.get() as {
+      uncorroborated_ambiguous: number;
+      corroborated_retained: number;
+      oldest_uncorroborated_at: string | null;
+    };
     const evidenceRows = this.statements.getRecentOutboundFailureEvidence.all() as Array<{
       status: string;
       error: string | null;
@@ -3514,6 +3533,12 @@ export class DurabilityEngine {
       quarantinedOutbound: quarantined.count,
       maybeSentOutbound: maybeSent.count,
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
+      deliveryAmbiguity: {
+        readable: true,
+        uncorroboratedAmbiguous: deliveryAmbiguity.uncorroborated_ambiguous,
+        corroboratedRetained: deliveryAmbiguity.corroborated_retained,
+        oldestUncorroboratedAt: deliveryAmbiguity.oldest_uncorroborated_at,
+      },
       outboundFailureEvidence,
       outboundQuarantineDispositions,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,

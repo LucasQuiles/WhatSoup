@@ -174,6 +174,9 @@ export const FleetKpis: FC<FleetKpisProps> = ({
         <span>
           carried health {kpis.staleExcluded} of {lineCount}
         </span>
+        <span>
+          recovery debt {kpis.recoveryDebtLines} of {lineCount}
+        </span>
         {freshness && freshness.observedAt !== null && (
           <span
             className={freshness.stale ? 'warn' : undefined}

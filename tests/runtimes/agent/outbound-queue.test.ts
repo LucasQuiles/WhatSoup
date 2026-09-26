@@ -10,12 +10,12 @@ import {
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
   PROGRESS_TEXT_DEDUPE_WINDOW_MS,
   SEND_TIMEOUT_MS,
-  MAX_CHUNKS,
   MAX_STATUS_MESSAGES_PER_TURN,
   STATUS_CAP_NOTICE,
   SALVAGED_REPLY_NOTICE,
   MAX_SALVAGE_RETENTION_CHARS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
+import { MAX_CHUNKS } from '../../../src/runtimes/agent/whatsapp-format.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger, SendOptions } from '../../../src/core/types.ts';

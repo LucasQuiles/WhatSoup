@@ -3,7 +3,7 @@ import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import type { TurnRecoveryOwnerIdentity } from '../../src/core/durability.ts';
 import { getTurnRecoveryHealthDetails } from '../../src/runtimes/agent/turn-recovery-dispatch.ts';
-import { runtimeTurnRecoveryIsDegraded } from '../../src/runtimes/agent/runtime-turn-supervisor.ts';
+import { classifyRuntimeRecoveryHealth } from '../../src/runtimes/agent/runtime-recovery-health.ts';
 import {
   toTurnFinalizationPersistence,
   toTurnRecoveryJobPersistence,
@@ -151,9 +151,16 @@ describe('turn-recovery corrupt-link and echo-conflict counts cover live jobs on
     `).get(jobId);
   }
 
-  /** The real runtime predicate behind the turn_recovery_degraded cause. */
+  /**
+   * The real runtime classification behind the turn_recovery_degraded cause for
+   * proof residue: corrupt links and echo conflicts raise turn_recovery_integrity.
+   */
   function causeRaised(): boolean {
-    return runtimeTurnRecoveryIsDegraded(NO_FINALIZATION_DEBT, getTurnRecoveryHealthDetails(durability));
+    return classifyRuntimeRecoveryHealth({
+      finalization: NO_FINALIZATION_DEBT,
+      recovery: getTurnRecoveryHealthDetails(durability),
+      completedDeliveryIdentity: { unresolvedCount: 0, nextAction: null },
+    }).blockingReasons.includes('turn_recovery_integrity');
   }
 
   it('does not count a corrupt link on a completed job but keeps it as settled residue', () => {

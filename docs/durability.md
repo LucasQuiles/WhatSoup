@@ -28,7 +28,7 @@ Every message that enters the bot's processing pipeline is written to `inbound_e
 
 The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
 
-An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
+An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`, and so does a completed turn whose answers the client output policy withheld (attempt kind `withheld_by_policy`, #3613); a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
 ### 2.2 Outbound Operations Journal (`outbound_ops`)
 
@@ -115,7 +115,7 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
-| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`) winner |
+| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`, or `client_output_withheld` for a policy-withheld answer) winner |
 | `processing` / `turn_done` | `failed` | `finalizeTurnTerminal()` — one atomic `failed_terminal` winner with its bounded failure class |
 | `processing` / `turn_done` | unchanged (recovery-owned) | `finalizeTurnTerminal()` — no inbound mutation; the linked recovery job and selected unresolved delivery become the durable owner in the same transaction, and later proof settles the source |
 | open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
@@ -307,11 +307,7 @@ cannot monopolize the maintenance tick: confirmed echoes settle,
 `safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
-starve actionable debt. The `/health` `durability_debt` cause uses the same
-exclusion: only a `maybe_sent` row without delivery corroboration can set its
-30-minute debt clock, so a preserved row never degrades health on its own.
-The raw `maybeSentOutbound` count still includes every `maybe_sent` row.
-An empty scan creates no recovery plan or run. The
+starve actionable debt. An empty scan creates no recovery plan or run. The
 `pending` stage is then re-sent by the drainer (§4.4), which runs both on this
 same interval and immediately after each recovery pass.
 
@@ -1148,20 +1144,24 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
-block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
-see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
-or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
+open/unresolved/ambiguous counts in a `continuity` block and includes them in the normalized
+`recovery_debt` projection. Readable retained obligations use `open=true`,
+`service_blocking=false`, and `attention="routine"` without changing an otherwise healthy service
+status. Unreadable or actionable recovery evidence uses `service_blocking=true`,
+`attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6. Compatibility
+`degradation_causes` may still include continuity reason codes for diagnostic consumers, but those
+codes are not independently an outage verdict. The recorder does not send,
 replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
 exact provenance link and terminal delivery proof exist.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
