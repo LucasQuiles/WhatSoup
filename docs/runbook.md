@@ -207,6 +207,20 @@ Two further dark-by-default checks ship alongside it:
   `BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS` (default 5); fail-closed when
   enabled without a usable reference.
 
+Watchdog renotify backoff: an open incident is re-sent every
+`BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS` (default 21600). Once it is escalated,
+each re-send whose evidence is unchanged (ages and timestamps ignored, counts
+compared) doubles the next interval, capped by
+`BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS` (default 86400). Changed evidence
+resets the interval to the base. The incident records `renotifyCount` and
+`lastNotifiedEvidence`. A `session_collision:` incident pages critical when it
+opens and re-sends as a warning.
+
+`browser_debug` ignores debug browsers an owner keeps alive on purpose:
+`BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED` is a comma-separated list of
+`--user-data-dir` paths (for example a scheduled watcher's keep-alive CDP
+Chrome profile). Unlisted debug browsers still warn.
+
 #### Instance-database snapshots (dark by default)
 
 `deploy/scripts/whatsoup-db-snapshot.py` writes a coherent per-instance
