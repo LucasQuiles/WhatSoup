@@ -96,11 +96,22 @@ ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
 PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
 PROBE_OUTPUT_LINES="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_OUTPUT_LINES:-200}"
 REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
+# Captured before the rewrite below. Used ONLY to locate service-manager tools
+# (plutil, systemctl), never as a service instance's PATH: an instance runs
+# with its own service definition's PATH, not this job's.
+JOB_INHERITED_PATH="$PATH"
 export PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
-# The claude the bot actually spawns: deploy/lib/runtime-path.sh puts $HOME/.local/bin first on the
-# bot's PATH. Checking the shell's `claude` instead let a wrapper keep serving an old binary while
-# this job logged "updated" every night.
-CLAUDE_SERVICE_BIN="${WHATSOUP_CLAUDE_SERVICE_BIN:-$HOME/.local/bin/claude}"
+# The native installer's own launcher link. It is updated only when every
+# service instance on this host resolves exactly this path (see
+# claude_service_inventory); any other layout or pin holds the update.
+CLAUDE_NATIVE_LAUNCHER="$HOME/.local/bin/claude"
+case "$(uname -s)" in
+  Darwin) SERVICE_MANAGER_DEFAULT=launchd ;;
+  *) SERVICE_MANAGER_DEFAULT=systemd ;;
+esac
+SERVICE_MANAGER="${WHATSOUP_HARNESS_SERVICE_MANAGER:-$SERVICE_MANAGER_DEFAULT}"
+# shellcheck source=deploy/lib/runtime-path.sh
+. "$REPO_ROOT/deploy/lib/runtime-path.sh"
 
 log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
@@ -218,25 +229,254 @@ command_version() {
   "$cmd" "$@" 2>/dev/null | parse_version
 }
 
-claude_current() {
-  [ -x "$CLAUDE_SERVICE_BIN" ] || return 0
-  "$CLAUDE_SERVICE_BIN" --version 2>/dev/null | parse_version || true
+# path_first_executable <PATH> <name>: print the first "<segment>/<name>" that is an executable
+# regular file, as exec(3) PATH search would pick it, without running anything. Returns 1 when no
+# segment has one and 2 when an empty or relative segment comes first: such a segment resolves
+# against the service's working directory, which cannot be known statically.
+path_first_executable() {
+  local rest="$1:" name="$2" segment
+  while [ -n "$rest" ]; do
+    segment="${rest%%:*}"
+    rest="${rest#*:}"
+    case "$segment" in
+      /*) ;;
+      *) return 2 ;;
+    esac
+    if [ -f "$segment/$name" ] && [ -x "$segment/$name" ]; then
+      printf '%s\n' "$segment/$name"
+      return 0
+    fi
+  done
+  return 1
 }
 
-# native = the installer's own layout (a symlink into ~/.local/share/claude/versions/); anything
-# else is left alone because `claude install` can repoint the path past a wrapper.
-claude_service_layout() {
-  if [ ! -e "$CLAUDE_SERVICE_BIN" ]; then
-    echo other
-  elif [ -L "$CLAUDE_SERVICE_BIN" ] && case "$(readlink "$CLAUDE_SERVICE_BIN")" in */.local/share/claude/versions/*) true ;; *) false ;; esac; then
-    echo native
-  elif head -c 2 "$CLAUDE_SERVICE_BIN" 2>/dev/null | grep -q '#!'; then
-    echo wrapper
-  elif case "$(_resolve_symlinks "$CLAUDE_SERVICE_BIN")" in */node_modules/@anthropic-ai/*) true ;; *) false ;; esac; then
-    echo npm
-  else
-    echo other
+# Service-manager tools come from the job's inherited PATH, never from the rewritten PATH above,
+# so a user-writable directory cannot shadow them.
+job_tool() {
+  path_first_executable "$JOB_INHERITED_PATH" "$1"
+}
+
+# --- Per-instance agent CLI resolution -------------------------------------------------------
+#
+# Every WhatSoup instance launches through deploy/whatsoup, which composes its PATH with
+# whatsoup_effective_runtime_path from the service definition's own PATH and
+# WHATSOUP_PATH_PREPEND. The binary an instance spawns is therefore the first executable
+# `claude` on THAT path. It is found here without executing anything and classified with the
+# guard's static --claude-resolve mode. Anything that cannot be determined is "unknown".
+
+CLAUDE_CONSUMERS_FILE=""
+
+# claude_consumer_record <name> <manager> <status> <bin> <kind> <version> <detail>
+claude_consumer_record() {
+  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$CLAUDE_CONSUMERS_FILE"
+  case "$3" in
+    resolved) record_event "claude-consumer" "resolved" "$1 via $2: $4 ($5${6:+ $6})" "" "" "" ;;
+    *) record_event "claude-consumer" "$3" "$1 via $2: $7" ;;
+  esac
+}
+
+# claude_resolve_consumer <name> <manager> <inherited PATH> <prepend> <node>
+claude_resolve_consumer() {
+  local name="$1" manager="$2" inherited="$3" prepend="$4" node="$5"
+  local composed bin rc classification kind version
+  if [ -z "$inherited" ]; then
+    claude_consumer_record "$name" "$manager" unknown "" "" "" "service definition sets no PATH"
+    return 0
   fi
+  [ -n "$node" ] || node="$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin/node"
+  if [ ! -x "$node" ]; then
+    claude_consumer_record "$name" "$manager" unknown "" "" "" "launcher node $node is not executable"
+    return 0
+  fi
+  rc=0
+  composed="$(whatsoup_effective_runtime_path "$HOME" "$node" "$inherited" "$prepend" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$composed" ]; then
+    claude_consumer_record "$name" "$manager" unknown "" "" "" "runtime PATH composition rejected the service PATH or prepend"
+    return 0
+  fi
+  rc=0
+  bin="$(path_first_executable "$composed" claude)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      claude_consumer_record "$name" "$manager" missing "" "" "" "no executable claude on the service PATH"
+      return 0 ;;
+    *)
+      claude_consumer_record "$name" "$manager" unknown "" "" "" "service PATH has a relative segment before any claude"
+      return 0 ;;
+  esac
+  rc=0
+  classification="$(claude_classify "$bin")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$classification" ]; then
+    claude_consumer_record "$name" "$manager" unknown "$bin" "" "" "static classification of $bin failed"
+    return 0
+  fi
+  kind="${classification%%$'\t'*}"
+  version="${classification#*$'\t'}"
+  claude_consumer_record "$name" "$manager" resolved "$bin" "$kind" "$version" ""
+}
+
+# claude_classify <abs path>: print "<kind>\t<configuredVersion>" from the static classifier.
+claude_classify() {
+  local out rc=0
+  out="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --claude-resolve --bin "$1" --home "$HOME" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # shellcheck disable=SC2016 # a JavaScript program; ${...} is a JS template, not shell.
+  printf '%s' "$out" | "$REPO_NODE_BIN" -e '
+let s = "";
+process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+  const r = JSON.parse(s);
+  if (typeof r.kind !== "string") process.exit(1);
+  process.stdout.write(`${r.kind}\t${typeof r.configuredVersion === "string" ? r.configuredVersion : ""}`);
+});'
+}
+
+# plist_string <file> <key path>: 0 and the value when present, 1 when absent or not a string.
+plist_string() {
+  "$PLUTIL_BIN" -extract "$2" raw -o - "$1" 2>/dev/null
+}
+
+claude_inventory_launchd() {
+  local dir="$HOME/Library/LaunchAgents" file name label program arg1 path_value prepend node
+  PLUTIL_BIN="$(job_tool plutil)" || {
+    echo "plutil not found on the job PATH"
+    return 1
+  }
+  for file in "$dir"/com.whatsoup.*.plist; do
+    [ -e "$file" ] || continue
+    name="${file##*/com.whatsoup.}"
+    name="${name%.plist}"
+    if ! "$PLUTIL_BIN" -lint "$file" >/dev/null 2>&1; then
+      claude_consumer_record "$name" launchd unknown "" "" "" "$file is not a readable property list"
+      continue
+    fi
+    label="$(plist_string "$file" Label || true)"
+    program="$(plist_string "$file" ProgramArguments.0 || true)"
+    arg1="$(plist_string "$file" ProgramArguments.1 || true)"
+    if [ "$label" != "com.whatsoup.$name" ] || [ "$program" != "$HOME/.local/bin/whatsoup" ] || [ "$arg1" != "$name" ]; then
+      record_event "claude-consumer" "skipped" "${file##*/} is not a generated instance plist (label or program differs)"
+      continue
+    fi
+    path_value="$(plist_string "$file" EnvironmentVariables.PATH || true)"
+    prepend="$(plist_string "$file" EnvironmentVariables.WHATSOUP_PATH_PREPEND || true)"
+    node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
+    claude_resolve_consumer "$name" launchd "$path_value" "$prepend" "$node"
+  done
+}
+
+# systemd_assign <KEY=VALUE>: fold one assignment into SYSTEMD_ENV_*; returns 1 on a value this
+# reader will not interpret (quotes, escapes, expansions).
+systemd_assign() {
+  local key="${1%%=*}" value="${1#*=}"
+  case "$1" in *=*) ;; *) return 1 ;; esac
+  case "$key" in
+    PATH|WHATSOUP_PATH_PREPEND|WHATSOUP_NODE) ;;
+    *) return 0 ;;
+  esac
+  case "$value" in
+    *\"*|*\'*|*\\*|*\$*|*\`*) return 1 ;;
+  esac
+  case "$key" in
+    PATH) SYSTEMD_ENV_PATH="$value" ;;
+    WHATSOUP_PATH_PREPEND) SYSTEMD_ENV_PREPEND="$value" ;;
+    WHATSOUP_NODE) SYSTEMD_ENV_NODE="$value" ;;
+  esac
+}
+
+# systemd_unit_environment <show output>: apply Environment= then EnvironmentFiles= (which
+# override it), after the manager environment already loaded by the caller.
+systemd_unit_environment() {
+  local line value token file flags
+  while IFS= read -r line; do
+    case "$line" in
+      Environment=*)
+        value="${line#Environment=}"
+        case "$value" in *\"*|*\'*|*\\*) return 1 ;; esac
+        set -f
+        for token in $value; do
+          systemd_assign "$token" || { set +f; return 1; }
+        done
+        set +f ;;
+    esac
+  done <<< "$1"
+  while IFS= read -r line; do
+    case "$line" in
+      EnvironmentFiles=?*)
+        value="${line#EnvironmentFiles=}"
+        file="${value%% (*}"
+        flags="${value#"$file"}"
+        if [ ! -e "$file" ]; then
+          case "$flags" in *ignore_errors=yes*) continue ;; esac
+          return 1
+        fi
+        [ -f "$file" ] && [ -r "$file" ] || return 1
+        systemd_environment_file "$file" || return 1 ;;
+    esac
+  done <<< "$1"
+}
+
+systemd_environment_file() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) ;;
+      *) continue ;;
+    esac
+    systemd_assign "$line" || return 1
+  done < "$1"
+}
+
+claude_inventory_systemd() {
+  local units unit name show manager_env rc=0
+  SYSTEMCTL_BIN="$(job_tool systemctl)" || {
+    echo "systemctl not found on the job PATH"
+    return 1
+  }
+  units="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "systemctl list-units failed rc=$rc"
+    return 1
+  fi
+  rc=0
+  manager_env="$("$SYSTEMCTL_BIN" --user show-environment 2>/dev/null)" || rc=$?
+  while IFS= read -r unit; do
+    unit="${unit%% *}"
+    case "$unit" in
+      whatsoup@?*.service) ;;
+      *) continue ;;
+    esac
+    name="${unit#whatsoup@}"
+    name="${name%.service}"
+    SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
+    if [ "$rc" -eq 0 ]; then
+      while IFS= read -r line; do
+        case "$line" in PATH=*) systemd_assign "$line" || SYSTEMD_ENV_PATH="" ;; esac
+      done <<< "$manager_env"
+    fi
+    if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
+      claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
+      continue
+    fi
+    if ! systemd_unit_environment "$show"; then
+      claude_consumer_record "$name" systemd unknown "" "" "" "unit environment for $unit is not statically readable"
+      continue
+    fi
+    claude_resolve_consumer "$name" systemd "$SYSTEMD_ENV_PATH" "$SYSTEMD_ENV_PREPEND" "$SYSTEMD_ENV_NODE"
+  done <<< "$units"
+}
+
+# claude_service_inventory: fill CLAUDE_CONSUMERS_FILE with one line per instance
+# (name, manager, status, bin, kind, configured version). Returns 1 with a reason on stdout when
+# the service manager itself cannot be read; zero instances is a successful empty inventory.
+claude_service_inventory() {
+  case "$SERVICE_MANAGER" in
+    launchd) claude_inventory_launchd ;;
+    systemd) claude_inventory_systemd ;;
+    *)
+      echo "unsupported service manager: $SERVICE_MANAGER"
+      return 1 ;;
+  esac
 }
 
 codex_bin() {
@@ -279,10 +519,6 @@ opencode_current() {
     return 0
   fi
   "$bin" --version 2>/dev/null | parse_version
-}
-
-smoke_claude() {
-  [ -x "$CLAUDE_SERVICE_BIN" ] && "$CLAUDE_SERVICE_BIN" --version >/dev/null 2>&1
 }
 
 smoke_codex() {
@@ -511,57 +747,160 @@ audit_npm_global() {
   PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" audit --global --audit-level=high >/dev/null 2>&1
 }
 
+# claude_consumer_policy: decide from CLAUDE_CONSUMERS_FILE whether the shared launcher may be
+# updated. Prints one \037-separated record "<verdict> <kind> <version> <message>"; verdict is one of
+#   proceed   every instance resolves exactly the launcher; kind/version describe it
+#   held      no instance uses the launcher, or an instance is pinned to another binary
+#   unknown   an instance's binary could not be determined
+#   missing   an instance has no claude on its service PATH
+# The native installer rewrites only the launcher, so an install is safe to report as a service
+# update only when every consumer runs it; a pinned instance is an owner decision and is held.
+claude_consumer_policy() {
+  local name manager status bin kind version
+  local count=0 unknown="" missing="" pinned="" launcher_kind="" launcher_version=""
+  while IFS=$'\037' read -r name manager status bin kind version; do
+    [ -n "$name" ] || continue
+    count=$((count + 1))
+    case "$status" in
+      unknown) unknown="$unknown $name" ;;
+      missing) missing="$missing $name" ;;
+      resolved)
+        if [ "$bin" != "$CLAUDE_NATIVE_LAUNCHER" ]; then
+          pinned="$pinned $name=$bin"
+        else
+          launcher_kind="$kind"
+          launcher_version="$version"
+        fi ;;
+      *) unknown="$unknown $name" ;;
+    esac
+  done < "$CLAUDE_CONSUMERS_FILE"
+  if [ -n "$unknown" ]; then
+    printf 'unknown\037\037\037instance binary could not be determined for:%s\n' "$unknown"
+  elif [ -n "$missing" ]; then
+    printf 'missing\037\037\037no claude on the service PATH of:%s\n' "$missing"
+  elif [ "$count" -eq 0 ]; then
+    printf 'held\037\037\037no service instance uses the shared launcher; nothing to update\n'
+  elif [ -n "$pinned" ]; then
+    printf 'held\037\037\037instances resolve a binary other than the shared launcher:%s\n' "$pinned"
+  else
+    printf 'proceed\037%s\037%s\037%s service instance(s) resolve the shared launcher\n' "$launcher_kind" "$launcher_version" "$count"
+  fi
+}
+
 update_claude() {
-  local before after target action layout plan npm time_json
-  before="$(claude_current)"
-  layout="$(claude_service_layout)"
+  local before="" after target action plan_file plan_rc npm time_json reason inventory_error
+  local policy verdict kind message layout rc
+  CLAUDE_CONSUMERS_FILE="$(mktemp "$TMP_DIR/claude-consumers.XXXXXX")"
+  inventory_error="$TMP_DIR/claude-inventory.err"
+  rc=0
+  claude_service_inventory >"$inventory_error" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    record_event "claude" "unknown" "service inventory unavailable: $(head -n 5 "$inventory_error")"
+    send_alert "claude-update" "warning" "Agent CLI inventory failed" "The maintenance job could not read the service manager, so no agent CLI update was attempted. $(head -n 5 "$inventory_error")"
+    return 0
+  fi
+  policy="$(claude_consumer_policy)"
+  IFS=$'\037' read -r verdict kind before message <<< "$policy"
+  case "$verdict" in
+    proceed) ;;
+    held)
+      record_event "claude" "held" "$message"
+      case "$message" in
+        *"other than the shared launcher"*)
+          send_alert "claude-update" "warning" "Agent CLI update held by an instance pin" "$message" ;;
+      esac
+      return 0 ;;
+    missing)
+      record_event "claude" "missing" "$message"
+      send_alert "claude-update" "warning" "Agent CLI missing for a service instance" "$message"
+      return 0 ;;
+    *)
+      record_event "claude" "unknown" "$message"
+      send_alert "claude-update" "warning" "Agent CLI update held: unknown instance binary" "$message"
+      return 0 ;;
+  esac
+  case "$kind" in
+    native) layout=native ;;
+    npm|wrapper|wrapper-unresolved|other)
+      record_event "claude" "unmanaged-layout" "shared launcher is a $kind layout; native installer not run" "$before"
+      send_alert "claude-update" "warning" "Agent CLI not on the native layout" "The shared launcher is a $kind layout, so the native installer was not run."
+      return 0 ;;
+    *)
+      record_event "claude" "unknown" "shared launcher classified as $kind" "$before"
+      send_alert "claude-update" "warning" "Agent CLI update held: launcher unusable" "The shared launcher classified as $kind."
+      return 0 ;;
+  esac
+
   npm="$(npm_bin)"
   time_json="$TMP_DIR/npm-time-claude.json"
   if [ -z "$npm" ] || ! PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view @anthropic-ai/claude-code time --json >"$time_json" 2>/dev/null; then
     record_event "claude" "unknown" "npm publish-time lookup failed" "$before"
-    send_alert "claude-update" "warning" "Claude version lookup failed" "The maintenance job could not read Claude CLI publish times, so it cannot apply the release-age cooldown."
+    send_alert "claude-update" "warning" "Agent CLI version lookup failed" "The maintenance job could not read agent CLI publish times, so it cannot apply the release-age cooldown."
     return 0
   fi
-  plan="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
-    --claude-update-plan --current "${before:-}" --time-json "$time_json" \
-    --cooldown-minutes "$(manifest_npm_cooldown_minutes)" --layout "$layout" 2>/dev/null | tail -n 1)"
-  action="$(printf '%s' "$plan" | "$REPO_NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).action)}catch{console.log("")}})')"
-  target="$(printf '%s' "$plan" | "$REPO_NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).target??"")}catch{console.log("")}})')"
+  plan_file="$TMP_DIR/claude-plan.json"
+  plan_rc=0
+  "$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --claude-update-plan --current "$before" --time-json "$time_json" \
+    --cooldown-minutes "$(manifest_npm_cooldown_minutes)" --layout "$layout" \
+    >"$plan_file" 2>/dev/null || plan_rc=$?
+  plan="$("$REPO_NODE_BIN" - "$plan_file" <<'NODE' || true
+const fs = require('node:fs');
+try {
+  const lines = fs.readFileSync(process.argv[2], 'utf8').split('\n').filter(Boolean);
+  const r = lines.length === 1 ? JSON.parse(lines[0]) : null;
+  const text = (v) => (typeof v === 'string' ? v.replace(/[\t\n]/g, ' ') : '');
+  if (r && typeof r.action === 'string') {
+    process.stdout.write([r.action, text(r.target), text(r.reason || (r.error && `${r.error.code}: ${r.error.message}`))].join('\x1f'));
+  }
+} catch {}
+NODE
+)"
+  IFS=$'\037' read -r action target reason <<< "$plan"
+  if [ "$plan_rc" -ne 0 ] && [ "$action" != "error" ]; then
+    action=""
+  fi
   case "$action" in
+    error)
+      record_event "claude" "held" "update plan rejected: $reason" "$before"
+      send_alert "claude-update" "warning" "Agent CLI update plan rejected" "$reason"
+      return 0 ;;
     missing)
-      record_event "claude" "missing" "service claude binary not found: $CLAUDE_SERVICE_BIN"
-      send_alert "claude-update" "warning" "Claude harness missing" "The maintenance job could not run the bot's claude binary at $CLAUDE_SERVICE_BIN."
+      record_event "claude" "missing" "planner reported no current version: $reason" "$before"
+      return 0 ;;
+    unknown)
+      record_event "claude" "unknown" "planner could not read the current version: $reason" "$before"
+      send_alert "claude-update" "warning" "Agent CLI version unknown" "$reason"
       return 0 ;;
     held)
-      record_event "claude" "held" "no Claude CLI release is past the publish-age cooldown" "$before"
+      record_event "claude" "held" "$reason" "$before"
       return 0 ;;
     current)
-      record_event "claude" "current" "service claude is at or past the newest cooldown-eligible release" "$before" "$before" "$target"
+      record_event "claude" "current" "shared launcher is at or past the newest cooldown-eligible release" "$before" "$before" "$target"
       return 0 ;;
     unmanaged-layout)
-      record_event "claude" "unmanaged-layout" "service claude is a $layout layout; native installer not run" "$before" "$before" "$target"
-      send_alert "claude-update" "warning" "Claude harness not on the native layout" "The bot's claude ($CLAUDE_SERVICE_BIN) is a $layout layout, so the native installer was not run. Eligible release: $target; serving: $before."
+      record_event "claude" "unmanaged-layout" "$reason" "$before" "$before" "$target"
       return 0 ;;
     install) ;;
     *)
-      record_event "claude" "unknown" "update plan unreadable" "$before"
-      send_alert "claude-update" "warning" "Claude update plan failed" "The maintenance job could not compute a Claude CLI update plan."
+      record_event "claude" "unknown" "update plan unreadable (rc=$plan_rc)" "$before"
+      send_alert "claude-update" "warning" "Agent CLI update plan failed" "The maintenance job could not compute an agent CLI update plan (rc=$plan_rc)."
       return 0 ;;
   esac
   if [ "$CHECK_ONLY" -eq 1 ]; then
     record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
     return 0
   fi
-  "$CLAUDE_SERVICE_BIN" install "$target" || true
-  after="$(claude_current)"
-  if ! smoke_claude || [ "$after" != "$target" ]; then
-    "$CLAUDE_SERVICE_BIN" install "$before" || true
-    record_event "claude" "rollback" "service claude did not report $target after install; rollback attempted" "$before" "$after" "$target"
-    send_alert "claude-update" "critical" "Claude harness rollback" "Install of $target left the bot's claude at '${after:-none}'; rollback to $before attempted."
+  "$CLAUDE_NATIVE_LAUNCHER" install "$target" || true
+  after="$(claude_classify "$CLAUDE_NATIVE_LAUNCHER" || true)"
+  after="${after#*$'\t'}"
+  if [ "$after" != "$target" ]; then
+    record_event "claude" "rollback" "shared launcher did not point at $target after install" "$before" "$after" "$target"
+    send_alert "claude-update" "critical" "Agent CLI install failed" "Install of $target left the shared launcher at '${after:-none}'."
     return 1
   fi
-  record_event "claude" "updated" "installed cooldown-eligible release and smoke checked the service binary" "$before" "$after" "$target"
-  send_alert "claude-update" "info" "Claude harness updated" "Claude CLI $before -> $after"
+  record_event "claude" "updated" "installed the cooldown-eligible release through the shared launcher" "$before" "$after" "$target"
+  send_alert "claude-update" "info" "Agent CLI updated" "Agent CLI $before -> $after"
 }
 
 update_codex() {

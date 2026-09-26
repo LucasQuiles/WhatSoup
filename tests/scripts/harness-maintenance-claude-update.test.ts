@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -63,24 +62,5 @@ describe('claudeUpdatePlan', () => {
   });
 });
 
-describe('harness-maintenance.sh claude update wiring', () => {
-  const source = readFileSync(path.join(process.cwd(), 'deploy/scripts/harness-maintenance.sh'), 'utf8');
-  const fn = source.slice(source.indexOf('update_claude()'), source.indexOf('update_codex()'));
-
-  it('checks and smoke-tests the binary the bot service resolves, not the shell PATH claude', () => {
-    // deploy/lib/runtime-path.sh puts $HOME/.local/bin first for the bot process.
-    expect(source).toContain('CLAUDE_SERVICE_BIN="${WHATSOUP_CLAUDE_SERVICE_BIN:-$HOME/.local/bin/claude}"');
-    const smoke = source.slice(source.indexOf('smoke_claude()'), source.indexOf('smoke_codex()'));
-    expect(smoke).toContain('"$CLAUDE_SERVICE_BIN" --version');
-  });
-
-  it('installs an explicit cooldown-eligible version through the service binary, never latest', () => {
-    expect(fn).not.toMatch(/install latest/);
-    expect(fn).toContain('--claude-update-plan');
-    expect(fn).toContain('"$CLAUDE_SERVICE_BIN" install "$target"');
-  });
-
-  it('verifies the service binary reports the target after install', () => {
-    expect(fn).toContain('[ "$after" != "$target" ]');
-  });
-});
+// The shell wiring (per-instance resolution, consumer policy, install and rollback) is exercised
+// behaviourally against the real script in tests/deploy/harness-maintenance-claude-e2e.test.ts.
