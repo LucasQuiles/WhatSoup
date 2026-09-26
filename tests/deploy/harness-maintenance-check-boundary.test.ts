@@ -266,6 +266,21 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     }
   }, T);
 
+  it('reports a binary behind a relative PATH entry as unknown, not missing, and runs nothing', () => {
+    const h = boundaryHarness();
+    rmSync(path.join(h.home, 'npm-global/bin/opencode'));
+    // A relative entry ahead of fakebin, where the local MCP and runtime stubs are: what it would
+    // find depends on the working directory of whatever runs it.
+    const r = run(h, ['--check'], { PATH: `relative-bin:${h.env.PATH}` });
+    expect(r.state?.mode, r.stderr).toBe('check');
+    for (const component of ['local-bin:pinecone-mcp', 'runtime:python3', 'opencode']) {
+      const last = events(r, component).at(-1);
+      expect(last, component).toMatchObject({ status: 'unknown' });
+      expect(last!.message, component).toContain('relative PATH entry');
+    }
+    expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+  }, T);
+
   it('exits 1 before any step without a usable node, leaving no state and no temporary directory', () => {
     const h = boundaryHarness();
     const systemTmp = mkdtempSync(path.join(tmpdir(), 'hm-systmp-'));

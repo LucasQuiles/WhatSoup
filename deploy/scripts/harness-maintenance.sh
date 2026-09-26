@@ -376,13 +376,27 @@ job_tool() {
 }
 
 # harness_which <name>: the path a harness binary resolves to on the harness PATH, without running
-# it. Check mode executes nothing from there, so it looks the binary up statically.
+# it. Check mode executes nothing from there, so it looks the binary up statically, and returns 2
+# when a relative PATH entry comes first: what that finds depends on a working directory.
 harness_which() {
+  local rc=0
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    path_first_executable "$HARNESS_PATH" "$1" || true
+    path_first_executable "$HARNESS_PATH" "$1" || rc=$?
+    [ "$rc" -ne 2 ] || return 2
   else
     command -v "$1" || true
   fi
+}
+
+HARNESS_RELATIVE_REASON="a relative PATH entry comes first, so check mode cannot resolve it without running anything"
+
+# harness_unresolvable <dir> <name>: 0 in check mode when <name> is not in <dir>, where it is
+# looked for first, and a relative PATH entry precedes it on the harness PATH.
+harness_unresolvable() {
+  local rc=0
+  [ "$CHECK_ONLY" -eq 1 ] && [ ! -x "$1/$2" ] || return 1
+  path_first_executable "$HARNESS_PATH" "$2" >/dev/null || rc=$?
+  [ "$rc" -eq 2 ]
 }
 
 # --- Per-instance agent CLI resolution -------------------------------------------------------
@@ -748,7 +762,7 @@ codex_bin() {
   if [ -x "$CODX_NODE_BIN_DIR/codex" ]; then
     echo "$CODX_NODE_BIN_DIR/codex"
   else
-    harness_which codex
+    harness_which codex || true
   fi
 }
 
@@ -813,7 +827,7 @@ opencode_bin() {
   if [ -x "$NPM_GLOBAL_BIN_DIR/opencode" ]; then
     echo "$NPM_GLOBAL_BIN_DIR/opencode"
   else
-    harness_which opencode
+    harness_which opencode || true
   fi
 }
 
@@ -1765,6 +1779,10 @@ observe_claude_update_path() {
 
 update_codex() {
   local before latest npm after
+  if harness_unresolvable "$CODX_NODE_BIN_DIR" codex; then
+    record_event "codex" "unknown" "codex: $HARNESS_RELATIVE_REASON"
+    return 0
+  fi
   before="$(codex_current)"
   if [ -z "$before" ] && [ "$CHECK_ONLY" -eq 1 ] && [ -n "$(codex_bin)" ]; then
     record_event "codex" "unknown" "codex is installed but not as an npm package, so check mode cannot read its version without executing it"
@@ -1810,6 +1828,10 @@ update_codex() {
 
 update_opencode() {
   local before after target
+  if harness_unresolvable "$NPM_GLOBAL_BIN_DIR" opencode; then
+    record_event "opencode" "unknown" "opencode: $HARNESS_RELATIVE_REASON"
+    return 0
+  fi
   before="$(opencode_current)"
   if [ -z "$before" ] && [ "$CHECK_ONLY" -eq 1 ] && [ -n "$(opencode_bin)" ]; then
     record_event "opencode" "unknown" "opencode is installed but not as an npm package, so check mode cannot read its version without executing it"
@@ -1885,7 +1907,10 @@ probe_command() {
 probe_local_bin() {
   local bin="$1"
   local path
-  path="$(harness_which "$bin")"
+  if ! path="$(harness_which "$bin")"; then
+    record_event "local-bin:$bin" "unknown" "$bin: $HARNESS_RELATIVE_REASON"
+    return 0
+  fi
   if [ -z "$path" ]; then
     record_event "local-bin:$bin" "missing" "$bin not found on PATH"
     return 0
@@ -1925,7 +1950,10 @@ probe_local_bin() {
 probe_runtime() {
   local name="$1" path
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    path="$(harness_which "$2")"
+    if ! path="$(harness_which "$2")"; then
+      record_event "$name" "unknown" "$2: $HARNESS_RELATIVE_REASON"
+      return 0
+    fi
     if [ -n "$path" ]; then
       record_event "$name" "present" "$path present; not executed in check mode"
     else
