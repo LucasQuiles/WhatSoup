@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The job's own PATH as the service manager gave it, and the user-writable directories where
+# harness binaries live. A --check run executes helpers only from the job's PATH with those
+# directories (and empty or relative segments) removed, from its first command on, so nothing
+# placed there can shadow a helper; harness binaries are still located there, by path only.
+JOB_INHERITED_PATH="$PATH"
+NPM_GLOBAL_PREFIX="${WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX:-$HOME/.local/share/whatsoup/npm-global}"
+NPM_GLOBAL_BIN_DIR="$NPM_GLOBAL_PREFIX/bin"
+path_without_user_dirs() {
+  local rest="$1:" segment out=""
+  while [ -n "$rest" ]; do
+    segment="${rest%%:*}"
+    rest="${rest#*:}"
+    case "$segment" in
+      "$HOME/.local/bin"|"$HOME/.local/bin/"|"$NPM_GLOBAL_BIN_DIR"|"$NPM_GLOBAL_BIN_DIR/") continue ;;
+      /*) out="${out:+$out:}$segment" ;;
+    esac
+  done
+  printf '%s\n' "${out:-/usr/bin:/bin:/usr/sbin:/sbin}"
+}
+JOB_TOOL_PATH="$(path_without_user_dirs "$JOB_INHERITED_PATH")"
+for arg in "$@"; do
+  if [ "$arg" = --check ]; then
+    export PATH="$JOB_TOOL_PATH"
+  fi
+done
+
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {
   local p="$1"
@@ -39,16 +65,22 @@ USAGE
 # run.log, and this run's temporary directory (removed on exit; npm's cache is
 # pointed into it). Permitted commands: the pinned node running this repo's own
 # scripts, plutil and read-only systemctl verbs (list-units, show-environment,
-# show, is-active), npm read-only verbs (--version, config get, view, ls),
-# apt list, ps (uid, elapsed time and executable name only), and
-# scripts/check-unit-drift.sh (file comparison only).
+# show, is-active), read-only verbs of the pinned npm only (--version, config
+# get, view, ls), apt list, ps (uid, elapsed time and executable name only),
+# scripts/check-unit-drift.sh (file comparison only), and system helpers (awk,
+# grep, mktemp, ...). Every command is taken from the job's own PATH with
+# ~/.local/bin, the npm-global bin directory and relative segments removed, so
+# nothing placed in those directories can shadow one. `npm view` reads the
+# registry: a check run makes these read-only network requests, and npm sends
+# any registry credentials ~/.npmrc holds with them. With the pinned npm absent,
+# the npm checks are skipped and reported unknown.
 #
 # Not permitted: any install or dry-run install, the npmrc merge or backup, an
-# alert, and executing any harness or wrapper binary found on a PATH (the agent
-# CLI, including its plugin and MCP listings, which can refresh MCP
-# authentication; codex; opencode; local MCP binaries; runtime --version
-# probes). Versions of npm-installed harnesses are read from package metadata;
-# anything else is reported by path only.
+# alert, any npm other than the pinned one, and executing any harness or
+# wrapper binary found on a PATH (the agent CLI, including its plugin and MCP
+# listings, which can refresh MCP authentication; codex; opencode; local MCP
+# binaries; runtime --version probes). Versions of npm-installed harnesses are
+# read from package metadata; anything else is reported by path only.
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -114,17 +146,19 @@ if [ "$REPO_NODE_BIN_SOURCE" = "path" ] && ! whatsoup_check_node_pin "$REPO_ROOT
 fi
 
 CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin}"
-NPM_GLOBAL_PREFIX="${WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX:-$HOME/.local/share/whatsoup/npm-global}"
-NPM_GLOBAL_BIN_DIR="$NPM_GLOBAL_PREFIX/bin"
 ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
 PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
 PROBE_OUTPUT_LINES="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_OUTPUT_LINES:-200}"
 REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
-# Captured before the rewrite below. Used ONLY to locate service-manager tools
-# (plutil, systemctl), never as a service instance's PATH: an instance runs
-# with its own service definition's PATH, not this job's.
-JOB_INHERITED_PATH="$PATH"
-export PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
+# Where a normal run looks for harness binaries: the npm-global and user bin directories first.
+# A normal run also executes from it; --check only locates on it (harness_which) and keeps
+# executing from JOB_TOOL_PATH. JOB_TOOL_PATH also locates service-manager and system tools
+# (job_tool), never a service instance's PATH: an instance runs with its own service
+# definition's PATH, not this job's.
+HARNESS_PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$JOB_INHERITED_PATH"
+if [ "$CHECK_ONLY" -eq 0 ]; then
+  export PATH="$HARNESS_PATH"
+fi
 # The native installer's own launcher link. It is updated only when every
 # service instance on this host resolves exactly this path (see
 # claude_service_inventory); any other layout or pin holds the update.
@@ -322,10 +356,20 @@ path_first_executable() {
   return 1
 }
 
-# Service-manager tools come from the job's inherited PATH, never from the rewritten PATH above,
-# so a user-writable directory cannot shadow them.
+# Service-manager and system tools come from the job's inherited PATH without the user-writable
+# harness directories, never from the harness PATH, so nothing placed there can shadow them.
 job_tool() {
-  path_first_executable "$JOB_INHERITED_PATH" "$1"
+  path_first_executable "$JOB_TOOL_PATH" "$1"
+}
+
+# harness_which <name>: the path a harness binary resolves to on the harness PATH, without running
+# it. Check mode executes nothing from there, so it looks the binary up statically.
+harness_which() {
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    path_first_executable "$HARNESS_PATH" "$1" || true
+  else
+    command -v "$1" || true
+  fi
 }
 
 # --- Per-instance agent CLI resolution -------------------------------------------------------
@@ -664,16 +708,27 @@ codex_bin() {
   if [ -x "$CODX_NODE_BIN_DIR/codex" ]; then
     echo "$CODX_NODE_BIN_DIR/codex"
   else
-    command -v codex || true
+    harness_which codex
   fi
 }
 
+# npm_bin: the pinned npm, or in a normal run the first npm on the PATH. Check mode runs no npm
+# but the pinned one (see npm_skipped_in_check).
 npm_bin() {
   if [ -x "$CODX_NODE_BIN_DIR/npm" ]; then
     echo "$CODX_NODE_BIN_DIR/npm"
-  else
+  elif [ "$CHECK_ONLY" -eq 0 ]; then
     command -v npm || true
   fi
+}
+
+# npm_skipped_in_check <component>: 0, with an unknown event, when this is a check run and the
+# pinned npm is absent; the caller then skips its npm checks.
+npm_skipped_in_check() {
+  if [ "$CHECK_ONLY" -eq 0 ] || [ -x "$CODX_NODE_BIN_DIR/npm" ]; then
+    return 1
+  fi
+  record_event "$1" "unknown" "npm checks skipped: the pinned npm $CODX_NODE_BIN_DIR/npm is absent, and check mode runs no other npm"
 }
 
 # npm_package_version <bin> <package>: print the version from the package.json of <package> that
@@ -718,7 +773,7 @@ opencode_bin() {
   if [ -x "$NPM_GLOBAL_BIN_DIR/opencode" ]; then
     echo "$NPM_GLOBAL_BIN_DIR/opencode"
   else
-    command -v opencode || true
+    harness_which opencode
   fi
 }
 
@@ -795,6 +850,9 @@ NODE
 
 check_codex_npm_cooldown() {
   local npm
+  if npm_skipped_in_check codex-npm-cooldown; then
+    return 0
+  fi
   npm="$(npm_bin)"
   if [ -z "$npm" ]; then
     record_event "codex-npm-cooldown" "missing" "npm not found for Codex node"
@@ -1057,6 +1115,9 @@ update_claude() {
       return 2 ;;
   esac
 
+  if npm_skipped_in_check claude; then
+    return 2
+  fi
   npm="$(npm_bin)"
   time_json="$TMP_DIR/npm-time-claude.json"
   rc=0
@@ -1544,13 +1605,13 @@ observe_claude_update_policy() {
 # "claude" or a bare version filename) and those running over 30 minutes. Only the uid, elapsed
 # time and executable name are read, never a command line, and only the counts are recorded.
 observe_claude_processes() {
-  local ps_bin counts total long
-  if ! ps_bin="$(job_tool ps)"; then
-    record_event "claude-processes" "unknown" "ps not found on the job PATH"
+  local ps_bin awk_bin counts total long
+  if ! ps_bin="$(job_tool ps)" || ! awk_bin="$(job_tool awk)"; then
+    record_event "claude-processes" "unknown" "ps or awk not found on the job PATH"
     return 0
   fi
   # shellcheck disable=SC2016 # an awk program; $1..$3 are awk fields.
-  if ! counts="$("$ps_bin" -A -o uid= -o etime= -o comm= 2>/dev/null | awk -v uid="$EUID" '
+  if ! counts="$("$ps_bin" -A -o uid= -o etime= -o comm= 2>/dev/null | "$awk_bin" -v uid="$EUID" '
     $1 == uid {
       comm = $0
       sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+/, "", comm)
@@ -1587,13 +1648,16 @@ update_codex() {
     record_event "codex" "unknown" "codex is installed but not as an npm package, so check mode cannot read its version without executing it"
     return 0
   fi
-  latest="$(npm_latest_version @openai/codex || true)"
-  npm="$(npm_bin)"
   if [ -z "$before" ]; then
     record_event "codex" "missing" "codex binary not found"
     send_alert "codex-update" "warning" "Codex harness missing" "The maintenance job could not find the codex binary."
     return 0
   fi
+  if npm_skipped_in_check codex; then
+    return 0
+  fi
+  latest="$(npm_latest_version @openai/codex || true)"
+  npm="$(npm_bin)"
   if [ -z "$latest" ] || [ -z "$npm" ]; then
     record_event "codex" "unknown" "latest version lookup failed" "$before"
     send_alert "codex-update" "warning" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
@@ -1630,6 +1694,9 @@ update_opencode() {
     return 0
   fi
   if [ -z "$before" ]; then
+    if npm_skipped_in_check opencode; then
+      return 0
+    fi
     target="$(npm_latest_eligible_version opencode-ai || true)"
     if [ -z "$target" ]; then
       record_event "opencode" "held" "opencode missing and no opencode-ai version is past the npm cooldown window"
@@ -1696,7 +1763,7 @@ probe_command() {
 probe_local_bin() {
   local bin="$1"
   local path
-  path="$(command -v "$bin" || true)"
+  path="$(harness_which "$bin")"
   if [ -z "$path" ]; then
     record_event "local-bin:$bin" "missing" "$bin not found on PATH"
     return 0
@@ -1736,7 +1803,7 @@ probe_local_bin() {
 probe_runtime() {
   local name="$1" path
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    path="$(command -v "$2" || true)"
+    path="$(harness_which "$2")"
     if [ -n "$path" ]; then
       record_event "$name" "present" "$path present; not executed in check mode"
     else
@@ -1810,10 +1877,12 @@ probe_tier2() {
 
   for version in 24.13.0 24.15.0; do
     local npm="$HOME/.nvm/versions/node/v$version/bin/npm"
-    if [ -x "$npm" ]; then
-      probe_command "npm-global:$version" env PATH="$HOME/.nvm/versions/node/v$version/bin:$PATH" "$npm" ls -g --depth=0
-    else
+    if [ ! -x "$npm" ]; then
       record_event "npm-global:$version" "missing" "npm not found for node $version"
+    elif [ "$CHECK_ONLY" -eq 1 ] && [ "$npm" != "$CODX_NODE_BIN_DIR/npm" ]; then
+      record_event "npm-global:$version" "skipped" "$npm is not the pinned npm; check mode runs no other npm"
+    else
+      probe_command "npm-global:$version" env PATH="$HOME/.nvm/versions/node/v$version/bin:$PATH" "$npm" ls -g --depth=0
     fi
   done
 

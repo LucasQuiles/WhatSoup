@@ -52,6 +52,13 @@ const NPM_READ_ONLY = [/^--version$/, /^config get min-release-age$/, /^view \S+
 const SYSTEMCTL_READ_ONLY = [/^--user list-units /, /^--user show-environment$/, /^--user show /, /^--user is-active /];
 const APT_READ_ONLY = [/^list --upgradable$/];
 
+// Helpers the script, its sourced libraries and check-unit-drift.sh call by bare name.
+const SHADOWED_HELPERS = [
+  'awk', 'basename', 'cat', 'chmod', 'cmp', 'cp', 'cut', 'date', 'dirname', 'env', 'grep', 'head', 'id',
+  'ln', 'ls', 'mkdir', 'mkfifo', 'mktemp', 'mv', 'ps', 'readlink', 'rm', 'rmdir', 'sed', 'sleep', 'sort',
+  'stat', 'tail', 'tee', 'timeout', 'touch', 'tr', 'uname', 'wc', 'xargs',
+];
+
 /** A stub that records "<name> <args>"; exec.log collects commands a check run must never execute. */
 function recorder(h: Harness, name: string, log = 'exec.log'): string {
   return ['#!/bin/sh', `printf '%s %s\\n' ${name} "$*" >> "${path.join(h.home, log)}"`, 'echo 0.0.1', 'exit 0', ''].join('\n');
@@ -185,6 +192,62 @@ describe('harness-maintenance.sh --check side-effect boundary', () => {
     expect(events(r, 'opencode')[0]).toMatchObject({ status: 'unknown' });
     expect(events(r, 'opencode')[0]!.message).toContain('check mode');
     expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+  }, T);
+
+  it('runs no helper from a user-writable PATH directory, and still reports binaries found there by path', () => {
+    const h = boundaryHarness();
+    // Pass-through recorders for every helper the script and its libraries call by name, in both
+    // directories the job puts first on its own PATH.
+    const shadowLog = path.join(h.home, 'shadow.log');
+    for (const dir of [path.join(h.home, '.local/bin'), path.join(h.home, 'npm-global/bin')]) {
+      mkdirSync(dir, { recursive: true });
+      for (const name of SHADOWED_HELPERS) {
+        const real = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].map((d) => path.join(d, name)).find((f) => existsSync(f));
+        writeExec(path.join(dir, name), ['#!/bin/sh', `printf '%s\\n' ${name} >> "${shadowLog}"`,
+          real ? `exec ${real} "$@"` : 'exit 127', ''].join('\n'));
+      }
+    }
+    // Only located, never executed: a local MCP binary in ~/.local/bin.
+    const mcp = path.join(h.home, '.local/bin/google-workspace-mcp');
+    writeExec(mcp, recorder(h, 'google-workspace-mcp'));
+
+    // As in the shipped launchd job, whose own PATH starts with ~/.local/bin.
+    const inherited = `${path.join(h.home, '.local/bin')}:${path.join(h.home, 'npm-global/bin')}:${h.env.PATH}`;
+    const r = run(h, ['--check'], { PATH: inherited });
+    expect(r.state?.mode, r.stderr).toBe('check');
+    expect([...new Set(lines(shadowLog))]).toEqual([]);
+    expect(events(r, 'local-bin:google-workspace-mcp')[0]).toMatchObject({ status: 'present' });
+    expect(events(r, 'local-bin:google-workspace-mcp')[0]!.message).toContain(mcp);
+    expect(lines(path.join(h.home, 'exec.log'))).toEqual([]);
+  }, T);
+
+  it('runs only the pinned npm: with it absent, every npm check is unknown and no other npm runs', () => {
+    const h = boundaryHarness();
+    const empty = path.join(h.home, 'empty-pinned-bin');
+    mkdirSync(empty);
+    const npmCalls = path.join(h.home, 'other-npm.log');
+    const npmRecorder = ['#!/bin/sh', `printf '%s\\n' "$*" >> "${npmCalls}"`, 'exit 1', ''].join('\n');
+    // Other npm binaries a PATH search or the node-version loop could reach. The fake npm on the
+    // inherited PATH (fakebin) records into npm.log.
+    for (const dir of ['.local/bin', 'npm-global/bin', '.nvm/versions/node/v24.13.0/bin', '.nvm/versions/node/v24.15.0/bin']) {
+      mkdirSync(path.join(h.home, dir), { recursive: true });
+      writeExec(path.join(h.home, dir, 'npm'), npmRecorder);
+    }
+    // opencode absent, so its install-availability lookup is reached too.
+    rmSync(path.join(h.home, 'npm-global/bin/opencode'));
+
+    const r = run(h, ['--check'], { WHATSOUP_CODEX_NODE_BIN_DIR: empty });
+    expect(r.state?.mode, r.stderr).toBe('check');
+    expect(lines(npmCalls)).toEqual([]);
+    expect(lines(h.npmLog)).toEqual([]);
+    for (const component of ['codex-npm-cooldown', 'claude', 'codex', 'opencode']) {
+      const last = events(r, component).at(-1);
+      expect(last, component).toMatchObject({ status: 'unknown' });
+      expect(last!.message, component).toContain('pinned npm');
+    }
+    for (const version of ['24.13.0', '24.15.0']) {
+      expect(events(r, `npm-global:${version}`)[0], version).toMatchObject({ status: 'skipped' });
+    }
   }, T);
 
   it('negative control: a normal run does reach the stubs, so the recorders can see a violation', () => {

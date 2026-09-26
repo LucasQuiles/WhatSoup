@@ -32,16 +32,27 @@ written, `3` a partial agent CLI install that needs reconciliation by hand.
 ### What `--check` does and does not do
 
 `--check` validates, inventories and plans, then reports. It is safe to run on
-a live host:
+a live host (it does make read-only registry requests, below):
 
 - **Writes only** its state directory (`state.json`, `run.log`) and a
   temporary directory removed on exit; npm's cache is pointed into that
   temporary directory.
 - **Runs only** the pinned node on this repo's scripts, `plutil`, read-only
   `systemctl` verbs (`list-units`, `show-environment`, `show`, `is-active`),
-  read-only npm verbs (`--version`, `config get`, `view`, `ls`), `apt list`,
-  `ps` (uid, elapsed time and executable name only) and
-  `scripts/check-unit-drift.sh`.
+  read-only verbs of the pinned npm (`--version`, `config get`, `view`, `ls`),
+  `apt list`, `ps` (uid, elapsed time and executable name only),
+  `scripts/check-unit-drift.sh` and system helpers such as `awk` and `mktemp`.
+  Every command comes from the job's own `PATH` with `~/.local/bin`, the
+  npm-global bin directory and relative entries removed, so nothing placed
+  there can shadow a helper. Binaries in those directories are still reported,
+  by path.
+- **Uses only the pinned npm** (`WHATSOUP_CODEX_NODE_BIN_DIR`, by default the
+  `.nvmrc` node's `bin`). If it is absent, the npm checks are skipped and
+  reported `unknown` with the reason; no other npm on any `PATH`, and no other
+  node version's npm, is run.
+- **Reads the npm registry.** `npm view` makes read-only network requests for
+  publish times and versions, and npm sends any registry credentials that
+  `~/.npmrc` configures with them. Nothing is written to the registry.
 - **Never** installs (not even npm's dry-run install smoke, so the npm cooldown
   verdict is marked configuration only), merges or backs up `~/.npmrc`, sends
   an alert, or executes a harness binary: not the agent CLI (so no plugin or
