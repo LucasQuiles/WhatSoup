@@ -89,6 +89,7 @@
     "guard:service-units": "bash scripts/run-with-pinned-node.sh scripts/check-service-units.ts",
     "guard:insecure-tempfile": "bash scripts/run-with-pinned-node.sh scripts/check-insecure-tempfile.ts",
     "guard:zero-byte-tracked": "bash scripts/run-with-pinned-node.sh scripts/check-zero-byte-tracked.ts",
+    "guard:sql-schema": "bash scripts/run-with-pinned-node.sh scripts/sql-schema-guard.ts",
     "guard:no-destructive-git": "bash scripts/run-with-pinned-node.sh scripts/no-destructive-git-guard.ts",
     "guard:png-estate": "bash scripts/run-with-pinned-node.sh scripts/png-estate-guard.ts",
     "guard:png-estate:staged": "bash scripts/run-with-pinned-node.sh scripts/png-estate-guard.ts --staged",
