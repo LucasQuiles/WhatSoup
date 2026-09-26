@@ -96,6 +96,25 @@ describe('out-of-band launcher movement', () => {
     expect(launcherAlerts(h)).toBe(2);
   }, T);
 
+  it('never follows a symlinked state file for the baseline', () => {
+    const h = idleHarness();
+    run(h);
+    const stateFile = path.join(h.home, '.cache/whatsoup/harness-maintenance/state.json');
+    const elsewhere = path.join(h.home, 'elsewhere.json');
+    const saved = readFileSync(stateFile, 'utf8');
+    writeFileSync(elsewhere, saved);
+    rmSync(stateFile);
+    symlinkSync(elsewhere, stateFile);
+    repoint(h, '2.1.281');
+    const r = run(h);
+    // The baseline behind the link is not read, so the move is not compared against it ...
+    expect(r.stderr).toContain('claude-launcher [first-observation]');
+    expect(launcherAlerts(h)).toBe(0);
+    // ... and the file behind the link is not overwritten.
+    expect(r.stderr).toContain('symlink; refusing to overwrite');
+    expect(readFileSync(elsewhere, 'utf8')).toBe(saved);
+  }, T);
+
   it('reports a launcher removed between runs as disappeared', () => {
     const h = idleHarness();
     run(h);
@@ -321,6 +340,33 @@ describe('agent CLI update policy surfaces', () => {
     // An array is readable JSON but not a config object: its keys read as absent.
     expect(instance.message).toContain('installMethod=absent autoUpdates=absent');
     expect(policy.at(-1)).toMatchObject({ status: 'unknown' });
+  }, T);
+
+  it('reports an unknown policy, not an empty one, when the service manager cannot be listed', () => {
+    const h = makeHarness();
+    portableInstance(h, 'alpha');
+    writeFileSync(path.join(h.systemdDir, 'list.rc'), '1');
+    const r = run(h, ['--check']);
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'unknown' });
+    const summary = events(r, 'claude-update-policy').at(-1)!;
+    expect(summary.status).toBe('unknown');
+    expect(summary.message).toContain('service definitions were not read');
+  }, T);
+
+  it('reads a quoted or expanded value in an observed key without making the unit unreadable', () => {
+    const h = makeHarness();
+    writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+    const envFile = path.join(h.home, 'unit.env');
+    // systemd would unquote and expand these; the reader records them as set but unrecognized, or
+    // as a config directory it cannot read, and still resolves the instance's binary.
+    writeFileSync(envFile, 'DISABLE_UPDATES="1"\nDISABLE_AUTOUPDATER=$FLAG\nCLAUDE_CONFIG_DIR=$HOME/alt\n');
+    systemdUnit(h, 'alpha', [`Environment=WHATSOUP_NODE=${process.execPath}`, `EnvironmentFiles=${envFile} (ignore_errors=no)`]);
+    h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+    const r = run(h, ['--check']);
+    expect(events(r, 'claude-consumer')[0]).toMatchObject({ status: 'resolved' });
+    const instance = events(r, 'claude-update-policy').find((e) => e.status === 'instance')!;
+    expect(instance.message).toContain('DISABLE_UPDATES=set-unrecognized DISABLE_AUTOUPDATER=set-unrecognized');
+    expect(instance.message).toContain('config set by the service, not readable');
   }, T);
 
   it('reports an unknown policy when the service definitions were not read this run', () => {
