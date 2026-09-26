@@ -578,6 +578,27 @@ describe('MessageScheduler — terminal send alert authority (#2387)', () => {
     expect(retainedKeys()).toEqual([]);
   });
 
+  it('B2a (A10): a valid-JSON wrong-shape row alerts with its shape class and the contract wording, not "not valid JSON"', async () => {
+    const id = insertPending(db.raw, 'null');
+    const { conn, sendRawCalls } = makeConn();
+
+    await new MessageScheduler(db, conn, SCHEDULER_CONFIG).tick();
+
+    expect(sendRawCalls).toEqual([]);
+    const error = rowOf(db, id).error ?? '';
+    expect(error).toBe('scheduled payload is not decodable: payload_undecodable shape=json_null');
+    const alerts = alertsOf('scheduler_send_failed');
+    expect(alerts.length).toBe(1);
+    const baseline = baselineUndecodableAlert(id, error, false);
+    expectAlertText(alerts[0], {
+      summary: baseline.summary,
+      evidence: baseline.evidence.replace(
+        'the payload column is not valid JSON.',
+        'the payload column is JSON but does not match the scheduled-message payload contract (see the shape class in the error).',
+      ),
+    });
+  });
+
   it('B1b: a payload that itself contains a double quote still reaches no durable byte', async () => {
     // V8 echoes such a payload WHOLE rather than as a ten-character prefix:
     // `{"x":}` renders as `Unexpected token '}', "{"x":}" is not valid JSON`.
