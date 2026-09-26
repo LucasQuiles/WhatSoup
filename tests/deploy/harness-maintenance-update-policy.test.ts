@@ -26,7 +26,8 @@ import {
 // environment, the live launcher, and running CLI processes (counts only).
 
 beforeAll(buildNativeFixture);
-afterAll(cleanupHarnesses);
+// Many temporary HOMEs to remove; the default hook timeout is too short under load.
+afterAll(cleanupHarnesses, 60_000);
 
 const UID = process.getuid?.() ?? 0;
 
