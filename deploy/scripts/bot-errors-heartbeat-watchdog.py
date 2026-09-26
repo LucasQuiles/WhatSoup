@@ -124,7 +124,15 @@ INSTANCE_CONFIG_ROOT = Path(
     os.environ.get("WHATSOUP_INSTANCE_CONFIG_ROOT")
     or Path.home() / ".config" / "whatsoup" / "instances"
 )
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json. The
+# auth_401_* classes are unconfirmed removals; a restart would buy a fresh
+# bounded retry and park again, so they are terminal for restart purposes.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
 

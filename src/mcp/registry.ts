@@ -33,6 +33,7 @@ import {
 } from './cross-conversation-guard.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { bondActorLedger } from '../transport/bond-actor-receipt.ts';
+import { getToolCallCallerEvidence, isTurnOwned } from './caller-attribution.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import {
@@ -627,6 +628,9 @@ export class ToolRegistry {
           replayPolicy,
           undefined,
           this.turnCorrelationResolver?.(durabilityKey) ?? null,
+          // #3421 step 1: evidence only. It is computed from values already on
+          // the session and never feeds any gate below.
+          getToolCallCallerEvidence(session, tool.sensitive === true),
         );
       } catch {
         this.recordDurabilityWriteLoss('record', name);
@@ -740,7 +744,17 @@ export class ToolRegistry {
           );
         }
         if (supportsAliasTarget) delete effectiveParams['to'];
-        effectiveParams['chatJid'] = session.binding!.deliveryJid;
+        const boundTarget = session.binding!.deliveryJid;
+        effectiveParams['chatJid'] = boundTarget;
+        // Cross-conversation guard, pre-handler point, on the injected target
+        // (issue 3585): most injected handlers never call the post-resolution
+        // callback, so without this check a bound session whose mirror has
+        // diverged from its binding would reach them unadjudicated. It can
+        // only deny: the target is the binding itself.
+        const verdict = this.evaluateTargetConversation(session, boundTarget, name, 'pre-handler');
+        if (verdict.kind === 'deny') {
+          return reject(verdict.text, verdict.failureCode, verdict.failureStage);
+        }
       } else if (session.tier === 'chat-scoped') {
         // Auto-fill deliveryJid from session; chatJid should not come from caller
         if (!session.deliveryJid) {
@@ -827,6 +841,8 @@ export class ToolRegistry {
       action: `mcp_tool:${name}`,
       actorIdentity: session.actorJid ?? null,
       requestId: durabilityId === undefined ? null : `durability:${durabilityId}`,
+      // #3421 step 1: labels the receipt only; no attribution means outside.
+      turnOwned: session.callerAttribution ? isTurnOwned(session.callerAttribution) : false,
     };
     try {
       if (tool.bondEffect !== 'requests_device_removal') {

@@ -236,6 +236,7 @@ function expectedTerminalInboundFailureClass(
     throw new Error('failed_terminal terminal disposition requires an exact attempt failure class');
   }
   if (detailed === 'crash') return 'session_crash';
+  if (detailed === 'operator_cancelled') return 'operator_cancelled';
   if (detailed === 'processor_throw') return 'processor_throw';
   if (detailed === 'unknown_terminal') return 'unknown';
   if (detailed === 'provider_stream_corrupt') return 'provider_failure';
@@ -292,6 +293,7 @@ export function normalizeFinalizeTurnTerminalParams(
       detailed === null ||
       (
         detailed !== 'crash' &&
+        detailed !== 'operator_cancelled' &&
         detailed !== 'processor_throw' &&
         detailed !== 'unknown_terminal' &&
         detailed !== 'provider_stream_corrupt' &&
@@ -538,7 +540,14 @@ export function normalizeFinalizeTurnTerminalParams(
   ) {
     throw new Error('Turn checkpoint completed identity requires a terminal inbound mutation');
   }
-  const completedIdentity = params.inbound === undefined || expectedInboundSeq === undefined
+  // #3295 S4: an admission-rejected turn never crossed the provider boundary,
+  // so it must not become the completed resumable identity. Leaving the
+  // fields unset keeps the prior identity (the checkpoint upsert coalesces).
+  const admissionRejected = terminal.attemptKind === 'admission_rejected';
+  if (admissionRejected && providedCompletedIdentity.some((value) => value !== undefined)) {
+    throw new Error('An admission-rejected terminal cannot carry a completed checkpoint identity');
+  }
+  const completedIdentity = params.inbound === undefined || expectedInboundSeq === undefined || admissionRejected
     ? undefined
     : {
         completedInboundSeq: expectedInboundSeq,

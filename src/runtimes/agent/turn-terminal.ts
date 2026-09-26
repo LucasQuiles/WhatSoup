@@ -26,6 +26,7 @@ export interface TurnIdentity {
 
 export type NonProviderTerminalFailureClass =
   | 'crash'
+  | 'operator_cancelled'
   | 'processor_throw'
   | 'unknown_terminal'
   | 'provider_stream_corrupt';
@@ -34,6 +35,7 @@ const NON_PROVIDER_TERMINAL_FAILURE_CLASS_PRESENCE: Readonly<
   Record<NonProviderTerminalFailureClass, true>
 > = {
   crash: true,
+  operator_cancelled: true,
   processor_throw: true,
   unknown_terminal: true,
   provider_stream_corrupt: true,
@@ -64,6 +66,12 @@ export type AttemptOutcome =
      */
     readonly class?: AdmissionRejectClass;
   };
+
+/** The exact failed outcome for an operator-issued `/stop` interruption. */
+export const OPERATOR_CANCELLATION_ATTEMPT_OUTCOME = Object.freeze({
+  kind: 'failed' as const,
+  class: 'operator_cancelled' as const,
+});
 
 export type InboundDisposition =
   | 'finalized_replied'
@@ -261,6 +269,8 @@ function toInboundMutation(result: TurnTerminalResult): TerminalInboundMutation 
         ? admissionRejectInboundFailureClass(result.attemptOutcome.class)
         : result.attemptOutcome.class === 'crash'
           ? 'session_crash'
+          : result.attemptOutcome.class === 'operator_cancelled'
+            ? 'operator_cancelled'
           : result.attemptOutcome.class === 'processor_throw'
             ? 'processor_throw'
             : result.attemptOutcome.class === 'unknown_terminal'

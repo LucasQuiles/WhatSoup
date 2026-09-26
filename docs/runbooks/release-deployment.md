@@ -134,6 +134,78 @@ short of. Having exported a release is not approval to activate it: activation
 needs named approval in the current turn, naming the instance, the target
 release, and the prepared rollback target.
 
+### `npm run release:activate`
+
+`scripts/release-activate.ts` performs the coordinated switch described in the
+rest of this section. It is **macOS launchd only**; on any other platform it
+refuses with exit `2` before doing anything. Every site value is a parameter or
+is derived: paths from `HOME`/`XDG_*`, the health port from the instance
+`config.json` (or `--health-port`), and the expected commit from the new
+release's manifest. The health token is resolved with the precedence of
+`deploy/scripts/lib/health_reader.py` and is never printed.
+
+```bash
+npm --silent run release:activate -- \
+  --instance <instance> \
+  --release /abs/path/to/<new-release> \
+  --expect-current /abs/path/to/<current-release> \
+  --aux-label com.whatsoup.reply-guarantee=setup-timer \
+  --aux-label com.whatsoup.release-drift-check=release-drift \
+  --backup-dir /abs/path/to/<backups> \
+  --plan
+```
+
+- `--plan` (the default) is read-only. It prints JSON listing every
+  precondition, each staged plist (with `renderDriftLines`, the number of lines
+  that differ from the installed plist beyond the release root), and the ordered
+  actions. It exits `0` only when every precondition holds. It runs the new
+  release's renderers to capture their output, and writes nothing.
+- `--apply` re-checks every precondition, then:
+  1. takes a quick_check-verified SQLite backup, records `symlink.before`, and
+     copies and stages every plist into a mode-0700
+     `<backup-dir>/activation-<commit12>-<utc>/`;
+  2. switches the wrapper symlink and installs the staged plists;
+  3. reloads each label with the reload sequence below;
+  4. verifies from the executing process (a new pid whose argv names
+     `<release>/src/bootstrap.ts`, authenticated health with the manifest
+     commit and `whatsapp.connected: true`, and each auxiliary job's loaded
+     definition on the new release).
+
+  Any failure after the switch restores the symlink and plists, reloads every
+  label, and verifies the rollback the same way. `receipt.json` in the backup
+  directory records the outcome.
+
+Preconditions include: the wrapper symlink points at
+`<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
+`--release` as its path and carries a full commit; the new release has
+`deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; each auxiliary job
+currently runs from `--expect-current`; a health token and port resolve; the
+database exists; and no staged plist still references `--expect-current`.
+
+Renderers (`--aux-label <label>=<renderer>`):
+
+- `setup-timer` re-renders `deploy/<label>.plist` exactly as `deploy/setup.sh`
+  `install_launchd_timer` does, from inside the new release, including the
+  `launchd-claude-config-env.ts --preserve-from` filter;
+- `release-drift` runs the new release's
+  `deploy/scripts/render-release-drift-launchd.sh`, carrying the installed job's
+  `--instance`, `--target-url`, `--target-ref`, `--max-log-bytes` and
+  `--keep-rotated-logs` values forward.
+
+The instance plist is edited, not re-rendered. `ProgramArguments[0]` is left
+alone when it is the wrapper symlink and rewritten only when it names
+`<expect-current>/deploy/whatsoup`. `WorkingDirectory` is rewritten only when it
+lies inside `--expect-current`.
+
+Exit codes: `0` plan ready, or activated and verified; `1` activation failed
+and the rollback was verified; `2` refused before any live change; `3`
+activation failed and the rollback could not be verified, so manual attention
+is required.
+
+`kickstart -k` on an auxiliary timer runs that job once immediately; the plan
+lists it. The manual procedure below remains the reference for what the command
+does, and the fallback when it cannot be used.
+
 **The wrapper symlink is the release selector.** The release that runs is the
 target of the wrapper symlink `~/.local/bin/whatsoup` →
 `<release>/deploy/whatsoup`. The wrapper resolves its own path through symlinks
@@ -221,8 +293,11 @@ looks right, old code runs" false pass described above.
 `bootout`, then a bounded poll until the old process actually exits, then
 `bootstrap`. Bootstrapping while the previous process is still in `SIGTERMed`
 shutdown fails with `Bootstrap failed: 5: Input/output error` and leaves the
-service DOWN. On mini11 recovery was a second `bootstrap` after the process had
-exited; do not treat that retry as part of the plan.
+service DOWN. On one `<host>`, recovery was a second `bootstrap` after the
+process had exited. The wait for the old pid comes first; a retry never
+substitutes for it. `release:activate` refuses to bootstrap while the old pid is
+still running. After that pid has exited, it retries only the transient error
+class, and only within a bounded limit.
 
 ```bash
 old_pid=<pid captured before bootout>
@@ -265,6 +340,13 @@ manifest's rollback path when it does not.
 
 Verify a rollback the same way as an activation: from the executing process,
 not from the restored configuration.
+
+`release:activate` performs this rollback automatically. It keeps the symlink
+target and plist copies in `<backup-dir>/activation-<commit12>-<utc>/` rather
+than as `.bak` files beside the plists. It checks `--expect-current` at plan
+time; it does not fall back to a manifest rollback path. Exit `3` means the
+automatic rollback could not be verified: restore by hand from that directory
+using the steps above.
 
 ## Drift Detection
 

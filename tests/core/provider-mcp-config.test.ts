@@ -145,10 +145,18 @@ describe('generateMcpConfigFile', () => {
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.command=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.args=/),
       '-c', expect.stringMatching(/^mcp_servers\.whatsoup\.env=/),
-      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET"]',
+      '-c', 'mcp_servers.whatsoup.env_vars=["WHATSOUP_MCP_SOCKET", "WHATSOUP_MCP_SESSION_TOKEN"]',
     ]);
     expect(args.join('\n')).toContain('WHATSOUP_SOCKET');
     expect(args.join('\n')).toContain(JSON.stringify(SOCKET));
+  });
+
+  // #3421 step 1: the session token reaches the proxy from the child env only.
+  // Config files are written to disk, so they must never name or carry it.
+  it('keeps the MCP session token out of every generated config file', () => {
+    const generated = ['claude-cli', 'gemini-cli', 'opencode-cli']
+      .map((provider) => JSON.stringify(generateMcpConfigFile(provider, SOCKET, PROXY)));
+    expect(generated.filter((text) => text.includes('SESSION_TOKEN'))).toEqual([]);
   });
 
   it('makes Claude consume the generated production target explicitly', () => {

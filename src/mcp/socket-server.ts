@@ -1,5 +1,6 @@
 import { createServer, connect } from 'node:net';
 import type { Server, Socket } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, renameSync, rmdirSync, unlinkSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -7,6 +8,13 @@ import { createChildLogger } from '../logger.ts';
 import { toConversationKey } from '../core/conversation-key.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import type { ToolRegistry } from './registry.ts';
+import {
+  initialSocketAttribution,
+  SESSION_TOKEN_NOTIFICATION,
+  withDeclaredClient,
+  withPresentedToken,
+  type SessionTokenVerifier,
+} from './caller-attribution.ts';
 import {
   makeConversationBinding,
   resolveSessionContext,
@@ -82,6 +90,13 @@ export class WhatSoupSocketServer {
 
   /** Dynamic authorization context for the turn executing this request. */
   private readonly executingSessionResolver: () => ExecutingSessionContext;
+  /**
+   * #3421: makes connection ids unique across restarts and servers, because the
+   * per-connection counter below starts at 1 in every process.
+   */
+  private readonly connectionIdPrefix = randomBytes(6).toString('hex');
+  /** #3421: verifies the token a session's own helper presents; absent = none can match. */
+  private readonly sessionTokens: SessionTokenVerifier | undefined;
 
   constructor(
     socketPath: string,
@@ -92,11 +107,15 @@ export class WhatSoupSocketServer {
     // (#2200). Optional and defaulted, so this slice changes no existing call
     // site.
     clock: Clock = systemClock,
+    // #3421 step 1: attribution evidence only. Optional so existing call sites
+    // and servers with no agent sessions record every caller as outside.
+    options: { sessionTokens?: SessionTokenVerifier } = {},
   ) {
     this.socketPath = socketPath;
     this.registry = registry;
     this.baseSession = session;
     this.clock = clock;
+    this.sessionTokens = options.sessionTokens;
     // Binding objects are immutable by contract (types.ts): enforce it at the
     // trust boundary so every per-request shallow snapshot below can safely
     // share the reference — a rekey REPLACES the object, never mutates it.
@@ -151,7 +170,11 @@ export class WhatSoupSocketServer {
       const clientId = ++clientCounter;
       // SP11: Clone base session for this connection
       const abortController = new AbortController();
-      const connSession: SessionContext = { ...this.baseSession, abortSignal: abortController.signal };
+      const connSession: SessionContext = {
+        ...this.baseSession,
+        abortSignal: abortController.signal,
+        callerAttribution: initialSocketAttribution(`${this.connectionIdPrefix}:${clientId}`),
+      };
       this.connectionSessions.set(clientId, connSession);
       this.activeSockets.set(clientId, socket);
 
@@ -223,9 +246,23 @@ export class WhatSoupSocketServer {
             continue;
           }
 
+          // #3421: a session's own helper presents its token as a notification.
+          // Record the result and send nothing back, exactly like any other
+          // notification.
+          if (req.id === undefined && req.method === SESSION_TOKEN_NOTIFICATION && connSession.callerAttribution) {
+            connSession.callerAttribution = withPresentedToken(connSession.callerAttribution, req.params, this.sessionTokens);
+            continue;
+          }
+
           // Notifications have no id — silently ignore them
           if (req.id === undefined) {
             continue;
+          }
+
+          // #3421: remember what the client says it is. A label only; the reply
+          // below is unchanged and nothing authorizes on it.
+          if (req.method === 'initialize' && connSession.callerAttribution) {
+            connSession.callerAttribution = withDeclaredClient(connSession.callerAttribution, req.params);
           }
 
           // QR-042: snapshot the session per request. connSession.actorJid /

@@ -5,6 +5,26 @@ import {
 } from './transport-error-taxonomy.ts';
 
 export const TOOL_INPUT_MARKER = '[metadata-only]';
+
+/**
+ * #3421 step 1: which caller made a tool call, stored on the tool_calls row
+ * (migration 65). Evidence only: nothing reads it to admit or deny a call.
+ */
+export interface ToolCallCallerEvidence {
+  transport: 'socket' | 'in_process';
+  /** Unique per server process and connection; null for in-process calls. */
+  connectionId: string | null;
+  /** Client-declared, bounded, never trusted. */
+  clientName: string | null;
+  clientVersion: string | null;
+  tokenResult: 'match' | 'mismatch' | 'absent' | 'not_applicable';
+  /** True when the call came from the executing session's own helper. */
+  turnOwned: boolean;
+  /** Whether the actor on the call was resolved from the running turn. */
+  actorSource: 'executing_turn' | 'none';
+  /** The tool's admin gate flag at call time. */
+  toolSensitive: boolean;
+}
 export const TOOL_RESULT_MARKERS = Object.freeze({
   success: '[metadata-only:success]',
   error: '[metadata-only:error]',
