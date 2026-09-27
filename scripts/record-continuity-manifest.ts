@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +14,7 @@ import {
 } from './audit-continuity-manifest.ts';
 import {
   auditContinuityManifest,
+  continuityReceiptFingerprints,
   parseContinuityManifest,
   type ContinuityManifest,
   type ContinuityManifestReceipt,
@@ -28,10 +28,6 @@ interface RecordArgs {
 
 const VALUE_FLAGS = new Set(['--db', '--manifest']);
 const CONFIRM_FLAG = '--confirm-record';
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
 
 function usage(): string {
   return [
@@ -69,20 +65,6 @@ export function parseRecordContinuityManifestArgs(argv: string[]): RecordArgs {
   };
 }
 
-function receiptFingerprint(
-  manifest: ContinuityManifest,
-  receipt: ContinuityManifestReceipt,
-): string {
-  return sha256(JSON.stringify([
-    manifest.source,
-    receipt.messageId,
-    receipt.sentAt,
-    receipt.senderFingerprint,
-    receipt.contentHash,
-    receipt.contentType,
-  ]));
-}
-
 function observationFor(
   manifest: ContinuityManifest,
   receipt: ContinuityManifestReceipt,
@@ -98,13 +80,7 @@ function observationFor(
   return {
     ordinal: receipt.ordinal,
     classification: audit.classification,
-    receiptFingerprint: receiptFingerprint(manifest, receipt),
-    destinationFingerprint: sha256(JSON.stringify([
-      manifest.destination.conversationKey,
-      manifest.destination.channelFingerprint,
-    ])),
-    manifestFingerprint: sha256(manifest.manifestId),
-    evidenceFingerprint: sha256(manifest.evidenceRef),
+    ...continuityReceiptFingerprints(manifest, receipt),
   };
 }
 
