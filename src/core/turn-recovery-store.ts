@@ -220,9 +220,15 @@ export interface TurnRecoverySupervisorCounts {
   expiredClaimed: number;
   exhausted: number;
   quarantinedDelivery: number;
+  /** Broken links on live jobs plus orphan transfers; finished jobs: corruptLinksSettled. */
   corruptLinks: number;
   orphanTransfers: number;
+  /** Late-echo contradictions on live jobs; finished jobs: echoConflictsSettled. */
   echoConflicts: number;
+  /** Broken proof links on completed or exhausted jobs. Diagnostic only. */
+  corruptLinksSettled?: number;
+  /** Late-echo contradictions on completed or exhausted jobs. Diagnostic only. */
+  echoConflictsSettled?: number;
   /** Pending operator catch-ups that lack an append-only closure link. */
   openRecoveries: number;
   /**
@@ -474,6 +480,35 @@ const VALID_RECOVERY_JOB_FROM = `
    AND o.conversation_key = j.conversation_key
    AND o.chat_jid = j.delivery_jid
 `;
+
+/** Job states that are finished recovery work: residue on them never pages. */
+const SETTLED_RECOVERY_JOB_STATES_SQL = "('completed', 'exhausted')";
+
+/** A supervisor-count job whose LEFT-joined `t`/`i`/`o` proof no longer matches. */
+const RECOVERY_JOB_LINK_BROKEN_SQL = `NOT (
+              t.id IS NOT NULL
+              AND t.inbound_disposition = 'transferred_to_recovery_owner'
+              AND t.scope = j.scope
+              AND t.inbound_seq_key = j.source_inbound_seq_key
+              AND t.inbound_seq = j.source_inbound_seq
+              AND t.logical_turn_id = j.source_logical_turn_id
+              AND t.manager_id = j.source_manager_id
+              AND t.generation = j.source_generation
+              AND t.conversation_key = j.conversation_key
+              AND t.delivery_jid = j.delivery_jid
+              AND t.recovery_owner_logical_turn_id = j.owner_logical_turn_id
+              AND t.recovery_owner_manager_id = j.owner_manager_id
+              AND t.recovery_owner_generation = j.owner_generation
+              AND t.delivery_kind IN ('enqueued', 'flushed', 'delivery_unknown')
+              AND i.seq IS NOT NULL
+              AND i.message_id = j.source_message_id
+              AND i.conversation_key = j.conversation_key
+              AND i.chat_jid = j.delivery_jid
+              AND o.id IS NOT NULL
+              AND o.conversation_key = j.conversation_key
+              AND o.chat_jid = j.delivery_jid
+              AND o.source_inbound_seq = j.source_inbound_seq
+            )`;
 
 const RECOVERY_JOB_SELECT = `
   j.*,
@@ -949,35 +984,26 @@ export class TurnRecoveryStore {
             WHEN j.state <> 'completed' AND o.status = 'quarantined' THEN 1
             ELSE 0
           END), 0) AS quarantined_delivery,
+          -- Live jobs only feed turn_recovery_integrity; completed/exhausted
+          -- residue goes to the diagnostic *_settled counters. Orphan transfers
+          -- have no job row, so corrupt_links adds them unfiltered.
           COALESCE(SUM(CASE
-            WHEN NOT (
-              t.id IS NOT NULL
-              AND t.inbound_disposition = 'transferred_to_recovery_owner'
-              AND t.scope = j.scope
-              AND t.inbound_seq_key = j.source_inbound_seq_key
-              AND t.inbound_seq = j.source_inbound_seq
-              AND t.logical_turn_id = j.source_logical_turn_id
-              AND t.manager_id = j.source_manager_id
-              AND t.generation = j.source_generation
-              AND t.conversation_key = j.conversation_key
-              AND t.delivery_jid = j.delivery_jid
-              AND t.recovery_owner_logical_turn_id = j.owner_logical_turn_id
-              AND t.recovery_owner_manager_id = j.owner_manager_id
-              AND t.recovery_owner_generation = j.owner_generation
-              AND t.delivery_kind IN ('enqueued', 'flushed', 'delivery_unknown')
-              AND i.seq IS NOT NULL
-              AND i.message_id = j.source_message_id
-              AND i.conversation_key = j.conversation_key
-              AND i.chat_jid = j.delivery_jid
-              AND o.id IS NOT NULL
-              AND o.conversation_key = j.conversation_key
-              AND o.chat_jid = j.delivery_jid
-              AND o.source_inbound_seq = j.source_inbound_seq
-            ) THEN 1 ELSE 0
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
           END), 0) + (SELECT count FROM orphan_transfers) AS corrupt_links,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND ${RECOVERY_JOB_LINK_BROKEN_SQL} THEN 1
+            ELSE 0
+          END), 0) AS corrupt_links_settled,
           (SELECT count FROM orphan_transfers) AS orphan_transfers,
-          COALESCE(SUM(CASE WHEN j.echo_conflict_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-            AS echo_conflicts,
+          COALESCE(SUM(CASE
+            WHEN j.state NOT IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts,
+          COALESCE(SUM(CASE
+            WHEN j.state IN ${SETTLED_RECOVERY_JOB_STATES_SQL} AND j.echo_conflict_at IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS echo_conflicts_settled,
           (SELECT count FROM open_recoveries) AS open_recoveries,
           COALESCE(SUM(CASE
             WHEN j.state IN ('pending', 'claimed')
@@ -1843,6 +1869,8 @@ export class TurnRecoveryStore {
       corrupt_links: number;
       orphan_transfers: number;
       echo_conflicts: number;
+      corrupt_links_settled: number;
+      echo_conflicts_settled: number;
       open_recoveries: number;
       blocking_outstanding: number;
       retained_terminal: number;
@@ -1862,6 +1890,8 @@ export class TurnRecoveryStore {
       corruptLinks: row.corrupt_links,
       orphanTransfers: row.orphan_transfers,
       echoConflicts: row.echo_conflicts,
+      corruptLinksSettled: row.corrupt_links_settled,
+      echoConflictsSettled: row.echo_conflicts_settled,
       openRecoveries: row.open_recoveries,
       blockingOutstanding: row.blocking_outstanding,
       retainedTerminal: row.retained_terminal,
