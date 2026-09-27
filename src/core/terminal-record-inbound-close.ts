@@ -52,6 +52,39 @@ export type TerminalRecordInboundCloseRefusal =
   | 'record_contract_invalid'
   | 'closed_differently';
 
+export interface TerminalRecordInboundCloserOptions {
+  /** Candidate rows fetched per keyset page (default 200). */
+  readonly pageSize?: number;
+  /** Candidate rows evaluated per scan() call (default 1000); must be >= pageSize. */
+  readonly scanCap?: number;
+}
+
+/** One bounded scan() call over the pre-filtered candidates. */
+export interface TerminalRecordInboundCloseScan {
+  /** Evaluated rows that pass every rule, oldest first. */
+  readonly eligible: number[];
+  /** Evaluated rows refused, counted by the evaluator's own reason. */
+  readonly refusedByReason: Partial<Record<TerminalRecordInboundCloseRefusal, number>>;
+  /** Rows evaluated by this call (never more than scanCap). */
+  readonly scanned: number;
+  /** True when this call reached the end of the current cycle's candidate range. */
+  readonly complete: boolean;
+  /** Highest inbound seq this cycle covers; later arrivals wait for the next cycle. */
+  readonly cycleUpperSeq: number;
+  /** Where the next call resumes (0 = the next call starts a new cycle). */
+  readonly nextAfterSeq: number;
+}
+
+const DEFAULT_PAGE_SIZE = 200;
+const DEFAULT_SCAN_CAP = 1000;
+
+function positiveInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`TerminalRecordInboundCloser: ${name} must be a positive integer`);
+  }
+  return value;
+}
+
 export type TerminalRecordInboundCloseEvaluation =
   | {
     readonly verdict: 'eligible';
@@ -128,11 +161,28 @@ export class TerminalRecordInboundCloser {
   private readonly selectRecoveryJob: PreparedStatement;
   private readonly selectDeliveryOp: PreparedStatement;
   private readonly selectCandidates: PreparedStatement;
+  private readonly selectMaxInboundSeq: PreparedStatement;
   private readonly closeComplete: PreparedStatement;
   private readonly closeFailed: PreparedStatement;
   private readonly markDeliveryTerminal: PreparedStatement;
 
-  constructor(raw: DatabaseSync) {
+  private readonly pageSize: number;
+  private readonly scanCap: number;
+  /**
+   * Process-local resume point: the last evaluated seq of an unfinished cycle
+   * (0 = start a new cycle). It lives on this instance only, so a restart
+   * begins a new cycle; progress across restarts is not persisted.
+   */
+  private resumeAfterSeq = 0;
+  /** Upper seq bound of the cycle in progress (null = no cycle in progress). */
+  private cycleUpperSeq: number | null = null;
+
+  constructor(raw: DatabaseSync, options: TerminalRecordInboundCloserOptions = {}) {
+    this.pageSize = positiveInteger('pageSize', options.pageSize ?? DEFAULT_PAGE_SIZE);
+    this.scanCap = positiveInteger('scanCap', options.scanCap ?? DEFAULT_SCAN_CAP);
+    if (this.scanCap < this.pageSize) {
+      throw new RangeError('TerminalRecordInboundCloser: scanCap must be >= pageSize');
+    }
     this.selectInbound = raw.prepare(
       `SELECT processing_status, conversation_key, chat_jid, terminal_reason, failure_class
        FROM inbound_events WHERE seq = ?`,
@@ -152,9 +202,13 @@ export class TerminalRecordInboundCloser {
     this.selectDeliveryOp = raw.prepare(
       `SELECT conversation_key, chat_jid, source_inbound_seq, status FROM outbound_ops WHERE id = ?`,
     );
-    // Pre-filters the refusals that are common and permanent so they neither
-    // occupy the bounded window forever nor show up in the sweep report;
-    // evaluate() re-checks every rule.
+    // Pre-filters the refusals SQL can express (non-final disposition,
+    // identity mismatch, conflicting records, disposition link, recovery job,
+    // the five-minute grace window); evaluate() re-checks every rule. Delivery
+    // proof and the record contract are judged only by evaluate(), so refused
+    // rows can precede eligible ones: scan() pages past them by keyset
+    // (seq > ?) up to scanCap per call and counts each refusal, so no refused
+    // prefix can hide a later row.
     this.selectCandidates = raw.prepare(
       `SELECT i.seq AS seq
        FROM inbound_events i
@@ -176,9 +230,12 @@ export class TerminalRecordInboundCloser {
          AND NOT EXISTS (
            SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = i.seq
          )
+         AND i.seq > ?
+         AND i.seq <= ?
        ORDER BY i.seq ASC
-       LIMIT 200`,
+       LIMIT ?`,
     );
+    this.selectMaxInboundSeq = raw.prepare(`SELECT MAX(seq) AS seq FROM inbound_events`);
     this.closeComplete = raw.prepare(
       `UPDATE inbound_events
        SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ?
@@ -194,14 +251,74 @@ export class TerminalRecordInboundCloser {
     this.markDeliveryTerminal = raw.prepare(`UPDATE outbound_ops SET is_terminal = 1 WHERE id = ?`);
   }
 
-  /** Bounded pre-filtered candidates, oldest first; each still goes through evaluate(). */
+  /**
+   * The first page of pre-filtered candidates, oldest first. Stateless: it
+   * does not touch the scan cursor. Each still goes through evaluate().
+   */
   candidates(): number[] {
-    return (this.selectCandidates.all() as Array<{ seq: number }>).map((row) => row.seq);
+    return this.candidatePage(0, Number.MAX_SAFE_INTEGER, this.pageSize);
   }
 
-  /** Candidates that pass every rule — what the sweep reports. Writes nothing. */
+  /**
+   * Candidates that pass every rule in one scan() call — what the sweep
+   * reports. Writes nothing to the database; advances the scan cursor.
+   */
   eligibleCandidates(): number[] {
-    return this.candidates().filter((seq) => this.evaluate(seq).verdict === 'eligible');
+    return this.scan().eligible;
+  }
+
+  /**
+   * Evaluate up to scanCap pre-filtered candidates, oldest first, resuming
+   * where the previous call stopped. A cycle covers candidates up to the
+   * highest inbound seq seen when it started, so continuous arrivals cannot
+   * postpone the wrap back to the oldest rows, and rows repaired behind the
+   * cursor are reconsidered on the next cycle. The cursor is committed only
+   * when the whole call succeeds, so a throw never skips rows.
+   */
+  scan(): TerminalRecordInboundCloseScan {
+    let afterSeq = this.resumeAfterSeq;
+    let upperSeq = this.cycleUpperSeq;
+    if (afterSeq === 0 || upperSeq === null) {
+      afterSeq = 0;
+      upperSeq = this.maxInboundSeq();
+    }
+    const eligible: number[] = [];
+    const refusedByReason: Partial<Record<TerminalRecordInboundCloseRefusal, number>> = {};
+    let scanned = 0;
+    let complete = false;
+    while (scanned < this.scanCap) {
+      const budget = Math.min(this.pageSize, this.scanCap - scanned);
+      // One lookahead row tells a full page from the end of the range; it is
+      // not evaluated and never becomes the cursor.
+      const page = this.candidatePage(afterSeq, upperSeq, budget + 1);
+      for (const seq of page.slice(0, budget)) {
+        const evaluation = this.evaluate(seq);
+        if (evaluation.verdict === 'eligible') {
+          eligible.push(seq);
+        } else if (evaluation.verdict === 'refused') {
+          refusedByReason[evaluation.reason] = (refusedByReason[evaluation.reason] ?? 0) + 1;
+        }
+        scanned += 1;
+        afterSeq = seq;
+      }
+      if (page.length <= budget) {
+        complete = true;
+        break;
+      }
+    }
+    const nextAfterSeq = complete ? 0 : afterSeq;
+    this.resumeAfterSeq = nextAfterSeq;
+    this.cycleUpperSeq = complete ? null : upperSeq;
+    return { eligible, refusedByReason, scanned, complete, cycleUpperSeq: upperSeq, nextAfterSeq };
+  }
+
+  private candidatePage(afterSeq: number, upperSeq: number, limit: number): number[] {
+    return allFromStatement<{ seq: number }>(this.selectCandidates, afterSeq, upperSeq, limit)
+      .map((row) => row.seq);
+  }
+
+  private maxInboundSeq(): number {
+    return allFromStatement<{ seq: number | null }>(this.selectMaxInboundSeq)[0]?.seq ?? 0;
   }
 
   evaluate(seq: number): TerminalRecordInboundCloseEvaluation {

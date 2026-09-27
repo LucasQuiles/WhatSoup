@@ -2200,7 +2200,10 @@ writes both atomically, so only an older release leaves this state. The stuck-in
 closes such rows: it only reports them (bucket 5 in `docs/durability.md` §4.5, the
 `terminalRecordCloseCandidates` count and a log line with their seqs). Each close is an operator
 decision, taken for ONE named row with `turn-recovery-operator close-inbound`, which applies the same
-rules without the five-minute grace window.
+rules without the five-minute grace window. Each sweep evaluates one bounded window (at most 1000
+rows) of a scan cycle, so the log line also carries `refusedByReason` (for example
+`delivery_proof_invalid`, `record_contract_invalid`) and `complete`: when `complete` is false the
+reported seqs cover only part of the backlog, and later sweeps report the rest.
 
 ```bash
 # 1. Dry run (the default). Read-only: it never opens the migrating database layer, never migrates,
