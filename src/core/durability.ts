@@ -3429,7 +3429,7 @@ export class DurabilityEngine {
    * backlog of refused rows stays visible instead of reading as zero.
    */
   private reportTerminalRecordCloseCandidates(): number {
-    const startedAt = Date.now();
+    const startedAt = systemClock.now();
     const scan = this.terminalRecordInboundCloser.scan();
     if (scan.scanned > 0) {
       const fields = {
@@ -3439,7 +3439,7 @@ export class DurabilityEngine {
         complete: scan.complete,
         refusedByReason: scan.refusedByReason,
         cycleUpperSeq: scan.cycleUpperSeq,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: systemClock.now() - startedAt,
       };
       if (scan.eligible.length > 0) {
         log.warn(
