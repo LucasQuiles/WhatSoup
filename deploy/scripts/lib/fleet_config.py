@@ -42,18 +42,29 @@ ROSTER_NAME = "bot-errors-expected-fleet.json"
 SOURCE_ENV = "env"
 SOURCE_PRIVATE = "private"
 SOURCE_TRACKED = "tracked-legacy"
+SOURCE_ENV_JSON = "env-json"
+SOURCE_NONE = "none"
+
+FAILURE_MISSING = "missing"
+FAILURE_UNREADABLE = "unreadable"
+FAILURE_INVALID_JSON = "invalid-json"
+FAILURE_NOT_OBJECT = "not-object"
 
 
 class FleetConfigError(RuntimeError):
     """A health profile or roster could not be resolved or read.
 
     ``path`` is the file the failure is about (for a nothing-found failure,
-    the private path an operator should seed).
+    the private path an operator should seed). ``source`` and ``kind`` are
+    fixed tokens that name where and how it failed without any path, for
+    callers that must report the failure somewhere a path may not go.
     """
 
-    def __init__(self, message: str, path: Path) -> None:
+    def __init__(self, message: str, path: Path, *, source: str, kind: str) -> None:
         super().__init__(message)
         self.path = path
+        self.source = source
+        self.kind = kind
 
 
 def private_config_dir() -> Path:
@@ -90,7 +101,7 @@ class ResolvedConfig:
     def order(self) -> str:
         return describe_order(self.env_name, self.private, self.tracked)
 
-    def failure(self, problem: str) -> FleetConfigError:
+    def failure(self, problem: str, kind: str) -> FleetConfigError:
         if self.source == SOURCE_ENV:
             note = f"{self.env_name} is set, so later sources were not tried"
         elif self.source == SOURCE_PRIVATE:
@@ -101,6 +112,8 @@ class ResolvedConfig:
             f"{self.what} {problem}: {self.path} (source={self.source}; {note}); "
             f"resolver order: {self.order()}",
             self.path,
+            source=self.source,
+            kind=kind,
         )
 
 
@@ -125,6 +138,8 @@ def resolve(what: str, env_name: str, private: Path, tracked: Path) -> ResolvedC
         f"{what} missing: {env_name} is unset, {private} is absent and {tracked} is absent; "
         f"resolver order: {describe_order(env_name, private, tracked)}",
         private,
+        source=SOURCE_NONE,
+        kind=FAILURE_MISSING,
     )
 
 
@@ -133,15 +148,15 @@ def read_json_object(resolved: ResolvedConfig) -> dict[str, Any]:
     try:
         text = resolved.path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise resolved.failure("missing") from exc
+        raise resolved.failure("missing", FAILURE_MISSING) from exc
     except (OSError, UnicodeDecodeError) as exc:
-        raise resolved.failure(f"unreadable ({type(exc).__name__})") from exc
+        raise resolved.failure(f"unreadable ({type(exc).__name__})", FAILURE_UNREADABLE) from exc
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise resolved.failure(f"is not valid JSON ({exc})") from exc
+        raise resolved.failure(f"is not valid JSON ({exc})", FAILURE_INVALID_JSON) from exc
     if not isinstance(loaded, dict):
-        raise resolved.failure("is not a JSON object")
+        raise resolved.failure("is not a JSON object", FAILURE_NOT_OBJECT)
     return loaded
 
 

@@ -5,14 +5,16 @@ When a producer cannot load its health profile (FleetConfigError) it still exits
 
 - event type ``alert``, severity ``critical``, the producer's usual ``source``
   and ``alertSource=profile-missing:<producer>``; no force-notify;
-- evidence lines ``kind=profile-missing``, ``producer=``, ``host=``,
-  ``utc_day=`` and ``error=``, with the private profile path redacted;
+- summary ``health profile missing: <producer> cannot load its health profile;
+  exiting 2``; evidence lines ``kind=profile-missing``, ``producer=``,
+  ``host=``, ``utc_day=``, ``error_class=``, ``source=`` and ``error_sha256=``,
+  so no path or error text reaches the event or the marker;
 - the event is published first and the marker second. A marker for the same
   producer, host and day suppresses, even for a different error. Anything that
-  cannot prove that (absent, other day, other host, wrong schema, future day,
-  unparseable, unreadable) alerts again;
-- one stderr line per run says which stage happened, after the unchanged
-  fail-closed line.
+  cannot prove that (absent, other day, other host, wrong schema, future day)
+  alerts again and is overwritten; an unparseable or unreadable marker is
+  renamed aside with its bytes kept and replaced by a fresh one;
+- stderr says which stage happened, after the unchanged fail-closed line.
 
 This is daily suppression after a successful marker, not exactly-once: a
 marker failure after publication and two overlapping runs can each produce a
@@ -24,10 +26,10 @@ clock is the producer's dry clock, and nothing leaves the temp outbox.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
-import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,6 +167,10 @@ def _err_lines(capsys) -> list[str]:
     return capsys.readouterr().err.strip().splitlines()
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # First emission
 # ---------------------------------------------------------------------------
@@ -186,47 +192,65 @@ def test_first_failure_queues_one_critical_event_and_exits_2(producer: Producer,
     assert event["alertSource"] == f"profile-missing:{producer.name}"
     assert "forceNotify" not in event["diagnostics"]
     assert "criticalAsset" not in event
-    evidence = event["evidence"].splitlines()
-    assert evidence[:4] == [
+    # The hash is of the full message, which only stderr carries.
+    error_sha256 = _sha256(lines[0][len(producer.first_line):])
+    assert event["evidence"].splitlines() == [
         "kind=profile-missing",
         f"producer={producer.name}",
         "host=host-a",
         f"utc_day={DAY1}",
+        "error_class=missing",
+        "source=none",
+        f"error_sha256={error_sha256}",
     ]
-    assert evidence[4].startswith("error=health profile missing")
-    assert "resolver order:" in evidence[4]
-    # The dispatcher headline shows only the summary, so it must explain itself.
-    assert event["summary"] == (
-        f"health profile missing: {producer.name} on host-a cannot load it and exits 2 without checking"
-    )
+    # The dispatcher headline shows the host and only this summary.
+    assert event["summary"] == f"health profile missing: {producer.name} cannot load its health profile; exiting 2"
     if producer.name == HEALTH:
         assert event["instance"] == "bot-errors-health"
 
-    marker = producer.marker()
-    assert marker == {
+    assert producer.marker() == {
         "schemaVersion": 1,
         "kind": "profile-missing-marker",
         "producer": producer.name,
         "host": "host-a",
         "utcDay": DAY1,
         "eventId": path.stem,
-        "errorSha256": marker["errorSha256"],
+        "errorSha256": error_sha256,
     }
-    assert re.fullmatch(r"[0-9a-f]{64}", marker["errorSha256"])
+
+
+def _assert_path_only_on_stderr(producer: Producer, lines: list[str], path: Path) -> None:
+    assert str(path) in lines[0]
+    (_, event), = producer.events()
+    payload = json.dumps(event)
+    marker_text = producer.marker_path.read_text(encoding="utf-8")
+    message = lines[0][len(producer.first_line):]
+    for text in (payload, marker_text):
+        assert str(path) not in text
+        assert path.name not in text
+        assert message not in text
+        assert "resolver order" not in text
 
 
 def test_private_path_stays_on_stderr_only(producer: Producer, capsys):
     assert producer.run(EPOCH1) == 2
 
+    _assert_path_only_on_stderr(producer, _err_lines(capsys), producer.private_profile)
+
+
+def test_env_path_outside_the_redacted_tree_stays_on_stderr_only(producer: Producer, monkeypatch, capsys):
+    """Shared redaction only rewrites ~/.config/whatsoup paths; a stale checkout
+    path set by env var must not reach the event or the marker either."""
+    stale = producer.tmp_path / "stale-checkout" / "deploy" / "health-profiles" / "old-profile.json"
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(stale))
+
+    assert producer.run(EPOCH1) == 2
+
     lines = _err_lines(capsys)
-    assert str(producer.private_profile) in lines[0]
+    _assert_path_only_on_stderr(producer, lines, stale)
     (_, event), = producer.events()
-    payload = json.dumps(event)
-    assert str(producer.private_profile) not in payload
-    assert ".config/whatsoup/health-profile.json" not in payload
-    marker_text = producer.marker_path.read_text(encoding="utf-8")
-    assert str(producer.private_profile) not in marker_text
-    assert "health profile missing" not in marker_text
+    assert "stale-checkout" not in json.dumps(event)
+    assert event["evidence"].splitlines()[4:6] == ["error_class=missing", "source=env"]
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +334,7 @@ def test_invalid_inline_profile_json_alerts_and_exits_2(monkeypatch, tmp_path: P
     lines = _err_lines(capsys)
     assert lines[0].startswith("bot-errors-health-check: fail-closed: health profile is not valid JSON")
     (_, event), = health.events()
-    error_line = event["evidence"].splitlines()[4]
-    assert "BOT_ERRORS_HEALTH_PROFILE_JSON" in error_line
-    assert "is not valid JSON" in error_line
+    assert event["evidence"].splitlines()[4:6] == ["error_class=invalid-json", "source=env-json"]
     assert health.marker()["utcDay"] == DAY1
 
 
@@ -384,15 +406,51 @@ def test_marker_that_cannot_prove_suppression_is_overwritten(producer: Producer,
     assert producer.marker()["utcDay"] == DAY1
 
 
-def test_unparseable_marker_alerts_and_is_left_in_place(producer: Producer, capsys):
+def _aside_path(producer: Producer) -> Path:
+    # Contract: <marker>.corrupt-<UTC stamp of the run> in the same directory.
+    return producer.marker_path.with_name(f"{producer.marker_path.name}.corrupt-20260927T120000Z")
+
+
+def test_unparseable_marker_is_moved_aside_and_replaced(producer: Producer, capsys):
+    """The compare-and-swap cannot replace an unparseable marker; left in place
+    it would re-alert every run (every 5 minutes for the watchdog)."""
     producer.seed_marker("{not json")
+    aside = _aside_path(producer)
 
     assert producer.run(EPOCH1) == 2
 
     lines = _err_lines(capsys)
     assert len(lines) == 3
     assert lines[1].startswith(f"{producer.prefix} marker read failed (DurableWriteError: ")
-    assert lines[1].endswith("alerting without suppression and leaving the marker in place")
+    assert lines[1].endswith(f"); moved it aside to {aside}")
+    (path, _), = producer.events()
+    assert lines[2] == f"{producer.prefix} event queued: {path}"
+    assert aside.read_text(encoding="utf-8") == "{not json"
+    assert producer.marker()["utcDay"] == DAY1
+    assert producer.marker()["eventId"] == path.stem
+
+    assert producer.run(EPOCH1 + 3600) == 2
+
+    lines = _err_lines(capsys)
+    assert lines[1] == f"{producer.prefix} event suppressed: already queued for host-a on {DAY1}"
+    assert len(producer.events()) == 1
+
+
+def test_marker_that_cannot_be_moved_aside_alerts_without_a_marker(producer: Producer, monkeypatch, capsys):
+    producer.seed_marker("{not json")
+    monkeypatch.setattr(
+        producer.module, "move_profile_missing_marker_aside", mock.Mock(side_effect=OSError("read-only"))
+    )
+
+    assert producer.run(EPOCH1) == 2
+
+    lines = _err_lines(capsys)
+    assert len(lines) == 3
+    assert lines[1].startswith(f"{producer.prefix} marker read failed (DurableWriteError: ")
+    assert lines[1].endswith(
+        ") and could not be moved aside (OSError: read-only); "
+        "alerting without suppression and leaving the marker in place"
+    )
     (path, _), = producer.events()
     assert lines[2] == (
         f"{producer.prefix} event queued at {path} but marker not written (existing marker unreadable); "
@@ -402,19 +460,26 @@ def test_unparseable_marker_alerts_and_is_left_in_place(producer: Producer, caps
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
-def test_unreadable_marker_alerts_and_is_left_in_place(producer: Producer, capsys):
-    producer.seed_marker(json.dumps(_contract_marker(producer=producer.name)))
+def test_unreadable_marker_is_moved_aside_and_replaced(producer: Producer, capsys):
+    seeded = json.dumps(_contract_marker(producer=producer.name))
+    producer.seed_marker(seeded)
     producer.marker_path.chmod(0)
+    aside = _aside_path(producer)
     try:
         assert producer.run(EPOCH1) == 2
     finally:
-        producer.marker_path.chmod(0o600)
+        if aside.exists():
+            aside.chmod(0o600)
+        if producer.marker_path.exists():
+            producer.marker_path.chmod(0o600)
 
     lines = _err_lines(capsys)
     assert lines[1].startswith(f"{producer.prefix} marker read failed (")
-    assert "marker not written (existing marker unreadable)" in lines[2]
-    assert len(producer.events()) == 1
-    assert producer.marker() == _contract_marker(producer=producer.name)
+    assert lines[1].endswith(f"); moved it aside to {aside}")
+    (path, _), = producer.events()
+    assert lines[2] == f"{producer.prefix} event queued: {path}"
+    assert aside.read_text(encoding="utf-8") == seeded
+    assert producer.marker()["eventId"] == path.stem
 
 
 # ---------------------------------------------------------------------------

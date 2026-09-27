@@ -729,21 +729,26 @@ def _profile_missing_error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _profile_missing_error_sha256(exc: FleetConfigError) -> str:
+    return hashlib.sha256(str(exc).encode("utf-8")).hexdigest()
+
+
 def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tuple[str, str]:
     """Summary and evidence for the profile-missing alert.
 
-    outbox_event() redacts both, which turns the private profile path in the
-    error into a marker; the full path stays on the configuration_error line.
+    The error message names paths, and an env-var path outside the redacted
+    config tree would survive redaction, so the event carries only fixed
+    tokens and a hash. The full message stays on the configuration_error line.
     """
-    summary = (
-        f"health profile missing: {PROFILE_MISSING_PRODUCER} on {host} cannot load it and exits 2 without checking"
-    )
+    summary = f"health profile missing: {PROFILE_MISSING_PRODUCER} cannot load its health profile; exiting 2"
     evidence = "\n".join([
         "kind=profile-missing",
         f"producer={PROFILE_MISSING_PRODUCER}",
         f"host={host}",
         f"utc_day={day}",
-        f"error={exc}",
+        f"error_class={getattr(exc, 'kind', 'unknown')}",
+        f"source={getattr(exc, 'source', 'unknown')}",
+        f"error_sha256={_profile_missing_error_sha256(exc)}",
     ])
     return summary, evidence
 
@@ -757,7 +762,7 @@ def profile_missing_marker_payload(host: str, day: str, event_path: Path, exc: F
         "host": host,
         "utcDay": day,
         "eventId": event_path.stem,
-        "errorSha256": hashlib.sha256(str(exc).encode("utf-8")).hexdigest(),
+        "errorSha256": _profile_missing_error_sha256(exc),
     }
 
 
@@ -765,13 +770,28 @@ def observe_profile_missing_marker() -> tuple[Any, Any]:
     """Return ``(target, observation)`` for this producer's marker.
 
     Raises when the marker cannot be read (unparseable, unreadable, wrong
-    type); the caller then alerts without suppression and leaves the file.
-    Only this marker is touched: controller state stays unopened.
+    type); the caller then moves it aside. Only this marker is touched:
+    controller state stays unopened.
     """
     root = state_root()
     ensure_private_dir(root)
     target = _durable_target(root / WATCHDOG_PROFILE_MISSING_MARKER)
     return target, observe_json(target)
+
+
+def move_profile_missing_marker_aside(epoch: int) -> Path:
+    """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
+
+    The compare-and-swap cannot replace a marker it cannot read, so without
+    this every run (every few minutes) would alert. Raises when the rename fails.
+    """
+    marker = state_root() / WATCHDOG_PROFILE_MISSING_MARKER
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
+    aside = marker.with_name(f"{marker.name}.corrupt-{stamp}")
+    if os.path.lexists(aside):
+        aside = marker.with_name(f"{marker.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}")
+    os.rename(marker, aside)
+    return aside
 
 
 def record_profile_missing_marker(target: Any, expected: JsonVersion, marker: dict[str, Any]) -> PublicationResult:
@@ -805,13 +825,19 @@ def emit_profile_missing_event(exc: FleetConfigError) -> None:
     then fails its compare-and-swap). The durable writer's lock covers one state
     write, not the event-plus-marker pair; no extra lock is taken here.
 
-    Every outcome is one stderr line after the configuration_error line.
+    An unreadable marker is renamed aside and replaced. Only a state root where
+    no marker can be written (or moved) is left, and there every run alerts:
+    nothing can suppress without writable state, and that state-root failure is
+    itself what needs a page.
+
+    Every outcome is reported on stderr after the configuration_error line.
     Nothing here raises: run_once() returns 2 whatever this does.
     """
     prefix = "profile-missing"
     try:
         host = canonical_local_host()
-        day = utc_day(now_epoch())
+        epoch = now_epoch()
+        day = utc_day(epoch)
     except Exception as setup_exc:  # noqa: BLE001 - the exit code must stay 2.
         print(f"{prefix} event not written (clock or host lookup failed): {_profile_missing_error_text(setup_exc)}", file=sys.stderr)
         return
@@ -820,11 +846,24 @@ def emit_profile_missing_event(exc: FleetConfigError) -> None:
     try:
         target, observation = observe_profile_missing_marker()
     except Exception as read_exc:  # noqa: BLE001 - an unreadable marker must not suppress.
-        print(
-            f"{prefix} marker read failed ({_profile_missing_error_text(read_exc)}); "
-            "alerting without suppression and leaving the marker in place",
-            file=sys.stderr,
-        )
+        read_error = _profile_missing_error_text(read_exc)
+        try:
+            aside = move_profile_missing_marker_aside(epoch)
+        except Exception as move_exc:  # noqa: BLE001 - fall back to alerting without a marker.
+            print(
+                f"{prefix} marker read failed ({read_error}) and could not be moved aside "
+                f"({_profile_missing_error_text(move_exc)}); alerting without suppression and leaving the marker in place",
+                file=sys.stderr,
+            )
+        else:
+            print(f"{prefix} marker read failed ({read_error}); moved it aside to {aside}", file=sys.stderr)
+            try:
+                target, observation = observe_profile_missing_marker()
+            except Exception as reread_exc:  # noqa: BLE001 - alert without a marker.
+                print(
+                    f"{prefix} marker still unreadable after the move ({_profile_missing_error_text(reread_exc)})",
+                    file=sys.stderr,
+                )
     if observation is not None:
         decision = profile_missing_due(observation.payload, producer=PROFILE_MISSING_PRODUCER, host=host, day=day)
         if not decision.due:

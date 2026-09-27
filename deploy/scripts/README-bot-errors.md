@@ -1124,29 +1124,38 @@ instances.
 
 A profile failure also queues one critical alert per host, per producer, per UTC day,
 before the exit 2. The alert has `alertSource` `profile-missing:health-check` or
-`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, a
-summary starting `health profile missing:` that names the producer and host, and
-evidence lines `kind=profile-missing`, `producer=`, `host=`, `utc_day=` and `error=`. The
-shared redaction replaces the private profile path in `error=`; the stderr fail-closed line
-keeps the full path. The watchdog's other configuration errors (a bad check selector or
-threshold) queue nothing and print exactly what they did before. Neither producer opens
-controller state on this path.
+`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, the
+summary `health profile missing: <producer> cannot load its health profile; exiting 2`
+(the dispatcher headline adds the host), and evidence lines `kind=profile-missing`,
+`producer=`, `host=`, `utc_day=`, `error_class=` (`missing`, `unreadable`,
+`invalid-json` or `not-object`), `source=` (`env`, `env-json`, `private`,
+`tracked-legacy` or `none`) and `error_sha256=`. The event carries no path and no error
+text, because a profile path set by env var can sit outside the tree the shared redaction
+covers; the stderr fail-closed line keeps the full message. The watchdog's other
+configuration errors (a bad check selector or threshold) queue nothing and print exactly
+what they did before. Neither producer opens controller state on this path.
 
 Suppression comes from a marker in the state root (`health-check-profile-missing.json` or
 `heartbeat-watchdog-profile-missing.json`), written with a compare-and-swap after the event
 is queued. A marker for the same producer, host and day suppresses a second alert that day,
 even for a different error. A marker from another day, host or producer, a wrong schema, or
 a date later than today (the clock went back) does not suppress: the run alerts and
-overwrites the marker. A marker that cannot be read or parsed does not suppress either, and
-it is left in place; while it stays, every run alerts and prints why on stderr. Each run
-prints one stderr line after the fail-closed line saying what happened: queued, suppressed,
-event publish failed (no marker written), or event queued but marker write failed.
+overwrites the marker. A marker that cannot be read or parsed cannot be overwritten, so the
+run renames it to `<marker>.corrupt-<UTC stamp>` in the same directory (its bytes are kept),
+alerts, and writes a fresh marker. If that rename fails, the run alerts without writing a
+marker and says so. After the fail-closed line, stderr says what happened: queued,
+suppressed, marker moved aside, event publish failed (no marker written), or event queued
+but marker write failed.
 
 This is daily suppression after a successfully written marker, not exactly-once delivery.
 Two duplicates are expected. If the marker write fails, or the process dies after the event
 is queued, the next run alerts again. If two runs overlap, both can read "due" before either
 marker lands, and both queue an alert; the second marker write then loses its
-compare-and-swap. The alert is never dropped to avoid a duplicate.
+compare-and-swap. The alert is never dropped to avoid a duplicate. One case is not bounded
+by the day: if marker writes (or the move aside) keep failing while the outbox still accepts
+events, for example an outbox set elsewhere and an unwritable state root, every run queues
+an event (the watchdog runs every 5 minutes on macOS). Nothing can suppress without writable
+state; the unwritable state root is itself the fault to page on.
 
 ## OPERATIONAL — Manual daily-health validation
 

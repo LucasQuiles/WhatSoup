@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "0509f32b96dbdb41e764b0c8641420467256fa79a431cdc3d66aa560ae7b7373",
+      "sha256": "6cf85ab393aa5b79b65130e97e8f5fc42ea24e40b2f7ef949d4a13a1bbcbb74b",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -285,7 +285,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "c4a85aca164625e716c25ac1a69d328a5d4f90e41b0fef49b80110d4bef9dcec",
+      "sha256": "e636e31dc20329ce2432ef259811e6e95b4cc99d741e38b24d5d8fcba060b953",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -626,7 +626,7 @@
     },
     {
       "path": "deploy/scripts/lib/fleet_config.py",
-      "sha256": "f8a6fa50eb197fa4e116dfe8a6d6dffb419c58984cda22236db357cee140580a",
+      "sha256": "30a67aa96ea4c47c2d262eccbffedd4b81bfecaa51ead0e9a631b3ec3c58136e",
       "mustContain": [
         "resolve_health_profile",
         "resolve_roster",

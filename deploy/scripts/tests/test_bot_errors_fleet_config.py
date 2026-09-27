@@ -205,6 +205,52 @@ def test_roster_both_missing_fails(home: Path, tmp_path: Path):
     assert "resolver order: 1) env BOT_ERRORS_EXPECTED_FLEET 2) private" in message
 
 
+def _failure(tracked: Path) -> "_mod.FleetConfigError":
+    with pytest.raises(_mod.FleetConfigError) as info:
+        _mod.read_json_object(_mod.resolve_health_profile(tracked))
+    return info.value
+
+
+def test_failure_carries_path_free_source_and_kind(home: Path, tmp_path: Path, monkeypatch):
+    """Callers that must not publish paths report these fixed tokens instead."""
+    tracked = tmp_path / "repo" / "deploy" / "health-profiles" / "host-a.json"
+
+    nothing = _failure(tracked)
+    assert (nothing.source, nothing.kind) == ("none", "missing")
+
+    monkeypatch.setenv(_mod.HEALTH_PROFILE_ENV, str(tmp_path / "gone.json"))
+    env_missing = _failure(tracked)
+    assert (env_missing.source, env_missing.kind) == ("env", "missing")
+    monkeypatch.delenv(_mod.HEALTH_PROFILE_ENV)
+
+    private = _private_profile(home)
+    private.parent.mkdir(parents=True)
+    private.write_text("{not json", encoding="utf-8")
+    invalid = _failure(tracked)
+    assert (invalid.source, invalid.kind) == ("private", "invalid-json")
+
+    private.write_text("[1]", encoding="utf-8")
+    not_object = _failure(tracked)
+    assert (not_object.source, not_object.kind) == ("private", "not-object")
+
+    private.unlink()
+    _write(tracked, {"role": "leaf"})
+    tracked.write_text("{", encoding="utf-8")
+    legacy = _failure(tracked)
+    assert (legacy.source, legacy.kind) == ("tracked-legacy", "invalid-json")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_failure_kind(home: Path, tmp_path: Path):
+    private = _write(_private_profile(home), {"role": "relay"})
+    private.chmod(0)
+    try:
+        unreadable = _failure(tmp_path / "tracked.json")
+    finally:
+        private.chmod(0o600)
+    assert (unreadable.source, unreadable.kind) == ("private", "unreadable")
+
+
 # ---------------------------------------------------------------------------
 # profile_missing_due: daily suppression key is (host, producer, UTC day)
 # ---------------------------------------------------------------------------
