@@ -6,7 +6,7 @@
 #   USERNAME      — macOS user account (the bot operator account)
 #   BOT_HEALTH    — health endpoint URL for THIS bot (check port map in
 #                   docs/runbooks/macos-host-setup.md before assuming 9099)
-#   FLEET_HEALTH  — fleet console URL for THIS host (standard 9099; except
+#   FLEET_HEALTH  — fleet liveness URL (/livez) for THIS host (standard 9099; except
 #                   some hosts run the fleet API on a non-default port — see the host port map)
 #   NODE_BIN      — absolute path to pinned node binary, e.g.
 #                   __HOME__/.nvm/versions/node/v24.15.0/bin/node
@@ -78,7 +78,7 @@ BOT_PLIST="$HOME_DIR/Library/LaunchAgents/$BOT_LABEL.plist"
 FLEET_PLIST="$HOME_DIR/Library/LaunchAgents/$FLEET_LABEL.plist"
 
 BOT_HEALTH="http://127.0.0.1:BOT_PORT/health"
-FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
+FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/livez"
 HEALTH_READER_PATH="__HEALTH_READER_PATH__"
 HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
 # The reader's per-socket timeout must expire well before the wall deadline,
@@ -643,7 +643,7 @@ try:
         if re.fullmatch(r"[0-9a-f]{64}", token) is None:
             raise ValueError()
         headers = {"Authorization": "Bearer " + token}
-    elif request_path == "/" and not token:
+    elif request_path == "/livez" and not token:
         headers = {}
     else:
         raise ValueError()
@@ -1424,7 +1424,9 @@ else
 fi
 
 # --- Fleet console health check ---
-fleet_resp="$(read_health_response FLEET_PORT / </dev/null 2>>"$LOG")"
+# Probe /livez, not the console root: the root serves built static assets and
+# 404s on a release without them while the fleet process is healthy.
+fleet_resp="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
 probe_rc=$?
 fleet_code="${fleet_resp##*$'\n'}"
 if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
