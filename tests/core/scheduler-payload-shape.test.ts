@@ -109,6 +109,7 @@ describe('A10 execution: invalid rows are dead-lettered with a shape class', () 
     { label: 'a text row with an extra transport key', shape: 'wrong_shape', contentType: 'text', payload: '{"text":"hi","delete":{"id":"x"}}' },
     { label: 'an unknown content_type', shape: 'unknown_content_type', contentType: 'poll', payload: '{"type":"poll"}', mediaBlob: BLOB },
     { label: 'a payload type that disagrees with content_type', shape: 'type_mismatch', contentType: 'image', payload: '{"type":"video","mimetype":"video/mp4"}', mediaBlob: BLOB },
+    { label: 'an image row with only a caption and no type key (census row 66 shape)', shape: 'missing_type', contentType: 'image', payload: '{"caption":"c"}', mediaBlob: BLOB },
     { label: 'a media row with no bytes anywhere', shape: 'missing_media', contentType: 'video', payload: '{"type":"video","mimetype":"video/mp4"}' },
     { label: 'a legacy buffer with an out-of-range byte', shape: 'invalid_legacy_buffer', contentType: 'image', payload: '{"type":"image","buffer":[1,256]}' },
     { label: 'a media row with an array payload', shape: 'json_array', contentType: 'sticker', payload: '[]', mediaBlob: BLOB },
@@ -201,6 +202,49 @@ describe('A10 execution: valid and legacy rows still send', () => {
   function status(id: number): string {
     return (db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = ?').get(id) as { status: string }).status;
   }
+
+  // F03: census rows 25..94 on ml-bot carry filename on image/video. It is
+  // accepted in storage and never forwarded; on a document it is forwarded.
+  for (const type of ['image', 'video'] as const) {
+    it(`sends a ${type} row that stores filename WITHOUT forwarding filename`, async () => {
+      const stored = { type, caption: 'c', filename: 'f.bin', mimetype: type === 'image' ? 'image/png' : 'video/mp4' };
+      const id = insert(type, JSON.stringify(stored), new Uint8Array([1]));
+      await scheduler.tick();
+      expect(sendMedia).toHaveBeenCalledTimes(1);
+      const media = sendMedia.mock.calls[0]![1] as Record<string, unknown>;
+      expect(media).not.toHaveProperty('filename');
+      expect(media['caption']).toBe('c');
+      expect(status(id)).toBe('sent');
+    });
+  }
+
+  it('sends a document row WITH its filename', async () => {
+    const id = insert('document', JSON.stringify({ type: 'document', filename: 'r.pdf', mimetype: 'application/pdf' }), new Uint8Array([1]));
+    await scheduler.tick();
+    expect((sendMedia.mock.calls[0]![1] as Record<string, unknown>)['filename']).toBe('r.pdf');
+    expect(status(id)).toBe('sent');
+  });
+
+  // Historical rows are never replayed: the shapes the census found are all
+  // status 'sent', and a tick must leave such rows untouched and unsent.
+  it('never replays historical sent rows of the census shapes (filename image, caption-only image)', async () => {
+    const shapes = [
+      JSON.stringify({ type: 'image', caption: 'c', filename: 'f.png', mimetype: 'image/png' }),
+      JSON.stringify({ caption: 'c' }),
+    ];
+    for (const payload of shapes) {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, sent_at, retry_count, media_blob)
+         VALUES (?, 'image', ?, ?, 'sent', ?, 0, ?)`,
+      ).run(CHAT, payload, Math.floor(Date.now() / 1000) - 3600, Math.floor(Date.now() / 1000) - 3500, new Uint8Array([1]));
+    }
+    const before = db.raw.prepare('SELECT * FROM scheduled_messages ORDER BY id').all();
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(sendMedia).not.toHaveBeenCalled();
+    expect(sendRaw).not.toHaveBeenCalled();
+    expect(db.raw.prepare('SELECT * FROM scheduled_messages ORDER BY id').all()).toEqual(before);
+  });
 
   it('sends a text row as exactly { text }', async () => {
     const id = insert('text', '{"text":"hello"}', null);

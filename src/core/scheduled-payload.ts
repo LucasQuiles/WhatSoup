@@ -25,6 +25,7 @@ export type ScheduledPayloadShape =
   | 'json_array'
   | 'unknown_content_type'
   | 'wrong_shape'
+  | 'missing_type'
   | 'type_mismatch'
   | 'missing_media'
   | 'invalid_legacy_buffer';
@@ -54,19 +55,44 @@ export interface ScheduledPayloadRow {
 type FieldKind = 'string' | 'boolean' | 'integer';
 
 /**
- * Per-type field allowlist. `true` = required. Derived from every payload
- * builder since the table was introduced (c45bb7680 onward) and from the
- * OutboundMedia contract; `buffer` is the pre-SP9 legacy inline-bytes key.
+ * How one stored key is treated: its runtime kind, whether the row must carry
+ * it, and whether it is EMITTED to the transport. A key can be accepted in
+ * storage without being emitted; accepting never implies forwarding.
  */
-const MEDIA_FIELDS: Record<Exclude<ScheduledContentType, 'text'>, Record<string, [FieldKind, boolean]>> = {
-  image: { caption: ['string', false], mimetype: ['string', false], viewOnce: ['boolean', false] },
-  video: {
-    caption: ['string', false], mimetype: ['string', false], ptv: ['boolean', false],
-    gifPlayback: ['boolean', false], viewOnce: ['boolean', false],
+interface FieldSpec {
+  kind: FieldKind;
+  required: boolean;
+  emit: boolean;
+}
+
+const field = (kind: FieldKind, required = false): FieldSpec => ({ kind, required, emit: true });
+/** Accepted in storage, validated, and dropped before the send. */
+const storageOnly = (kind: FieldKind): FieldSpec => ({ kind, required: false, emit: false });
+
+/**
+ * Per-type storage allowlist. Derived from every payload builder since the
+ * table was introduced (c45bb7680 onward) and from the OutboundMedia contract;
+ * `buffer` is the pre-SP9 legacy inline-bytes key, handled separately.
+ *
+ * `filename` on image and video is storage-only. The E11 census found 31 sent
+ * ml-bot rows carrying it (28 captioned images, 1 uncaptioned image, 2 videos;
+ * writer provenance unresolved). OutboundMedia has no filename for those types,
+ * so it is accepted and discarded rather than forwarded. On a document it is
+ * the transport field and is emitted.
+ */
+const MEDIA_FIELDS: Record<Exclude<ScheduledContentType, 'text'>, Record<string, FieldSpec>> = {
+  image: {
+    caption: field('string'), mimetype: field('string'), viewOnce: field('boolean'),
+    filename: storageOnly('string'),
   },
-  audio: { mimetype: ['string', true], ptt: ['boolean', false], seconds: ['integer', false] },
-  document: { filename: ['string', true], mimetype: ['string', true], caption: ['string', false] },
-  sticker: { mimetype: ['string', false], isAnimated: ['boolean', false] },
+  video: {
+    caption: field('string'), mimetype: field('string'), ptv: field('boolean'),
+    gifPlayback: field('boolean'), viewOnce: field('boolean'),
+    filename: storageOnly('string'),
+  },
+  audio: { mimetype: field('string', true), ptt: field('boolean'), seconds: field('integer') },
+  document: { filename: field('string', true), mimetype: field('string', true), caption: field('string') },
+  sticker: { mimetype: field('string'), isAnimated: field('boolean') },
 };
 
 function isScheduledContentType(value: string): value is ScheduledContentType {
@@ -119,6 +145,12 @@ export function decodeScheduledPayload(row: ScheduledPayloadRow): ScheduledPaylo
     return { ok: true, send: { kind: 'text', content: { text } } };
   }
 
+  // A media row with no `type` key is refused, not inferred from content_type.
+  // No known writer stores media without it (census row 66 on ml-bot, a sent
+  // image with only `caption`, has no identified writer), so a legacy decoder
+  // would be guessing. The refusal is its own class so it is not mistaken for
+  // a row that names a different type.
+  if (!('type' in parsed)) return refuse('missing_type');
   if (parsed['type'] !== contentType) return refuse('type_mismatch');
 
   const allowed = MEDIA_FIELDS[contentType];
@@ -126,13 +158,18 @@ export function decodeScheduledPayload(row: ScheduledPayloadRow): ScheduledPaylo
   for (const [key, value] of Object.entries(parsed)) {
     if (key === 'type' || key === 'buffer') continue;
     const spec = allowed[key];
-    if (!spec || !matchesKind(value, spec[0])) return refuse('wrong_shape');
-    fields[key] = value;
+    if (!spec || !matchesKind(value, spec.kind)) return refuse('wrong_shape');
+    if (spec.emit) fields[key] = value;
   }
-  for (const [key, [, required]] of Object.entries(allowed)) {
-    if (required && !(key in fields)) return refuse('wrong_shape');
+  for (const [key, spec] of Object.entries(allowed)) {
+    if (spec.required && !(key in parsed)) return refuse('wrong_shape');
   }
 
+  // Byte precedence (deterministic, F04): a NON-EMPTY media_blob always wins,
+  // and the legacy `buffer` key is then neither validated nor emitted. Only
+  // when media_blob is NULL or zero-length is the legacy key consulted, and an
+  // unusable one is refused rather than skipped. No migration normalizes dual
+  // rows: none were observed (E12), and this rule already decides them.
   let buffer: Buffer;
   if (row.media_blob && row.media_blob.byteLength > 0) {
     buffer = Buffer.from(row.media_blob);

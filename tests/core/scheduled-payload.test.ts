@@ -77,6 +77,59 @@ describe('decodeScheduledPayload: accepted forms', () => {
   });
 });
 
+// F03: storage fields the contract ACCEPTS are separate from transport fields it EMITS.
+describe('decodeScheduledPayload: accepted storage fields vs emitted transport fields', () => {
+  function emitted(contentType: string, payload: Record<string, unknown>): Record<string, unknown> {
+    const verdict = decode(contentType, JSON.stringify(payload), BLOB);
+    if (!verdict.ok || verdict.send.kind !== 'media') throw new Error(`expected a media send for ${contentType}`);
+    const { buffer: _b, ...fields } = verdict.send.media as unknown as Record<string, unknown>;
+    return fields;
+  }
+
+  for (const type of ['image', 'video'] as const) {
+    it(`accepts filename on a captioned ${type} and discards it from the emitted fields`, () => {
+      const fields = emitted(type, { ...VALID_MEDIA[type], filename: 'clip.bin' });
+      expect(fields).not.toHaveProperty('filename');
+      expect(fields).toEqual(VALID_MEDIA[type]);
+    });
+  }
+
+  it('accepts filename on an uncaptioned image (census row 63 key set) and discards it', () => {
+    const fields = emitted('image', { type: 'image', filename: 'a.png', mimetype: 'image/png' });
+    expect(fields).toEqual({ type: 'image', mimetype: 'image/png' });
+  });
+
+  it('preserves filename on a document, where it is the transport field', () => {
+    expect(emitted('document', VALID_MEDIA.document)['filename']).toBe('a.pdf');
+  });
+
+  it('still type-checks a storage-only field: a non-string image filename is wrong_shape', () => {
+    expect(shapeOf('image', JSON.stringify({ ...VALID_MEDIA.image, filename: 7 }), BLOB)).toBe('wrong_shape');
+  });
+
+  it('does not widen other types: filename on audio or sticker is still wrong_shape', () => {
+    expect(shapeOf('audio', JSON.stringify({ ...VALID_MEDIA.audio, filename: 'a.ogg' }), BLOB)).toBe('wrong_shape');
+    expect(shapeOf('sticker', JSON.stringify({ ...VALID_MEDIA.sticker, filename: 'a.webp' }), BLOB)).toBe('wrong_shape');
+  });
+});
+
+// F04: the deterministic byte-precedence rule, at its boundary (zero vs one byte of media_blob).
+describe('decodeScheduledPayload: media_blob vs legacy buffer precedence', () => {
+  it('a 1-byte media_blob wins and an unusable legacy buffer beside it is neither validated nor emitted; a 0-byte media_blob defers to the legacy buffer', () => {
+    const withInvalidLegacy = JSON.stringify({ ...VALID_MEDIA.image, buffer: [999] });
+    const oneByte = decode('image', withInvalidLegacy, new Uint8Array([42]));
+    if (!oneByte.ok || oneByte.send.kind !== 'media') throw new Error('expected media send');
+    expect([...(oneByte.send.media.buffer as Buffer)]).toEqual([42]);
+
+    // Same payload, zero-length blob: the legacy key is now consulted and refused.
+    expect(shapeOf('image', withInvalidLegacy, new Uint8Array(0))).toBe('invalid_legacy_buffer');
+
+    const zeroByteValidLegacy = decode('image', JSON.stringify({ ...VALID_MEDIA.image, buffer: [5, 6] }), new Uint8Array(0));
+    if (!zeroByteValidLegacy.ok || zeroByteValidLegacy.send.kind !== 'media') throw new Error('expected media send');
+    expect([...(zeroByteValidLegacy.send.media.buffer as Buffer)]).toEqual([5, 6]);
+  });
+});
+
 describe('decodeScheduledPayload: refused shape classes', () => {
   it('not_json: plain text that is not JSON is never coerced into a send', () => {
     expect(shapeOf('text', 'Reminder: the meeting moved to Friday at 10.')).toBe('not_json');
@@ -132,7 +185,15 @@ describe('decodeScheduledPayload: refused shape classes', () => {
 
   it('type_mismatch: the payload type disagrees with content_type', () => {
     expect(shapeOf('image', JSON.stringify({ ...VALID_MEDIA.video }), BLOB)).toBe('type_mismatch');
-    expect(shapeOf('sticker', JSON.stringify({ mimetype: 'image/webp' }), BLOB)).toBe('type_mismatch');
+    expect(shapeOf('sticker', JSON.stringify({ type: 'image', mimetype: 'image/webp' }), BLOB)).toBe('type_mismatch');
+  });
+
+  // F03: census row 66 (ml-bot, sent image, payload keys [caption] only, blob
+  // present, writer unidentified). The type is NOT inferred from content_type;
+  // the refusal is stated as its own class.
+  it('missing_type: a media payload with no type key is refused, never inferred (census row 66 shape)', () => {
+    expect(shapeOf('image', JSON.stringify({ caption: 'c' }), BLOB)).toBe('missing_type');
+    expect(shapeOf('sticker', JSON.stringify({ mimetype: 'image/webp' }), BLOB)).toBe('missing_type');
   });
 
   it('missing_media: no media_blob and no legacy buffer', () => {
