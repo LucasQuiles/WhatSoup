@@ -3285,7 +3285,15 @@ export class DurabilityEngine {
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
     const reclaimedStaleRows: StaleReclaimedInbound[] = [];
-    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    // Bucket 5 is advisory and writes nothing, so it reads in its own snapshot
+    // before the mutating sweep instead of lengthening that transaction; the
+    // operator close path re-evaluates every row before it writes. Buckets 1-4
+    // never select a row that has a terminal record, so the two cannot overlap.
+    const terminalRecordCloseCandidates = withTransaction(
+      this.db,
+      () => this.reportTerminalRecordCloseCandidates(),
+    );
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows, terminalRecordCloseCandidates);
     if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
       try {
         this.staleInboundReclaimListener(reclaimedStaleRows);
@@ -3298,6 +3306,7 @@ export class DurabilityEngine {
 
   private runSweepStuckInboundTransaction(
     reclaimedStaleRows: StaleReclaimedInbound[],
+    terminalRecordCloseCandidates: number,
   ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
@@ -3317,7 +3326,6 @@ export class DurabilityEngine {
         job_id: number;
         job_state: string;
       }>;
-      const terminalRecordCloseCandidates = this.reportTerminalRecordCloseCandidates();
       if (
         echoed.length === 0 &&
         turnDone.length === 0 &&
@@ -3416,17 +3424,36 @@ export class DurabilityEngine {
    * Report-only: open inbound rows behind a final terminal record that an
    * operator could close with `turn-recovery-operator close-inbound`. Each
    * close is an operator decision, so the sweep writes nothing here — not the
-   * row, and no recovery evidence.
+   * row, and no recovery evidence. Each call evaluates one bounded window of
+   * the scan cycle; a window whose rows were all refused is logged too, so a
+   * backlog of refused rows stays visible instead of reading as zero.
    */
   private reportTerminalRecordCloseCandidates(): number {
-    const seqs = this.terminalRecordInboundCloser.eligibleCandidates();
-    if (seqs.length > 0) {
-      log.warn(
-        { count: seqs.length, inboundSeqs: seqs },
-        'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
-      );
+    const startedAt = Date.now();
+    const scan = this.terminalRecordInboundCloser.scan();
+    if (scan.scanned > 0) {
+      const fields = {
+        count: scan.eligible.length,
+        inboundSeqs: scan.eligible.slice(0, 50),
+        scanned: scan.scanned,
+        complete: scan.complete,
+        refusedByReason: scan.refusedByReason,
+        cycleUpperSeq: scan.cycleUpperSeq,
+        elapsedMs: Date.now() - startedAt,
+      };
+      if (scan.eligible.length > 0) {
+        log.warn(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
+        );
+      } else {
+        log.info(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record were all refused in this scan window',
+        );
+      }
     }
-    return seqs.length;
+    return scan.eligible.length;
   }
 
   getHealthStats(): {

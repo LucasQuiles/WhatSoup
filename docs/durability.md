@@ -389,7 +389,7 @@ reports:
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
-| 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the seqs are logged. Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies |
+| 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the seqs are logged. Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies. Read in its own snapshot before the four-bucket transaction, and bounded per sweep (see below) |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
@@ -401,8 +401,18 @@ buckets remain mutually exclusive and no row is disposed twice (an echoed termin
 record still routes to bucket 1). The operator close derives the status by the same mapping live
 finalization uses (`deriveTerminalInboundMutation`), validates the record against the finalize
 contract and re-checks its delivery proof: `complete` with `response_echoed` / `no_reply_policy`,
-or `failed` with the record's failure class. Each SELECT is bounded to 200 rows so a
-large backlog drains over successive sweeps rather than in one long transaction. The
+or `failed` with the record's failure class. Each SELECT of buckets 1–4 is bounded to 200
+rows so a large backlog drains over successive sweeps rather than in one long transaction.
+Bucket 5 writes nothing, so nothing drains: its SQL pre-filters only what SQL can judge
+(disposition, identity, conflicting records, links, recovery jobs, grace window), while delivery
+proof and the record contract are judged per row by the evaluator. A sweep therefore scans the
+pre-filtered rows oldest first in keyset pages of 200, evaluating at most **1000** rows, and
+resumes after the last evaluated seq on the next sweep; each scan cycle covers the seqs that
+existed when it began, then wraps to the oldest row, so refused rows can never hide a later
+eligible one and a row repaired behind the cursor is seen on the next cycle. The resume point is
+held in memory only: a restart begins a new cycle. The log line carries `scanned`, `complete`,
+`cycleUpperSeq` and `refusedByReason` (evaluated rows only; SQL-pre-filtered rows are not
+counted), and a window whose rows were all refused is logged at info level. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
 opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns untouched. The

@@ -15,7 +15,7 @@
  * transferred records, disposition links, recovery jobs, conflicting records,
  * identity mismatches, broken delivery proof and contract-invalid records.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { withTransaction } from '../../src/core/db-tx.ts';
@@ -399,5 +399,170 @@ describe('open inbound behind a final terminal record', () => {
 
     expect(close(seq)).toMatchObject({ verdict: 'refused', reason: 'record_contract_invalid' });
     expect(inboundState(seq).processing_status).toBe('processing');
+  });
+
+  /** A replied row whose delivery proof no longer holds: refused, but SQL-prefiltered as a candidate. */
+  const proofBroken = (): number => {
+    const seq = journal();
+    finalize(seq, 'finalized_replied');
+    reopen(seq, 'processing');
+    db.raw.prepare(
+      `UPDATE outbound_ops SET status = 'failed_permanent'
+       WHERE id = (SELECT delivery_op_id FROM turn_terminal_records WHERE inbound_seq = ?)`,
+    ).run(seq);
+    return seq;
+  };
+
+  /** A reopened row with a valid record: eligible. */
+  const eligible = (): number => {
+    const seq = journal();
+    finalize(seq, 'finalized_no_reply_policy');
+    reopen(seq, 'pending');
+    return seq;
+  };
+
+  it('a refused prefix longer than one scan page does not hide a later eligible row', () => {
+    const refused = Array.from({ length: 200 }, () => proofBroken());
+    const last = eligible();
+    expect(closer.evaluate(refused[0]!)).toMatchObject({ verdict: 'refused', reason: 'delivery_proof_invalid' });
+
+    expect(closer.eligibleCandidates()).toEqual([last]);
+    expect(engine.sweepStuckInbound().terminalRecordCloseCandidates).toBe(1);
+    expect(engine.sweepStuckInbound().terminalRecordCloseCandidates).toBe(1);
+    expect(inboundState(last).processing_status).toBe('pending');
+  }, 30_000);
+
+  describe('bounded scan cycle', () => {
+    const smallCloser = (): TerminalRecordInboundCloser =>
+      new TerminalRecordInboundCloser(db.raw, { pageSize: 2, scanCap: 3 });
+
+    const restoreProof = (seq: number): void => {
+      db.raw.prepare(
+        `UPDATE outbound_ops SET status = 'echoed'
+         WHERE id = (SELECT delivery_op_id FROM turn_terminal_records WHERE inbound_seq = ?)`,
+      ).run(seq);
+    };
+
+    it('pages past a refused prefix longer than the scan cap and reaches the eligible row on the next call', () => {
+      const [r1, , r3] = [proofBroken(), proofBroken(), proofBroken(), proofBroken()];
+      const e5 = eligible();
+      const scanner = smallCloser();
+
+      expect(scanner.scan()).toMatchObject({ eligible: [], scanned: 3, complete: false, nextAfterSeq: r3 });
+      expect(scanner.scan()).toMatchObject({ eligible: [e5], scanned: 2, complete: true, nextAfterSeq: 0 });
+      // The next call starts a new cycle at the oldest candidate.
+      expect(scanner.scan()).toMatchObject({ eligible: [], scanned: 3, complete: false, nextAfterSeq: r3 });
+      expect(r1).toBeLessThan(r3!);
+    });
+
+    it('a row repaired behind the cursor is found on the next cycle', () => {
+      const [r1] = [proofBroken(), proofBroken(), proofBroken(), proofBroken()];
+      const e5 = eligible();
+      const scanner = smallCloser();
+
+      expect(scanner.scan().complete).toBe(false);
+      restoreProof(r1!);
+      expect(scanner.scan()).toMatchObject({ eligible: [e5], complete: true });
+      expect(scanner.scan().eligible).toEqual([r1]);
+    });
+
+    it('rows arriving during a cycle wait for the next cycle, so arrivals cannot postpone the wrap', () => {
+      const [r1] = [proofBroken(), proofBroken(), proofBroken(), proofBroken()];
+      const scanner = smallCloser();
+
+      const first = scanner.scan();
+      expect(first.complete).toBe(false);
+      restoreProof(r1!);
+      const late = eligible();
+      expect(late).toBeGreaterThan(first.cycleUpperSeq);
+
+      expect(scanner.scan()).toMatchObject({ eligible: [], scanned: 1, complete: true });
+      const next = scanner.scan();
+      expect(next.eligible).toEqual([r1]);
+      expect(next.cycleUpperSeq).toBeGreaterThanOrEqual(late);
+      expect(scanner.scan()).toMatchObject({ eligible: [late], complete: true });
+    });
+
+    it('handles the empty, exact-page, exact-cap and cap-plus-one boundaries without skipping the lookahead row', () => {
+      const scanner = new TerminalRecordInboundCloser(db.raw, { pageSize: 2, scanCap: 4 });
+      expect(scanner.scan()).toMatchObject({ eligible: [], scanned: 0, complete: true, nextAfterSeq: 0 });
+
+      const rows = [eligible(), eligible()];
+      expect(scanner.scan()).toMatchObject({ eligible: rows, scanned: 2, complete: true });
+
+      rows.push(eligible());
+      expect(scanner.scan()).toMatchObject({ eligible: rows, scanned: 3, complete: true });
+
+      rows.push(eligible());
+      expect(scanner.scan()).toMatchObject({ eligible: rows, scanned: 4, complete: true });
+
+      rows.push(eligible());
+      const capped = scanner.scan();
+      expect(capped).toMatchObject({ eligible: rows.slice(0, 4), scanned: 4, complete: false, nextAfterSeq: rows[3] });
+      expect(scanner.scan()).toMatchObject({ eligible: [rows[4]], scanned: 1, complete: true });
+    });
+
+    it('counts refusals by the evaluator reason without changing any rule', () => {
+      const proof = proofBroken();
+      const contract = journal();
+      finalize(contract, 'failed_terminal', { attempt: { kind: 'failed', class: 'crash' } });
+      reopen(contract, 'processing');
+      db.raw.prepare(
+        `UPDATE turn_terminal_records SET attempt_failure_class = 'retired-class' WHERE inbound_seq = ?`,
+      ).run(contract);
+      const ok = eligible();
+
+      expect(closer.scan()).toEqual({
+        eligible: [ok],
+        refusedByReason: { delivery_proof_invalid: 1, record_contract_invalid: 1 },
+        scanned: 3,
+        complete: true,
+        cycleUpperSeq: ok,
+        nextAfterSeq: 0,
+      });
+      expect(closer.evaluate(proof)).toMatchObject({ verdict: 'refused', reason: 'delivery_proof_invalid' });
+    });
+
+    it('a scan that throws commits no cursor progress, so the next call re-reads the same rows', () => {
+      const rows = [proofBroken(), proofBroken(), proofBroken(), proofBroken(), proofBroken()];
+      const scanner = smallCloser();
+      expect(scanner.scan()).toMatchObject({ scanned: 3, nextAfterSeq: rows[2] });
+
+      const original = scanner.evaluate.bind(scanner);
+      const spy = vi.spyOn(scanner, 'evaluate').mockImplementation((seq: number) => {
+        if (seq === rows[4]) throw new Error('evaluator failed');
+        return original(seq);
+      });
+      expect(() => scanner.scan()).toThrow('evaluator failed');
+      spy.mockRestore();
+
+      expect(scanner.scan()).toMatchObject({ scanned: 2, complete: true, refusedByReason: { delivery_proof_invalid: 2 } });
+    });
+
+    it('a deleted cursor row does not break the keyset resume', () => {
+      const rows = [proofBroken(), proofBroken(), proofBroken(), proofBroken()];
+      const e5 = eligible();
+      const scanner = smallCloser();
+      expect(scanner.scan().nextAfterSeq).toBe(rows[2]);
+      db.raw.prepare('DELETE FROM turn_terminal_records WHERE inbound_seq = ?').run(rows[2]);
+
+      expect(scanner.scan()).toMatchObject({ eligible: [e5], complete: true });
+    });
+
+    it('rejects a page size or scan cap that is not a positive integer, or a cap below the page size', () => {
+      expect(() => new TerminalRecordInboundCloser(db.raw, { pageSize: 0 })).toThrow(RangeError);
+      expect(() => new TerminalRecordInboundCloser(db.raw, { scanCap: 1.5 })).toThrow(RangeError);
+      expect(() => new TerminalRecordInboundCloser(db.raw, { pageSize: 5, scanCap: 4 })).toThrow(RangeError);
+    });
+
+    it('the sweep reads bucket 5 before its own transaction and still writes nothing for it', () => {
+      const seq = eligible();
+      const before = evidenceRowCount();
+      expect(db.raw.isTransaction).toBe(false);
+      expect(engine.sweepStuckInbound().terminalRecordCloseCandidates).toBe(1);
+      expect(db.raw.isTransaction).toBe(false);
+      expect(inboundState(seq).processing_status).toBe('pending');
+      expect(evidenceRowCount()).toBe(before);
+    });
   });
 });

@@ -100,7 +100,11 @@ describe('prepared statement caching', () => {
     // constructor and reused by every sweep report.)
     // (+1: the corroboration-aware delivery ambiguity health aggregate is
     // prepared once and reused with the rest of the durability statements.)
-    expect(prepareSpy).toHaveBeenCalledTimes(164);
+    // (+1 vs 164, bucket-5 scan cycle: TerminalRecordInboundCloser's
+    // MAX(inbound_events.seq) probe that fixes each scan cycle's upper bound so
+    // arrivals cannot postpone the wrap; the candidate scan itself stays one
+    // statement, now keyset-paged.)
+    expect(prepareSpy).toHaveBeenCalledTimes(165);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
