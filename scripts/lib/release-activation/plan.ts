@@ -453,6 +453,7 @@ export function describeActions(context: ActivationContext): Array<Record<string
   return [
     { step: 'create-backup-dir', path: args.backupDir === null ? null : path.join(args.backupDir, 'activation-<commit12>-<utc>'), mode: '0700' },
     { step: 'backup-database', from: context.dbPath, to: '<backup>/bot.db', verify: 'PRAGMA quick_check = ok', mode: '0600' },
+    { step: 'record-schema-level', from: '<backup>/bot.db', read: 'MAX(version) FROM schema_migrations' },
     { step: 'record-symlink', link: context.wrapperLink, to: '<backup>/symlink.before' },
     { step: 'backup-plists', labels, to: '<backup>/<label>.plist', mode: '0600' },
     { step: 'write-staged-plists', labels, to: '<backup>/<label>.staged.plist', lint: 'plutil -lint' },
@@ -482,6 +483,7 @@ export function describeActions(context: ActivationContext): Array<Record<string
     },
     {
       step: 'rollback-on-failure',
+      blockIf: 'schema migration level differs from <backup>/bot.db or cannot be read, before rollback and again after the new instance exits (exit 4, manual restore)',
       restore: ['symlink', 'plists'],
       reload: labels,
       verify: { argvContains: bootstrapEntrypointFor(args.expectCurrent), commit: context.oldCommit },
