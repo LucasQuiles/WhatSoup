@@ -94,6 +94,6 @@ fall out of sync.
   applied only by this primitive — a raw consumer pairing `role="switch"` with a sliding
   thumb is the anti-pattern. A dedicated `soup/no-raw-switch` shadow rule (paralleling
   `soup/no-inline-seg`) is a candidate enforcement; not yet wired.
-- **behavioural** (pending G3): `aria-checked` reflects `checked`, Space/Enter toggle,
-  and disabled-never-fires want a `tests/console` behavioural suite — none exists for
-  Switch yet (`tests/console/*switch*` is absent). Adding it is the G3 gate for this spec.
+- **behavioural** (active): `aria-checked` reflects `checked`, Space/Enter toggle,
+  and disabled-never-fires are covered by the behavioural suite
+  `tests/console/switch.test.tsx`, which satisfies the G3 gate for this spec.
