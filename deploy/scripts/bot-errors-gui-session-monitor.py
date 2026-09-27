@@ -53,6 +53,14 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.fleet_config import (
+    GUI_ROSTER_ENV,
+    FleetConfigError,
+    describe_order,
+    private_roster_path,
+    resolve_roster,
+    tracked_roster_path,
+)
 from lib.state_files import GUI_SESSION_MONITOR_STATE
 from lib.state_root import DEFAULT_STATE_ROOT
 
@@ -710,10 +718,27 @@ def ssh_timeout_seconds() -> float:
 
 
 def fleet_path() -> Path:
-    raw = os.environ.get("BOT_ERRORS_EXPECTED_FLEET", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
+    """Expected-fleet path via ``lib.fleet_config``.
+
+    Order: ``BOT_ERRORS_EXPECTED_FLEET``, the private per-host file, the
+    tracked copy. With no source it returns the tracked path, which
+    validate_inventory() then reports as missing (fail closed).
+    """
+    try:
+        return resolve_roster(REPO_ROOT, GUI_ROSTER_ENV).path
+    except FleetConfigError:
+        return tracked_roster_path(REPO_ROOT)
+
+
+def fleet_resolver_order() -> str:
+    return describe_order(GUI_ROSTER_ENV, private_roster_path(), tracked_roster_path(REPO_ROOT))
+
+
+def private_fleet_override(path: Path) -> str | None:
+    """The private default file meets the override contract as the env var does."""
+    if not _norm(os.environ.get(GUI_ROSTER_ENV, "")) and path == private_roster_path():
+        return str(path)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -791,20 +816,25 @@ def validate_inventory() -> InventoryValidationResult:
             data = json.load(handle)
     except FileNotFoundError:
         return InventoryValidationResult(
-            INVENTORY_MISSING, f"expected fleet file not found: {path}", None, [])
+            INVENTORY_MISSING,
+            f"expected fleet file not found: {path}; resolver order: {fleet_resolver_order()}",
+            None, [])
     except json.JSONDecodeError as exc:
         return InventoryValidationResult(
             INVENTORY_MALFORMED,
-            f"expected fleet file is not valid JSON: {path}: {exc}", None, [])
+            f"expected fleet file is not valid JSON: {path}: {exc}; resolver order: {fleet_resolver_order()}",
+            None, [])
     except OSError as exc:
         return InventoryValidationResult(
             INVENTORY_UNREADABLE,
-            f"expected fleet file is not readable: {path}: {exc}", None, [])
+            f"expected fleet file is not readable: {path}: {exc}; resolver order: {fleet_resolver_order()}",
+            None, [])
 
     if not isinstance(data, dict):
         return InventoryValidationResult(
             INVENTORY_NON_OBJECT,
-            f"expected fleet file must contain a JSON object: {path}", None, [])
+            f"expected fleet file must contain a JSON object: {path}; resolver order: {fleet_resolver_order()}",
+            None, [])
 
     # --- semantic validation ---
     unknown = unknown_policy_values(data)
@@ -819,7 +849,8 @@ def validate_inventory() -> InventoryValidationResult:
             f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
             None, [])
 
-    private_override_error = private_override_contract_error(data)
+    private_override_error = private_override_contract_error(
+        data, expected_fleet_override=private_fleet_override(path))
     if private_override_error is not None:
         return InventoryValidationResult(
             INVENTORY_INVALID_POLICY, private_override_error, None, [])

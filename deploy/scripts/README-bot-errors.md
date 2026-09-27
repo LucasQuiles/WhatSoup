@@ -1107,6 +1107,21 @@ policy choice. Set it in the bot host's private profile, not in a tracked profil
 the private copy in step with tracked profile changes. The daily evidence line
 `profile: role=… path=…` shows which profile file a run used.
 
+At runtime the health check and the heartbeat watchdog resolve the profile through
+`deploy/scripts/lib/fleet_config.py`, in this order: `BOT_ERRORS_HEALTH_PROFILE_JSON`
+(health check only), `BOT_ERRORS_HEALTH_PROFILE`, `~/.config/whatsoup/health-profile.json`,
+then the tracked `deploy/health-profiles/<host>.json`. The fleet roster resolves the same
+way: `BOT_ERRORS_FLEET_SENTINEL_HOSTS` (sentinel, watchdog) or `BOT_ERRORS_EXPECTED_FLEET`
+(GUI-session monitor), then `~/.config/whatsoup/bot-errors-expected-fleet.json`, then the
+tracked `deploy/bot-errors-expected-fleet.json`. Only an absent source moves on to the next
+one. A set env var whose file is missing or unreadable, a private file that cannot be read,
+or no source at all fails closed, with a message that names the path and the order tried.
+For the profile, `--daily` and a watchdog run with a profile-based check exit 2. For the
+roster, the sentinel (without `--hosts`) and the GUI-session monitor exit 2, and the
+watchdog's roster checks report not-green. The health check no longer falls back to
+role=central, and the watchdog no longer treats a missing profile as zero expected
+instances.
+
 ## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.

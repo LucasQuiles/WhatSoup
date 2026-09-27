@@ -32,6 +32,12 @@ from lib.bounded_jsonl import (
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.fleet_config import (  # noqa: E402
+    FleetConfigError,
+    read_json_object,
+    resolve_health_profile,
+    tracked_health_profile_path,
+)
 from lib.dm_roundtrip import (  # noqa: E402
     RoundtripConfigError,
     evaluate_target as dm_roundtrip_evaluate_target,
@@ -114,6 +120,13 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "supervision_deadman",
     "clock_skew",
     "dm_roundtrip",
+})
+# Checks whose expectation is the per-host health profile's instance list.
+PROFILE_CHECKS: frozenset[str] = frozenset({
+    "local_services",
+    "local_instance_health",
+    "wedge_signature",
+    "turn_failure_rate",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1006,23 +1019,29 @@ def local_daily_health_hosts() -> list[str]:
     return [canonical_local_host()]
 
 
+def tracked_health_profile() -> Path:
+    return tracked_health_profile_path(REPO_ROOT, canonical_local_host())
+
+
 def health_profile_path() -> Path:
-    raw = os.environ.get("BOT_ERRORS_HEALTH_PROFILE", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return REPO_ROOT / "deploy" / "health-profiles" / f"{canonical_local_host()}.json"
+    """Profile path for evidence text; never raises (the load reports failures)."""
+    try:
+        return resolve_health_profile(tracked_health_profile()).path
+    except FleetConfigError:
+        return tracked_health_profile()
 
 
-def load_health_profile() -> dict[str, Any] | None:
-    path = health_profile_path()
-    data = load_json(path)
-    return data if isinstance(data, dict) else None
+def load_health_profile() -> dict[str, Any]:
+    """Load this host's profile via ``lib.fleet_config``.
+
+    Raises :class:`FleetConfigError` instead of returning nothing: a missing
+    profile must never read as "this host expects zero instances".
+    """
+    return read_json_object(resolve_health_profile(tracked_health_profile()))
 
 
 def expected_local_instances() -> list[dict[str, Any]]:
     profile = load_health_profile()
-    if not profile:
-        return []
     result: list[dict[str, Any]] = []
     instances = profile.get("instances")
     if not isinstance(instances, list):
@@ -3267,7 +3286,11 @@ def run_once(args: argparse.Namespace) -> int:
             turn_failure_window_seconds()
             turn_failure_min_count()
             turn_failure_max_chats_reported()
-    except ValueError as exc:
+        if checks & PROFILE_CHECKS:
+            # Resolve the profile before any state effect: an unreadable
+            # profile must fail the run, not expect zero instances.
+            expected_local_services()
+    except (ValueError, FleetConfigError) as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded
         # diagnostic so supervisors see a configuration failure, not success.
