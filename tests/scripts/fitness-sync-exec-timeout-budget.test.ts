@@ -25,8 +25,8 @@ import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 const SPREAD_CARRIED_TIMEOUT_SITES = [
   'src/lib/keyring.ts:503',
   'src/lib/keyring.ts:531',
-  'src/lib/keyring.ts:766',
-  'src/lib/keyring.ts:807',
+  'src/lib/keyring.ts:780',
+  'src/lib/keyring.ts:821',
 ];
 
 describe('portability.sync-exec-timeout warning budget', () => {

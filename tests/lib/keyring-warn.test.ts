@@ -232,6 +232,8 @@ describe('keyring fail-loud logging', () => {
     it.each([
       ['exit 36 (interaction not allowed)', securityError(36, 'security: SecKeychainItemCopyContent: User interaction is not allowed.\n')],
       ['timeout', securityError(null, '', 'ETIMEDOUT')],
+      // A non-44 status is authoritative even when stderr says "could not be found".
+      ['exit 37 (no default keychain)', securityError(37, 'security: SecKeychainCopyDefault: A default keychain could not be found.\n')],
     ])('still warns and reports unreadable for a genuine failure (%s)', (_label, err) => {
       mockedExecFileSync.mockImplementation(() => { throw err; });
 
@@ -242,6 +244,43 @@ describe('keyring fail-loud logging', () => {
         expect.objectContaining({ service: 'anthropic', backend: 'macos-keychain' }),
         expect.stringContaining('keyring read failed'),
       );
+    });
+
+    // 'google' carries a migration fallback candidate ('gemini'): a failure on
+    // the fallback is as real as one on the primary; only absence is silent.
+    const ABSENT = () => securityError(44, 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n');
+
+    it('reports unreadable with one warning when the primary is absent and the fallback fails', () => {
+      mockedExecFileSync
+        .mockImplementationOnce(() => { throw ABSENT(); })
+        .mockImplementationOnce(() => { throw securityError(36, 'security: User interaction is not allowed.\n'); });
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(mockedExecFileSync).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'google' });
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+
+    it('stays a silent not_found when the primary and the fallback are both absent', () => {
+      mockedExecFileSync.mockImplementation(() => { throw ABSENT(); });
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(mockedExecFileSync).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ value: null, reason: 'not_found', service: 'google' });
+      expect(logWarn).not.toHaveBeenCalled();
+    });
+
+    it('returns the fallback value when the primary is absent', () => {
+      mockedExecFileSync
+        .mockImplementationOnce(() => { throw ABSENT(); })
+        .mockImplementationOnce(() => Buffer.from('fallback-value\n'));
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(result).toEqual({ value: 'fallback-value', reason: 'ok', service: 'google' });
+      expect(logWarn).not.toHaveBeenCalled();
     });
   });
 

@@ -314,7 +314,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
   if (backend === 'macos-keychain') {
     try {
       const account = options.user ?? os.userInfo().username;
-      for (const [index, candidate] of services.entries()) {
+      for (const candidate of services) {
         try {
           const raw = execFileSync(
             'security',
@@ -324,8 +324,8 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
         } catch (err) {
-          // Warn on primary candidate failure; fallback misses and an absent item (exit 44) are expected.
-          if (index === 0 && !isDarwinItemNotFound(err)) {
+          // An absent item on any candidate is a silent miss; every other failure is recorded.
+          if (!isDarwinReadItemNotFound(err)) {
             warnKeyringReadFailure(service, backend, err);
           }
         }
@@ -734,7 +734,7 @@ export interface CredentialDeleteResult {
 }
 
 /**
- * `security find-generic-password` / `delete-generic-password` exit non-zero for BOTH "no such item" and
+ * `security delete-generic-password` exits non-zero for BOTH "no such item" and
  * real failures, so absence cannot be inferred from the throw alone. Status 44
  * is errSecItemNotFound; the message check covers locale-stable wording.
  */
@@ -743,6 +743,20 @@ function isDarwinItemNotFound(err: unknown): boolean {
   if (status === 44) return true;
   const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
   return /could not be found|SecKeychainSearchCopyNext/i.test(stderr);
+}
+
+/**
+ * Read-path absence for `security find-generic-password`. Stricter than
+ * {@link isDarwinItemNotFound}: a numeric exit status is authoritative, so only
+ * 44 is absence — other statuses whose stderr also says "could not be found"
+ * (e.g. no default keychain) are real failures. Without a status, only the
+ * errSecItemNotFound wording ("specified item could not be found") counts.
+ */
+function isDarwinReadItemNotFound(err: unknown): boolean {
+  const status = (err as { status?: number | null } | null)?.status;
+  if (typeof status === 'number') return status === 44;
+  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
+  return /specified item could not be found/i.test(stderr);
 }
 
 /**
