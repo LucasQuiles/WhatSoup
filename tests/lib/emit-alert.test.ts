@@ -453,10 +453,19 @@ function alertFunctionForCallee(expression: ts.Expression, bindings: AlertBindin
   return undefined;
 }
 
+// Every call the scanner can report names emitAlert or clearAlertSource literally:
+// direct and aliased imports keep the imported name, and namespace access needs
+// the member name or a string literal. A file without either name has no
+// reportable call, so it can skip the TypeScript parse. The full scan parsed
+// ~650 src files, about 5 % of which mention either name, and timed out at
+// 10 s on CI Node 24.
+const ALERT_FUNCTION_NAME_RE = /emitAlert|clearAlertSource/;
+
 function scanAlertEmissionGovernance(sources: AlertGovernanceSource[]): string[] {
   return sources.flatMap((source) => {
     const normalizedPath = normalizeGovernancePath(source.path);
     if (normalizedPath === 'src/lib/emit-alert.ts') return [];
+    if (!ALERT_FUNCTION_NAME_RE.test(source.text)) return [];
 
     const sourceFile = ts.createSourceFile(normalizedPath, source.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     const bindings = alertBindings(sourceFile);
