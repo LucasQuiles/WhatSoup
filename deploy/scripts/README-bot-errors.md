@@ -1148,14 +1148,24 @@ suppressed, marker moved aside, event publish failed (no marker written), or eve
 but marker write failed.
 
 This is daily suppression after a successfully written marker, not exactly-once delivery.
-Two duplicates are expected. If the marker write fails, or the process dies after the event
+Three duplicates are expected. If the marker write fails, or the process dies after the event
 is queued, the next run alerts again. If two runs overlap, both can read "due" before either
 marker lands, and both queue an alert; the second marker write then loses its
-compare-and-swap. The alert is never dropped to avoid a duplicate. One case is not bounded
+compare-and-swap. A run that found the marker unreadable renames aside whatever is at the
+path, which can be a good marker an overlapping run just wrote, so one more alert follows.
+The rename keeps the corrupt bytes before the fresh marker supersedes them, but it neither
+syncs the state directory nor takes the durable-JSON lock. Renamed-aside files are not
+pruned; expect one per corruption. The alert is never dropped to avoid a duplicate. One case is not bounded
 by the day: if marker writes (or the move aside) keep failing while the outbox still accepts
 events, for example an outbox set elsewhere and an unwritable state root, every run queues
 an event (the watchdog runs every 5 minutes on macOS). Nothing can suppress without writable
 state; the unwritable state root is itself the fault to page on.
+
+Two lifecycle limits are known and not changed here. Nothing emits a clear when the profile
+loads again, so the `profile-missing:*` incident ages out through the dispatcher's normal
+recovery-unverified path instead of closing on proof. And the health-check event keeps
+`source=daily-health`, so it refreshes daily-health liveness: a host with no profile never
+shows cadence-stale, although it raises this critical alert every UTC day.
 
 ## OPERATIONAL — Manual daily-health validation
 

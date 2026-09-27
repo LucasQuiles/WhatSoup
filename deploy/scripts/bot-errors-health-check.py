@@ -9139,10 +9139,13 @@ def move_profile_missing_marker_aside(epoch: int) -> Path:
     """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
 
     The compare-and-swap cannot replace a marker it cannot read, so without
-    this every run would alert. Corrupt evidence is preserved before it is
-    superseded, per docs/superpowers/specs/2026-07-28-bot-errors-durability-
-    stack-design.md lines 514-526; the fresh marker then goes through the
-    normal compare-and-swap from absent. Raises when the rename fails.
+    this every run would alert. The corrupt bytes are kept before the fresh
+    marker (a normal compare-and-swap from absent) supersedes them, the
+    ordering docs/superpowers/specs/2026-07-28-bot-errors-durability-stack-
+    design.md lines 514-517 ask for. Only the ordering: this plain rename
+    neither syncs the state directory nor takes the durable-JSON lock, so the
+    spec's "published and synced" guarantee and its Draft 3 transition
+    contract (lines 428-437) are not met here. Raises when the rename fails.
     """
     marker = state_root() / HEALTH_PROFILE_MISSING_MARKER
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
@@ -9177,12 +9180,15 @@ def emit_profile_missing_event(exc: FleetConfigError) -> None:
 
     This is daily suppression after a successfully recorded marker, not
     exactly-once delivery. The event is published first and the marker second,
-    so a lost alert is never traded for a quiet day. Two known duplicates follow:
+    so a lost alert is never traded for a quiet day. Three known duplicates follow:
     (a) the event is published but the marker write fails or the process dies
     before it, so the next run alerts again; (b) two concurrent runs both read
     "due" before either marker lands, so both publish (the loser's marker write
-    then fails its compare-and-swap). The durable writer's lock covers one state
-    write, not the event-plus-marker pair; no extra lock is taken here.
+    then fails its compare-and-swap); (c) a run that found the marker unreadable
+    renames aside whatever sits at the path, which can be a good marker a
+    concurrent run just wrote, so one more alert follows. The durable writer's
+    lock covers one state write, not the event-plus-marker pair, and the rename
+    takes no lock; no extra lock is taken here.
 
     An unreadable marker is renamed aside and replaced. Only a state root where
     no marker can be written (or moved) is left, and there every run alerts:
