@@ -62,6 +62,7 @@ function recoveryCounts(
     echoConflicts: 0,
     openRecoveries: 0,
     blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
+    corruptLinksSettled: 0, echoConflictsSettled: 0,
     ...overrides,
   };
 }
@@ -205,6 +206,34 @@ describe('runtime turn finalization recovery health', () => {
           turnRecoveryBlockedUnsafeSynthetic: 1,
           turnRecoveryBlockedUnsafeSuperseded: 2,
           turnRecoveryBlockedUnsafeStranded: 3,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('projects settled recovery residue as diagnostic-only fields that keep health green', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ corruptLinksSettled: 2, echoConflictsSettled: 3 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'settled-residue-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          turnRecoveryCorruptLinksSettled: 2,
+          turnRecoveryEchoConflictsSettled: 3,
         },
       });
     } finally {
@@ -375,7 +404,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('reports a completed recovery echo conflict as degraded audit health', () => {
+  it('reports a live recovery echo conflict as degraded audit health', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -393,6 +422,7 @@ describe('runtime turn finalization recovery health', () => {
         echoConflicts: 1,
         openRecoveries: 0,
         blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
+        corruptLinksSettled: 0, echoConflictsSettled: 0,
       });
       const runtime = new AgentRuntime(db, makeMessenger().messenger, 'echo-conflict-health', {
         sessionScope: 'per_chat',

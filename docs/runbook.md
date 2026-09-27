@@ -553,7 +553,7 @@ The authenticated diagnostic body (excerpt):
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
 | `unhealthy` | 503 | WhatsApp is disconnected or a runtime-global safety condition, such as database compatibility loss, blocks safe message processing. |
 
-**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
+**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding (pending/claimed) recovery jobs, orphan transfers, and corrupt links or echo conflicts on live recovery jobs degrade agent health even when WhatsApp remains connected; the same residue on completed or exhausted jobs, and preserved crash-exhaustion history, stay visible as diagnostic counts (`turnRecoveryCorruptLinksSettled`, `turnRecoveryEchoConflictsSettled`, `turnRecoveryExhausted`) without degrading health.
 
 ### Degradation silence latch (`degradation_silence_unproven`)
 
