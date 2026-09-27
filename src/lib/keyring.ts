@@ -324,8 +324,8 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
         } catch (err) {
-          // Warn on primary candidate failure; migration fallback misses are expected.
-          if (index === 0) {
+          // Warn on primary candidate failure; fallback misses and an absent item (exit 44) are expected.
+          if (index === 0 && !isDarwinItemNotFound(err)) {
             warnKeyringReadFailure(service, backend, err);
           }
         }
@@ -734,7 +734,7 @@ export interface CredentialDeleteResult {
 }
 
 /**
- * `security delete-generic-password` exits non-zero for BOTH "no such item" and
+ * `security find-generic-password` / `delete-generic-password` exit non-zero for BOTH "no such item" and
  * real failures, so absence cannot be inferred from the throw alone. Status 44
  * is errSecItemNotFound; the message check covers locale-stable wording.
  */

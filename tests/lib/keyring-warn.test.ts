@@ -18,8 +18,18 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 
-import { lookupCredential, detectKeyringBackend, _resetBackendCache } from '../../src/lib/keyring.ts';
+import {
+  lookupCredential,
+  lookupCredentialTyped,
+  detectKeyringBackend,
+  _resetBackendCache,
+  _setFileStoreDirForTests,
+  _setOpenCodeAuthDirForTests,
+} from '../../src/lib/keyring.ts';
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
 
@@ -173,6 +183,65 @@ describe('keyring fail-loud logging', () => {
       lookupCredential('anthropic', { skipEnv: true });
 
       expect(logWarn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // `security find-generic-password` exits 44 (errSecItemNotFound) when the
+  // item is simply absent. That is a miss, not a read failure: it must neither
+  // warn nor make the typed lookup report `unreadable`. Real failures still do.
+  describe('macOS keychain absent item vs read failure', () => {
+    let storeDir: string;
+    let openCodeDir: string;
+
+    function securityError(status: number | null, stderr: string, code?: string): Error {
+      const err: Error & { status?: number | null; stderr?: Buffer; code?: string; signal?: string } =
+        new Error('Command failed: security find-generic-password');
+      err.status = status;
+      err.stderr = Buffer.from(stderr);
+      if (code) { err.code = code; err.signal = 'SIGKILL'; }
+      return err;
+    }
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', writable: true });
+      storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-warn-fs-'));
+      openCodeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-warn-oc-'));
+      _setFileStoreDirForTests(storeDir);
+      _setOpenCodeAuthDirForTests(openCodeDir);
+    });
+
+    afterEach(() => {
+      _setFileStoreDirForTests(null);
+      _setOpenCodeAuthDirForTests(null);
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(openCodeDir, { recursive: true, force: true });
+    });
+
+    it.each([
+      ['exit 44', securityError(44, 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n')],
+      ['not-found wording without a status', securityError(null, 'The specified item could not be found in the keychain.\n')],
+    ])('does not warn or report unreadable for an absent item (%s)', (_label, err) => {
+      mockedExecFileSync.mockImplementation(() => { throw err; });
+
+      const result = lookupCredentialTyped('anthropic', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'not_found', service: 'anthropic' });
+      expect(logWarn).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['exit 36 (interaction not allowed)', securityError(36, 'security: SecKeychainItemCopyContent: User interaction is not allowed.\n')],
+      ['timeout', securityError(null, '', 'ETIMEDOUT')],
+    ])('still warns and reports unreadable for a genuine failure (%s)', (_label, err) => {
+      mockedExecFileSync.mockImplementation(() => { throw err; });
+
+      const result = lookupCredentialTyped('anthropic', { skipEnv: true });
+
+      expect(result.reason).toBe('unreadable');
+      expect(logWarn).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'anthropic', backend: 'macos-keychain' }),
+        expect.stringContaining('keyring read failed'),
+      );
     });
   });
 
