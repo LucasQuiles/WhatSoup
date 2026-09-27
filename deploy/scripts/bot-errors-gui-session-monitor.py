@@ -9,8 +9,10 @@ the in-GUI heartbeat watchdog dies in the same failure, so the outage is silent.
 
 This monitor runs OFF the target host (over SSH) so it survives the bot user's
 GUI logout. For each expected GUI-LaunchAgent host it determines the expected
-bot user + agent label + uid from the SSOT (deploy/bot-errors-expected-fleet.json
-and deploy/health-profiles/*.json), runs two read-only probes, and classifies
+bot user + agent label + uid from the expected-fleet roster (resolved by
+lib/fleet_config.py: BOT_ERRORS_EXPECTED_FLEET, then the private
+~/.config/whatsoup/bot-errors-expected-fleet.json, then the tracked
+deploy/bot-errors-expected-fleet.json), runs two read-only probes, and classifies
 the session state:
 
   - ok                : console owner == bot user AND agent running
@@ -330,7 +332,8 @@ _EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EF
 
 # Public manifests may use sanitized placeholder labels for private hosts. Those
 # hosts must declare this marker and provide their live labels via a hub-private
-# BOT_ERRORS_EXPECTED_FLEET file outside the repo root before the monitor probes.
+# file outside the repo root (BOT_ERRORS_EXPECTED_FLEET, or the private
+# ~/.config/whatsoup/bot-errors-expected-fleet.json) before the monitor probes.
 PRIVATE_MONITOR_OVERRIDE_REQUIRED_KEY = "privateMonitorOverrideRequired"
 
 
@@ -488,9 +491,10 @@ def private_override_contract_error(
     """Return a fail-closed config error when a private override is required.
 
     If any public manifest host declares privateMonitorOverrideRequired, the
-    monitor must be launched with BOT_ERRORS_EXPECTED_FLEET pointing to a
-    hub-private JSON file outside the repository. Otherwise it would probe
-    sanitized placeholder labels and create false health evidence.
+    monitor must read a hub-private JSON file outside the repository: the
+    BOT_ERRORS_EXPECTED_FLEET path, or the private default that
+    validate_inventory() passes as ``expected_fleet_override``. Otherwise it
+    would probe sanitized placeholder labels and create false health evidence.
     """
     required_count = private_monitor_override_required_count(fleet)
     if required_count == 0:
@@ -505,7 +509,8 @@ def private_override_contract_error(
     if not override:
         return (
             f"private expected-fleet override required for {required_count} host(s); "
-            "set BOT_ERRORS_EXPECTED_FLEET to a hub-private JSON path outside the repo"
+            "set BOT_ERRORS_EXPECTED_FLEET to a hub-private JSON path outside the repo, "
+            "or seed ~/.config/whatsoup/bot-errors-expected-fleet.json"
         )
 
     if _path_is_under(Path(override), REPO_ROOT):

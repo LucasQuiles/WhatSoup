@@ -171,7 +171,7 @@ bash deploy/scripts/install-bot-errors-gui-monitor-launchd.sh [--dry-run]
 |----------|---------|-------------|
 | `BOT_ERRORS_GUI_MONITOR_LABEL` | `com.bot-errors.gui-session-monitor` | launchd label / systemd unit name. Must match `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` (enforced by `validate_label`; exit 2 on violation). |
 | `BOT_ERRORS_GUI_MONITOR_INTERVAL_SECONDS` | `300` | Probe interval in seconds. Written into `StartInterval` (launchd) or `OnUnitActiveSec` (systemd). |
-| `BOT_ERRORS_EXPECTED_FLEET` | _(required)_ | Path to a hub-private JSON file listing the expected fleet members. Must point outside the repo root. Read by `bot-errors-gui-session-monitor.py` at runtime. |
+| `BOT_ERRORS_EXPECTED_FLEET` | _(required unless `~/.config/whatsoup/bot-errors-expected-fleet.json` exists)_ | Path to a hub-private JSON file listing the expected fleet members. Must point outside the repo root. Read by `bot-errors-gui-session-monitor.py` at runtime. When unset, the monitor reads the private `~/.config/whatsoup/bot-errors-expected-fleet.json`, which meets the same outside-the-repo contract. |
 | `BOT_ERRORS_GUI_MONITOR_USERS` | _(optional)_ | Comma-separated `host=user` overrides for SSH login names when the default `$USER` differs on the target host. |
 | `BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS` | `15` | Per-host SSH connection timeout in seconds. |
 | `BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD` | _(optional)_ | Consecutive-failure count before the monitor emits an alert. Non-positive values are treated as 1. |
