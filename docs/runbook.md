@@ -2203,7 +2203,8 @@ decision, taken for ONE named row with `turn-recovery-operator close-inbound`, w
 rules without the five-minute grace window. Each sweep evaluates one bounded window (at most 1000
 rows) of a scan cycle, so the log line also carries `refusedByReason` (for example
 `delivery_proof_invalid`, `record_contract_invalid`) and `complete`: when `complete` is false the
-reported seqs cover only part of the backlog, and later sweeps report the rest.
+reported seqs cover only part of the backlog, and later sweeps report the rest. The line lists at
+most 200 seqs; `inboundSeqsTruncated` is true when the window found more, and `count` is the full number.
 
 ```bash
 # 1. Dry run (the default). Read-only: it never opens the migrating database layer, never migrates,

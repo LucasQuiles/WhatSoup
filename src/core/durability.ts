@@ -3287,8 +3287,9 @@ export class DurabilityEngine {
     const reclaimedStaleRows: StaleReclaimedInbound[] = [];
     // Bucket 5 is advisory and writes nothing, so it reads in its own snapshot
     // before the mutating sweep instead of lengthening that transaction; the
-    // operator close path re-evaluates every row before it writes. Buckets 1-4
-    // never select a row that has a terminal record, so the two cannot overlap.
+    // operator close path re-evaluates every row before it writes. The buckets
+    // are disjoint: buckets 1-3 require no terminal record, bucket 4 requires a
+    // `transferred_to_recovery_owner` record, and bucket 5 requires a final one.
     const terminalRecordCloseCandidates = withTransaction(
       this.db,
       () => this.reportTerminalRecordCloseCandidates(),
@@ -3434,7 +3435,10 @@ export class DurabilityEngine {
     if (scan.scanned > 0) {
       const fields = {
         count: scan.eligible.length,
-        inboundSeqs: scan.eligible.slice(0, 50),
+        // Bounded by scanCap; the old fixed window logged up to 200, so keep
+        // that and flag truncation instead of silently hiding later seqs.
+        inboundSeqs: scan.eligible.slice(0, 200),
+        inboundSeqsTruncated: scan.eligible.length > 200,
         scanned: scan.scanned,
         complete: scan.complete,
         refusedByReason: scan.refusedByReason,

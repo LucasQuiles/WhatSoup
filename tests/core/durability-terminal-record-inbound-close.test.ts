@@ -28,6 +28,18 @@ import {
   type TurnTerminalResult,
 } from '../../src/runtimes/agent/turn-terminal.ts';
 
+// Only the durability component's logger is captured, so bucket-5 log lines
+// can be asserted without other components' calls polluting the mocks.
+const durabilityLogger = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
+vi.mock('../../src/logger.ts', async () => {
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('durability', () =>
+    loggerMock().createChildLogger(),
+  );
+  Object.assign(durabilityLogger, log);
+  return { createChildLogger };
+});
+
 const CONVERSATION_KEY = '15550107777';
 const DELIVERY_JID = '15550107777@s.whatsapp.net';
 const OPEN_STATUSES = ['pending', 'processing', 'turn_done'] as const;
@@ -564,5 +576,38 @@ describe('open inbound behind a final terminal record', () => {
       expect(inboundState(seq).processing_status).toBe('pending');
       expect(evidenceRowCount()).toBe(before);
     });
+
+    const bucket5Calls = (level: 'info' | 'warn'): Array<Record<string, unknown>> =>
+      durabilityLogger[level]!.mock.calls
+        .filter((call) => String(call[1]).includes('behind a final terminal record'))
+        .map((call) => call[0] as Record<string, unknown>);
+
+    it('logs a refused-only window at info, so a refused backlog never reads as zero', () => {
+      durabilityLogger.info!.mockClear();
+      durabilityLogger.warn!.mockClear();
+      proofBroken();
+      proofBroken();
+      expect(engine.sweepStuckInbound().terminalRecordCloseCandidates).toBe(0);
+      expect(bucket5Calls('warn')).toEqual([]);
+      expect(bucket5Calls('info')).toEqual([
+        expect.objectContaining({
+          count: 0,
+          inboundSeqs: [],
+          inboundSeqsTruncated: false,
+          scanned: 2,
+          complete: true,
+          refusedByReason: { delivery_proof_invalid: 2 },
+        }),
+      ]);
+    });
+
+    it('logs at most 200 eligible seqs and flags the truncation; count stays exact', () => {
+      durabilityLogger.warn!.mockClear();
+      const seqs = Array.from({ length: 201 }, () => eligible());
+      expect(engine.sweepStuckInbound().terminalRecordCloseCandidates).toBe(201);
+      const [fields] = bucket5Calls('warn');
+      expect(fields).toMatchObject({ count: 201, inboundSeqsTruncated: true, scanned: 201, complete: true });
+      expect(fields!.inboundSeqs).toEqual(seqs.slice(0, 200));
+    }, 30_000);
   });
 });
