@@ -1,6 +1,6 @@
 # Agent-job dispatch gap — `create_agent_job` cron beads never run their prompt
 
-**Status:** MERGED — both fixes landed on main in #1689 (`1e80f13fc`, 2026-07-08): Bug 1 (agent-job dispatch) via `dispatchAgentJob` (`src/core/substrate/poller.ts:795,844`, guarded by `isSyntheticJob`), Bug 2 (cron tz) via `nextCronRun(expr, now, tz ?? 'UTC')` in `poller.ts` and `triggers.ts`. Test coverage: `tests/core/substrate/poller.test.ts` ("TriggerPoller — agent_job dispatch"). Deploy/fleet-restart state is operational and tracked outside this repo. Pre-fix line numbers cited in the body below describe the 2026-06-29 tree and have shifted since; the current dispatch path is the one named here.
+**Status:** MERGED — both fixes landed on main in #1689 (`1e80f13fc`, 2026-07-08): Bug 1 (agent-job dispatch) via `dispatchAgentJob` (`src/core/substrate/poller.ts:1250,1298`, guarded by `isSyntheticJob`), Bug 2 (cron tz) via `nextCronRun(expr, now, tz ?? 'UTC')` in `poller.ts` and `triggers.ts`. Test coverage: `tests/core/substrate/poller.test.ts` ("TriggerPoller — agent_job dispatch"). Deploy/fleet-restart state is operational and tracked outside this repo. Pre-fix line numbers cited in the body below describe the 2026-06-29 tree and have shifted since; the current dispatch path is the one named here.
 **Date:** 2026-06-29
 **Author:** ana-bot (operator-agent), at Lucas Quiles's request.
 **Severity:** high — a scheduled `agent_job` silently no-ops every fire. Production impact: the
