@@ -61,19 +61,29 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
-from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE, TOOL_INVENTORY_STATE
+from lib.state_files import (
+    DEADMAN_STATE,
+    DISPATCHER_STATE,
+    HEALTH_PROFILE_MISSING_MARKER,
+    Q_LOOP_STATE,
+    TOOL_INVENTORY_STATE,
+)
 from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
 from lib.classify_health import recovery_debt_issue
 from lib.fleet_config import (
     HEALTH_PROFILE_ENV,
     HEALTH_PROFILE_JSON_ENV,
+    PROFILE_MISSING_MARKER_KIND,
+    PROFILE_MISSING_MARKER_SCHEMA,
     SOURCE_ENV,
     SOURCE_TRACKED,
     FleetConfigError,
     private_health_profile_path,
+    profile_missing_due,
     read_json_object,
     resolve_health_profile,
     tracked_health_profile_path,
+    utc_day,
 )
 from lib.queue_age import scan_directory
 
@@ -9063,12 +9073,164 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationR
     return publication
 
 
+PROFILE_MISSING_PRODUCER = "health-check"
+PROFILE_MISSING_STDERR_PREFIX = "bot-errors-health-check: profile-missing"
+
+
+def _profile_missing_error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tuple[str, str]:
+    """Summary and evidence for the profile-missing alert.
+
+    outbox_event() redacts both, which turns the private profile path in the
+    error into a marker; the full path stays on the stderr fail-closed line.
+    """
+    summary = (
+        f"profile-missing: {PROFILE_MISSING_PRODUCER} on {host} cannot load its health profile; exiting 2"
+    )
+    evidence = "\n".join([
+        "kind=profile-missing",
+        f"producer={PROFILE_MISSING_PRODUCER}",
+        f"host={host}",
+        f"utc_day={day}",
+        f"error={exc}",
+    ])
+    return summary, evidence
+
+
+def profile_missing_marker_payload(host: str, day: str, event_path: Path, exc: FleetConfigError) -> dict[str, Any]:
+    # A hash, not the error text: the marker must not carry the private path.
+    return {
+        "schemaVersion": PROFILE_MISSING_MARKER_SCHEMA,
+        "kind": PROFILE_MISSING_MARKER_KIND,
+        "producer": PROFILE_MISSING_PRODUCER,
+        "host": host,
+        "utcDay": day,
+        "eventId": event_path.stem,
+        "errorSha256": hashlib.sha256(str(exc).encode("utf-8")).hexdigest(),
+    }
+
+
+def observe_profile_missing_marker() -> tuple[Any, Any]:
+    """Return ``(target, observation)`` for this producer's marker.
+
+    Raises when the marker cannot be read (unparseable, unreadable, wrong
+    type); the caller then alerts without suppression and leaves the file.
+    """
+    root = state_root()
+    ensure_private_dir(root)
+    target = _durable_target(root / HEALTH_PROFILE_MISSING_MARKER)
+    return target, observe_json(target)
+
+
+def record_profile_missing_marker(target: Any, expected: JsonVersion, marker: dict[str, Any]) -> PublicationResult:
+    publication_operation = operation_id(
+        target,
+        marker,
+        component="health_check.profile_missing_marker",
+        predecessor=expected,
+    )
+    publication = publish_state_json(
+        target,
+        marker,
+        component="health_check.profile_missing_marker",
+        operation_id=publication_operation,
+        expected=expected,
+        generation=(expected.generation or 0) + 1,
+    )
+    require_advance(publication)
+    return publication
+
+
+def emit_profile_missing_event(exc: FleetConfigError) -> None:
+    """Queue the critical profile-missing alert at most once per (host, producer, UTC day).
+
+    This is daily suppression after a successfully recorded marker, not
+    exactly-once delivery. The event is published first and the marker second,
+    so a lost alert is never traded for a quiet day. Two known duplicates follow:
+    (a) the event is published but the marker write fails or the process dies
+    before it, so the next run alerts again; (b) two concurrent runs both read
+    "due" before either marker lands, so both publish (the loser's marker write
+    then fails its compare-and-swap). The durable writer's lock covers one state
+    write, not the event-plus-marker pair; no extra lock is taken here.
+
+    Every outcome is one stderr line after the fail-closed line. Nothing here
+    raises: daily() returns 2 whatever this does.
+    """
+    prefix = PROFILE_MISSING_STDERR_PREFIX
+    try:
+        host = host_profile_name()
+        day = utc_day(current_epoch())
+    except Exception as setup_exc:  # noqa: BLE001 - the exit code must stay 2.
+        print(f"{prefix} event not written (clock or host lookup failed): {_profile_missing_error_text(setup_exc)}", file=sys.stderr)
+        return
+    target: Any = None
+    observation: Any = None
+    try:
+        target, observation = observe_profile_missing_marker()
+    except Exception as read_exc:  # noqa: BLE001 - an unreadable marker must not suppress.
+        print(
+            f"{prefix} marker read failed ({_profile_missing_error_text(read_exc)}); "
+            "alerting without suppression and leaving the marker in place",
+            file=sys.stderr,
+        )
+    if observation is not None:
+        decision = profile_missing_due(observation.payload, producer=PROFILE_MISSING_PRODUCER, host=host, day=day)
+        if not decision.due:
+            print(f"{prefix} event suppressed: already queued for {host} on {day}", file=sys.stderr)
+            return
+        if decision.anomaly:
+            print(f"{prefix} marker does not prove suppression ({decision.reason}); alerting", file=sys.stderr)
+    summary, evidence = profile_missing_event_text(host, day, exc)
+    try:
+        event_path = outbox_event(
+            summary,
+            evidence,
+            severity="critical",
+            source="daily-health",
+            event_type="alert",
+            alert_source=f"profile-missing:{PROFILE_MISSING_PRODUCER}",
+            force_notify=False,
+        )
+    except Exception as publish_exc:  # noqa: BLE001 - outbox_event already left a writefail breadcrumb.
+        print(
+            f"{prefix} event not written (event publish failed; no marker written): "
+            f"{_profile_missing_error_text(publish_exc)}",
+            file=sys.stderr,
+        )
+        return
+    if observation is None:
+        print(
+            f"{prefix} event queued at {event_path} but marker not written (existing marker unreadable); "
+            "the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    try:
+        record_profile_missing_marker(
+            target,
+            observation.version,
+            profile_missing_marker_payload(host, day, event_path, exc),
+        )
+    except Exception as marker_exc:  # noqa: BLE001 - the event is already queued.
+        print(
+            f"{prefix} event queued at {event_path} but marker write failed "
+            f"({_profile_missing_error_text(marker_exc)}); the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    print(f"{prefix} event queued: {event_path}", file=sys.stderr)
+
+
 def daily() -> int:
     try:
         profile = load_health_profile()
     except FleetConfigError as exc:
         # Fail closed before any probe: a guessed profile checks the wrong things.
         print(f"bot-errors-health-check: fail-closed: {exc}", file=sys.stderr)
+        emit_profile_missing_event(exc)
         return 2
     tool_lines, tool_probe = tool_inventory(profile)
     tool_fail_line, tool_failure_entry, tool_summary_override = required_tools_daily_sections(tool_probe)

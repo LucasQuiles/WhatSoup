@@ -1122,6 +1122,31 @@ watchdog's roster checks report not-green. The health check no longer falls back
 role=central, and the watchdog no longer treats a missing profile as zero expected
 instances.
 
+A profile failure also queues one critical alert per host, per producer, per UTC day,
+before the exit 2. The alert has `alertSource` `profile-missing:health-check` or
+`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, and
+evidence lines `kind=profile-missing`, `producer=`, `host=`, `utc_day=` and `error=`. The
+shared redaction replaces the private profile path in `error=`; the stderr fail-closed line
+keeps the full path. The watchdog's other configuration errors (a bad check selector or
+threshold) queue nothing and print exactly what they did before. Neither producer opens
+controller state on this path.
+
+Suppression comes from a marker in the state root (`health-check-profile-missing.json` or
+`heartbeat-watchdog-profile-missing.json`), written with a compare-and-swap after the event
+is queued. A marker for the same producer, host and day suppresses a second alert that day,
+even for a different error. A marker from another day, host or producer, a wrong schema, or
+a date later than today (the clock went back) does not suppress: the run alerts and
+overwrites the marker. A marker that cannot be read or parsed does not suppress either, and
+it is left in place; while it stays, every run alerts and prints why on stderr. Each run
+prints one stderr line after the fail-closed line saying what happened: queued, suppressed,
+event publish failed (no marker written), or event queued but marker write failed.
+
+This is daily suppression after a successfully written marker, not exactly-once delivery.
+Two duplicates are expected. If the marker write fails, or the process dies after the event
+is queued, the next run alerts again. If two runs overlap, both can read "due" before either
+marker lands, and both queue an alert; the second marker write then loses its
+compare-and-swap. The alert is never dropped to avoid a duplicate.
+
 ## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.

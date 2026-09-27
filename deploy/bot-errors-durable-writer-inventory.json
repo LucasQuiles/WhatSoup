@@ -789,6 +789,17 @@
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
+      "site_id": "health-profile-missing-marker",
+      "script": "deploy/scripts/bot-errors-health-check.py",
+      "function": "record_profile_missing_marker",
+      "logical_publication": "health_check.profile_missing_marker",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "record_profile_missing_marker",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "health-deadman-state",
       "script": "deploy/scripts/bot-errors-health-check.py",
       "function": "save_deadman_state",
@@ -860,6 +871,17 @@
       "result_policy": "require_advance",
       "result_consumer": "outbox_event",
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
+      "site_id": "watchdog-profile-missing-marker",
+      "script": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
+      "function": "record_profile_missing_marker",
+      "logical_publication": "heartbeat_watchdog.profile_missing_marker",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "record_profile_missing_marker",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
       "site_id": "q-loop-state",

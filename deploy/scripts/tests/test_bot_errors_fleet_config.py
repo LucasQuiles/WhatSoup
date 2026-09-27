@@ -4,12 +4,16 @@ Order under test: env var -> private ~/.config/whatsoup file -> tracked repo
 copy -> fail. Only absence moves resolution on; a set env var or an existing
 private file that cannot be read fails instead of falling through. HOME points
 at a temp dir so the host's real private files are never read.
+
+The last section covers profile_missing_due, the pure daily-suppression
+decision for the profile-missing alert.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -199,3 +203,81 @@ def test_roster_both_missing_fails(home: Path, tmp_path: Path):
     message = str(info.value)
     assert message.startswith("fleet roster missing: BOT_ERRORS_EXPECTED_FLEET is unset")
     assert "resolver order: 1) env BOT_ERRORS_EXPECTED_FLEET 2) private" in message
+
+
+# ---------------------------------------------------------------------------
+# profile_missing_due: daily suppression key is (host, producer, UTC day)
+# ---------------------------------------------------------------------------
+
+_DAY = "2026-09-27"
+
+
+def _marker(**overrides) -> dict:
+    marker = {
+        "schemaVersion": 1,
+        "kind": "profile-missing-marker",
+        "producer": "health-check",
+        "host": "host-a",
+        "utcDay": _DAY,
+        "eventId": "20260927T120000Z.health-1-2",
+        "errorSha256": "0" * 64,
+    }
+    marker.update(overrides)
+    return marker
+
+
+def _due(marker) -> tuple[bool, str, bool]:
+    decision = _mod.profile_missing_due(marker, producer="health-check", host="host-a", day=_DAY)
+    return decision.due, decision.reason, decision.anomaly
+
+
+def test_utc_day_splits_at_utc_midnight():
+    before = int(datetime(2026, 9, 27, 23, 30, tzinfo=timezone.utc).timestamp())
+    after = int(datetime(2026, 9, 28, 0, 30, tzinfo=timezone.utc).timestamp())
+    assert _mod.utc_day(before) == "2026-09-27"
+    assert _mod.utc_day(after) == "2026-09-28"
+
+
+def test_absent_marker_is_due():
+    assert _due(None) == (True, "absent", False)
+
+
+def test_same_day_marker_suppresses():
+    assert _due(_marker()) == (False, "same-day", False)
+
+
+def test_same_day_marker_suppresses_a_different_error():
+    assert _due(_marker(errorSha256="f" * 64)) == (False, "same-day", False)
+
+
+def test_earlier_day_marker_is_due_without_anomaly():
+    assert _due(_marker(utcDay="2026-09-26")) == (True, "earlier-day", False)
+
+
+def test_future_day_marker_is_due_as_anomaly():
+    """Clock reversal must not silence every day until the clock catches up."""
+    assert _due(_marker(utcDay="2026-09-28")) == (True, "future-day", True)
+
+
+@pytest.mark.parametrize(
+    "overrides, reason",
+    [
+        ({"host": "host-b"}, "wrong-host"),
+        ({"producer": "heartbeat-watchdog"}, "wrong-producer"),
+        ({"schemaVersion": 2}, "wrong-schema"),
+        ({"schemaVersion": True}, "wrong-schema"),
+        ({"schemaVersion": "1"}, "wrong-schema"),
+        ({"kind": "daily-health-receipt"}, "wrong-schema"),
+        ({"utcDay": "2026-9-27"}, "malformed-day"),
+        ({"utcDay": "2026-02-30"}, "malformed-day"),
+        ({"utcDay": 20260927}, "malformed-day"),
+        ({"utcDay": None}, "malformed-day"),
+    ],
+)
+def test_marker_that_cannot_prove_suppression_is_due(overrides, reason):
+    assert _due(_marker(**overrides)) == (True, reason, True)
+
+
+@pytest.mark.parametrize("marker", [[], "marker", 7, {}])
+def test_non_marker_payload_is_wrong_schema(marker):
+    assert _due(marker) == (True, "wrong-schema", True)

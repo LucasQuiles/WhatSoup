@@ -7,17 +7,20 @@ return [] and every per-service check watched nothing while staying green.
 Now the profile resolves through ``lib/fleet_config.py``
 (BOT_ERRORS_HEALTH_PROFILE -> ~/.config/whatsoup/health-profile.json -> tracked
 deploy/health-profiles/<host>.json). A failure raises FleetConfigError, and
-run_once() exits 2 with one configuration_error line before opening state
-whenever a profile-based check is selected.
+run_once() exits 2 before opening state whenever a profile-based check is
+selected: one configuration_error line, then one line for the daily
+profile-missing alert (covered in test_bot_errors_profile_missing_event.py).
 
-HOME, REPO_ROOT and the hostname are pinned to temp values and the synthetic
-host ``host-a`` so neither real private files nor tracked profiles are read.
+HOME, REPO_ROOT, the state root, the outbox and the hostname are pinned to temp
+values and the synthetic host ``host-a`` so neither real private files nor
+tracked profiles are read and no real alert is queued.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -47,6 +50,13 @@ def mod(monkeypatch, tmp_path: Path):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("BOT_ERRORS_HEALTH_PROFILE", raising=False)
+    # run_once() now writes an event and a marker on a profile failure.
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "state" / "outbox"))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_NOW",
+        str(int(datetime(2026, 9, 27, 12, tzinfo=timezone.utc).timestamp())),
+    )
     monkeypatch.setattr(module, "REPO_ROOT", tmp_path / "repo")
     monkeypatch.setattr(module.socket, "gethostname", lambda: "host-a.example")
     return module
@@ -140,11 +150,13 @@ def test_run_once_exits_2_when_profile_missing(mod, tmp_path: Path, monkeypatch,
     err, _ = _run_once_refused(mod, monkeypatch, check, capsys)
 
     lines = err.strip().splitlines()
-    assert len(lines) == 1
+    # The configuration_error line stays first; the profile-missing outcome follows it.
+    assert len(lines) == 2
     assert lines[0].startswith("configuration_error: health profile missing")
     assert str(_private(tmp_path)) in lines[0]
     assert str(_tracked(tmp_path)) in lines[0]
     assert "resolver order:" in lines[0]
+    assert lines[1].startswith("profile-missing event queued: ")
 
 
 def test_env_set_to_missing_file_fails_without_falling_through(mod, tmp_path: Path, monkeypatch, capsys):

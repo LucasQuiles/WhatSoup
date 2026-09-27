@@ -10,18 +10,21 @@ loader now resolves through ``lib/fleet_config.py``:
   BOT_ERRORS_HEALTH_PROFILE_JSON -> BOT_ERRORS_HEALTH_PROFILE
   -> ~/.config/whatsoup/health-profile.json -> tracked deploy/health-profiles/<host>.json
 
-and any failure raises FleetConfigError; daily() then exits 2. A set env var
-never self-heals from a later source, and a missing profile never becomes
-role=central.
+and any failure raises FleetConfigError; daily() then queues the daily
+profile-missing alert (covered in test_bot_errors_profile_missing_event.py) and
+exits 2. A set env var never self-heals from a later source, and a missing
+profile never becomes role=central.
 
 Loads bot-errors-health-check.py via importlib (hyphen in filename prevents
-normal import). HOME points at a temp dir so real private files are never read.
+normal import). HOME, the state root and the outbox point at temp dirs so real
+private files are never read and no real alert is queued.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -46,6 +49,13 @@ def _isolate(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # daily() now writes an event and a marker on a profile failure.
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "state" / "outbox"))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_NOW_EPOCH",
+        str(int(datetime(2026, 9, 27, 12, tzinfo=timezone.utc).timestamp())),
+    )
 
 
 def _private_path() -> Path:
@@ -223,9 +233,11 @@ def test_daily_exits_2_before_any_probe_when_profile_missing(monkeypatch, capsys
 
     captured = capsys.readouterr()
     lines = captured.err.strip().splitlines()
-    assert len(lines) == 1
+    # The fail-closed line stays first; the profile-missing outcome follows it.
+    assert len(lines) == 2
     assert lines[0].startswith("bot-errors-health-check: fail-closed: health profile missing")
     assert "resolver order:" in lines[0]
+    assert lines[1].startswith("bot-errors-health-check: profile-missing event queued: ")
     assert "role=central" not in captured.out
 
 

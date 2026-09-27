@@ -15,15 +15,21 @@ exists the load fails too. Every failure raises :class:`FleetConfigError`
 whose message is one line naming the path, the problem and the order tried,
 so callers can exit non-zero instead of watching nothing or defaulting to
 role=central.
+
+:func:`profile_missing_due` is the pure daily-suppression decision for the
+profile-missing alert those exits raise. Each producer builds and writes its
+own event and marker; this module only judges a marker it has read.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 HEALTH_PROFILE_ENV = "BOT_ERRORS_HEALTH_PROFILE"
 HEALTH_PROFILE_JSON_ENV = "BOT_ERRORS_HEALTH_PROFILE_JSON"
@@ -145,3 +151,70 @@ def resolve_health_profile(tracked: Path) -> ResolvedConfig:
 
 def resolve_roster(repo_root: Path, env_name: str = ROSTER_ENV) -> ResolvedConfig:
     return resolve("fleet roster", env_name, private_roster_path(), tracked_roster_path(repo_root))
+
+
+PROFILE_MISSING_MARKER_KIND = "profile-missing-marker"
+PROFILE_MISSING_MARKER_SCHEMA = 1
+
+_UTC_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def utc_day(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _valid_utc_day(value: Any) -> bool:
+    if not isinstance(value, str) or not _UTC_DAY_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class ProfileMissingDecision:
+    """Whether a profile-missing alert is due, and why.
+
+    ``anomaly`` marks a marker that exists but cannot prove suppression; the
+    caller prints ``reason`` (a fixed token, never marker content) on stderr.
+    """
+
+    due: bool
+    reason: str
+    anomaly: bool = False
+
+
+def profile_missing_due(
+    marker: Mapping[str, Any] | None, *, producer: str, host: str, day: str
+) -> ProfileMissingDecision:
+    """Decide whether ``producer`` on ``host`` must alert for UTC ``day``.
+
+    Only a well-formed marker for the same producer, host and day suppresses.
+    Anything else is due: a marker that is absent or from an earlier day
+    normally, and a wrong-schema, wrong-host, wrong-producer, malformed-day or
+    future-day marker as an anomaly. A future day means the clock went back; it
+    must not silence every day until the clock catches up.
+    """
+    if marker is None:
+        return ProfileMissingDecision(True, "absent")
+    if (
+        not isinstance(marker, Mapping)
+        or type(marker.get("schemaVersion")) is not int
+        or marker.get("schemaVersion") != PROFILE_MISSING_MARKER_SCHEMA
+        or marker.get("kind") != PROFILE_MISSING_MARKER_KIND
+    ):
+        return ProfileMissingDecision(True, "wrong-schema", anomaly=True)
+    if marker.get("producer") != producer:
+        return ProfileMissingDecision(True, "wrong-producer", anomaly=True)
+    if marker.get("host") != host:
+        return ProfileMissingDecision(True, "wrong-host", anomaly=True)
+    recorded = marker.get("utcDay")
+    if not _valid_utc_day(recorded):
+        return ProfileMissingDecision(True, "malformed-day", anomaly=True)
+    if recorded > day:
+        return ProfileMissingDecision(True, "future-day", anomaly=True)
+    if recorded < day:
+        return ProfileMissingDecision(True, "earlier-day")
+    return ProfileMissingDecision(False, "same-day")
