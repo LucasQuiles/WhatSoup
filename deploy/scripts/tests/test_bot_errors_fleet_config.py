@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,8 @@ def _load_module():
     spec = importlib.util.spec_from_file_location("fleet_config", _LIB)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    # @dataclass resolves string annotations through sys.modules[cls.__module__].
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
