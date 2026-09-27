@@ -2335,7 +2335,11 @@ def test_run_once_private_override_error_returns_two(mod, monkeypatch, tmp_path,
     fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
     monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
     monkeypatch.setattr(mod, "load_fleet", lambda: {"hosts": []})
-    monkeypatch.setattr(mod, "private_override_contract_error", lambda fleet: "config error: missing override")
+    monkeypatch.setattr(
+        mod,
+        "private_override_contract_error",
+        lambda fleet, *, expected_fleet_override=None: "config error: missing override",
+    )
 
     rc = mod.run_once(dry_run=True)
     assert rc == 2
