@@ -4764,9 +4764,12 @@ export class AgentRuntime implements Runtime {
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
       const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
+      // Same key the turn identity and its outbound ops use: a mapped @lid
+      // report chat keys under the resolved phone, and terminal finalization
+      // rejects an inbound journaled under any other key.
       const inboundSeq = this.durability.journalInbound(
         messageId,
-        toConversationKey(ctx.reportChatJid),
+        canonicalConversationKey(ctx.reportChatJid, this.db),
         ctx.reportChatJid,
         'agent',
         now,
