@@ -128,9 +128,15 @@ describe('continuity gap ledger', () => {
 
     expect(readContinuityGapHealth(db.raw)).toEqual({
       readable: true,
+      closure_ledger: 'present',
+      total: 3,
       open: 3,
       unresolved: 2,
       ambiguous: 1,
+      ambiguous_total: 1,
+      closed: 0,
+      addressed: 0,
+      declined: 0,
     });
 
     db.raw.prepare(`

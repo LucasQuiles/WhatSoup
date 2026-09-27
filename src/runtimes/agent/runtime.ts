@@ -218,7 +218,11 @@ import {
 import { resolveResumeIdentity, type PersistedResumeIdentity } from './resume-identity.ts';
 import type { FinalizeRuntimeTurnResult } from './turn-finalizer.ts';
 import { OPERATOR_CANCELLATION_ATTEMPT_OUTCOME } from './turn-terminal.ts';
-import { runtimeTurnRecoveryIsDegraded, RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
+import { RuntimeTurnSupervisor } from './runtime-turn-supervisor.ts';
+import {
+  classifyRuntimeRecoveryHealth,
+  runtimeRecoveryDegradation,
+} from './runtime-recovery-health.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import {
   AutoCompactController,
@@ -4760,9 +4764,12 @@ export class AgentRuntime implements Runtime {
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
       const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
+      // Same key the turn identity and its outbound ops use: a mapped @lid
+      // report chat keys under the resolved phone, and terminal finalization
+      // rejects an inbound journaled under any other key.
       const inboundSeq = this.durability.journalInbound(
         messageId,
-        toConversationKey(ctx.reportChatJid),
+        canonicalConversationKey(ctx.reportChatJid, this.db),
         ctx.reportChatJid,
         'agent',
         now,
@@ -7575,8 +7582,15 @@ export class AgentRuntime implements Runtime {
     const finalizationHealth = this.runtimeTurnSupervisor.health();
     const recoveryHealth = getTurnRecoveryHealthDetails(this.durability);
     const completedDeliveryIdentityAdmissions = this.completedDeliveryIdentityAdmissionHealth();
-    const completedDeliveryIdentityDebt = completedDeliveryIdentityAdmissions.unresolvedCount > 0;
-    const finalizationDegraded = runtimeTurnRecoveryIsDegraded(finalizationHealth, recoveryHealth);
+    const recoveryClassification = classifyRuntimeRecoveryHealth({
+      finalization: finalizationHealth,
+      recovery: recoveryHealth,
+      completedDeliveryIdentity: completedDeliveryIdentityAdmissions,
+    });
+    // Only service-blocking recovery debt degrades; retained debt is reported
+    // through `recovery_debt` without paging.
+    const { finalizationDegraded, completedDeliveryIdentityDebt } =
+      runtimeRecoveryDegradation(recoveryClassification);
     // Chats wedged with a session entry no ownership record backs. Read pure
     // here: this snapshot is polled, so the warning sweep stays on the tick.
     const perChatSessionsWithoutOwner = this.perChatSessionsWithoutOwner();
@@ -7612,6 +7626,12 @@ export class AgentRuntime implements Runtime {
       autoCompactWorstCurrentBackoffTier: autoCompactHealth.worstCurrentBackoffTier,
       proactiveResumeIdentityRejects: this.proactiveResumeIdentityRejects,
       completedDeliveryIdentityAdmissions,
+      recoveryBlockingReasons: recoveryClassification.blockingReasons,
+      recoveryDebtReasons: recoveryClassification.retainedReasons,
+      completedDeliveryIdentityBlocking:
+        recoveryClassification.completedDeliveryIdentityBlocking,
+      completedDeliveryIdentityRetained:
+        recoveryClassification.completedDeliveryIdentityRetained,
       restartLoopGuard: {
         enabled: config.restartLoopGuard.enabled,
         ...readRestartLoopGuardHealth(

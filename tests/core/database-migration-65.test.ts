@@ -26,12 +26,13 @@ describe('migration 65 — tool_calls caller attribution', () => {
     db = undefined;
   });
 
-  it('is the current schema and adds every caller column as nullable with no default', () => {
+  it('is applied by the registry and adds every caller column as nullable with no default', () => {
     db = new Database(':memory:');
     db.open();
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(65);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(66);
     const applied = db.raw.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number };
-    expect(applied.v).toBe(65);
+    expect(applied.v).toBe(66);
+    expect(db.raw.prepare('SELECT 1 AS ok FROM schema_migrations WHERE version = 65').get()).toEqual({ ok: 1 });
 
     const columns = toolCallColumns(db.raw);
     expect(CALLER_COLUMNS.map((name) => [name, columns.get(name)])).toEqual([

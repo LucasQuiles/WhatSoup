@@ -380,7 +380,8 @@ missed (the QR-102 ordering strand), or a turn that finished with no reply and n
 finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
-**15 minutes**, and reconciles four buckets in a single transaction:
+**15 minutes**, and reconciles four buckets in a single transaction, plus a fifth that it only
+reports:
 
 | Bucket | Selection | Disposition |
 |---|---|---|
@@ -388,13 +389,30 @@ pre-connect recovery. It is wired in `main.ts` to run once at startup and then e
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
+| 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the first 200 seqs are logged (`inboundSeqsTruncated` is true when there are more). Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies. Read in its own snapshot before the four-bucket transaction, and bounded per sweep (see below) |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
 Bucket 4 is the exact inverse: it selects **only** inbound rows owning such a terminal record
-whose delivery can never echo-settle, so the four buckets remain mutually exclusive and no row is
-disposed twice (an echoed terminal op still routes to bucket 1). Each SELECT is bounded to 200 rows so a
-large backlog drains over successive sweeps rather than in one long transaction. The
+whose delivery can never echo-settle. Bucket 5 reports only rows whose single terminal record is
+final — live finalization writes that record and the inbound status atomically, so such a row is
+left only by an older release — and never a transferred or `unfinalized_retry_owned` record. The
+buckets remain mutually exclusive and no row is disposed twice (an echoed terminal op without a
+record still routes to bucket 1). The operator close derives the status by the same mapping live
+finalization uses (`deriveTerminalInboundMutation`), validates the record against the finalize
+contract and re-checks its delivery proof: `complete` with `response_echoed` / `no_reply_policy`,
+or `failed` with the record's failure class. Each SELECT of buckets 1–4 is bounded to 200
+rows so a large backlog drains over successive sweeps rather than in one long transaction.
+Bucket 5 writes nothing, so nothing drains: its SQL pre-filters only what SQL can judge
+(disposition, identity, conflicting records, links, recovery jobs, grace window), while delivery
+proof and the record contract are judged per row by the evaluator. A sweep therefore scans the
+pre-filtered rows oldest first in keyset pages of 200, evaluating at most **1000** rows, and
+resumes after the last evaluated seq on the next sweep; each scan cycle covers the seqs that
+existed when it began, then wraps to the oldest row, so refused rows can never hide a later
+eligible one and a row repaired behind the cursor is seen on the next cycle. The resume point is
+held in memory only: a restart begins a new cycle. The log line carries `scanned`, `complete`,
+`cycleUpperSeq` and `refusedByReason` (evaluated rows only; SQL-pre-filtered rows are not
+counted), and a window whose rows were all refused is logged at info level. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
 opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns untouched. The
@@ -1139,20 +1157,33 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
-block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
-see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
-or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
-replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
-exact provenance link and terminal delivery proof exist.
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
+`total`/`open`/`unresolved`/`ambiguous`/`ambiguous_total`/`closed`/`addressed`/`declined` counts in a
+`continuity` block; the open/unresolved/ambiguous counts of that same reading feed the normalized
+`recovery_debt` projection, whose `continuity` part keeps its four-field shape. Readable retained
+obligations use `open=true`, `service_blocking=false`, and `attention="routine"` without changing an
+otherwise healthy service status. Unreadable or actionable recovery evidence uses
+`service_blocking=true`, `attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6.
+Compatibility `degradation_causes` may still include continuity reason codes for diagnostic consumers,
+but those codes are not independently an outage verdict. The recorder does not send, replay, admit,
+or close work.
+Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
+recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
+changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
+same conversation, its terminal delivery proof, an exact selected-context witness, and (for audio) bound
+media and transcript hashes; `declined` needs an owner-approved `continuity-closure-authority.v1`
+policy and a transport-verified decision inbound. Only `open > 0` keeps `continuity_gap_open` and the
+continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
+unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
+`turn_recovery_degraded` is derived independently and is not cleared by a closure.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 

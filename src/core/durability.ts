@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import {
+  validDeliveryCorroboratedSelectedOpsSql,
+} from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import { DeferredTurnStore } from './deferred-turn-store.ts';
@@ -34,6 +37,7 @@ import {
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import { TerminalRecordInboundCloser } from './terminal-record-inbound-close.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 import {
@@ -568,6 +572,12 @@ export interface StuckInboundSweepResult {
    * claimed owning job driven to `exhausted` so the scope becomes admissible.
    */
   reclaimedRecoveryOwned: number;
+  /**
+   * Report-only: open inbound rows behind their own FINAL terminal record
+   * that `turn-recovery-operator close-inbound` could close (see
+   * terminal-record-inbound-close.ts). The sweep never closes them.
+   */
+  terminalRecordCloseCandidates: number;
 }
 
 export interface OutboundOpParams {
@@ -679,6 +689,7 @@ type DurabilityStatements = {
   getQuarantineClearContributorCounts: PreparedStatement;
   getMaybeSentOutboundCount: PreparedStatement;
   getOldestMaybeSentSubmittedAt: PreparedStatement;
+  getMaybeSentDeliveryAmbiguityHealth: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   getCompletedDeliveryIdentityAdmissionHealth: PreparedStatement;
@@ -691,6 +702,7 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
   /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
@@ -1261,6 +1273,28 @@ export class DurabilityEngine {
       getOldestMaybeSentSubmittedAt: prepare(
         `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      getMaybeSentDeliveryAmbiguityHealth: prepare(`
+        WITH valid_corroborated_selected AS (
+          ${validDeliveryCorroboratedSelectedOpsSql()}
+        )
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 0
+            ELSE 1
+          END), 0) AS uncorroborated_ambiguous,
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS corroborated_retained,
+          MIN(CASE
+            WHEN proof.selected_op_id IS NULL
+            THEN ${maybeSentDwellAtSql('o.')}
+            ELSE NULL
+          END) AS oldest_uncorroborated_at
+        FROM outbound_ops o
+        LEFT JOIN valid_corroborated_selected proof ON proof.selected_op_id = o.id
+        WHERE o.status = 'maybe_sent'
+      `),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
          FROM outbound_ops
@@ -1368,6 +1402,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.terminalRecordInboundCloser = new TerminalRecordInboundCloser(db.raw);
     this.capabilityObligations = new CapabilityObligationStore(db);
     this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
@@ -3250,7 +3285,16 @@ export class DurabilityEngine {
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
     const reclaimedStaleRows: StaleReclaimedInbound[] = [];
-    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    // Bucket 5 is advisory and writes nothing, so it reads in its own snapshot
+    // before the mutating sweep instead of lengthening that transaction; the
+    // operator close path re-evaluates every row before it writes. The buckets
+    // are disjoint: buckets 1-3 require no terminal record, bucket 4 requires a
+    // `transferred_to_recovery_owner` record, and bucket 5 requires a final one.
+    const terminalRecordCloseCandidates = withTransaction(
+      this.db,
+      () => this.reportTerminalRecordCloseCandidates(),
+    );
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows, terminalRecordCloseCandidates);
     if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
       try {
         this.staleInboundReclaimListener(reclaimedStaleRows);
@@ -3263,6 +3307,7 @@ export class DurabilityEngine {
 
   private runSweepStuckInboundTransaction(
     reclaimedStaleRows: StaleReclaimedInbound[],
+    terminalRecordCloseCandidates: number,
   ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
@@ -3288,7 +3333,9 @@ export class DurabilityEngine {
         staleOpen.length === 0 &&
         recoveryOwned.length === 0
       ) {
-        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
+        return {
+          completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned, terminalRecordCloseCandidates,
+        };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -3353,6 +3400,7 @@ export class DurabilityEngine {
         completedTurnDone,
         failedStale,
         reclaimedRecoveryOwned,
+        terminalRecordCloseCandidates,
       };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
@@ -3373,11 +3421,56 @@ export class DurabilityEngine {
     });
   }
 
+  /**
+   * Report-only: open inbound rows behind a final terminal record that an
+   * operator could close with `turn-recovery-operator close-inbound`. Each
+   * close is an operator decision, so the sweep writes nothing here — not the
+   * row, and no recovery evidence. Each call evaluates one bounded window of
+   * the scan cycle; a window whose rows were all refused is logged too, so a
+   * backlog of refused rows stays visible instead of reading as zero.
+   */
+  private reportTerminalRecordCloseCandidates(): number {
+    const startedAt = systemClock.now();
+    const scan = this.terminalRecordInboundCloser.scan();
+    if (scan.scanned > 0) {
+      const fields = {
+        count: scan.eligible.length,
+        // Bounded by scanCap; the old fixed window logged up to 200, so keep
+        // that and flag truncation instead of silently hiding later seqs.
+        inboundSeqs: scan.eligible.slice(0, 200),
+        inboundSeqsTruncated: scan.eligible.length > 200,
+        scanned: scan.scanned,
+        complete: scan.complete,
+        refusedByReason: scan.refusedByReason,
+        cycleUpperSeq: scan.cycleUpperSeq,
+        elapsedMs: systemClock.now() - startedAt,
+      };
+      if (scan.eligible.length > 0) {
+        log.warn(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
+        );
+      } else {
+        log.info(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record were all refused in this scan window',
+        );
+      }
+    }
+    return scan.eligible.length;
+  }
+
   getHealthStats(): {
     pendingOutbound: number;
     quarantinedOutbound: number;
     maybeSentOutbound: number;
     oldestMaybeSentAt: string | null;
+    deliveryAmbiguity: {
+      readable: true;
+      uncorroboratedAmbiguous: number;
+      corroboratedRetained: number;
+      oldestUncorroboratedAt: string | null;
+    };
     outboundFailureEvidence: OutboundFailureHealthProjection;
     outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection;
     lastRecoveryAt: string | null;
@@ -3389,6 +3482,11 @@ export class DurabilityEngine {
     const oldestMaybeSent = this.statements.getOldestMaybeSentSubmittedAt.get() as
       | { at: string | null }
       | undefined;
+    const deliveryAmbiguity = this.statements.getMaybeSentDeliveryAmbiguityHealth.get() as {
+      uncorroborated_ambiguous: number;
+      corroborated_retained: number;
+      oldest_uncorroborated_at: string | null;
+    };
     const evidenceRows = this.statements.getRecentOutboundFailureEvidence.all() as Array<{
       status: string;
       error: string | null;
@@ -3496,6 +3594,12 @@ export class DurabilityEngine {
       quarantinedOutbound: quarantined.count,
       maybeSentOutbound: maybeSent.count,
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
+      deliveryAmbiguity: {
+        readable: true,
+        uncorroboratedAmbiguous: deliveryAmbiguity.uncorroborated_ambiguous,
+        corroboratedRetained: deliveryAmbiguity.corroborated_retained,
+        oldestUncorroboratedAt: deliveryAmbiguity.oldest_uncorroborated_at,
+      },
       outboundFailureEvidence,
       outboundQuarantineDispositions,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,
