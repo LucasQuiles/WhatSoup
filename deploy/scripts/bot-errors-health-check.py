@@ -9139,7 +9139,10 @@ def move_profile_missing_marker_aside(epoch: int) -> Path:
     """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
 
     The compare-and-swap cannot replace a marker it cannot read, so without
-    this every run would alert. Raises when the rename fails.
+    this every run would alert. Corrupt evidence is preserved before it is
+    superseded, per docs/superpowers/specs/2026-07-28-bot-errors-durability-
+    stack-design.md lines 514-526; the fresh marker then goes through the
+    normal compare-and-swap from absent. Raises when the rename fails.
     """
     marker = state_root() / HEALTH_PROFILE_MISSING_MARKER
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
