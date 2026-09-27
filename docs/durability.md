@@ -1145,15 +1145,24 @@ After that dry run, `record-continuity-manifest --confirm-record` can persist on
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
 manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
-open/unresolved/ambiguous counts in a `continuity` block and includes them in the normalized
-`recovery_debt` projection. Readable retained obligations use `open=true`,
-`service_blocking=false`, and `attention="routine"` without changing an otherwise healthy service
-status. Unreadable or actionable recovery evidence uses `service_blocking=true`,
-`attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6. Compatibility
-`degradation_causes` may still include continuity reason codes for diagnostic consumers, but those
-codes are not independently an outage verdict. The recorder does not send,
-replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
-exact provenance link and terminal delivery proof exist.
+`total`/`open`/`unresolved`/`ambiguous`/`ambiguous_total`/`closed`/`addressed`/`declined` counts in a
+`continuity` block; the open/unresolved/ambiguous counts of that same reading feed the normalized
+`recovery_debt` projection, whose `continuity` part keeps its four-field shape. Readable retained
+obligations use `open=true`, `service_blocking=false`, and `attention="routine"` without changing an
+otherwise healthy service status. Unreadable or actionable recovery evidence uses
+`service_blocking=true`, `attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6.
+Compatibility `degradation_causes` may still include continuity reason codes for diagnostic consumers,
+but those codes are not independently an outage verdict. The recorder does not send, replay, admit,
+or close work.
+Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
+recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
+changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
+same conversation, its terminal delivery proof, an exact selected-context witness, and (for audio) bound
+media and transcript hashes; `declined` needs an owner-approved `continuity-closure-authority.v1`
+policy and a transport-verified decision inbound. Only `open > 0` keeps `continuity_gap_open` and the
+continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
+unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
+`turn_recovery_degraded` is derived independently and is not cleared by a closure.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
