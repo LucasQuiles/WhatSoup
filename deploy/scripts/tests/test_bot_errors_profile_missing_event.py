@@ -195,8 +195,9 @@ def test_first_failure_queues_one_critical_event_and_exits_2(producer: Producer,
     ]
     assert evidence[4].startswith("error=health profile missing")
     assert "resolver order:" in evidence[4]
+    # The dispatcher headline shows only the summary, so it must explain itself.
     assert event["summary"] == (
-        f"profile-missing: {producer.name} on host-a cannot load its health profile; exiting 2"
+        f"health profile missing: {producer.name} on host-a cannot load it and exits 2 without checking"
     )
     if producer.name == HEALTH:
         assert event["instance"] == "bot-errors-health"

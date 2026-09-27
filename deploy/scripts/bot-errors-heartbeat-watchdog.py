@@ -736,7 +736,7 @@ def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tu
     error into a marker; the full path stays on the configuration_error line.
     """
     summary = (
-        f"profile-missing: {PROFILE_MISSING_PRODUCER} on {host} cannot load its health profile; exiting 2"
+        f"health profile missing: {PROFILE_MISSING_PRODUCER} on {host} cannot load it and exits 2 without checking"
     )
     evidence = "\n".join([
         "kind=profile-missing",

@@ -1124,7 +1124,8 @@ instances.
 
 A profile failure also queues one critical alert per host, per producer, per UTC day,
 before the exit 2. The alert has `alertSource` `profile-missing:health-check` or
-`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, and
+`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, a
+summary starting `health profile missing:` that names the producer and host, and
 evidence lines `kind=profile-missing`, `producer=`, `host=`, `utc_day=` and `error=`. The
 shared redaction replaces the private profile path in `error=`; the stderr fail-closed line
 keeps the full path. The watchdog's other configuration errors (a bad check selector or

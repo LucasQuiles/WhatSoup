@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "eb6c39fa013872f6821d6b7d85653db191cdc24101d63b1ccf25933440a2ae9e",
+      "sha256": "0509f32b96dbdb41e764b0c8641420467256fa79a431cdc3d66aa560ae7b7373",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -285,7 +285,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "0d350b02368815c19b321c81b093b1434604984e670277f43c3a1a2f826d17d9",
+      "sha256": "c4a85aca164625e716c25ac1a69d328a5d4f90e41b0fef49b80110d4bef9dcec",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
