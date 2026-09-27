@@ -19,9 +19,13 @@
  * Exit codes: 0 plan ready / activated and verified; 1 activation failed and
  * the rollback was verified; 2 refused before any live change (usage,
  * platform, or an unmet precondition); 3 activation failed and the rollback
- * could not be verified — manual attention required.
+ * could not be verified — manual attention required; 4 activation failed and
+ * the automatic rollback was NOT attempted because the new release changed
+ * the database schema migration level (or it could not be read) — the old
+ * binary would refuse that database, so the new release is left in place and
+ * stderr carries the manual database-restore steps.
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -34,10 +38,12 @@ import {
   type ActivationContext,
   AUX_RENDERERS,
   type AuxRenderer,
+  bootstrapEntrypointFor,
   buildActivationContext,
   describeActions,
   LABEL_PATTERN,
   preconditionsMet,
+  wrapperTargetFor,
 } from './lib/release-activation/plan.ts';
 
 export const RELEASE_ACTIVATE_EXIT = {
@@ -45,6 +51,7 @@ export const RELEASE_ACTIVATE_EXIT = {
   rolledBack: 1,
   refused: 2,
   rollbackUnverified: 3,
+  rollbackBlockedMigrated: 4,
 } as const;
 
 const DEFAULT_EXIT_TIMEOUT_SECONDS = 60;
@@ -180,7 +187,58 @@ function outcomeExit(outcome: ApplyOutcome['outcome']): number {
     case 'rolled-back': return RELEASE_ACTIVATE_EXIT.rolledBack;
     case 'refused': return RELEASE_ACTIVATE_EXIT.refused;
     case 'rollback-unverified': return RELEASE_ACTIVATE_EXIT.rollbackUnverified;
+    case 'rollback-blocked-migrated': return RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated;
   }
+}
+
+/**
+ * Operator instructions for `rollback-blocked-migrated`: the levels, the
+ * backup, and the exact manual restore. Written to stderr so stdout stays one
+ * JSON receipt.
+ */
+export function blockedRollbackMessage(context: ActivationContext, outcome: ApplyOutcome): string {
+  const backup = outcome.backupPath!;
+  const { domain, dbPath, wrapperLink } = context;
+  const schema = outcome.schemaMigration;
+  let oldTarget: string;
+  try {
+    oldTarget = readFileSync(path.join(backup, 'symlink.before'), 'utf8');
+  } catch {
+    oldTarget = wrapperTargetFor(context.args.expectCurrent);
+  }
+  const state = schema.blockedAt === 'after-instance-stop'
+    ? `The new release's instance ${context.instanceLabel} is stopped; its symlink and plists are still in place.`
+    : 'The new release was left in place, in whatever state verification found it.';
+  const aside = `${dbPath}.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)`;
+  return [
+    '',
+    'release:activate: ROLLBACK BLOCKED — the database schema changed during activation.',
+    `  schema migration level before activation: ${schema.before ?? 'unknown'}`,
+    `  schema migration level after failure: ${schema.after ?? 'unreadable'}${schema.afterError ? ` (${schema.afterError})` : ''}`,
+    `The old release would refuse this database, so the symlink and plists were NOT restored and the old release was NOT started. ${state}`,
+    `Pre-activation database backup: ${path.join(backup, 'bot.db')}`,
+    '',
+    'WARNING: data loss. Messages received after the backup was taken are lost from the restored database.',
+    'The moved-aside live database below is then the only copy of those messages; keep it.',
+    '',
+    'Manual restore, only with approval for this instance:',
+    '  1. Stop every label and confirm the instance pid is gone:',
+    ...context.staged.map((entry) => `       launchctl bootout ${domain}/${entry.label}`),
+    `       launchctl print ${domain}/${context.instanceLabel}   # must fail: not loaded`,
+    '  2. Move the live database and its sidecars aside together (a stale -wal beside a restored bot.db corrupts it):',
+    `       aside=${aside}; mkdir -m 700 "$aside"`,
+    `       mv ${dbPath} ${dbPath}-wal ${dbPath}-shm "$aside"/   # -wal/-shm may be absent`,
+    '  3. Restore the backup:',
+    `       cp ${path.join(backup, 'bot.db')} ${dbPath} && chmod 600 ${dbPath}`,
+    '  4. Repoint the wrapper symlink and the plists to the old release:',
+    `       ln -sfn ${oldTarget} ${wrapperLink}`,
+    ...context.staged.map((entry) => `       cp ${path.join(backup, `${entry.label}.plist`)} ${entry.plistPath}`),
+    '  5. Start every label:',
+    ...context.staged.map((entry) => `       launchctl bootstrap ${domain} ${entry.plistPath}`),
+    `  6. Verify from the executing process: ps argv names ${bootstrapEntrypointFor(context.args.expectCurrent)} and health reports commit ${context.oldCommit ?? '<old commit>'}.`,
+    'See docs/runbooks/release-deployment.md, "Rollback".',
+    '',
+  ].join('\n');
 }
 
 export async function runReleaseActivateCli(
@@ -230,6 +288,7 @@ export async function runReleaseActivateCli(
     }
   }
   io.stdout(receipt);
+  if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
   return outcomeExit(outcome.outcome);
 }
 
