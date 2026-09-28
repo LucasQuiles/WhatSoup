@@ -395,6 +395,85 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     });
   });
 
+  describe('#3658: a pre-spawn close that fails only at the lifecycle step starts fresh with a notice', () => {
+    const LIFECYCLE_CLOSE_FAILED = 'Exact resumable checkpoint does not match the conversation identity';
+
+    function managerWithFailingClose(error: unknown) {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      vi.spyOn(session, 'shutdown').mockRejectedValueOnce(error);
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      return { session, spawnSpy };
+    }
+
+    it('no checkpoint to adopt: the turn starts fresh with the notice and dispatches', async () => {
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('a resumable checkpoint is not resumed behind the failed close: fresh spawn and one notice', async () => {
+      insertRow(OWN_SID, PHONE, 'suspended');
+      writeCheckpoint(PHONE, OWN_SID);
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('an adoption that already announced the notice does not announce it twice', async () => {
+      insertRow(SCHEDULED_SID, SCHEDULED, 'suspended');
+      writeCheckpoint(PHONE, SCHEDULED_SID);
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerSend).toHaveBeenCalledTimes(1);
+    });
+
+    const unprovenStops: Array<[string, Partial<ReturnType<SessionManager['getStatus']>>]> = [
+      ['the provider is not proven stopped', { providerTerminated: false }],
+      ['a durable failure closure was recorded', { durableFailureClosed: true }],
+      ['the durable lifecycle is inconclusive', { durableFailureInconclusive: true }],
+    ];
+
+    it.each(unprovenStops)('refuses the turn without a spawn or notice when %s', async (_label, override) => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      const realStatus = session.getStatus.bind(session);
+      let failedClose = false;
+      vi.spyOn(session, 'shutdown').mockImplementationOnce(async () => {
+        failedClose = true;
+        throw new Error('fixture termination failed');
+      });
+      // The override covers only the failed close, so teardown reads real state.
+      vi.spyOn(session, 'getStatus').mockImplementation(() => (
+        failedClose ? { ...realStatus(), ...override } : realStatus()
+      ));
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture termination failed');
+      failedClose = false;
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(providerSend).not.toHaveBeenCalled();
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('refuses the turn without a spawn or notice when the close reports an aggregate termination failure', async () => {
+      const { session, spawnSpy } = managerWithFailingClose(
+        new AggregateError([new Error('fixture kill failed')], 'fixture termination and closure both failed'),
+      );
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture termination and closure both failed');
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(providerSend).not.toHaveBeenCalled();
+      expect(notices).not.toHaveBeenCalled();
+    });
+  });
+
   describe('scope: adoption restores a chat with no resident manager, never an in-process handoff', () => {
     type HandoffView = {
       recreatePerChatSessionForFallback(mapKey: string, chatJid: string): void;
