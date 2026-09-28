@@ -6,11 +6,14 @@
  * fabricated.
  */
 import {
+  chmodSync,
   lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -1303,6 +1306,87 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
     expect(result.json.outcome).toBe('refused');
     expect(world.alerts).toEqual([]);
+  });
+});
+
+describe('release:activate --apply: installed plist mode', () => {
+  // An instance plist can carry credentials in EnvironmentVariables and is then
+  // installed owner-only. The activation must replace it without widening it.
+  const plistAt = (label: string): string => path.join(fixture.launchAgents, `${label}.plist`);
+  const modeOf = (label: string): number => lstatSync(plistAt(label)).mode & 0o777;
+
+  beforeEach(() => {
+    // Explicit modes, so no assertion below depends on the runner's umask.
+    chmodSync(plistAt(INSTANCE_LABEL), 0o600);
+    chmodSync(plistAt(TIMER_LABEL), 0o644);
+    chmodSync(plistAt(DRIFT_LABEL), 0o644);
+  });
+
+  it.each([
+    ['0600', 0o600],
+    ['0640', 0o640],
+    ['0400', 0o400],
+  ])('keeps an instance plist installed at %s at that mode through the switch', async (_octal, installed) => {
+    chmodSync(plistAt(INSTANCE_LABEL), installed);
+    const inodeBefore = lstatSync(plistAt(INSTANCE_LABEL)).ino;
+    const world = new SimulatedLaunchd(fixture);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.json.outcome).toBe('activated');
+    // The switch replaced the file (a new inode carrying the new release), so
+    // the mode below is the writer's choice, not the untouched original.
+    expect(lstatSync(plistAt(INSTANCE_LABEL)).ino).not.toBe(inodeBefore);
+    expect(readFileSync(plistAt(INSTANCE_LABEL), 'utf8')).toContain(`<string>${fixture.newRelease}</string>`);
+    expect(modeOf(INSTANCE_LABEL)).toBe(installed);
+    // Positive control: plists installed at 0644 stay at 0644.
+    expect(modeOf(TIMER_LABEL)).toBe(0o644);
+    expect(modeOf(DRIFT_LABEL)).toBe(0o644);
+  });
+
+  it('keeps an owner-only instance plist owner-only through the automatic rollback', async () => {
+    const original = readFileSync(plistAt(INSTANCE_LABEL), 'utf8');
+    const stuck = new Set<number>();
+    const world = new SimulatedLaunchd(fixture, { stuckPids: stuck });
+    stuck.add(world.initialInstancePid);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.json.outcome).toBe('rolled-back');
+    expect(readFileSync(plistAt(INSTANCE_LABEL), 'utf8')).toBe(original);
+    expect(modeOf(INSTANCE_LABEL)).toBe(0o600);
+    expect(modeOf(TIMER_LABEL)).toBe(0o644);
+    expect(modeOf(DRIFT_LABEL)).toBe(0o644);
+  });
+
+  it('never installs a plist wider than 0644, even over a group-writable one', async () => {
+    chmodSync(plistAt(TIMER_LABEL), 0o664);
+    const world = new SimulatedLaunchd(fixture);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.json.outcome).toBe('activated');
+    expect(modeOf(TIMER_LABEL)).toBe(0o644);
+  });
+
+  it('refuses an instance plist that is a symlink, and leaves the link and its target untouched', async () => {
+    const elsewhere = path.join(fixture.base, 'elsewhere');
+    mkdirSync(elsewhere, { recursive: true });
+    const target = path.join(elsewhere, `${INSTANCE_LABEL}.plist`);
+    writeFileSync(target, readFileSync(plistAt(INSTANCE_LABEL), 'utf8'), { mode: 0o600 });
+    chmodSync(target, 0o600);
+    unlinkSync(plistAt(INSTANCE_LABEL));
+    symlinkSync(target, plistAt(INSTANCE_LABEL));
+    const world = new SimulatedLaunchd(fixture);
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    const failed = (result.json.preconditions as Array<{ id: string; ok: boolean }>).filter((entry) => !entry.ok).map((entry) => entry.id);
+    expect(failed).toContain('instance-plist-present');
+    expect(snapshotTree(fixture.base)).toEqual(before);
+    expect(lstatSync(target).mode & 0o777).toBe(0o600);
   });
 });
 

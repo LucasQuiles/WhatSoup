@@ -30,9 +30,11 @@ import {
 import path from 'node:path';
 
 import {
+  installedLaunchdPlistMode,
   isTransientLaunchdBootstrapError,
   LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS,
   LAUNCHD_BOOTSTRAP_RETRY_LIMIT,
+  LAUNCHD_PLIST_MAX_MODE,
 } from '../../../src/fleet/platform.ts';
 import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { backupSqliteConsistent } from '../sqlite-consistent-backup.ts';
@@ -55,7 +57,6 @@ import {
 export const VERIFY_POLL_INTERVAL_MS = 3_000;
 const EXIT_POLL_INTERVAL_MS = 1_000;
 const PRIVATE_FILE_MODE = 0o600;
-const PLIST_MODE = 0o644;
 
 export interface StepRecord {
   step: string;
@@ -133,6 +134,15 @@ function writeAtomic(filePath: string, contents: string, mode: number): void {
   writeFileSync(temporary, contents, { encoding: 'utf8', mode });
   chmodSync(temporary, mode);
   renameSync(temporary, filePath);
+}
+
+/**
+ * Replace an installed plist, keeping its permission bits (never wider than
+ * 0644). An owner-only instance plist can carry credentials in its
+ * EnvironmentVariables, so neither the switch nor the rollback may widen it.
+ */
+function writePlist(plistPath: string, contents: string): void {
+  writeAtomic(plistPath, contents, installedLaunchdPlistMode(plistPath) ?? LAUNCHD_PLIST_MAX_MODE);
 }
 
 /** `ln -sfn` without a window where the link is absent. */
@@ -500,7 +510,7 @@ async function rollback(
   });
   for (const entry of context.staged) {
     await attempt(`restore-plist:${entry.label}`, () => {
-      writeAtomic(entry.plistPath, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'), PLIST_MODE);
+      writePlist(entry.plistPath, readFileSync(path.join(backupPath, `${entry.label}.plist`), 'utf8'));
       return null;
     });
   }
@@ -583,7 +593,7 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
   try {
     repointSymlink(context.wrapperLink, wrapperTargetFor(args.release));
     steps.push({ step: 'switch-symlink', ok: true });
-    for (const entry of context.staged) writeAtomic(entry.plistPath, entry.staged!, PLIST_MODE);
+    for (const entry of context.staged) writePlist(entry.plistPath, entry.staged!);
     steps.push({ step: 'install-plists', ok: true });
     for (const entry of context.staged) {
       const reloadFailure = await reloadLabel(host, context, entry.label, entry.plistPath);
