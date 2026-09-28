@@ -498,6 +498,27 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         { status: string }).status).toBe('ended');
     });
 
+    it.each([
+      ['reactivated by another generation', `UPDATE agent_sessions SET session_id = 'other-generation-session' WHERE id = ?`, 'active'],
+      ['already reconciled by the sweep', `UPDATE agent_sessions SET status = 'crashed' WHERE id = ?`, 'crashed'],
+    ])('the fallback does not end an abandoned row %s', async (_label, sql, expectedStatus) => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const rowId = session.getDbRowId();
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      db.raw.prepare(sql).run(rowId);
+
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+      closeSpy.mockRestore();
+
+      expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+        { status: string }).status).toBe(expectedStatus);
+    });
+
     it('a refused fallback on a started manager keeps its row and provider session', async () => {
       view.ensureSessionAndQueueSync(JID, JID);
       const session = view.chatSessions.get(JID)!;
