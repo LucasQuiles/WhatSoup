@@ -207,6 +207,40 @@ because the new release changed the database schema migration level (or the
 level could not be read) — outcome `rollback-blocked-migrated`, manual database
 restore required.
 
+#### Health invariants verdict (report-only, #2481)
+
+Under `--apply`, after the outcome is final, `receipt.json` (and the stdout
+receipt) carries an `invariants` record:
+
+- `floor`: the schema and the required ids from **this tool's own**
+  `src/core/health-invariants.ts` (`RELEASE_INVARIANT_FLOOR`). The floor never
+  comes from the release under test.
+- `activation`, and `rollback` when a rollback restarted the old release and
+  observed it (otherwise `null`): the verdict for the
+  process `verify` bound by pid and argv, read from the `health_invariants`
+  block of its authenticated diagnostic body:
+  - `satisfied`: the process declared every floor id. This is a declaration by
+    the loaded code, not a proof of behaviour.
+  - `missing`: a diagnostic body with no block, i.e. a release that predates
+    it.
+  - `below_floor`: a known schema that omits a floor id (`undeclared` lists
+    them).
+  - `unknown`: an unrecognised schema, a malformed block, a process that was
+    not bound (`unbound`), or no diagnostic body at all (`unobserved`). A
+    transport failure is never read as `missing`.
+- `alert`: whether a warning was attempted, and the helper's exit status.
+
+When any verdict is not `satisfied`, exactly one BOT ERRORS warning (source
+`release-invariants`) is sent through the release observers' alert helper. It
+carries verdicts and ids only: no paths, commits, or host details. A refusal
+before any live change has no verdict and sends nothing. `--plan` never reads
+invariants and never sends an alert.
+
+The verdict is **report-only**: it is not part of the pass condition, and the
+outcome and every exit code above are unchanged. A failed alert is printed to
+stderr and recorded in `alert.status`; it does not change the exit code either.
+Expect `missing` for rollback targets built before the block existed.
+
 `kickstart -k` on an auxiliary timer runs that job once immediately; the plan
 lists it. The manual procedure below remains the reference for what the command
 does, and the fallback when it cannot be used.

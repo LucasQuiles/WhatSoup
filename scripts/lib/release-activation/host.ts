@@ -1,7 +1,8 @@
 /**
  * Host adapter for `release:activate`: every effect that reaches outside the
  * filesystem (launchctl, ps, plutil, renderer scripts, process liveness,
- * clocks, and the loopback health probe) goes through this seam so tests can
+ * clocks, the loopback health probe, and the BOT ERRORS alert helper) goes
+ * through this seam so tests can
  * drive the whole activation against a real temporary HOME with fakes here.
  *
  * Filesystem effects use node:fs directly against paths derived from `HOME`
@@ -11,9 +12,12 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { configRoot } from '../../../src/fleet/paths.ts';
 import { isRecord } from '../../../src/lib/type-guards.ts';
+import { emitReleaseAlert, type ReleaseAlertEmitPayload } from '../live-release-alert.ts';
+import { type HealthInvariantsReading, readHealthInvariants } from './invariants.ts';
 
 export interface ExecResult {
   code: number;
@@ -36,11 +40,26 @@ export interface ActivationHost {
   now(): number;
   /** GET http://127.0.0.1:<port>/health with the bearer token. */
   fetchHealth(port: number, token: string): Promise<HealthResponse>;
+  /**
+   * Send one BOT ERRORS alert through `emitReleaseAlert` (the release
+   * observers' path). Returns the helper's exit status; a spawn that fails
+   * outright may throw.
+   */
+  emitReleaseAlert(request: ReleaseAlertRequest): Promise<{ status: number | null }>;
+}
+
+export interface ReleaseAlertRequest {
+  instance: string;
+  source: string;
+  payload: ReleaseAlertEmitPayload;
 }
 
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
 const HEALTH_TIMEOUT_MS = 10_000;
-const HEALTH_MAX_BYTES = 65_536;
+/** Body cap of the loopback health read; the same cap as health_reader.py (`read(65537)` / `> 65536`). */
+export const HEALTH_MAX_BYTES = 65_536;
+/** The activating tool's own tree, which owns the alert helper (not `--release`). */
+const TOOL_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 function defaultExec(file: string, args: readonly string[], options: { input?: string } = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
@@ -103,6 +122,16 @@ export function createDefaultActivationHost(): ActivationHost {
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     fetchHealth: defaultFetchHealth,
+    emitReleaseAlert: async ({ instance, source, payload }) => {
+      const result = emitReleaseAlert({
+        repoRoot: TOOL_REPO_ROOT,
+        instance,
+        source,
+        emitHelper: path.join(TOOL_REPO_ROOT, 'deploy/scripts/bot-errors-emit.py'),
+        python: 'python3',
+      }, payload, 'alert');
+      return { status: result.status };
+    },
   };
 }
 
@@ -147,6 +176,8 @@ export interface HealthObservation {
   httpStatus: number | null;
   commit: string | null;
   connected: boolean | null;
+  /** The #2481 `health_invariants` reading; null unless the body is diagnostic. */
+  invariants: HealthInvariantsReading | null;
 }
 
 const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
@@ -156,7 +187,7 @@ const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
  * a request that carried a token: only a body with a `whatsapp` object and no
  * public schema is `diagnostic`; a public envelope means the token was
  * rejected, and anything else is unobserved. Only a diagnostic body yields
- * commit and connection fields.
+ * commit, connection, and invariant fields.
  */
 export function classifyAuthenticatedHealth(status: number | null, body: string): HealthObservation {
   let payload: unknown = null;
@@ -165,7 +196,9 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
   } catch {
     payload = null;
   }
-  const unobserved: HealthObservation = { projection: 'unobserved', httpStatus: status, commit: null, connected: null };
+  const unobserved: HealthObservation = {
+    projection: 'unobserved', httpStatus: status, commit: null, connected: null, invariants: null,
+  };
   if (!isRecord(payload)) return unobserved;
   const schema = payload['schema_version'];
   if (typeof schema === 'string' && schema.startsWith(PUBLIC_HEALTH_SCHEMA_PREFIX)) return unobserved;
@@ -177,5 +210,6 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
     httpStatus: status,
     commit: typeof instance['commit'] === 'string' ? instance['commit'] : null,
     connected: typeof whatsapp['connected'] === 'boolean' ? whatsapp['connected'] : null,
+    invariants: readHealthInvariants(payload),
   };
 }

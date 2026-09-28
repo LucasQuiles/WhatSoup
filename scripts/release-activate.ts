@@ -24,15 +24,26 @@
  * the database schema migration level (or it could not be read) — the old
  * binary would refuse that database, so the new release is left in place and
  * stderr carries the manual database-restore steps.
+ *
+ * #2481, report-only: under --apply, the receipt also records the health
+ * invariant verdict of the activated (and any rollback) process against this
+ * tool's floor, and one BOT ERRORS warning is sent when it is not
+ * `satisfied`. The verdict never changes the outcome or the exit code.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { HEALTH_INVARIANTS_SCHEMA, RELEASE_INVARIANT_FLOOR } from '../src/core/health-invariants.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
 import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
 import { applyActivation, type ApplyOutcome } from './lib/release-activation/apply.ts';
 import { type ActivationHost, createDefaultActivationHost } from './lib/release-activation/host.ts';
+import {
+  RELEASE_INVARIANTS_ALERT_SOURCE,
+  type ReleaseInvariantsVerdict,
+  releaseInvariantsVerdict,
+} from './lib/release-activation/invariants.ts';
 import {
   type ActivationArgs,
   type ActivationContext,
@@ -181,6 +192,76 @@ export function planDocument(context: ActivationContext): Record<string, unknown
   };
 }
 
+/** The receipt's #2481 record: verdicts, the tool floor, and the one alert attempt. */
+export interface InvariantsRecord {
+  reportOnly: true;
+  floor: { schema: string; ids: string[] };
+  activation: ReleaseInvariantsVerdict | null;
+  rollback: ReleaseInvariantsVerdict | null;
+  alert: { attempted: boolean; status: number | null };
+}
+
+function describeVerdict(label: string, verdict: ReleaseInvariantsVerdict): string[] {
+  return [
+    `${label}=${verdict.outcome}${verdict.detail === null ? '' : `/${verdict.detail}`}`,
+    `${label}_schema=${verdict.observedSchema ?? 'none'}`,
+    `${label}_undeclared=${verdict.undeclared.join(',') || 'none'}`,
+  ];
+}
+
+/**
+ * #2481, report-only: classify the activation and rollback observations
+ * against this tool's floor and send at most ONE warning when either is not
+ * `satisfied`. Runs under --apply only, after the outcome is final; it never
+ * changes the outcome or the exit code. A refusal changed nothing live, so it
+ * has no verdict. The alert carries verdicts and ids only.
+ */
+async function reportReleaseInvariants(
+  host: ActivationHost,
+  instance: string,
+  outcome: ApplyOutcome,
+  stderr: (text: string) => void,
+): Promise<InvariantsRecord> {
+  const floor = [...RELEASE_INVARIANT_FLOOR];
+  const record: InvariantsRecord = {
+    reportOnly: true,
+    floor: { schema: HEALTH_INVARIANTS_SCHEMA, ids: floor },
+    activation: null,
+    rollback: null,
+    alert: { attempted: false, status: null },
+  };
+  if (outcome.outcome === 'refused') return record;
+  record.activation = releaseInvariantsVerdict(outcome.verification, floor);
+  // No rollback verdict unless a rollback process was actually verified; a
+  // rollback stopped before restart has no generation to classify.
+  const rollbackObservation = outcome.rollback?.observation ?? null;
+  record.rollback = rollbackObservation === null ? null : releaseInvariantsVerdict(rollbackObservation, floor);
+  const verdicts: Array<[string, ReleaseInvariantsVerdict]> = [['activation', record.activation]];
+  if (record.rollback !== null) verdicts.push(['rollback', record.rollback]);
+  if (verdicts.every(([, verdict]) => verdict.outcome === 'satisfied')) return record;
+
+  record.alert.attempted = true;
+  try {
+    const sent = await host.emitReleaseAlert({
+      instance,
+      source: RELEASE_INVARIANTS_ALERT_SOURCE,
+      payload: {
+        summary: `release:activate: release invariants not satisfied (${verdicts.map(([label, verdict]) => `${label} ${verdict.outcome}`).join(', ')})`,
+        evidence: `report-only verdict against floor ${HEALTH_INVARIANTS_SCHEMA} [${floor.join(',')}]; activation outcome ${outcome.outcome}; exit code unchanged`,
+        diagnostics: verdicts.flatMap(([label, verdict]) => describeVerdict(label, verdict)),
+        severity: 'warning',
+      },
+    });
+    record.alert.status = sent.status;
+  } catch {
+    record.alert.status = null;
+  }
+  if (record.alert.status !== 0) {
+    stderr(`release invariants alert was not sent (status ${record.alert.status ?? 'none'}); the verdict is in receipt.json\n`);
+  }
+  return record;
+}
+
 function outcomeExit(outcome: ApplyOutcome['outcome']): number {
   switch (outcome) {
     case 'activated': return RELEASE_ACTIVATE_EXIT.ok;
@@ -273,12 +354,14 @@ export async function runReleaseActivateCli(
     return RELEASE_ACTIVATE_EXIT.refused;
   }
   const outcome = await applyActivation(host, context);
+  const invariants = await reportReleaseInvariants(host, args.instance, outcome, io.stderr);
   const receipt = `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
     release: plan.release,
     expectCurrent: plan.expectCurrent,
     ...outcome,
+    invariants,
   }, null, 2)}\n`;
   if (outcome.backupPath !== null) {
     try {

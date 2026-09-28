@@ -191,7 +191,7 @@ async function observeInstance(
       const response = await host.fetchHealth(context.healthPort, context.healthToken);
       health = classifyAuthenticatedHealth(response.status, response.body);
     } catch {
-      health = { projection: 'unobserved', httpStatus: null, commit: null, connected: null };
+      health = { projection: 'unobserved', httpStatus: null, commit: null, connected: null, invariants: null };
     }
   }
   return { pid: state.pid, argvMatches, health };

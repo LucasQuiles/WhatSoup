@@ -452,6 +452,19 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/
 
 The diagnostic examples in this runbook pass that header.
 
+### Health invariants block
+
+The diagnostic body (never the public envelope) carries
+`health_invariants: { "schema": "whatsoup.health-invariants.v1", "ids": [...] }`.
+The ids are compile-time constants from `src/core/health-invariants.ts` naming
+the invariants the loaded code implements, for example
+`turn_capability.stale_evidence_degrades` (#2446). They are not runtime state.
+A release that predates the block does not emit it. `release:activate --apply`
+classifies the block against its own floor and records a report-only verdict;
+see [release-deployment.md](runbooks/release-deployment.md#health-invariants-verdict-report-only-2481).
+The top-level `schema_version` is unchanged and still appears only on the
+public envelope.
+
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
 - `POST /send` — send a text message to a chat
