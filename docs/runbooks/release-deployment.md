@@ -214,11 +214,15 @@ receipt) carries an `invariants` record:
 
 - `floor`: the schema and the required ids from the `src/core/health-invariants.ts`
   (`RELEASE_INVARIANT_FLOOR`) of **the tree that runs the tool**, and
-  `toolCommit`, that tree's commit (its release-manifest commit, else the
-  `HEAD` of the checkout whose top level is that tree, asked with the clean
-  git environment; `unknown` when neither resolves within 5 s). The floor
-  comes from the release under test only if the tool is run from inside that
-  release; `toolCommit` shows which tree it was.
+  `toolCommit`, that tree's commit (its release-manifest commit, read only
+  when the manifest is a regular file of at most 64 KiB, else the `HEAD` of
+  the checkout whose top level is that tree, asked with the clean git
+  environment; `unknown` when neither resolves within 5 s). The floor comes
+  from the release under test only if the tool is run from inside that
+  release; `toolCommit` shows which tree it was. The lookup starts after the
+  activation returns and uses only asynchronous file reads. It is provenance,
+  not attestation: `git` is resolved from `PATH` (as the repository's other
+  tool git calls are), and the manifest's commit is taken as written.
 - `activation`, and `rollback` when a rollback restarted the old release and
   observed it (otherwise `null`): the verdict for the process `verify`
   observed, read from the `health_invariants` block of its authenticated
@@ -239,53 +243,90 @@ receipt) carries an `invariants` record:
   `clear`, or `null` when none is due), and the helper's exit status.
 
 The observation beside it (`verification`, `rollback.observation`) gains
-`health.responderPid` (the body's `instance.pid`), `health.invariants`
-(`reading`, the floor ids the body declared as `floorIds`, and
-`extraIdCount`, a count of every other declared id), and `resample` (the
-launchd pid and argv match sampled again after the response). No
+`health.invariants` (`reading`, the floor ids the body declared as
+`floorIds`, and `extraIdCount`, a count of every other declared id) and
+`binding`: `bound`, `unbound`, `restarted`, or `unobserved`. No
 producer-declared id or schema string is stored anywhere: only the tool's own
 floor ids and a count.
 
-**Binding.** A body counts only when the launchd pid sampled before the
-request (whose argv names the release entrypoint), the same pid and argv
-sampled again after the response, and the body's own `instance.pid` all
-agree; otherwise the verdict is `unknown`/`unbound`. This checks the
-producer's self-reported pid inside one window. It is not a kernel proof: a
-process of the same user that holds the health port and echoes the pid is
-outside it. A producer that predates `instance.pid` reads `unbound`. It relies
-on the instance being the launchd job's own process (`deploy/whatsoup` execs
-node, which reports its `process.pid`).
+**Binding.** A body counts only when `binding` is `bound`: the launchd pid
+sampled before the request (whose argv names the release entrypoint, and
+whose process start time `ps -o lstart=` is read), the same pid, argv and
+start time sampled again once after the verification decision, and the
+body's own `instance.pid` all agree. Another pid, or the same pid with another
+start time (pid reuse), is `restarted`; a re-sample that timed out, or a start
+time that could not be read, is `unobserved`; any other mismatch is
+`unbound`. The verdict is then `unknown` with `detail` `unbound` or
+`unobserved`. The pids and start times behind the binding, including the pid
+the body reports, are used only to compute it and are never recorded; the
+record keeps only the pre-existing launchd `pid`.
+
+The re-sample never affects activation: it runs once, after the pass/fail
+decision for that observation, outside the verification poll loop, so it
+never consumes the verification deadline. Each exec it makes (`launchctl
+print`, `ps`) has its own 5 s timeout and is killed with SIGKILL. The
+start-time read before the request is bounded the same way. Every other
+`launchctl`, `ps`, `plutil` and renderer call keeps its previous behaviour,
+with no timeout.
+
+This checks the producer's self-reported identity inside one window. It is
+not a kernel proof: a process of the same user that holds the health port and
+reports the right pid is outside it, nothing is known about a restart after
+the re-sample, and `ps -o lstart=` resolves to the second, so a pid reused
+within the same second is not told apart. A producer that predates
+`instance.pid` reads `unbound`.
+It relies on the instance being the launchd job's own process:
+`deploy/whatsoup` execs node, `src/bootstrap-common.ts` imports the main
+module in that same process, and `src/core/health.ts` reports that
+`process.pid` as `instance.pid`.
 
 **What the receipt holds.** `receipt.json` is a local operator record in the
 private backup directory (mode 0600). The activation record already carries
-host data: release and backup paths, commits, the instance name, and pids.
-Nothing #2481 adds carries a producer string or host data beyond that: the
-added fields are the tool's constants (schema, floor ids), enums, booleans,
-counts, pids already in the record's kind, `null`, and `toolCommit`, the
-commit of the tool tree.
+host data: release and backup paths, commits, the instance name, and the
+launchd pids. Nothing #2481 adds carries a producer string, a pid, or host
+data: the added fields are the tool's constants (schema, floor ids), enums
+(including `binding`), booleans, counts, `null`, and `toolCommit`, the commit
+of the tool tree.
 
 `receipt.json` is written with the verdict **before** the event is sent
 (`alert.status: "pending"`), then rewritten with the final status, so an
 interrupt during the event leaves the verdict on disk. Every write is atomic
-(temporary file, fsync, rename): a failed rewrite leaves the previous receipt
-whole. A failed write prints only `release:activate: receipt-write-failed` on
-stderr (never the path or the error text), the event is still attempted, and
-the exit code is unchanged, because it reports the live activation, which a
-lost receipt does not change.
+(temporary file, fsync, rename) with a required directory fsync, so a
+successful write is a durable rename; a failed rewrite leaves the previous
+receipt whole. A failed directory fsync after the rename is also reported as
+a failure (the receipt is then not proven durable). A failed write prints only
+`release:activate: receipt-write-failed <ERRNO>` on stderr (the errno name,
+for example `EACCES`; never the path or the error text), the event is still
+attempted, and the exit code is unchanged, because it reports the live
+activation, which a lost receipt does not change. If the event also fails,
+stderr says the verdict is in `receipt.json` only when the first write
+succeeded, and otherwise that the verdict was not recorded.
 
-Exactly one BOT ERRORS event (source `release-invariants`) is sent through the
-release observers' alert helper for every `--apply` that reached the switch:
-a **warning** when any recorded verdict is not `satisfied`, else a **clear**
-for the same instance and source, which resolves an earlier warning the way
-the release observers' clears do. Per operator decision, it is a **standard
-BOT ERRORS alert with no log tail**: the payload this tool supplies carries
-verdicts and ids only (no paths or commits), and the delivered event carries
-the standard operator fields every BOT ERRORS alert carries (machine,
-platform, instance, process, runtime, and diagnostic hints such as
-log-location hints and the outbox path), with the inline log tail turned off
-for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`, the only per-call override the
-helper accepts). A refusal (before or during the apply) has no verdict and
-sends nothing. `--plan` never reads invariants and never sends an event.
+At most one BOT ERRORS event is sent, through the release observers' alert
+helper, for source `release-invariants:<digest>`: the first 8 hex of sha256
+over the schema and the sorted floor ids, joined by newlines. A tool with a
+different floor raises and clears a different incident, so a clear never
+closes a requirement it did not check. The dispatcher keeps that source
+unchanged (its source segment allows `[A-Za-z0-9_.:-]`).
+- a **warning** for any `--apply` that reached the switch with a recorded
+  verdict that is not `satisfied`;
+- a **clear** for the same instance and source when every recorded verdict is
+  `satisfied` and the outcome is `activated` or `rolled-back` (a verified
+  process is live); a clear with no open incident is dropped by the
+  dispatcher;
+- nothing after satisfied verdicts with `rollback-unverified` or
+  `rollback-blocked-migrated` (the instance may be stopped), after a refusal
+  (before or during the apply; no verdict), or for `--plan` (which never reads
+  invariants).
+
+Per operator decision, both the warning and the clear are **standard BOT
+ERRORS events with no log tail**, on the private operator channel: the payload
+this tool supplies carries verdicts and ids only (no paths or commits), and
+the delivered event carries the standard operator fields every BOT ERRORS
+alert carries (machine, platform, instance, process, runtime, and diagnostic
+hints such as log-location hints and the outbox path), with the inline log
+tail turned off for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`, the only
+per-call override the helper accepts).
 
 stdout stays one JSON document, printed after the event, so it can trail the
 activation by up to the helper's 60 s timeout; `receipt.json` already holds

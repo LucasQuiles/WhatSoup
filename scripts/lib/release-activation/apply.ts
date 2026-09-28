@@ -37,7 +37,14 @@ import {
 import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { backupSqliteConsistent } from '../sqlite-consistent-backup.ts';
 import { readSchemaMigrationLevel } from '../sqlite-schema-level.ts';
-import { type ActivationHost, classifyAuthenticatedHealth, type HealthObservation } from './host.ts';
+import {
+  type ActivationHost,
+  classifyAuthenticatedHealth,
+  type ExecResult,
+  type HealthObservation,
+  type RecordedHealth,
+} from './host.ts';
+import { type Binding, type ProcessSample, resolveBinding } from './invariants.ts';
 import {
   type ActivationContext,
   bootstrapEntrypointFor,
@@ -56,17 +63,27 @@ export interface StepRecord {
   detail?: string;
 }
 
+/** An instance observation as the receipt and stdout record it. */
 export interface InstanceObservation {
   pid: number | null;
   argvMatches: boolean;
-  health: HealthObservation | null;
+  health: RecordedHealth | null;
   /**
-   * launchd pid and argv sampled again after the health response (#2481
-   * binding); null when no health request was made. Not part of the pass
-   * predicate.
+   * #2481: whether the body is bound to one process generation (see
+   * invariants.ts `resolveBinding`). The pids and start times behind it are
+   * transient. Not part of the pass predicate.
    */
-  resample: { pid: number | null; argvMatches: boolean } | null;
+  binding: Binding;
 }
+
+/** One poll's observation, before recording: it still carries the transient binding evidence. */
+interface PolledObservation {
+  sample: ProcessSample;
+  health: HealthObservation | null;
+}
+
+/** Upper bound on every exec the #2481 binding makes (its own timeout, then SIGKILL). */
+export const BINDING_EXEC_TIMEOUT_MS = 5_000;
 
 /**
  * Schema migration level of the database before activation (read from the
@@ -182,19 +199,42 @@ export async function reloadLabel(
   return null;
 }
 
+/**
+ * A #2481 binding exec: bounded by its own timeout (the host kills the child
+ * with SIGKILL) and by a timer here, so no host seam can hold the caller past
+ * BINDING_EXEC_TIMEOUT_MS. Null when it timed out or threw.
+ */
+async function boundedExec(host: ActivationHost, file: string, args: readonly string[]): Promise<ExecResult | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), BINDING_EXEC_TIMEOUT_MS); });
+  const run = Promise.resolve()
+    .then(() => host.exec(file, args, { timeoutMs: BINDING_EXEC_TIMEOUT_MS }))
+    .catch(() => null);
+  try {
+    return await Promise.race([run, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** `ps -o lstart=` for a pid (bounded); null when it could not be read in time. */
+async function startTimeOf(host: ActivationHost, pid: number): Promise<string | null> {
+  const ps = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'lstart=']);
+  const value = ps !== null && ps.code === 0 ? ps.stdout.trim() : '';
+  return value === '' ? null : value;
+}
+
 async function observeInstance(
   host: ActivationHost,
   context: ActivationContext,
   entrypoint: string,
-): Promise<InstanceObservation> {
-  const sample = async (): Promise<{ pid: number | null; argvMatches: boolean }> => {
-    const state = await launchdState(host, context.domain, context.instanceLabel);
-    if (state.pid === null) return { pid: null, argvMatches: false };
-    const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
-    return { pid: state.pid, argvMatches: ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint) };
-  };
-  const { pid, argvMatches } = await sample();
-  if (pid === null) return { pid: null, argvMatches: false, health: null, resample: null };
+): Promise<PolledObservation> {
+  const state = await launchdState(host, context.domain, context.instanceLabel);
+  if (state.pid === null) return { sample: { pid: null, argvMatches: false, startTime: null }, health: null };
+  const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
+  const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
+  // #2481: the start time, before the request, tells a reused pid apart later.
+  const startTime = await startTimeOf(host, state.pid);
   let health: HealthObservation | null = null;
   if (context.healthPort !== null && context.healthToken !== null) {
     try {
@@ -206,37 +246,84 @@ async function observeInstance(
       };
     }
   }
-  // The body names its own pid; launchd must still show that pid on the
-  // release after the response, or the body cannot be bound to it.
-  const resample = health === null ? null : await sample();
-  return { pid, argvMatches, health, resample };
+  return { sample: { pid: state.pid, argvMatches, startTime }, health };
+}
+
+/** The #2481 re-sample: launchd pid, argv and start time, every exec bounded. Null when any timed out. */
+async function resampleProcess(
+  host: ActivationHost,
+  context: ActivationContext,
+  entrypoint: string,
+): Promise<ProcessSample | null> {
+  const print = await boundedExec(host, 'launchctl', ['print', `${context.domain}/${context.instanceLabel}`]);
+  if (print === null) return null;
+  const match = print.code === 0 ? PID_LINE.exec(print.stdout) : null;
+  if (match === null) return { pid: null, argvMatches: false, startTime: null };
+  const pid = Number(match[1]);
+  const ps = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'command=']);
+  if (ps === null) return null;
+  const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
+  return { pid, argvMatches, startTime: await startTimeOf(host, pid) };
+}
+
+/**
+ * Record the final observation. Runs once, after the pass/fail decision, so
+ * it never consumes the verification deadline and never changes the outcome;
+ * the re-sample adds at most three bounded execs. The producer-reported pid is
+ * dropped here: only the binding result is recorded.
+ */
+async function recordObservation(
+  host: ActivationHost,
+  context: ActivationContext,
+  entrypoint: string,
+  polled: PolledObservation,
+): Promise<InstanceObservation> {
+  const { sample, health } = polled;
+  const resample = sample.pid === null || health === null ? null : await resampleProcess(host, context, entrypoint);
+  // Field by field, so nothing added to HealthObservation later reaches the receipt unreviewed.
+  const recorded: RecordedHealth | null = health === null ? null : {
+    projection: health.projection,
+    httpStatus: health.httpStatus,
+    commit: health.commit,
+    connected: health.connected,
+    invariants: health.invariants,
+  };
+  return {
+    pid: sample.pid,
+    argvMatches: sample.argvMatches,
+    health: recorded,
+    binding: resolveBinding(sample, resample, health),
+  };
 }
 
 function instancePasses(
-  observation: InstanceObservation,
+  observation: PolledObservation,
   expected: { commit: string | null; previousPid: number | null },
 ): boolean {
-  if (observation.pid === null || !observation.argvMatches) return false;
-  if (expected.previousPid !== null && observation.pid === expected.previousPid) return false;
+  const { sample } = observation;
+  if (sample.pid === null || !sample.argvMatches) return false;
+  if (expected.previousPid !== null && sample.pid === expected.previousPid) return false;
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.connected !== true) return false;
   return expected.commit === null || health.commit === expected.commit;
 }
 
-/** Poll until the instance passes or the verify timeout elapses. */
+/** Poll until the instance passes or the verify timeout elapses, then record the final observation. */
 async function verifyInstance(
   host: ActivationHost,
   context: ActivationContext,
   expected: { entrypoint: string; commit: string | null; previousPid: number | null },
 ): Promise<{ ok: boolean; observation: InstanceObservation }> {
   const deadline = host.now() + context.args.verifyTimeoutSeconds * 1_000;
-  let observation: InstanceObservation = { pid: null, argvMatches: false, health: null, resample: null };
+  let ok: boolean;
+  let polled: PolledObservation;
   for (;;) {
-    observation = await observeInstance(host, context, expected.entrypoint);
-    if (instancePasses(observation, expected)) return { ok: true, observation };
-    if (host.now() >= deadline) return { ok: false, observation };
+    polled = await observeInstance(host, context, expected.entrypoint);
+    if (instancePasses(polled, expected)) { ok = true; break; }
+    if (host.now() >= deadline) { ok = false; break; }
     await host.sleep(VERIFY_POLL_INTERVAL_MS);
   }
+  return { ok, observation: await recordObservation(host, context, expected.entrypoint, polled) };
 }
 
 async function verifyAuxDefinitions(

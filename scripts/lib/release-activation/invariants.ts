@@ -21,20 +21,32 @@
  * floor id". It does not prove the behaviour. The verdict never enters the
  * pass predicate, the outcome, or the exit code.
  *
- * Binding contract. The verdict classifies a body only when all of these
- * agree: the launchd pid sampled before the request, whose argv names the
- * release entrypoint; the same pid and argv sampled again after the response;
- * and the body's own `instance.pid`. Otherwise it is `unbound`. This is the
- * producer's self-reported identity checked inside one window, not a kernel
- * proof: a process of the same user squatting the port and echoing the pid is
- * outside it. A producer that predates `instance.pid` reads `unbound`. It
- * relies on the instance being the launchd job's own process
- * (deploy/whatsoup execs node, and src/core/health.ts reports that
- * process.pid as `instance.pid`).
+ * Binding contract (`resolveBinding`). The verdict classifies a body only
+ * when the binding is `bound`: the launchd pid sampled before the request,
+ * with its argv naming the release entrypoint and its process start time
+ * (`ps -o lstart=`); the same pid, argv and start time sampled again once
+ * after the verification decision; and the body's own `instance.pid`, all
+ * agree. Another pid or another start time is `restarted` (the start time
+ * catches pid reuse); a re-sample that timed out or a start time that could
+ * not be read is `unobserved`; any other mismatch is `unbound`. The raw pids
+ * and start times are transient: only the binding result is recorded.
+ *
+ * This checks the producer's self-reported identity inside one window, not a
+ * kernel proof: a process of the same user that holds the health port and
+ * reports the right pid is outside it, nothing is known about restarts after
+ * the re-sample, and `lstart` resolves to the second, so a pid reused within
+ * the same second reads `bound`. A producer that predates `instance.pid` reads
+ * `unbound`. It relies on the instance being the launchd job's own process:
+ * deploy/whatsoup execs node, src/bootstrap-common.ts:23 imports the main
+ * module in that process, and src/core/health.ts reports its process.pid as
+ * `instance.pid`.
+ *
  * A body that could not be read or was not diagnostic is `unobserved`, and a
  * non-2xx diagnostic body is `http-status`: never `missing`, because a failed
  * or erroring read is not evidence of a legacy producer.
  */
+import { createHash } from 'node:crypto';
+
 import {
   HEALTH_INVARIANTS_SCHEMA,
   RELEASE_INVARIANT_FLOOR,
@@ -42,7 +54,22 @@ import {
 import { isRecord } from '../../../src/lib/type-guards.ts';
 import type { HealthObservation } from './host.ts';
 
-export const RELEASE_INVARIANTS_ALERT_SOURCE = 'release-invariants';
+const ALERT_SOURCE_PREFIX = 'release-invariants';
+
+/**
+ * The BOT ERRORS source for this tool's floor: `release-invariants:` plus the
+ * first 8 hex of sha256 over the schema and the sorted floor ids, joined by
+ * newlines. A tool with another floor raises and clears another incident, so
+ * a clear never closes a requirement it did not check. Built only from our own
+ * constants; it fits the dispatcher's source segment unchanged.
+ */
+export function releaseInvariantsAlertSource(
+  schema: string = HEALTH_INVARIANTS_SCHEMA,
+  floor: readonly string[] = RELEASE_INVARIANT_FLOOR,
+): string {
+  const digest = createHash('sha256').update([schema, ...[...floor].sort()].join('\n')).digest('hex');
+  return `${ALERT_SOURCE_PREFIX}:${digest.slice(0, 8)}`;
+}
 
 const HEALTH_INVARIANTS_KEY = 'health_invariants';
 const MAX_IDS = 64;
@@ -68,13 +95,42 @@ export interface ReleaseInvariantsVerdict {
   undeclared: string[];
 }
 
-/** An instance observation as `observeInstance` records it (apply.ts). */
+/** One launchd sample of the instance; transient, never recorded. */
+export interface ProcessSample {
+  pid: number | null;
+  argvMatches: boolean;
+  /** `ps -o lstart=` for that pid; null when it could not be read in time. */
+  startTime: string | null;
+}
+
+export type Binding = 'bound' | 'unbound' | 'restarted' | 'unobserved';
+
+/** An instance observation as recorded (apply.ts): the binding result, not the pids behind it. */
 export interface BoundObservation {
   pid: number | null;
   argvMatches: boolean;
-  health: HealthObservation | null;
-  /** launchd pid and argv sampled again after the response; null when not re-sampled. */
-  resample: { pid: number | null; argvMatches: boolean } | null;
+  health: Pick<HealthObservation, 'projection' | 'httpStatus' | 'invariants'> | null;
+  binding: Binding;
+}
+
+/**
+ * Is the body bound to one process generation? `first` was sampled before
+ * the request; `resample` once after the verification decision, or null when
+ * it timed out or failed. See the binding contract above.
+ */
+export function resolveBinding(
+  first: ProcessSample,
+  resample: ProcessSample | null,
+  health: Pick<HealthObservation, 'projection' | 'responderPid'> | null,
+): Binding {
+  if (first.pid === null || !first.argvMatches) return 'unbound';
+  if (health === null || health.projection !== 'diagnostic') return 'unobserved';
+  if (resample === null) return 'unobserved';
+  if (resample.pid !== first.pid) return 'restarted';
+  if (first.startTime === null || resample.startTime === null) return 'unobserved';
+  if (resample.startTime !== first.startTime) return 'restarted';
+  if (!resample.argvMatches || health.responderPid !== first.pid) return 'unbound';
+  return 'bound';
 }
 
 function unread(reading: 'absent' | 'unknown-schema' | 'malformed'): HealthInvariantsReading {
@@ -136,9 +192,9 @@ export function classifyReleaseInvariants(
 
 /**
  * The verdict for one instance observation. No pid, argv naming another
- * release, a re-sample that disagrees, or a body not served by that pid is
- * `unbound`; no diagnostic body is `unobserved`; a non-2xx diagnostic body is
- * `http-status`. All three are `unknown`.
+ * release, or a binding that is `unbound` or `restarted` is `unbound`; no
+ * diagnostic body, or a binding that could not be observed, is `unobserved`;
+ * a non-2xx diagnostic body is `http-status`. All three are `unknown`.
  */
 export function releaseInvariantsVerdict(
   observation: BoundObservation | null,
@@ -148,13 +204,11 @@ export function releaseInvariantsVerdict(
     outcome: 'unknown', detail, schema: null, undeclared: [...floor],
   });
   if (observation === null) return unknown('unobserved');
-  const { pid, resample } = observation;
-  if (pid === null || !observation.argvMatches) return unknown('unbound');
+  if (observation.pid === null || !observation.argvMatches) return unknown('unbound');
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.invariants === null) return unknown('unobserved');
-  if (resample === null || resample.pid !== pid || !resample.argvMatches || health.responderPid !== pid) {
-    return unknown('unbound');
-  }
+  if (observation.binding === 'unbound' || observation.binding === 'restarted') return unknown('unbound');
+  if (observation.binding === 'unobserved') return unknown('unobserved');
   if (health.httpStatus === null || health.httpStatus < 200 || health.httpStatus > 299) return unknown('http-status');
   return classifyReleaseInvariants(health.invariants, floor);
 }

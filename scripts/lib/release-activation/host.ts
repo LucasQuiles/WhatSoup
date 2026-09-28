@@ -34,8 +34,13 @@ export interface HealthResponse {
 export interface ActivationHost {
   platform: NodeJS.Platform;
   uid: number;
-  /** Run a program with argv (never a shell string). Non-zero exit is a result, not a throw. */
-  exec(file: string, args: readonly string[], options?: { input?: string }): Promise<ExecResult>;
+  /**
+   * Run a program with argv (never a shell string). Non-zero exit is a result,
+   * not a throw. `timeoutMs` kills the child with SIGKILL when it expires; only
+   * the #2481 binding samples pass it, and every other caller runs unbounded
+   * as before.
+   */
+  exec(file: string, args: readonly string[], options?: { input?: string; timeoutMs?: number }): Promise<ExecResult>;
   isProcessAlive(pid: number): boolean;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -72,9 +77,14 @@ export const HEALTH_MAX_BYTES = 65_536;
 /** The activating tool's own tree, which owns the alert helper (not `--release`). */
 const TOOL_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-function defaultExec(file: string, args: readonly string[], options: { input?: string } = {}): Promise<ExecResult> {
+function defaultExec(
+  file: string,
+  args: readonly string[],
+  options: { input?: string; timeoutMs?: number } = {},
+): Promise<ExecResult> {
+  const bound = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: 'SIGKILL' as const };
   return new Promise((resolve) => {
-    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' }, (error, stdout, stderr) => {
+    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8', ...bound }, (error, stdout, stderr) => {
       const code = error === null
         ? 0
         : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
@@ -200,11 +210,17 @@ export interface HealthObservation {
   httpStatus: number | null;
   commit: string | null;
   connected: boolean | null;
-  /** `instance.pid` of the process that served the body (a positive integer), else null. */
+  /**
+   * `instance.pid` the body reports (a positive integer), else null.
+   * Transient: used only to bind the verdict, never recorded (see RecordedHealth).
+   */
   responderPid: number | null;
   /** The #2481 `health_invariants` reading; null unless the body is diagnostic. */
   invariants: HealthInvariantsReading | null;
 }
+
+/** A health observation as the receipt and stdout record it: without the producer-reported pid. */
+export type RecordedHealth = Omit<HealthObservation, 'responderPid'>;
 
 const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
 

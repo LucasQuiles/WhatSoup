@@ -27,12 +27,14 @@
  *
  * #2481, report-only: under --apply, the receipt also records the health
  * invariant verdict of the activated (and any rollback) process against this
- * tool's floor. It is written before any event; then exactly one BOT ERRORS
- * event is sent for source `release-invariants` (standard event fields,
- * inline log tail off): a warning when any recorded verdict is not
- * `satisfied`, else a clear. The receipt is then rewritten with the event
- * status. Every receipt write is atomic; a failed one prints only the fixed
- * code `receipt-write-failed`. The verdict never changes the outcome or the
+ * tool's floor. It is written before any event; then at most one BOT ERRORS
+ * event is sent for source `release-invariants:<floor digest>` (standard
+ * event fields, inline log tail off): a warning when any recorded verdict is
+ * not `satisfied`; a clear when every verdict is satisfied and the outcome is
+ * `activated` or `rolled-back`; nothing otherwise. The receipt is then
+ * rewritten with the event status. Every receipt write is atomic with a
+ * required directory fsync; a failed one prints only the fixed code
+ * `receipt-write-failed <ERRNO>`. The verdict never changes the outcome or the
  * exit code. stdout stays one JSON document, printed after the event, so it
  * can trail the activation by up to the helper's 60 s timeout.
  */
@@ -47,7 +49,7 @@ import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
 import { applyActivation, type ApplyOutcome } from './lib/release-activation/apply.ts';
 import { type ActivationHost, createDefaultActivationHost } from './lib/release-activation/host.ts';
 import {
-  RELEASE_INVARIANTS_ALERT_SOURCE,
+  releaseInvariantsAlertSource,
   type ReleaseInvariantsVerdict,
   releaseInvariantsVerdict,
 } from './lib/release-activation/invariants.ts';
@@ -208,8 +210,10 @@ export interface InvariantsRecord {
   activation: ReleaseInvariantsVerdict | null;
   rollback: ReleaseInvariantsVerdict | null;
   /**
-   * The one BOT ERRORS event: a `warning` when any verdict is not satisfied,
-   * else a `clear`; `kind` null when no event is due (a refusal).
+   * The one BOT ERRORS event: a `warning` when any verdict is not satisfied;
+   * a `clear` when all are satisfied and the outcome is `activated` or
+   * `rolled-back`; `kind` null when no event is due (a refusal, or satisfied
+   * verdicts after a rollback that did not end live and verified).
    * `pending` while the event is in flight (the receipt is written before it is sent).
    */
   alert: { attempted: boolean; kind: 'warning' | 'clear' | null; status: number | null | 'pending' };
@@ -231,8 +235,9 @@ function describeVerdict(label: string, verdict: ReleaseInvariantsVerdict): stri
 
 /**
  * The tool commit, bounded here as well as in the default host
- * (tool-commit.ts), so no host seam can hold the receipt. Started before the
- * activation and awaited after it.
+ * (tool-commit.ts), so no host seam can hold the receipt. Started only after
+ * the activation returns, so none of its work runs inside the activation
+ * sequence; it can delay the first receipt write by at most the bound.
  */
 function boundedToolCommit(host: ActivationHost): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -241,12 +246,18 @@ function boundedToolCommit(host: ActivationHost): Promise<string | null> {
   return Promise.race([lookup, expired]).finally(() => clearTimeout(timer));
 }
 
+/** Outcomes after which a verified process is live, so satisfied verdicts may clear the incident. */
+const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated', 'rolled-back']);
+
 /**
  * #2481, report-only: classify the activation and rollback observations
  * against this tool's floor. Pure; it never changes the outcome or the exit
  * code. A refusal changed nothing live, so it has no verdict and no event.
- * Otherwise exactly one event is due and marked pending: a warning when any
- * recorded verdict is not satisfied, else a clear.
+ * Otherwise a warning is due when any recorded verdict is not satisfied. A
+ * clear is due only when every verdict is satisfied AND the outcome left a
+ * verified process live (`activated`, or `rolled-back` with the rollback
+ * verified); after `rollback-unverified` or `rollback-blocked-migrated` the
+ * instance may be stopped, so no clear is sent.
  */
 function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): InvariantsRecord {
   const floor = [...RELEASE_INVARIANT_FLOOR];
@@ -264,7 +275,8 @@ function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): I
   const rollbackObservation = outcome.rollback?.observation ?? null;
   record.rollback = rollbackObservation === null ? null : releaseInvariantsVerdict(rollbackObservation, floor);
   const satisfied = verdictsOf(record).every(([, verdict]) => verdict.outcome === 'satisfied');
-  record.alert = { attempted: true, kind: satisfied ? 'clear' : 'warning', status: 'pending' };
+  if (!satisfied) record.alert = { attempted: true, kind: 'warning', status: 'pending' };
+  else if (CLEAR_OUTCOMES.has(outcome.outcome)) record.alert = { attempted: true, kind: 'clear', status: 'pending' };
   return record;
 }
 
@@ -287,6 +299,7 @@ async function sendInvariantsEvent(
   instance: string,
   outcome: ApplyOutcome,
   record: InvariantsRecord,
+  receiptWritten: boolean,
   stderr: (text: string) => void,
 ): Promise<void> {
   const { kind } = record.alert;
@@ -297,7 +310,7 @@ async function sendInvariantsEvent(
   try {
     const sent = await host.emitReleaseAlert({
       instance,
-      source: RELEASE_INVARIANTS_ALERT_SOURCE,
+      source: releaseInvariantsAlertSource(record.floor.schema, record.floor.ids),
       eventType: kind === 'clear' ? 'clear' : 'alert',
       env: INVARIANTS_ALERT_ENV,
       payload: {
@@ -315,8 +328,16 @@ async function sendInvariantsEvent(
   }
   record.alert.status = status;
   if (status !== 0) {
-    stderr(`release invariants alert (${kind}) was not sent (status ${status ?? 'none'}); the verdict is in receipt.json\n`);
+    // Name the receipt only when it was actually written.
+    const where = receiptWritten ? 'the verdict is in receipt.json' : 'the verdict was not recorded';
+    stderr(`release invariants alert (${kind}) was not sent (status ${status ?? 'none'}); ${where}\n`);
   }
+}
+
+/** The errno name of a failed write (e.g. EACCES), never its message, which carries the path. */
+function errnoName(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) ? code : 'UNKNOWN';
 }
 
 function outcomeExit(outcome: ApplyOutcome['outcome']): number {
@@ -410,9 +431,8 @@ export async function runReleaseActivateCli(
     io.stdout(`${JSON.stringify({ ...plan, outcome: 'refused' }, null, 2)}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
-  const toolCommit = boundedToolCommit(host);
   const outcome = await applyActivation(host, context);
-  const invariants = classifyForReceipt(await toolCommit, outcome);
+  const invariants = classifyForReceipt(await boundedToolCommit(host), outcome);
   const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
@@ -421,23 +441,28 @@ export async function runReleaseActivateCli(
     ...outcome,
     invariants,
   }, null, 2)}\n`;
-  // Atomic (temporary file, fsync, rename): a failed rewrite leaves the
-  // previous receipt whole. The exit code reports the live activation, which a
-  // lost receipt does not change, so a write failure is a fixed stderr code
-  // only; the error text would carry the backup path.
-  const writeReceipt = (): void => {
-    if (outcome.backupPath === null) return;
+  // Atomic (temporary file, fsync, rename) with a REQUIRED directory fsync
+  // (private-fs `directoryFsync: 'required'`): a failed rewrite leaves the
+  // previous receipt whole, and success means the rename is durable. A failed
+  // directory fsync after the rename also reports a failure ("not proven
+  // durable"). The exit code reports the live activation, which a lost
+  // receipt does not change, so a write failure is a fixed stderr code with
+  // the errno name only; the error text would carry the backup path.
+  const writeReceipt = (): boolean => {
+    if (outcome.backupPath === null) return false;
     try {
-      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt');
-    } catch {
-      io.stderr('release:activate: receipt-write-failed\n');
+      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'required');
+      return true;
+    } catch (error) {
+      io.stderr(`release:activate: receipt-write-failed ${errnoName(error)}\n`);
+      return false;
     }
   };
   // The receipt, with the verdict and the event still pending, is durable
   // before the helper runs; an interrupt during the event cannot lose it.
-  writeReceipt();
+  const receiptWritten = writeReceipt();
   if (invariants.alert.status === 'pending') {
-    await sendInvariantsEvent(host, args.instance, outcome, invariants, io.stderr);
+    await sendInvariantsEvent(host, args.instance, outcome, invariants, receiptWritten, io.stderr);
     writeReceipt();
   }
   // One JSON document on stdout, after the event (see the header).
