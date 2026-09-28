@@ -4,6 +4,7 @@
  * report-only; these tests pin the outcomes and the rule that only
  * `satisfied` is green.
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -14,14 +15,19 @@ import {
 } from '../../src/core/health-invariants.ts';
 import type { HealthObservation } from '../../scripts/lib/release-activation/host.ts';
 import {
+  type Binding,
   classifyReleaseInvariants,
   type HealthInvariantsReading,
+  type ProcessSample,
   readHealthInvariants,
+  releaseInvariantsAlertSource,
   releaseInvariantsVerdict,
+  resolveBinding,
 } from '../../scripts/lib/release-activation/invariants.ts';
 
 const FLOOR = ['a.required'] as const;
 const PID = 7001;
+const STARTED = 'Mon Sep 28 12:00:00 2026';
 
 function declared(floorIds: string[], extraIdCount = 0): HealthInvariantsReading {
   return { reading: 'declared', floorIds, extraIdCount };
@@ -41,9 +47,13 @@ function observation(
   };
 }
 
-/** An instance observation whose launchd pid and argv were re-sampled unchanged after the response. */
-function bound(health: HealthObservation | null, pid: number | null = PID) {
-  return { pid, argvMatches: true, health, resample: { pid, argvMatches: true } };
+/** An instance observation as recorded, with the binding result the re-sample produced. */
+function bound(health: HealthObservation | null, pid: number | null = PID, binding: Binding = 'bound') {
+  return { pid, argvMatches: true, health, binding };
+}
+
+function sample(overrides: Partial<ProcessSample> = {}): ProcessSample {
+  return { pid: PID, argvMatches: true, startTime: STARTED, ...overrides };
 }
 
 describe('the leaf constant', () => {
@@ -160,25 +170,22 @@ describe('classifyReleaseInvariants', () => {
 describe('releaseInvariantsVerdict: bound to the responding process', () => {
   const unknown = (detail: string) => ({ outcome: 'unknown', detail, schema: null, undeclared: ['a.required'] });
 
-  it('classifies the body when the observed pid and argv, the re-sample, and the responder pid all agree', () => {
+  it('classifies the body only when the binding is bound', () => {
     expect(releaseInvariantsVerdict(bound(observation(declared(['a.required']))), FLOOR).outcome).toBe('satisfied');
   });
 
-  it('unbound: no pid, argv naming another release, a responder with another pid, or no responder pid', () => {
+  it('unbound: no pid, argv naming another release, or a binding that is unbound or restarted', () => {
     const body = observation(declared(['a.required']));
-    expect(releaseInvariantsVerdict({ pid: null, argvMatches: false, health: null, resample: null }, FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict({ ...bound(body), argvMatches: false }, FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict(bound(body, PID + 1), FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict(bound(observation(declared(['a.required']), { responderPid: null })), FLOOR))
+    expect(releaseInvariantsVerdict({ pid: null, argvMatches: false, health: null, binding: 'unbound' }, FLOOR))
       .toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict({ ...bound(body), argvMatches: false }, FLOOR)).toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict(bound(body, PID, 'unbound'), FLOOR)).toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict(bound(body, PID, 'restarted'), FLOOR)).toEqual(unknown('unbound'));
   });
 
-  it('unbound: launchd no longer shows the same pid and argv after the response (or was not re-sampled)', () => {
-    const body = observation(declared(['a.required']));
-    expect(releaseInvariantsVerdict({ ...bound(body), resample: { pid: PID + 1, argvMatches: true } }, FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict({ ...bound(body), resample: { pid: null, argvMatches: false } }, FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict({ ...bound(body), resample: { pid: PID, argvMatches: false } }, FLOOR)).toEqual(unknown('unbound'));
-    expect(releaseInvariantsVerdict({ ...bound(body), resample: null }, FLOOR)).toEqual(unknown('unbound'));
+  it('unobserved: a binding that could not be observed (the re-sample timed out or failed)', () => {
+    expect(releaseInvariantsVerdict(bound(observation(declared(['a.required'])), PID, 'unobserved'), FLOOR))
+      .toEqual(unknown('unobserved'));
   });
 
   it('unobserved: no body, or a body that is not diagnostic, is unknown and never missing', () => {
@@ -198,5 +205,58 @@ describe('releaseInvariantsVerdict: bound to the responding process', () => {
 
   it('null observation (the step never ran) is unknown/unobserved', () => {
     expect(releaseInvariantsVerdict(null, FLOOR).detail).toBe('unobserved');
+  });
+});
+
+describe('resolveBinding: generation identity across the two samples', () => {
+  const body = observation(declared(['a.required']));
+
+  it('bound: same pid and start time in both samples, argv on the release, and the responder names that pid', () => {
+    expect(resolveBinding(sample(), sample(), body)).toBe('bound');
+  });
+
+  it('unbound: no pid or argv on another release at the first sample, argv changed, or another responder pid', () => {
+    expect(resolveBinding(sample({ pid: null, argvMatches: false, startTime: null }), null, null)).toBe('unbound');
+    expect(resolveBinding(sample({ argvMatches: false }), sample(), body)).toBe('unbound');
+    expect(resolveBinding(sample(), sample({ argvMatches: false }), body)).toBe('unbound');
+    expect(resolveBinding(sample(), sample(), observation(declared(['a.required']), { responderPid: 424_242 }))).toBe('unbound');
+    expect(resolveBinding(sample(), sample(), observation(declared(['a.required']), { responderPid: null }))).toBe('unbound');
+  });
+
+  it('restarted: another pid, no pid at all, or the same pid with another start time (pid reuse)', () => {
+    expect(resolveBinding(sample(), sample({ pid: PID + 1 }), body)).toBe('restarted');
+    expect(resolveBinding(sample(), sample({ pid: null, argvMatches: false, startTime: null }), body)).toBe('restarted');
+    expect(resolveBinding(sample(), sample({ startTime: 'Mon Sep 28 12:00:07 2026' }), body)).toBe('restarted');
+  });
+
+  it('unobserved: no diagnostic body, no re-sample (timed out or failed), or a start time that could not be read', () => {
+    expect(resolveBinding(sample(), sample(), null)).toBe('unobserved');
+    expect(resolveBinding(sample(), sample(), observation(null, { projection: 'public' }))).toBe('unobserved');
+    expect(resolveBinding(sample(), null, body)).toBe('unobserved');
+    expect(resolveBinding(sample({ startTime: null }), sample(), body)).toBe('unobserved');
+    expect(resolveBinding(sample(), sample({ startTime: null }), body)).toBe('unobserved');
+  });
+});
+
+describe('releaseInvariantsAlertSource: the incident names its floor', () => {
+  it('is release-invariants: plus 8 hex, and the same for the same floor in any order', () => {
+    const source = releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['b.second', 'a.first']);
+    expect(source).toMatch(/^release-invariants:[0-9a-f]{8}$/);
+    expect(releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['a.first', 'b.second'])).toBe(source);
+  });
+
+  it('two floors (or two schemas) give two sources, so a clear under one never closes the other', () => {
+    const floorA = releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['a.first']);
+    const floorB = releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['a.first', 'b.second']);
+    expect(floorA).not.toBe(floorB);
+    expect(releaseInvariantsAlertSource('whatsoup.health-invariants.v2', ['a.first'])).not.toBe(floorA);
+  });
+
+  it('defaults to the tool schema and floor it imports, as a literal digest (lockstep with the release-activate tests)', () => {
+    const digest = createHash('sha256')
+      .update([HEALTH_INVARIANTS_SCHEMA, ...[...RELEASE_INVARIANT_FLOOR].sort()].join('\n'))
+      .digest('hex')
+      .slice(0, 8);
+    expect(releaseInvariantsAlertSource()).toBe(`release-invariants:${digest}`);
   });
 });

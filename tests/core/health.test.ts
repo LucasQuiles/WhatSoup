@@ -8528,14 +8528,17 @@ describe('GET /health — #2481 health_invariants block', () => {
     // The real producer names its own pid; here the process that served the body is this one.
     expect((observation as { responderPid?: unknown }).responderPid).toBe(process.pid);
 
-    const { releaseInvariantsVerdict } = await import('../../scripts/lib/release-activation/invariants.ts');
-    // The launchd pid/argv half of the binding is release:activate's job
+    const { releaseInvariantsVerdict, resolveBinding } = await import('../../scripts/lib/release-activation/invariants.ts');
+    // The launchd pid, argv and start-time samples are release:activate's job
     // (launchctl + ps); the responder half is checked against the body here.
+    const sample = { pid: process.pid, argvMatches: true, startTime: 'this process' };
+    const binding = resolveBinding(sample, sample, observation);
+    expect(binding).toBe('bound');
     expect(releaseInvariantsVerdict({
       pid: process.pid,
       argvMatches: true,
       health: observation,
-      resample: { pid: process.pid, argvMatches: true },
+      binding,
     })).toEqual({
       outcome: 'satisfied',
       detail: null,

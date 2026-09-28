@@ -1,10 +1,12 @@
 /**
  * #2481: the commit of the tree that runs release:activate (the tree that
- * supplies the invariant floor). The lookup is bounded, runs git with the
- * repository's clean git environment, and accepts a commit only from the
- * work tree whose top level is the tool root. The exec seam is faked; no git
- * runs here.
+ * supplies the invariant floor). The lookup is bounded, uses only
+ * asynchronous filesystem calls, reads the release manifest only when it is a
+ * small regular file, runs git with the repository's clean git environment,
+ * and accepts a commit only from the work tree whose top level is the tool
+ * root. The exec seam is faked; no git runs here.
  */
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +20,8 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const tmp = trackTmpDirs('whatsoup-tool-commit-');
 const COMMIT = 'b'.repeat(40);
+const GIT_COMMIT = 'c'.repeat(40);
+const MANIFEST = '.whatsoup-release-manifest.json';
 
 interface Call {
   file: string;
@@ -33,6 +37,9 @@ function answering(stdout: (root: string) => string, calls: Call[] = []): ToolCo
   };
 }
 
+/** A git that reports the root itself as the top level, at GIT_COMMIT. */
+const gitAtRoot = (calls: Call[]): ToolCommitExec => answering((cwd) => `${cwd}\n${GIT_COMMIT}\n`, calls);
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
@@ -43,14 +50,39 @@ describe('resolveToolCommit', () => {
     vi.useFakeTimers();
     const root = tmp.make('root');
     const never: ToolCommitExec = () => new Promise(() => { /* a git that never exits */ });
+    // The filesystem answers at once here, so only the exec can hold the lookup.
+    const fs = {
+      lstat: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+      readFile: async () => '',
+      realpath: async (filePath: string) => filePath,
+    };
     let settled: string | null | 'pending' = 'pending';
-    const pending = resolveToolCommit({ root, exec: never }).then((value) => { settled = value; return value; });
+    const pending = resolveToolCommit({ root, exec: never, fs }).then((value) => { settled = value; return value; });
 
     await vi.advanceTimersByTimeAsync(TOOL_COMMIT_TIMEOUT_MS - 1);
     expect(settled).toBe('pending');
     await vi.advanceTimersByTimeAsync(1);
     await expect(pending).resolves.toBeNull();
     expect(TOOL_COMMIT_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
+  });
+
+  it('is bounded when the filesystem itself never answers: a stalled lstat gives null at the bound', async () => {
+    vi.useFakeTimers();
+    const root = tmp.make('root');
+    const calls: Call[] = [];
+    const stalled = () => new Promise<never>(() => { /* a stalled filesystem */ });
+    let settled: string | null | 'pending' = 'pending';
+    const pending = resolveToolCommit({
+      root,
+      exec: gitAtRoot(calls),
+      fs: { lstat: stalled, readFile: stalled, realpath: stalled },
+    }).then((value) => { settled = value; return value; });
+
+    await vi.advanceTimersByTimeAsync(TOOL_COMMIT_TIMEOUT_MS - 1);
+    expect(settled).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeNull();
+    expect(calls).toEqual([]);
   });
 
   it('asks git for the top level and HEAD with the clean git environment and the bound as its own timeout', async () => {
@@ -88,10 +120,38 @@ describe('resolveToolCommit', () => {
 
   it('prefers the release manifest commit of a release snapshot, without running git', async () => {
     const root = tmp.make('root');
-    writeFileSync(path.join(root, '.whatsoup-release-manifest.json'), JSON.stringify({ source: { commit: COMMIT } }));
+    writeFileSync(path.join(root, MANIFEST), JSON.stringify({ source: { commit: COMMIT } }));
     const calls: Call[] = [];
 
     expect(await resolveToolCommit({ root, exec: answering(() => '', calls) })).toBe(COMMIT);
     expect(calls).toEqual([]);
+  });
+
+  it('never reads a manifest that is a directory: it falls through to git', async () => {
+    const root = tmp.make('root');
+    mkdirSync(path.join(root, MANIFEST));
+    const calls: Call[] = [];
+
+    expect(await resolveToolCommit({ root, exec: gitAtRoot(calls) })).toBe(GIT_COMMIT);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never opens a manifest that is a FIFO (a read would block with no writer): it falls through to git', async () => {
+    const root = tmp.make('root');
+    execFileSync('mkfifo', [path.join(root, MANIFEST)]);
+    const calls: Call[] = [];
+
+    expect(await resolveToolCommit({ root, exec: gitAtRoot(calls) })).toBe(GIT_COMMIT);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never reads a manifest over 64 KiB, even a valid one: it falls through to git', async () => {
+    const root = tmp.make('root');
+    const padding = 'x'.repeat(64 * 1024);
+    writeFileSync(path.join(root, MANIFEST), JSON.stringify({ source: { commit: COMMIT }, padding }));
+    const calls: Call[] = [];
+
+    expect(await resolveToolCommit({ root, exec: gitAtRoot(calls) })).toBe(GIT_COMMIT);
+    expect(calls).toHaveLength(1);
   });
 });
