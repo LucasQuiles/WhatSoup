@@ -75,6 +75,45 @@ exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
   };
 }
 
+/**
+ * #3561: the guard applies ONE git budget to every subprocess, setup calls
+ * included, so a status-timeout case cannot shrink the budget for the status
+ * probe alone. Instead the FIRST status probe hangs far past any budget (exec,
+ * so the guard's kill reaches the sleeping pid), while every other call is real
+ * git. `setupDelaySeconds` delays the single pre-status `--show-toplevel`
+ * discovery so a case can prove setup calls get real headroom under the budget.
+ */
+export function statusProbeHangEnvironment(
+  root: string,
+  hangSeconds: number,
+  setupDelaySeconds = 0,
+): { env: NodeJS.ProcessEnv; marker: string } {
+  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
+  const bin = join(root, `status-hang-bin-${Math.random().toString(16).slice(2)}`);
+  const marker = join(root, `status-hang-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(bin);
+  const wrapper = join(bin, 'git');
+  writeFileSync(wrapper, `#!/bin/sh
+is_status=0
+is_toplevel=0
+for arg in "$@"; do
+  if [ "$arg" = "status" ]; then is_status=1; fi
+  if [ "$arg" = "--show-toplevel" ]; then is_toplevel=1; fi
+done
+if [ "$is_status" -eq 1 ] && [ ! -e ${shellQuote(marker)} ]; then
+  : > ${shellQuote(marker)}
+  exec sleep ${String(hangSeconds)}
+fi
+if [ "$is_toplevel" -eq 1 ] && [ ${String(setupDelaySeconds)} -gt 0 ]; then
+  sleep ${String(setupDelaySeconds)}
+fi
+exec ${shellQuote(resolvedGit.stdout.trim())} "$@"
+`);
+  chmodSync(wrapper, 0o755);
+  return { env: { PATH: `${bin}:${process.env['PATH'] ?? ''}` }, marker };
+}
+
 export function worktreeOutputEnvironment(
   root: string,
   worktreeBody: string,

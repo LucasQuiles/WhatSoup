@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
@@ -161,14 +161,72 @@ function makeAncestorRepo(): string {
   return parent;
 }
 
-describe('source runtime drift check', () => {
-  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
-    const root = makeRepo();
-    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+// #3561: under gate load the five fixture git calls alone outran the 10 s test
+// budget. Read-only clean-graph cases build their repo in a hook with its own
+// budget, so the test budget times only the code under test.
+const FIXTURE_SETUP_TIMEOUT_MS = 60_000;
+// Longer than the 10 s default test budget, so setup inside a test body times out.
+const SLOW_FIXTURE_INIT_SECONDS = 11;
 
-    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+function slowInitGitDir(): string {
+  const bin = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-slow-git-'));
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  // Once only: makeRepo's `commit -qm init` also carries an `init` argument.
+  writeFileSync(path.join(bin, 'git'), `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "init" ] && [ ! -e '${bin}/slept' ]; then
+    : > '${bin}/slept'
+    sleep ${String(SLOW_FIXTURE_INIT_SECONDS)}
+    break
+  fi
+done
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+  return bin;
+}
+
+function expectCleanImportGraph(root: string): void {
+  const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+  expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+}
+
+describe('source runtime drift check on a prebuilt clean repo', () => {
+  let root = '';
+  beforeAll(() => {
+    root = makeRepo();
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+
+  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
+    expectCleanImportGraph(root);
+  });
+});
+
+// #3561 injection: a git whose `init` sleeps past the default test budget. Setup
+// inside the test body would time out; setup in the hook leaves the body its budget.
+// @skip-env #3561 red-proof harness; sleeps 11 s, off in the normal suite
+describe.runIf(process.env.WHATSOUP_TEST_3561_SLOW_SETUP_INJECTION === '1')('source runtime drift check on a slowly built clean repo', () => {
+  let root = '';
+  let slowGit = '';
+  beforeAll(() => {
+    slowGit = slowInitGitDir();
+    vi.stubEnv('PATH', `${slowGit}:${process.env.PATH ?? ''}`);
+    try {
+      root = makeRepo();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+  afterAll(() => {
+    if (slowGit) rmSync(slowGit, { recursive: true, force: true });
   });
 
+  it('keeps slow fixture setup out of the clean-graph test budget', () => {
+    expectCleanImportGraph(root);
+  });
+});
+
+describe('source runtime drift check', () => {
   it('loads Git state with a constant number of bulk commands across a diamond import graph', () => {
     const root = makeRepo();
     writeFileSync(
