@@ -180,6 +180,37 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
   });
 
+  it.each([
+    ['an unknown identity leaves a row reowned by another session', null, 'other-generation-session', 'active'],
+    ['a known identity leaves a row reowned by another session', 'abandoned-provider-session', 'other-generation-session', 'active'],
+    ['an unknown identity ends a still session-less row', null, null, 'ended'],
+    ['a known identity ends its own row', 'abandoned-provider-session', 'abandoned-provider-session', 'ended'],
+  ])('retiring an unclosed generation: %s (#3658)', (_label, managerSessionId, rowSessionId, expectedStatus) => {
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550146@s.whatsapp.net', '15550146',
+         datetime('now'), 'active', 'claude-cli')`,
+    ).run(rowSessionId);
+    const rowId = Number(insert.lastInsertRowid);
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550146@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    const state = sm as unknown as MutableSessionState;
+    state.dbRowId = rowId;
+    state.sessionId = managerSessionId;
+
+    sm.retireUnclosedGeneration();
+
+    expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+      { status: string }).status).toBe(expectedStatus);
+  });
+
   it('/new on a never-started manager still ends the chat checkpoint (#3658)', async () => {
     durability.upsertSessionCheckpoint('15550145', {
       sessionId: 'previous-process-session',
