@@ -12,7 +12,7 @@
 // module boundary and the child's exit is driven from its kill.
 // Repo-hygiene reserved IDs only.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
@@ -56,7 +56,7 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
 }));
 
 import { spawn } from 'node:child_process';
-import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import { SessionManager, type SessionCrashInfo } from '../../../src/runtimes/agent/session.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
@@ -122,7 +122,7 @@ describe('SessionManager resume identity retirement (#3658)', () => {
   let closeSessionLifecycle: ReturnType<typeof vi.fn>;
   let closeSessionLifecycleFailure: ReturnType<typeof vi.fn>;
   let updateExactSessionCheckpointStatus: ReturnType<typeof vi.fn>;
-  let onCrash: ReturnType<typeof vi.fn>;
+  let onCrash: Mock<(info: SessionCrashInfo) => void>;
   let sm: SessionManager;
 
   beforeEach(() => {
@@ -141,7 +141,7 @@ describe('SessionManager resume identity retirement (#3658)', () => {
       if (endedIdentities.has(params.providerSessionId)) throw new Error(NOT_RESUMABLE);
       return 1;
     });
-    onCrash = vi.fn();
+    onCrash = vi.fn<(info: SessionCrashInfo) => void>();
     sm = new SessionManager({
       db: makeDb(),
       messenger: makeMessenger(),
