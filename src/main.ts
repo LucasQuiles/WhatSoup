@@ -992,7 +992,7 @@ const healthServer = startHealthServer({
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
         if (groupSkipped > 0) {
-          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
+          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped non-direct (group/status) messages');
         }
         for (const msg of toReplay) {
           attempted++;
