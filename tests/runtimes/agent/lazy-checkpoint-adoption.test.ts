@@ -473,6 +473,31 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(notices).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['admitted', false],
+      ['refused', true],
+    ])('the abandoned row is no longer active once the fallback spawn is %s', async (_label, refuseSpawn) => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const abandonedRowId = session.getDbRowId();
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      if (refuseSpawn) {
+        vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
+      }
+
+      const turn = view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      if (refuseSpawn) await expect(turn).rejects.toThrow('fixture fresh spawn refused');
+      else await expect(turn).resolves.toBeUndefined();
+      closeSpy.mockRestore();
+
+      expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(abandonedRowId) as
+        { status: string }).status).toBe('ended');
+    });
+
     it('sends no notice when the fresh spawn after a failed close is refused', async () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       spawnSpy.mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
