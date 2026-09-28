@@ -244,7 +244,7 @@ whatsoup_run_bounded() {
         rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
         rmdir "$control_directory" 2>/dev/null
       fi
-      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$outcome_file"
+      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$deadline_file.pending" "$outcome_file"
       rm -f "$outcome_file.result" "$outcome_file.deadline-outer"
     }
 
@@ -345,7 +345,11 @@ whatsoup_run_bounded() {
         IFS= read -r start < "$directory/watchdog" || exit 2
         [ "$start" = run ] || exit 2
         sleep "$budget" || exit 2
-        ( umask 077; set -C; builtin printf '%s\n' "$control_token" > "$deadline_file" ) || exit 2
+        # Publish a complete token by exclusive link, so a watchdog killed mid-write
+        # never leaves a torn marker. Unlike rename, link never replaces a path.
+        ( umask 077; set -C; builtin printf '%s\n' "$control_token" > "$deadline_file.pending" ) || exit 2
+        command -p link "$deadline_file.pending" "$deadline_file" 2>/dev/null || exit 2
+        rm -f "$deadline_file.pending"
         kill -TERM -- "-$cmd_group" 2>/dev/null
         sleep "$grace" || exit 2
         kill -9 -- "-$cmd_group" 2>/dev/null

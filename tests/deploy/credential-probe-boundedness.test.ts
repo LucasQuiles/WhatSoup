@@ -266,7 +266,11 @@ function observeLifecycleEventOrder(source: string): string {
   const event = (text: string) => `builtin printf '%s\\n' "${text}" >> "$EVENT_ORDER_LOG"`;
   insert('          sleep "$chunk" || return 2', `${event('S_OUTER budget=$budget worker=$worker_pid')}\n          sleep "$chunk" || return 2`);
   insert('        [ "$start" = run ] || exit 2\n        trap', `        [ "$start" = run ] || exit 2\n        ${event('L_COMMAND')}\n        trap`);
-  const inner = '        ( umask 077; set -C; builtin printf \'%s\\n\' "$control_token" > "$deadline_file" ) || exit 2';
+  // D_INNER_COMMIT follows the link: that is when the reader can see the token.
+  const inner = [
+    '        ( umask 077; set -C; builtin printf \'%s\\n\' "$control_token" > "$deadline_file.pending" ) || exit 2',
+    '        command -p link "$deadline_file.pending" "$deadline_file" 2>/dev/null || exit 2',
+  ].join('\n');
   insert('        sleep "$budget" || exit 2', [
     '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
     '          IFS= read -r -t 2 event_release <> "$EVENT_ORDER_INNER_START" || exit 2',
