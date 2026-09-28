@@ -4826,17 +4826,26 @@ export class SessionManager {
   /**
    * #3658: forget a generation whose provider stopped but whose durable close
    * failed, before the runtime starts a fresh one in its place. Nothing later
-   * may pair this row or provider session with the new generation. The row is
-   * not closed here: it stays for the startup sweep. The lane and the
-   * cleanup-unproven flag are left alone, since only a fully successful
-   * teardown may reset them.
+   * may pair this row or provider session with the new generation. The row
+   * gets one best-effort row-only close to 'ended': the zombie sweep reconciles
+   * only 'active' rows, and 'orphaned' would still read as resumable. The lane
+   * and the cleanup-unproven flag are left alone, since only a fully
+   * successful teardown may reset them.
    */
   retireUnclosedGeneration(): void {
+    const rowId = this.dbRowId;
     log.warn({
       chatJid: this.chatJid,
-      rowId: this.dbRowId,
+      rowId,
       sessionId: this.sessionId ?? this.resumeAttemptId,
     }, 'session: abandoning a generation whose lifecycle close failed');
+    if (rowId !== null) {
+      try {
+        updateSessionStatus(this.db, rowId, 'ended');
+      } catch (err) {
+        log.warn({ err, chatJid: this.chatJid, rowId }, 'session: abandoned row could not be ended — left for the startup sweep');
+      }
+    }
     this.clearGenerationIdentity();
   }
 
