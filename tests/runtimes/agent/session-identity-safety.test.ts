@@ -206,6 +206,8 @@ describe('SessionManager immutable checkpoint identity', () => {
     state.sessionId = managerSessionId;
 
     sm.retireUnclosedGeneration();
+    expect(sm.getStatus().sessionId).toBeNull();
+    expect(sm.getDbRowId()).toBeNull();
 
     expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
       { status: string }).status).toBe(expectedStatus);
