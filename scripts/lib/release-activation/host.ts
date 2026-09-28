@@ -18,6 +18,7 @@ import { configRoot } from '../../../src/fleet/paths.ts';
 import { isRecord } from '../../../src/lib/type-guards.ts';
 import { emitReleaseAlert, type ReleaseAlertEmitPayload } from '../live-release-alert.ts';
 import { type HealthInvariantsReading, readHealthInvariants } from './invariants.ts';
+import { resolveToolCommit, type ToolCommitExec } from './tool-commit.ts';
 
 export interface ExecResult {
   code: number;
@@ -41,14 +42,15 @@ export interface ActivationHost {
   /** GET http://127.0.0.1:<port>/health with the bearer token. */
   fetchHealth(port: number, token: string): Promise<HealthResponse>;
   /**
-   * Send one BOT ERRORS alert through `emitReleaseAlert` (the release
-   * observers' path). Returns the helper's exit status; a spawn that fails
-   * outright may throw.
+   * Send one BOT ERRORS event (an alert or its clear) through
+   * `emitReleaseAlert` (the release observers' path). Returns the helper's
+   * exit status; a spawn that fails outright may throw.
    */
   emitReleaseAlert(request: ReleaseAlertRequest): Promise<{ status: number | null }>;
   /**
    * Commit of the tree this tool runs from (the tree that supplies the
-   * invariant floor), or null when it cannot be resolved.
+   * invariant floor), or null when it cannot be resolved within
+   * `TOOL_COMMIT_TIMEOUT_MS` (see tool-commit.ts).
    */
   toolCommit(): Promise<string | null>;
 }
@@ -56,6 +58,8 @@ export interface ActivationHost {
 export interface ReleaseAlertRequest {
   instance: string;
   source: string;
+  /** `alert` raises the source's event; `clear` resolves it (`bot-errors-emit.py --clear`). */
+  eventType: 'alert' | 'clear';
   payload: ReleaseAlertEmitPayload;
   /** Variables set for this helper call only (see `ReleaseAlertEmitOptions.env`). */
   env?: Readonly<Record<string, string>>;
@@ -120,6 +124,17 @@ function defaultFetchHealth(port: number, token: string): Promise<HealthResponse
   });
 }
 
+/** The tool-commit git child: its own timeout, killed outright when it expires. */
+const toolCommitExec: ToolCommitExec = (file, args, { env, timeoutMs }) => new Promise((resolve) => {
+  execFile(file, [...args], { env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' },
+    (error, stdout) => {
+      const code = error === null
+        ? 0
+        : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
+      resolve({ code, stdout: String(stdout) });
+    });
+});
+
 export function createDefaultActivationHost(): ActivationHost {
   return {
     platform: process.platform,
@@ -129,7 +144,7 @@ export function createDefaultActivationHost(): ActivationHost {
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     fetchHealth: defaultFetchHealth,
-    emitReleaseAlert: async ({ instance, source, payload, env }) => {
+    emitReleaseAlert: async ({ instance, source, eventType, payload, env }) => {
       const result = emitReleaseAlert({
         repoRoot: TOOL_REPO_ROOT,
         instance,
@@ -137,28 +152,11 @@ export function createDefaultActivationHost(): ActivationHost {
         emitHelper: path.join(TOOL_REPO_ROOT, 'deploy/scripts/bot-errors-emit.py'),
         python: 'python3',
         ...(env ? { env } : {}),
-      }, payload, 'alert');
+      }, payload, eventType);
       return { status: result.status };
     },
-    toolCommit: defaultToolCommit,
+    toolCommit: () => resolveToolCommit({ root: TOOL_REPO_ROOT, exec: toolCommitExec }),
   };
-}
-
-const FULL_COMMIT = /^[0-9a-f]{40}$/;
-
-/** The tool tree's release-manifest commit, else its git HEAD; null when neither resolves. */
-async function defaultToolCommit(): Promise<string | null> {
-  try {
-    const manifest: unknown = JSON.parse(readFileSync(path.join(TOOL_REPO_ROOT, '.whatsoup-release-manifest.json'), 'utf8'));
-    const source = isRecord(manifest) && isRecord(manifest['source']) ? manifest['source'] : {};
-    const commit = source['commit'];
-    if (typeof commit === 'string' && FULL_COMMIT.test(commit)) return commit;
-  } catch {
-    // Not a release snapshot (or an unreadable manifest): try the checkout.
-  }
-  const head = await defaultExec('git', ['-C', TOOL_REPO_ROOT, 'rev-parse', 'HEAD']);
-  const commit = head.stdout.trim();
-  return head.code === 0 && FULL_COMMIT.test(commit) ? commit : null;
 }
 
 /**

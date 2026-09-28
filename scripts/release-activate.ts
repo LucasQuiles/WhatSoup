@@ -27,17 +27,22 @@
  *
  * #2481, report-only: under --apply, the receipt also records the health
  * invariant verdict of the activated (and any rollback) process against this
- * tool's floor. It is written before any alert; then one BOT ERRORS warning
- * (standard event fields, inline log tail off) is sent when a verdict is not
- * `satisfied`, and the receipt is rewritten with the alert status. The verdict
- * never changes the outcome or the exit code.
+ * tool's floor. It is written before any event; then exactly one BOT ERRORS
+ * event is sent for source `release-invariants` (standard event fields,
+ * inline log tail off): a warning when any recorded verdict is not
+ * `satisfied`, else a clear. The receipt is then rewritten with the event
+ * status. Every receipt write is atomic; a failed one prints only the fixed
+ * code `receipt-write-failed`. The verdict never changes the outcome or the
+ * exit code. stdout stays one JSON document, printed after the event, so it
+ * can trail the activation by up to the helper's 60 s timeout.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { HEALTH_INVARIANTS_SCHEMA, RELEASE_INVARIANT_FLOOR } from '../src/core/health-invariants.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
+import { writeAtomicPrivateFileSync } from '../src/lib/private-fs.ts';
 import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
 import { applyActivation, type ApplyOutcome } from './lib/release-activation/apply.ts';
 import { type ActivationHost, createDefaultActivationHost } from './lib/release-activation/host.ts';
@@ -46,6 +51,7 @@ import {
   type ReleaseInvariantsVerdict,
   releaseInvariantsVerdict,
 } from './lib/release-activation/invariants.ts';
+import { TOOL_COMMIT_TIMEOUT_MS } from './lib/release-activation/tool-commit.ts';
 import {
   type ActivationArgs,
   type ActivationContext,
@@ -194,15 +200,19 @@ export function planDocument(context: ActivationContext): Record<string, unknown
   };
 }
 
-/** The receipt's #2481 record: verdicts, the tool floor and its source, and the one alert attempt. */
+/** The receipt's #2481 record: verdicts, the tool floor and its source, and the one event attempt. */
 export interface InvariantsRecord {
   reportOnly: true;
   /** `toolCommit`: commit of the tree that ran this tool and so supplied the floor; 'unknown' if unresolved. */
   floor: { schema: string; ids: string[]; toolCommit: string };
   activation: ReleaseInvariantsVerdict | null;
   rollback: ReleaseInvariantsVerdict | null;
-  /** `pending` while the alert is in flight (the receipt is written before it is sent). */
-  alert: { attempted: boolean; status: number | null | 'pending' };
+  /**
+   * The one BOT ERRORS event: a `warning` when any verdict is not satisfied,
+   * else a `clear`; `kind` null when no event is due (a refusal).
+   * `pending` while the event is in flight (the receipt is written before it is sent).
+   */
+  alert: { attempted: boolean; kind: 'warning' | 'clear' | null; status: number | null | 'pending' };
 }
 
 /**
@@ -220,25 +230,32 @@ function describeVerdict(label: string, verdict: ReleaseInvariantsVerdict): stri
 }
 
 /**
- * #2481, report-only: classify the activation and rollback observations
- * against this tool's floor. Pure apart from resolving the tool commit; it
- * never changes the outcome or the exit code. A refusal changed nothing live,
- * so it has no verdict. The alert is marked pending when one will be sent.
+ * The tool commit, bounded here as well as in the default host
+ * (tool-commit.ts), so no host seam can hold the receipt. Started before the
+ * activation and awaited after it.
  */
-async function classifyForReceipt(host: ActivationHost, outcome: ApplyOutcome): Promise<InvariantsRecord> {
+function boundedToolCommit(host: ActivationHost): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), TOOL_COMMIT_TIMEOUT_MS); });
+  const lookup = Promise.resolve().then(() => host.toolCommit()).catch(() => null);
+  return Promise.race([lookup, expired]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * #2481, report-only: classify the activation and rollback observations
+ * against this tool's floor. Pure; it never changes the outcome or the exit
+ * code. A refusal changed nothing live, so it has no verdict and no event.
+ * Otherwise exactly one event is due and marked pending: a warning when any
+ * recorded verdict is not satisfied, else a clear.
+ */
+function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): InvariantsRecord {
   const floor = [...RELEASE_INVARIANT_FLOOR];
-  let toolCommit: string | null = null;
-  try {
-    toolCommit = await host.toolCommit();
-  } catch {
-    toolCommit = null;
-  }
   const record: InvariantsRecord = {
     reportOnly: true,
     floor: { schema: HEALTH_INVARIANTS_SCHEMA, ids: floor, toolCommit: toolCommit ?? 'unknown' },
     activation: null,
     rollback: null,
-    alert: { attempted: false, status: null },
+    alert: { attempted: false, kind: null, status: null },
   };
   if (outcome.outcome === 'refused') return record;
   record.activation = releaseInvariantsVerdict(outcome.verification, floor);
@@ -246,9 +263,8 @@ async function classifyForReceipt(host: ActivationHost, outcome: ApplyOutcome): 
   // rollback stopped before restart has no generation to classify.
   const rollbackObservation = outcome.rollback?.observation ?? null;
   record.rollback = rollbackObservation === null ? null : releaseInvariantsVerdict(rollbackObservation, floor);
-  if (verdictsOf(record).some(([, verdict]) => verdict.outcome !== 'satisfied')) {
-    record.alert = { attempted: true, status: 'pending' };
-  }
+  const satisfied = verdictsOf(record).every(([, verdict]) => verdict.outcome === 'satisfied');
+  record.alert = { attempted: true, kind: satisfied ? 'clear' : 'warning', status: 'pending' };
   return record;
 }
 
@@ -260,27 +276,34 @@ function verdictsOf(record: InvariantsRecord): Array<[string, ReleaseInvariantsV
 }
 
 /**
- * Send the ONE warning a pending record calls for and set its final status.
- * The tool-supplied payload carries verdicts and ids only; the helper adds its
- * standard event fields. A failed or throwing helper never changes the exit code.
+ * Send the ONE event a pending record calls for (a warning, or the clear that
+ * resolves an earlier warning for the same instance and source, as the
+ * release observers do) and set its final status. The tool-supplied payload
+ * carries verdicts and ids only; the helper adds its standard event fields.
+ * A failed or throwing helper never changes the exit code.
  */
-async function sendInvariantsAlert(
+async function sendInvariantsEvent(
   host: ActivationHost,
   instance: string,
   outcome: ApplyOutcome,
   record: InvariantsRecord,
   stderr: (text: string) => void,
 ): Promise<void> {
-  if (record.alert.status !== 'pending') return;
+  const { kind } = record.alert;
+  if (record.alert.status !== 'pending' || kind === null) return;
   const verdicts = verdictsOf(record);
+  const verdictList = verdicts.map(([label, verdict]) => `${label} ${verdict.outcome}`).join(', ');
   let status: number | null;
   try {
     const sent = await host.emitReleaseAlert({
       instance,
       source: RELEASE_INVARIANTS_ALERT_SOURCE,
+      eventType: kind === 'clear' ? 'clear' : 'alert',
       env: INVARIANTS_ALERT_ENV,
       payload: {
-        summary: `release:activate: release invariants not satisfied (${verdicts.map(([label, verdict]) => `${label} ${verdict.outcome}`).join(', ')})`,
+        summary: kind === 'clear'
+          ? `release:activate: release invariants satisfied (${verdictList})`
+          : `release:activate: release invariants not satisfied (${verdictList})`,
         evidence: `report-only verdict against floor ${record.floor.schema} [${record.floor.ids.join(',')}]; activation outcome ${outcome.outcome}; exit code unchanged`,
         diagnostics: verdicts.flatMap(([label, verdict]) => describeVerdict(label, verdict)),
         severity: 'warning',
@@ -292,7 +315,7 @@ async function sendInvariantsAlert(
   }
   record.alert.status = status;
   if (status !== 0) {
-    stderr(`release invariants alert was not sent (status ${status ?? 'none'}); the verdict is in receipt.json\n`);
+    stderr(`release invariants alert (${kind}) was not sent (status ${status ?? 'none'}); the verdict is in receipt.json\n`);
   }
 }
 
@@ -387,8 +410,9 @@ export async function runReleaseActivateCli(
     io.stdout(`${JSON.stringify({ ...plan, outcome: 'refused' }, null, 2)}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
+  const toolCommit = boundedToolCommit(host);
   const outcome = await applyActivation(host, context);
-  const invariants = await classifyForReceipt(host, outcome);
+  const invariants = classifyForReceipt(await toolCommit, outcome);
   const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
@@ -397,21 +421,26 @@ export async function runReleaseActivateCli(
     ...outcome,
     invariants,
   }, null, 2)}\n`;
+  // Atomic (temporary file, fsync, rename): a failed rewrite leaves the
+  // previous receipt whole. The exit code reports the live activation, which a
+  // lost receipt does not change, so a write failure is a fixed stderr code
+  // only; the error text would carry the backup path.
   const writeReceipt = (): void => {
     if (outcome.backupPath === null) return;
     try {
-      writeFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), { mode: 0o600 });
-    } catch (error) {
-      io.stderr(`could not write receipt.json: ${error instanceof Error ? error.message : String(error)}\n`);
+      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt');
+    } catch {
+      io.stderr('release:activate: receipt-write-failed\n');
     }
   };
-  // The receipt, with the verdict and any alert still pending, is durable
-  // before the helper runs; an interrupt during the alert cannot lose it.
+  // The receipt, with the verdict and the event still pending, is durable
+  // before the helper runs; an interrupt during the event cannot lose it.
   writeReceipt();
   if (invariants.alert.status === 'pending') {
-    await sendInvariantsAlert(host, args.instance, outcome, invariants, io.stderr);
+    await sendInvariantsEvent(host, args.instance, outcome, invariants, io.stderr);
     writeReceipt();
   }
+  // One JSON document on stdout, after the event (see the header).
   io.stdout(receipt());
   if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
   return outcomeExit(outcome.outcome);

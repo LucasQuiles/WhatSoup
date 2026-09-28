@@ -214,47 +214,85 @@ receipt) carries an `invariants` record:
 
 - `floor`: the schema and the required ids from the `src/core/health-invariants.ts`
   (`RELEASE_INVARIANT_FLOOR`) of **the tree that runs the tool**, and
-  `toolCommit`, that tree's commit (its release-manifest commit, else its git
-  `HEAD`; `unknown` when neither resolves). The floor comes from the release
-  under test only if the tool is run from inside that release; `toolCommit`
-  shows which tree it was.
+  `toolCommit`, that tree's commit (its release-manifest commit, else the
+  `HEAD` of the checkout whose top level is that tree, asked with the clean
+  git environment; `unknown` when neither resolves within 5 s). The floor
+  comes from the release under test only if the tool is run from inside that
+  release; `toolCommit` shows which tree it was.
 - `activation`, and `rollback` when a rollback restarted the old release and
   observed it (otherwise `null`): the verdict for the process `verify`
   observed, read from the `health_invariants` block of its authenticated
-  diagnostic body. The body counts only when its own `instance.pid` is the
-  launchd pid whose argv names the release:
+  diagnostic body:
   - `satisfied`: the process declared every floor id. This is a declaration by
     the loaded code, not a proof of behaviour.
   - `missing`: a 2xx diagnostic body with no block, i.e. a release that
     predates it.
   - `below_floor`: the known schema, omitting a floor id (`undeclared` lists
     them).
-  - `unknown`, with `detail`: `unknown-schema`, `malformed`, `unbound` (no
-    pid, argv on another release, or a body served by another pid or with no
-    pid), `unobserved` (no diagnostic body at all), or `http-status` (a
-    non-2xx diagnostic body). A failed or erroring read is never `missing`.
+  - `unknown`, with `detail`: `unknown-schema`, `malformed`, `unbound` (see
+    the binding below), `unobserved` (no diagnostic body at all), or
+    `http-status` (a non-2xx diagnostic body). A failed or erroring read is
+    never `missing`.
   - `schema` is `known`, `unrecognised`, or `null`; the producer's schema
     string is never copied.
-- `alert`: whether a warning was attempted, and the helper's exit status.
+- `alert`: whether the one event was attempted, its `kind` (`warning`,
+  `clear`, or `null` when none is due), and the helper's exit status.
 
-`receipt.json` is written with the verdict **before** any alert is sent
+The observation beside it (`verification`, `rollback.observation`) gains
+`health.responderPid` (the body's `instance.pid`), `health.invariants`
+(`reading`, the floor ids the body declared as `floorIds`, and
+`extraIdCount`, a count of every other declared id), and `resample` (the
+launchd pid and argv match sampled again after the response). No
+producer-declared id or schema string is stored anywhere: only the tool's own
+floor ids and a count.
+
+**Binding.** A body counts only when the launchd pid sampled before the
+request (whose argv names the release entrypoint), the same pid and argv
+sampled again after the response, and the body's own `instance.pid` all
+agree; otherwise the verdict is `unknown`/`unbound`. This checks the
+producer's self-reported pid inside one window. It is not a kernel proof: a
+process of the same user that holds the health port and echoes the pid is
+outside it. A producer that predates `instance.pid` reads `unbound`. It relies
+on the instance being the launchd job's own process (`deploy/whatsoup` execs
+node, which reports its `process.pid`).
+
+**What the receipt holds.** `receipt.json` is a local operator record in the
+private backup directory (mode 0600). The activation record already carries
+host data: release and backup paths, commits, the instance name, and pids.
+Nothing #2481 adds carries a producer string or host data beyond that: the
+added fields are the tool's constants (schema, floor ids), enums, booleans,
+counts, pids already in the record's kind, `null`, and `toolCommit`, the
+commit of the tool tree.
+
+`receipt.json` is written with the verdict **before** the event is sent
 (`alert.status: "pending"`), then rewritten with the final status, so an
-interrupt during the alert leaves the verdict on disk.
+interrupt during the event leaves the verdict on disk. Every write is atomic
+(temporary file, fsync, rename): a failed rewrite leaves the previous receipt
+whole. A failed write prints only `release:activate: receipt-write-failed` on
+stderr (never the path or the error text), the event is still attempted, and
+the exit code is unchanged, because it reports the live activation, which a
+lost receipt does not change.
 
-When any verdict is not `satisfied`, exactly one BOT ERRORS warning (source
-`release-invariants`) is sent through the release observers' alert helper.
-Per operator decision, it is a **standard BOT ERRORS alert with no log tail**:
-the payload this tool supplies carries verdicts and ids only (no paths or
-commits), and the delivered event carries the standard operator fields every
-BOT ERRORS alert carries (machine, platform, instance, process, runtime, and
-diagnostic hints such as log-location hints and the outbox path), with the
-inline log tail turned off for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`).
-`receipt.json` holds no host data. A refusal (before or during the apply) has
-no verdict and sends nothing. `--plan` never reads invariants and never sends
-an alert.
+Exactly one BOT ERRORS event (source `release-invariants`) is sent through the
+release observers' alert helper for every `--apply` that reached the switch:
+a **warning** when any recorded verdict is not `satisfied`, else a **clear**
+for the same instance and source, which resolves an earlier warning the way
+the release observers' clears do. Per operator decision, it is a **standard
+BOT ERRORS alert with no log tail**: the payload this tool supplies carries
+verdicts and ids only (no paths or commits), and the delivered event carries
+the standard operator fields every BOT ERRORS alert carries (machine,
+platform, instance, process, runtime, and diagnostic hints such as
+log-location hints and the outbox path), with the inline log tail turned off
+for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`, the only per-call override the
+helper accepts). A refusal (before or during the apply) has no verdict and
+sends nothing. `--plan` never reads invariants and never sends an event.
+
+stdout stays one JSON document, printed after the event, so it can trail the
+activation by up to the helper's 60 s timeout; `receipt.json` already holds
+the verdict during that wait.
 
 The verdict is **report-only**: it is not part of the pass condition, and the
-outcome and every exit code above are unchanged. A failed alert is printed to
+outcome and every exit code above are unchanged. A failed event is printed to
 stderr and recorded in `alert.status`; it does not change the exit code either.
 Expect `missing` for rollback targets built before the block existed.
 

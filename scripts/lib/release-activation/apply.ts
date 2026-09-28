@@ -60,6 +60,12 @@ export interface InstanceObservation {
   pid: number | null;
   argvMatches: boolean;
   health: HealthObservation | null;
+  /**
+   * launchd pid and argv sampled again after the health response (#2481
+   * binding); null when no health request was made. Not part of the pass
+   * predicate.
+   */
+  resample: { pid: number | null; argvMatches: boolean } | null;
 }
 
 /**
@@ -181,10 +187,14 @@ async function observeInstance(
   context: ActivationContext,
   entrypoint: string,
 ): Promise<InstanceObservation> {
-  const state = await launchdState(host, context.domain, context.instanceLabel);
-  if (state.pid === null) return { pid: null, argvMatches: false, health: null };
-  const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
-  const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
+  const sample = async (): Promise<{ pid: number | null; argvMatches: boolean }> => {
+    const state = await launchdState(host, context.domain, context.instanceLabel);
+    if (state.pid === null) return { pid: null, argvMatches: false };
+    const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
+    return { pid: state.pid, argvMatches: ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint) };
+  };
+  const { pid, argvMatches } = await sample();
+  if (pid === null) return { pid: null, argvMatches: false, health: null, resample: null };
   let health: HealthObservation | null = null;
   if (context.healthPort !== null && context.healthToken !== null) {
     try {
@@ -196,7 +206,10 @@ async function observeInstance(
       };
     }
   }
-  return { pid: state.pid, argvMatches, health };
+  // The body names its own pid; launchd must still show that pid on the
+  // release after the response, or the body cannot be bound to it.
+  const resample = health === null ? null : await sample();
+  return { pid, argvMatches, health, resample };
 }
 
 function instancePasses(
@@ -217,7 +230,7 @@ async function verifyInstance(
   expected: { entrypoint: string; commit: string | null; previousPid: number | null },
 ): Promise<{ ok: boolean; observation: InstanceObservation }> {
   const deadline = host.now() + context.args.verifyTimeoutSeconds * 1_000;
-  let observation: InstanceObservation = { pid: null, argvMatches: false, health: null };
+  let observation: InstanceObservation = { pid: null, argvMatches: false, health: null, resample: null };
   for (;;) {
     observation = await observeInstance(host, context, expected.entrypoint);
     if (instancePasses(observation, expected)) return { ok: true, observation };

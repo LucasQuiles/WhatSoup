@@ -13,17 +13,25 @@
  *   Verdict `satisfied` when the ids cover the floor, else `below_floor`.
  * - `unknown-schema` or `malformed`: verdict `unknown`.
  *
- * No producer string is kept: an unrecognised schema is recorded only as
- * `unrecognised`, and only ids that match the id pattern are ever read.
+ * No producer string is kept. An unrecognised schema is recorded only as
+ * `unrecognised`; of the declared ids, only members of the tool's floor are
+ * kept (as the tool's own constants), and every other id is only counted.
  *
  * Only `satisfied` is green, and it means "the bound process declared every
  * floor id". It does not prove the behaviour. The verdict never enters the
  * pass predicate, the outcome, or the exit code.
  *
- * The verdict is bound to the responding process. It classifies a body only
- * when `observeInstance` matched the launchd pid's argv to the release AND the
- * body's own `instance.pid` is that same pid; otherwise it is `unbound`. A
- * body that could not be read or was not diagnostic is `unobserved`, and a
+ * Binding contract. The verdict classifies a body only when all of these
+ * agree: the launchd pid sampled before the request, whose argv names the
+ * release entrypoint; the same pid and argv sampled again after the response;
+ * and the body's own `instance.pid`. Otherwise it is `unbound`. This is the
+ * producer's self-reported identity checked inside one window, not a kernel
+ * proof: a process of the same user squatting the port and echoing the pid is
+ * outside it. A producer that predates `instance.pid` reads `unbound`. It
+ * relies on the instance being the launchd job's own process
+ * (deploy/whatsoup execs node, and src/core/health.ts reports that
+ * process.pid as `instance.pid`).
+ * A body that could not be read or was not diagnostic is `unobserved`, and a
  * non-2xx diagnostic body is `http-status`: never `missing`, because a failed
  * or erroring read is not evidence of a legacy producer.
  */
@@ -43,8 +51,10 @@ const ID_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/;
 
 export interface HealthInvariantsReading {
   reading: 'absent' | 'declared' | 'unknown-schema' | 'malformed';
-  /** Declared ids (the known schema only); empty for every other reading. */
-  ids: string[];
+  /** Declared ids that are members of the floor, in floor order (the known schema only). */
+  floorIds: string[];
+  /** How many declared ids are not floor members; never the ids themselves. */
+  extraIdCount: number;
 }
 
 export type ReleaseInvariantsOutcome = 'satisfied' | 'missing' | 'below_floor' | 'unknown';
@@ -58,28 +68,45 @@ export interface ReleaseInvariantsVerdict {
   undeclared: string[];
 }
 
-function malformed(): HealthInvariantsReading {
-  return { reading: 'malformed', ids: [] };
+/** An instance observation as `observeInstance` records it (apply.ts). */
+export interface BoundObservation {
+  pid: number | null;
+  argvMatches: boolean;
+  health: HealthObservation | null;
+  /** launchd pid and argv sampled again after the response; null when not re-sampled. */
+  resample: { pid: number | null; argvMatches: boolean } | null;
 }
 
-/** Read the block from a parsed diagnostic payload. Structural only: text elsewhere in the body is never a declaration. */
-export function readHealthInvariants(payload: Record<string, unknown>): HealthInvariantsReading {
-  if (!Object.prototype.hasOwnProperty.call(payload, HEALTH_INVARIANTS_KEY)) return { reading: 'absent', ids: [] };
+function unread(reading: 'absent' | 'unknown-schema' | 'malformed'): HealthInvariantsReading {
+  return { reading, floorIds: [], extraIdCount: 0 };
+}
+
+/**
+ * Read the block from a parsed diagnostic payload. Structural only: text
+ * elsewhere in the body is never a declaration. The ids are validated in
+ * full, but only floor members survive the read.
+ */
+export function readHealthInvariants(
+  payload: Record<string, unknown>,
+  floor: readonly string[] = RELEASE_INVARIANT_FLOOR,
+): HealthInvariantsReading {
+  if (!Object.prototype.hasOwnProperty.call(payload, HEALTH_INVARIANTS_KEY)) return unread('absent');
   const block = payload[HEALTH_INVARIANTS_KEY];
-  if (!isRecord(block)) return malformed();
+  if (!isRecord(block)) return unread('malformed');
   const schema = block['schema'];
-  if (typeof schema !== 'string') return malformed();
-  if (schema !== HEALTH_INVARIANTS_SCHEMA) return { reading: 'unknown-schema', ids: [] };
+  if (typeof schema !== 'string') return unread('malformed');
+  if (schema !== HEALTH_INVARIANTS_SCHEMA) return unread('unknown-schema');
   const ids = block['ids'];
-  if (!Array.isArray(ids) || ids.length > MAX_IDS) return malformed();
+  if (!Array.isArray(ids) || ids.length > MAX_IDS) return unread('malformed');
   const seen = new Set<string>();
   for (const id of ids) {
     if (typeof id !== 'string' || id.length > MAX_ID_LENGTH || !ID_PATTERN.test(id) || seen.has(id)) {
-      return malformed();
+      return unread('malformed');
     }
     seen.add(id);
   }
-  return { reading: 'declared', ids: [...seen] };
+  const floorIds = floor.filter((id) => seen.has(id));
+  return { reading: 'declared', floorIds, extraIdCount: seen.size - floorIds.length };
 }
 
 /** Classify a reading against the tool's floor. */
@@ -95,7 +122,7 @@ export function classifyReleaseInvariants(
     case 'malformed':
       return { outcome: 'unknown', detail: 'malformed', schema: null, undeclared: [...floor] };
     case 'declared': {
-      const declared = new Set(reading.ids);
+      const declared = new Set(reading.floorIds);
       const undeclared = floor.filter((id) => !declared.has(id));
       return {
         outcome: undeclared.length === 0 ? 'satisfied' : 'below_floor',
@@ -109,22 +136,25 @@ export function classifyReleaseInvariants(
 
 /**
  * The verdict for one instance observation. No pid, argv naming another
- * release, or a body not served by that pid is `unbound`; no diagnostic body
- * is `unobserved`; a non-2xx diagnostic body is `http-status`. All three are
- * `unknown`.
+ * release, a re-sample that disagrees, or a body not served by that pid is
+ * `unbound`; no diagnostic body is `unobserved`; a non-2xx diagnostic body is
+ * `http-status`. All three are `unknown`.
  */
 export function releaseInvariantsVerdict(
-  observation: { pid: number | null; argvMatches: boolean; health: HealthObservation | null } | null,
+  observation: BoundObservation | null,
   floor: readonly string[] = RELEASE_INVARIANT_FLOOR,
 ): ReleaseInvariantsVerdict {
   const unknown = (detail: 'unbound' | 'unobserved' | 'http-status'): ReleaseInvariantsVerdict => ({
     outcome: 'unknown', detail, schema: null, undeclared: [...floor],
   });
   if (observation === null) return unknown('unobserved');
-  if (observation.pid === null || !observation.argvMatches) return unknown('unbound');
+  const { pid, resample } = observation;
+  if (pid === null || !observation.argvMatches) return unknown('unbound');
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.invariants === null) return unknown('unobserved');
-  if (health.responderPid !== observation.pid) return unknown('unbound');
+  if (resample === null || resample.pid !== pid || !resample.argvMatches || health.responderPid !== pid) {
+    return unknown('unbound');
+  }
   if (health.httpStatus === null || health.httpStatus < 200 || health.httpStatus > 299) return unknown('http-status');
   return classifyReleaseInvariants(health.invariants, floor);
 }
