@@ -8520,6 +8520,7 @@ describe('GET /health — #2481 health_invariants block', () => {
   // The test #3014 lacked: the REAL server's authenticated bytes, read by the
   // REAL release-activation reader and classifier. Nothing here writes the block.
   it('producer/consumer: the real diagnostic body classifies satisfied against the tool floor', async () => {
+    const requestedAtMs = Date.now();
     const { status, body } = await healthReq(port);
     const { classifyAuthenticatedHealth } = await import('../../scripts/lib/release-activation/host.ts');
     const observation = classifyAuthenticatedHealth(status, body);
@@ -8531,11 +8532,10 @@ describe('GET /health — #2481 health_invariants block', () => {
     const { releaseInvariantsVerdict, resolveBinding } = await import('../../scripts/lib/release-activation/invariants.ts');
     // The launchd pid, argv and start-time sample is release:activate's job
     // (launchctl + ps); the responder half is checked against the body here.
-    // This process started well before the response it just served.
-    const respondedAtMs = Date.now();
+    // This process started well before the request it just answered.
     const binding = resolveBinding(
-      { pid: process.pid, argvMatches: true, passed: true, health: observation, respondedAtMs },
-      { pid: process.pid, argvMatches: true, startedAtMs: respondedAtMs - 60_000 },
+      { pid: process.pid, argvMatches: true, passed: true, health: observation, requestedAtMs },
+      { pid: process.pid, argvMatches: true, startedAtMs: requestedAtMs - 60_000 },
     );
     expect(binding).toBe('bound');
     expect(releaseInvariantsVerdict({

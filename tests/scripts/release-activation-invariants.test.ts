@@ -28,8 +28,8 @@ import {
 
 const FLOOR = ['a.required'] as const;
 const PID = 7001;
-/** When the diagnostic response was received (a whole second plus 400 ms). */
-const RESPONDED = Date.UTC(2026, 0, 1, 12, 0, 10) + 400;
+/** When the health request was sent (a whole second plus 400 ms). */
+const REQUESTED = Date.UTC(2026, 0, 1, 12, 0, 10) + 400;
 
 function declared(floorIds: string[], extraIdCount = 0): HealthInvariantsReading {
   return { reading: 'declared', floorIds, extraIdCount };
@@ -54,17 +54,17 @@ function bound(health: HealthObservation | null, pid: number | null = PID, bindi
   return { pid, argvMatches: true, health, binding };
 }
 
-/** The observation from the poll that decided: it passed, with a diagnostic body answered at RESPONDED. */
+/** The observation from the poll that decided: it passed, with a diagnostic body to a request sent at REQUESTED. */
 function evidence(overrides: Partial<BindingEvidence> = {}): BindingEvidence {
   return {
-    pid: PID, argvMatches: true, passed: true, health: observation(declared(['a.required'])), respondedAtMs: RESPONDED,
+    pid: PID, argvMatches: true, passed: true, health: observation(declared(['a.required'])), requestedAtMs: REQUESTED,
     ...overrides,
   };
 }
 
-/** The one sample taken after the outcome: the same process, started a minute before the response. */
+/** The one sample taken after the outcome: the same process, started a minute before the request. */
 function sample(overrides: Partial<ProcessSample> = {}): ProcessSample {
-  return { pid: PID, argvMatches: true, startedAtMs: RESPONDED - 60_400, ...overrides };
+  return { pid: PID, argvMatches: true, startedAtMs: REQUESTED - 60_400, ...overrides };
 }
 
 describe('the leaf constant', () => {
@@ -219,21 +219,30 @@ describe('releaseInvariantsVerdict: bound to the responding process', () => {
   });
 });
 
-describe('resolveBinding: one sample after the outcome, against the response second', () => {
+describe('resolveBinding: one sample after the outcome, against the request second', () => {
   const second = (ms: number) => Math.floor(ms / 1_000) * 1_000;
 
-  it('bound: same pid and argv, a start second strictly before the response second, and the responder names that pid', () => {
+  it('bound: same pid and argv, a start second strictly before the request second, and the responder names that pid', () => {
     expect(resolveBinding(evidence(), sample())).toBe('bound');
-    // The latest start that still binds: the whole second before the response.
-    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) - 1_000 }))).toBe('bound');
+    // The latest start that still binds: the whole second before the request.
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(REQUESTED) - 1_000 }))).toBe('bound');
   });
 
-  it('unobserved: a start in the SAME second as the response (a same-second pid reuse would compare equal)', () => {
-    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) }))).toBe('unobserved');
+  it('unobserved: a start in the SAME second as the request (a same-second pid reuse would compare equal)', () => {
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(REQUESTED) }))).toBe('unobserved');
   });
 
-  it('restarted: a start in a later second than the response, another pid, or no process at all', () => {
-    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) + 1_000 }))).toBe('restarted');
+  it('a delayed response never binds a replacement: request 9.9 s, answer 10.1 s, pid reused 10.8 s, read at 12 s', () => {
+    // The responder started at 8 s. Its replacement starts after it exits, so after the request was sent;
+    // a boundary taken when the response was read (12 s) would put 10.8 s before it and bind.
+    const at = (seconds: number) => Date.UTC(2026, 0, 1, 12, 0, 0) + seconds * 1_000;
+    const delayed = evidence({ requestedAtMs: at(9.9) });
+    expect(resolveBinding(delayed, sample({ startedAtMs: at(10) }))).toBe('restarted');
+    expect(resolveBinding(delayed, sample({ startedAtMs: at(8) }))).toBe('bound');
+  });
+
+  it('restarted: a start in a later second than the request, another pid, or no process at all', () => {
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(REQUESTED) + 1_000 }))).toBe('restarted');
     expect(resolveBinding(evidence(), sample({ pid: PID + 1 }))).toBe('restarted');
     expect(resolveBinding(evidence(), sample({ pid: null, argvMatches: false, startedAtMs: null }))).toBe('restarted');
   });
@@ -248,11 +257,11 @@ describe('resolveBinding: one sample after the outcome, against the response sec
       .toBe('unbound');
   });
 
-  it('unobserved: the observation did not pass, no diagnostic body, no response time, no sample (timed out), or no start time', () => {
+  it('unobserved: the observation did not pass, no diagnostic body, no request time, no sample (timed out), or no start time', () => {
     expect(resolveBinding(evidence({ passed: false }), sample())).toBe('unobserved');
     expect(resolveBinding(evidence({ health: null }), sample())).toBe('unobserved');
     expect(resolveBinding(evidence({ health: observation(null, { projection: 'public' }) }), sample())).toBe('unobserved');
-    expect(resolveBinding(evidence({ respondedAtMs: null }), sample())).toBe('unobserved');
+    expect(resolveBinding(evidence({ requestedAtMs: null }), sample())).toBe('unobserved');
     expect(resolveBinding(evidence(), null)).toBe('unobserved');
     expect(resolveBinding(evidence(), sample({ startedAtMs: null }))).toBe('unobserved');
   });
