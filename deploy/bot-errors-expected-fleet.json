@@ -32,7 +32,7 @@
         },
         {
           "name": "personal",
-          "expected": "always_on",
+          "expected": "blocked",
           "service": "com.whatsoup.personal",
           "healthPort": 9091
         }

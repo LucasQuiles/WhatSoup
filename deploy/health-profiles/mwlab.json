@@ -24,7 +24,8 @@
     },
     {
       "name": "personal",
-      "expected": "always_on",
+      "expected": "blocked",
+      "reason": "retired; relink required to restore",
       "service": "com.whatsoup.personal",
       "healthPort": 9091,
       "primaryPhoneOwner": "instance:personal"
