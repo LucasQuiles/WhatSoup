@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -100,6 +100,34 @@ function runKeyringLookupProbe(
   return { stdout, log };
 }
 
+// #3561: 5 s killed even fast scenarios (special-dir-mode, duplicate) under
+// gate load. 15 s is 5x the 3 s keychain bound in read-keychain-secret.mjs,
+// yet still half of the stubs' 30 s hang, so a removed bound still ends as a
+// named harness kill. Every probe case's own timeout sits above the cap.
+const PROBE_HARNESS_TIMEOUT_MS = 5_000;
+const PROBE_TEST_TIMEOUT_MS = 20_000;
+
+/**
+ * #3561: a harness-cap kill returns `status: null` with empty output, which an
+ * assertion on `status` reports as a wrapper behaviour failure. A spawn error or
+ * a terminating signal is never a wrapper result, so it fails here with its own
+ * name, elapsed time, and cap. Checked before stdout is read: a spawn failure
+ * leaves stdout null.
+ */
+function requireProbeCompletion(
+  result: SpawnSyncReturns<string>,
+  harnessTimeoutMs: number,
+  elapsedMs: number,
+): void {
+  if (result.error === undefined && result.signal === null) return;
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  throw new Error(
+    `probe harness observed no wrapper result: error=${code ?? result.error?.message ?? 'none'} ` +
+      `signal=${result.signal ?? 'none'} after ${Math.round(elapsedMs)} ms (harness cap ${harnessTimeoutMs} ms); ` +
+      'this is a harness kill or spawn failure, not a wrapper behaviour result',
+  );
+}
+
 type HealthTokenFileScenario =
   | 'safe-file'
   | 'keyring-hit'
@@ -122,6 +150,7 @@ type HealthTokenFileScenario =
 function runHealthTokenFileProbe(
   platform: 'Darwin' | 'Linux',
   scenario: HealthTokenFileScenario,
+  harnessTimeoutMs = PROBE_HARNESS_TIMEOUT_MS,
 ): { status: number | null; stdout: string; stderr: string; log: string } {
   const tmpDir = tmp.make('whatsoup-wrapper-health-token-file');
   const binDir = path.join(tmpDir, 'bin');
@@ -170,7 +199,7 @@ function runHealthTokenFileProbe(
   if (scenario === 'special-dir-mode') fs.chmodSync(instanceDir, 0o1700);
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf '%s\\n' '${platform}'\n`);
-  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "keyring-hang" ] && [ "\${3:-}" = "whatsoup-health-token" ]; then sleep 30; fi\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
+  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "keyring-hang" ] && [ "\${3:-}" = "whatsoup-health-token" ]; then exec sleep 30; fi\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
   writeExecutable(path.join(binDir, 'timeout'), `#!/usr/bin/env bash\n${fakeTimeoutBody()}\n`);
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif { [ "$SCENARIO" = "keyring-hit" ] || [ "$SCENARIO" = "keyring-only" ]; } && [ "$3" = "whatsoup-health-token" ]; then printf '%s\\n' '${'c'.repeat(64)}'; exit 0; fi\nif [ "$SCENARIO" = "legacy-hit" ] && [ "$3" = "whatsoup_health" ]; then printf '%s\\n' '${'d'.repeat(64)}'; exit 0; fi\nexit 1\n`);
   writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
@@ -230,7 +259,8 @@ printf 'resolved=%s\\n' "\${WHATSOUP_HEALTH_TOKEN-}"
   );
   fs.chmodSync(scriptPath, 0o700);
 
-  const result = spawnSync('/bin/bash', [scriptPath], { encoding: 'utf8', timeout: 5_000 });
+  const startedAt = performance.now();
+  const result = spawnSync('/bin/bash', [scriptPath], { encoding: 'utf8', timeout: harnessTimeoutMs });
   return {
     status: result.status,
     stdout: result.stdout.trim(),
@@ -262,7 +292,7 @@ function runHealthTokenCheckerProbe(): {
   fs.chmodSync(tokenPath, 0o600);
 
   writeExecutable(path.join(binDir, 'uname'), `#!/usr/bin/env bash\nprintf 'Darwin\\n'\n`);
-  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nsleep 30\n`);
+  writeExecutable(path.join(binDir, 'security'), `#!/usr/bin/env bash\nprintf 'security %s\\n' "$*" >> "$LOG_PATH"\nexec sleep 30\n`);
   writeExecutable(path.join(binDir, 'stat'), `#!/usr/bin/env bash
 set -euo pipefail
 case "$1:$2" in
@@ -281,6 +311,7 @@ case "\${1-}" in
 esac
 `);
 
+  const startedAt = performance.now();
   const result = spawnSync(
     '/bin/bash',
     ['deploy/check-health-token-keyring.sh', 'fixture-checker'],
@@ -294,7 +325,7 @@ esac
         WHATSOUP_NODE: pinnedNode,
         XDG_CONFIG_HOME: configRoot,
       },
-      timeout: 5_000,
+      timeout: PROBE_HARNESS_TIMEOUT_MS,
     },
   );
 
@@ -481,6 +512,7 @@ describe('health token shell wrappers', () => {
       expect(result.log).toContain('stat ');
       expect(result.log).not.toContain('a'.repeat(64));
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it.each(['Darwin', 'Linux'] as const)(
@@ -494,6 +526,7 @@ describe('health token shell wrappers', () => {
       expect(result.log).not.toContain('whatsoup_health');
       expect(result.log).not.toContain('d'.repeat(64));
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it.each(['Darwin', 'Linux'] as const)(
@@ -507,6 +540,7 @@ describe('health token shell wrappers', () => {
       expect(result.log).not.toContain('whatsoup-health-token');
       expect(result.log).not.toContain('c'.repeat(64));
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it.each(['Darwin', 'Linux'] as const)(
@@ -521,9 +555,10 @@ describe('health token shell wrappers', () => {
       expect(result.log).not.toContain('stat ');
       expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
-  it('bounds a hanging Darwin keychain child under the five-second outer harness', () => {
+  it('bounds a hanging Darwin keychain child under the bounded outer harness', () => {
     const result = runHealthTokenFileProbe('Darwin', 'keyring-hang');
 
     expect(result.status).toBe(0);
@@ -532,7 +567,15 @@ describe('health token shell wrappers', () => {
     expect(result.log).toContain(
       'security find-generic-password -s whatsoup-health-token -a fixture-bot -w',
     );
-  }, 8_000);
+  }, PROBE_TEST_TIMEOUT_MS);
+
+  // #3561: the keychain helper bounds the hang at 3 s, so a 200 ms harness cap
+  // always kills the probe first. The old helper returned that kill as
+  // `status: null` with empty output instead of naming it.
+  it('reports a harness-cap kill as a harness outcome, never as a wrapper status', () => {
+    expect(() => runHealthTokenFileProbe('Darwin', 'keyring-hang', 200))
+      .toThrow(/error=ETIMEDOUT signal=SIGTERM after \d+ ms \(harness cap 200 ms\)/);
+  });
 
   it('bounds a hanging Darwin keychain child in the parity checker', () => {
     const result = runHealthTokenCheckerProbe();
@@ -544,7 +587,7 @@ describe('health token shell wrappers', () => {
       'security find-generic-password -s whatsoup-health-token -a fixture-checker -w',
     );
     expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
-  }, 8_000);
+  }, PROBE_TEST_TIMEOUT_MS);
 
   it('uses one bounded pinned-Node helper for Darwin keychain reads', () => {
     const helper = fs.readFileSync('deploy/lib/read-keychain-secret.mjs', 'utf8');
@@ -574,6 +617,7 @@ describe('health token shell wrappers', () => {
       expect(result.log).toContain('whatsoup-health-token');
       expect(result.log).not.toContain('stat ');
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it('deploy/whatsoup preserves fail-closed request auth when neither keyring nor tokens.env exists', () => {
@@ -582,7 +626,7 @@ describe('health token shell wrappers', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('resolved=');
     expect(result.stderr).toBe('');
-  });
+  }, PROBE_TEST_TIMEOUT_MS);
 
   it.each([
     ['bad-mode', 'mode 0600'],
@@ -602,7 +646,7 @@ describe('health token shell wrappers', () => {
     expect(result.stderr).toContain(detail);
     expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
     expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('b'.repeat(64));
-  });
+  }, PROBE_TEST_TIMEOUT_MS);
 
   it.each(['Darwin', 'Linux'] as const)(
     'deploy/whatsoup accepts a private directory with non-permission special bits on %s',
@@ -613,6 +657,7 @@ describe('health token shell wrappers', () => {
       expect(result.stdout).toBe(`resolved=${'a'.repeat(64)}`);
       expect(result.stderr).toBe('');
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it.each(['Darwin', 'Linux'] as const)(
@@ -627,6 +672,7 @@ describe('health token shell wrappers', () => {
       expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('a'.repeat(64));
       expect(`${result.stdout}\n${result.stderr}\n${result.log}`).not.toContain('b'.repeat(64));
     },
+    PROBE_TEST_TIMEOUT_MS,
   );
 
   it('uses a shared descriptor reader with no-follow, fstat, and a bounded read', () => {
