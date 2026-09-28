@@ -37,6 +37,8 @@ EXPECTED_CONSTANTS = {
     "SENTINEL_HEARTBEAT": "sentinel-heartbeat.json",
     "FLEET_SENTINEL_STATE": "fleet-sentinel-state.json",
     "Q_LOOP_STATE": "state.json",
+    "HEALTH_PROFILE_MISSING_MARKER": "health-check-profile-missing.json",
+    "WATCHDOG_PROFILE_MISSING_MARKER": "heartbeat-watchdog-profile-missing.json",
 }
 
 SCANNED_LITERALS = {
