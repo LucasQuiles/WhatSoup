@@ -38,6 +38,7 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 42),
+  endAbandonedActiveSession: vi.fn(() => 1),
   incrementMessageCount: vi.fn(),
   resolveResumableAgentSession: vi.fn((
     _db: unknown,

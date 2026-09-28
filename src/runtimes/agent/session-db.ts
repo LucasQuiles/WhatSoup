@@ -383,6 +383,32 @@ export function updateSessionStatus(db: Database, rowId: number, status: string)
   }
 }
 
+/**
+ * #3658: end a row whose generation was abandoned after a failed lifecycle
+ * close, but only while it is still that generation's active row. A row the
+ * sweep already reconciled, or one another generation reactivated with a
+ * different provider session, is left alone. Returns the number of rows ended.
+ */
+export function endAbandonedActiveSession(
+  db: Database,
+  rowId: number,
+  providerSessionId: string | null,
+): number {
+  const endedAt = new Date().toISOString();
+  const result = providerSessionId === null
+    ? db.raw.prepare(
+      `UPDATE agent_sessions SET status = 'ended', ended_at = ?
+       WHERE id = ? AND status = 'active'`,
+    ).run(endedAt, rowId)
+    : db.raw.prepare(
+      `UPDATE agent_sessions SET status = 'ended', ended_at = ?
+       WHERE id = ? AND status = 'active' AND session_id IS ?`,
+    ).run(endedAt, rowId, providerSessionId);
+  const changes = Number(result.changes);
+  if (changes === 1) log.info({ agentSessionId: rowId, status: 'ended', endedAt }, 'session.ended');
+  return changes;
+}
+
 /** Update a resumed row only while its immutable provider/session identity still matches. */
 export function updateResumedSessionStatus(
   db: Database,

@@ -21,6 +21,7 @@ import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import {
   createSession,
+  endAbandonedActiveSession,
   incrementMessageCount,
   resolveResumableAgentSession,
   updateResumedSessionStatus,
@@ -4827,21 +4828,24 @@ export class SessionManager {
    * #3658: forget a generation whose provider stopped but whose durable close
    * failed, before the runtime starts a fresh one in its place. Nothing later
    * may pair this row or provider session with the new generation. The row
-   * gets one best-effort row-only close to 'ended': the zombie sweep reconciles
-   * only 'active' rows, and 'orphaned' would still read as resumable. The lane
-   * and the cleanup-unproven flag are left alone, since only a fully
-   * successful teardown may reset them.
+   * gets one best-effort close to 'ended' while it is still this generation's
+   * active row: the zombie sweep reconciles only 'active' rows, and 'orphaned'
+   * would still read as resumable. The lane and the cleanup-unproven flag are
+   * left alone, since only a fully successful teardown may reset them.
    */
   retireUnclosedGeneration(): void {
     const rowId = this.dbRowId;
+    const sessionId = this.sessionId ?? this.resumeAttemptId;
     log.warn({
       chatJid: this.chatJid,
       rowId,
-      sessionId: this.sessionId ?? this.resumeAttemptId,
+      sessionId,
     }, 'session: abandoning a generation whose lifecycle close failed');
     if (rowId !== null) {
       try {
-        updateSessionStatus(this.db, rowId, 'ended');
+        if (endAbandonedActiveSession(this.db, rowId, sessionId) === 0) {
+          log.info({ chatJid: this.chatJid, rowId }, 'session: abandoned row already reconciled or reowned — left as is');
+        }
       } catch (err) {
         log.warn({ err, chatJid: this.chatJid, rowId }, 'session: abandoned row could not be ended — left for the startup sweep');
       }
