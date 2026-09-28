@@ -434,6 +434,35 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
+    it('a real lifecycle-close failure in the pre-spawn shutdown starts fresh with one notice', async () => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      // The first failed close leaves the manager inactive and still holding its row.
+      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+
+      expect(closeSpy).toHaveBeenCalledTimes(2);
+      closeSpy.mockRestore();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(providerSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no notice when the fresh spawn after a failed close is refused', async () => {
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      spawnSpy.mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture fresh spawn refused');
+      expect(notices).not.toHaveBeenCalled();
+      expect(providerSend).not.toHaveBeenCalled();
+    });
+
     const unprovenStops: Array<[string, Partial<ReturnType<SessionManager['getStatus']>>]> = [
       ['the provider is not proven stopped', { providerTerminated: false }],
       ['a durable failure closure was recorded', { durableFailureClosed: true }],
