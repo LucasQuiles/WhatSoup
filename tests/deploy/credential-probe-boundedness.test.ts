@@ -963,7 +963,9 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    if builtin [ "$#" -eq 1 ] && builtin [ "${start-}" = run ] && builtin [ "${FUNCNAME[1]}" = whatsoup_run_bounded ]; then',
     '      builtin umask "$@" || return',
     '      : > "$DEADLINE_WRITER_ARMED" || return 2',
-    '      if builtin [ "$cleanup_mode" = deadline-writer-publish-limited ]; then',
+    // Lift it for the pending write only: a later umask, as in a copying
+    // publish subshell, finds the pending file and keeps the limit.
+    '      if builtin [ "$cleanup_mode" = deadline-writer-publish-limited ] && ! builtin [ -e "$deadline_file.pending" ] && ! builtin [ -L "$deadline_file.pending" ]; then',
     '        builtin [ -e "$deadline_file" ] || builtin [ -L "$deadline_file" ] || : > "$DEADLINE_ABSENT_BEFORE_PUBLISH"',
     '        ulimit -S -f "$(ulimit -H -f)" || return 2',
     '      fi',
