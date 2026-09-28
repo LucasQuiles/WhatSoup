@@ -421,6 +421,9 @@ whatsoup_run_bounded() {
         [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
       }
       _bounded_guard_exit() {
+        # Derive the report from the durable claim, not the status set after
+        # it, so a TERM between a won claim and that status still reports 124.
+        if [ "$guard_status" -eq 0 ] && _bounded_read_outcome && [ "$outcome_event" = deadline ]; then guard_status=124; fi
         _bounded_guard_cleanup
         trap - EXIT
         exit "$guard_status"
