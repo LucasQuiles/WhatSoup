@@ -204,6 +204,33 @@ describe('SessionManager resume identity retirement (#3658)', () => {
     expect((sm as unknown as ResumeIdentityState).resumeAttemptId).toBeNull();
   });
 
+  it('retiring an unclosed resumed generation clears its attempted resume identity', async () => {
+    await sm.spawnSession(RESUME_ID, ROW_ID);
+    closeSessionLifecycle.mockImplementationOnce(() => {
+      throw new Error('fixture lifecycle close failed');
+    });
+    await expect(sm.shutdown(false)).rejects.toThrow('fixture lifecycle close failed');
+    expect((sm as unknown as ResumeIdentityState).resumeAttemptId).toBe(RESUME_ID);
+
+    sm.retireUnclosedGeneration();
+
+    expect((sm as unknown as ResumeIdentityState).resumeAttemptId).toBeNull();
+    expect(sm.getDbRowId()).toBeNull();
+    // A later shutdown owns nothing, so it cannot reach the exact-status update.
+    await expect(sm.shutdown()).resolves.toBeUndefined();
+    expect(updateExactSessionCheckpointStatus).not.toHaveBeenCalled();
+  });
+
+  it('retiring an unclosed generation leaves the provider turn lane as it was', async () => {
+    await sm.spawnSession();
+    (sm as unknown as { providerTurnInFlight: boolean }).providerTurnInFlight = true;
+
+    sm.retireUnclosedGeneration();
+
+    // Only a fully successful teardown may reopen a lane.
+    expect(sm.getStatus().turnInFlight).toBe(true);
+  });
+
   it('a fresh spawn after a failed close never attributes a pre-init crash to the old provider session', async () => {
     await sm.spawnSession();
     // The old generation's init named its provider session.

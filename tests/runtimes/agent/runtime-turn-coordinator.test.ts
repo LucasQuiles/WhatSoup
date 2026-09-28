@@ -219,6 +219,16 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
 });
 
 describe('turnFinalizationBookkeeping — checkpoint status ownership (#3658)', () => {
+  it('a turn finalized while its session is live reports the checkpoint active', () => {
+    const params = makeCoordinator().turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+    );
+    expect(params.checkpoint?.fields).toMatchObject({ sessionStatus: 'active' });
+  });
+
   it('a turn finalized after its session was torn down keeps an ended checkpoint ended', () => {
     const db = new Database(':memory:');
     db.open();

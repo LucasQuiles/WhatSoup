@@ -498,6 +498,36 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         { status: string }).status).toBe('ended');
     });
 
+    it('a refused fallback on a started manager keeps its row and provider session', async () => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const rowId = session.getDbRowId();
+      const sessionId = session.getStatus().sessionId;
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      // The provider is not proven stopped, so the fallback must refuse.
+      const realStatus = session.getStatus.bind(session);
+      const statusSpy = vi.spyOn(session, 'getStatus').mockImplementation(() => ({
+        ...realStatus(), providerTerminated: false,
+      }));
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      statusSpy.mockRestore();
+      closeSpy.mockRestore();
+
+      expect(spawnSpy).not.toHaveBeenCalled();
+      expect(session.getDbRowId()).toBe(rowId);
+      expect(session.getStatus().sessionId).toBe(sessionId);
+      expect(db.raw.prepare('SELECT status, session_id FROM agent_sessions WHERE id = ?').get(rowId))
+        .toMatchObject({ status: 'active', session_id: sessionId });
+      expect(notices).not.toHaveBeenCalled();
+    });
+
     it('sends no notice when the fresh spawn after a failed close is refused', async () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       spawnSpy.mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
