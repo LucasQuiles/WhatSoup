@@ -112,6 +112,7 @@ import {
   markSessionCompacted,
 } from './session-db.ts';
 import {
+  adoptionAfterFailedClose,
   announceAdoption,
   lazyCheckpointAdoption,
   LazyRestoreScopes,
@@ -5890,7 +5891,7 @@ export class AgentRuntime implements Runtime {
     if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
       // #3530 successor: a never-started non-sandbox per_chat manager decides
       // from its checkpoint what it may adopt (checkpoint-adoption.ts).
-      const adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
+      let adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
         && effectiveMapKey !== undefined && !isScheduledAgentJobMapKey(effectiveMapKey)
         && this.lazyRestoreScopes.isEligible(session)
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
@@ -5916,7 +5917,20 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
-      await session.shutdown();
+      try {
+        await session.shutdown();
+      } catch (err) {
+        // #3658: a close that failed only at its durable lifecycle step leaves
+        // no provider behind, so the turn takes the #3530 fresh-with-notice
+        // path instead of a silent pre-dispatch rejection.
+        const fallback = adoptionAfterFailedClose(err, session.getStatus());
+        if (fallback === null) throw err;
+        log.warn({ err, chatJid }, 'previous session close failed — starting fresh with a notice');
+        if (adoption.kind !== 'fresh_with_notice') {
+          announceAdoption(fallback, (notice) => this.sendDirect(chatJid, notice));
+        }
+        adoption = fallback;
+      }
       if (dispatchCancelled()) return;
       const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
         log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
