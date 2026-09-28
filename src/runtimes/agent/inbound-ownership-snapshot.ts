@@ -13,7 +13,9 @@
  *                behind another outstanding recovery job for the scope, or the
  *                oldest waiter on the provider lane
  *   executing  — a live recovery claim, or the provider lane is held by a turn
- *                for this chat (head row only)
+ *                for this chat (head row only), per a capture no older than
+ *                PROVIDER_CAPTURE_MAX_AGE_SECONDS, and not contradicted by a
+ *                completed checkpoint at or past the row
  *   no_owner   — none of the above; never healthy
  *
  * What it can NOT see (in-process only, and deliberately not reached into):
@@ -62,6 +64,8 @@ export type InboundOwnershipReason =
   | 'queued_behind_scope_recovery'
   | 'provider_execution_active'
   | 'provider_execution_waiting'
+  | 'provider_capture_stale'
+  | 'provider_active_contradicts_completed_checkpoint'
   | 'no_attributable_owner'
   | 'no_persisted_owner_provider_not_observed';
 
@@ -91,8 +95,17 @@ export type ProviderExecutionObservation = Pick<
   | 'oldestWaitMs'
 >;
 
+/**
+ * A provider capture older than this (or undated) is not evidence of what the
+ * lane holds now: holds turn over in seconds, so an old `active` proves nothing
+ * about the row. A capture up to the skew bound in the future is tolerated.
+ */
+export const PROVIDER_CAPTURE_MAX_AGE_SECONDS = 60;
+export const PROVIDER_CAPTURE_MAX_FUTURE_SKEW_SECONDS = 5;
+
 export type ProviderExecutionEvidence =
   | 'not_supplied'
+  | 'stale'
   | 'idle'
   | 'active_this_scope'
   | 'active_other_scope'
@@ -184,7 +197,9 @@ export interface InboundOwnershipSnapshot {
   readonly schemaVersion: typeof INBOUND_OWNERSHIP_SCHEMA_VERSION;
   readonly minAgeMinutes: number;
   readonly queueScope: InboundOwnershipQueueScope;
-  readonly providerExecutionEvidence: 'supplied' | 'not_supplied';
+  readonly providerExecutionEvidence: 'supplied' | 'not_supplied' | 'stale';
+  /** Seconds between the provider capture and this read (null when none or undated). */
+  readonly providerCaptureAgeSeconds: number | null;
   readonly healthy: boolean;
   readonly counts: {
     readonly processing: number;
@@ -201,7 +216,10 @@ export interface InboundOwnershipSnapshotOptions {
   readonly minAgeMinutes: number;
   readonly queueScope?: InboundOwnershipQueueScope;
   readonly providerExecution?: ProviderExecutionObservation | null;
-  /** When the provider capture was taken (epoch ms). */
+  /**
+   * When the provider capture was taken (epoch ms). Missing, or outside
+   * PROVIDER_CAPTURE_MAX_AGE_SECONDS, makes the capture stale: it attributes nothing.
+   */
   readonly providerExecutionCapturedAtMs?: number | null;
   readonly nowMs?: number;
 }
@@ -437,8 +455,18 @@ export function readInboundOwnershipSnapshot(
     throw new RangeError('minAgeMinutes must be a finite number >= 0');
   }
   const queueScope = options.queueScope ?? 'per_chat';
-  const provider = options.providerExecution ?? null;
   const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1000);
+  const supplied = options.providerExecution ?? null;
+  const capturedAtMs = options.providerExecutionCapturedAtMs ?? null;
+  const captureAgeSeconds = supplied !== null && capturedAtMs !== null && Number.isFinite(capturedAtMs)
+    ? nowSeconds - Math.floor(capturedAtMs / 1000)
+    : null;
+  const captureFresh = captureAgeSeconds !== null
+    && captureAgeSeconds <= PROVIDER_CAPTURE_MAX_AGE_SECONDS
+    && captureAgeSeconds >= -PROVIDER_CAPTURE_MAX_FUTURE_SKEW_SECONDS;
+  const captureStale = supplied !== null && !captureFresh;
+  // A stale capture is kept out of every decision below, not just labelled.
+  const provider = captureFresh ? supplied : null;
   const minAgeSeconds = options.minAgeMinutes * 60;
   const statements = prepareStatements(raw);
   const closer = new TerminalRecordInboundCloser(raw);
@@ -458,6 +486,7 @@ export function readInboundOwnershipSnapshot(
     : { depth: row.chat_depth, position: row.chat_position, head: row.chat_head };
 
   const providerEvidence = (scopeHash: string): ProviderExecutionEvidence => {
+    if (captureStale) return 'stale';
     if (!provider) return 'not_supplied';
     if (!provider.active) return 'idle';
     // A probe hashes provider/model, not a chat: it never attributes a chat row.
@@ -522,6 +551,12 @@ export function readInboundOwnershipSnapshot(
     if (direct) return direct;
     const scopeHash = shortHash(row.chat_jid);
     if (providerEvidence(scopeHash) === 'active_this_scope') {
+      // The chat's persisted completed turn is at or past this row, so the turn
+      // the lane holds for this chat cannot be this row's.
+      const completed = statements.checkpoint.get(row.seq) as CheckpointRow | undefined;
+      if (completed?.completed_inbound_seq != null && completed.completed_inbound_seq >= row.seq) {
+        return unowned('provider_active_contradicts_completed_checkpoint');
+      }
       return owned('executing', 'provider_execution_active', { kind: 'provider_execution' });
     }
     if (oldestPendingIsThisScope(scopeHash) === true) {
@@ -537,6 +572,7 @@ export function readInboundOwnershipSnapshot(
         generation: scopeJob.assigned_owner_generation,
       });
     }
+    if (captureStale) return unowned('provider_capture_stale');
     return unowned(provider ? 'no_attributable_owner' : 'no_persisted_owner_provider_not_observed');
   };
 
@@ -687,7 +723,8 @@ export function readInboundOwnershipSnapshot(
     schemaVersion: INBOUND_OWNERSHIP_SCHEMA_VERSION,
     minAgeMinutes: options.minAgeMinutes,
     queueScope,
-    providerExecutionEvidence: provider ? 'supplied' : 'not_supplied',
+    providerExecutionEvidence: captureStale ? 'stale' : provider ? 'supplied' : 'not_supplied',
+    providerCaptureAgeSeconds: captureAgeSeconds,
     healthy: rows.every((row) => row.healthy),
     counts: {
       processing,

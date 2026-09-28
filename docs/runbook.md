@@ -2581,16 +2581,35 @@ Each row is classified:
 |---|---|
 | `deferred` | A non-terminal `deferred_turn_obligations` row owns it (an exhausted one is `no_owner`). |
 | `queued` | A pending recovery job, the chat's persisted FIFO head (`queued_behind_fifo_head`), another outstanding recovery job for the scope, or the oldest provider-lane waiter owns it. A row queued behind an unowned head reports `healthy: false`. |
-| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts). |
+| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts), according to a fresh capture that no completed checkpoint contradicts. |
 | `no_owner` | Nothing attributable, including a terminal record or finished recovery job left beside an open row. Never healthy. |
 
 Exit `0` means every reported row has a healthy owner, `3` means at least one does not, and `2` is a
-usage, capture or open error. Limits: the queue is the persisted proxy (open inbounds per conversation
-in seq order), not the runtime's in-process TurnQueue; the gate's lease generation is not exposed;
-`checkpoint.activeTurnId` is reported as stored, and current writers only store null; the health
-capture and the database read are separate observations, and an `@lid`/`@s.whatsapp.net` alias can
-hash differently from the session's chat, so a mismatch reads `no_owner`, never healthy. Record the
-output as evidence. Do not replay, reset a checkpoint or restart on its basis alone.
+usage, capture or open error. Record the output as evidence. Do not replay, reset a checkpoint or
+restart on its basis alone.
+
+Evidence limits. Read every classification against these:
+
+- **Persisted FIFO proxy, not the TurnQueue.** `queue` is derived from open inbounds per conversation
+  (or globally with `--queue-scope global`) in seq order. The runtime's in-process per-chat TurnQueue
+  (depth, position, active turn) is not readable from outside the process and is not reported.
+- **No lease generation.** The provider gate does not publish its lease generation, so a capture cannot
+  say which hold it saw. Only recovery jobs, terminal records and the checkpoint's completed identity
+  carry a turn id and generation.
+- **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
+  writers only ever store null, so it never names an owner.
+- **The capture is a separate observation.** The health capture and the database read are not
+  simultaneous. The capture is dated by the file's mtime. If it is older than 60 seconds
+  (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the future, or undated, every row reads
+  `providerExecution.evidence: stale` and it attributes nothing (`provider_capture_stale`). Re-capture
+  immediately before running the script.
+- **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
+  chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
+  `executing`.
+- **Contradiction reads unowned.** If the capture shows a turn for this chat but the chat's
+  `session_checkpoints.completed_inbound_seq` is at or past the row, the held turn cannot be this row's:
+  the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
+  terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner

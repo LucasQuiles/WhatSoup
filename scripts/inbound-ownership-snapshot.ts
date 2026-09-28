@@ -12,7 +12,9 @@
  * naming the owner (queued / deferred / executing / no_owner) from the
  * persisted durability rows, joined with the provider-execution gate state when
  * a health capture is supplied. The capture is a separate observation taken by
- * the operator, not simultaneous with the database read.
+ * the operator, not simultaneous with the database read. It is dated by the
+ * file's mtime (the moment `curl > FILE` wrote it); a capture older than
+ * PROVIDER_CAPTURE_MAX_AGE_SECONDS is reported `stale` and attributes nothing.
  *
  * Safety posture:
  *   - opens the database read-only with `PRAGMA query_only = ON`, never through
@@ -25,7 +27,7 @@
  * Exit codes: 0 every reported row has an owner; 3 at least one row is
  * unowned or queued behind an unowned head; 2 usage, input or open error.
  */
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -111,9 +113,11 @@ function assertExistingRegularDatabase(dbPath: string): string {
  * Accepts either the bare providerExecution object or a saved health body,
  * where the runbook documents it at `runtime.agent.providerExecution`.
  */
-function loadProviderExecution(path: string): ProviderExecutionObservation {
+function loadProviderExecution(path: string): { observation: ProviderExecutionObservation; capturedAtMs: number } {
   let body: unknown;
+  let capturedAtMs: number;
   try {
+    capturedAtMs = statSync(path).mtimeMs;
     body = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   } catch {
     throw new Error('provider_execution_unreadable');
@@ -122,7 +126,7 @@ function loadProviderExecution(path: string): ProviderExecutionObservation {
     ?.runtime?.agent?.providerExecution;
   const observation = parseProviderExecutionObservation(nested ?? body);
   if (!observation) throw new Error('provider_execution_invalid');
-  return observation;
+  return { observation, capturedAtMs };
 }
 
 function refusal(reason: string): string {
@@ -144,10 +148,13 @@ export function runInboundOwnershipSnapshotCli(
   }
 
   let providerExecution: ProviderExecutionObservation | null = null;
+  let providerExecutionCapturedAtMs: number | null = null;
   let absolute: string;
   try {
     if (args.providerExecutionPath !== undefined) {
-      providerExecution = loadProviderExecution(args.providerExecutionPath);
+      const capture = loadProviderExecution(args.providerExecutionPath);
+      providerExecution = capture.observation;
+      providerExecutionCapturedAtMs = capture.capturedAtMs;
     }
     absolute = assertExistingRegularDatabase(args.dbPath);
   } catch (error) {
@@ -172,6 +179,7 @@ export function runInboundOwnershipSnapshotCli(
       minAgeMinutes: args.minAgeMinutes,
       queueScope: args.queueScope,
       providerExecution,
+      providerExecutionCapturedAtMs,
       ...(nowMs === undefined ? {} : { nowMs }),
     });
     write(`${JSON.stringify(snapshot)}\n`);
