@@ -49,6 +49,9 @@ vi.mock('../../scripts/lib/release-activation/apply.ts', async (importOriginal) 
   };
 });
 
+import { EventEmitter } from 'node:events';
+
+import * as cli from '../../scripts/release-activate.ts';
 import { RELEASE_ACTIVATE_EXIT, runReleaseActivateCli } from '../../scripts/release-activate.ts';
 import {
   activationArgs,
@@ -158,7 +161,68 @@ describe('release:activate report: one exception boundary, and a clock read that
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
-    expect(result.stderr).toBe('release:activate: report-failed Error\n');
+    expect(result.stderr).toBe('release:activate: report-failed\n');
+  });
+
+  it('a hostile error whose class name changes text between reads prints only the fixed report-failed line', async () => {
+    let reads = 0;
+    const hostileName = {
+      // Looks like a class name on the first conversion, and a path plus producer text on every later one.
+      toString: () => (reads++ === 0 ? 'Error' : `${fixture.base}/private-file\nproducer text`),
+    };
+    applyFaults.bindings = () => {
+      const error = new Error('injected');
+      Object.defineProperty(error, 'constructor', { value: { name: hostileName } });
+      return error;
+    };
+    const world = new SimulatedLaunchd(fixture);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.stderr).toBe('release:activate: report-failed\n');
+    expect(result.stderr).not.toContain('producer text');
+    expect(result.stderr).not.toContain(fixture.base);
+  });
+
+  it('an asynchronous stream error (EPIPE after a helper-failure diagnostic) is contained at the CLI I/O boundary', async () => {
+    // A stand-in for a process stream whose reader has gone: the write returns, then 'error' is emitted
+    // asynchronously, as a real pipe does. Without a listener, that emit would be an uncaught exception.
+    class ClosingStream extends EventEmitter {
+      readonly writes: string[] = [];
+      constructor(private readonly failOn: (text: string) => boolean) { super(); }
+      write(text: string): boolean {
+        this.writes.push(text);
+        if (this.failOn(text)) {
+          process.nextTick(() => this.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+        }
+        return true;
+      }
+    }
+    expect(typeof (cli as Record<string, unknown>).guardedCliIo).toBe('function');
+    const guardedCliIo = (cli as Record<string, unknown>).guardedCliIo as (streams: {
+      stdout: NodeJS.WritableStream;
+      stderr: NodeJS.WritableStream;
+    }) => { stdout: (text: string) => void; stderr: (text: string) => void };
+    const stdout = new ClosingStream(() => false);
+    const stderr = new ClosingStream((text) => text.includes('was not sent'));
+    const io = guardedCliIo({
+      stdout: stdout as unknown as NodeJS.WritableStream,
+      stderr: stderr as unknown as NodeJS.WritableStream,
+    });
+    // The alert helper fails, so the one stderr line on a successful activation is its diagnostic.
+    const world = new SimulatedLaunchd(fixture, { alertStatus: 1 });
+
+    const code = await runReleaseActivateCli(activationArgs(fixture, ['--apply']), world.host(), io);
+    await new Promise((resolve) => { setImmediate(resolve); });
+    io.stderr('a later line\n');
+
+    expect(code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(stderr.listenerCount('error')).toBe(1);
+    expect(stdout.listenerCount('error')).toBe(1);
+    expect(stderr.writes).toHaveLength(1);
+    expect(stderr.writes[0]).toContain('was not sent');
+    expect(stdout.writes.join('')).toContain('"outcome": "activated"');
   });
 
   it('a stderr callback that throws while reporting a receipt failure still returns the fixed exit code', async () => {
