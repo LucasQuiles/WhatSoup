@@ -4789,7 +4789,12 @@ export class SessionManager {
             );
           }
         }
-        this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
+        // #3658: with no row and no provider session this manager owns no
+        // lifecycle. A key-only status write would repaint whatever the chat's
+        // checkpoint holds, including an ended one, as resumable.
+        if (closingRowId !== null || closingSessionId !== null) {
+          this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
+        }
       }
       log.info({
         rowId: closingRowId,
