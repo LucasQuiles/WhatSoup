@@ -997,12 +997,15 @@ turnFinalizationBookkeeping(
       fields: {
         ...(status?.sessionId ? { sessionId: status.sessionId } : {}),
         ...(status?.pid ? { claudePid: status.pid } : {}),
+        // #3658: only a live session is reported here. An inactive one was
+        // closed by a lifecycle method (suspend, end or failure), which owns
+        // that status; writing 'suspended' would reopen an ended checkpoint.
         ...(
-          status?.active === undefined
+          status?.active !== true
           || status.durableFailureClosed === true
           || status.durableFailureInconclusive === true
           ? {}
-          : { sessionStatus: status.active ? 'active' : 'suspended' }
+          : { sessionStatus: 'active' }
         ),
         activeTurnId: null,
         ...(context.identity.inboundSeq === null
