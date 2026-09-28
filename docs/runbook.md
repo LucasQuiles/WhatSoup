@@ -2573,7 +2573,14 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/
 node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$HEALTH_JSON"
 # shared/single instances serialize every chat on one queue:
 node scripts/inbound-ownership-snapshot.ts --db "$DB" --queue-scope global --provider-execution-json "$HEALTH_JSON"
+# a bare providerExecution object carries no generated_at; date it explicitly:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$PE_JSON" \
+  --provider-captured-at 2026-09-28T07:20:00Z
 ```
+
+The full `/health` body carries its own `generated_at`, which dates the capture. Use
+`--provider-captured-at <ISO-8601 instant with zone>` only for a capture without one, such as a
+bare `runtime.agent.providerExecution` object.
 
 Each row is classified:
 
@@ -2599,10 +2606,14 @@ Evidence limits. Read every classification against these:
 - **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
   writers only ever store null, so it never names an owner.
 - **The capture is a separate observation.** The health capture and the database read are not
-  simultaneous. The capture is dated by the file's mtime. If it is older than 60 seconds
-  (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the future, or undated, every row reads
-  `providerExecution.evidence: stale` and it attributes nothing (`provider_capture_stale`). Re-capture
-  immediately before running the script.
+  simultaneous. The capture time comes from, in order: the body's own top-level `generated_at`;
+  else `--provider-captured-at`; else it is unknown, which counts as stale. `providerCaptureTimeSource`
+  reports which (`payload_generated_at`, `operator_flag`, `unknown`). The file's modification time is
+  never used, because a copied, touched or re-saved file would make an old body look fresh. A
+  `generated_at` that is present but unparseable is unknown; the flag does not override it. If the
+  capture is older than 60 seconds (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the
+  future, or undated, every row reads `providerExecution.evidence: stale` and it attributes nothing
+  (`provider_capture_stale`). Re-capture immediately before running the script.
 - **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
   chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
   `executing`.
