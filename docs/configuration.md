@@ -628,6 +628,17 @@ unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
 
+Every plist write replaces the installed file through a same-directory rename,
+and the replacement keeps the installed file's permission bits, capped at
+`0644` because launchd refuses group- or world-writable job definitions
+(`installedLaunchdPlistMode` in `src/fleet/platform.ts`). This covers
+reconcile, its rollback, and `release:activate`. So an owner-only (`0600`)
+instance plist, for example one carrying credentials in
+`EnvironmentVariables`, stays `0600`. When the installed plist is a symlink,
+the mode comes from the file it points to; the rename replaces the link itself
+and leaves that file untouched. A first install with no plist present creates
+the file at `0644` under the user's umask.
+
 Home-confinement of the two filesystem fields is enforced at two call sites. At
 API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
 `src/fleet/routes/ops.ts`) a `claudeConfigDir` or a `pathPrepend` entry
