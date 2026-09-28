@@ -465,16 +465,17 @@ whatsoup_run_bounded() {
         _bounded_guard_protocol_failure
       fi
       local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0 outcome_claim_rc=0
-      guard_status=124
+      # Report the deadline only once it owns the outcome. A TERM before the
+      # claim follows a worker that already returned its own authenticated view.
       _bounded_claim_outcome deadline-outer
       outcome_claim_rc=$?
       case "$outcome_claim_rc" in
-        0) ;;
+        0) guard_status=124 ;;
         1)
           _bounded_read_outcome || _bounded_guard_protocol_failure
           case "$outcome_event" in
             result) guard_status=0 ;;
-            deadline) ;;
+            deadline) guard_status=124 ;;
             *) _bounded_guard_protocol_failure ;;
           esac
           ;;

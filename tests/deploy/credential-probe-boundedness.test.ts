@@ -304,8 +304,7 @@ function observeLifecycleEventOrder(source: string): string {
     '        rm -f "$timeout_file"',
   ].join('\n'));
   insert('        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"', `        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"\n        ${event('C_COMPLETE cleanup=$cleanup_rc')}`);
-  insert('      guard_status=124\n      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
-    '      guard_status=124',
+  insert('      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
     '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
     '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
     '        ;; esac',
