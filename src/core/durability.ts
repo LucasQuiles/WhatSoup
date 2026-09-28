@@ -985,8 +985,18 @@ export class DurabilityEngine {
           workspace_path = COALESCE(excluded.workspace_path, workspace_path),
           claude_pid = COALESCE(excluded.claude_pid, claude_pid),
           -- #3658: excluded.session_status carries the insert default, so
-          -- the update reads the caller's own, possibly absent, status.
-          session_status = COALESCE(?, session_status),
+          -- the update reads the caller's own, possibly absent, status. A
+          -- write that keeps the same provider session never reopens an
+          -- ended checkpoint as suspended or orphaned; only a lifecycle method
+          -- or a new session does that.
+          session_status = CASE
+            WHEN session_checkpoints.session_status = 'ended'
+              AND (excluded.session_id IS NULL
+                OR excluded.session_id IS session_checkpoints.session_id)
+              AND ? IN ('suspended', 'orphaned')
+              THEN session_checkpoints.session_status
+            ELSE COALESCE(?, session_checkpoints.session_status)
+          END,
           completed_inbound_seq = CASE
             WHEN excluded.session_id IS NOT NULL
               AND excluded.session_id IS NOT session_checkpoints.session_id
@@ -1432,6 +1442,8 @@ export class DurabilityEngine {
       fields.completedLogicalTurnId ?? null,
       fields.completedManagerId ?? null,
       fields.completedGeneration ?? null,
+      // The conflict clause reads the status twice: the ended guard, then the write.
+      fields.sessionStatus ?? null,
       fields.sessionStatus ?? null,
     );
   }
