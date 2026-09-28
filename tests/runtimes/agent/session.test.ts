@@ -7720,7 +7720,11 @@ describe('session.ts uncovered-branch coverage', () => {
       now = 30_030;
       const secondTurn = session.sendTurn('second');
       await vi.waitFor(() => {
-        expect(killSessionTree).toHaveBeenCalledWith(firstChild, 'SIGTERM', expect.anything());
+        expect(killSessionTree).toHaveBeenCalledWith(firstChild, 'SIGTERM', expect.objectContaining({
+          generationMarker: expect.any(String),
+          termGraceMs: (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS,
+          onOutcome: expect.any(Function),
+        }));
       });
       expect(gate.snapshot()).toMatchObject({
         active: true,
