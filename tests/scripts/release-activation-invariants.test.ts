@@ -16,6 +16,7 @@ import {
 import type { HealthObservation } from '../../scripts/lib/release-activation/host.ts';
 import {
   type Binding,
+  type BindingEvidence,
   classifyReleaseInvariants,
   type HealthInvariantsReading,
   type ProcessSample,
@@ -27,7 +28,8 @@ import {
 
 const FLOOR = ['a.required'] as const;
 const PID = 7001;
-const STARTED = 'Mon Sep 28 12:00:00 2026';
+/** When the diagnostic response was received (a whole second plus 400 ms). */
+const RESPONDED = Date.UTC(2026, 0, 1, 12, 0, 10) + 400;
 
 function declared(floorIds: string[], extraIdCount = 0): HealthInvariantsReading {
   return { reading: 'declared', floorIds, extraIdCount };
@@ -52,8 +54,17 @@ function bound(health: HealthObservation | null, pid: number | null = PID, bindi
   return { pid, argvMatches: true, health, binding };
 }
 
+/** The observation from the poll that decided: it passed, with a diagnostic body answered at RESPONDED. */
+function evidence(overrides: Partial<BindingEvidence> = {}): BindingEvidence {
+  return {
+    pid: PID, argvMatches: true, passed: true, health: observation(declared(['a.required'])), respondedAtMs: RESPONDED,
+    ...overrides,
+  };
+}
+
+/** The one sample taken after the outcome: the same process, started a minute before the response. */
 function sample(overrides: Partial<ProcessSample> = {}): ProcessSample {
-  return { pid: PID, argvMatches: true, startTime: STARTED, ...overrides };
+  return { pid: PID, argvMatches: true, startedAtMs: RESPONDED - 60_400, ...overrides };
 }
 
 describe('the leaf constant', () => {
@@ -208,33 +219,42 @@ describe('releaseInvariantsVerdict: bound to the responding process', () => {
   });
 });
 
-describe('resolveBinding: generation identity across the two samples', () => {
-  const body = observation(declared(['a.required']));
+describe('resolveBinding: one sample after the outcome, against the response second', () => {
+  const second = (ms: number) => Math.floor(ms / 1_000) * 1_000;
 
-  it('bound: same pid and start time in both samples, argv on the release, and the responder names that pid', () => {
-    expect(resolveBinding(sample(), sample(), body)).toBe('bound');
+  it('bound: same pid and argv, a start second strictly before the response second, and the responder names that pid', () => {
+    expect(resolveBinding(evidence(), sample())).toBe('bound');
+    // The latest start that still binds: the whole second before the response.
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) - 1_000 }))).toBe('bound');
   });
 
-  it('unbound: no pid or argv on another release at the first sample, argv changed, or another responder pid', () => {
-    expect(resolveBinding(sample({ pid: null, argvMatches: false, startTime: null }), null, null)).toBe('unbound');
-    expect(resolveBinding(sample({ argvMatches: false }), sample(), body)).toBe('unbound');
-    expect(resolveBinding(sample(), sample({ argvMatches: false }), body)).toBe('unbound');
-    expect(resolveBinding(sample(), sample(), observation(declared(['a.required']), { responderPid: 424_242 }))).toBe('unbound');
-    expect(resolveBinding(sample(), sample(), observation(declared(['a.required']), { responderPid: null }))).toBe('unbound');
+  it('unobserved: a start in the SAME second as the response (a same-second pid reuse would compare equal)', () => {
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) }))).toBe('unobserved');
   });
 
-  it('restarted: another pid, no pid at all, or the same pid with another start time (pid reuse)', () => {
-    expect(resolveBinding(sample(), sample({ pid: PID + 1 }), body)).toBe('restarted');
-    expect(resolveBinding(sample(), sample({ pid: null, argvMatches: false, startTime: null }), body)).toBe('restarted');
-    expect(resolveBinding(sample(), sample({ startTime: 'Mon Sep 28 12:00:07 2026' }), body)).toBe('restarted');
+  it('restarted: a start in a later second than the response, another pid, or no process at all', () => {
+    expect(resolveBinding(evidence(), sample({ startedAtMs: second(RESPONDED) + 1_000 }))).toBe('restarted');
+    expect(resolveBinding(evidence(), sample({ pid: PID + 1 }))).toBe('restarted');
+    expect(resolveBinding(evidence(), sample({ pid: null, argvMatches: false, startedAtMs: null }))).toBe('restarted');
   });
 
-  it('unobserved: no diagnostic body, no re-sample (timed out or failed), or a start time that could not be read', () => {
-    expect(resolveBinding(sample(), sample(), null)).toBe('unobserved');
-    expect(resolveBinding(sample(), sample(), observation(null, { projection: 'public' }))).toBe('unobserved');
-    expect(resolveBinding(sample(), null, body)).toBe('unobserved');
-    expect(resolveBinding(sample({ startTime: null }), sample(), body)).toBe('unobserved');
-    expect(resolveBinding(sample(), sample({ startTime: null }), body)).toBe('unobserved');
+  it('unbound: no pid or argv on another release when observed, argv changed, or another responder pid', () => {
+    expect(resolveBinding(evidence({ pid: null, argvMatches: false }), null)).toBe('unbound');
+    expect(resolveBinding(evidence({ argvMatches: false }), sample())).toBe('unbound');
+    expect(resolveBinding(evidence(), sample({ argvMatches: false }))).toBe('unbound');
+    expect(resolveBinding(evidence({ health: observation(declared(['a.required']), { responderPid: 424_242 }) }), sample()))
+      .toBe('unbound');
+    expect(resolveBinding(evidence({ health: observation(declared(['a.required']), { responderPid: null }) }), sample()))
+      .toBe('unbound');
+  });
+
+  it('unobserved: the observation did not pass, no diagnostic body, no response time, no sample (timed out), or no start time', () => {
+    expect(resolveBinding(evidence({ passed: false }), sample())).toBe('unobserved');
+    expect(resolveBinding(evidence({ health: null }), sample())).toBe('unobserved');
+    expect(resolveBinding(evidence({ health: observation(null, { projection: 'public' }) }), sample())).toBe('unobserved');
+    expect(resolveBinding(evidence({ respondedAtMs: null }), sample())).toBe('unobserved');
+    expect(resolveBinding(evidence(), null)).toBe('unobserved');
+    expect(resolveBinding(evidence(), sample({ startedAtMs: null }))).toBe('unobserved');
   });
 });
 

@@ -30,6 +30,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fsFaults = vi.hoisted(() => ({
   rename: null as null | ((from: string, to: string) => void),
   write: null as null | ((target: unknown, data: unknown) => void),
+  /** Runs before fsyncSync with the path its fd was opened on (a directory fsync opens the directory). */
+  fsync: null as null | ((openedPath: string) => void),
+  opened: new Map<number, string>(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -43,6 +46,15 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
       fsFaults.write?.(args[0], args[1]);
       return actual.writeFileSync(...args);
+    },
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      const fd = actual.openSync(...args);
+      fsFaults.opened.set(fd, String(args[0]));
+      return fd;
+    },
+    fsyncSync: (fd: number) => {
+      fsFaults.fsync?.(fsFaults.opened.get(fd) ?? '');
+      return actual.fsyncSync(fd);
     },
   };
 });
@@ -307,6 +319,23 @@ interface WorldOptions {
   plutilFails?: boolean;
   /** A bounded exec (one given `timeoutMs`) matching this never settles, as a hung child would. */
   hangBounded?: (file: string, args: readonly string[]) => boolean;
+  /** Runs at every bounded exec, before it answers (e.g. a migration that commits meanwhile). */
+  onBoundedCall?: (file: string, args: readonly string[]) => void;
+  /** How long a process has been up when it first answers (its start precedes the tool's clock by this). Default 2 s. */
+  bootMs?: number;
+  /** Take `now` from Date.now() and sleep on setTimeout, so fake timers drive the clock (runPumped). */
+  realTime?: boolean;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `ps -o lstart=` under TZ=UTC0 and LC_ALL=C: second resolution, day padded with a space. */
+function lstartText(ms: number): string {
+  const d = new Date(ms);
+  const two = (n: number): string => String(n).padStart(2, '0');
+  return `${WEEKDAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${String(d.getUTCDate()).padStart(2, ' ')} `
+    + `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
 }
 
 interface RecordedAlert {
@@ -336,18 +365,23 @@ class SimulatedLaunchd {
   readonly tokensSeen: string[] = [];
   /** Every alert sent through the host seam, in order. */
   readonly alerts: RecordedAlert[] = [];
-  /** Every health body served, with the release root it came from. */
-  readonly served: Array<{ root: string | null; body: string }> = [];
+  /** Every health body served: the release root and pid it came from, and the tool clock when it was served. */
+  readonly served: Array<{ root: string | null; body: string; at: number; pid: number | null }> = [];
   /** Release root of every instance process started, in order. */
   readonly instanceStarts: string[] = [];
   private readonly loaded = new Map<string, { pid: number; definition: string; root: string | null }>();
   private readonly alive = new Set<number>();
   private readonly argv = new Map<number, string>();
-  /** `ps -o lstart=` per pid: a new value on every start, even when a pid is reused. */
-  private readonly startTimes = new Map<number, string>();
-  private startSeq = 0;
+  /** Process start time per pid (ms), as `ps -o lstart=` reports it. */
+  private readonly startTimes = new Map<number, number>();
   /** Every exec the tool bounded with its own timeout (`options.timeoutMs`), in order. */
   readonly boundedCalls: string[][] = [];
+  /** Index into `calls` of every bounded exec, to check its order against the mutating calls. */
+  readonly boundedAt: number[] = [];
+  /** The tool clock at each hung call. */
+  readonly hungAt: number[] = [];
+  /** The `env` each `ps -o lstart=` call asked for. */
+  readonly startTimeEnvs: unknown[] = [];
   private nextPid = 7000;
   private clock = 1_767_225_600_000;
   readonly transient: Record<string, number>;
@@ -366,10 +400,14 @@ class SimulatedLaunchd {
     return path.dirname(path.dirname(readlinkSync(this.fixture.wrapperLink)));
   }
 
-  private start(label: string, definition: string, reusePid?: number): number {
+  now(): number {
+    return this.options.realTime ? Date.now() : this.clock;
+  }
+
+  private start(label: string, definition: string, reusePid?: number, startedAtMs?: number): number {
     const pid = reusePid ?? this.nextPid++;
     this.alive.add(pid);
-    this.startTimes.set(pid, `Mon Sep 28 12:00:${String(this.startSeq++).padStart(2, '0')} 2026`);
+    this.startTimes.set(pid, startedAtMs ?? this.now() - (this.options.bootMs ?? 2_000));
     const root = label === INSTANCE_LABEL ? this.runningRoot() : null;
     if (root !== null) {
       this.argv.set(pid, this.options.instanceArgv?.(root)
@@ -395,12 +433,26 @@ class SimulatedLaunchd {
     this.start(INSTANCE_LABEL, job.definition);
   }
 
-  /** Restart the instance on the SAME pid (pid reuse): only the process start time tells the generations apart. */
-  reuseInstancePid(): void {
+  /**
+   * Restart the instance on the SAME pid (pid reuse). By default the new
+   * process starts a second after now; `startedAtMs` can give it the same
+   * start time as the process it replaced.
+   */
+  reuseInstancePid(startedAtMs: number = this.now() + 1_000): void {
     const job = this.loaded.get(INSTANCE_LABEL);
     if (!job) return;
     this.exit(job.pid, job.root, 'kickstart');
-    this.start(INSTANCE_LABEL, job.definition, job.pid);
+    this.start(INSTANCE_LABEL, job.definition, job.pid, startedAtMs);
+  }
+
+  /** Start time (ms) of the running instance process. */
+  instanceStartedAt(): number {
+    return this.startTimes.get(this.loaded.get(INSTANCE_LABEL)!.pid)!;
+  }
+
+  /** Give the running instance process this start time (a process that started just now). */
+  setInstanceStartedAt(ms: number): void {
+    this.startTimes.set(this.loaded.get(INSTANCE_LABEL)!.pid, ms);
   }
 
   /** Release roots the instance ran on, collapsing the restart `kickstart -k` adds after each bootstrap. */
@@ -438,8 +490,10 @@ class SimulatedLaunchd {
       platform: this.options.platform ?? 'darwin',
       uid: UID,
       isProcessAlive: (pid) => this.alive.has(pid),
-      sleep: async (ms) => { this.clock += ms; },
-      now: () => this.clock,
+      sleep: this.options.realTime
+        ? (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); })
+        : async (ms) => { this.clock += ms; },
+      now: () => this.now(),
       fetchHealth: async (port, token) => {
         expect(port).toBe(HEALTH_PORT);
         this.tokensSeen.push(token);
@@ -452,7 +506,7 @@ class SimulatedLaunchd {
         const body = this.options.injectPid === false || serving === null
           ? response.body
           : withServingPid(response.body, serving.pid);
-        this.served.push({ root, body });
+        this.served.push({ root, body, at: this.now(), pid: serving?.pid ?? null });
         return { status: response.status, body };
       },
       emitReleaseAlert: async (request) => {
@@ -464,11 +518,17 @@ class SimulatedLaunchd {
       toolCommit: async () => TOOL_COMMIT,
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
-        const bounded = (options as { timeoutMs?: number } | undefined)?.timeoutMs !== undefined;
-        if (bounded) {
+        const extra = options as { timeoutMs?: number; env?: unknown } | undefined;
+        if (extra?.timeoutMs !== undefined) {
           this.boundedCalls.push([file, ...args]);
+          this.boundedAt.push(this.calls.length - 1);
+          if (args.includes('lstart=')) this.startTimeEnvs.push(extra.env);
+          this.options.onBoundedCall?.(file, args);
           // A child that never exits: only the tool's own bound can end this call.
-          if (this.options.hangBounded?.(file, args)) return new Promise<ExecResult>(() => {});
+          if (this.options.hangBounded?.(file, args)) {
+            this.hungAt.push(this.now());
+            return new Promise<ExecResult>(() => {});
+          }
         }
         if (file === 'launchctl') {
           const [verb, ...rest] = args;
@@ -507,7 +567,7 @@ class SimulatedLaunchd {
         if (file === 'ps') {
           const pid = Number(args[1]);
           if (args.includes('lstart=')) {
-            return this.alive.has(pid) ? ok(`${this.startTimes.get(pid)}\n`) : { code: 1, stdout: '', stderr: '' };
+            return this.alive.has(pid) ? ok(`${lstartText(this.startTimes.get(pid)!)}\n`) : { code: 1, stdout: '', stderr: '' };
           }
           return this.alive.has(pid) && this.argv.has(pid) ? ok(`${this.argv.get(pid)}\n`) : { code: 1, stdout: '', stderr: '' };
         }
@@ -535,6 +595,11 @@ class SimulatedLaunchd {
 
   mutatingCalls(): string[][] {
     return this.calls.filter(([file, verb]) => file === 'launchctl' && ['bootout', 'bootstrap', 'kickstart'].includes(verb!));
+  }
+
+  /** Index into `calls` of the last bootout, bootstrap or kickstart. */
+  lastMutatingAt(): number {
+    return this.calls.findLastIndex(([file, verb]) => file === 'launchctl' && ['bootout', 'bootstrap', 'kickstart'].includes(verb!));
   }
 }
 
@@ -565,6 +630,37 @@ async function run(
   return { code, stdout, stderr, json: stdout ? JSON.parse(stdout) as Record<string, unknown> : {} };
 }
 
+const PUMP_STEP_MS = 250;
+const PUMP_LIMIT_MS = 180_000;
+
+/**
+ * Run the CLI under fake setTimeout, clearTimeout and Date, with a
+ * `realTime` world (host.now() = Date.now(), sleep on setTimeout), so fake time
+ * drives both the tool's timers and its deadline clock. Real I/O progresses
+ * between steps. A run that does not settle within PUMP_LIMIT_MS of fake time
+ * fails with a labelled error rather than the runner timeout.
+ */
+async function runPumped(
+  makeWorld: () => SimulatedLaunchd,
+  argv: string[],
+): Promise<{ world: SimulatedLaunchd; result: Awaited<ReturnType<typeof run>> }> {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: 1_767_225_600_000 });
+  try {
+    const world = makeWorld();
+    const pending = run(world, argv);
+    let settled = false;
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    for (let elapsed = 0; !settled; elapsed += PUMP_STEP_MS) {
+      if (elapsed >= PUMP_LIMIT_MS) throw new Error(`release:activate did not settle within ${PUMP_LIMIT_MS} ms of fake time`);
+      await new Promise((resolve) => { setImmediate(resolve); });
+      await vi.advanceTimersByTimeAsync(PUMP_STEP_MS);
+    }
+    return { world, result: await pending };
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 function onlyBackup(fixture: Fixture): string {
   const entries = readdirSync(fixture.backupDir);
   expect(entries).toHaveLength(1);
@@ -573,20 +669,26 @@ function onlyBackup(fixture: Fixture): string {
 
 let fixture: Fixture;
 
-beforeEach(() => {
-  fixture = installFixture();
+/** Make `next` the current fixture, with the environment pointed at its home. */
+function useFixture(next: Fixture): void {
+  fixture = next;
   vi.stubEnv('HOME', fixture.home);
   vi.stubEnv('XDG_CONFIG_HOME', path.join(fixture.home, '.config'));
   vi.stubEnv('XDG_DATA_HOME', path.join(fixture.home, '.local', 'share'));
   vi.stubEnv('XDG_STATE_HOME', path.join(fixture.home, '.local', 'state'));
   vi.stubEnv('WHATSOUP_HEALTH_TOKEN', undefined);
   vi.stubEnv(`BOT_ERRORS_HEALTH_TOKEN_${INSTANCE.replace(/-/g, '_').toUpperCase()}`, undefined);
+}
+
+beforeEach(() => {
+  useFixture(installFixture());
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
   fsFaults.rename = null;
   fsFaults.write = null;
+  fsFaults.fsync = null;
 });
 
 describe('release:activate arguments', () => {
@@ -1103,6 +1205,35 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
   });
 
+  it('a failed directory fsync after the rename reports the receipt published with durability unproven, never "not recorded"', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      alertStatus: 1,
+      health: (root, fallback) => {
+        // Armed after every backup write: only the receipt's directory fsync fails.
+        if (root === fixture.newRelease && fsFaults.fsync === null) {
+          const dir = onlyBackup(fixture);
+          fsFaults.fsync = (openedPath) => {
+            if (openedPath === dir) throw Object.assign(new Error('EIO: injected directory fsync failure'), { code: 'EIO' });
+          };
+        }
+        return newReleaseEmits(NO_BLOCK)(root, fallback);
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+    fsFaults.fsync = null;
+
+    // The final receipt was published: its bytes carry the helper status.
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, kind: 'warning', status: 1 } });
+    expect(receiptTemporaries()).toEqual([]);
+    expect(result.stderr).toContain('release:activate: receipt-written-durability-unproven EIO\n');
+    expect(result.stderr).not.toContain('receipt-write-failed');
+    expect(result.stderr).not.toContain('not recorded');
+    expect(result.stderr).toContain('the verdict is in receipt.json');
+    expect(result.stderr).not.toContain(fixture.base);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
   it('a failed first receipt write still attempts the alert, prints only a fixed code with the errno name, and keeps the exit code', async () => {
     let blocked: { restore: () => void } | null = null;
     const world = new SimulatedLaunchd(fixture, {
@@ -1405,31 +1536,130 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
   });
 
   it('a re-sample exec that never exits is cut off at its own bound: the activation completes as the baseline, binding unobserved', async () => {
+    let alertAt: number | null = null;
     // Only bounded execs can hang here, and the one bounded launchctl call is the re-sample.
-    const world = new SimulatedLaunchd(fixture, { hangBounded: (file) => file === 'launchctl' });
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    let result: Awaited<ReturnType<typeof run>> | null = null;
-    try {
-      const pending = run(world, activationArgs(fixture, ['--apply']));
-      let settled = false;
-      pending.then(() => { settled = true; }, () => { settled = true; });
-      while (!settled) {
-        // Let real I/O (the database backup, file writes) progress, then move the fake clock.
-        await new Promise((resolve) => { setImmediate(resolve); });
-        await vi.advanceTimersByTimeAsync(1_000);
-      }
-      result = await pending;
-    } finally {
-      vi.useRealTimers();
-    }
+    const { world, result } = await runPumped(() => new SimulatedLaunchd(fixture, {
+      realTime: true,
+      hangBounded: (file) => file === 'launchctl',
+      onAlert: () => { alertAt = Date.now(); },
+    }), activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'unknown', detail: 'unobserved', schema: null, undeclared: INVARIANT_FLOOR },
     });
     expect(receiptOf().verification).toMatchObject({ binding: 'unobserved' });
-    expect(result!.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
-    expect(result!.json.outcome).toBe('activated');
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
     expect(world.boundedCalls.filter(([file]) => file === 'launchctl')).toHaveLength(1);
+    // The bound is 5 s: the run continues 5 s after the hung call, not earlier and not much later.
+    expect(world.hungAt).toHaveLength(1);
+    expect(alertAt! - world.hungAt[0]!).toBeGreaterThanOrEqual(5_000);
+    expect(alertAt! - world.hungAt[0]!).toBeLessThan(5_000 + PUMP_STEP_MS);
+  });
+
+  it('a hanging start-time read never moves the verification: five failed polls then success pass at the sixth poll, one lstart call', async () => {
+    let polls = 0;
+    let alertAt: number | null = null;
+    const { world, result } = await runPumped(() => new SimulatedLaunchd(fixture, {
+      realTime: true,
+      hangBounded: (file, args) => file === 'ps' && args.includes('lstart='),
+      health: (root, fallback) => {
+        if (root !== fixture.newRelease) return fallback();
+        polls += 1;
+        return polls <= 5 ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) } : fallback();
+      },
+      onAlert: () => { alertAt = Date.now(); },
+    }), activationArgs(fixture, ['--apply']));
+
+    // The same poll and outcome as with no report work at all.
+    expect(polls).toBe(6);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
+    expect(receiptOf().verification).toMatchObject({ binding: 'unobserved' });
+    // At most one start-time read, after the outcome, in UTC with the C locale.
+    expect(world.boundedCalls.filter((call) => call.includes('lstart='))).toHaveLength(1);
+    expect(world.startTimeEnvs).toEqual([{ TZ: 'UTC0', LC_ALL: 'C' }]);
+    expect(Math.min(...world.boundedAt)).toBeGreaterThan(world.lastMutatingAt());
+    expect(alertAt! - world.hungAt[0]!).toBeGreaterThanOrEqual(5_000);
+    expect(alertAt! - world.hungAt[0]!).toBeLessThan(5_000 + PUMP_STEP_MS);
+  });
+
+  it('report work never runs before the outcome is final: a migration committing during a hung re-sample cannot block the rollback', async () => {
+    const failing = (world: Fixture): WorldOptions => ({
+      realTime: true,
+      health: (root, fallback) => (root === world.newRelease
+        ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
+        : fallback()),
+    });
+    const hung = fixture;
+    let migrated = false;
+    const { world, result } = await runPumped(() => new SimulatedLaunchd(hung, {
+      ...failing(hung),
+      // Every report exec hangs, and a migration commits while the first one hangs.
+      hangBounded: () => true,
+      onBoundedCall: () => {
+        if (!migrated) migrateFixture(hung.dbPath, FIXTURE_SCHEMA + 1);
+        migrated = true;
+      },
+    }), activationArgs(hung, ['--apply']));
+    const hungInvariants = receiptOf().invariants;
+
+    // The no-report baseline: the same failing verification on a fresh fixture, with no hang and no migration.
+    useFixture(installFixture());
+    const baseline = await runPumped(() => new SimulatedLaunchd(fixture, failing(fixture)), activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(baseline.result.code);
+    expect(result.json.outcome).toBe(baseline.result.json.outcome);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+    expect(result.json.outcome).toBe('rolled-back');
+    expect(migrated).toBe(true);
+    // Every report exec comes after the last launchctl bootout, bootstrap or kickstart.
+    expect(Math.min(...world.boundedAt)).toBeGreaterThan(world.lastMutatingAt());
+    // The failed observation is never re-sampled: no bounded exec names a pid that served the new release.
+    const failedPids = new Set(world.served.filter((entry) => entry.root === hung.newRelease).map((entry) => String(entry.pid)));
+    expect(failedPids.size).toBeGreaterThan(0);
+    expect(world.boundedCalls.filter(([file, , pid]) => file === 'ps' && failedPids.has(pid!))).toEqual([]);
+    expect(hungInvariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unobserved' },
+      rollback: { outcome: 'unknown', detail: 'unobserved' },
+    });
+  });
+
+  it('same-second pid reuse is never bound: the same lstart for the responder and its replacement gives unobserved and no clear', async () => {
+    let reused = false;
+    const lstarts: string[] = [];
+    let world: SimulatedLaunchd | null = null;
+    world = new SimulatedLaunchd(fixture, {
+      health: (root, fallback) => {
+        const response = newReleaseEmits(CURRENT_BLOCK)(root, fallback);
+        if (root === fixture.newRelease && !reused) {
+          reused = true;
+          const at = world!.now();
+          // The responder started in the second of its response; the replacement gets the
+          // same pid AND the same second-resolution start time.
+          world!.setInstanceStartedAt(at);
+          lstarts.push(lstartText(world!.instanceStartedAt()));
+          world!.reuseInstancePid(at);
+          lstarts.push(lstartText(world!.instanceStartedAt()));
+        }
+        return response;
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    // Fixture premise: one lstart string for both processes, in the second the passing response was served.
+    const passing = world.served.filter((entry) => entry.root === fixture.newRelease);
+    expect(passing).toHaveLength(1);
+    expect(lstarts).toEqual([lstartText(passing[0]!.at), lstartText(passing[0]!.at)]);
+    expect(Math.floor(world.instanceStartedAt() / 1_000)).toBe(Math.floor(passing[0]!.at / 1_000));
+    expect(receiptOf().verification).toMatchObject({ binding: 'unobserved' });
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unobserved', undeclared: INVARIANT_FLOOR },
+    });
+    expect(reused).toBe(true);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
   });
 
   it('a failed first health poll and a passing second activate as the baseline; the re-sample runs once, after the decision', async () => {
@@ -1451,8 +1681,9 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.json.outcome).toBe('activated');
     expect(polls).toBe(2);
-    // Not once per poll: one bounded launchctl print, for the final observation only.
+    // Not once per poll: one bounded launchctl print and one start-time read, after the outcome.
     expect(world.boundedCalls.filter(([file, verb]) => file === 'launchctl' && verb === 'print')).toHaveLength(1);
+    expect(world.boundedCalls.filter((call) => call.includes('lstart='))).toHaveLength(1);
     expect(receiptOf().verification).toMatchObject({ binding: 'bound' });
   });
 
@@ -1499,8 +1730,9 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
+    // The activation observation did not pass, so it was not re-sampled: unobserved.
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'satisfied' },
+      activation: { outcome: 'unknown', detail: 'unobserved' },
       rollback: { outcome: 'missing', detail: null, undeclared: INVARIANT_FLOOR },
       alert: { attempted: true, kind: 'warning', status: 0 },
     });
@@ -1508,7 +1740,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
   });
 
-  it('a rollback where both processes declare the floor sends exactly one clear', async () => {
+  it('a rollback where both processes declare the floor still sends one warning: the failed activation is unobserved, so rolled-back never clears', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: (root, fallback) => (root === fixture.newRelease
         ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
@@ -1518,12 +1750,12 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'satisfied' },
+      activation: { outcome: 'unknown', detail: 'unobserved' },
       rollback: { outcome: 'satisfied' },
-      alert: { attempted: true, kind: 'clear', status: 0 },
+      alert: { attempted: true, kind: 'warning', status: 0 },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
-    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['clear']);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
   });
 
   it('a rollback body served by another pid is unknown/unbound for the rollback verdict', async () => {
@@ -1536,7 +1768,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'satisfied' },
+      activation: { outcome: 'unknown', detail: 'unobserved' },
       rollback: { outcome: 'unknown', detail: 'unbound' },
     });
     expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
@@ -1556,13 +1788,13 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
-    // The new instance may already be stopped: a satisfied activation verdict clears nothing here.
+    // The activation did not pass, so it is unobserved: one warning, never a clear.
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'satisfied' },
+      activation: { outcome: 'unknown', detail: 'unobserved' },
       rollback: null,
-      alert: { attempted: false, kind: null, status: null },
+      alert: { attempted: true, kind: 'warning', status: 0 },
     });
-    expect(world.alerts).toEqual([]);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
   });
 
   it('binds to the executing process: argv on the old release gives unknown/unbound, not the body it served', async () => {
@@ -1676,6 +1908,18 @@ describe('release activation helpers', () => {
     expect(pidOf({})).toBeNull();
     expect(pidOf({ pid: '7001' })).toBeNull();
     expect(pidOf({ pid: 7001.5 })).toBeNull();
+  });
+
+  it('parses ps lstart (TZ=UTC0, LC_ALL=C) to UTC epoch ms at second resolution, and refuses anything else', async () => {
+    const apply = await import('../../scripts/lib/release-activation/apply.ts') as Record<string, unknown>;
+    expect(typeof apply.parseProcessStartTime).toBe('function');
+    const parse = apply.parseProcessStartTime as (text: string) => number | null;
+    expect(parse('Thu Jan  1 00:00:00 2026')).toBe(Date.UTC(2026, 0, 1, 0, 0, 0));
+    expect(parse('Mon Sep 28 12:34:56 2026\n')).toBe(Date.UTC(2026, 8, 28, 12, 34, 56));
+    expect(parse(lstartText(1_767_225_602_999))).toBe(1_767_225_602_000);
+    for (const bad of ['', 'garbage', 'Thu Jan 32 00:00:00 2026', 'Thu Foo  1 00:00:00 2026', '2026-01-01T00:00:00Z']) {
+      expect(parse(bad)).toBeNull();
+    }
   });
 
   it('reads no invariants from a body it cannot classify as diagnostic', () => {

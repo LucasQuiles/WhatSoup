@@ -8529,10 +8529,14 @@ describe('GET /health — #2481 health_invariants block', () => {
     expect((observation as { responderPid?: unknown }).responderPid).toBe(process.pid);
 
     const { releaseInvariantsVerdict, resolveBinding } = await import('../../scripts/lib/release-activation/invariants.ts');
-    // The launchd pid, argv and start-time samples are release:activate's job
+    // The launchd pid, argv and start-time sample is release:activate's job
     // (launchctl + ps); the responder half is checked against the body here.
-    const sample = { pid: process.pid, argvMatches: true, startTime: 'this process' };
-    const binding = resolveBinding(sample, sample, observation);
+    // This process started well before the response it just served.
+    const respondedAtMs = Date.now();
+    const binding = resolveBinding(
+      { pid: process.pid, argvMatches: true, passed: true, health: observation, respondedAtMs },
+      { pid: process.pid, argvMatches: true, startedAtMs: respondedAtMs - 60_000 },
+    );
     expect(binding).toBe('bound');
     expect(releaseInvariantsVerdict({
       pid: process.pid,
