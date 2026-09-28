@@ -180,6 +180,24 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
   });
 
+  it('/new on a never-started manager still ends the chat checkpoint (#3658)', async () => {
+    durability.upsertSessionCheckpoint('15550145', {
+      sessionId: 'previous-process-session',
+      sessionStatus: 'suspended',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550145@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+
+    await sm.shutdown(false);
+
+    expect(durability.getSessionCheckpoint('15550145')?.session_status).toBe('ended');
+  });
+
   it('a fresh generation after a failed close closes pre-init without looping (#3658)', async () => {
     // No init: the managed provider never names its session in this window.
     vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);

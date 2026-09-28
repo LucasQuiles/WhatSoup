@@ -71,6 +71,23 @@ describe('DurabilityEngine — session checkpoints', () => {
       expect(row!.session_id).toBe('sess-abc');
     });
 
+    it('a key-only suspended or orphaned write leaves an ended checkpoint ended (#3658)', () => {
+      engine.upsertSessionCheckpoint('conv-1', { sessionId: 'sess-abc', sessionStatus: 'ended' });
+
+      engine.upsertSessionCheckpoint('conv-1', { sessionStatus: 'suspended' });
+      expect(engine.getSessionCheckpoint('conv-1')!.session_status).toBe('ended');
+
+      engine.upsertSessionCheckpoint('conv-1', { sessionStatus: 'orphaned' });
+      expect(engine.getSessionCheckpoint('conv-1')!.session_status).toBe('ended');
+
+      engine.upsertSessionCheckpoint('conv-1', { sessionId: 'sess-abc', sessionStatus: 'suspended' });
+      expect(engine.getSessionCheckpoint('conv-1')!.session_status).toBe('ended');
+
+      // A write that names a new provider session is a new lifecycle, not a repaint.
+      engine.upsertSessionCheckpoint('conv-1', { sessionId: 'sess-next', sessionStatus: 'suspended' });
+      expect(engine.getSessionCheckpoint('conv-1')!.session_status).toBe('suspended');
+    });
+
     it('increments checkpoint_version on each upsert', () => {
       engine.upsertSessionCheckpoint('conv-1', { claudePid: 1 });
       engine.upsertSessionCheckpoint('conv-1', { claudePid: 2 });
