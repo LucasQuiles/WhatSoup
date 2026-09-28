@@ -648,6 +648,12 @@ record['helper_vanished_after_probe'] = (root / 'helper-vanished-after-probe').e
 record['helper_signal_refused'] = (root / 'helper-signal-refused').exists()
 record['timer_partial_signal'] = (root / 'timer-partial-signal').read_text() if (root / 'timer-partial-signal').exists() else None
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
+record['deadline_writer_armed'] = (root / 'deadline-writer-armed').exists()
+record['deadline_writer_size0'] = (root / 'deadline-writer-size0').exists()
+record['deadline_writer_exit'] = sorted(item.name.rsplit('.', 1)[1] for item in root.glob('deadline-writer-exit.*'))
+record['deadline_marker_observed'] = (root / 'deadline-marker-observed').read_text().strip() if (root / 'deadline-marker-observed').exists() else None
+record['deadline_preexisting_planted'] = (root / 'deadline-preexisting-planted').exists()
+record['residual_bounded_files'] = sorted(item.name for item in root.glob('whatsoup-bounded*'))
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])
@@ -671,7 +677,7 @@ if (root / 'outcome-fixture-ready').exists():
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
@@ -893,6 +899,45 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
+    // Classify the deadline marker at the outer existence check. `[` is the only
+    // hook that runs there; every nested test uses `builtin [` to avoid recursion.
+    'case "$4" in deadline-writer-*)',
+    '  function [ {',
+    '    case "$1" in -e)',
+    '      case "${2##*/}" in *.pending) ;; whatsoup-bounded-deadline.*)',
+    '        local observed=absent line=""',
+    '        if builtin [ -L "$2" ] || builtin [ -e "$2" ]; then',
+    '          observed=other',
+    '          if builtin [ -f "$2" ] && ! builtin [ -s "$2" ]; then observed=empty',
+    '          elif builtin [ -f "$2" ] && IFS= read -r line < "$2" && builtin [ "$line" = "$control_token" ]; then observed=token; fi',
+    '        fi',
+    '        builtin printf "%s\\n" "$observed" > "$DEADLINE_MARKER_OBSERVED"',
+    '        ;; esac',
+    '      ;; esac',
+    '    builtin [ "$@"',
+    '  }',
+    '  ;; esac',
+    // Interrupt the real watchdog writer after its exclusive create and before
+    // its token write: the writer subshell calls `umask 077` first, and with a
+    // zero file-size limit the create still succeeds while the write fails.
+    // XFSZ is ignored so the write returns an error instead of dumping core.
+    // The EXIT trap proves the size-0 state was reached; files it creates stay
+    // empty, so the limit cannot block them. The preexisting mode only records
+    // that the writer was reached.
+    'case "$4" in deadline-writer-*)',
+    '  umask() {',
+    '    if builtin [ "$#" -eq 1 ] && builtin [ "${start-}" = run ] && builtin [ "${FUNCNAME[1]}" = whatsoup_run_bounded ]; then',
+    '      builtin umask "$@" || return',
+    '      : > "$DEADLINE_WRITER_ARMED" || return 2',
+    '      builtin [ "$cleanup_mode" = deadline-writer-interrupted ] || return 0',
+    '      trap \'writer_status=$?; for marker in "$TMPDIR"/whatsoup-bounded-deadline.*; do if builtin [ -f "$marker" ] && ! builtin [ -s "$marker" ]; then : > "$DEADLINE_WRITER_SIZE0"; fi; done; : > "$DEADLINE_WRITER_EXIT.$writer_status"\' EXIT',
+    '      trap "" XFSZ',
+    '      ulimit -f 0',
+    '      return 0',
+    '    fi',
+    '    builtin umask "$@"',
+    '  }',
+    '  ;; esac',
     'case "$4" in cleanup-child-group)',
     '  umask() { if [ "$#" -eq 0 ]; then /bin/bash "$TMPDIR/umask-capture.sh"; else builtin umask "$@"; fi; }',
     '  ;; esac',
@@ -932,7 +977,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
+    'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'else',
@@ -965,6 +1010,12 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  ;; esac',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
     'if [ "$1" = command-group-descendant ]; then sleep 30 & exit 0; fi',
+    'if [ "$1" = deadline-writer-preexisting ]; then',
+    '  for control in "$TMPDIR"/whatsoup-bounded-control.*; do builtin printf "preexisting\\n" > "$TMPDIR/whatsoup-bounded-deadline.${control##*/whatsoup-bounded-control.}" && : > "$TMPDIR/deadline-preexisting-planted"; done',
+    'fi',
+    // Ignore TERM so the command outlives the watchdog budget and the real
+    // watchdog writer is reached instead of being reaped before it runs.
+    'case "$1" in deadline-writer-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
@@ -1016,6 +1067,10 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       HANDSHAKE_CONT_AFTER_STOP: path.join(root, 'handshake-cont-after-stop'),
       CLEANUP_RESIDUAL_ACTIVE: path.join(root, 'cleanup-residual-active'),
       CLEANUP_RESIDUAL_POLLS: path.join(root, 'cleanup-residual-polls'),
+      DEADLINE_WRITER_ARMED: path.join(root, 'deadline-writer-armed'),
+      DEADLINE_WRITER_SIZE0: path.join(root, 'deadline-writer-size0'),
+      DEADLINE_WRITER_EXIT: path.join(root, 'deadline-writer-exit'),
+      DEADLINE_MARKER_OBSERVED: path.join(root, 'deadline-marker-observed'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -1043,7 +1098,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     const expected = mode === 'fast' ? 'rc=0 output=payload' : mode === 'nonzero' ? 'rc=7 output=payload' : 'rc=124 output=';
-    expect(result.stdout).toContain(expected);
+    expect(result.stdout, JSON.stringify(result)).toContain(expected);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
@@ -1449,6 +1504,39 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.terminal_foreground_group, JSON.stringify(result)).toBe(result.root_pid);
     expect(result.terminal_echo, JSON.stringify(result)).toContain('go');
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+
+  // A watchdog that dies after creating its deadline marker but before writing
+  // the token must not turn an exhausted budget into a protocol failure: the
+  // outer guard still owns the deadline, so the contract result is 124.
+  it('keeps the deadline when the watchdog writer dies between create and token write', () => {
+    const result = runLifecycleProbe('deadline-writer-interrupted');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    // Setup proof: the real writer was reached, created a size-0 file, and failed.
+    expect(result.deadline_writer_armed, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_size0, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_exit, JSON.stringify(result)).toHaveLength(1);
+    expect(result.deadline_writer_exit[0], JSON.stringify(result)).not.toBe('0');
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.deadline_marker_observed, JSON.stringify(result)).toBe('absent');
+    expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // The deadline marker is exclusive: an existing file at its path is never
+  // replaced by the watchdog, and an unauthenticated marker fails closed.
+  it('never replaces a deadline marker that already exists', () => {
+    const result = runLifecycleProbe('deadline-writer-preexisting');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.deadline_preexisting_planted, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_armed, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_marker_observed, JSON.stringify(result)).toBe('other');
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
