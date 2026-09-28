@@ -1672,17 +1672,155 @@ def test_ssh_timeout_seconds_below_minimum_clamped(mod, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_fleet_path_default(mod, monkeypatch):
+def test_fleet_path_default(mod, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no private roster
     monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
     p = mod.fleet_path()
-    assert p.name == "bot-errors-expected-fleet.json"
-    assert "deploy" in str(p)
+    assert p == mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
 
 
 def test_fleet_path_custom_env(mod, monkeypatch, tmp_path):
     custom = tmp_path / "my-fleet.json"
     monkeypatch.setenv("BOT_ERRORS_EXPECTED_FLEET", str(custom))
     assert mod.fleet_path() == custom
+
+
+# ---------------------------------------------------------------------------
+# Resolver order (lib/fleet_config.py): BOT_ERRORS_EXPECTED_FLEET ->
+# ~/.config/whatsoup/bot-errors-expected-fleet.json -> tracked copy -> fail.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fleet_sources(mod, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
+    monkeypatch.setattr(mod, "REPO_ROOT", repo)
+    return {
+        "private": home / ".config" / "whatsoup" / "bot-errors-expected-fleet.json",
+        "tracked": repo / "deploy" / "bot-errors-expected-fleet.json",
+    }
+
+
+def _write_fleet(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _override_required_fleet_json() -> str:
+    return json.dumps({"hosts": [{
+        "host": "host-a",
+        "guiSessionExpected": "always_aqua",
+        "privateMonitorOverrideRequired": True,
+        "instances": [{"name": "x-bot", "service": "com.whatsoup.x-bot"}],
+    }]})
+
+
+def test_fleet_path_prefers_private_over_tracked(mod, fleet_sources):
+    _write_fleet(fleet_sources["private"], _minimal_fleet_json())
+    _write_fleet(fleet_sources["tracked"], "{not json")
+
+    assert mod.fleet_path() == fleet_sources["private"]
+    assert mod.validate_inventory().status == mod.INVENTORY_VALID
+
+
+def test_fleet_path_private_missing_uses_tracked(mod, fleet_sources):
+    _write_fleet(fleet_sources["tracked"], _minimal_fleet_json())
+
+    assert mod.fleet_path() == fleet_sources["tracked"]
+    assert mod.validate_inventory().status == mod.INVENTORY_VALID
+
+
+def test_no_fleet_anywhere_fails_closed_naming_order(mod, fleet_sources, capsys):
+    assert mod.fleet_path() == fleet_sources["tracked"]
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_MISSING
+    assert result.targets == []
+    assert str(fleet_sources["tracked"]) in result.error
+    assert (
+        f"resolver order: 1) env BOT_ERRORS_EXPECTED_FLEET 2) private {fleet_sources['private']} "
+        f"3) tracked {fleet_sources['tracked']}"
+    ) in result.error
+    assert mod.config_check() == 2
+    assert "resolver order" in capsys.readouterr().err
+
+
+def test_env_fleet_missing_does_not_fall_through(mod, fleet_sources, monkeypatch, tmp_path):
+    _write_fleet(fleet_sources["private"], _minimal_fleet_json())
+    missing = tmp_path / "gone-fleet.json"
+    monkeypatch.setenv("BOT_ERRORS_EXPECTED_FLEET", str(missing))
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_MISSING
+    assert f"expected fleet file not found: {missing}; resolver order:" in result.error
+
+
+def test_invalid_private_fleet_does_not_fall_through(mod, fleet_sources):
+    _write_fleet(fleet_sources["private"], "{not json")
+    _write_fleet(fleet_sources["tracked"], _minimal_fleet_json())
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_MALFORMED
+    assert str(fleet_sources["private"]) in result.error
+    assert "resolver order:" in result.error
+
+
+def test_non_object_private_fleet_fails(mod, fleet_sources):
+    _write_fleet(fleet_sources["private"], "[]")
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_NON_OBJECT
+    assert "resolver order:" in result.error
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_private_fleet_does_not_fall_through(mod, fleet_sources):
+    private = _write_fleet(fleet_sources["private"], _minimal_fleet_json())
+    _write_fleet(fleet_sources["tracked"], _minimal_fleet_json())
+    private.chmod(0)
+    try:
+        result = mod.validate_inventory()
+    finally:
+        private.chmod(0o600)
+
+    assert result.status == mod.INVENTORY_UNREADABLE
+    assert "resolver order:" in result.error
+
+
+def test_private_default_fleet_satisfies_override_contract(mod, fleet_sources):
+    """The private file is outside the repo, so it meets the contract that
+    BOT_ERRORS_EXPECTED_FLEET meets, without the env var being set."""
+    _write_fleet(fleet_sources["private"], _override_required_fleet_json())
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_VALID
+    assert mod.private_fleet_override(fleet_sources["private"]) == str(fleet_sources["private"])
+
+
+def test_tracked_fleet_still_requires_override(mod, fleet_sources):
+    _write_fleet(fleet_sources["tracked"], _override_required_fleet_json())
+
+    result = mod.validate_inventory()
+
+    assert result.status == mod.INVENTORY_INVALID_POLICY
+    assert "BOT_ERRORS_EXPECTED_FLEET" in result.error
+    assert mod.private_fleet_override(fleet_sources["tracked"]) is None
+
+
+def test_private_fleet_override_defers_to_set_env(mod, fleet_sources, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_EXPECTED_FLEET", str(fleet_sources["private"]))
+
+    assert mod.private_fleet_override(fleet_sources["private"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2197,7 +2335,11 @@ def test_run_once_private_override_error_returns_two(mod, monkeypatch, tmp_path,
     fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
     monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
     monkeypatch.setattr(mod, "load_fleet", lambda: {"hosts": []})
-    monkeypatch.setattr(mod, "private_override_contract_error", lambda fleet: "config error: missing override")
+    monkeypatch.setattr(
+        mod,
+        "private_override_contract_error",
+        lambda fleet, *, expected_fleet_override=None: "config error: missing override",
+    )
 
     rc = mod.run_once(dry_run=True)
     assert rc == 2

@@ -234,12 +234,67 @@ def test_expected_fleet_roster_derives_heartbeat_and_ack_paths(tmp_path: Path):
     assert hosts[1].ack_path == tmp_path / "explicit-ack.json"
 
 
-def test_default_hosts_path_reuses_expected_fleet_manifest(monkeypatch):
+def test_default_hosts_path_reuses_expected_fleet_manifest(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no private roster
     monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
 
     path = _mod.default_hosts_path()
 
     assert path == _mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
+
+
+def test_default_hosts_path_prefers_private_roster(monkeypatch, tmp_path: Path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
+    private = _write_json(
+        home / ".config" / "whatsoup" / "bot-errors-expected-fleet.json",
+        {"schemaVersion": 1, "hosts": [{"host": "host-a"}]},
+    )
+
+    assert _mod.default_hosts_path() == private
+
+
+def test_main_without_hosts_fails_closed_naming_resolver_order(monkeypatch, tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    # A private roster exists, but the set env var is authoritative.
+    _write_json(
+        home / ".config" / "whatsoup" / "bot-errors-expected-fleet.json",
+        {"schemaVersion": 1, "hosts": [{"host": "host-a"}]},
+    )
+    missing = tmp_path / "gone-roster.json"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(missing))
+    lock = tmp_path / "sentinel-instance.lock"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(lock))
+
+    rc = _mod.main(["--state-dir", str(tmp_path / "state")])
+
+    assert rc == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1
+    assert err[0].startswith(f"bot-errors-sentinel: fail-closed: fleet roster missing: {missing}")
+    assert "BOT_ERRORS_FLEET_SENTINEL_HOSTS is set, so later sources were not tried" in err[0]
+    assert "resolver order: 1) env BOT_ERRORS_FLEET_SENTINEL_HOSTS 2) private" in err[0]
+    assert not lock.exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_main_without_hosts_resolves_env_roster(monkeypatch, tmp_path: Path):
+    roster = _write_json(tmp_path / "roster.json", {"schemaVersion": 1, "hosts": [{"host": "host-a"}]})
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(roster))
+    seen = {}
+
+    def _fake_default_config(hosts_path, state_dir):
+        seen["hosts_path"] = hosts_path
+        raise SystemExit(0)
+
+    monkeypatch.setattr(_mod, "default_config", _fake_default_config)
+
+    with pytest.raises(SystemExit):
+        _mod.main(["--state-dir", str(tmp_path / "state")])
+
+    assert seen["hosts_path"] == roster
 
 
 def test_json_and_private_directory_helpers_fail_closed(tmp_path: Path):
@@ -1728,12 +1783,14 @@ def test_parse_args_defaults_and_default_deps(monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/fleet-state")
     monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
     default_args = _mod.parse_args([])
-    assert default_args.hosts == str(_mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json")
+    # The roster is resolved in main(), so a missing one fails with one message.
+    assert default_args.hosts is None
     assert default_args.state_dir == "/tmp/fleet-state"
 
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", "/tmp/fleet-hosts.json")
     args = _mod.parse_args([])
-    assert args.hosts == "/tmp/fleet-hosts.json"
+    assert args.hosts is None
+    assert _mod.default_hosts_path() == Path("/tmp/fleet-hosts.json")
     assert args.state_dir == "/tmp/fleet-state"
     deps = _mod.default_deps()
     assert isinstance(deps.hostname(), str)

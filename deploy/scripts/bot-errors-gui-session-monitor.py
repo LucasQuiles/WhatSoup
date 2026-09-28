@@ -9,8 +9,10 @@ the in-GUI heartbeat watchdog dies in the same failure, so the outage is silent.
 
 This monitor runs OFF the target host (over SSH) so it survives the bot user's
 GUI logout. For each expected GUI-LaunchAgent host it determines the expected
-bot user + agent label + uid from the SSOT (deploy/bot-errors-expected-fleet.json
-and deploy/health-profiles/*.json), runs two read-only probes, and classifies
+bot user + agent label + uid from the expected-fleet roster (resolved by
+lib/fleet_config.py: BOT_ERRORS_EXPECTED_FLEET, then the private
+~/.config/whatsoup/bot-errors-expected-fleet.json, then the tracked
+deploy/bot-errors-expected-fleet.json), runs two read-only probes, and classifies
 the session state:
 
   - ok                : console owner == bot user AND agent running
@@ -52,6 +54,14 @@ from lib.durable_json import (
     operation_id,
     publish_state_json,
     require_advance,
+)
+from lib.fleet_config import (
+    GUI_ROSTER_ENV,
+    FleetConfigError,
+    describe_order,
+    private_roster_path,
+    resolve_roster,
+    tracked_roster_path,
 )
 from lib.state_files import GUI_SESSION_MONITOR_STATE
 from lib.state_root import DEFAULT_STATE_ROOT
@@ -322,7 +332,8 @@ _EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE, POLICY_BEST_EF
 
 # Public manifests may use sanitized placeholder labels for private hosts. Those
 # hosts must declare this marker and provide their live labels via a hub-private
-# BOT_ERRORS_EXPECTED_FLEET file outside the repo root before the monitor probes.
+# file outside the repo root (BOT_ERRORS_EXPECTED_FLEET, or the private
+# ~/.config/whatsoup/bot-errors-expected-fleet.json) before the monitor probes.
 PRIVATE_MONITOR_OVERRIDE_REQUIRED_KEY = "privateMonitorOverrideRequired"
 
 
@@ -480,9 +491,10 @@ def private_override_contract_error(
     """Return a fail-closed config error when a private override is required.
 
     If any public manifest host declares privateMonitorOverrideRequired, the
-    monitor must be launched with BOT_ERRORS_EXPECTED_FLEET pointing to a
-    hub-private JSON file outside the repository. Otherwise it would probe
-    sanitized placeholder labels and create false health evidence.
+    monitor must read a hub-private JSON file outside the repository: the
+    BOT_ERRORS_EXPECTED_FLEET path, or the private default that
+    validate_inventory() passes as ``expected_fleet_override``. Otherwise it
+    would probe sanitized placeholder labels and create false health evidence.
     """
     required_count = private_monitor_override_required_count(fleet)
     if required_count == 0:
@@ -497,7 +509,8 @@ def private_override_contract_error(
     if not override:
         return (
             f"private expected-fleet override required for {required_count} host(s); "
-            "set BOT_ERRORS_EXPECTED_FLEET to a hub-private JSON path outside the repo"
+            "set BOT_ERRORS_EXPECTED_FLEET to a hub-private JSON path outside the repo, "
+            "or seed ~/.config/whatsoup/bot-errors-expected-fleet.json"
         )
 
     if _path_is_under(Path(override), REPO_ROOT):
@@ -710,10 +723,27 @@ def ssh_timeout_seconds() -> float:
 
 
 def fleet_path() -> Path:
-    raw = os.environ.get("BOT_ERRORS_EXPECTED_FLEET", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
+    """Expected-fleet path via ``lib.fleet_config``.
+
+    Order: ``BOT_ERRORS_EXPECTED_FLEET``, the private per-host file, the
+    tracked copy. With no source it returns the tracked path, which
+    validate_inventory() then reports as missing (fail closed).
+    """
+    try:
+        return resolve_roster(REPO_ROOT, GUI_ROSTER_ENV).path
+    except FleetConfigError:
+        return tracked_roster_path(REPO_ROOT)
+
+
+def fleet_resolver_order() -> str:
+    return describe_order(GUI_ROSTER_ENV, private_roster_path(), tracked_roster_path(REPO_ROOT))
+
+
+def private_fleet_override(path: Path) -> str | None:
+    """The private default file meets the override contract as the env var does."""
+    if not _norm(os.environ.get(GUI_ROSTER_ENV, "")) and path == private_roster_path():
+        return str(path)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -791,20 +821,25 @@ def validate_inventory() -> InventoryValidationResult:
             data = json.load(handle)
     except FileNotFoundError:
         return InventoryValidationResult(
-            INVENTORY_MISSING, f"expected fleet file not found: {path}", None, [])
+            INVENTORY_MISSING,
+            f"expected fleet file not found: {path}; resolver order: {fleet_resolver_order()}",
+            None, [])
     except json.JSONDecodeError as exc:
         return InventoryValidationResult(
             INVENTORY_MALFORMED,
-            f"expected fleet file is not valid JSON: {path}: {exc}", None, [])
+            f"expected fleet file is not valid JSON: {path}: {exc}; resolver order: {fleet_resolver_order()}",
+            None, [])
     except OSError as exc:
         return InventoryValidationResult(
             INVENTORY_UNREADABLE,
-            f"expected fleet file is not readable: {path}: {exc}", None, [])
+            f"expected fleet file is not readable: {path}: {exc}; resolver order: {fleet_resolver_order()}",
+            None, [])
 
     if not isinstance(data, dict):
         return InventoryValidationResult(
             INVENTORY_NON_OBJECT,
-            f"expected fleet file must contain a JSON object: {path}", None, [])
+            f"expected fleet file must contain a JSON object: {path}; resolver order: {fleet_resolver_order()}",
+            None, [])
 
     # --- semantic validation ---
     unknown = unknown_policy_values(data)
@@ -819,7 +854,8 @@ def validate_inventory() -> InventoryValidationResult:
             f"{detail}; known values: {sorted(KNOWN_GUI_SESSION_POLICIES)}: {path}",
             None, [])
 
-    private_override_error = private_override_contract_error(data)
+    private_override_error = private_override_contract_error(
+        data, expected_fleet_override=private_fleet_override(path))
     if private_override_error is not None:
         return InventoryValidationResult(
             INVENTORY_INVALID_POLICY, private_override_error, None, [])

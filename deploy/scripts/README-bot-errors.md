@@ -171,7 +171,7 @@ bash deploy/scripts/install-bot-errors-gui-monitor-launchd.sh [--dry-run]
 |----------|---------|-------------|
 | `BOT_ERRORS_GUI_MONITOR_LABEL` | `com.bot-errors.gui-session-monitor` | launchd label / systemd unit name. Must match `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` (enforced by `validate_label`; exit 2 on violation). |
 | `BOT_ERRORS_GUI_MONITOR_INTERVAL_SECONDS` | `300` | Probe interval in seconds. Written into `StartInterval` (launchd) or `OnUnitActiveSec` (systemd). |
-| `BOT_ERRORS_EXPECTED_FLEET` | _(required)_ | Path to a hub-private JSON file listing the expected fleet members. Must point outside the repo root. Read by `bot-errors-gui-session-monitor.py` at runtime. |
+| `BOT_ERRORS_EXPECTED_FLEET` | _(required unless `~/.config/whatsoup/bot-errors-expected-fleet.json` exists)_ | Path to a hub-private JSON file listing the expected fleet members. Must point outside the repo root. Read by `bot-errors-gui-session-monitor.py` at runtime. When unset, the monitor reads the private `~/.config/whatsoup/bot-errors-expected-fleet.json`, which meets the same outside-the-repo contract. |
 | `BOT_ERRORS_GUI_MONITOR_USERS` | _(optional)_ | Comma-separated `host=user` overrides for SSH login names when the default `$USER` differs on the target host. |
 | `BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS` | `15` | Per-host SSH connection timeout in seconds. |
 | `BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD` | _(optional)_ | Consecutive-failure count before the monitor emits an alert. Non-positive values are treated as 1. |
@@ -1106,6 +1106,66 @@ policy choice. Set it in the bot host's private profile, not in a tracked profil
 `BOT_ERRORS_HEALTH_PROFILE` replaces the tracked profile; it does not overlay it. Keep
 the private copy in step with tracked profile changes. The daily evidence line
 `profile: role=… path=…` shows which profile file a run used.
+
+At runtime the health check and the heartbeat watchdog resolve the profile through
+`deploy/scripts/lib/fleet_config.py`, in this order: `BOT_ERRORS_HEALTH_PROFILE_JSON`
+(health check only), `BOT_ERRORS_HEALTH_PROFILE`, `~/.config/whatsoup/health-profile.json`,
+then the tracked `deploy/health-profiles/<host>.json`. The fleet roster resolves the same
+way: `BOT_ERRORS_FLEET_SENTINEL_HOSTS` (sentinel, watchdog) or `BOT_ERRORS_EXPECTED_FLEET`
+(GUI-session monitor), then `~/.config/whatsoup/bot-errors-expected-fleet.json`, then the
+tracked `deploy/bot-errors-expected-fleet.json`. Only an absent source moves on to the next
+one. A set env var whose file is missing or unreadable, a private file that cannot be read,
+or no source at all fails closed, with a message that names the path and the order tried.
+For the profile, `--daily` and a watchdog run with a profile-based check exit 2. For the
+roster, the sentinel (without `--hosts`) and the GUI-session monitor exit 2, and the
+watchdog's roster checks report not-green. The health check no longer falls back to
+role=central, and the watchdog no longer treats a missing profile as zero expected
+instances.
+
+A profile failure also queues one critical alert per host, per producer, per UTC day,
+before the exit 2. The alert has `alertSource` `profile-missing:health-check` or
+`profile-missing:heartbeat-watchdog`, source `daily-health` or `heartbeat-watchdog`, the
+summary `health profile missing: <producer> cannot load its health profile; exiting 2`
+(the dispatcher headline adds the host), and evidence lines `kind=profile-missing`,
+`producer=`, `host=`, `utc_day=`, `error_class=` (`missing`, `unreadable`,
+`invalid-json` or `not-object`), `source=` (`env`, `env-json`, `private`,
+`tracked-legacy` or `none`) and `error_sha256=`. The event carries no path and no error
+text, because a profile path set by env var can sit outside the tree the shared redaction
+covers; the stderr fail-closed line keeps the full message. The watchdog's other
+configuration errors (a bad check selector or threshold) queue nothing and print exactly
+what they did before. Neither producer opens controller state on this path.
+
+Suppression comes from a marker in the state root (`health-check-profile-missing.json` or
+`heartbeat-watchdog-profile-missing.json`), written with a compare-and-swap after the event
+is queued. A marker for the same producer, host and day suppresses a second alert that day,
+even for a different error. A marker from another day, host or producer, a wrong schema, or
+a date later than today (the clock went back) does not suppress: the run alerts and
+overwrites the marker. A marker that cannot be read or parsed cannot be overwritten, so the
+run renames it to `<marker>.corrupt-<UTC stamp>` in the same directory (its bytes are kept),
+alerts, and writes a fresh marker. If that rename fails, the run alerts without writing a
+marker and says so. After the fail-closed line, stderr says what happened: queued,
+suppressed, marker moved aside, event publish failed (no marker written), or event queued
+but marker write failed.
+
+This is daily suppression after a successfully written marker, not exactly-once delivery.
+Three duplicates are expected. If the marker write fails, or the process dies after the event
+is queued, the next run alerts again. If two runs overlap, both can read "due" before either
+marker lands, and both queue an alert; the second marker write then loses its
+compare-and-swap. A run that found the marker unreadable renames aside whatever is at the
+path, which can be a good marker an overlapping run just wrote, so one more alert follows.
+The rename keeps the corrupt bytes before the fresh marker supersedes them, but it neither
+syncs the state directory nor takes the durable-JSON lock. Renamed-aside files are not
+pruned; expect one per corruption. The alert is never dropped to avoid a duplicate. One case is not bounded
+by the day: if marker writes (or the move aside) keep failing while the outbox still accepts
+events, for example an outbox set elsewhere and an unwritable state root, every run queues
+an event (the watchdog runs every 5 minutes on macOS). Nothing can suppress without writable
+state; the unwritable state root is itself the fault to page on.
+
+Two lifecycle limits are known and not changed here. Nothing emits a clear when the profile
+loads again, so the `profile-missing:*` incident ages out through the dispatcher's normal
+recovery-unverified path instead of closing on proof. And the health-check event keeps
+`source=daily-health`, so it refreshes daily-health liveness: a host with no profile never
+shows cadence-stale, although it raises this critical alert every UTC day.
 
 ## OPERATIONAL — Manual daily-health validation
 
