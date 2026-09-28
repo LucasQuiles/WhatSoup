@@ -103,6 +103,19 @@ export type ProviderExecutionObservation = Pick<
 export const PROVIDER_CAPTURE_MAX_AGE_SECONDS = 60;
 export const PROVIDER_CAPTURE_MAX_FUTURE_SKEW_SECONDS = 5;
 
+/**
+ * Where the capture time came from. `payload_generated_at` is the health
+ * body's own timestamp; `operator_flag` is the CLI's --provider-captured-at;
+ * `caller_supplied` is a direct module caller; `unknown` means undated, and an
+ * undated capture is stale. A file's mtime is never a source: a copied,
+ * touched or re-saved file would make an old body look fresh.
+ */
+export type ProviderCaptureTimeSource =
+  | 'payload_generated_at'
+  | 'operator_flag'
+  | 'caller_supplied'
+  | 'unknown';
+
 export type ProviderExecutionEvidence =
   | 'not_supplied'
   | 'stale'
@@ -200,6 +213,8 @@ export interface InboundOwnershipSnapshot {
   readonly providerExecutionEvidence: 'supplied' | 'not_supplied' | 'stale';
   /** Seconds between the provider capture and this read (null when none or undated). */
   readonly providerCaptureAgeSeconds: number | null;
+  /** Null when no capture was supplied. */
+  readonly providerCaptureTimeSource: ProviderCaptureTimeSource | null;
   readonly healthy: boolean;
   readonly counts: {
     readonly processing: number;
@@ -221,6 +236,8 @@ export interface InboundOwnershipSnapshotOptions {
    * PROVIDER_CAPTURE_MAX_AGE_SECONDS, makes the capture stale: it attributes nothing.
    */
   readonly providerExecutionCapturedAtMs?: number | null;
+  /** Reported as-is; defaults to caller_supplied when a time is given, else unknown. */
+  readonly providerExecutionCaptureTimeSource?: ProviderCaptureTimeSource;
   readonly nowMs?: number;
 }
 
@@ -725,6 +742,10 @@ export function readInboundOwnershipSnapshot(
     queueScope,
     providerExecutionEvidence: captureStale ? 'stale' : provider ? 'supplied' : 'not_supplied',
     providerCaptureAgeSeconds: captureAgeSeconds,
+    providerCaptureTimeSource: supplied === null
+      ? null
+      : options.providerExecutionCaptureTimeSource
+        ?? (capturedAtMs !== null ? 'caller_supplied' : 'unknown'),
     healthy: rows.every((row) => row.healthy),
     counts: {
       processing,
