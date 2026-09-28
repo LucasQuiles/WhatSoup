@@ -8524,18 +8524,17 @@ describe('GET /health — #2481 health_invariants block', () => {
     const { classifyAuthenticatedHealth } = await import('../../scripts/lib/release-activation/host.ts');
     const observation = classifyAuthenticatedHealth(status, body);
     expect(observation.projection).toBe('diagnostic');
-    expect((observation as { invariants?: unknown }).invariants).toMatchObject({
-      reading: 'declared',
-      schema: 'whatsoup.health-invariants.v1',
-    });
+    expect((observation as { invariants?: unknown }).invariants).toMatchObject({ reading: 'declared' });
+    // The real producer names its own pid; here the process that served the body is this one.
+    expect((observation as { responderPid?: unknown }).responderPid).toBe(process.pid);
 
     const { releaseInvariantsVerdict } = await import('../../scripts/lib/release-activation/invariants.ts');
-    // The pid/argv binding is release:activate's job (launchctl + ps); here the
-    // process that served the body is this one.
+    // The launchd pid/argv half of the binding is release:activate's job
+    // (launchctl + ps); the responder half is checked against the body here.
     expect(releaseInvariantsVerdict({ pid: process.pid, argvMatches: true, health: observation })).toEqual({
       outcome: 'satisfied',
       detail: null,
-      observedSchema: 'whatsoup.health-invariants.v1',
+      schema: 'known',
       undeclared: [],
     });
   });
@@ -8546,8 +8545,11 @@ describe('GET /health — #2481 health_invariants block', () => {
   // (`raw = response.read(65537)` / `len(raw) > 65536`). Over the cap, the
   // reader destroys the request and verification reads `unobserved`, which
   // fails the activation, so the block must not push the body near it.
-  // Measured bytes: computed on every run and printed in the assertion
-  // message; the first heavygate run records the value.
+  // The byte counts are computed on every run but appear ONLY in the assertion
+  // message, i.e. only when an assertion fails; a passing run proves the bounds
+  // without recording the numbers. The body is this harness's chat-mode body,
+  // not a production agent-mode body, and it is checked against the exported
+  // cap constant, not read through the real fetch.
   it('the diagnostic body with the block is measured well under the 65 536-byte reader cap', async () => {
     const { HEALTH_MAX_BYTES } = await import('../../scripts/lib/release-activation/host.ts') as { HEALTH_MAX_BYTES?: number };
     expect(HEALTH_MAX_BYTES).toBe(65_536);

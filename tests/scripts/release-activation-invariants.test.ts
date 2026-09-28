@@ -21,19 +21,27 @@ import {
 } from '../../scripts/lib/release-activation/invariants.ts';
 
 const FLOOR = ['a.required'] as const;
+const PID = 7001;
 
-function declared(ids: string[], schema = HEALTH_INVARIANTS_SCHEMA): HealthInvariantsReading {
-  return { reading: 'declared', schema, ids };
+function declared(ids: string[]): HealthInvariantsReading {
+  return { reading: 'declared', ids };
 }
 
-function observation(invariants: HealthInvariantsReading | null, projection: HealthObservation['projection'] = 'diagnostic'): HealthObservation {
-  return { projection, httpStatus: 200, commit: 'c'.repeat(40), connected: true, invariants };
+function observation(
+  invariants: HealthInvariantsReading | null,
+  overrides: Partial<HealthObservation> = {},
+): HealthObservation {
+  return {
+    projection: 'diagnostic', httpStatus: 200, commit: 'c'.repeat(40), connected: true, responderPid: PID, invariants,
+    ...overrides,
+  };
 }
 
 describe('the leaf constant', () => {
-  it('is a leaf: no imports, so the producer and the deploy tool load nothing else through it', () => {
+  it('is a leaf: no imports or re-exports, so the producer and the deploy tool load nothing else through it', () => {
     const source = readFileSync(new URL('../../src/core/health-invariants.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/^\s*import\s/m);
+    expect(source).not.toMatch(/\bfrom\s+['"]/);
     expect(source).not.toMatch(/\brequire\(/);
     expect(source).not.toMatch(/\bimport\(/);
   });
@@ -61,12 +69,15 @@ describe('the leaf constant', () => {
 
 describe('readHealthInvariants', () => {
   it('separates absent (a legacy producer) from a present but unusable block', () => {
-    expect(readHealthInvariants({ whatsapp: {} })).toEqual({ reading: 'absent', schema: null, ids: [] });
-    expect(readHealthInvariants({ health_invariants: null })).toEqual({ reading: 'malformed', schema: null, ids: [] });
-    expect(readHealthInvariants({ health_invariants: undefined })).toEqual({ reading: 'malformed', schema: null, ids: [] });
+    expect(readHealthInvariants({ whatsapp: {} })).toEqual({ reading: 'absent', ids: [] });
+    expect(readHealthInvariants({ health_invariants: null })).toEqual({ reading: 'malformed', ids: [] });
+    expect(readHealthInvariants({ health_invariants: undefined })).toEqual({ reading: 'malformed', ids: [] });
+    // Only an own key counts; an inherited one is still absent.
+    expect(readHealthInvariants(Object.create({ health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: [] } }) as Record<string, unknown>))
+      .toEqual({ reading: 'absent', ids: [] });
   });
 
-  it('declares only a known schema with an array of unique, bounded, well-formed ids', () => {
+  it('declares only the known schema with an array of unique, bounded, well-formed ids', () => {
     expect(readHealthInvariants({ health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: ['a.required', 'b.extra'] } }))
       .toEqual(declared(['a.required', 'b.extra']));
     expect(readHealthInvariants({ health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: 'a.required' } }).reading).toBe('malformed');
@@ -75,21 +86,20 @@ describe('readHealthInvariants', () => {
     expect(readHealthInvariants({ health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: ['x'.repeat(97)] } }).reading).toBe('malformed');
   });
 
-  it('keeps an unrecognised schema string, bounded, and drops its ids', () => {
-    expect(readHealthInvariants({ health_invariants: { schema: 'whatsoup.health-invariants.v9', ids: ['a.required'] } }))
-      .toEqual({ reading: 'unknown-schema', schema: 'whatsoup.health-invariants.v9', ids: [] });
-    expect(readHealthInvariants({ health_invariants: { schema: 'has space', ids: [] } }).reading).toBe('malformed');
-    // The schema string is relayed into the receipt and alert, so only an id-like value is kept.
-    expect(readHealthInvariants({ health_invariants: { schema: '/var/lib/whatsoup/state', ids: [] } }))
-      .toEqual({ reading: 'malformed', schema: null, ids: [] });
-    expect(readHealthInvariants({ health_invariants: { schema: 'Whatsoup.Health', ids: [] } }).reading).toBe('malformed');
+  it('reads any other schema string as unknown-schema and keeps none of it', () => {
+    for (const schema of ['whatsoup.health-invariants.v9', 'tenant-alice.prod.example', '/var/lib/whatsoup/state', 'has space']) {
+      const reading = readHealthInvariants({ health_invariants: { schema, ids: ['a.required'] } });
+      expect(reading).toEqual({ reading: 'unknown-schema', ids: [] });
+      expect(JSON.stringify(reading)).not.toContain(schema);
+    }
+    expect(readHealthInvariants({ health_invariants: { schema: 42, ids: [] } }).reading).toBe('malformed');
   });
 });
 
 describe('classifyReleaseInvariants', () => {
   it('satisfied: the declared ids cover the floor', () => {
     expect(classifyReleaseInvariants(declared(['a.required']), FLOOR))
-      .toEqual({ outcome: 'satisfied', detail: null, observedSchema: HEALTH_INVARIANTS_SCHEMA, undeclared: [] });
+      .toEqual({ outcome: 'satisfied', detail: null, schema: 'known', undeclared: [] });
   });
 
   it('extra ids beyond the floor are still satisfied', () => {
@@ -97,52 +107,62 @@ describe('classifyReleaseInvariants', () => {
   });
 
   it('missing: a producer with no block at all, every floor id undeclared', () => {
-    expect(classifyReleaseInvariants({ reading: 'absent', schema: null, ids: [] }, FLOOR))
-      .toEqual({ outcome: 'missing', detail: null, observedSchema: null, undeclared: ['a.required'] });
+    expect(classifyReleaseInvariants({ reading: 'absent', ids: [] }, FLOOR))
+      .toEqual({ outcome: 'missing', detail: null, schema: null, undeclared: ['a.required'] });
   });
 
-  it('below_floor: a known schema that omits a floor id', () => {
+  it('below_floor: the known schema omitting a floor id', () => {
     expect(classifyReleaseInvariants(declared(['b.extra']), FLOOR))
-      .toEqual({ outcome: 'below_floor', detail: null, observedSchema: HEALTH_INVARIANTS_SCHEMA, undeclared: ['a.required'] });
+      .toEqual({ outcome: 'below_floor', detail: null, schema: 'known', undeclared: ['a.required'] });
     expect(classifyReleaseInvariants(declared([]), FLOOR).outcome).toBe('below_floor');
   });
 
-  it('unknown: an unrecognised schema, even one listing every floor id', () => {
-    expect(classifyReleaseInvariants({ reading: 'unknown-schema', schema: 'whatsoup.health-invariants.v9', ids: [] }, FLOOR))
-      .toEqual({ outcome: 'unknown', detail: 'unknown-schema', observedSchema: 'whatsoup.health-invariants.v9', undeclared: ['a.required'] });
+  it('unknown: an unrecognised schema, recorded only as unrecognised', () => {
+    expect(classifyReleaseInvariants({ reading: 'unknown-schema', ids: [] }, FLOOR))
+      .toEqual({ outcome: 'unknown', detail: 'unknown-schema', schema: 'unrecognised', undeclared: ['a.required'] });
   });
 
   it('unknown: a malformed block', () => {
-    expect(classifyReleaseInvariants({ reading: 'malformed', schema: null, ids: [] }, FLOOR))
-      .toEqual({ outcome: 'unknown', detail: 'malformed', observedSchema: null, undeclared: ['a.required'] });
+    expect(classifyReleaseInvariants({ reading: 'malformed', ids: [] }, FLOOR))
+      .toEqual({ outcome: 'unknown', detail: 'malformed', schema: null, undeclared: ['a.required'] });
   });
 
   it('defaults to the tool floor it imports, never one the producer supplies', () => {
-    const verdict = classifyReleaseInvariants(declared([...RELEASE_INVARIANT_FLOOR]));
-    expect(verdict.outcome).toBe('satisfied');
+    expect(classifyReleaseInvariants(declared([...RELEASE_INVARIANT_FLOOR])).outcome).toBe('satisfied');
     expect(classifyReleaseInvariants(declared([])).undeclared).toEqual([...RELEASE_INVARIANT_FLOOR]);
   });
 });
 
-describe('releaseInvariantsVerdict: bound to the executing process', () => {
-  it('classifies the body of a process whose pid and argv were bound', () => {
-    expect(releaseInvariantsVerdict({ pid: 7001, argvMatches: true, health: observation(declared(['a.required'])) }, FLOOR).outcome)
+describe('releaseInvariantsVerdict: bound to the responding process', () => {
+  const unknown = (detail: string) => ({ outcome: 'unknown', detail, schema: null, undeclared: ['a.required'] });
+
+  it('classifies the body when the observed pid, argv, and the responder pid all agree', () => {
+    expect(releaseInvariantsVerdict({ pid: PID, argvMatches: true, health: observation(declared(['a.required'])) }, FLOOR).outcome)
       .toBe('satisfied');
   });
 
-  it('unbound: no pid, or argv naming another release, is never attributed the body it served', () => {
+  it('unbound: no pid, argv naming another release, a responder with another pid, or no responder pid', () => {
     const body = observation(declared(['a.required']));
-    expect(releaseInvariantsVerdict({ pid: null, argvMatches: false, health: null }, FLOOR))
-      .toEqual({ outcome: 'unknown', detail: 'unbound', observedSchema: null, undeclared: ['a.required'] });
-    expect(releaseInvariantsVerdict({ pid: 7001, argvMatches: false, health: body }, FLOOR))
-      .toEqual({ outcome: 'unknown', detail: 'unbound', observedSchema: null, undeclared: ['a.required'] });
+    expect(releaseInvariantsVerdict({ pid: null, argvMatches: false, health: null }, FLOOR)).toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict({ pid: PID, argvMatches: false, health: body }, FLOOR)).toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict({ pid: PID + 1, argvMatches: true, health: body }, FLOOR)).toEqual(unknown('unbound'));
+    expect(releaseInvariantsVerdict({ pid: PID, argvMatches: true, health: observation(declared(['a.required']), { responderPid: null }) }, FLOOR))
+      .toEqual(unknown('unbound'));
   });
 
   it('unobserved: no body, or a body that is not diagnostic, is unknown and never missing', () => {
-    for (const health of [null, observation(null, 'unobserved'), observation(null, 'public')]) {
-      expect(releaseInvariantsVerdict({ pid: 7001, argvMatches: true, health }, FLOOR))
-        .toEqual({ outcome: 'unknown', detail: 'unobserved', observedSchema: null, undeclared: ['a.required'] });
+    for (const health of [null, observation(null, { projection: 'unobserved' }), observation(null, { projection: 'public' })]) {
+      expect(releaseInvariantsVerdict({ pid: PID, argvMatches: true, health }, FLOOR)).toEqual(unknown('unobserved'));
     }
+  });
+
+  it('http-status: a non-2xx diagnostic body is unknown whatever it declares', () => {
+    for (const httpStatus of [503, 500, 404, 304]) {
+      expect(releaseInvariantsVerdict({ pid: PID, argvMatches: true, health: observation(declared(['a.required']), { httpStatus }) }, FLOOR))
+        .toEqual(unknown('http-status'));
+    }
+    expect(releaseInvariantsVerdict({ pid: PID, argvMatches: true, health: observation({ reading: 'absent', ids: [] }, { httpStatus: 503 }) }, FLOOR))
+      .toEqual(unknown('http-status'));
   });
 
   it('null observation (the step never ran) is unknown/unobserved', () => {

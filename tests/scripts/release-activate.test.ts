@@ -63,17 +63,31 @@ const DECLARED_INVARIANTS = [
 ];
 const INVARIANT_FLOOR = ['turn_capability.stale_evidence_degrades'];
 const INVARIANTS_ALERT_SOURCE = 'release-invariants';
+/** The commit the fake host reports for the activating tool's own tree (the floor's source). */
+const TOOL_COMMIT = 'a'.repeat(40);
+const CURRENT_BLOCK = { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS };
+/**
+ * A producer that predates the block. A sentinel, not `undefined`: a default
+ * parameter would silently turn an explicit `undefined` back into the current
+ * block, which is exactly the legacy case these tests exist to cover.
+ */
+const NO_BLOCK = Symbol('no health_invariants block');
 
-/** An authenticated diagnostic body; `invariants: undefined` is a producer that predates the block. */
+/**
+ * An authenticated diagnostic body. The fake host adds the serving pid as
+ * `instance.pid` (like the real producer) unless the body already names one or
+ * the world sets `injectPid: false`.
+ */
 function diagnosticBody(
   commit: string,
   connected: boolean,
-  invariants: unknown = { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS },
+  invariants: unknown = CURRENT_BLOCK,
+  instance: Record<string, unknown> = {},
 ): string {
   return JSON.stringify({
-    instance: { commit },
+    instance: { commit, ...instance },
     whatsapp: { connected },
-    ...(invariants === undefined ? {} : { health_invariants: invariants }),
+    ...(invariants === NO_BLOCK ? {} : { health_invariants: invariants }),
   });
 }
 
@@ -247,12 +261,33 @@ interface WorldOptions {
   platform?: NodeJS.Platform;
   /** Exit status the alert helper reports (default 0), or 'throw' for a spawn that fails outright. */
   alertStatus?: number | 'throw';
+  /** Runs inside the alert call, before it returns (to observe what is already durable). */
+  onAlert?: () => void;
+  /** Add the serving pid as `instance.pid` to diagnostic bodies that lack one (default true). */
+  injectPid?: boolean;
+  /** `plutil -lint` rejects every staged plist: a refusal inside the apply, after the backup dir exists. */
+  plutilFails?: boolean;
 }
 
 interface RecordedAlert {
   instance: string;
   source: string;
+  env?: Record<string, string>;
   payload: { summary: string; evidence: string; diagnostics: string[]; severity: string };
+}
+
+/** The real producer reports its own `process.pid` as `instance.pid`; the fake does the same for the serving pid. */
+function withServingPid(body: string, pid: number): string {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return body;
+  const instance = (payload as Record<string, unknown>).instance;
+  if (typeof instance !== 'object' || instance === null || Array.isArray(instance) || 'pid' in instance) return body;
+  return JSON.stringify({ ...payload, instance: { ...instance, pid } });
 }
 
 class SimulatedLaunchd {
@@ -260,6 +295,8 @@ class SimulatedLaunchd {
   readonly tokensSeen: string[] = [];
   /** Every alert sent through the host seam, in order. */
   readonly alerts: RecordedAlert[] = [];
+  /** Every health body served, with the release root it came from. */
+  readonly served: Array<{ root: string | null; body: string }> = [];
   /** Release root of every instance process started, in order. */
   readonly instanceStarts: string[] = [];
   private readonly loaded = new Map<string, { pid: number; definition: string; root: string | null }>();
@@ -344,15 +381,24 @@ class SimulatedLaunchd {
         expect(port).toBe(HEALTH_PORT);
         this.tokensSeen.push(token);
         const job = this.loaded.get(INSTANCE_LABEL);
-        const root = job && this.alive.has(job.pid) ? job.root : null;
-        if (this.options.health) return this.options.health(root, () => this.defaultHealth(root));
-        return this.defaultHealth(root);
+        const serving = job && this.alive.has(job.pid) ? job : null;
+        const root = serving?.root ?? null;
+        const response = this.options.health
+          ? this.options.health(root, () => this.defaultHealth(root))
+          : this.defaultHealth(root);
+        const body = this.options.injectPid === false || serving === null
+          ? response.body
+          : withServingPid(response.body, serving.pid);
+        this.served.push({ root, body });
+        return { status: response.status, body };
       },
       emitReleaseAlert: async (request) => {
         this.alerts.push(request as RecordedAlert);
+        this.options.onAlert?.();
         if (this.options.alertStatus === 'throw') throw new Error('spawn python3 ENOENT');
         return { status: this.options.alertStatus ?? 0 };
       },
+      toolCommit: async () => TOOL_COMMIT,
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
         if (file === 'launchctl') {
@@ -393,7 +439,11 @@ class SimulatedLaunchd {
           const pid = Number(args[1]);
           return this.alive.has(pid) && this.argv.has(pid) ? ok(`${this.argv.get(pid)}\n`) : { code: 1, stdout: '', stderr: '' };
         }
-        if (file === 'plutil') return ok(`${args[1]}: OK\n`);
+        if (file === 'plutil') {
+          return this.options.plutilFails
+            ? { code: 1, stdout: '', stderr: `${args[1]}: invalid property list\n` }
+            : ok(`${args[1]}: OK\n`);
+        }
         if (file === 'bash' && args[0]!.endsWith('run-with-pinned-node.sh')) return ok(options?.input ?? '');
         if (file === 'bash' && args[0]!.endsWith('render-release-drift-launchd.sh')) {
           const value = (flag: string): string => args[args.indexOf(flag) + 1]!;
@@ -825,16 +875,26 @@ describe('release:activate --apply: rollback against a migrated database', () =>
 
 describe('release:activate: health invariants are report-only (#2481)', () => {
   /** The new release's producer; the old release keeps the default current body unless a test says otherwise. */
-  const newReleaseEmits = (invariants: unknown) => (root: string | null, fallback: () => { status: number; body: string }) => (
-    root === fixture.newRelease ? { status: 200, body: diagnosticBody(NEW_COMMIT, true, invariants) } : fallback()
+  const newReleaseEmits = (invariants: unknown, instance: Record<string, unknown> = {}, status = 200) => (
+    root: string | null,
+    fallback: () => { status: number; body: string },
+  ) => (
+    root === fixture.newRelease ? { status, body: diagnosticBody(NEW_COMMIT, true, invariants, instance) } : fallback()
   );
 
   function receiptOf(): Record<string, unknown> {
     return JSON.parse(readFileSync(path.join(onlyBackup(fixture), 'receipt.json'), 'utf8')) as Record<string, unknown>;
   }
 
+  /** Bodies the new release actually served, parsed. */
+  function servedByNew(world: SimulatedLaunchd): Array<Record<string, unknown>> {
+    return world.served
+      .filter((entry) => entry.root === fixture.newRelease)
+      .map((entry) => JSON.parse(entry.body) as Record<string, unknown>);
+  }
+
   it('a producer without the block still activates with exit 0 and sends exactly one warning, under --apply', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
@@ -846,17 +906,21 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
       source: INVARIANTS_ALERT_SOURCE,
       payload: { severity: 'warning' },
     });
+    // Guard on the fixture itself: the new release really served bodies without the block.
+    const served = servedByNew(world);
+    expect(served.length).toBeGreaterThan(0);
+    for (const body of served) expect(body).not.toHaveProperty('health_invariants');
   });
 
-  it('records the missing verdict, the tool floor, and the alert attempt in receipt.json', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+  it('records the missing verdict, the tool floor and its source commit, and the alert attempt in receipt.json', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     const expected = {
       reportOnly: true,
-      floor: { schema: INVARIANTS_SCHEMA, ids: INVARIANT_FLOOR },
-      activation: { outcome: 'missing', detail: null, observedSchema: null, undeclared: INVARIANT_FLOOR },
+      floor: { schema: INVARIANTS_SCHEMA, ids: INVARIANT_FLOOR, toolCommit: TOOL_COMMIT },
+      activation: { outcome: 'missing', detail: null, schema: null, undeclared: INVARIANT_FLOOR },
       rollback: null,
       alert: { attempted: true, status: 0 },
     };
@@ -864,8 +928,33 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.json.invariants).toEqual(expected);
   });
 
-  it('the alert is content-free: verdicts and ids only, no paths, commits, or token', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+  it('writes receipt.json with the verdict before the alert is sent, marking the alert pending', async () => {
+    let atAlert: unknown = 'alert never sent';
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits(NO_BLOCK),
+      onAlert: () => { atAlert = receiptOf().invariants; },
+    });
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(atAlert).toMatchObject({
+      activation: { outcome: 'missing' },
+      alert: { attempted: true, status: 'pending' },
+    });
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: 0 } });
+  });
+
+  it('the alert asks the helper for the standard BOT ERRORS event with the inline log tail off, and nothing else', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts[0]!.env).toEqual({ BOT_ERRORS_INLINE_LOG_TAIL: '0' });
+  });
+
+  it('the tool-supplied alert payload is content-free: verdicts and ids only, no paths, commits, or token', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
 
     await run(world, activationArgs(fixture, ['--apply']));
 
@@ -873,24 +962,38 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const text = JSON.stringify(world.alerts[0]!.payload);
     expect(text).toContain('missing');
     expect(text).toContain(INVARIANT_FLOOR[0]);
-    for (const forbidden of [fixture.base, fixture.home, NEW_COMMIT, OLD_COMMIT, TOKEN]) {
+    for (const forbidden of [fixture.base, fixture.home, NEW_COMMIT, OLD_COMMIT, TOOL_COMMIT, TOKEN]) {
       expect(text).not.toContain(forbidden);
     }
   });
 
-  it('an unknown schema is relayed only in id-like form; a path-shaped one never reaches the alert', async () => {
+  it('never echoes a producer schema string into the receipt or the alert', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: 'tenant-alice.prod.example', ids: DECLARED_INVARIANTS }),
+    });
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unknown-schema', schema: 'unrecognised', undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts).toHaveLength(1);
+    const texts = [JSON.stringify(receiptOf().invariants), JSON.stringify(world.alerts[0]!.payload)];
+    for (const text of texts) {
+      for (const part of ['tenant-alice.prod.example', 'tenant', 'alice', 'prod.example']) expect(text).not.toContain(part);
+    }
+  });
+
+  it('a path-shaped schema never reaches the receipt or the alert', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: newReleaseEmits({ schema: `${fixture.base}/health-invariants`, ids: DECLARED_INVARIANTS }),
     });
 
     await run(world, activationArgs(fixture, ['--apply']));
 
-    expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'unknown', detail: 'malformed', observedSchema: null },
-    });
+    expect(receiptOf().invariants).toMatchObject({ activation: { outcome: 'unknown', schema: 'unrecognised' } });
     expect(world.alerts).toHaveLength(1);
-    const text = JSON.stringify(world.alerts[0]!.payload);
-    expect(text).not.toContain(fixture.base);
+    expect(JSON.stringify(world.alerts[0]!.payload)).not.toContain(fixture.base);
     expect(JSON.stringify(receiptOf().invariants)).not.toContain(fixture.base);
   });
 
@@ -900,14 +1003,14 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'satisfied', detail: null, observedSchema: INVARIANTS_SCHEMA, undeclared: [] },
+      activation: { outcome: 'satisfied', detail: null, schema: 'known', undeclared: [] },
       alert: { attempted: false, status: null },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(world.alerts).toEqual([]);
   });
 
-  it('extra ids beyond the floor stay satisfied; the fabricated commits carry no ancestry, so none is consulted', async () => {
+  it('extra ids beyond the floor stay satisfied', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: [...INVARIANT_FLOOR, 'future.invariant_this_tool_does_not_know'] }),
     });
@@ -927,7 +1030,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'below_floor', detail: null, observedSchema: INVARIANTS_SCHEMA, undeclared: INVARIANT_FLOOR },
+      activation: { outcome: 'below_floor', detail: null, schema: 'known', undeclared: INVARIANT_FLOOR },
     });
     expect(world.alerts).toHaveLength(1);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
@@ -942,9 +1045,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: {
-        outcome: 'unknown', detail: 'unknown-schema', observedSchema: 'whatsoup.health-invariants.v2', undeclared: INVARIANT_FLOOR,
-      },
+      activation: { outcome: 'unknown', detail: 'unknown-schema', schema: 'unrecognised', undeclared: INVARIANT_FLOOR },
     });
     expect(world.alerts).toHaveLength(1);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
@@ -958,14 +1059,50 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'unknown', detail: 'malformed', observedSchema: null, undeclared: INVARIANT_FLOOR },
+      activation: { outcome: 'unknown', detail: 'malformed', schema: null, undeclared: INVARIANT_FLOOR },
     });
     expect(world.alerts).toHaveLength(1);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
   });
 
+  it('a non-2xx diagnostic body that declares the floor is unknown/http-status: one warning, outcome and exit unchanged', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(CURRENT_BLOCK, {}, 503) });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'http-status', schema: null, undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
+  });
+
+  it('a body served by another pid than the one observed is unknown/unbound, whatever it declares', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(CURRENT_BLOCK, { pid: 424_242 }) });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unbound', schema: null, undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
+  it('a body without a numeric instance.pid is unknown/unbound', async () => {
+    const world = new SimulatedLaunchd(fixture, { injectPid: false });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({ activation: { outcome: 'unknown', detail: 'unbound' } });
+    expect(servedByNew(world).every((body) => !('pid' in (body.instance as Record<string, unknown>)))).toBe(true);
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
   it('a failed alert helper never changes the outcome or exit code; the receipt records its status', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined), alertStatus: 1 });
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK), alertStatus: 1 });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
@@ -974,12 +1111,15 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.json.outcome).toBe('activated');
   });
 
-  it('an alert helper that throws is recorded with a null status, and the exit code is unchanged', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined), alertStatus: 'throw' });
+  it('an alert helper that throws is recorded with a null status, the verdict is already durable, and the exit code is unchanged', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK), alertStatus: 'throw' });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
-    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: null } });
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'missing' },
+      alert: { attempted: true, status: null },
+    });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.stderr).toMatch(/release invariants alert/);
   });
@@ -988,7 +1128,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const world = new SimulatedLaunchd(fixture, {
       health: (root) => (root === fixture.newRelease
         ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
-        : { status: 200, body: diagnosticBody(OLD_COMMIT, true, undefined) }),
+        : { status: 200, body: diagnosticBody(OLD_COMMIT, true, NO_BLOCK) }),
     });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
@@ -997,6 +1137,41 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
       activation: { outcome: 'satisfied' },
       rollback: { outcome: 'missing', detail: null, undeclared: INVARIANT_FLOOR },
       alert: { attempted: true, status: 0 },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+  });
+
+  it('a rollback where both processes declare the floor sends no alert', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: (root, fallback) => (root === fixture.newRelease
+        ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
+        : fallback()),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'satisfied' },
+      rollback: { outcome: 'satisfied' },
+      alert: { attempted: false, status: null },
+    });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('a rollback body served by another pid is unknown/unbound for the rollback verdict', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: (root) => (root === fixture.newRelease
+        ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
+        : { status: 200, body: diagnosticBody(OLD_COMMIT, true, CURRENT_BLOCK, { pid: 424_242 }) }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'satisfied' },
+      rollback: { outcome: 'unknown', detail: 'unbound' },
     });
     expect(world.alerts).toHaveLength(1);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
@@ -1035,7 +1210,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'unknown', detail: 'unbound', observedSchema: null, undeclared: INVARIANT_FLOOR },
+      activation: { outcome: 'unknown', detail: 'unbound', schema: null, undeclared: INVARIANT_FLOOR },
       rollback: { outcome: 'satisfied' },
     });
     expect(world.alerts).toHaveLength(1);
@@ -1050,7 +1225,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
-      activation: { outcome: 'unknown', detail: 'unobserved', observedSchema: null, undeclared: INVARIANT_FLOOR },
+      activation: { outcome: 'unknown', detail: 'unobserved', schema: null, undeclared: INVARIANT_FLOOR },
       rollback: { outcome: 'unknown', detail: 'unobserved' },
     });
     expect(world.alerts).toHaveLength(1);
@@ -1058,7 +1233,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
   });
 
   it('--plan never sends an alert, even against a producer without the block', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
 
     const result = await run(world, activationArgs(fixture, ['--plan']));
 
@@ -1068,7 +1243,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
   });
 
   it('an --apply refused on its preconditions sends no alert', async () => {
-    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK) });
     const other = path.join(fixture.base, 'releases', 'release-other');
     writeRelease(other, '3'.repeat(40), true);
     const argv = activationArgs(fixture, ['--apply']).map((arg) => (arg === fixture.oldRelease ? other : arg));
@@ -1078,19 +1253,35 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
     expect(world.alerts).toEqual([]);
   });
+
+  it('an --apply refused inside the apply (staged plist fails plutil) records no verdict and sends no alert', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK), plutilFails: true });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: null,
+      rollback: null,
+      alert: { attempted: false, status: null },
+    });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(world.alerts).toEqual([]);
+  });
 });
 
 describe('release activation helpers', () => {
   it('reads the health_invariants block structurally, never by matching bytes', () => {
     const read = (invariants: unknown): unknown => classifyAuthenticatedHealth(200, diagnosticBody(NEW_COMMIT, true, invariants)).invariants;
 
-    expect(read(undefined)).toEqual({ reading: 'absent', schema: null, ids: [] });
-    expect(read({ schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS }))
-      .toEqual({ reading: 'declared', schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS });
-    expect(read({ schema: INVARIANTS_SCHEMA, ids: [] })).toEqual({ reading: 'declared', schema: INVARIANTS_SCHEMA, ids: [] });
-    expect(read({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS }))
-      .toEqual({ reading: 'unknown-schema', schema: 'whatsoup.health-invariants.v2', ids: [] });
-    const malformed = { reading: 'malformed', schema: null, ids: [] };
+    expect(read(NO_BLOCK)).toEqual({ reading: 'absent', ids: [] });
+    expect(read(CURRENT_BLOCK)).toEqual({ reading: 'declared', ids: DECLARED_INVARIANTS });
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: [] })).toEqual({ reading: 'declared', ids: [] });
+    const unknownSchema = { reading: 'unknown-schema', ids: [] };
+    expect(read({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS })).toEqual(unknownSchema);
+    expect(read({ schema: '/var/lib/whatsoup/state', ids: [] })).toEqual(unknownSchema);
+    expect(read({ schema: 'x'.repeat(129), ids: [] })).toEqual(unknownSchema);
+    const malformed = { reading: 'malformed', ids: [] };
     expect(read(null)).toEqual(malformed);
     expect(read(DECLARED_INVARIANTS)).toEqual(malformed);
     expect(read({ schema: INVARIANTS_SCHEMA })).toEqual(malformed);
@@ -1100,24 +1291,31 @@ describe('release activation helpers', () => {
     expect(read({ schema: INVARIANTS_SCHEMA, ids: ['/var/lib/whatsoup/state'] })).toEqual(malformed);
     expect(read({ schema: INVARIANTS_SCHEMA, ids: Array.from({ length: 65 }, (_, index) => `id_${index}`) })).toEqual(malformed);
     expect(read({ schema: 42, ids: DECLARED_INVARIANTS })).toEqual(malformed);
-    expect(read({ schema: 'x'.repeat(129), ids: [] })).toEqual(malformed);
-    expect(read({ schema: '/var/lib/whatsoup/state', ids: [] })).toEqual(malformed);
 
     // The ids appearing as text elsewhere in the body are not a declaration.
     const smuggled = JSON.stringify({
-      instance: { commit: NEW_COMMIT, note: JSON.stringify({ health_invariants: { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS } }) },
+      instance: { commit: NEW_COMMIT, note: JSON.stringify({ health_invariants: CURRENT_BLOCK }) },
       whatsapp: { connected: true },
     });
-    expect(classifyAuthenticatedHealth(200, smuggled).invariants).toEqual({ reading: 'absent', schema: null, ids: [] });
+    expect(classifyAuthenticatedHealth(200, smuggled).invariants).toEqual({ reading: 'absent', ids: [] });
+  });
+
+  it('reads the responder pid from instance.pid, numeric only', () => {
+    const pidOf = (instance: Record<string, unknown>): unknown =>
+      classifyAuthenticatedHealth(200, diagnosticBody(NEW_COMMIT, true, CURRENT_BLOCK, instance)).responderPid;
+    expect(pidOf({ pid: 7001 })).toBe(7001);
+    expect(pidOf({})).toBeNull();
+    expect(pidOf({ pid: '7001' })).toBeNull();
+    expect(pidOf({ pid: 7001.5 })).toBeNull();
   });
 
   it('reads no invariants from a body it cannot classify as diagnostic', () => {
     expect(classifyAuthenticatedHealth(200, JSON.stringify({ schema_version: 'health.public.v1', status: 'ok' })).invariants).toBeNull();
     expect(classifyAuthenticatedHealth(500, JSON.stringify({ status: 'error' })).invariants).toBeNull();
     expect(classifyAuthenticatedHealth(200, 'not json').invariants).toBeNull();
-    // A 503 diagnostic body is still a diagnostic body: status and content stay separate.
-    expect(classifyAuthenticatedHealth(503, diagnosticBody(NEW_COMMIT, false, undefined)).invariants)
-      .toEqual({ reading: 'absent', schema: null, ids: [] });
+    // A 503 diagnostic body is still read; the verdict, not the reader, maps non-2xx to unknown.
+    expect(classifyAuthenticatedHealth(503, diagnosticBody(NEW_COMMIT, false, NO_BLOCK)).invariants)
+      .toEqual({ reading: 'absent', ids: [] });
   });
 
   it('matches the bootstrap entrypoint only as a whole argument', () => {
