@@ -57,6 +57,20 @@ describe('DurabilityEngine — session checkpoints', () => {
       expect(row!.claude_pid).toBe(1234);
     });
 
+    it('keeps the stored session_status when an update omits it (#3658)', () => {
+      engine.upsertSessionCheckpoint('conv-1', { sessionId: 'sess-abc', sessionStatus: 'ended' });
+
+      engine.upsertSessionCheckpoint('conv-1', { activeTurnId: null, lastInboundSeq: 7 });
+      let row = engine.getSessionCheckpoint('conv-1');
+      expect(row!.session_status).toBe('ended');
+      expect(row!.last_inbound_seq).toBe(7);
+
+      engine.upsertSessionCheckpoint('conv-1', { watchdogState: '{}' });
+      row = engine.getSessionCheckpoint('conv-1');
+      expect(row!.session_status).toBe('ended');
+      expect(row!.session_id).toBe('sess-abc');
+    });
+
     it('increments checkpoint_version on each upsert', () => {
       engine.upsertSessionCheckpoint('conv-1', { claudePid: 1 });
       engine.upsertSessionCheckpoint('conv-1', { claudePid: 2 });

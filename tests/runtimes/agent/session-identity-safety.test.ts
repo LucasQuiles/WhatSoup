@@ -153,6 +153,30 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect(durability.getSessionCheckpoint('15550142')?.session_status).toBe('active');
   });
 
+  it('retires the attempted resume identity so a resident manager can shut down again (#3658)', async () => {
+    durability.upsertSessionCheckpoint('15550143', {
+      sessionId: 'resume-provider-session',
+      sessionStatus: 'active',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550143@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    const state = sm as unknown as MutableSessionState;
+    state.resumeAttemptId = 'resume-provider-session';
+
+    await sm.shutdown(false);
+
+    expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
+    expect(state.resumeAttemptId).toBeNull();
+    // The manager stays resident after an intentional end; its next pre-spawn
+    // shutdown must not target the ended checkpoint by the stale identity.
+    await expect(sm.shutdown()).resolves.toBeUndefined();
+  });
+
   it('orphans only the current conversation checkpoint when a managed provider reports a crash', async () => {
     const providerSessionId = 'managed-provider-session';
     durability.upsertSessionCheckpoint('15550151', {
