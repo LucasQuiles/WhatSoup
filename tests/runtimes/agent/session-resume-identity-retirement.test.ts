@@ -148,8 +148,10 @@ describe('SessionManager resume identity retirement (#3658)', () => {
       onEvent: vi.fn(),
       onCrash,
     });
+    let nextFreshRowId = 50;
     sm.setDurability({
       upsertSessionCheckpoint: vi.fn(),
+      beginFreshSessionLifecycle: vi.fn(() => nextFreshRowId++),
       reactivateSessionLifecycle: vi.fn(() => ROW_ID),
       closeSessionLifecycle,
       closeSessionLifecycleFailure,
@@ -200,5 +202,26 @@ describe('SessionManager resume identity retirement (#3658)', () => {
       status: 'ended',
     }));
     expect((sm as unknown as ResumeIdentityState).resumeAttemptId).toBeNull();
+  });
+
+  it('a fresh spawn after a failed close never attributes a pre-init crash to the old provider session', async () => {
+    await sm.spawnSession();
+    // The old generation's init named its provider session.
+    (sm as unknown as { sessionId: string | null }).sessionId = 'old-provider-session';
+    closeSessionLifecycle.mockImplementationOnce(() => {
+      throw new Error('fixture lifecycle close failed');
+    });
+    await expect(sm.shutdown()).rejects.toThrow('fixture lifecycle close failed');
+
+    // The failed close skipped the shutdown tail; the fallback spawns fresh.
+    const freshChild = makeMockChild(9320);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(freshChild);
+    await sm.spawnSession();
+    freshChild.on.mock.calls.find(([event]) => event === 'exit')?.[1](1, null);
+
+    expect(closeSessionLifecycleFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      agentSessionRowId: 51,
+      providerSessionId: null,
+    }));
   });
 });
