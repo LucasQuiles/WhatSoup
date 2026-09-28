@@ -220,9 +220,17 @@ receipt) carries an `invariants` record:
   environment; `unknown` when neither resolves within 5 s). The floor comes
   from the release under test only if the tool is run from inside that
   release; `toolCommit` shows which tree it was. The lookup starts after the
-  activation returns and uses only asynchronous file reads. It is provenance,
-  not attestation: `git` is resolved from `PATH` (as the repository's other
-  tool git calls are), and the manifest's commit is taken as written.
+  outcome and exit code are final and uses only asynchronous file reads. The
+  manifest is opened once (non-blocking, never through a symlink), checked with
+  fstat on that descriptor, and read only from it, at most 64 KiB + 1 bytes; a
+  manifest that grew past 64 KiB after the check is refused. When the 5 s bound
+  expires the lookup is marked expired, and no later step (in particular the
+  `git` fallback) starts. A filesystem call already in flight cannot be
+  cancelled in Node, so a stalled one can keep the process alive after the
+  result is printed; the lookup reads only the tool's own checkout, the tree
+  the CLI was loaded from. It is provenance, not attestation: `git` is
+  resolved from `PATH` (as the repository's other tool git calls are), and the
+  manifest's commit is taken as written.
 - `activation`, and `rollback` when a rollback restarted the old release and
   observed it (otherwise `null`): the verdict for the process `verify`
   observed, read from the `health_invariants` block of its authenticated
@@ -234,7 +242,8 @@ receipt) carries an `invariants` record:
   - `below_floor`: the known schema, omitting a floor id (`undeclared` lists
     them).
   - `unknown`, with `detail`: `unknown-schema`, `malformed`, `unbound` (see
-    the binding below), `unobserved` (no diagnostic body at all), or
+    the binding below), `unobserved` (no diagnostic body at all, or a binding
+    that could not be observed), or
     `http-status` (a non-2xx diagnostic body). A failed or erroring read is
     never `missing`.
   - `schema` is `known`, `unrecognised`, or `null`; the producer's schema
@@ -249,32 +258,52 @@ The observation beside it (`verification`, `rollback.observation`) gains
 producer-declared id or schema string is stored anywhere: only the tool's own
 floor ids and a count.
 
-**Binding.** A body counts only when `binding` is `bound`: the launchd pid
-sampled before the request (whose argv names the release entrypoint, and
-whose process start time `ps -o lstart=` is read), the same pid, argv and
-start time sampled again once after the verification decision, and the
-body's own `instance.pid` all agree. Another pid, or the same pid with another
-start time (pid reuse), is `restarted`; a re-sample that timed out, or a start
-time that could not be read, is `unobserved`; any other mismatch is
-`unbound`. The verdict is then `unknown` with `detail` `unbound` or
-`unobserved`. The pids and start times behind the binding, including the pid
-the body reports, are used only to compute it and are never recorded; the
-record keeps only the pre-existing launchd `pid`.
+**Binding.** A body counts only when `binding` is `bound`. The evidence is
+the poll that decided verification: the launchd pid (whose argv names the
+release entrypoint), the body's own `instance.pid`, and the tool's clock when
+the response arrived. Once the activation outcome and exit code are final,
+one sample reads the launchd pid, its argv, and its process start time
+(`ps -o lstart=`, run with `TZ=UTC0` and `LC_ALL=C`). `bound` needs the same
+pid and argv, a body naming that pid, and a start second **strictly earlier**
+than the second the response was received: a process that reused the pid
+after the responder exited started no earlier than that second, so it can
+never bind. A start in the response second itself is `unobserved` (a
+same-second reuse would read the same `lstart` text). A later start or another
+pid is `restarted`; an observation that did not pass verification, a sample
+that timed out, or a start time that could not be read is `unobserved`; any
+other mismatch is `unbound`. The verdict is then `unknown` with `detail`
+`unbound` or `unobserved`. The pids and times behind the binding, including
+the pid the body reports, are used only to compute it and are never recorded;
+the record keeps only the pre-existing launchd `pid`.
 
-The re-sample never affects activation: it runs once, after the pass/fail
-decision for that observation, outside the verification poll loop, so it
-never consumes the verification deadline. Each exec it makes (`launchctl
-print`, `ps`) has its own 5 s timeout and is killed with SIGKILL. The
-start-time read before the request is bounded the same way. Every other
-`launchctl`, `ps`, `plutil` and renderer call keeps its previous behaviour,
-with no timeout.
+Report work never changes when or how the outcome is decided. Inside the
+verification poll the binding adds only a clock read after each response.
+Every binding exec (`launchctl print`, `ps -o command=`, `ps -o lstart=`)
+runs after the outcome and exit code are final, is attempted once (a timeout
+or failure is `unobserved`, never retried), has its own 5 s timeout and is
+killed with SIGKILL. One sample serves both observations, and it is taken only
+when an observation passed with a diagnostic body, so the bounded cost is at
+most 15 s, and it delays only the receipt, the event and stdout. The
+tool-commit lookup (at most 5 s) follows it. Every other `launchctl`, `ps`,
+`plutil` and renderer call keeps its previous behaviour, with no timeout.
+
+Consequence for rollbacks: a rollback always follows an activation
+observation that did not pass, which is never sampled and is recorded
+`unknown`/`unobserved`. So `rolled-back` (like every other rollback outcome)
+sends a warning, never a clear, even when both processes declare the floor;
+the incident is cleared by a later `activated` run whose verdict is
+satisfied. After an activation that passed but whose auxiliary labels failed,
+the sample sees the restored old process, so the activation observation reads
+`restarted`.
 
 This checks the producer's self-reported identity inside one window. It is
 not a kernel proof: a process of the same user that holds the health port and
-reports the right pid is outside it, nothing is known about a restart after
-the re-sample, and `ps -o lstart=` resolves to the second, so a pid reused
-within the same second is not told apart. A producer that predates
-`instance.pid` reads `unbound`.
+reports the right pid is outside it, and nothing is known about a restart
+after the sample. The rule compares a kernel start time with the tool's
+clock, both wall-clock: a wall-clock step backwards after the response (a
+manual clock change or a large NTP correction) can give a process that reused
+the pid a start second earlier than the response, and bind it. A producer that
+predates `instance.pid` reads `unbound`.
 It relies on the instance being the launchd job's own process:
 `deploy/whatsoup` execs node, `src/bootstrap-common.ts` imports the main
 module in that same process, and `src/core/health.ts` reports that
@@ -291,16 +320,22 @@ of the tool tree.
 `receipt.json` is written with the verdict **before** the event is sent
 (`alert.status: "pending"`), then rewritten with the final status, so an
 interrupt during the event leaves the verdict on disk. Every write is atomic
-(temporary file, fsync, rename) with a required directory fsync, so a
-successful write is a durable rename; a failed rewrite leaves the previous
-receipt whole. A failed directory fsync after the rename is also reported as
-a failure (the receipt is then not proven durable). A failed write prints only
-`release:activate: receipt-write-failed <ERRNO>` on stderr (the errno name,
-for example `EACCES`; never the path or the error text), the event is still
-attempted, and the exit code is unchanged, because it reports the live
-activation, which a lost receipt does not change. If the event also fails,
-stderr says the verdict is in `receipt.json` only when the first write
-succeeded, and otherwise that the verdict was not recorded.
+(temporary file, fsync, rename), followed by a required directory fsync, and
+publication and durability are reported apart:
+
+- a write that fails **before** the rename leaves the previous receipt whole
+  and prints `release:activate: receipt-write-failed <ERRNO>`;
+- a write whose rename succeeded but whose directory fsync failed leaves the
+  **new** receipt published, not proven durable across a crash, and prints
+  `release:activate: receipt-written-durability-unproven <ERRNO>`;
+- otherwise the new receipt is published and durable.
+
+The stderr line carries the errno name only (for example `EACCES`; never the
+path or the error text). The event is still attempted and the exit code is
+unchanged, because it reports the live activation, which a lost receipt does
+not change. If the event also fails, stderr says the verdict is in
+`receipt.json` whenever the first write published a receipt (durable or not),
+and otherwise that the verdict was not recorded.
 
 At most one BOT ERRORS event is sent, through the release observers' alert
 helper, for source `release-invariants:<digest>`: the first 8 hex of sha256
@@ -312,12 +347,20 @@ unchanged (its source segment allows `[A-Za-z0-9_.:-]`).
   verdict that is not `satisfied`;
 - a **clear** for the same instance and source when every recorded verdict is
   `satisfied` and the outcome is `activated` or `rolled-back` (a verified
-  process is live); a clear with no open incident is dropped by the
-  dispatcher;
+  process is live); in practice only `activated`, because a rollback's
+  activation verdict is always `unobserved` (see the binding above); a clear
+  with no open incident is dropped by the dispatcher;
 - nothing after satisfied verdicts with `rollback-unverified` or
   `rollback-blocked-migrated` (the instance may be stopped), after a refusal
   (before or during the apply; no verdict), or for `--plan` (which never reads
   invariants).
+
+**Stranded incidents.** A clear resolves only the incident of its own source.
+Incidents opened under the earlier bare `release-invariants` source, or under
+the digest of an earlier floor, are never closed by a later clear. Before
+resolving one by hand, the operator checks that the live instance meets the
+floor that incident was raised for (the `evidence` line names its schema and
+ids), then resolves it in BOT ERRORS.
 
 Per operator decision, both the warning and the clear are **standard BOT
 ERRORS events with no log tail**, on the private operator channel: the payload
@@ -329,8 +372,9 @@ tail turned off for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`, the only
 per-call override the helper accepts).
 
 stdout stays one JSON document, printed after the event, so it can trail the
-activation by up to the helper's 60 s timeout; `receipt.json` already holds
-the verdict during that wait.
+activation by the bounded report work above (at most 20 s) plus up to the
+helper's 60 s timeout; `receipt.json` already holds the verdict during the
+helper wait.
 
 The verdict is **report-only**: it is not part of the pass condition, and the
 outcome and every exit code above are unchanged. A failed event is printed to

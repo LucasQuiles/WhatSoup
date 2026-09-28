@@ -22,24 +22,32 @@
  * pass predicate, the outcome, or the exit code.
  *
  * Binding contract (`resolveBinding`). The verdict classifies a body only
- * when the binding is `bound`: the launchd pid sampled before the request,
- * with its argv naming the release entrypoint and its process start time
- * (`ps -o lstart=`); the same pid, argv and start time sampled again once
- * after the verification decision; and the body's own `instance.pid`, all
- * agree. Another pid or another start time is `restarted` (the start time
- * catches pid reuse); a re-sample that timed out or a start time that could
- * not be read is `unobserved`; any other mismatch is `unbound`. The raw pids
- * and start times are transient: only the binding result is recorded.
+ * when the binding is `bound`. The evidence is the poll that decided the
+ * verification: the launchd pid, its argv naming the release entrypoint, the
+ * body's own `instance.pid`, and the tool clock when the response arrived.
+ * Once the activation outcome is final, one sample reads the launchd pid, its
+ * argv and its process start time (`ps -o lstart=` in UTC). `bound` needs the
+ * same pid and argv, a responder that names that pid, and a start second
+ * strictly earlier than the response second. A process that reused the pid
+ * after the responder exited started no earlier than the response second, so
+ * it can never bind; a start in the response second itself is `unobserved`,
+ * because a same-second reuse would read the same `lstart` text. A later start
+ * or another pid is `restarted`; an observation that did not pass, a sample
+ * that timed out, or a start time that could not be read is `unobserved`; any
+ * other mismatch is `unbound`. The raw pids and times are transient: only the
+ * binding result is recorded.
  *
  * This checks the producer's self-reported identity inside one window, not a
  * kernel proof: a process of the same user that holds the health port and
- * reports the right pid is outside it, nothing is known about restarts after
- * the re-sample, and `lstart` resolves to the second, so a pid reused within
- * the same second reads `bound`. A producer that predates `instance.pid` reads
- * `unbound`. It relies on the instance being the launchd job's own process:
- * deploy/whatsoup execs node, src/bootstrap-common.ts:23 imports the main
- * module in that process, and src/core/health.ts reports its process.pid as
- * `instance.pid`.
+ * reports the right pid is outside it, and nothing is known about restarts
+ * after the sample. Both seconds come from the same wall clock (the tool's
+ * `host.now()` and the kernel's start time), so a wall-clock step backwards
+ * after the response can give a process that reused the pid a start second
+ * earlier than the response second; the rule assumes no such step. A producer that
+ * predates `instance.pid` reads `unbound`. It relies on the instance being the
+ * launchd job's own process: deploy/whatsoup execs node,
+ * src/bootstrap-common.ts:23 imports the main module in that process, and
+ * src/core/health.ts reports its process.pid as `instance.pid`.
  *
  * A body that could not be read or was not diagnostic is `unobserved`, and a
  * non-2xx diagnostic body is `http-status`: never `missing`, because a failed
@@ -95,12 +103,23 @@ export interface ReleaseInvariantsVerdict {
   undeclared: string[];
 }
 
-/** One launchd sample of the instance; transient, never recorded. */
+/** The one launchd sample taken after the outcome; transient, never recorded. */
 export interface ProcessSample {
   pid: number | null;
   argvMatches: boolean;
-  /** `ps -o lstart=` for that pid; null when it could not be read in time. */
-  startTime: string | null;
+  /** Process start (`ps -o lstart=`, UTC) in epoch ms at second resolution; null when it could not be read. */
+  startedAtMs: number | null;
+}
+
+/** The deciding poll's observation, as the binding needs it; transient, never recorded. */
+export interface BindingEvidence {
+  pid: number | null;
+  argvMatches: boolean;
+  /** Whether this observation passed verification; one that did not is never re-sampled. */
+  passed: boolean;
+  health: Pick<HealthObservation, 'projection' | 'responderPid'> | null;
+  /** The tool clock (`host.now()`) when the health response arrived; null when none did. */
+  respondedAtMs: number | null;
 }
 
 export type Binding = 'bound' | 'unbound' | 'restarted' | 'unobserved';
@@ -113,23 +132,26 @@ export interface BoundObservation {
   binding: Binding;
 }
 
+const secondOf = (ms: number): number => Math.floor(ms / 1_000);
+
 /**
- * Is the body bound to one process generation? `first` was sampled before
- * the request; `resample` once after the verification decision, or null when
- * it timed out or failed. See the binding contract above.
+ * Is the body bound to one process generation? `evidence` is the deciding
+ * poll; `sample` was taken once after the activation outcome was final, or is
+ * null when it was not taken or timed out. See the binding contract above.
  */
-export function resolveBinding(
-  first: ProcessSample,
-  resample: ProcessSample | null,
-  health: Pick<HealthObservation, 'projection' | 'responderPid'> | null,
-): Binding {
-  if (first.pid === null || !first.argvMatches) return 'unbound';
-  if (health === null || health.projection !== 'diagnostic') return 'unobserved';
-  if (resample === null) return 'unobserved';
-  if (resample.pid !== first.pid) return 'restarted';
-  if (first.startTime === null || resample.startTime === null) return 'unobserved';
-  if (resample.startTime !== first.startTime) return 'restarted';
-  if (!resample.argvMatches || health.responderPid !== first.pid) return 'unbound';
+export function resolveBinding(evidence: BindingEvidence, sample: ProcessSample | null): Binding {
+  if (evidence.pid === null || !evidence.argvMatches) return 'unbound';
+  if (!evidence.passed) return 'unobserved';
+  const health = evidence.health;
+  if (health === null || health.projection !== 'diagnostic' || evidence.respondedAtMs === null) return 'unobserved';
+  if (sample === null) return 'unobserved';
+  if (sample.pid !== evidence.pid) return 'restarted';
+  if (sample.startedAtMs === null) return 'unobserved';
+  const started = secondOf(sample.startedAtMs);
+  const responded = secondOf(evidence.respondedAtMs);
+  if (started > responded) return 'restarted';
+  if (started === responded) return 'unobserved';
+  if (!sample.argvMatches || health.responderPid !== evidence.pid) return 'unbound';
   return 'bound';
 }
 

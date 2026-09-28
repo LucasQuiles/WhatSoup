@@ -44,7 +44,7 @@ import {
   type HealthObservation,
   type RecordedHealth,
 } from './host.ts';
-import { type Binding, type ProcessSample, resolveBinding } from './invariants.ts';
+import { type Binding, type BindingEvidence, type ProcessSample, resolveBinding } from './invariants.ts';
 import {
   type ActivationContext,
   bootstrapEntrypointFor,
@@ -70,20 +70,34 @@ export interface InstanceObservation {
   health: RecordedHealth | null;
   /**
    * #2481: whether the body is bound to one process generation (see
-   * invariants.ts `resolveBinding`). The pids and start times behind it are
-   * transient. Not part of the pass predicate.
+   * invariants.ts `resolveBinding`). `applyActivation` leaves it `unobserved`;
+   * `resolveOutcomeBindings` sets it once the outcome is final. The pids and
+   * times behind it are transient. Not part of the pass predicate.
    */
   binding: Binding;
 }
 
-/** One poll's observation, before recording: it still carries the transient binding evidence. */
+/** One poll's observation: the pass predicate's inputs plus the transient binding evidence. */
 interface PolledObservation {
-  sample: ProcessSample;
+  pid: number | null;
+  argvMatches: boolean;
   health: HealthObservation | null;
+  /** `host.now()` when the health response arrived; null when none did. */
+  respondedAtMs: number | null;
 }
 
 /** Upper bound on every exec the #2481 binding makes (its own timeout, then SIGKILL). */
 export const BINDING_EXEC_TIMEOUT_MS = 5_000;
+
+/** `ps -o lstart=` prints local time in the locale's words: pin both so the text is UTC in English. */
+const START_TIME_ENV = { TZ: 'UTC0', LC_ALL: 'C' } as const;
+
+/**
+ * The deciding poll's evidence behind each recorded observation, keyed by the
+ * observation object. Never recorded: `resolveOutcomeBindings` reads it once
+ * the activation outcome is final.
+ */
+const BINDING_EVIDENCE = new WeakMap<InstanceObservation, { evidence: BindingEvidence; entrypoint: string }>();
 
 /**
  * Schema migration level of the database before activation (read from the
@@ -199,17 +213,30 @@ export async function reloadLabel(
   return null;
 }
 
+type BoundedExecResult = { kind: 'done'; result: ExecResult } | { kind: 'timeout' } | { kind: 'error' };
+
 /**
  * A #2481 binding exec: bounded by its own timeout (the host kills the child
  * with SIGKILL) and by a timer here, so no host seam can hold the caller past
- * BINDING_EXEC_TIMEOUT_MS. Null when it timed out or threw.
+ * BINDING_EXEC_TIMEOUT_MS. A timeout, a throw and a completed run (whatever
+ * its exit code) are told apart.
  */
-async function boundedExec(host: ActivationHost, file: string, args: readonly string[]): Promise<ExecResult | null> {
+async function boundedExec(
+  host: ActivationHost,
+  file: string,
+  args: readonly string[],
+  env?: Readonly<Record<string, string>>,
+): Promise<BoundedExecResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), BINDING_EXEC_TIMEOUT_MS); });
+  const expired = new Promise<BoundedExecResult>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'timeout' }), BINDING_EXEC_TIMEOUT_MS);
+  });
   const run = Promise.resolve()
-    .then(() => host.exec(file, args, { timeoutMs: BINDING_EXEC_TIMEOUT_MS }))
-    .catch(() => null);
+    .then(() => host.exec(file, args, { timeoutMs: BINDING_EXEC_TIMEOUT_MS, ...(env === undefined ? {} : { env }) }))
+    .then(
+      (result): BoundedExecResult => (result.timedOut === true ? { kind: 'timeout' } : { kind: 'done', result }),
+      (): BoundedExecResult => ({ kind: 'error' }),
+    );
   try {
     return await Promise.race([run, expired]);
   } finally {
@@ -217,11 +244,96 @@ async function boundedExec(host: ActivationHost, file: string, args: readonly st
   }
 }
 
-/** `ps -o lstart=` for a pid (bounded); null when it could not be read in time. */
-async function startTimeOf(host: ActivationHost, pid: number): Promise<string | null> {
-  const ps = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'lstart=']);
-  const value = ps !== null && ps.code === 0 ? ps.stdout.trim() : '';
-  return value === '' ? null : value;
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LSTART = /^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) {1,2}(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/;
+
+/**
+ * `ps -o lstart=` text under TZ=UTC0 and LC_ALL=C (`Thu Jan  1 00:00:00 2026`)
+ * as UTC epoch ms at second resolution; null for anything else, including a
+ * date that does not exist or a weekday that does not match it.
+ */
+export function parseProcessStartTime(text: string): number | null {
+  const match = LSTART.exec(text.trim());
+  if (match === null) return null;
+  const [, weekday, monthName, day, hours, minutes, seconds, year] = match;
+  const month = MONTHS.indexOf(monthName!);
+  if (month < 0) return null;
+  const [d, h, m, s, y] = [day, hours, minutes, seconds, year].map(Number) as [number, number, number, number, number];
+  if (h > 23 || m > 59 || s > 59) return null;
+  const ms = Date.UTC(y, month, d, h, m, s);
+  const date = new Date(ms);
+  if (date.getUTCDate() !== d || date.getUTCMonth() !== month || WEEKDAYS[date.getUTCDay()] !== weekday) return null;
+  return ms;
+}
+
+/** The raw post-outcome sample; argv is matched per observation, against its own release. */
+interface RawProcessSample {
+  pid: number | null;
+  argvLine: string | null;
+  startedAtMs: number | null;
+}
+
+/**
+ * The #2481 sample: launchd pid, argv and start time, every exec bounded,
+ * each attempted once. Null when the pid or argv read timed out or threw; a
+ * start time that timed out or failed is null and never retried. Called only
+ * by `resolveOutcomeBindings`, after the outcome is final.
+ */
+async function sampleInstanceProcess(host: ActivationHost, context: ActivationContext): Promise<RawProcessSample | null> {
+  const print = await boundedExec(host, 'launchctl', ['print', `${context.domain}/${context.instanceLabel}`]);
+  if (print.kind !== 'done') return null;
+  const match = print.result.code === 0 ? PID_LINE.exec(print.result.stdout) : null;
+  if (match === null) return { pid: null, argvLine: null, startedAtMs: null };
+  const pid = Number(match[1]);
+  const ps = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'command=']);
+  if (ps.kind !== 'done') return null;
+  const argvLine = ps.result.code === 0 ? ps.result.stdout.trim() : null;
+  const lstart = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'lstart='], START_TIME_ENV);
+  const startedAtMs = lstart.kind === 'done' && lstart.result.code === 0 ? parseProcessStartTime(lstart.result.stdout) : null;
+  return { pid, argvLine, startedAtMs };
+}
+
+/** Would a sample decide anything for this evidence? Only a passing observation with a diagnostic response. */
+function worthSampling(evidence: BindingEvidence): boolean {
+  return evidence.pid !== null && evidence.argvMatches && evidence.passed
+    && evidence.health?.projection === 'diagnostic' && evidence.respondedAtMs !== null;
+}
+
+/**
+ * #2481: set the binding of every recorded observation. Call only once the
+ * activation outcome and exit code are final: it takes at most one shared
+ * sample (three bounded execs, at most 3 x BINDING_EXEC_TIMEOUT_MS), and only
+ * when some observation passed with a diagnostic response. An observation that
+ * did not pass is never sampled and stays `unobserved`. It changes nothing but
+ * the `binding` fields of the copies it returns.
+ */
+export async function resolveOutcomeBindings(
+  host: ActivationHost,
+  context: ActivationContext,
+  outcome: ApplyOutcome,
+): Promise<ApplyOutcome> {
+  const pending = [outcome.verification, outcome.rollback?.observation ?? null]
+    .map((observation) => (observation === null ? undefined : BINDING_EVIDENCE.get(observation)));
+  const raw = pending.some((entry) => entry !== undefined && worthSampling(entry.evidence))
+    ? await sampleInstanceProcess(host, context)
+    : null;
+  const bind = (observation: InstanceObservation | null): InstanceObservation | null => {
+    if (observation === null) return null;
+    const entry = BINDING_EVIDENCE.get(observation);
+    if (entry === undefined) return observation;
+    const sample: ProcessSample | null = raw === null ? null : {
+      pid: raw.pid,
+      argvMatches: raw.argvLine !== null && argvNamesEntrypoint(raw.argvLine, entry.entrypoint),
+      startedAtMs: raw.startedAtMs,
+    };
+    return { ...observation, binding: resolveBinding(entry.evidence, sample) };
+  };
+  return {
+    ...outcome,
+    verification: bind(outcome.verification),
+    rollback: outcome.rollback === null ? null : { ...outcome.rollback, observation: bind(outcome.rollback.observation) },
+  };
 }
 
 async function observeInstance(
@@ -230,15 +342,16 @@ async function observeInstance(
   entrypoint: string,
 ): Promise<PolledObservation> {
   const state = await launchdState(host, context.domain, context.instanceLabel);
-  if (state.pid === null) return { sample: { pid: null, argvMatches: false, startTime: null }, health: null };
+  if (state.pid === null) return { pid: null, argvMatches: false, health: null, respondedAtMs: null };
   const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
   const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
-  // #2481: the start time, before the request, tells a reused pid apart later.
-  const startTime = await startTimeOf(host, state.pid);
   let health: HealthObservation | null = null;
+  let respondedAtMs: number | null = null;
   if (context.healthPort !== null && context.healthToken !== null) {
     try {
       const response = await host.fetchHealth(context.healthPort, context.healthToken);
+      // #2481: a synchronous clock read, the only binding work inside the poll.
+      respondedAtMs = host.now();
       health = classifyAuthenticatedHealth(response.status, response.body);
     } catch {
       health = {
@@ -246,40 +359,16 @@ async function observeInstance(
       };
     }
   }
-  return { sample: { pid: state.pid, argvMatches, startTime }, health };
-}
-
-/** The #2481 re-sample: launchd pid, argv and start time, every exec bounded. Null when any timed out. */
-async function resampleProcess(
-  host: ActivationHost,
-  context: ActivationContext,
-  entrypoint: string,
-): Promise<ProcessSample | null> {
-  const print = await boundedExec(host, 'launchctl', ['print', `${context.domain}/${context.instanceLabel}`]);
-  if (print === null) return null;
-  const match = print.code === 0 ? PID_LINE.exec(print.stdout) : null;
-  if (match === null) return { pid: null, argvMatches: false, startTime: null };
-  const pid = Number(match[1]);
-  const ps = await boundedExec(host, 'ps', ['-p', String(pid), '-o', 'command=']);
-  if (ps === null) return null;
-  const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
-  return { pid, argvMatches, startTime: await startTimeOf(host, pid) };
+  return { pid: state.pid, argvMatches, health, respondedAtMs };
 }
 
 /**
- * Record the final observation. Runs once, after the pass/fail decision, so
- * it never consumes the verification deadline and never changes the outcome;
- * the re-sample adds at most three bounded execs. The producer-reported pid is
- * dropped here: only the binding result is recorded.
+ * Record the deciding observation. No exec and no await: the producer-reported
+ * pid and the response time go only into the transient binding evidence, and
+ * the binding itself is resolved after the outcome (`resolveOutcomeBindings`).
  */
-async function recordObservation(
-  host: ActivationHost,
-  context: ActivationContext,
-  entrypoint: string,
-  polled: PolledObservation,
-): Promise<InstanceObservation> {
-  const { sample, health } = polled;
-  const resample = sample.pid === null || health === null ? null : await resampleProcess(host, context, entrypoint);
+function recordObservation(polled: PolledObservation, passed: boolean, entrypoint: string): InstanceObservation {
+  const { health } = polled;
   // Field by field, so nothing added to HealthObservation later reaches the receipt unreviewed.
   const recorded: RecordedHealth | null = health === null ? null : {
     projection: health.projection,
@@ -288,21 +377,31 @@ async function recordObservation(
     connected: health.connected,
     invariants: health.invariants,
   };
-  return {
-    pid: sample.pid,
-    argvMatches: sample.argvMatches,
+  const observation: InstanceObservation = {
+    pid: polled.pid,
+    argvMatches: polled.argvMatches,
     health: recorded,
-    binding: resolveBinding(sample, resample, health),
+    binding: 'unobserved',
   };
+  BINDING_EVIDENCE.set(observation, {
+    evidence: {
+      pid: polled.pid,
+      argvMatches: polled.argvMatches,
+      passed,
+      health: health === null ? null : { projection: health.projection, responderPid: health.responderPid },
+      respondedAtMs: polled.respondedAtMs,
+    },
+    entrypoint,
+  });
+  return observation;
 }
 
 function instancePasses(
   observation: PolledObservation,
   expected: { commit: string | null; previousPid: number | null },
 ): boolean {
-  const { sample } = observation;
-  if (sample.pid === null || !sample.argvMatches) return false;
-  if (expected.previousPid !== null && sample.pid === expected.previousPid) return false;
+  if (observation.pid === null || !observation.argvMatches) return false;
+  if (expected.previousPid !== null && observation.pid === expected.previousPid) return false;
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.connected !== true) return false;
   return expected.commit === null || health.commit === expected.commit;
@@ -323,7 +422,7 @@ async function verifyInstance(
     if (host.now() >= deadline) { ok = false; break; }
     await host.sleep(VERIFY_POLL_INTERVAL_MS);
   }
-  return { ok, observation: await recordObservation(host, context, expected.entrypoint, polled) };
+  return { ok, observation: recordObservation(polled, ok, expected.entrypoint) };
 }
 
 async function verifyAuxDefinitions(

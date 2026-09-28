@@ -27,16 +27,20 @@
  *
  * #2481, report-only: under --apply, the receipt also records the health
  * invariant verdict of the activated (and any rollback) process against this
- * tool's floor. It is written before any event; then at most one BOT ERRORS
- * event is sent for source `release-invariants:<floor digest>` (standard
- * event fields, inline log tail off): a warning when any recorded verdict is
- * not `satisfied`; a clear when every verdict is satisfied and the outcome is
- * `activated` or `rolled-back`; nothing otherwise. The receipt is then
- * rewritten with the event status. Every receipt write is atomic with a
- * required directory fsync; a failed one prints only the fixed code
- * `receipt-write-failed <ERRNO>`. The verdict never changes the outcome or the
- * exit code. stdout stays one JSON document, printed after the event, so it
- * can trail the activation by up to the helper's 60 s timeout.
+ * tool's floor. All of that report work (the process sample behind the
+ * binding, the tool-commit lookup, the receipt, the event) runs only after the
+ * activation outcome and the exit code are final. The receipt is written
+ * before any event; then at most one BOT ERRORS event is sent for source
+ * `release-invariants:<floor digest>` (standard event fields, inline log tail
+ * off): a warning when any recorded verdict is not `satisfied`; a clear when
+ * every verdict is satisfied and the outcome is `activated` or `rolled-back`;
+ * nothing otherwise. The receipt is then rewritten with the event status.
+ * Every receipt write is atomic; a failed one prints only the fixed code
+ * `receipt-write-failed <ERRNO>`, and a published receipt whose directory
+ * fsync failed prints `receipt-written-durability-unproven <ERRNO>`. The
+ * verdict never changes the outcome or the exit code. stdout stays one JSON
+ * document, printed after the event, so it can trail the activation by the
+ * bounded report work plus up to the helper's 60 s timeout.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -44,9 +48,9 @@ import { pathToFileURL } from 'node:url';
 
 import { HEALTH_INVARIANTS_SCHEMA, RELEASE_INVARIANT_FLOOR } from '../src/core/health-invariants.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
-import { writeAtomicPrivateFileSync } from '../src/lib/private-fs.ts';
+import { fsyncDirectoryRequired, writeAtomicPrivateFileSync } from '../src/lib/private-fs.ts';
 import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
-import { applyActivation, type ApplyOutcome } from './lib/release-activation/apply.ts';
+import { applyActivation, type ApplyOutcome, resolveOutcomeBindings } from './lib/release-activation/apply.ts';
 import { type ActivationHost, createDefaultActivationHost } from './lib/release-activation/host.ts';
 import {
   releaseInvariantsAlertSource,
@@ -246,7 +250,12 @@ function boundedToolCommit(host: ActivationHost): Promise<string | null> {
   return Promise.race([lookup, expired]).finally(() => clearTimeout(timer));
 }
 
-/** Outcomes after which a verified process is live, so satisfied verdicts may clear the incident. */
+/**
+ * Outcomes after which a verified process is live, so satisfied verdicts may
+ * clear the incident. `rolled-back` stays listed, but in practice it never
+ * clears: its activation observation did not pass, is never sampled, and so
+ * is always `unknown`/`unobserved` (apply.ts `resolveOutcomeBindings`).
+ */
 const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated', 'rolled-back']);
 
 /**
@@ -257,7 +266,9 @@ const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated
  * clear is due only when every verdict is satisfied AND the outcome left a
  * verified process live (`activated`, or `rolled-back` with the rollback
  * verified); after `rollback-unverified` or `rollback-blocked-migrated` the
- * instance may be stopped, so no clear is sent.
+ * instance may be stopped, so no clear is sent. Every rollback outcome follows
+ * a failed activation observation, which is recorded `unobserved`, so a
+ * rollback always sends a warning, never a clear.
  */
 function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): InvariantsRecord {
   const floor = [...RELEASE_INVARIANT_FLOOR];
@@ -299,7 +310,8 @@ async function sendInvariantsEvent(
   instance: string,
   outcome: ApplyOutcome,
   record: InvariantsRecord,
-  receiptWritten: boolean,
+  /** Whether a receipt was published (renamed into place), durable or not. */
+  receiptPublished: boolean,
   stderr: (text: string) => void,
 ): Promise<void> {
   const { kind } = record.alert;
@@ -328,8 +340,8 @@ async function sendInvariantsEvent(
   }
   record.alert.status = status;
   if (status !== 0) {
-    // Name the receipt only when it was actually written.
-    const where = receiptWritten ? 'the verdict is in receipt.json' : 'the verdict was not recorded';
+    // Name the receipt whenever one was published, even one not proven durable.
+    const where = receiptPublished ? 'the verdict is in receipt.json' : 'the verdict was not recorded';
     stderr(`release invariants alert (${kind}) was not sent (status ${status ?? 'none'}); ${where}\n`);
   }
 }
@@ -431,7 +443,11 @@ export async function runReleaseActivateCli(
     io.stdout(`${JSON.stringify({ ...plan, outcome: 'refused' }, null, 2)}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
-  const outcome = await applyActivation(host, context);
+  const applied = await applyActivation(host, context);
+  // The outcome and the exit code are final here. Everything below is report
+  // work: it can delay the receipt and stdout, never change either.
+  const exitCode = outcomeExit(applied.outcome);
+  const outcome = await resolveOutcomeBindings(host, context, applied);
   const invariants = classifyForReceipt(await boundedToolCommit(host), outcome);
   const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
@@ -441,34 +457,42 @@ export async function runReleaseActivateCli(
     ...outcome,
     invariants,
   }, null, 2)}\n`;
-  // Atomic (temporary file, fsync, rename) with a REQUIRED directory fsync
-  // (private-fs `directoryFsync: 'required'`): a failed rewrite leaves the
-  // previous receipt whole, and success means the rename is durable. A failed
-  // directory fsync after the rename also reports a failure ("not proven
-  // durable"). The exit code reports the live activation, which a lost
-  // receipt does not change, so a write failure is a fixed stderr code with
-  // the errno name only; the error text would carry the backup path.
-  const writeReceipt = (): boolean => {
-    if (outcome.backupPath === null) return false;
+  // Atomic (temporary file, fsync, rename): a write that fails before the
+  // rename leaves the previous receipt whole (`none`). Publication and
+  // durability are reported apart: once the rename succeeded the new receipt
+  // is published, and a directory fsync that then fails leaves it published
+  // but not proven durable (`unproven`); only a successful one is `durable`.
+  // The exit code reports the live activation, which a lost receipt does not
+  // change, so a failure is a fixed stderr code with the errno name only; the
+  // error text would carry the backup path.
+  const writeReceipt = (): 'none' | 'unproven' | 'durable' => {
+    if (outcome.backupPath === null) return 'none';
     try {
-      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'required');
-      return true;
+      // 'best-effort' here: the required directory fsync runs next, on its own, so its failure is told apart.
+      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'best-effort');
     } catch (error) {
       io.stderr(`release:activate: receipt-write-failed ${errnoName(error)}\n`);
-      return false;
+      return 'none';
+    }
+    try {
+      fsyncDirectoryRequired(outcome.backupPath);
+      return 'durable';
+    } catch (error) {
+      io.stderr(`release:activate: receipt-written-durability-unproven ${errnoName(error)}\n`);
+      return 'unproven';
     }
   };
-  // The receipt, with the verdict and the event still pending, is durable
+  // The receipt, with the verdict and the event still pending, is published
   // before the helper runs; an interrupt during the event cannot lose it.
-  const receiptWritten = writeReceipt();
+  const receiptWrite = writeReceipt();
   if (invariants.alert.status === 'pending') {
-    await sendInvariantsEvent(host, args.instance, outcome, invariants, receiptWritten, io.stderr);
+    await sendInvariantsEvent(host, args.instance, outcome, invariants, receiptWrite !== 'none', io.stderr);
     writeReceipt();
   }
   // One JSON document on stdout, after the event (see the header).
   io.stdout(receipt());
   if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
-  return outcomeExit(outcome.outcome);
+  return exitCode;
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';

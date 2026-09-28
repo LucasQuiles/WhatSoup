@@ -24,6 +24,19 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Set when the child was killed because `timeoutMs` expired (not a failed exit). */
+  timedOut?: true;
+}
+
+export interface ExecOptions {
+  input?: string;
+  /** Kill the child with SIGKILL when this expires. */
+  timeoutMs?: number;
+  /**
+   * An explicit child environment: these variables plus the tool's `PATH`
+   * only. Without it the child inherits the tool's environment, as before.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface HealthResponse {
@@ -37,10 +50,10 @@ export interface ActivationHost {
   /**
    * Run a program with argv (never a shell string). Non-zero exit is a result,
    * not a throw. `timeoutMs` kills the child with SIGKILL when it expires; only
-   * the #2481 binding samples pass it, and every other caller runs unbounded
-   * as before.
+   * the #2481 binding sample passes it (and `env`), after the activation
+   * outcome is final, and every other caller runs unbounded as before.
    */
-  exec(file: string, args: readonly string[], options?: { input?: string; timeoutMs?: number }): Promise<ExecResult>;
+  exec(file: string, args: readonly string[], options?: ExecOptions): Promise<ExecResult>;
   isProcessAlive(pid: number): boolean;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -80,15 +93,21 @@ const TOOL_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 function defaultExec(
   file: string,
   args: readonly string[],
-  options: { input?: string; timeoutMs?: number } = {},
+  options: ExecOptions = {},
 ): Promise<ExecResult> {
   const bound = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: 'SIGKILL' as const };
+  const env = options.env === undefined
+    ? {}
+    : { env: { ...(process.env['PATH'] === undefined ? {} : { PATH: process.env['PATH'] }), ...options.env } };
   return new Promise((resolve) => {
-    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8', ...bound }, (error, stdout, stderr) => {
+    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8', ...bound, ...env }, (error, stdout, stderr) => {
       const code = error === null
         ? 0
         : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+      // execFile reports its own timeout as a kill with the configured signal.
+      const timedOut = error !== null && options.timeoutMs !== undefined
+        && (error as { killed?: unknown }).killed === true && (error as { signal?: unknown }).signal === 'SIGKILL';
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), ...(timedOut ? { timedOut: true as const } : {}) });
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
     else child.stdin?.end();
