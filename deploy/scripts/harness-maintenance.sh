@@ -110,7 +110,8 @@ chmod 700 "$STATE_DIR"
 RUN_LOG="$STATE_DIR/run.log"
 # An explicit template: mktemp -d alone ignores TMPDIR on macOS.
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/harness-maintenance.XXXXXX")"
-EVENTS_FILE="$TMP_DIR/events.ndjson"
+# Seven NUL-terminated fields per event (see record_event); write_state turns them into JSON.
+EVENTS_FILE="$TMP_DIR/events.fields"
 STATE_TMP="$TMP_DIR/state.json"
 STATE_FILE="$STATE_DIR/state.json"
 touch "$EVENTS_FILE"
@@ -194,25 +195,27 @@ log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
 }
 
-json_escape_event() {
-  "$REPO_NODE_BIN" - "$EVENTS_FILE" "$1" "$2" "$3" "${4:-}" "${5:-}" "${6:-}" <<'NODE'
-const fs = require('node:fs');
-const [eventsPath, component, status, message, before, after, target] = process.argv.slice(2);
-fs.appendFileSync(eventsPath, `${JSON.stringify({
-  at: new Date().toISOString(),
-  component,
-  status,
-  message,
-  before: before || undefined,
-  after: after || undefined,
-  target: target || undefined,
-})}\n`);
-NODE
+# record_event <component> <status> <message> [before] [after] [target]: append the event as
+# seven NUL-terminated fields (at, then the arguments). A shell string cannot hold a NUL, so no
+# field needs escaping, and no process starts per event; write_state encodes the JSON once.
+# The timestamp has whole-second precision (the .000 keeps toISOString's shape).
+record_event() {
+  printf '%s\0' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$1" "$2" "$3" "${4:-}" "${5:-}" "${6:-}" >> "$EVENTS_FILE"
+  log "$1 [$2] $3"
 }
 
-record_event() {
-  json_escape_event "$@"
-  log "$1 [$2] $3"
+# events_recorded <component> <status>: 0 when this run has recorded such an event.
+events_recorded() {
+  local component status
+  # Fields: at, component, status, message, before, after, target.
+  while IFS= read -r -d '' _ && IFS= read -r -d '' component && IFS= read -r -d '' status \
+    && IFS= read -r -d '' _ && IFS= read -r -d '' _ && IFS= read -r -d '' _ \
+    && IFS= read -r -d '' _; do
+    if [ "$component" = "$1" ] && [ "$status" = "$2" ]; then
+      return 0
+    fi
+  done 2>/dev/null < "$EVENTS_FILE"
+  return 1
 }
 
 # Returns nonzero instead of exiting so the caller can surface a failed write on
@@ -224,8 +227,22 @@ write_state() {
   "$REPO_NODE_BIN" - "$EVENTS_FILE" "$STATE_TMP" "$status" "$MODE" <<'NODE' || return 1
 const fs = require('node:fs');
 const [eventsPath, outPath, status, mode] = process.argv.slice(2);
-const lines = fs.readFileSync(eventsPath, 'utf8').split(/\n/).filter(Boolean);
-const events = lines.map((line) => JSON.parse(line));
+const fields = fs.readFileSync(eventsPath, 'utf8').split('\0');
+// A complete file ends in NUL and holds whole events; anything else is truncated.
+if (fields.pop() !== '' || fields.length % 7 !== 0) throw new Error(`truncated events file: ${eventsPath}`);
+const events = [];
+for (let i = 0; i < fields.length; i += 7) {
+  const [at, component, eventStatus, message, before, after, target] = fields.slice(i, i + 7);
+  events.push({
+    at,
+    component,
+    status: eventStatus,
+    message,
+    before: before || undefined,
+    after: after || undefined,
+    target: target || undefined,
+  });
+}
 const state = {
   schema_version: 1,
   run_at: new Date().toISOString(),
@@ -1545,7 +1562,7 @@ record_launcher_history() {
 # carry_launcher_state_on_exit: for a run that ends before its baseline step, carry the baseline
 # and alert history into the failed final state, so they are not lost with it.
 carry_launcher_state_on_exit() {
-  if grep -Fq '"component":"claude-launcher","status":"baseline"' "$EVENTS_FILE" 2>/dev/null; then
+  if events_recorded claude-launcher baseline; then
     return 0
   fi
   [ -f "$CLAUDE_LAUNCHER_HISTORY_FILE" ] || load_launcher_history
