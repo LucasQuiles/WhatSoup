@@ -104,7 +104,7 @@ function runKeyringLookupProbe(
 // gate load. 15 s is 5x the 3 s keychain bound in read-keychain-secret.mjs,
 // yet still half of the stubs' 30 s hang, so a removed bound still ends as a
 // named harness kill. Every probe case's own timeout sits above the cap.
-const PROBE_HARNESS_TIMEOUT_MS = 5_000;
+const PROBE_HARNESS_TIMEOUT_MS = 15_000;
 const PROBE_TEST_TIMEOUT_MS = 20_000;
 
 /**
@@ -261,6 +261,7 @@ printf 'resolved=%s\\n' "\${WHATSOUP_HEALTH_TOKEN-}"
 
   const startedAt = performance.now();
   const result = spawnSync('/bin/bash', [scriptPath], { encoding: 'utf8', timeout: harnessTimeoutMs });
+  requireProbeCompletion(result, harnessTimeoutMs, performance.now() - startedAt);
   return {
     status: result.status,
     stdout: result.stdout.trim(),
@@ -328,6 +329,7 @@ esac
       timeout: PROBE_HARNESS_TIMEOUT_MS,
     },
   );
+  requireProbeCompletion(result, PROBE_HARNESS_TIMEOUT_MS, performance.now() - startedAt);
 
   return {
     status: result.status,

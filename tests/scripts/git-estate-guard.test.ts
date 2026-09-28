@@ -48,7 +48,7 @@ const SUITE_GIT_TIMEOUT_MS = '20000';
 // shares (gitTimeoutMs, scripts/git-estate-guard.ts:100-113, used by runGit and
 // runGitAsync), so it must still cover each real setup call under gate load.
 // 300 ms did not: a setup call died first and the snapshot became scan_failed.
-const STATUS_TIMEOUT_GIT_BUDGET_MS = 300;
+const STATUS_TIMEOUT_GIT_BUDGET_MS = 3_000;
 const STATUS_PROBE_HANG_SECONDS = 30;
 const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
 const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>

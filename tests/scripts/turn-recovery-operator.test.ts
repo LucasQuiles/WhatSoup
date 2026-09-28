@@ -191,28 +191,28 @@ describe('turn-recovery-operator CLI (#2155)', () => {
     }
   }
 
-  it('refuses promotion when the conversation has newer journaled activity', () => {
-    const jobId = seedOne();
-    const db = new Database(dbPath);
-    db.open();
-    new DurabilityEngine(db).journalInbound('wamid-newer', CONVERSATION_KEY, DELIVERY_JID, 'agent');
-    db.close();
+  describe('with newer journaled activity seeded outside the test budget', () => {
+    let jobId = 0;
+    beforeEach(() => {
+      jobId = seedNewerActivity();
+    }, FIXTURE_SETUP_TIMEOUT_MS);
 
-    const res = run(['promote', '--db', dbPath, '--job', String(jobId), '--evidence-type', 'provider-receipt', '--evidence-ref', 'SM-receipt-99', '--apply', '--audit-file', auditPath]);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain('newer journaled activity');
-    expect(res.stderr).not.toContain(CONVERSATION_KEY);
-
-    const verify = run(['show', '--db', dbPath, '--job', String(jobId)]);
-    expect(JSON.parse(verify.stdout)).toMatchObject({ job: { state: 'blocked_unsafe' } });
+    it('refuses promotion when the conversation has newer journaled activity', () => {
+      expectNewerActivityRefusal(jobId);
+    });
   });
 
   // #3561 injection: seeding stalls past the default 10 s test budget. Inside the
   // body that times out; in the hook the body keeps its full budget.
   // @skip-env #3561 red-proof harness; sleeps 11 s, off in the normal suite
   describe.runIf(process.env.WHATSOUP_TEST_3561_SLOW_SETUP_INJECTION === '1')('with a slow seed of newer journaled activity', () => {
+    let jobId = 0;
+    beforeEach(() => {
+      jobId = seedNewerActivity(SLOW_SEED_DELAY_MS);
+    }, FIXTURE_SETUP_TIMEOUT_MS);
+
     it('keeps slow seeding out of the newer-activity refusal budget', () => {
-      expectNewerActivityRefusal(seedNewerActivity(SLOW_SEED_DELAY_MS));
+      expectNewerActivityRefusal(jobId);
     });
   });
 

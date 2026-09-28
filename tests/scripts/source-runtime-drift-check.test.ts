@@ -191,36 +191,42 @@ function expectCleanImportGraph(root: string): void {
   expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
 }
 
+describe('source runtime drift check on a prebuilt clean repo', () => {
+  let root = '';
+  beforeAll(() => {
+    root = makeRepo();
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+
+  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
+    expectCleanImportGraph(root);
+  });
+});
+
 // #3561 injection: a git whose `init` sleeps past the default test budget. Setup
 // inside the test body would time out; setup in the hook leaves the body its budget.
 // @skip-env #3561 red-proof harness; sleeps 11 s, off in the normal suite
 describe.runIf(process.env.WHATSOUP_TEST_3561_SLOW_SETUP_INJECTION === '1')('source runtime drift check on a slowly built clean repo', () => {
+  let root = '';
   let slowGit = '';
-  afterAll(() => {
-    if (slowGit) rmSync(slowGit, { recursive: true, force: true });
-  });
-
-  it('keeps slow fixture setup out of the clean-graph test budget', () => {
+  beforeAll(() => {
     slowGit = slowInitGitDir();
     vi.stubEnv('PATH', `${slowGit}:${process.env.PATH ?? ''}`);
-    let root = '';
     try {
       root = makeRepo();
     } finally {
       vi.unstubAllEnvs();
     }
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+  afterAll(() => {
+    if (slowGit) rmSync(slowGit, { recursive: true, force: true });
+  });
+
+  it('keeps slow fixture setup out of the clean-graph test budget', () => {
     expectCleanImportGraph(root);
   });
 });
 
 describe('source runtime drift check', () => {
-  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
-    const root = makeRepo();
-    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
-
-    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
-  });
-
   it('loads Git state with a constant number of bulk commands across a diamond import graph', () => {
     const root = makeRepo();
     writeFileSync(
