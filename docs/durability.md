@@ -1146,7 +1146,10 @@ which have no job row, always count as corrupt links.
 Database triggers keep every linked source inbound and selected outbound proof immutable and
 retained while its job exists, including completed jobs. Retention selects only an old
 `completed` job whose exact source inbound is still terminal (`complete`/`failed`) and whose
-selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). The job deletion
+selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). It also keeps the
+job whenever its terminal record must be kept: while a `turn_delivery_corroboration` row names that
+terminal, or an `inbound_disposition_links` closure supersedes to the terminal's inbound. Deleting
+the job there would leave the transferred terminal as an orphan transfer. The job deletion
 uses `RETURNING terminal_record_id`; only those returned records can drive terminal and then
 unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
 Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
