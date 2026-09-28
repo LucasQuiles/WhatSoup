@@ -8456,3 +8456,113 @@ describe('GET /health — shadowGate (advisory)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2481 — the versioned `health_invariants` block (report-only).
+//
+// The producer emits a compile-time constant on the DIAGNOSTIC body only; the
+// release-activation tool classifies it against its own floor. New modules are
+// loaded with in-test `await import(...)` so this file still loads where they
+// do not exist yet.
+// ---------------------------------------------------------------------------
+
+describe('GET /health — #2481 health_invariants block', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+  });
+
+  afterEach(async () => {
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  it('emits the versioned block on the diagnostic body (literal lockstep)', async () => {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    expect((JSON.parse(body) as Record<string, unknown>).health_invariants).toEqual({
+      schema: 'whatsoup.health-invariants.v1',
+      ids: [
+        'turn_capability.stale_evidence_degrades',
+        'turn_capability.probe_expected_stale_degrades',
+        'health.diagnostic_requires_token',
+      ],
+    });
+  });
+
+  it('emits the leaf constant verbatim', async () => {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const block = (JSON.parse(body) as Record<string, unknown>).health_invariants;
+    const { HEALTH_INVARIANTS, HEALTH_INVARIANTS_SCHEMA } = await import('../../src/core/health-invariants.ts');
+    expect(block).toEqual({ schema: HEALTH_INVARIANTS_SCHEMA, ids: [...HEALTH_INVARIANTS] });
+  });
+
+  it('keeps the block off the public envelope (#2515 boundary)', async () => {
+    const { body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body) as Record<string, unknown>;
+    expect(json.schema_version).toBe('health.public.v1');
+    expect(json).not.toHaveProperty('health_invariants');
+    expect(body).not.toContain('health_invariants');
+  });
+
+  it('leaves the diagnostic body without a top-level schema_version (unchanged discriminator)', async () => {
+    const { body } = await healthReq(port);
+    expect(JSON.parse(body) as Record<string, unknown>).not.toHaveProperty('schema_version');
+  });
+
+  // The test #3014 lacked: the REAL server's authenticated bytes, read by the
+  // REAL release-activation reader and classifier. Nothing here writes the block.
+  it('producer/consumer: the real diagnostic body classifies satisfied against the tool floor', async () => {
+    const { status, body } = await healthReq(port);
+    const { classifyAuthenticatedHealth } = await import('../../scripts/lib/release-activation/host.ts');
+    const observation = classifyAuthenticatedHealth(status, body);
+    expect(observation.projection).toBe('diagnostic');
+    expect((observation as { invariants?: unknown }).invariants).toMatchObject({
+      reading: 'declared',
+      schema: 'whatsoup.health-invariants.v1',
+    });
+
+    const { releaseInvariantsVerdict } = await import('../../scripts/lib/release-activation/invariants.ts');
+    // The pid/argv binding is release:activate's job (launchctl + ps); here the
+    // process that served the body is this one.
+    expect(releaseInvariantsVerdict({ pid: process.pid, argvMatches: true, health: observation })).toEqual({
+      outcome: 'satisfied',
+      detail: null,
+      observedSchema: 'whatsoup.health-invariants.v1',
+      undeclared: [],
+    });
+  });
+
+  // Lead condition 2. Both readers cap the body at 65 536 bytes:
+  // scripts/lib/release-activation/host.ts HEALTH_MAX_BYTES (the TypeScript
+  // reader release:activate uses) and deploy/scripts/lib/health_reader.py
+  // (`raw = response.read(65537)` / `len(raw) > 65536`). Over the cap, the
+  // reader destroys the request and verification reads `unobserved`, which
+  // fails the activation, so the block must not push the body near it.
+  // Measured bytes: computed on every run and printed in the assertion
+  // message; the first heavygate run records the value.
+  it('the diagnostic body with the block is measured well under the 65 536-byte reader cap', async () => {
+    const { HEALTH_MAX_BYTES } = await import('../../scripts/lib/release-activation/host.ts') as { HEALTH_MAX_BYTES?: number };
+    expect(HEALTH_MAX_BYTES).toBe(65_536);
+
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    const json = JSON.parse(body) as Record<string, unknown>;
+    expect(json).toHaveProperty('health_invariants');
+
+    const bodyBytes = Buffer.byteLength(body, 'utf8');
+    const blockBytes = Buffer.byteLength(JSON.stringify({ health_invariants: json.health_invariants }), 'utf8');
+    const measured = `diagnostic /health body measured ${bodyBytes} bytes (block ${blockBytes} bytes) against cap ${HEALTH_MAX_BYTES}`;
+    expect(blockBytes, measured).toBeLessThanOrEqual(1_024);
+    // Margin: at most half the cap, so a production body larger than this
+    // harness's chat-mode body still has room.
+    expect(bodyBytes, measured).toBeLessThanOrEqual(HEALTH_MAX_BYTES! / 2);
+  });
+});

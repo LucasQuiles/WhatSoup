@@ -24,7 +24,11 @@ import {
   runReleaseActivateCli,
 } from '../../scripts/release-activate.ts';
 import { argvNamesEntrypoint } from '../../scripts/lib/release-activation/apply.ts';
-import type { ActivationHost, ExecResult } from '../../scripts/lib/release-activation/host.ts';
+import {
+  type ActivationHost,
+  classifyAuthenticatedHealth,
+  type ExecResult,
+} from '../../scripts/lib/release-activation/host.ts';
 import { stageInstancePlist } from '../../scripts/lib/release-activation/plan.ts';
 
 const packageJson = JSON.parse(readFileSync(
@@ -46,6 +50,32 @@ const TARGET_URL = 'https://example.invalid/fabricated/repo.git';
 const UID = 4242;
 /** Schema migration level of the fixture database; the old release's ceiling. */
 const FIXTURE_SCHEMA = 64;
+/**
+ * #2481: the `health_invariants` block a current producer emits, and the floor
+ * the activating tool requires. Literal copies of src/core/health-invariants.ts,
+ * so a change there is a reviewed diff here too.
+ */
+const INVARIANTS_SCHEMA = 'whatsoup.health-invariants.v1';
+const DECLARED_INVARIANTS = [
+  'turn_capability.stale_evidence_degrades',
+  'turn_capability.probe_expected_stale_degrades',
+  'health.diagnostic_requires_token',
+];
+const INVARIANT_FLOOR = ['turn_capability.stale_evidence_degrades'];
+const INVARIANTS_ALERT_SOURCE = 'release-invariants';
+
+/** An authenticated diagnostic body; `invariants: undefined` is a producer that predates the block. */
+function diagnosticBody(
+  commit: string,
+  connected: boolean,
+  invariants: unknown = { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS },
+): string {
+  return JSON.stringify({
+    instance: { commit },
+    whatsapp: { connected },
+    ...(invariants === undefined ? {} : { health_invariants: invariants }),
+  });
+}
 
 interface Fixture {
   base: string;
@@ -215,11 +245,21 @@ interface WorldOptions {
   /** Runs when an instance process on `root` exits (a migration committed during shutdown). */
   onInstanceExit?: (root: string, via: 'bootout' | 'kickstart') => void;
   platform?: NodeJS.Platform;
+  /** Exit status the alert helper reports (default 0), or 'throw' for a spawn that fails outright. */
+  alertStatus?: number | 'throw';
+}
+
+interface RecordedAlert {
+  instance: string;
+  source: string;
+  payload: { summary: string; evidence: string; diagnostics: string[]; severity: string };
 }
 
 class SimulatedLaunchd {
   readonly calls: string[][] = [];
   readonly tokensSeen: string[] = [];
+  /** Every alert sent through the host seam, in order. */
+  readonly alerts: RecordedAlert[] = [];
   /** Release root of every instance process started, in order. */
   readonly instanceStarts: string[] = [];
   private readonly loaded = new Map<string, { pid: number; definition: string; root: string | null }>();
@@ -275,7 +315,9 @@ class SimulatedLaunchd {
       if (level === null || level > FIXTURE_SCHEMA) throw new Error('connection refused');
     }
     const commit = root === this.fixture.newRelease ? NEW_COMMIT : OLD_COMMIT;
-    return { status: 200, body: JSON.stringify({ instance: { commit }, whatsapp: { connected: true } }) };
+    // Both releases are current producers, so a test about the switch itself
+    // sees a satisfied invariant verdict and no alert.
+    return { status: 200, body: diagnosticBody(commit, true) };
   }
 
   private labelOf(target: string): string {
@@ -305,6 +347,11 @@ class SimulatedLaunchd {
         const root = job && this.alive.has(job.pid) ? job.root : null;
         if (this.options.health) return this.options.health(root, () => this.defaultHealth(root));
         return this.defaultHealth(root);
+      },
+      emitReleaseAlert: async (request) => {
+        this.alerts.push(request as RecordedAlert);
+        if (this.options.alertStatus === 'throw') throw new Error('spawn python3 ENOENT');
+        return { status: this.options.alertStatus ?? 0 };
       },
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
@@ -776,7 +823,303 @@ describe('release:activate --apply: rollback against a migrated database', () =>
   });
 });
 
+describe('release:activate: health invariants are report-only (#2481)', () => {
+  /** The new release's producer; the old release keeps the default current body unless a test says otherwise. */
+  const newReleaseEmits = (invariants: unknown) => (root: string | null, fallback: () => { status: number; body: string }) => (
+    root === fixture.newRelease ? { status: 200, body: diagnosticBody(NEW_COMMIT, true, invariants) } : fallback()
+  );
+
+  function receiptOf(): Record<string, unknown> {
+    return JSON.parse(readFileSync(path.join(onlyBackup(fixture), 'receipt.json'), 'utf8')) as Record<string, unknown>;
+  }
+
+  it('a producer without the block still activates with exit 0 and sends exactly one warning, under --apply', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
+    expect(world.alerts[0]).toMatchObject({
+      instance: INSTANCE,
+      source: INVARIANTS_ALERT_SOURCE,
+      payload: { severity: 'warning' },
+    });
+  });
+
+  it('records the missing verdict, the tool floor, and the alert attempt in receipt.json', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    const expected = {
+      reportOnly: true,
+      floor: { schema: INVARIANTS_SCHEMA, ids: INVARIANT_FLOOR },
+      activation: { outcome: 'missing', detail: null, observedSchema: null, undeclared: INVARIANT_FLOOR },
+      rollback: null,
+      alert: { attempted: true, status: 0 },
+    };
+    expect(receiptOf().invariants).toEqual(expected);
+    expect(result.json.invariants).toEqual(expected);
+  });
+
+  it('the alert is content-free: verdicts and ids only, no paths, commits, or token', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.alerts).toHaveLength(1);
+    const text = JSON.stringify(world.alerts[0]!.payload);
+    expect(text).toContain('missing');
+    expect(text).toContain(INVARIANT_FLOOR[0]);
+    for (const forbidden of [fixture.base, fixture.home, NEW_COMMIT, OLD_COMMIT, TOKEN]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+
+  it('an unknown schema is relayed only in id-like form; a path-shaped one never reaches the alert', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: `${fixture.base}/health-invariants`, ids: DECLARED_INVARIANTS }),
+    });
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'malformed', observedSchema: null },
+    });
+    expect(world.alerts).toHaveLength(1);
+    const text = JSON.stringify(world.alerts[0]!.payload);
+    expect(text).not.toContain(fixture.base);
+    expect(JSON.stringify(receiptOf().invariants)).not.toContain(fixture.base);
+  });
+
+  it('a producer that declares the floor is satisfied and sends no alert', async () => {
+    const world = new SimulatedLaunchd(fixture);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'satisfied', detail: null, observedSchema: INVARIANTS_SCHEMA, undeclared: [] },
+      alert: { attempted: false, status: null },
+    });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('extra ids beyond the floor stay satisfied; the fabricated commits carry no ancestry, so none is consulted', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: [...INVARIANT_FLOOR, 'future.invariant_this_tool_does_not_know'] }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({ activation: { outcome: 'satisfied', undeclared: [] } });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('a block that omits a floor id is below_floor: one warning, outcome and exit unchanged', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: ['health.diagnostic_requires_token'] }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'below_floor', detail: null, observedSchema: INVARIANTS_SCHEMA, undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
+  });
+
+  it('an unrecognised schema is unknown, never satisfied, even when every floor id is listed', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: {
+        outcome: 'unknown', detail: 'unknown-schema', observedSchema: 'whatsoup.health-invariants.v2', undeclared: INVARIANT_FLOOR,
+      },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
+  it('a malformed block (ids not an array) is unknown, never missing', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS.join(',') }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'malformed', observedSchema: null, undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
+  it('a failed alert helper never changes the outcome or exit code; the receipt records its status', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined), alertStatus: 1 });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: 1 } });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
+  });
+
+  it('an alert helper that throws is recorded with a null status, and the exit code is unchanged', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined), alertStatus: 'throw' });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: null } });
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.stderr).toMatch(/release invariants alert/);
+  });
+
+  it('on rollback, records the rollback target verdict too, and still sends only one warning', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: (root) => (root === fixture.newRelease
+        ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
+        : { status: 200, body: diagnosticBody(OLD_COMMIT, true, undefined) }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'satisfied' },
+      rollback: { outcome: 'missing', detail: null, undeclared: INVARIANT_FLOOR },
+      alert: { attempted: true, status: 0 },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+  });
+
+  it('records no rollback verdict when the rollback stopped before any rollback process was verified', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: (root, fallback) => (root === fixture.newRelease
+        ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
+        : fallback()),
+      onInstanceExit: (root, via) => {
+        if (root === fixture.newRelease && via === 'bootout') migrateFixture(fixture.dbPath, FIXTURE_SCHEMA + 1);
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackBlockedMigrated);
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'satisfied' },
+      rollback: null,
+      alert: { attempted: false, status: null },
+    });
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('binds to the executing process: argv on the old release gives unknown/unbound, not the body it served', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      instanceArgv: () => `/opt/node/bin/node --experimental-strip-types ${fixture.oldRelease}/src/bootstrap.ts ${INSTANCE}`,
+      health: () => {
+        const onNew = readlinkSync(fixture.wrapperLink).startsWith(`${fixture.newRelease}/`);
+        return { status: 200, body: diagnosticBody(onNew ? NEW_COMMIT : OLD_COMMIT, true) };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unbound', observedSchema: null, undeclared: INVARIANT_FLOOR },
+      rollback: { outcome: 'satisfied' },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
+  });
+
+  it('an unobserved body (public envelope) is unknown/unobserved, never missing', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: () => ({ status: 200, body: JSON.stringify({ schema_version: 'health.public.v1', status: 'ok' }) }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unobserved', observedSchema: null, undeclared: INVARIANT_FLOOR },
+      rollback: { outcome: 'unknown', detail: 'unobserved' },
+    });
+    expect(world.alerts).toHaveLength(1);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rollbackUnverified);
+  });
+
+  it('--plan never sends an alert, even against a producer without the block', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+
+    const result = await run(world, activationArgs(fixture, ['--plan']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(world.alerts).toEqual([]);
+    expect(result.json).not.toHaveProperty('invariants');
+  });
+
+  it('an --apply refused on its preconditions sends no alert', async () => {
+    const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(undefined) });
+    const other = path.join(fixture.base, 'releases', 'release-other');
+    writeRelease(other, '3'.repeat(40), true);
+    const argv = activationArgs(fixture, ['--apply']).map((arg) => (arg === fixture.oldRelease ? other : arg));
+
+    const result = await run(world, argv);
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(world.alerts).toEqual([]);
+  });
+});
+
 describe('release activation helpers', () => {
+  it('reads the health_invariants block structurally, never by matching bytes', () => {
+    const read = (invariants: unknown): unknown => classifyAuthenticatedHealth(200, diagnosticBody(NEW_COMMIT, true, invariants)).invariants;
+
+    expect(read(undefined)).toEqual({ reading: 'absent', schema: null, ids: [] });
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS }))
+      .toEqual({ reading: 'declared', schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS });
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: [] })).toEqual({ reading: 'declared', schema: INVARIANTS_SCHEMA, ids: [] });
+    expect(read({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS }))
+      .toEqual({ reading: 'unknown-schema', schema: 'whatsoup.health-invariants.v2', ids: [] });
+    const malformed = { reading: 'malformed', schema: null, ids: [] };
+    expect(read(null)).toEqual(malformed);
+    expect(read(DECLARED_INVARIANTS)).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA })).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS.join(',') })).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: [INVARIANT_FLOOR[0], INVARIANT_FLOOR[0]] })).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: [INVARIANT_FLOOR[0], 7] })).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: ['/var/lib/whatsoup/state'] })).toEqual(malformed);
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: Array.from({ length: 65 }, (_, index) => `id_${index}`) })).toEqual(malformed);
+    expect(read({ schema: 42, ids: DECLARED_INVARIANTS })).toEqual(malformed);
+    expect(read({ schema: 'x'.repeat(129), ids: [] })).toEqual(malformed);
+    expect(read({ schema: '/var/lib/whatsoup/state', ids: [] })).toEqual(malformed);
+
+    // The ids appearing as text elsewhere in the body are not a declaration.
+    const smuggled = JSON.stringify({
+      instance: { commit: NEW_COMMIT, note: JSON.stringify({ health_invariants: { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS } }) },
+      whatsapp: { connected: true },
+    });
+    expect(classifyAuthenticatedHealth(200, smuggled).invariants).toEqual({ reading: 'absent', schema: null, ids: [] });
+  });
+
+  it('reads no invariants from a body it cannot classify as diagnostic', () => {
+    expect(classifyAuthenticatedHealth(200, JSON.stringify({ schema_version: 'health.public.v1', status: 'ok' })).invariants).toBeNull();
+    expect(classifyAuthenticatedHealth(500, JSON.stringify({ status: 'error' })).invariants).toBeNull();
+    expect(classifyAuthenticatedHealth(200, 'not json').invariants).toBeNull();
+    // A 503 diagnostic body is still a diagnostic body: status and content stay separate.
+    expect(classifyAuthenticatedHealth(503, diagnosticBody(NEW_COMMIT, false, undefined)).invariants)
+      .toEqual({ reading: 'absent', schema: null, ids: [] });
+  });
+
   it('matches the bootstrap entrypoint only as a whole argument', () => {
     const entry = '/r/rel/src/bootstrap.ts';
     expect(argvNamesEntrypoint(`node ${entry} inst`, entry)).toBe(true);
