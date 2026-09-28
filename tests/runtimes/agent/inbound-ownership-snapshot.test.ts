@@ -271,6 +271,27 @@ describe('inbound ownership snapshot (#3560)', () => {
     });
   });
 
+  it('unmatched evidence: a turn held for a different scope hash (lid vs pn alias) never makes the row executing', () => {
+    const fixture = openFixture();
+    // Same conversation, but journaled under its @lid alias while the session hashes the pn JID.
+    const aliased: Chat = { key: '15550100006', jid: '15550100006@lid' };
+    const head = journal(fixture, aliased, 25);
+
+    const snapshot = snapshotOf(fixture, activeTurnOn('15550100006@s.whatsapp.net'));
+
+    expect(snapshot.rows).toHaveLength(1);
+    expect(rowFor(snapshot, head)).toMatchObject({
+      chatScopeHash: shortHash(aliased.jid),
+      classification: 'no_owner',
+      reason: 'no_attributable_owner',
+      healthy: false,
+      owner: { kind: 'none' },
+      providerExecution: { evidence: 'active_other_scope' },
+    });
+    expect(snapshot.counts).toMatchObject({ executing: 0, no_owner: 1 });
+    expect(snapshot.healthy).toBe(false);
+  });
+
   it('T3: output is content-free — no message text, message id, chat or sender identifier, or path', () => {
     const fixture = openFixture();
     const chat: Chat = { key: 'SENTINEL-CONVERSATION-KEY', jid: 'SENTINEL-CHAT-JID@s.whatsapp.net' };
