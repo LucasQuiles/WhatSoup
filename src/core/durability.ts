@@ -969,7 +969,7 @@ export class DurabilityEngine {
           session_status, completed_inbound_seq, completed_delivery_jid,
           completed_delivery_namespace, completed_scope,
           completed_logical_turn_id, completed_manager_id, completed_generation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'active'), ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(conversation_key) DO UPDATE SET
           session_id = COALESCE(excluded.session_id, session_checkpoints.session_id),
           transcript_path = COALESCE(excluded.transcript_path, session_checkpoints.transcript_path),
@@ -984,7 +984,9 @@ export class DurabilityEngine {
           watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
           workspace_path = COALESCE(excluded.workspace_path, workspace_path),
           claude_pid = COALESCE(excluded.claude_pid, claude_pid),
-          session_status = COALESCE(excluded.session_status, session_status),
+          -- #3658: excluded.session_status carries the insert default, so
+          -- the update reads the caller's own, possibly absent, status.
+          session_status = COALESCE(?, session_status),
           completed_inbound_seq = CASE
             WHEN excluded.session_id IS NOT NULL
               AND excluded.session_id IS NOT session_checkpoints.session_id
@@ -1420,7 +1422,9 @@ export class DurabilityEngine {
       fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
       fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
       fields.workspacePath ?? null, fields.claudePid ?? null,
-      fields.sessionStatus ?? 'active',
+      // #3658: only lifecycle writers change the status. A new row still gets
+      // 'active' in SQL; an update that omits the status keeps the stored one.
+      fields.sessionStatus ?? null,
       fields.completedInboundSeq ?? null,
       fields.completedDeliveryJid ?? null,
       fields.completedDeliveryNamespace ?? null,
@@ -1428,6 +1432,7 @@ export class DurabilityEngine {
       fields.completedLogicalTurnId ?? null,
       fields.completedManagerId ?? null,
       fields.completedGeneration ?? null,
+      fields.sessionStatus ?? null,
     );
   }
 

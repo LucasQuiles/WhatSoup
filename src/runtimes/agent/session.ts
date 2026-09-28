@@ -3104,10 +3104,11 @@ export class SessionManager {
         this.completeProviderTurn();
         this.active = false;
         this.child = null;
-        // sessionId is deliberately retained here, matching the clean path
-        // below: shutdown() owns its retirement at the tail (durable closure
-        // uses the id it captured before the kill), and no exit-handler
-        // consumer needs it cleared — resume derivation is caller/DB-supplied.
+        // sessionId and resumeAttemptId are deliberately retained here,
+        // matching the clean path below: shutdown() owns their retirement at
+        // the tail (durable closure uses the id it captured before the kill),
+        // and a retried closure still needs the attempted resume id when no
+        // init arrived (#3658).
         return;
       }
 
@@ -4807,6 +4808,9 @@ export class SessionManager {
 
     this.sessionId = null;
     this.dbRowId = null;
+    // #3658: the manager can stay resident after this closure. Its next
+    // shutdown must not target the now-closed checkpoint by this identity.
+    this.resumeAttemptId = null;
     this.startedAt = null;
     this.messageCount = 0;
     this.lastMessageAt = null;
