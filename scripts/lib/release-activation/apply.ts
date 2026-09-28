@@ -82,8 +82,8 @@ interface PolledObservation {
   pid: number | null;
   argvMatches: boolean;
   health: HealthObservation | null;
-  /** `host.now()` when the health response arrived; null when none did. */
-  respondedAtMs: number | null;
+  /** `host.now()` read immediately before the health request was sent; null when none was sent or the clock failed. */
+  requestedAtMs: number | null;
 }
 
 /** Upper bound on every exec the #2481 binding makes (its own timeout, then SIGKILL). */
@@ -297,7 +297,7 @@ async function sampleInstanceProcess(host: ActivationHost, context: ActivationCo
 /** Would a sample decide anything for this evidence? Only a passing observation with a diagnostic response. */
 function worthSampling(evidence: BindingEvidence): boolean {
   return evidence.pid !== null && evidence.argvMatches && evidence.passed
-    && evidence.health?.projection === 'diagnostic' && evidence.respondedAtMs !== null;
+    && evidence.health?.projection === 'diagnostic' && evidence.requestedAtMs !== null;
 }
 
 /**
@@ -342,16 +342,22 @@ async function observeInstance(
   entrypoint: string,
 ): Promise<PolledObservation> {
   const state = await launchdState(host, context.domain, context.instanceLabel);
-  if (state.pid === null) return { pid: null, argvMatches: false, health: null, respondedAtMs: null };
+  if (state.pid === null) return { pid: null, argvMatches: false, health: null, requestedAtMs: null };
   const ps = await host.exec('ps', ['-p', String(state.pid), '-o', 'command=']);
   const argvMatches = ps.code === 0 && argvNamesEntrypoint(ps.stdout.trim(), entrypoint);
   let health: HealthObservation | null = null;
-  let respondedAtMs: number | null = null;
+  let requestedAtMs: number | null = null;
   if (context.healthPort !== null && context.healthToken !== null) {
+    // #2481: a synchronous clock read immediately before the request, the only
+    // binding work inside the poll. Its own try: a clock fault leaves the
+    // binding unobserved and never touches the health read below.
+    try {
+      requestedAtMs = host.now();
+    } catch {
+      requestedAtMs = null;
+    }
     try {
       const response = await host.fetchHealth(context.healthPort, context.healthToken);
-      // #2481: a synchronous clock read, the only binding work inside the poll.
-      respondedAtMs = host.now();
       health = classifyAuthenticatedHealth(response.status, response.body);
     } catch {
       health = {
@@ -359,12 +365,12 @@ async function observeInstance(
       };
     }
   }
-  return { pid: state.pid, argvMatches, health, respondedAtMs };
+  return { pid: state.pid, argvMatches, health, requestedAtMs };
 }
 
 /**
  * Record the deciding observation. No exec and no await: the producer-reported
- * pid and the response time go only into the transient binding evidence, and
+ * pid and the request time go only into the transient binding evidence, and
  * the binding itself is resolved after the outcome (`resolveOutcomeBindings`).
  */
 function recordObservation(polled: PolledObservation, passed: boolean, entrypoint: string): InstanceObservation {
@@ -389,7 +395,7 @@ function recordObservation(polled: PolledObservation, passed: boolean, entrypoin
       argvMatches: polled.argvMatches,
       passed,
       health: health === null ? null : { projection: health.projection, responderPid: health.responderPid },
-      respondedAtMs: polled.respondedAtMs,
+      requestedAtMs: polled.requestedAtMs,
     },
     entrypoint,
   });

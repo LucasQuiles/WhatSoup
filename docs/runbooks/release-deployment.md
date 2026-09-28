@@ -260,26 +260,34 @@ floor ids and a count.
 
 **Binding.** A body counts only when `binding` is `bound`. The evidence is
 the poll that decided verification: the launchd pid (whose argv names the
-release entrypoint), the body's own `instance.pid`, and the tool's clock when
-the response arrived. Once the activation outcome and exit code are final,
-one sample reads the launchd pid, its argv, and its process start time
-(`ps -o lstart=`). The start-time child runs with only `PATH`, `TZ=UTC0` and
-`LC_ALL=C` in its environment. `bound` needs the same
-pid and argv, a body naming that pid, and a start second **strictly earlier**
-than the second the response was received: a process that reused the pid
-after the responder exited started no earlier than that second, so it can
-never bind. A start in the response second itself is `unobserved` (a
-same-second reuse would read the same `lstart` text). A later start or another
-pid is `restarted`; an observation that did not pass verification, a sample
-that timed out, or a start time that could not be read is `unobserved`; any
-other mismatch is `unbound`. The verdict is then `unknown` with `detail`
+release entrypoint), the body's own `instance.pid`, and the tool's clock read
+immediately **before the health request was sent**. Once the activation
+outcome and exit code are final, one sample reads the launchd pid, its argv,
+and its process start time (`ps -o lstart=`). The start-time child runs with
+only `PATH`, `TZ=UTC0` and `LC_ALL=C` in its environment. `bound` needs the
+same pid and argv, a body naming that pid, and a start second **strictly
+earlier** than the request second. The causal chain: the responder answered
+after the request was sent, and a process that reuses its pid starts only
+after the responder exits, so after it answered, so after the request was
+sent. Such a process can never bind, however late the tool reads the
+response. A start in the request second itself is `unobserved` (a same-second
+reuse would read the same `lstart` text). A later start or another pid is
+`restarted`; an observation that did not pass verification, a request time
+the clock could not give, a sample that timed out, or a start time that could
+not be read is `unobserved`; any other mismatch is `unbound`. The verdict is then `unknown` with `detail`
 `unbound` or `unobserved`. The pids and times behind the binding, including
 the pid the body reports, are used only to compute it and are never recorded;
 the record keeps only the pre-existing launchd `pid`.
 
 Report work never changes when or how the outcome is decided. Inside the
-verification poll the binding adds only a clock read after each response.
-Every binding exec (`launchctl print`, `ps -o command=`, `ps -o lstart=`)
+verification poll the binding adds only a clock read before each request, in
+its own `try`: a clock fault leaves that observation's binding `unobserved`
+and never touches the health read or the pass decision. After the exit code
+is fixed, the whole report phase (binding sample, tool-commit lookup, receipt
+writes, event, stdout) runs inside one exception boundary: any throw prints
+only `release:activate: report-failed <error class>` (never the message, which
+can carry a path), and the already-fixed exit code is returned; a failing
+stderr is ignored. Every binding exec (`launchctl print`, `ps -o command=`, `ps -o lstart=`)
 runs after the outcome and exit code are final, is attempted once (a timeout
 or failure is `unobserved`, never retried), has its own 5 s timeout and is
 killed with SIGKILL. One sample serves both observations, and it is taken only
@@ -287,24 +295,36 @@ when an observation passed with a diagnostic body, so the bounded cost is at
 most 15 s, and it delays only the receipt, the event and stdout. The
 tool-commit lookup (at most 5 s) follows it. Every other `launchctl`, `ps`,
 `plutil` and renderer call keeps its previous behaviour, with no timeout.
+These 5 s bounds cover the receipt, the event and stdout, not process exit: a
+`ps` child that SIGKILL cannot reap, or a stalled filesystem call in the
+tool-commit lookup, can keep the process alive after stdout is printed (the
+exit code it then returns is still the fixed one).
 
-Consequence for rollbacks: every rollback now yields a warning rather than a
-possible clear. A rollback always follows an activation
-observation that did not pass, which is never sampled and is recorded
-`unknown`/`unobserved`. So `rolled-back` (like every other rollback outcome)
-sends a warning, never a clear, even when both processes declare the floor;
-the incident is cleared by a later `activated` run whose verdict is
-satisfied. After an activation that passed but whose auxiliary labels failed,
-the sample sees the restored old process, so the activation observation reads
-`restarted`.
+Consequence for rollbacks, the exact warn/clear rule:
+
+- a failed activation verification always warns: that observation did not
+  pass, is never sampled, and is recorded `unknown`/`unobserved`. So
+  `rolled-back` never clears, even when both processes declare the floor; the
+  incident is cleared by a later `activated` run whose verdict is satisfied;
+- after an **auxiliary-label** failure the activation observation passed, and
+  the result depends on whether the rollback touched the instance:
+  - a rollback that restored and restarted the instance: the sample sees the
+    restarted process, so the activation reads `restarted` and warns;
+  - a rollback that stopped before touching the instance
+    (`rollback-blocked-migrated` at the schema gate, or `rollback-unverified`
+    from a failed bootout): the sample can still see the verified new
+    process, so the activation can read `bound`, and with every verdict
+    satisfied **no event** is sent (the blocked rollback's own stderr and exit
+    code carry the alarm);
+- a clear is sent only for `activated` with every verdict satisfied.
 
 This checks the producer's self-reported identity inside one window. It is
 not a kernel proof: a process of the same user that holds the health port and
 reports the right pid is outside it, and nothing is known about a restart
 after the sample. The rule compares a kernel start time with the tool's
-clock, both wall-clock: a wall-clock step backwards after the response (a
-manual clock change or a large NTP correction) can give a process that reused
-the pid a start second earlier than the response, and bind it. A producer that
+clock, both wall-clock: a wall-clock step backwards between the request and a
+pid reuse (a manual clock change or a large NTP correction) can give the
+reusing process a start second earlier than the request, and bind it. A producer that
 predates `instance.pid` reads `unbound`.
 It relies on the instance being the launchd job's own process:
 `deploy/whatsoup` execs node, `src/bootstrap-common.ts` imports the main
@@ -322,8 +342,10 @@ of the tool tree.
 `receipt.json` is written with the verdict **before** the event is sent
 (`alert.status: "pending"`), then rewritten with the final status, so an
 interrupt during the event leaves the verdict on disk. Every write is atomic
-(temporary file, fsync, rename), followed by a required directory fsync, and
-publication and durability are reported apart:
+(temporary file, fsync, rename), followed by exactly one required directory
+fsync (the shared writer's own directory fsync is turned off for this call),
+and publication and durability are reported apart, so the durability line
+prints at most once per write:
 
 - a write that fails **before** the rename leaves the previous receipt whole
   and prints `release:activate: receipt-write-failed <ERRNO>`;
@@ -347,15 +369,15 @@ closes a requirement it did not check. The dispatcher keeps that source
 unchanged (its source segment allows `[A-Za-z0-9_.:-]`).
 - a **warning** for any `--apply` that reached the switch with a recorded
   verdict that is not `satisfied`;
-- a **clear** for the same instance and source when every recorded verdict is
-  `satisfied` and the outcome is `activated` or `rolled-back` (a verified
-  process is live); in practice only `activated`, because a rollback's
-  activation verdict is always `unobserved` (see the binding above); a clear
-  with no open incident is dropped by the dispatcher;
-- nothing after satisfied verdicts with `rollback-unverified` or
-  `rollback-blocked-migrated` (the instance may be stopped), after a refusal
-  (before or during the apply; no verdict), or for `--plan` (which never reads
+- a **clear** for the same instance and source only when the outcome is
+  `activated` and every recorded verdict is `satisfied`; a clear with no open
+  incident is dropped by the dispatcher;
+- nothing when every recorded verdict is satisfied but the outcome is not
+  `activated` (the auxiliary-label paths above), after a refusal (before or
+  during the apply; no verdict), or for `--plan` (which never reads
   invariants).
+
+See "Consequence for rollbacks" above for which rollback paths warn.
 
 **Stranded incidents.** A clear resolves only the incident of its own source.
 Incidents opened under the earlier bare `release-invariants` source, or under

@@ -138,7 +138,8 @@ export function writeAtomicPrivateFileSync(
   filePath: string,
   data: string | Buffer,
   label = 'private file',
-  directoryFsync: 'best-effort' | 'required' = 'best-effort',
+  // 'none' leaves the directory fsync to the caller, which can then report it apart from publication.
+  directoryFsync: 'best-effort' | 'required' | 'none' = 'best-effort',
 ): void {
   const dir = dirname(filePath);
   forceEnsurePrivateDirectorySync(dir, `${label} directory`);
@@ -174,7 +175,7 @@ export function writeAtomicPrivateFileSync(
     renameSync(tmpPath, filePath);
     tempCreated = false;
     if (directoryFsync === 'required') fsyncDirectoryRequired(dir);
-    else fsyncDirectory(dir);
+    else if (directoryFsync === 'best-effort') fsyncDirectory(dir);
   } catch (err) {
     if (fd !== null) {
       try { closeSync(fd); } catch { /* preserve the original failure */ }

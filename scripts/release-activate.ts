@@ -32,13 +32,15 @@
  * activation outcome and the exit code are final. The receipt is written
  * before any event; then at most one BOT ERRORS event is sent for source
  * `release-invariants:<floor digest>` (standard event fields, inline log tail
- * off): a warning when any recorded verdict is not `satisfied`; a clear when
- * every verdict is satisfied and the outcome is `activated` or `rolled-back`;
+ * off): a warning when any recorded verdict is not `satisfied`; a clear only
+ * when every verdict is satisfied and the outcome is `activated`;
  * nothing otherwise. The receipt is then rewritten with the event status.
  * Every receipt write is atomic; a failed one prints only the fixed code
  * `receipt-write-failed <ERRNO>`, and a published receipt whose directory
- * fsync failed prints `receipt-written-durability-unproven <ERRNO>`. The
- * verdict never changes the outcome or the exit code. stdout stays one JSON
+ * fsync failed prints `receipt-written-durability-unproven <ERRNO>`. The whole
+ * report phase sits inside one exception boundary: any throw prints only
+ * `report-failed <error class>` and the exit code stands. The verdict never
+ * changes the outcome or the exit code. stdout stays one JSON
  * document, printed after the event, so it can trail the activation by the
  * bounded report work plus up to the helper's 60 s timeout.
  */
@@ -215,9 +217,9 @@ export interface InvariantsRecord {
   rollback: ReleaseInvariantsVerdict | null;
   /**
    * The one BOT ERRORS event: a `warning` when any verdict is not satisfied;
-   * a `clear` when all are satisfied and the outcome is `activated` or
-   * `rolled-back`; `kind` null when no event is due (a refusal, or satisfied
-   * verdicts after a rollback that did not end live and verified).
+   * a `clear` when all are satisfied and the outcome is `activated`; `kind`
+   * null when no event is due (a refusal, or satisfied verdicts after a
+   * rollback that stopped before touching the instance).
    * `pending` while the event is in flight (the receipt is written before it is sent).
    */
   alert: { attempted: boolean; kind: 'warning' | 'clear' | null; status: number | null | 'pending' };
@@ -251,24 +253,29 @@ function boundedToolCommit(host: ActivationHost): Promise<string | null> {
 }
 
 /**
- * Outcomes after which a verified process is live, so satisfied verdicts may
- * clear the incident. `rolled-back` stays listed, but in practice it never
- * clears: its activation observation did not pass, is never sampled, and so
- * is always `unknown`/`unobserved` (apply.ts `resolveOutcomeBindings`).
+ * The only outcome after which satisfied verdicts clear the incident. A
+ * `rolled-back` run could never have every verdict satisfied anyway (see
+ * `classifyForReceipt`), so listing only `activated` states the rule, not a
+ * behaviour change.
  */
-const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated', 'rolled-back']);
+const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated']);
 
 /**
  * #2481, report-only: classify the activation and rollback observations
  * against this tool's floor. Pure; it never changes the outcome or the exit
- * code. A refusal changed nothing live, so it has no verdict and no event.
- * Otherwise a warning is due when any recorded verdict is not satisfied. A
- * clear is due only when every verdict is satisfied AND the outcome left a
- * verified process live (`activated`, or `rolled-back` with the rollback
- * verified); after `rollback-unverified` or `rollback-blocked-migrated` the
- * instance may be stopped, so no clear is sent. Every rollback outcome follows
- * a failed activation observation, which is recorded `unobserved`, so a
- * rollback always sends a warning, never a clear.
+ * code. The warn/clear rule, exactly:
+ * - a refusal changed nothing live: no verdict and no event;
+ * - any recorded verdict not satisfied: one warning;
+ * - a failed activation verification always warns: its observation did not
+ *   pass, is never sampled, and is recorded `unknown`/`unobserved`; so
+ *   `rolled-back` never clears;
+ * - after an auxiliary-label failure the activation observation passed, and
+ *   the result depends on whether the rollback touched the instance: a
+ *   restored or restarted instance reads `restarted` and warns; a rollback
+ *   that stopped before touching it (`rollback-blocked-migrated` at the schema
+ *   gate, or `rollback-unverified` from a failed bootout) can leave it `bound`,
+ *   and with every verdict satisfied no event is sent;
+ * - a clear is sent only for `activated` with every verdict satisfied.
  */
 function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): InvariantsRecord {
   const floor = [...RELEASE_INVARIANT_FLOOR];
@@ -445,8 +452,40 @@ export async function runReleaseActivateCli(
   }
   const applied = await applyActivation(host, context);
   // The outcome and the exit code are final here. Everything below is report
-  // work: it can delay the receipt and stdout, never change either.
+  // work inside one exception boundary: it can delay or lose the receipt, the
+  // event and stdout, never change the exit code.
   const exitCode = outcomeExit(applied.outcome);
+  try {
+    await reportActivation(host, context, args, plan, applied, io);
+  } catch (error) {
+    // One fixed line: the error class name only, never its message, which can carry a path.
+    try { io.stderr(`release:activate: report-failed ${errorClassName(error)}\n`); } catch { /* the exit code stands */ }
+  }
+  if (applied.outcome === 'rollback-blocked-migrated') {
+    try { io.stderr(blockedRollbackMessage(context, applied)); } catch { /* the exit code stands */ }
+  }
+  return exitCode;
+}
+
+/** The class name of a report failure (e.g. TypeError), or UNKNOWN; never the message. */
+function errorClassName(error: unknown): string {
+  const name = error instanceof Error ? error.constructor.name : '';
+  return /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name) ? name : 'UNKNOWN';
+}
+
+/**
+ * #2481, the report phase, run only after the exit code is fixed: bind the
+ * observations (one bounded sample), look up the tool commit (bounded), write
+ * the receipt, send at most one event, rewrite the receipt, print stdout.
+ */
+async function reportActivation(
+  host: ActivationHost,
+  context: ActivationContext,
+  args: ActivationArgs,
+  plan: ReturnType<typeof planDocument>,
+  applied: ApplyOutcome,
+  io: { stdout: (text: string) => void; stderr: (text: string) => void },
+): Promise<void> {
   const outcome = await resolveOutcomeBindings(host, context, applied);
   const invariants = classifyForReceipt(await boundedToolCommit(host), outcome);
   const receipt = (): string => `${JSON.stringify({
@@ -460,16 +499,16 @@ export async function runReleaseActivateCli(
   // Atomic (temporary file, fsync, rename): a write that fails before the
   // rename leaves the previous receipt whole (`none`). Publication and
   // durability are reported apart: once the rename succeeded the new receipt
-  // is published, and a directory fsync that then fails leaves it published
-  // but not proven durable (`unproven`); only a successful one is `durable`.
-  // The exit code reports the live activation, which a lost receipt does not
-  // change, so a failure is a fixed stderr code with the errno name only; the
-  // error text would carry the backup path.
+  // is published, and the one directory fsync that follows decides between
+  // `durable` and published but not proven durable (`unproven`). The exit code
+  // reports the live activation, which a lost receipt does not change, so a
+  // failure is a fixed stderr code with the errno name only; the error text
+  // would carry the backup path.
   const writeReceipt = (): 'none' | 'unproven' | 'durable' => {
     if (outcome.backupPath === null) return 'none';
     try {
-      // 'best-effort' here: the required directory fsync runs next, on its own, so its failure is told apart.
-      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'best-effort');
+      // 'none': the writer skips its own directory fsync, so the single one below is the only one.
+      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'none');
     } catch (error) {
       io.stderr(`release:activate: receipt-write-failed ${errnoName(error)}\n`);
       return 'none';
@@ -491,8 +530,6 @@ export async function runReleaseActivateCli(
   }
   // One JSON document on stdout, after the event (see the header).
   io.stdout(receipt());
-  if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
-  return exitCode;
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
