@@ -58,6 +58,14 @@ name:
 - The migrator writes a same-directory temporary plist with mode `0644`, then
   atomically renames it into place. This prevents a permissive umask from
   creating a group- or world-writable LaunchAgent plist.
+
+  > **Superseded by #3673.** Every plist write, including this migrator and its
+  > rollback, now keeps the installed file's permission bits, capped at `0644`,
+  > so an owner-only `0600` plist stays `0600`. Only a first install with no
+  > plist present uses `0644`. The current rule is in
+  > [`service` (launchd render options)](../../configuration.md#service-launchd-render-options)
+  > (`installedLaunchdPlistMode` in `src/fleet/platform.ts`). This spec is kept
+  > as the historical design record.
 - It runs strict GUI-domain `bootout`, `bootstrap`, and `kickstart -k` in that
   order. A bootstrap or kickstart failure boots out any partially loaded new
   job, restores prior bytes, then attempts to restore the prior job.
