@@ -1478,7 +1478,7 @@ systemctl --user start whatsoup@$INSTANCE
 
 ### 7.1 Approve or Block Users
 
-Admins receive approval requests as WhatsApp messages when an unknown sender contacts the bot. Reply directly in WhatsApp:
+Admins receive approval requests as WhatsApp messages in their direct chat when an unknown sender contacts the bot in a direct chat. In a group under strict group-sender mode (`groupSenderPolicy: allowlisted_only`), an unknown sender only produces an approval request when they @mention the bot; ordinary group chatter and status broadcasts never do. Reply directly in WhatsApp:
 
 ```
 ALLOW 15551234567       # approve a phone number
