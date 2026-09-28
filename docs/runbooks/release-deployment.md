@@ -263,7 +263,8 @@ the poll that decided verification: the launchd pid (whose argv names the
 release entrypoint), the body's own `instance.pid`, and the tool's clock when
 the response arrived. Once the activation outcome and exit code are final,
 one sample reads the launchd pid, its argv, and its process start time
-(`ps -o lstart=`, run with `TZ=UTC0` and `LC_ALL=C`). `bound` needs the same
+(`ps -o lstart=`). The start-time child runs with only `PATH`, `TZ=UTC0` and
+`LC_ALL=C` in its environment. `bound` needs the same
 pid and argv, a body naming that pid, and a start second **strictly earlier**
 than the second the response was received: a process that reused the pid
 after the responder exited started no earlier than that second, so it can
@@ -287,7 +288,8 @@ most 15 s, and it delays only the receipt, the event and stdout. The
 tool-commit lookup (at most 5 s) follows it. Every other `launchctl`, `ps`,
 `plutil` and renderer call keeps its previous behaviour, with no timeout.
 
-Consequence for rollbacks: a rollback always follows an activation
+Consequence for rollbacks: every rollback now yields a warning rather than a
+possible clear. A rollback always follows an activation
 observation that did not pass, which is never sampled and is recorded
 `unknown`/`unobserved`. So `rolled-back` (like every other rollback outcome)
 sends a warning, never a clear, even when both processes declare the floor;

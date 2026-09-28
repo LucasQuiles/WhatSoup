@@ -450,11 +450,6 @@ class SimulatedLaunchd {
     return this.startTimes.get(this.loaded.get(INSTANCE_LABEL)!.pid)!;
   }
 
-  /** Give the running instance process this start time (a process that started just now). */
-  setInstanceStartedAt(ms: number): void {
-    this.startTimes.set(this.loaded.get(INSTANCE_LABEL)!.pid, ms);
-  }
-
   /** Release roots the instance ran on, collapsing the restart `kickstart -k` adds after each bootstrap. */
   releasesStarted(): string[] {
     return this.instanceStarts.filter((root, index) => index === 0 || this.instanceStarts[index - 1] !== root);
@@ -1615,10 +1610,10 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(migrated).toBe(true);
     // Every report exec comes after the last launchctl bootout, bootstrap or kickstart.
     expect(Math.min(...world.boundedAt)).toBeGreaterThan(world.lastMutatingAt());
-    // The failed observation is never re-sampled: no bounded exec names a pid that served the new release.
-    const failedPids = new Set(world.served.filter((entry) => entry.root === hung.newRelease).map((entry) => String(entry.pid)));
-    expect(failedPids.size).toBeGreaterThan(0);
-    expect(world.boundedCalls.filter(([file, , pid]) => file === 'ps' && failedPids.has(pid!))).toEqual([]);
+    // With nothing hanging: one shared sample after the outcome, not one per observation or per poll.
+    expect(baseline.world.boundedCalls.filter(([file, verb]) => file === 'launchctl' && verb === 'print')).toHaveLength(1);
+    expect(baseline.world.boundedCalls.filter((call) => call.includes('lstart='))).toHaveLength(1);
+    expect(Math.min(...baseline.world.boundedAt)).toBeGreaterThan(baseline.world.lastMutatingAt());
     expect(hungInvariants).toMatchObject({
       activation: { outcome: 'unknown', detail: 'unobserved' },
       rollback: { outcome: 'unknown', detail: 'unobserved' },
@@ -1627,20 +1622,18 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
   it('same-second pid reuse is never bound: the same lstart for the responder and its replacement gives unobserved and no clear', async () => {
     let reused = false;
-    const lstarts: string[] = [];
+    let original: string | null = null;
     let world: SimulatedLaunchd | null = null;
+    // No boot time: the responder starts in the same second as its first response.
     world = new SimulatedLaunchd(fixture, {
+      bootMs: 0,
       health: (root, fallback) => {
         const response = newReleaseEmits(CURRENT_BLOCK)(root, fallback);
         if (root === fixture.newRelease && !reused) {
           reused = true;
-          const at = world!.now();
-          // The responder started in the second of its response; the replacement gets the
-          // same pid AND the same second-resolution start time.
-          world!.setInstanceStartedAt(at);
-          lstarts.push(lstartText(world!.instanceStartedAt()));
-          world!.reuseInstancePid(at);
-          lstarts.push(lstartText(world!.instanceStartedAt()));
+          original = lstartText(world!.instanceStartedAt());
+          // The replacement gets the same pid AND the same start time.
+          world!.reuseInstancePid(world!.instanceStartedAt());
         }
         return response;
       },
@@ -1651,7 +1644,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     // Fixture premise: one lstart string for both processes, in the second the passing response was served.
     const passing = world.served.filter((entry) => entry.root === fixture.newRelease);
     expect(passing).toHaveLength(1);
-    expect(lstarts).toEqual([lstartText(passing[0]!.at), lstartText(passing[0]!.at)]);
+    expect(original).toBe(lstartText(world.instanceStartedAt()));
     expect(Math.floor(world.instanceStartedAt() / 1_000)).toBe(Math.floor(passing[0]!.at / 1_000));
     expect(receiptOf().verification).toMatchObject({ binding: 'unobserved' });
     expect(receiptOf().invariants).toMatchObject({
