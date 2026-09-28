@@ -5930,6 +5930,7 @@ export class AgentRuntime implements Runtime {
         const fallback = adoptionAfterFailedClose(err, session.getStatus());
         if (fallback === null) throw err;
         log.warn({ err, chatJid }, 'previous session close failed — starting fresh with a notice');
+        session.retireUnclosedGeneration();
         if (adoption.kind !== 'fresh_with_notice') closeFailedNotice = fallback;
         adoption = fallback;
       }

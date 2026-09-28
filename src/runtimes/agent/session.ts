@@ -4816,6 +4816,31 @@ export class SessionManager {
       }
     }
 
+    this.clearGenerationIdentity();
+    this.hostWorkAdmissionCleanupUnproven = false;
+    // Only a fully successful teardown (process proof plus lifecycle closure)
+    // may reopen a lane closed by an ambiguous provider write.
+    this.completeProviderTurn();
+  }
+
+  /**
+   * #3658: forget a generation whose provider stopped but whose durable close
+   * failed, before the runtime starts a fresh one in its place. Nothing later
+   * may pair this row or provider session with the new generation. The row is
+   * not closed here: it stays for the startup sweep. The lane and the
+   * cleanup-unproven flag are left alone, since only a fully successful
+   * teardown may reset them.
+   */
+  retireUnclosedGeneration(): void {
+    log.warn({
+      chatJid: this.chatJid,
+      rowId: this.dbRowId,
+      sessionId: this.sessionId ?? this.resumeAttemptId,
+    }, 'session: abandoning a generation whose lifecycle close failed');
+    this.clearGenerationIdentity();
+  }
+
+  private clearGenerationIdentity(): void {
     this.sessionId = null;
     this.dbRowId = null;
     // #3658: the manager can stay resident after this closure. Its next
@@ -4828,10 +4853,6 @@ export class SessionManager {
     this.codexResumeThreadStartReqId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
-    this.hostWorkAdmissionCleanupUnproven = false;
-    // Only a fully successful teardown (process proof plus lifecycle closure)
-    // may reopen a lane closed by an ambiguous provider write.
-    this.completeProviderTurn();
   }
 }
 
