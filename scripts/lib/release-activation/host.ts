@@ -46,12 +46,19 @@ export interface ActivationHost {
    * outright may throw.
    */
   emitReleaseAlert(request: ReleaseAlertRequest): Promise<{ status: number | null }>;
+  /**
+   * Commit of the tree this tool runs from (the tree that supplies the
+   * invariant floor), or null when it cannot be resolved.
+   */
+  toolCommit(): Promise<string | null>;
 }
 
 export interface ReleaseAlertRequest {
   instance: string;
   source: string;
   payload: ReleaseAlertEmitPayload;
+  /** Variables set for this helper call only (see `ReleaseAlertEmitOptions.env`). */
+  env?: Readonly<Record<string, string>>;
 }
 
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
@@ -122,17 +129,36 @@ export function createDefaultActivationHost(): ActivationHost {
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     fetchHealth: defaultFetchHealth,
-    emitReleaseAlert: async ({ instance, source, payload }) => {
+    emitReleaseAlert: async ({ instance, source, payload, env }) => {
       const result = emitReleaseAlert({
         repoRoot: TOOL_REPO_ROOT,
         instance,
         source,
         emitHelper: path.join(TOOL_REPO_ROOT, 'deploy/scripts/bot-errors-emit.py'),
         python: 'python3',
+        ...(env ? { env } : {}),
       }, payload, 'alert');
       return { status: result.status };
     },
+    toolCommit: defaultToolCommit,
   };
+}
+
+const FULL_COMMIT = /^[0-9a-f]{40}$/;
+
+/** The tool tree's release-manifest commit, else its git HEAD; null when neither resolves. */
+async function defaultToolCommit(): Promise<string | null> {
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(path.join(TOOL_REPO_ROOT, '.whatsoup-release-manifest.json'), 'utf8'));
+    const source = isRecord(manifest) && isRecord(manifest['source']) ? manifest['source'] : {};
+    const commit = source['commit'];
+    if (typeof commit === 'string' && FULL_COMMIT.test(commit)) return commit;
+  } catch {
+    // Not a release snapshot (or an unreadable manifest): try the checkout.
+  }
+  const head = await defaultExec('git', ['-C', TOOL_REPO_ROOT, 'rev-parse', 'HEAD']);
+  const commit = head.stdout.trim();
+  return head.code === 0 && FULL_COMMIT.test(commit) ? commit : null;
 }
 
 /**
@@ -176,6 +202,8 @@ export interface HealthObservation {
   httpStatus: number | null;
   commit: string | null;
   connected: boolean | null;
+  /** `instance.pid` of the process that served the body (a positive integer), else null. */
+  responderPid: number | null;
   /** The #2481 `health_invariants` reading; null unless the body is diagnostic. */
   invariants: HealthInvariantsReading | null;
 }
@@ -197,7 +225,7 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
     payload = null;
   }
   const unobserved: HealthObservation = {
-    projection: 'unobserved', httpStatus: status, commit: null, connected: null, invariants: null,
+    projection: 'unobserved', httpStatus: status, commit: null, connected: null, responderPid: null, invariants: null,
   };
   if (!isRecord(payload)) return unobserved;
   const schema = payload['schema_version'];
@@ -210,6 +238,7 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
     httpStatus: status,
     commit: typeof instance['commit'] === 'string' ? instance['commit'] : null,
     connected: typeof whatsapp['connected'] === 'boolean' ? whatsapp['connected'] : null,
+    responderPid: Number.isSafeInteger(instance['pid']) && (instance['pid'] as number) > 0 ? instance['pid'] as number : null,
     invariants: readHealthInvariants(payload),
   };
 }

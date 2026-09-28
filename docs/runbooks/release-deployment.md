@@ -212,29 +212,46 @@ restore required.
 Under `--apply`, after the outcome is final, `receipt.json` (and the stdout
 receipt) carries an `invariants` record:
 
-- `floor`: the schema and the required ids from **this tool's own**
-  `src/core/health-invariants.ts` (`RELEASE_INVARIANT_FLOOR`). The floor never
-  comes from the release under test.
+- `floor`: the schema and the required ids from the `src/core/health-invariants.ts`
+  (`RELEASE_INVARIANT_FLOOR`) of **the tree that runs the tool**, and
+  `toolCommit`, that tree's commit (its release-manifest commit, else its git
+  `HEAD`; `unknown` when neither resolves). The floor comes from the release
+  under test only if the tool is run from inside that release; `toolCommit`
+  shows which tree it was.
 - `activation`, and `rollback` when a rollback restarted the old release and
-  observed it (otherwise `null`): the verdict for the
-  process `verify` bound by pid and argv, read from the `health_invariants`
-  block of its authenticated diagnostic body:
+  observed it (otherwise `null`): the verdict for the process `verify`
+  observed, read from the `health_invariants` block of its authenticated
+  diagnostic body. The body counts only when its own `instance.pid` is the
+  launchd pid whose argv names the release:
   - `satisfied`: the process declared every floor id. This is a declaration by
     the loaded code, not a proof of behaviour.
-  - `missing`: a diagnostic body with no block, i.e. a release that predates
-    it.
-  - `below_floor`: a known schema that omits a floor id (`undeclared` lists
+  - `missing`: a 2xx diagnostic body with no block, i.e. a release that
+    predates it.
+  - `below_floor`: the known schema, omitting a floor id (`undeclared` lists
     them).
-  - `unknown`: an unrecognised schema, a malformed block, a process that was
-    not bound (`unbound`), or no diagnostic body at all (`unobserved`). A
-    transport failure is never read as `missing`.
+  - `unknown`, with `detail`: `unknown-schema`, `malformed`, `unbound` (no
+    pid, argv on another release, or a body served by another pid or with no
+    pid), `unobserved` (no diagnostic body at all), or `http-status` (a
+    non-2xx diagnostic body). A failed or erroring read is never `missing`.
+  - `schema` is `known`, `unrecognised`, or `null`; the producer's schema
+    string is never copied.
 - `alert`: whether a warning was attempted, and the helper's exit status.
 
+`receipt.json` is written with the verdict **before** any alert is sent
+(`alert.status: "pending"`), then rewritten with the final status, so an
+interrupt during the alert leaves the verdict on disk.
+
 When any verdict is not `satisfied`, exactly one BOT ERRORS warning (source
-`release-invariants`) is sent through the release observers' alert helper. It
-carries verdicts and ids only: no paths, commits, or host details. A refusal
-before any live change has no verdict and sends nothing. `--plan` never reads
-invariants and never sends an alert.
+`release-invariants`) is sent through the release observers' alert helper.
+Per operator decision, it is a **standard BOT ERRORS alert with no log tail**:
+the payload this tool supplies carries verdicts and ids only (no paths or
+commits), and the delivered event carries the standard operator fields every
+BOT ERRORS alert carries (machine, platform, instance, process, runtime, and
+diagnostic hints such as log-location hints and the outbox path), with the
+inline log tail turned off for this call (`BOT_ERRORS_INLINE_LOG_TAIL=0`).
+`receipt.json` holds no host data. A refusal (before or during the apply) has
+no verdict and sends nothing. `--plan` never reads invariants and never sends
+an alert.
 
 The verdict is **report-only**: it is not part of the pass condition, and the
 outcome and every exit code above are unchanged. A failed alert is printed to

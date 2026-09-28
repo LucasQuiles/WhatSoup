@@ -13,14 +13,19 @@
  *   Verdict `satisfied` when the ids cover the floor, else `below_floor`.
  * - `unknown-schema` or `malformed`: verdict `unknown`.
  *
+ * No producer string is kept: an unrecognised schema is recorded only as
+ * `unrecognised`, and only ids that match the id pattern are ever read.
+ *
  * Only `satisfied` is green, and it means "the bound process declared every
  * floor id". It does not prove the behaviour. The verdict never enters the
  * pass predicate, the outcome, or the exit code.
  *
- * The verdict is bound to the executing process: it classifies only an
- * observation whose pid and argv `observeInstance` matched to the release.
- * A body that could not be read or was not diagnostic is `unobserved`, never
- * `missing`: a transport failure is not evidence of a legacy producer.
+ * The verdict is bound to the responding process. It classifies a body only
+ * when `observeInstance` matched the launchd pid's argv to the release AND the
+ * body's own `instance.pid` is that same pid; otherwise it is `unbound`. A
+ * body that could not be read or was not diagnostic is `unobserved`, and a
+ * non-2xx diagnostic body is `http-status`: never `missing`, because a failed
+ * or erroring read is not evidence of a legacy producer.
  */
 import {
   HEALTH_INVARIANTS_SCHEMA,
@@ -35,15 +40,10 @@ const HEALTH_INVARIANTS_KEY = 'health_invariants';
 const MAX_IDS = 64;
 const MAX_ID_LENGTH = 96;
 const ID_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/;
-// Id-like only: an unrecognised schema string is relayed into the receipt and
-// the alert, so a path- or text-shaped value is malformed rather than echoed.
-const SCHEMA_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 export interface HealthInvariantsReading {
   reading: 'absent' | 'declared' | 'unknown-schema' | 'malformed';
-  /** The known schema when declared; the bounded unrecognised string when unknown-schema; else null. */
-  schema: string | null;
-  /** Declared ids; empty for every other reading. */
+  /** Declared ids (the known schema only); empty for every other reading. */
   ids: string[];
 }
 
@@ -51,24 +51,25 @@ export type ReleaseInvariantsOutcome = 'satisfied' | 'missing' | 'below_floor' |
 
 export interface ReleaseInvariantsVerdict {
   outcome: ReleaseInvariantsOutcome;
-  detail: 'unbound' | 'unobserved' | 'unknown-schema' | 'malformed' | null;
-  observedSchema: string | null;
+  detail: 'unbound' | 'unobserved' | 'http-status' | 'unknown-schema' | 'malformed' | null;
+  /** Whether the block used this tool's schema; never the producer's string. */
+  schema: 'known' | 'unrecognised' | null;
   /** Floor ids the bound process did not declare; every floor id unless the block was read. */
   undeclared: string[];
 }
 
 function malformed(): HealthInvariantsReading {
-  return { reading: 'malformed', schema: null, ids: [] };
+  return { reading: 'malformed', ids: [] };
 }
 
 /** Read the block from a parsed diagnostic payload. Structural only: text elsewhere in the body is never a declaration. */
 export function readHealthInvariants(payload: Record<string, unknown>): HealthInvariantsReading {
-  if (!(HEALTH_INVARIANTS_KEY in payload)) return { reading: 'absent', schema: null, ids: [] };
+  if (!Object.prototype.hasOwnProperty.call(payload, HEALTH_INVARIANTS_KEY)) return { reading: 'absent', ids: [] };
   const block = payload[HEALTH_INVARIANTS_KEY];
   if (!isRecord(block)) return malformed();
   const schema = block['schema'];
-  if (typeof schema !== 'string' || !SCHEMA_PATTERN.test(schema)) return malformed();
-  if (schema !== HEALTH_INVARIANTS_SCHEMA) return { reading: 'unknown-schema', schema, ids: [] };
+  if (typeof schema !== 'string') return malformed();
+  if (schema !== HEALTH_INVARIANTS_SCHEMA) return { reading: 'unknown-schema', ids: [] };
   const ids = block['ids'];
   if (!Array.isArray(ids) || ids.length > MAX_IDS) return malformed();
   const seen = new Set<string>();
@@ -78,7 +79,7 @@ export function readHealthInvariants(payload: Record<string, unknown>): HealthIn
     }
     seen.add(id);
   }
-  return { reading: 'declared', schema, ids: [...seen] };
+  return { reading: 'declared', ids: [...seen] };
 }
 
 /** Classify a reading against the tool's floor. */
@@ -88,18 +89,18 @@ export function classifyReleaseInvariants(
 ): ReleaseInvariantsVerdict {
   switch (reading.reading) {
     case 'absent':
-      return { outcome: 'missing', detail: null, observedSchema: null, undeclared: [...floor] };
+      return { outcome: 'missing', detail: null, schema: null, undeclared: [...floor] };
     case 'unknown-schema':
-      return { outcome: 'unknown', detail: 'unknown-schema', observedSchema: reading.schema, undeclared: [...floor] };
+      return { outcome: 'unknown', detail: 'unknown-schema', schema: 'unrecognised', undeclared: [...floor] };
     case 'malformed':
-      return { outcome: 'unknown', detail: 'malformed', observedSchema: null, undeclared: [...floor] };
+      return { outcome: 'unknown', detail: 'malformed', schema: null, undeclared: [...floor] };
     case 'declared': {
       const declared = new Set(reading.ids);
       const undeclared = floor.filter((id) => !declared.has(id));
       return {
         outcome: undeclared.length === 0 ? 'satisfied' : 'below_floor',
         detail: null,
-        observedSchema: reading.schema,
+        schema: 'known',
         undeclared,
       };
     }
@@ -107,20 +108,23 @@ export function classifyReleaseInvariants(
 }
 
 /**
- * The verdict for one instance observation. An observation whose process was
- * not bound (no pid, or argv naming another release) is `unbound`; one with
- * no diagnostic body is `unobserved`. Both are `unknown`.
+ * The verdict for one instance observation. No pid, argv naming another
+ * release, or a body not served by that pid is `unbound`; no diagnostic body
+ * is `unobserved`; a non-2xx diagnostic body is `http-status`. All three are
+ * `unknown`.
  */
 export function releaseInvariantsVerdict(
   observation: { pid: number | null; argvMatches: boolean; health: HealthObservation | null } | null,
   floor: readonly string[] = RELEASE_INVARIANT_FLOOR,
 ): ReleaseInvariantsVerdict {
-  const unknown = (detail: 'unbound' | 'unobserved'): ReleaseInvariantsVerdict => ({
-    outcome: 'unknown', detail, observedSchema: null, undeclared: [...floor],
+  const unknown = (detail: 'unbound' | 'unobserved' | 'http-status'): ReleaseInvariantsVerdict => ({
+    outcome: 'unknown', detail, schema: null, undeclared: [...floor],
   });
   if (observation === null) return unknown('unobserved');
   if (observation.pid === null || !observation.argvMatches) return unknown('unbound');
   const health = observation.health;
   if (health === null || health.projection !== 'diagnostic' || health.invariants === null) return unknown('unobserved');
+  if (health.responderPid !== observation.pid) return unknown('unbound');
+  if (health.httpStatus === null || health.httpStatus < 200 || health.httpStatus > 299) return unknown('http-status');
   return classifyReleaseInvariants(health.invariants, floor);
 }

@@ -27,8 +27,10 @@
  *
  * #2481, report-only: under --apply, the receipt also records the health
  * invariant verdict of the activated (and any rollback) process against this
- * tool's floor, and one BOT ERRORS warning is sent when it is not
- * `satisfied`. The verdict never changes the outcome or the exit code.
+ * tool's floor. It is written before any alert; then one BOT ERRORS warning
+ * (standard event fields, inline log tail off) is sent when a verdict is not
+ * `satisfied`, and the receipt is rewritten with the alert status. The verdict
+ * never changes the outcome or the exit code.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -192,74 +194,106 @@ export function planDocument(context: ActivationContext): Record<string, unknown
   };
 }
 
-/** The receipt's #2481 record: verdicts, the tool floor, and the one alert attempt. */
+/** The receipt's #2481 record: verdicts, the tool floor and its source, and the one alert attempt. */
 export interface InvariantsRecord {
   reportOnly: true;
-  floor: { schema: string; ids: string[] };
+  /** `toolCommit`: commit of the tree that ran this tool and so supplied the floor; 'unknown' if unresolved. */
+  floor: { schema: string; ids: string[]; toolCommit: string };
   activation: ReleaseInvariantsVerdict | null;
   rollback: ReleaseInvariantsVerdict | null;
-  alert: { attempted: boolean; status: number | null };
+  /** `pending` while the alert is in flight (the receipt is written before it is sent). */
+  alert: { attempted: boolean; status: number | null | 'pending' };
 }
+
+/**
+ * Operator decision for this alert: the standard BOT ERRORS event fields, like
+ * every other BOT ERRORS alert, but no inline log tail. Set for this call only.
+ */
+const INVARIANTS_ALERT_ENV = Object.freeze({ BOT_ERRORS_INLINE_LOG_TAIL: '0' });
 
 function describeVerdict(label: string, verdict: ReleaseInvariantsVerdict): string[] {
   return [
     `${label}=${verdict.outcome}${verdict.detail === null ? '' : `/${verdict.detail}`}`,
-    `${label}_schema=${verdict.observedSchema ?? 'none'}`,
+    `${label}_schema=${verdict.schema ?? 'none'}`,
     `${label}_undeclared=${verdict.undeclared.join(',') || 'none'}`,
   ];
 }
 
 /**
  * #2481, report-only: classify the activation and rollback observations
- * against this tool's floor and send at most ONE warning when either is not
- * `satisfied`. Runs under --apply only, after the outcome is final; it never
- * changes the outcome or the exit code. A refusal changed nothing live, so it
- * has no verdict. The alert carries verdicts and ids only.
+ * against this tool's floor. Pure apart from resolving the tool commit; it
+ * never changes the outcome or the exit code. A refusal changed nothing live,
+ * so it has no verdict. The alert is marked pending when one will be sent.
  */
-async function reportReleaseInvariants(
-  host: ActivationHost,
-  instance: string,
-  outcome: ApplyOutcome,
-  stderr: (text: string) => void,
-): Promise<InvariantsRecord> {
+async function classifyForReceipt(host: ActivationHost, outcome: ApplyOutcome): Promise<InvariantsRecord> {
   const floor = [...RELEASE_INVARIANT_FLOOR];
+  let toolCommit: string | null = null;
+  try {
+    toolCommit = await host.toolCommit();
+  } catch {
+    toolCommit = null;
+  }
   const record: InvariantsRecord = {
     reportOnly: true,
-    floor: { schema: HEALTH_INVARIANTS_SCHEMA, ids: floor },
+    floor: { schema: HEALTH_INVARIANTS_SCHEMA, ids: floor, toolCommit: toolCommit ?? 'unknown' },
     activation: null,
     rollback: null,
     alert: { attempted: false, status: null },
   };
   if (outcome.outcome === 'refused') return record;
   record.activation = releaseInvariantsVerdict(outcome.verification, floor);
-  // No rollback verdict unless a rollback process was actually verified; a
+  // No rollback verdict unless a rollback process was actually observed; a
   // rollback stopped before restart has no generation to classify.
   const rollbackObservation = outcome.rollback?.observation ?? null;
   record.rollback = rollbackObservation === null ? null : releaseInvariantsVerdict(rollbackObservation, floor);
-  const verdicts: Array<[string, ReleaseInvariantsVerdict]> = [['activation', record.activation]];
-  if (record.rollback !== null) verdicts.push(['rollback', record.rollback]);
-  if (verdicts.every(([, verdict]) => verdict.outcome === 'satisfied')) return record;
+  if (verdictsOf(record).some(([, verdict]) => verdict.outcome !== 'satisfied')) {
+    record.alert = { attempted: true, status: 'pending' };
+  }
+  return record;
+}
 
-  record.alert.attempted = true;
+function verdictsOf(record: InvariantsRecord): Array<[string, ReleaseInvariantsVerdict]> {
+  const verdicts: Array<[string, ReleaseInvariantsVerdict]> = [];
+  if (record.activation !== null) verdicts.push(['activation', record.activation]);
+  if (record.rollback !== null) verdicts.push(['rollback', record.rollback]);
+  return verdicts;
+}
+
+/**
+ * Send the ONE warning a pending record calls for and set its final status.
+ * The tool-supplied payload carries verdicts and ids only; the helper adds its
+ * standard event fields. A failed or throwing helper never changes the exit code.
+ */
+async function sendInvariantsAlert(
+  host: ActivationHost,
+  instance: string,
+  outcome: ApplyOutcome,
+  record: InvariantsRecord,
+  stderr: (text: string) => void,
+): Promise<void> {
+  if (record.alert.status !== 'pending') return;
+  const verdicts = verdictsOf(record);
+  let status: number | null;
   try {
     const sent = await host.emitReleaseAlert({
       instance,
       source: RELEASE_INVARIANTS_ALERT_SOURCE,
+      env: INVARIANTS_ALERT_ENV,
       payload: {
         summary: `release:activate: release invariants not satisfied (${verdicts.map(([label, verdict]) => `${label} ${verdict.outcome}`).join(', ')})`,
-        evidence: `report-only verdict against floor ${HEALTH_INVARIANTS_SCHEMA} [${floor.join(',')}]; activation outcome ${outcome.outcome}; exit code unchanged`,
+        evidence: `report-only verdict against floor ${record.floor.schema} [${record.floor.ids.join(',')}]; activation outcome ${outcome.outcome}; exit code unchanged`,
         diagnostics: verdicts.flatMap(([label, verdict]) => describeVerdict(label, verdict)),
         severity: 'warning',
       },
     });
-    record.alert.status = sent.status;
+    status = sent.status;
   } catch {
-    record.alert.status = null;
+    status = null;
   }
-  if (record.alert.status !== 0) {
-    stderr(`release invariants alert was not sent (status ${record.alert.status ?? 'none'}); the verdict is in receipt.json\n`);
+  record.alert.status = status;
+  if (status !== 0) {
+    stderr(`release invariants alert was not sent (status ${status ?? 'none'}); the verdict is in receipt.json\n`);
   }
-  return record;
 }
 
 function outcomeExit(outcome: ApplyOutcome['outcome']): number {
@@ -354,8 +388,8 @@ export async function runReleaseActivateCli(
     return RELEASE_ACTIVATE_EXIT.refused;
   }
   const outcome = await applyActivation(host, context);
-  const invariants = await reportReleaseInvariants(host, args.instance, outcome, io.stderr);
-  const receipt = `${JSON.stringify({
+  const invariants = await classifyForReceipt(host, outcome);
+  const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
     release: plan.release,
@@ -363,14 +397,22 @@ export async function runReleaseActivateCli(
     ...outcome,
     invariants,
   }, null, 2)}\n`;
-  if (outcome.backupPath !== null) {
+  const writeReceipt = (): void => {
+    if (outcome.backupPath === null) return;
     try {
-      writeFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt, { mode: 0o600 });
+      writeFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), { mode: 0o600 });
     } catch (error) {
       io.stderr(`could not write receipt.json: ${error instanceof Error ? error.message : String(error)}\n`);
     }
+  };
+  // The receipt, with the verdict and any alert still pending, is durable
+  // before the helper runs; an interrupt during the alert cannot lose it.
+  writeReceipt();
+  if (invariants.alert.status === 'pending') {
+    await sendInvariantsAlert(host, args.instance, outcome, invariants, io.stderr);
+    writeReceipt();
   }
-  io.stdout(receipt);
+  io.stdout(receipt());
   if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
   return outcomeExit(outcome.outcome);
 }
