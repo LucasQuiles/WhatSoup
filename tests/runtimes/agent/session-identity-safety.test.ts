@@ -175,6 +175,9 @@ describe('SessionManager immutable checkpoint identity', () => {
     // The manager stays resident after an intentional end; its next pre-spawn
     // shutdown must not target the ended checkpoint by the stale identity.
     await expect(sm.shutdown()).resolves.toBeUndefined();
+    // It owns nothing to close any more, so it must not repaint the ended
+    // checkpoint as resumable either.
+    expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
   });
 
   it('orphans only the current conversation checkpoint when a managed provider reports a crash', async () => {
