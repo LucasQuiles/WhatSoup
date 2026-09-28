@@ -16,6 +16,7 @@ import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
   PrimaryModelProbeAdapters,
+  PrimaryModelProbeStageReporter,
   ServingContextReceipt,
 } from './primary-model-usability.ts';
 import type {
@@ -135,21 +136,21 @@ export function createPrimaryModelProbeAdapters(
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
   return {
-    probeBinaryModel: (target, signal) => {
+    probeBinaryModel: (target, signal, onStage) => {
       // #3017 AXIS C: fail closed when the probe target context differs from
       // the serving context receipt.
       const mismatch = verifyServingContext(target, deps);
       if (mismatch !== null) {
         return Promise.resolve({ status: 'unknown', reason: mismatch });
       }
-      return probeCliModel(target.provider, target.model, providerConfig, deps, signal);
+      return probeCliModel(target.provider, target.model, providerConfig, deps, signal, onStage);
     },
-    probeApiModelAccess: (target, signal) => {
+    probeApiModelAccess: (target, signal, onStage) => {
       const mismatch = verifyServingContext(target, deps);
       if (mismatch !== null) {
         return Promise.resolve({ status: 'unknown', reason: mismatch });
       }
-      return probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal);
+      return probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal, onStage);
     },
   };
 }
@@ -160,8 +161,10 @@ async function probeCliModel(
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
   signal?: AbortSignal,
+  onStage?: PrimaryModelProbeStageReporter,
 ): Promise<BinaryModelProbeResult> {
   if (signal?.aborted) return { status: 'timeout' };
+  onStage?.('prepare');
   const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
   let binary: string | null;
   try {
@@ -178,6 +181,7 @@ async function probeCliModel(
   // — arming the fallback and preventing revert. No-op off-darwin / when
   // CLAUDE_CONFIG_DIR is unset / when the file store is already current.
   if (provider !== 'opencode-cli') {
+    onStage?.('credential-heal');
     // Best-effort: the heal is fail-open by contract, but guard the call site too
     // so no future/injected heal fault can ever break the probe (a broken probe
     // would strand the fallback — the exact failure mode this change fixes).
@@ -186,6 +190,7 @@ async function probeCliModel(
     } catch {
       // swallow — proceed to probe exactly as before
     }
+    onStage?.('prepare');
   }
 
   const probe = deps.probeBinaryCommand
@@ -197,6 +202,7 @@ async function probeCliModel(
   const env = modelProbeEnv(provider, model, providerConfig, deps);
   let executionLease: ProviderExecutionLease | null = null;
   if (provider === 'opencode-cli' && deps.providerExecutionGate) {
+    onStage?.('gate-wait');
     executionLease = await deps.providerExecutionGate.acquire({
       ...(signal ? { signal } : {}),
       work: { kind: 'probe', scopeHash: shortHash(`${provider}\0${model ?? ''}`) },
@@ -220,6 +226,7 @@ async function probeCliModel(
   };
   let result: BinaryAuthStatusResult;
   try {
+    onStage?.('child-run');
     if (!signal?.aborted) {
       executionLease?.setPhase('executing');
       executionLease?.markProgress();
@@ -355,8 +362,10 @@ async function probeApiModelAccess(
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
   signal?: AbortSignal,
+  onStage?: PrimaryModelProbeStageReporter,
 ): Promise<ApiModelAccessProbeResult> {
   if (signal?.aborted) return { status: 'timeout' };
+  onStage?.('prepare');
   const apiKey = resolveProviderApiKey(provider, providerConfig, deps.resolveApiKey ?? resolveApiKey);
   if (!apiKey) return { status: 'credential_failed' };
 
@@ -370,6 +379,7 @@ async function probeApiModelAccess(
   timer.unref?.();
 
   try {
+    onStage?.('api-request');
     const response = await fetchImpl(apiGenerationUrl(provider, providerConfig), {
       method: 'POST',
       headers: {
