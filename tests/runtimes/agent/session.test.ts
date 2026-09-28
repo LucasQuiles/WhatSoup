@@ -7680,6 +7680,73 @@ describe('session.ts uncovered-branch coverage', () => {
     }
   });
 
+  it('#3547: reports terminalizing after a stop candidate and cleanup while the replaced child tree is reaped', async () => {
+    let now = 30_000;
+    const firstChild = makeMockChild(12021);
+    const secondChild = makeMockChild(12022);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    let finishKill: () => void = () => {};
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finishKill = resolve; }),
+    );
+    try {
+      const gate = new ProviderExecutionGate({ now: () => now });
+      const session = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: '15550003547@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      await session.spawnSession();
+      await session.sendTurn('first');
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      const stop = `${JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } })}\n`;
+      now = 30_010;
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'terminalizing', progressAgeMs: 0 });
+
+      // Continued output supersedes the stop candidate, so the holder is executing again.
+      now = 30_020;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'text', part: { text: 'continued output' } })}\n`));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'terminalizing' });
+
+      session.completeProviderTurn();
+      now = 30_030;
+      const secondTurn = session.sendTurn('second');
+      await vi.waitFor(() => {
+        expect(killSessionTree).toHaveBeenCalledWith(firstChild, 'SIGTERM', expect.anything());
+      });
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('15550003547@s.whatsapp.net'),
+        activePhase: 'cleanup',
+        progressAgeMs: 0,
+      });
+
+      finishKill();
+      await secondTurn;
+      expect(gate.snapshot()).toMatchObject({ active: true, activePhase: 'executing', progressAgeMs: 0 });
+
+      // A late stop candidate from the reaped child cannot move the successor.
+      now = 30_040;
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 10 });
+
+      secondChild._closeCb?.(0, null);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.mocked(spawn).mockReset();
+      // An early failure must not leave the pending once-only kill for the next reaping test.
+      vi.mocked(killSessionTree).mockReset();
+    }
+  });
+
   it('reaps a completed same-session OpenCode child before waiting for its next execution lease', async () => {
     const firstChild = makeMockChild(12005);
     const secondChild = makeMockChild(12006);
