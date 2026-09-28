@@ -119,11 +119,27 @@ function deferFollower(fixture: Fixture, chat: Chat, inboundSeq: number): void {
 function snapshotOf(
   fixture: Fixture,
   providerExecution: ProviderExecutionObservation | null,
+  providerExecutionCapturedAtMs: number | null = NOW_MS,
 ): InboundOwnershipSnapshot {
   return readInboundOwnershipSnapshot(openReader(fixture.dbPath), {
     minAgeMinutes: 15,
     providerExecution,
+    providerExecutionCapturedAtMs,
     nowMs: NOW_MS,
+  });
+}
+
+/** The chat's persisted completed-turn identity, written through the real checkpoint writer. */
+function checkpointCompleted(fixture: Fixture, chat: Chat, completedInboundSeq: number): void {
+  fixture.engine.upsertSessionCheckpoint(chat.key, {
+    sessionStatus: 'active',
+    completedInboundSeq,
+    completedDeliveryJid: chat.jid,
+    completedDeliveryNamespace: 's.whatsapp.net',
+    completedScope: 'per_chat',
+    completedLogicalTurnId: 'turn-completed-1',
+    completedManagerId: 'manager-1',
+    completedGeneration: 3,
   });
 }
 
@@ -290,6 +306,72 @@ describe('inbound ownership snapshot (#3560)', () => {
     });
     expect(snapshot.counts).toMatchObject({ executing: 0, no_owner: 1 });
     expect(snapshot.healthy).toBe(false);
+  });
+
+  it('stale evidence: a provider capture older than 60 seconds, or undated, never makes the row executing', () => {
+    const fixture = openFixture();
+    const head = journal(fixture, CHAT_E, 25);
+    const running = activeTurnOn(CHAT_E.jid);
+
+    // Boundary control: a capture exactly at the freshness bound still attributes.
+    expect(rowFor(snapshotOf(fixture, running, NOW_MS - 60_000), head)).toMatchObject({
+      classification: 'executing',
+      healthy: true,
+    });
+
+    for (const capturedAt of [NOW_MS - 61_000, NOW_MS - 10 * 60_000, null]) {
+      const snapshot = snapshotOf(fixture, running, capturedAt);
+      expect(snapshot.providerExecutionEvidence).toBe('stale');
+      expect(snapshot.rows).toHaveLength(1);
+      expect(rowFor(snapshot, head)).toMatchObject({
+        classification: 'no_owner',
+        reason: 'provider_capture_stale',
+        healthy: false,
+        owner: { kind: 'none' },
+        providerExecution: {
+          evidence: 'stale',
+          activePhase: null,
+          progressAgeMs: null,
+          oldestPendingIsThisScope: null,
+        },
+      });
+      expect(snapshot.healthy).toBe(false);
+    }
+  });
+
+  it('contradictory evidence: a turn active for the scope while the checkpoint already completed this row never reads executing', () => {
+    const contradicted = openFixture();
+    const head = journal(contradicted, CHAT_E, 25);
+    // The chat's persisted completed-turn identity is AT this row: whatever the lane is
+    // running for this chat now, it is not this row's turn.
+    checkpointCompleted(contradicted, CHAT_E, head);
+
+    const snapshot = snapshotOf(contradicted, activeTurnOn(CHAT_E.jid));
+
+    expect(snapshot.rows).toHaveLength(1);
+    expect(rowFor(snapshot, head)).toMatchObject({
+      classification: 'no_owner',
+      reason: 'provider_active_contradicts_completed_checkpoint',
+      healthy: false,
+      providerExecution: { evidence: 'active_this_scope' },
+      checkpoint: { completedInboundSeq: head, completedGeneration: 3 },
+    });
+    expect(snapshot.healthy).toBe(false);
+
+    // Control: a checkpoint completed BEFORE this row is consistent with it executing now.
+    const consistent = openFixture();
+    const earlier = journal(consistent, CHAT_E, 30);
+    consistent.db.raw.prepare(
+      `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'),
+       terminal_reason = 'response_echoed' WHERE seq = ?`,
+    ).run(earlier);
+    const current = journal(consistent, CHAT_E, 25);
+    checkpointCompleted(consistent, CHAT_E, earlier);
+    expect(rowFor(snapshotOf(consistent, activeTurnOn(CHAT_E.jid)), current)).toMatchObject({
+      classification: 'executing',
+      healthy: true,
+      checkpoint: { completedInboundSeq: earlier },
+    });
   });
 
   it('T3: output is content-free — no message text, message id, chat or sender identifier, or path', () => {

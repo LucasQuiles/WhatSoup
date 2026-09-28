@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -48,6 +48,12 @@ function activeTurnProviderExecution(): Record<string, unknown> {
   };
 }
 
+/** The CLI dates a capture by its file mtime; pin it so the freshness check is deterministic. */
+function writeCapture(filePath: string, body: unknown, capturedAtSeconds = NOW_SECONDS): void {
+  writeFileSync(filePath, JSON.stringify(body));
+  utimesSync(filePath, capturedAtSeconds, capturedAtSeconds);
+}
+
 function run(argv: string[]): { code: number; output: string } {
   let output = '';
   const code = runInboundOwnershipSnapshotCli(argv, (chunk) => { output += chunk; }, NOW_SECONDS * 1000);
@@ -63,10 +69,10 @@ describe('inbound-ownership-snapshot CLI (#3560)', () => {
   it('joins a saved health body and exits 0 when every stale row has an owner, printing no content', () => {
     const { root, dbPath, seq } = seedDatabase();
     const healthPath = path.join(root, 'health.json');
-    writeFileSync(healthPath, JSON.stringify({
+    writeCapture(healthPath, {
       status: 'healthy',
       runtime: { agent: { providerExecution: activeTurnProviderExecution() } },
-    }));
+    });
 
     const { code, output } = run(['--db', dbPath, '--provider-execution-json', healthPath]);
 
@@ -78,6 +84,23 @@ describe('inbound-ownership-snapshot CLI (#3560)', () => {
     ]);
     expect(output).not.toContain('SENTINEL');
     expect(output).not.toContain(root);
+  });
+
+  it('refuses a capture file older than the freshness bound as an execution owner and exits 3', () => {
+    const { root, dbPath, seq } = seedDatabase();
+    const healthPath = path.join(root, 'health.json');
+    writeCapture(healthPath, {
+      runtime: { agent: { providerExecution: activeTurnProviderExecution() } },
+    }, NOW_SECONDS - 10 * 60);
+
+    const { code, output } = run(['--db', dbPath, '--provider-execution-json', healthPath]);
+
+    const snapshot = JSON.parse(output) as { providerExecutionEvidence: string; rows: unknown[] };
+    expect(snapshot.providerExecutionEvidence).toBe('stale');
+    expect(snapshot.rows).toEqual([
+      expect.objectContaining({ inboundSeq: seq, classification: 'no_owner', healthy: false }),
+    ]);
+    expect(code).toBe(3);
   });
 
   it('exits 3 when a stale processing inbound has no attributable owner', () => {
@@ -96,9 +119,9 @@ describe('inbound-ownership-snapshot CLI (#3560)', () => {
   it('accepts a bare providerExecution object and refuses an invalid capture or a missing database', () => {
     const { root, dbPath } = seedDatabase();
     const barePath = path.join(root, 'provider-execution.json');
-    writeFileSync(barePath, JSON.stringify(activeTurnProviderExecution()));
+    writeCapture(barePath, activeTurnProviderExecution());
     const invalidPath = path.join(root, 'invalid.json');
-    writeFileSync(invalidPath, JSON.stringify({ active: 'yes' }));
+    writeCapture(invalidPath, { active: 'yes' });
 
     const bare = run(['--db', dbPath, '--provider-execution-json', barePath]);
     expect(bare.code).toBe(0);

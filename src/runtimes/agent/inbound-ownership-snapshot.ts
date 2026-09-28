@@ -201,6 +201,8 @@ export interface InboundOwnershipSnapshotOptions {
   readonly minAgeMinutes: number;
   readonly queueScope?: InboundOwnershipQueueScope;
   readonly providerExecution?: ProviderExecutionObservation | null;
+  /** When the provider capture was taken (epoch ms). */
+  readonly providerExecutionCapturedAtMs?: number | null;
   readonly nowMs?: number;
 }
 
