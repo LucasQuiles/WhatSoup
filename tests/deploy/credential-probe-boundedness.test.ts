@@ -254,7 +254,7 @@ function resolveBinary(name: string): string | undefined {
 // groups. Capture survivors before finally cleans them; cleanup cannot make a
 // lifecycle assertion pass. Processes that create a new session are outside
 // this boundary and are not claimed as covered by these probes.
-type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}`;
+type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first`;
 
 // Instrument a fixture-owned string, never the production helper. Each anchor
 // must remain unique so a source change cannot silently remove an observation.
@@ -271,8 +271,15 @@ function observeLifecycleEventOrder(source: string): string {
     '        ( umask 077; set -C; builtin printf \'%s\\n\' "$control_token" > "$deadline_file.pending" ) || exit 2',
     '        command -p link "$deadline_file.pending" "$deadline_file" 2>/dev/null || exit 2',
   ].join('\n');
+  // A parked guard polls with an external sleep, not a FIFO read, so a TERM
+  // trap runs within one poll on every bash, including one that retries a read.
+  const park = [
+    `        ${event('D_OUTER_PARKED')}`,
+    '        event_polls=0; while [ "$event_polls" -lt 200 ]; do sleep 0.01; event_polls=$((event_polls + 1)); done',
+    `        ${event('CONTROL_ERROR guard-park')}`,
+  ];
   insert('        sleep "$budget" || exit 2', [
-    '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
+    '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ] || [ "${EVENT_ORDER_MODE#event-order-near-deadline-}" != "$EVENT_ORDER_MODE" ]; then',
     '          IFS= read -r -t 2 event_release <> "$EVENT_ORDER_INNER_START" || exit 2',
     `          ${event('I_START')}`,
     '        fi',
@@ -302,12 +309,18 @@ function observeLifecycleEventOrder(source: string): string {
     '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
     '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
     '        ;; esac',
+    '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-result-first ]; then',
+    ...park,
+    '      fi',
     `      ${event('D_OUTER_ENTER worker=$worker_pid')}`,
     '      _bounded_claim_outcome deadline-outer',
     '      outcome_claim_rc=$?',
     `      ${event('O_OUTER_CLAIM rc=$outcome_claim_rc worker=$worker_pid')}`,
     '      if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
     '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
+    '      fi',
+    '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-deadline-first ]; then',
+    ...park,
     '      fi',
   ].join('\n'));
   insert('      esac\n      _bounded_read_authorization\n      authorization_state=$?\n      if [ "$authorization_state" -eq 0 ]; then', [
@@ -410,6 +423,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                         release_fifo('event-order-cleanup-release')
                         released = True
                         record['cleanup_released_after_authority'] = True
+                if mode.startswith('event-order-near-deadline-') and not child_released and 'D_OUTER_PARKED' in lines:
+                    release = os.open(root / 'event-order-child-release', os.O_WRONLY | os.O_NONBLOCK)
+                    try: os.write(release, b'release\n')
+                    finally: os.close(release)
+                    child_released = True
+                    record['child_released_after_guard_parked'] = True
                 if mode.startswith('event-order-natural-') and not released and any(line.startswith('O_OUTER_CLAIM rc=1 ') for line in lines) and any(line.startswith('C_HOLD ') for line in lines):
                     release = os.open(root / 'event-order-cleanup-release', os.O_WRONLY | os.O_NONBLOCK)
                     try: os.write(release, b'release\n')
@@ -691,7 +710,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
-  const eventTrace = mode.startsWith('event-order-') || nearDeadlineTrace || outcomeTrace || stoppedWorkerTrace;
+  // near-deadline always records its events: its expected result follows the claim order.
+  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
@@ -1035,7 +1055,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
     '    exit 2',
     '    ;; esac',
-    '  if [ "$1" = event-order-deadline-first ] || [ "$1" = event-order-expired-reaped ]; then',
+    '  if [ "$1" = event-order-deadline-first ] || [ "$1" = event-order-expired-reaped ] || [ "${1#event-order-near-deadline-}" != "$1" ]; then',
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
     '    exit 0',
     '  fi',
@@ -1481,7 +1501,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
-  it.each(['leader-exits', 'status-255', 'printf-override', 'near-deadline', 'near-deadline', 'near-deadline'] as const)('preserves status and cleans owned groups for %s', (mode) => {
+  it.each(['leader-exits', 'status-255', 'printf-override'] as const)('preserves status and cleans owned groups for %s', (mode) => {
     const result = runLifecycleProbe(mode);
     const expected = mode === 'leader-exits' ? 'rc=137 output=' : mode === 'status-255' ? 'rc=255 output=payload' : 'rc=0 output=payload';
     expect(result.exit, JSON.stringify(result)).toBe(0);
@@ -1489,6 +1509,62 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // With real timers the scheduler picks the winner near the deadline, so the
+  // result must agree with the observed winner, never with wall-clock hopes: a
+  // won result claim with no inner deadline read is rc 0, anything else is 124.
+  it.each([1, 2, 3] as const)('arbitrates a near-deadline result by its observed claim order (run %s)', () => {
+    const result = runLifecycleProbe('near-deadline');
+    const evidence = JSON.stringify(result);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const claims = events.filter((event) => event.startsWith('O_RESULT_CLAIM '));
+    const arbitration = events.filter((event) => event.startsWith('A '));
+    expect(claims, evidence).toHaveLength(1);
+    expect(arbitration, evidence).toHaveLength(1);
+    // The outer's own read decides whether an inner deadline counted; the
+    // commit event can be lost when the watchdog is reaped right after link.
+    const deadlineRead = /^A .* deadline_rc=(\d+) rc=\d+$/.exec(arbitration[0])?.[1];
+    if (events.includes('D_INNER_COMMIT')) expect(deadlineRead, evidence).toBe('124');
+    const resultWon = claims[0] === 'O_RESULT_CLAIM rc=0 result=0' && deadlineRead === '0';
+    expect(result.stdout, evidence).toContain(resultWon ? 'rc=0 output=payload' : 'rc=124 output=');
+  });
+  // Force each claim order around the deadline while the command completes
+  // normally and the inner watchdog stays gated. The guard parks after its
+  // budget, before its claim (result-first) or after it (deadline-first).
+  it.for(['event-order-near-deadline-result-first', 'event-order-near-deadline-deadline-first'] as const)('arbitrates a near-deadline completion by forced claim order: %s', (mode, { task }) => {
+    const result = runLifecycleProbe(mode);
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedNearDeadlineOrder: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.child_released_after_guard_parked, evidence).toBe(true);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('D_INNER_ENTER'), evidence).toBe(-1);
+    expect(index('D_OUTER_PARKED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_FIFO'), evidence).toBeGreaterThan(index('D_OUTER_PARKED'));
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    if (mode === 'event-order-near-deadline-result-first') {
+      // The TERM that follows the worker's return reaches the guard before its claim.
+      expect(index('D_OUTER_ENTER'), evidence).toBe(-1);
+      expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+      expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=0 guard=\d+ guard_rc=0 deadline_rc=0 rc=0$/);
+      expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    } else {
+      expect(events[index('O_OUTER_CLAIM')], evidence).toMatch(/^O_OUTER_CLAIM rc=0 worker=\d+$/);
+      expect(index('D_OUTER_PARKED'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
+      expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=1 result=0');
+      expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=124 guard=\d+ guard_rc=124 deadline_rc=0 rc=124$/);
+      expect(result.stdout, evidence).toContain('rc=124 output=payload');
+    }
   });
   it('reaps a command child that survives the first group signal', () => {
     const result = runLifecycleProbe('command-group-descendant');
