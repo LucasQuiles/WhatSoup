@@ -408,7 +408,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
 
     it('no checkpoint to adopt: the turn starts fresh with the notice and dispatches', async () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
-      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
       expect(providerSend).toHaveBeenCalledTimes(1);
@@ -418,7 +418,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       insertRow(OWN_SID, PHONE, 'suspended');
       writeCheckpoint(PHONE, OWN_SID);
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
-      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
       expect(providerSend).toHaveBeenCalledTimes(1);
@@ -428,7 +428,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       insertRow(SCHEDULED_SID, SCHEDULED, 'suspended');
       writeCheckpoint(PHONE, SCHEDULED_SID);
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
-      await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
       expect(providerSend).toHaveBeenCalledTimes(1);
