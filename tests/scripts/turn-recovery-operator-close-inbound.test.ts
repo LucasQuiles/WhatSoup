@@ -248,6 +248,40 @@ describe('turn-recovery-operator close-inbound', () => {
     expect(inboundState(seq)).toEqual(finalized);
   });
 
+  it('an apply that fails inside the write transaction rolls back and appends an apply-mode failed receipt', () => {
+    const { seq } = seedStaleFailed('write-fails', 'processing');
+    const { parsed } = dryRun(seq);
+    const failingClose = 'test-only: inbound close aborted';
+    // TEST-ONLY trigger that aborts the close's write for this row.
+    seed((db) => db.raw.exec(`
+      CREATE TRIGGER test_only_close_update_fails
+      BEFORE UPDATE ON inbound_events
+      WHEN OLD.seq = ${seq}
+      BEGIN
+        SELECT RAISE(ABORT, '${failingClose}');
+      END
+    `));
+    const stateBefore = inboundState(seq);
+    const receiptsBefore = audit().length;
+
+    const applied = run(['close-inbound', '--db', dbPath, '--seq', String(seq), '--apply',
+      '--expect-digest', String(parsed.digest), '--audit-file', auditPath]);
+
+    expect(applied.status, applied.stdout).toBe(1);
+    expect(applied.stderr).toContain(failingClose);
+    expect(applied.stdout).toBe('');
+    expect(stateBefore.processing_status).toBe('processing');
+    expect(inboundState(seq)).toEqual(stateBefore);
+    expect(audit()).toHaveLength(receiptsBefore + 1);
+    expect(audit().at(-1)).toEqual(expect.objectContaining({
+      action: 'close-inbound',
+      inboundSeq: seq,
+      mode: 'apply',
+      outcome: 'failed',
+      reason: 'write_transaction_error',
+    }));
+  });
+
   it('refuses an open inbound with no terminal record', () => {
     let seq = 0;
     seed((_db, engine) => {

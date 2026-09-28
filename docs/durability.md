@@ -1188,7 +1188,12 @@ per-chat or global scope. When the selected delivery is provably dead (`failed_p
 Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
 and historical catch-ups remain visible as retained recovery debt without making health degraded.
 Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
-uncorroborated delivery ambiguity are blocking. Appending the
+uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
+admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
+source inbound that is not echo-settled and has no open disposition link), `turn-recovery-operator settle-orphan-transfer`
+(`docs/runbook.md`) writes its missing job directly in `exhausted`, with no replayable content, plus an
+append-only operator `recovery_plans` row. The terminal record is kept as evidence. Every other orphan
+is refused with a reason. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
