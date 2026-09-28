@@ -454,6 +454,25 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
+    it('retires the unclosed generation\'s identity before the fallback spawn, even when that spawn is refused', async () => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+      vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
+
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture fresh spawn refused');
+      closeSpy.mockRestore();
+
+      expect(session.getDbRowId()).toBeNull();
+      expect(session.getStatus().sessionId).toBeNull();
+      expect(notices).not.toHaveBeenCalled();
+    });
+
     it('sends no notice when the fresh spawn after a failed close is refused', async () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       spawnSpy.mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
