@@ -38,8 +38,10 @@
  * Every receipt write is atomic; a failed one prints only the fixed code
  * `receipt-write-failed <ERRNO>`, and a published receipt whose directory
  * fsync failed prints `receipt-written-durability-unproven <ERRNO>`. The whole
- * report phase sits inside one exception boundary: any throw prints only
- * `report-failed <error class>` and the exit code stands. The verdict never
+ * report phase sits inside one exception boundary: any throw prints only the
+ * fixed line `report-failed` and the exit code stands. The CLI's stdout and
+ * stderr each carry one 'error' listener, so an asynchronous stream error
+ * (EPIPE) cannot end the process either. The verdict never
  * changes the outcome or the exit code. stdout stays one JSON
  * document, printed after the event, so it can trail the activation by the
  * bounded report work plus up to the helper's 60 s timeout.
@@ -419,6 +421,29 @@ export function blockedRollbackMessage(context: ActivationContext, outcome: Appl
   ].join('\n');
 }
 
+/**
+ * The CLI's output callbacks, with one 'error' listener on each stream,
+ * attached before any write. A write can return and the stream then emit an
+ * asynchronous 'error' (EPIPE once the reader has gone); unhandled, that ends
+ * the process with a failure whatever exit code was fixed. The listener prints
+ * nothing (the stream may be broken) and exits nothing; later writes to that
+ * stream are skipped.
+ */
+export function guardedCliIo(
+  streams: { stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream } = {
+    stdout: process.stdout,
+    stderr: process.stderr,
+  },
+): { stdout: (text: string) => void; stderr: (text: string) => void } {
+  const broken = { stdout: false, stderr: false };
+  streams.stdout.on('error', () => { broken.stdout = true; });
+  streams.stderr.on('error', () => { broken.stderr = true; });
+  return {
+    stdout: (text) => { if (!broken.stdout) streams.stdout.write(text); },
+    stderr: (text) => { if (!broken.stderr) streams.stderr.write(text); },
+  };
+}
+
 export async function runReleaseActivateCli(
   argv: readonly string[],
   host: ActivationHost = createDefaultActivationHost(),
@@ -457,20 +482,14 @@ export async function runReleaseActivateCli(
   const exitCode = outcomeExit(applied.outcome);
   try {
     await reportActivation(host, context, args, plan, applied, io);
-  } catch (error) {
-    // One fixed line: the error class name only, never its message, which can carry a path.
-    try { io.stderr(`release:activate: report-failed ${errorClassName(error)}\n`); } catch { /* the exit code stands */ }
+  } catch {
+    // One fixed line and nothing read from the error: its message, and even its class name, can carry text.
+    try { io.stderr('release:activate: report-failed\n'); } catch { /* the exit code stands */ }
   }
   if (applied.outcome === 'rollback-blocked-migrated') {
     try { io.stderr(blockedRollbackMessage(context, applied)); } catch { /* the exit code stands */ }
   }
   return exitCode;
-}
-
-/** The class name of a report failure (e.g. TypeError), or UNKNOWN; never the message. */
-function errorClassName(error: unknown): string {
-  const name = error instanceof Error ? error.constructor.name : '';
-  return /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name) ? name : 'UNKNOWN';
 }
 
 /**
@@ -534,5 +553,5 @@ async function reportActivation(
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
 if (import.meta.url === invokedPath) {
-  process.exitCode = await runReleaseActivateCli(process.argv.slice(2));
+  process.exitCode = await runReleaseActivateCli(process.argv.slice(2), createDefaultActivationHost(), guardedCliIo());
 }

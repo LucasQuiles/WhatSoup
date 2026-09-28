@@ -285,9 +285,12 @@ its own `try`: a clock fault leaves that observation's binding `unobserved`
 and never touches the health read or the pass decision. After the exit code
 is fixed, the whole report phase (binding sample, tool-commit lookup, receipt
 writes, event, stdout) runs inside one exception boundary: any throw prints
-only `release:activate: report-failed <error class>` (never the message, which
-can carry a path), and the already-fixed exit code is returned; a failing
-stderr is ignored. Every binding exec (`launchctl print`, `ps -o command=`, `ps -o lstart=`)
+only the fixed line `release:activate: report-failed` (nothing read from the
+error: its message, and even its class name, can carry text), and the
+already-fixed exit code is returned; a failing stderr is ignored. The CLI
+attaches one `error` listener to stdout and to stderr before any write, so an
+asynchronous stream error (EPIPE once the reader has gone) skips later writes
+to that stream and never changes the exit code. Every binding exec (`launchctl print`, `ps -o command=`, `ps -o lstart=`)
 runs after the outcome and exit code are final, is attempted once (a timeout
 or failure is `unobserved`, never retried), has its own 5 s timeout and is
 killed with SIGKILL. One sample serves both observations, and it is taken only
@@ -295,7 +298,11 @@ when an observation passed with a diagnostic body, so the bounded cost is at
 most 15 s, and it delays only the receipt, the event and stdout. The
 tool-commit lookup (at most 5 s) follows it. Every other `launchctl`, `ps`,
 `plutil` and renderer call keeps its previous behaviour, with no timeout.
-These 5 s bounds cover the receipt, the event and stdout, not process exit: a
+These bounds cover the bounded report execs, the tool-commit lookup and the
+alert helper's timeout. Synchronous receipt I/O (the file write, its fsync
+and the directory fsync) is outside them: a stalled fsync blocks the process,
+so it delays the event and stdout without bound. The bounds also cover the
+receipt, the event and stdout only, not process exit: a
 `ps` child that SIGKILL cannot reap, or a stalled filesystem call in the
 tool-commit lookup, can keep the process alive after stdout is printed (the
 exit code it then returns is still the fixed one).
@@ -397,8 +404,9 @@ per-call override the helper accepts).
 
 stdout stays one JSON document, printed after the event, so it can trail the
 activation by the bounded report work above (at most 20 s) plus up to the
-helper's 60 s timeout; `receipt.json` already holds the verdict during the
-helper wait.
+helper's 60 s timeout, plus any time the synchronous receipt writes and their
+fsyncs take, which is not bounded; `receipt.json` already holds the verdict
+during the helper wait.
 
 The verdict is **report-only**: it is not part of the pass condition, and the
 outcome and every exit code above are unchanged. A failed event is printed to
