@@ -118,6 +118,7 @@ import {
   LazyRestoreScopes,
   NO_CHECKPOINT_ADOPTION,
   spawnForAdoption,
+  type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
@@ -5917,18 +5918,19 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
+      let closeFailedNotice: CheckpointAdoption | null = null;
       try {
         await session.shutdown();
       } catch (err) {
         // #3658: a close that failed only at its durable lifecycle step leaves
         // no provider behind, so the turn takes the #3530 fresh-with-notice
-        // path instead of a silent pre-dispatch rejection.
+        // path instead of a silent pre-dispatch rejection. A lazy resume
+        // chosen above is dropped for a fresh spawn: conservative, since the
+        // manager's own close just failed, and the notice says so.
         const fallback = adoptionAfterFailedClose(err, session.getStatus());
         if (fallback === null) throw err;
         log.warn({ err, chatJid }, 'previous session close failed — starting fresh with a notice');
-        if (adoption.kind !== 'fresh_with_notice') {
-          announceAdoption(fallback, (notice) => this.sendDirect(chatJid, notice));
-        }
+        if (adoption.kind !== 'fresh_with_notice') closeFailedNotice = fallback;
         adoption = fallback;
       }
       if (dispatchCancelled()) return;
@@ -5940,6 +5942,11 @@ export class AgentRuntime implements Runtime {
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
         return;
+      }
+      // Announced only once the fresh spawn is admitted, so a refused spawn
+      // never promises a continuation it cannot deliver.
+      if (closeFailedNotice !== null) {
+        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
