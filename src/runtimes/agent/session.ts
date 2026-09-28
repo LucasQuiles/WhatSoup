@@ -2636,6 +2636,8 @@ export class SessionManager {
       this.lastMessageAt = null;
       this.systemPrompt = systemPrompt;
       if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
+      // #3658: never carry an unretired provider session into this generation.
+      this.sessionId = null;
       this.resumeAttemptId = null;
 
       try {
@@ -2834,6 +2836,9 @@ export class SessionManager {
     this.startedAt = new Date().toISOString();
     this.messageCount = 0;
     this.lastMessageAt = null;
+    // #3658: a close that failed skipped the shutdown tail; the new
+    // generation learns its provider session from its own init.
+    this.sessionId = null;
     this.resumeAttemptId = resumeSessionId ?? null;
 
     // Persist the exact row/checkpoint lifecycle after spawn. If this fails the
