@@ -11,7 +11,9 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -272,6 +274,7 @@ interface WorldOptions {
 interface RecordedAlert {
   instance: string;
   source: string;
+  eventType: 'alert' | 'clear';
   env?: Record<string, string>;
   payload: { summary: string; evidence: string; diagnostics: string[]; severity: string };
 }
@@ -341,6 +344,14 @@ class SimulatedLaunchd {
   }
 
   /** Release roots the instance ran on, collapsing the restart `kickstart -k` adds after each bootstrap. */
+  /** Restart the instance under launchd (a new pid on the same definition), as a crash-and-respawn would. */
+  restartInstance(): void {
+    const job = this.loaded.get(INSTANCE_LABEL);
+    if (!job) return;
+    this.exit(job.pid, job.root, 'kickstart');
+    this.start(INSTANCE_LABEL, job.definition);
+  }
+
   releasesStarted(): string[] {
     return this.instanceStarts.filter((root, index) => index === 0 || this.instanceStarts[index - 1] !== root);
   }
@@ -882,8 +893,12 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     root === fixture.newRelease ? { status, body: diagnosticBody(NEW_COMMIT, true, invariants, instance) } : fallback()
   );
 
+  function receiptText(): string {
+    return readFileSync(path.join(onlyBackup(fixture), 'receipt.json'), 'utf8');
+  }
+
   function receiptOf(): Record<string, unknown> {
-    return JSON.parse(readFileSync(path.join(onlyBackup(fixture), 'receipt.json'), 'utf8')) as Record<string, unknown>;
+    return JSON.parse(receiptText()) as Record<string, unknown>;
   }
 
   /** Bodies the new release actually served, parsed. */
@@ -891,6 +906,23 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     return world.served
       .filter((entry) => entry.root === fixture.newRelease)
       .map((entry) => JSON.parse(entry.body) as Record<string, unknown>);
+  }
+
+  /**
+   * Swap the backup directory for a regular file (and back), so the durable
+   * receipt writer cannot create its temporary file there.
+   */
+  function blockBackupDir(): { restore: () => void } {
+    const dir = onlyBackup(fixture);
+    const aside = `${dir}.aside`;
+    renameSync(dir, aside);
+    writeFileSync(dir, 'not a directory\n');
+    return {
+      restore: () => {
+        unlinkSync(dir);
+        renameSync(aside, dir);
+      },
+    };
   }
 
   it('a producer without the block still activates with exit 0 and sends exactly one warning, under --apply', async () => {
@@ -904,6 +936,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(world.alerts[0]).toMatchObject({
       instance: INSTANCE,
       source: INVARIANTS_ALERT_SOURCE,
+      eventType: 'alert',
       payload: { severity: 'warning' },
     });
     // Guard on the fixture itself: the new release really served bodies without the block.
@@ -922,7 +955,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
       floor: { schema: INVARIANTS_SCHEMA, ids: INVARIANT_FLOOR, toolCommit: TOOL_COMMIT },
       activation: { outcome: 'missing', detail: null, schema: null, undeclared: INVARIANT_FLOOR },
       rollback: null,
-      alert: { attempted: true, status: 0 },
+      alert: { attempted: true, kind: 'warning', status: 0 },
     };
     expect(receiptOf().invariants).toEqual(expected);
     expect(result.json.invariants).toEqual(expected);
@@ -939,9 +972,48 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     expect(atAlert).toMatchObject({
       activation: { outcome: 'missing' },
-      alert: { attempted: true, status: 'pending' },
+      alert: { attempted: true, kind: 'warning', status: 'pending' },
     });
-    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: 0 } });
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, kind: 'warning', status: 0 } });
+  });
+
+  it('a failed final receipt rewrite leaves the pending receipt intact and prints only a fixed code', async () => {
+    let blocked: { restore: () => void } | null = null;
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits(NO_BLOCK),
+      onAlert: () => { blocked = blockBackupDir(); },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+    (blocked as { restore: () => void } | null)?.restore();
+
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'missing' },
+      alert: { attempted: true, kind: 'warning', status: 'pending' },
+    });
+    expect(result.stderr).toContain('receipt-write-failed');
+    expect(result.stderr).not.toContain(fixture.base);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
+  it('a failed first receipt write still attempts the alert, prints only a fixed code, and keeps the exit code', async () => {
+    let blocked: { restore: () => void } | null = null;
+    const world = new SimulatedLaunchd(fixture, {
+      health: (root, fallback) => {
+        // Verification runs after every backup write, so the receipt is the next write into the directory.
+        if (root === fixture.newRelease && blocked === null) blocked = blockBackupDir();
+        return newReleaseEmits(NO_BLOCK)(root, fallback);
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+    (blocked as { restore: () => void } | null)?.restore();
+
+    expect(world.alerts).toHaveLength(1);
+    expect(result.stderr).toContain('receipt-write-failed');
+    expect(result.stderr).not.toContain(fixture.base);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
   });
 
   it('the alert asks the helper for the standard BOT ERRORS event with the inline log tail off, and nothing else', async () => {
@@ -967,18 +1039,34 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     }
   });
 
+  it('never carries a producer-declared id anywhere: the whole receipt, stdout and the event hold only a count of extra ids', async () => {
+    const world = new SimulatedLaunchd(fixture, {
+      health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: [...INVARIANT_FLOOR, 'tenant.alice.prod.example'] }),
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    const verification = receiptOf().verification as { health?: { invariants?: unknown } } | undefined;
+    expect(verification?.health?.invariants).toEqual({ reading: 'declared', floorIds: INVARIANT_FLOOR, extraIdCount: 1 });
+    expect(world.alerts).toHaveLength(1);
+    const documents = [receiptText(), result.stdout, JSON.stringify(world.alerts[0]!.payload)];
+    for (const text of documents) {
+      for (const part of ['alice', 'tenant', 'prod.example']) expect(text).not.toContain(part);
+    }
+  });
+
   it('never echoes a producer schema string into the receipt or the alert', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: newReleaseEmits({ schema: 'tenant-alice.prod.example', ids: DECLARED_INVARIANTS }),
     });
 
-    await run(world, activationArgs(fixture, ['--apply']));
+    const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'unknown', detail: 'unknown-schema', schema: 'unrecognised', undeclared: INVARIANT_FLOOR },
     });
     expect(world.alerts).toHaveLength(1);
-    const texts = [JSON.stringify(receiptOf().invariants), JSON.stringify(world.alerts[0]!.payload)];
+    const texts = [receiptText(), result.stdout, JSON.stringify(world.alerts[0]!.payload)];
     for (const text of texts) {
       for (const part of ['tenant-alice.prod.example', 'tenant', 'alice', 'prod.example']) expect(text).not.toContain(part);
     }
@@ -997,20 +1085,35 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(JSON.stringify(receiptOf().invariants)).not.toContain(fixture.base);
   });
 
-  it('a producer that declares the floor is satisfied and sends no alert', async () => {
+  it('a producer that declares the floor is satisfied and sends exactly one clear for the same instance and source', async () => {
     const world = new SimulatedLaunchd(fixture);
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'satisfied', detail: null, schema: 'known', undeclared: [] },
-      alert: { attempted: false, status: null },
+      alert: { attempted: true, kind: 'clear', status: 0 },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
-    expect(world.alerts).toEqual([]);
+    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts[0]).toMatchObject({ instance: INSTANCE, source: INVARIANTS_ALERT_SOURCE, eventType: 'clear' });
   });
 
-  it('extra ids beyond the floor stay satisfied', async () => {
+  it('the clear payload is content-free: verdicts and ids only, no paths, commits, or token', async () => {
+    const world = new SimulatedLaunchd(fixture);
+
+    await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts[0]!.eventType).toBe('clear');
+    const text = JSON.stringify(world.alerts[0]!.payload);
+    expect(text).toContain('satisfied');
+    for (const forbidden of [fixture.base, fixture.home, NEW_COMMIT, OLD_COMMIT, TOOL_COMMIT, TOKEN]) {
+      expect(text).not.toContain(forbidden);
+    }
+  });
+
+  it('extra ids beyond the floor stay satisfied (one clear)', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: newReleaseEmits({ schema: INVARIANTS_SCHEMA, ids: [...INVARIANT_FLOOR, 'future.invariant_this_tool_does_not_know'] }),
     });
@@ -1019,7 +1122,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     expect(receiptOf().invariants).toMatchObject({ activation: { outcome: 'satisfied', undeclared: [] } });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
-    expect(world.alerts).toEqual([]);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['clear']);
   });
 
   it('a block that omits a floor id is below_floor: one warning, outcome and exit unchanged', async () => {
@@ -1032,7 +1135,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'below_floor', detail: null, schema: 'known', undeclared: INVARIANT_FLOOR },
     });
-    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.json.outcome).toBe('activated');
   });
@@ -1090,6 +1193,31 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
   });
 
+  it('a launchd pid that changes between the samples before and after the response is unknown/unbound, one warning', async () => {
+    let restarted = false;
+    let world: SimulatedLaunchd | null = null;
+    world = new SimulatedLaunchd(fixture, {
+      health: (root, fallback) => {
+        const response = newReleaseEmits(CURRENT_BLOCK)(root, fallback);
+        // The process that answered is replaced before the tool looks at launchd again.
+        if (root === fixture.newRelease && !restarted) {
+          restarted = true;
+          world!.restartInstance();
+        }
+        return response;
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(restarted).toBe(true);
+    expect(receiptOf().invariants).toMatchObject({
+      activation: { outcome: 'unknown', detail: 'unbound', schema: null, undeclared: INVARIANT_FLOOR },
+    });
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+  });
+
   it('a body without a numeric instance.pid is unknown/unbound', async () => {
     const world = new SimulatedLaunchd(fixture, { injectPid: false });
 
@@ -1106,7 +1234,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
 
-    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, status: 1 } });
+    expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, kind: 'warning', status: 1 } });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.json.outcome).toBe('activated');
   });
@@ -1118,7 +1246,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'missing' },
-      alert: { attempted: true, status: null },
+      alert: { attempted: true, kind: 'warning', status: null },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.stderr).toMatch(/release invariants alert/);
@@ -1136,13 +1264,13 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'satisfied' },
       rollback: { outcome: 'missing', detail: null, undeclared: INVARIANT_FLOOR },
-      alert: { attempted: true, status: 0 },
+      alert: { attempted: true, kind: 'warning', status: 0 },
     });
-    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
   });
 
-  it('a rollback where both processes declare the floor sends no alert', async () => {
+  it('a rollback where both processes declare the floor sends exactly one clear', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: (root, fallback) => (root === fixture.newRelease
         ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
@@ -1154,10 +1282,10 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'satisfied' },
       rollback: { outcome: 'satisfied' },
-      alert: { attempted: false, status: null },
+      alert: { attempted: true, kind: 'clear', status: 0 },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
-    expect(world.alerts).toEqual([]);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['clear']);
   });
 
   it('a rollback body served by another pid is unknown/unbound for the rollback verdict', async () => {
@@ -1173,11 +1301,11 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
       activation: { outcome: 'satisfied' },
       rollback: { outcome: 'unknown', detail: 'unbound' },
     });
-    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
   });
 
-  it('records no rollback verdict when the rollback stopped before any rollback process was verified', async () => {
+  it('records no rollback verdict when the rollback stopped before any rollback process was observed (one clear for the activation)', async () => {
     const world = new SimulatedLaunchd(fixture, {
       health: (root, fallback) => (root === fixture.newRelease
         ? { status: 200, body: diagnosticBody(NEW_COMMIT, false) }
@@ -1193,9 +1321,9 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(receiptOf().invariants).toMatchObject({
       activation: { outcome: 'satisfied' },
       rollback: null,
-      alert: { attempted: false, status: null },
+      alert: { attempted: true, kind: 'clear', status: 0 },
     });
-    expect(world.alerts).toEqual([]);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['clear']);
   });
 
   it('binds to the executing process: argv on the old release gives unknown/unbound, not the body it served', async () => {
@@ -1213,7 +1341,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
       activation: { outcome: 'unknown', detail: 'unbound', schema: null, undeclared: INVARIANT_FLOOR },
       rollback: { outcome: 'satisfied' },
     });
-    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts.map((alert) => alert.eventType)).toEqual(['alert']);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.rolledBack);
   });
 
@@ -1254,7 +1382,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(world.alerts).toEqual([]);
   });
 
-  it('an --apply refused inside the apply (staged plist fails plutil) records no verdict and sends no alert', async () => {
+  it('an --apply refused inside the apply (staged plist fails plutil) records no verdict and sends no event', async () => {
     const world = new SimulatedLaunchd(fixture, { health: newReleaseEmits(NO_BLOCK), plutilFails: true });
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
@@ -1262,7 +1390,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
     expect(receiptOf().invariants).toMatchObject({
       activation: null,
       rollback: null,
-      alert: { attempted: false, status: null },
+      alert: { attempted: false, kind: null, status: null },
     });
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
     expect(result.json.outcome).toBe('refused');
@@ -1273,15 +1401,17 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 describe('release activation helpers', () => {
   it('reads the health_invariants block structurally, never by matching bytes', () => {
     const read = (invariants: unknown): unknown => classifyAuthenticatedHealth(200, diagnosticBody(NEW_COMMIT, true, invariants)).invariants;
+    const reading = (kind: string, floorIds: string[] = [], extraIdCount = 0) => ({ reading: kind, floorIds, extraIdCount });
 
-    expect(read(NO_BLOCK)).toEqual({ reading: 'absent', ids: [] });
-    expect(read(CURRENT_BLOCK)).toEqual({ reading: 'declared', ids: DECLARED_INVARIANTS });
-    expect(read({ schema: INVARIANTS_SCHEMA, ids: [] })).toEqual({ reading: 'declared', ids: [] });
-    const unknownSchema = { reading: 'unknown-schema', ids: [] };
-    expect(read({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS })).toEqual(unknownSchema);
-    expect(read({ schema: '/var/lib/whatsoup/state', ids: [] })).toEqual(unknownSchema);
-    expect(read({ schema: 'x'.repeat(129), ids: [] })).toEqual(unknownSchema);
-    const malformed = { reading: 'malformed', ids: [] };
+    expect(read(NO_BLOCK)).toEqual(reading('absent'));
+    // Only floor members are kept by name; every other declared id is only counted.
+    expect(read(CURRENT_BLOCK)).toEqual(reading('declared', INVARIANT_FLOOR, DECLARED_INVARIANTS.length - INVARIANT_FLOOR.length));
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: [] })).toEqual(reading('declared'));
+    expect(read({ schema: INVARIANTS_SCHEMA, ids: ['tenant.alice.prod.example'] })).toEqual(reading('declared', [], 1));
+    expect(read({ schema: 'whatsoup.health-invariants.v2', ids: DECLARED_INVARIANTS })).toEqual(reading('unknown-schema'));
+    expect(read({ schema: '/var/lib/whatsoup/state', ids: [] })).toEqual(reading('unknown-schema'));
+    expect(read({ schema: 'x'.repeat(129), ids: [] })).toEqual(reading('unknown-schema'));
+    const malformed = reading('malformed');
     expect(read(null)).toEqual(malformed);
     expect(read(DECLARED_INVARIANTS)).toEqual(malformed);
     expect(read({ schema: INVARIANTS_SCHEMA })).toEqual(malformed);
@@ -1297,7 +1427,7 @@ describe('release activation helpers', () => {
       instance: { commit: NEW_COMMIT, note: JSON.stringify({ health_invariants: CURRENT_BLOCK }) },
       whatsapp: { connected: true },
     });
-    expect(classifyAuthenticatedHealth(200, smuggled).invariants).toEqual({ reading: 'absent', ids: [] });
+    expect(classifyAuthenticatedHealth(200, smuggled).invariants).toEqual(reading('absent'));
   });
 
   it('reads the responder pid from instance.pid, numeric only', () => {
@@ -1315,7 +1445,7 @@ describe('release activation helpers', () => {
     expect(classifyAuthenticatedHealth(200, 'not json').invariants).toBeNull();
     // A 503 diagnostic body is still read; the verdict, not the reader, maps non-2xx to unknown.
     expect(classifyAuthenticatedHealth(503, diagnosticBody(NEW_COMMIT, false, NO_BLOCK)).invariants)
-      .toEqual({ reading: 'absent', ids: [] });
+      .toEqual({ reading: 'absent', floorIds: [], extraIdCount: 0 });
   });
 
   it('matches the bootstrap entrypoint only as a whole argument', () => {

@@ -37,6 +37,13 @@ describe('emitReleaseAlert child environment', () => {
     expect(childEnv({ BOT_ERRORS_INLINE_LOG_TAIL: '0' }).BOT_ERRORS_INLINE_LOG_TAIL).toBe('0');
   });
 
+  it('accepts only the log-tail key as an override: any other key (PYTHONPATH, PATH) is dropped', () => {
+    const env = childEnv({ BOT_ERRORS_INLINE_LOG_TAIL: '0', PYTHONPATH: '/injected/python/path', PATH: '/injected/bin' });
+    expect(env.BOT_ERRORS_INLINE_LOG_TAIL).toBe('0');
+    expect(env).not.toHaveProperty('PYTHONPATH');
+    expect(env.PATH).not.toBe('/injected/bin');
+  });
+
   it('without an override, other alert sources are unchanged: the variable is not forwarded from the parent', () => {
     vi.stubEnv('BOT_ERRORS_INLINE_LOG_TAIL', '0');
     vi.stubEnv('LOG_DIR', '/nonexistent/log-dir');

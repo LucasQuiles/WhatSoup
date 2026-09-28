@@ -8531,7 +8531,12 @@ describe('GET /health — #2481 health_invariants block', () => {
     const { releaseInvariantsVerdict } = await import('../../scripts/lib/release-activation/invariants.ts');
     // The launchd pid/argv half of the binding is release:activate's job
     // (launchctl + ps); the responder half is checked against the body here.
-    expect(releaseInvariantsVerdict({ pid: process.pid, argvMatches: true, health: observation })).toEqual({
+    expect(releaseInvariantsVerdict({
+      pid: process.pid,
+      argvMatches: true,
+      health: observation,
+      resample: { pid: process.pid, argvMatches: true },
+    })).toEqual({
       outcome: 'satisfied',
       detail: null,
       schema: 'known',
