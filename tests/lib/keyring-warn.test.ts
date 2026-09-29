@@ -317,6 +317,162 @@ describe('keyring fail-loud logging', () => {
     });
   });
 
+  // `secret-tool lookup` exits 1 with no output when nothing matches, but 1 is
+  // also its generic failure status. Only a clean exit 1 (no signal, no
+  // timeout, empty stderr) is absence; everything else is a read failure, on
+  // the primary AND on any migration candidate.
+  describe('secret-tool absent item vs read failure', () => {
+    let storeDir: string;
+    let openCodeDir: string;
+
+    // Shaped like the error execFileSync throws: numeric status or null,
+    // signal, captured stderr Buffer, and a code only for timeouts/spawn errors.
+    function secretToolError(
+      status: number | null,
+      stderr: string,
+      extra: { signal?: string; code?: string } = {},
+    ): Error {
+      const err: Error & {
+        status?: number | null; signal?: string | null; stderr?: Buffer; stdout?: Buffer; code?: string;
+      } = new Error('Command failed: secret-tool lookup');
+      err.status = status;
+      err.signal = extra.signal ?? null;
+      err.stdout = Buffer.from('');
+      err.stderr = Buffer.from(stderr);
+      if (extra.code) err.code = extra.code;
+      return err;
+    }
+    const NO_MATCH = () => secretToolError(1, '');
+    const DBUS_FAILURE = () => secretToolError(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n');
+    const TIMEOUT = () => secretToolError(null, '', { signal: 'SIGKILL', code: 'ETIMEDOUT' });
+
+    // Probe succeeds; each lookup candidate (args[2]) gets its own outcome.
+    function stubLookups(outcomes: Record<string, () => Buffer>): void {
+      mockedExecFileSync.mockImplementation((_file, args) => {
+        const argv = args as string[];
+        if (argv[0] === '--help') return Buffer.from('');
+        const outcome = outcomes[argv[2]];
+        if (!outcome) throw new Error(`unexpected secret-tool call: ${argv.join(' ')}`);
+        return outcome();
+      });
+    }
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+      storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-warn-st-fs-'));
+      openCodeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-warn-st-oc-'));
+      _setFileStoreDirForTests(storeDir);
+      _setOpenCodeAuthDirForTests(openCodeDir);
+    });
+
+    afterEach(() => {
+      _setFileStoreDirForTests(null);
+      _setOpenCodeAuthDirForTests(null);
+      fs.rmSync(storeDir, { recursive: true, force: true });
+      fs.rmSync(openCodeDir, { recursive: true, force: true });
+    });
+
+    it('stays a silent not_found on repeat when every candidate exits 1 with empty stderr', () => {
+      stubLookups({ google: () => { throw NO_MATCH(); }, gemini: () => { throw NO_MATCH(); } });
+
+      const first = lookupCredentialTyped('google', { skipEnv: true });
+      const second = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(first).toEqual({ value: null, reason: 'not_found', service: 'google' });
+      expect(second).toEqual({ value: null, reason: 'not_found', service: 'google' });
+      expect(logWarn).not.toHaveBeenCalled();
+    });
+
+    it('reports unreadable with one warning for exit 1 with stderr text', () => {
+      stubLookups({ whatsoup_health: () => { throw DBUS_FAILURE(); } });
+
+      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(logWarn).toHaveBeenCalledOnce();
+      expect(logWarn).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'whatsoup_health', backend: 'secret-tool' }),
+        expect.stringContaining('keyring read failed'),
+      );
+    });
+
+    it('reports unreadable when the primary is absent and the migration candidate times out', () => {
+      stubLookups({ google: () => { throw NO_MATCH(); }, gemini: () => { throw TIMEOUT(); } });
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'google' });
+      expect(logWarn).toHaveBeenCalledOnce();
+      // The requested service is recorded, not the migration candidate.
+      expect(logWarn).toHaveBeenCalledWith(
+        expect.objectContaining({ service: 'google', backend: 'secret-tool' }),
+        expect.stringContaining('keyring read failed'),
+      );
+    });
+
+    it('reports unreadable when the primary is whitespace and the migration candidate fails', () => {
+      stubLookups({ google: () => Buffer.from('  \n'), gemini: () => { throw DBUS_FAILURE(); } });
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'google' });
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+
+    it('returns ok when the primary fails and the migration candidate supplies a value', () => {
+      stubLookups({ google: () => { throw DBUS_FAILURE(); }, gemini: () => Buffer.from('fallback-value\n') });
+
+      const result = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(result).toEqual({ value: 'fallback-value', reason: 'ok', service: 'google' });
+    });
+
+    it.each([
+      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' })],
+      ['timeout', TIMEOUT],
+      ['spawn ENOENT', () => Object.assign(new Error('spawnSync secret-tool ENOENT'), { code: 'ENOENT' })],
+      ['exit 2 with empty stderr', () => secretToolError(2, '')],
+    ])('reports unreadable for a non-absence failure (%s)', (_label, makeErr) => {
+      stubLookups({ whatsoup_health: () => { throw makeErr(); } });
+
+      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+  });
+
+  // Without an explicit `stdio`, execFileSync copies the child's stderr to this
+  // process's stderr before throwing. Reads set piped stdio so stderr stays on
+  // the thrown error (for classification) and is never echoed.
+  describe('keyring read exec options', () => {
+    it('passes piped stdio to the secret-tool lookup', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+      mockedExecFileSync.mockImplementation(() => Buffer.from('value\n'));
+
+      lookupCredential('whatsoup_health', { user: 'bot', skipEnv: true });
+
+      expect(mockedExecFileSync).toHaveBeenCalledWith(
+        'secret-tool',
+        ['lookup', 'service', 'whatsoup_health', 'user', 'bot'],
+        expect.objectContaining({ stdio: 'pipe', timeout: 3_000 }),
+      );
+    });
+
+    it('passes piped stdio to the macOS keychain read', () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', writable: true });
+      mockedExecFileSync.mockImplementation(() => Buffer.from('value\n'));
+
+      lookupCredential('whatsoup_health', { user: 'bot', skipEnv: true });
+
+      expect(mockedExecFileSync).toHaveBeenCalledWith(
+        'security',
+        ['find-generic-password', '-s', 'whatsoup_health', '-a', 'bot', '-w'],
+        expect.objectContaining({ stdio: 'pipe', timeout: 3_000 }),
+      );
+    });
+  });
+
   // CRED-2: a probe that ERRORS (timeout, EACCES, unexpected exit) silently
   // downgrading all credential storage to plaintext 0600 files is alarming and
   // must be distinguished from a genuinely-absent keyring (ENOENT), which is the
