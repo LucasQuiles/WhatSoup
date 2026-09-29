@@ -10,7 +10,7 @@
  */
 import { type WAMessage, isJidGroup, jidNormalizedUser } from '@whiskeysockets/baileys';
 import type { IncomingMessage } from './types.ts';
-import { bareNumber, isLidJid } from './jid-constants.ts';
+import { bareNumber, isLidJid, isStatusBroadcastJid } from './jid-constants.ts';
 import { normalizeUnixTimestampSeconds } from './substrate/time.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 
@@ -273,7 +273,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   const quotedMessageId: string | null = contextInfo?.stanzaId ?? null;
 
   // --- isResponseWorthy ---
-  const isStatusBroadcast = msg.key.remoteJid === 'status@broadcast';
+  const isStatusBroadcast = isStatusBroadcastJid(msg.key.remoteJid);
   const isReaction = !!(innerMessage as any).reactionMessage;
   const isPollVote = !!(innerMessage as any).pollUpdateMessage;
   const isProtocol = !!(innerMessage as any).protocolMessage;

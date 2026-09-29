@@ -253,6 +253,11 @@ rendered from `deploy/com.whatsoup.*.plist` templates:
 Both plists pin `RunAtLoad=false`, so installing or re-loading them never fires
 the job immediately. Logs land in `~/Library/Logs/whatsoup/`.
 
+What the harness-maintenance job changes, its exit codes, the side-effect
+boundary of `--check`, and the agent CLI update and self-update observation
+events are described in
+[docs/runbooks/host-maintenance.md](runbooks/host-maintenance.md).
+
 **Install / update** — `deploy/setup.sh` step 4 renders both plists into
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
 up first; an already-loaded label or a cron twin triggers a duplicate-timer
@@ -1478,7 +1483,7 @@ systemctl --user start whatsoup@$INSTANCE
 
 ### 7.1 Approve or Block Users
 
-Admins receive approval requests as WhatsApp messages when an unknown sender contacts the bot. Reply directly in WhatsApp:
+Admins receive approval requests as WhatsApp messages in their direct chat when an unknown sender contacts the bot in a direct chat. In a group under strict group-sender mode (`groupSenderPolicy: allowlisted_only`), an unknown sender only produces an approval request when they @mention the bot; ordinary group chatter and status broadcasts never do. Reply directly in WhatsApp:
 
 ```
 ALLOW 15551234567       # approve a phone number
