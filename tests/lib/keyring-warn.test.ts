@@ -262,6 +262,39 @@ describe('keyring fail-loud logging', () => {
       expect(logWarn).toHaveBeenCalledOnce();
     });
 
+    // The warning is deduped per service, but the typed lookup clears the
+    // failure flag before every call. A deduped repeat failure must still flag
+    // the lookup, or the second call degrades a broken store to `not_found`.
+    it('keeps reporting unreadable on a repeat lookup after the warning is deduped', () => {
+      mockedExecFileSync.mockImplementation((_file, args) => {
+        const candidate = (args as string[])[2];
+        if (candidate === 'google') throw ABSENT();
+        throw securityError(36, 'security: User interaction is not allowed.\n');
+      });
+
+      const first = lookupCredentialTyped('google', { skipEnv: true });
+      const second = lookupCredentialTyped('google', { skipEnv: true });
+
+      expect(first).toEqual({ value: null, reason: 'unreadable', service: 'google' });
+      expect(second).toEqual({ value: null, reason: 'unreadable', service: 'google' });
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+
+    it('keeps reporting unreadable on a repeat secret-tool lookup after the warning is deduped', () => {
+      Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+      mockedExecFileSync.mockImplementation((_file, args) => {
+        if ((args as string[])[0] === '--help') return Buffer.from('');
+        throw new Error('secret-tool failed');
+      });
+
+      const first = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+      const second = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+
+      expect(first).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(second).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+
     it('stays a silent not_found when the primary and the fallback are both absent', () => {
       mockedExecFileSync.mockImplementation(() => { throw ABSENT(); });
 
