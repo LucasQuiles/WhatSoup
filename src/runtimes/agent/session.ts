@@ -79,6 +79,7 @@ import {
 import type {
   ProviderExecutionGate,
   ProviderExecutionLease,
+  ProviderExecutionPhase,
 } from './provider-execution-gate.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import { assessTreeLiveness } from './tree-liveness.ts';
@@ -1311,6 +1312,12 @@ export class SessionManager {
     child: ReturnType<typeof spawn>,
     signal: NodeJS.Signals,
   ): Promise<void> {
+    // #3547: reaping the tree is the holder's cleanup phase. The lease is keyed
+    // by this exact child and generation-fenced, so a child whose lease was
+    // already released cannot touch its successor.
+    const executionLease = this.childExecutionLeases.get(child);
+    executionLease?.setPhase('cleanup');
+    executionLease?.markProgress();
     let generationMarker = this.childTreeMarkers.get(child);
     if (generationMarker === undefined) {
       const generation = this.childGenerations.get(child) ?? null;
@@ -3281,7 +3288,7 @@ export class SessionManager {
   private markProviderExecutionProgress(
     child: ReturnType<typeof spawn>,
     generation: SessionGenerationIdentity | null,
-    phase?: 'executing',
+    phase?: Exclude<ProviderExecutionPhase, 'queued_to_spawn'>,
   ): void {
     if (!this.isCurrentPersistentChild(child, generation)) return;
     const lease = this.childExecutionLeases.get(child);
@@ -3971,7 +3978,14 @@ export class SessionManager {
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        this.markProviderExecutionProgress(child, childGeneration);
+        // #3547: a result (for OpenCode, a stop candidate) moves the holder to
+        // terminalizing; any later provider output is execution again, which
+        // matches the stop-candidate supersession below.
+        this.markProviderExecutionProgress(
+          child,
+          childGeneration,
+          event.type === 'result' ? 'terminalizing' : 'executing',
+        );
         if (this.provider === 'opencode-cli') {
           if (pendingOpenCodeResult !== null && event.type !== 'result') {
             if (openCodeStopCandidateCount === 1) {
