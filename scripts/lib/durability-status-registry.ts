@@ -195,7 +195,9 @@ export const REGISTRY: DurabilityStatusEntry[] = [
     vocabulary: ['blocked_unsafe', 'pending', 'claimed', 'completed', 'exhausted'],
     vocabularySource: 'sql-check',
     terminalFailureValues: ['exhausted'],
-    writerSites: ['src/core/turn-recovery-store.ts'],
+    // turn-recovery-orphan-settle.ts inserts an operator-settled orphan
+    // transfer directly as 'exhausted'; its plan row tells it apart.
+    writerSites: ['src/core/turn-recovery-store.ts', 'src/core/turn-recovery-orphan-settle.ts'],
   },
   {
     // #3295 S1: deferred_by_recovery_scope obligations. Quarantine/operator
