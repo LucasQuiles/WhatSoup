@@ -121,9 +121,16 @@ const keyringExecOptions = {
 };
 // Credential reads return the value on stdout; bound it to the same 4 KiB the
 // pinned-Node keychain helper enforces (deploy/lib/read-keychain-secret.mjs).
-// Detection, writes, and deletes keep the base options — backend detection's
-// `secret-tool --help` banner can legitimately exceed 4 KiB.
-const keyringReadExecOptions = { ...keyringExecOptions, maxBuffer: FILE_STORE_MAX_BYTES };
+// Reads also set an explicit piped stdio: without a `stdio` option execFileSync
+// copies the child's stderr to ours before throwing, and absence classification
+// needs that stderr on the thrown error, not echoed. Detection, writes, and
+// deletes keep the base options — backend detection's `secret-tool --help`
+// banner can legitimately exceed 4 KiB, and writes feed the secret on stdin.
+const keyringReadExecOptions = {
+  ...keyringExecOptions,
+  maxBuffer: FILE_STORE_MAX_BYTES,
+  stdio: 'pipe' as const,
+};
 
 // Lazy logger — avoids any risk of a cycle during module initialisation while
 // still giving us structured log output once the module is fully loaded.
@@ -203,6 +210,23 @@ function isSecretToolUsageHelpExit(err: unknown): boolean {
     .map((part) => Buffer.isBuffer(part) ? part.toString('utf8') : part)
     .join('\n');
   return /usage:\s*secret-tool\b/i.test(output);
+}
+
+/**
+ * Read-path absence for `secret-tool lookup`. libsecret's tool exits 1 with no
+ * output when nothing matches, but 1 is also its generic failure status, so the
+ * status alone cannot decide: only a clean exit 1 — no signal, no timeout, empty
+ * stderr — is absence. Any stderr text, any other status, a signal, a timeout,
+ * or a spawn error (ENOENT/EACCES) is a real read failure.
+ */
+function isSecretToolLookupNotFound(err: unknown): boolean {
+  const e = err as {
+    status?: number | null; signal?: string | null; code?: string; stderr?: Buffer | string;
+  } | null;
+  if (e?.status !== 1) return false;
+  if (e.signal || e.code === 'ETIMEDOUT') return false;
+  const stderr = Buffer.isBuffer(e.stderr) ? e.stderr.toString('utf8') : (e.stderr ?? '');
+  return stderr.trim() === '';
 }
 
 /**
@@ -292,7 +316,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
   };
 
   if (backend === 'secret-tool') {
-    for (const [index, candidate] of services.entries()) {
+    for (const candidate of services) {
       try {
         const raw = execFileSync(
           'secret-tool',
@@ -302,8 +326,8 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
         const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
         if (val) return val;
       } catch (err) {
-        // Warn on primary candidate failure; migration fallback misses are expected.
-        if (index === 0) {
+        // A no-match exit on any candidate is a silent miss; every other failure is recorded.
+        if (!isSecretToolLookupNotFound(err)) {
           warnKeyringReadFailure(service, backend, err);
         }
       }
