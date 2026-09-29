@@ -73,10 +73,10 @@ const warnedKeyringReadServices = new Set<string>();
  * reaches the typed surface without turning "not configured" into a throw on the
  * credential-presence hot path.
  *
- * Written only by {@link recordCredentialReadFailure}; read and cleared by
- * `lookupCredentialTyped`. Safe despite being module state: the whole lookup
- * chain is synchronous, so no other lookup can interleave between the clear and
- * the read.
+ * Written by {@link recordCredentialReadFailure} and `warnKeyringReadFailure`,
+ * before any warn dedup; read and cleared by `lookupCredentialTyped`. Safe as
+ * module state: the whole lookup chain is synchronous, so no other lookup can
+ * interleave between the clear and the read.
  */
 const credentialReadFailures = new Set<string>();
 
@@ -345,9 +345,9 @@ function warnKeyringReadFailure(service: string, backend: KeyringBackend, err: u
   // platform-keyring warning suppressed the file-store/opencode warning for the
   // same service (and vice versa) even though they are independent faults.
   const dedupKey = `keyring:${service}`;
+  credentialReadFailures.add(service);
   if (warnedKeyringReadServices.has(dedupKey)) return;
   warnedKeyringReadServices.add(dedupKey);
-  credentialReadFailures.add(service);
   getLog().warn(
     { service, backend, err: errorMessage(err) },
     'keyring read failed — falling back to env lookup',
