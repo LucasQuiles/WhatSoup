@@ -229,10 +229,28 @@ function isSecretToolSilentExit(err: unknown): boolean {
   return stderr.trim() === '';
 }
 
+/**
+ * Name a thrown exec failure by class only — timeout, output overflow, spawn
+ * error, signal, or exit status — from `code`, `signal` and `status`, each
+ * shape-checked. Never reads `message`, `stdout` or `stderr`: those can carry
+ * the command's output, and a `secret-tool search` prints unlocked secrets.
+ */
+function execFailureClass(err: unknown): string {
+  const e = err as { code?: unknown; signal?: unknown; status?: unknown } | null;
+  if (e?.code === 'ETIMEDOUT') return 'timeout';
+  if (e?.code === 'ENOBUFS') return 'output overflow';
+  if (typeof e?.code === 'string' && /^E[A-Z0-9]+$/.test(e.code)) return `spawn error ${e.code}`;
+  if (typeof e?.signal === 'string' && /^SIG[A-Z0-9]+$/.test(e.signal)) return `signal ${e.signal}`;
+  if (typeof e?.status === 'number') return `exit status ${e.status}`;
+  return 'unclassified failure';
+}
+
+// A failed search keeps only its failure class; the error object itself (with
+// its captured stdout) never leaves secretToolItemPresence.
 type SecretToolItemPresence =
   | { state: 'absent' }
   | { state: 'present' }
-  | { state: 'failed'; err: unknown };
+  | { state: 'failed'; failureClass: string };
 
 /**
  * Decide what a silent exit 1 from `secret-tool lookup` or `clear` meant.
@@ -256,29 +274,42 @@ type SecretToolItemPresence =
  *  - `failed` on any throw: non-zero exit, signal, timeout, spawn error, or an
  *    output overflow.
  *
- * `--all` is deliberately omitted: one listed match is enough, and the tool
- * prints the secret of every unlocked match it lists. The output is tested for
- * emptiness only — never logged, stored, or returned.
+ * `--all` is deliberately omitted (a deviation from the plan, which named it):
+ * without it libsecret still returns one match whenever any exists, locked or
+ * unlocked (secret-methods.c `load_items`, want = 1), while `--all` would call
+ * GetSecret on every match and print every unlocked secret, risking a false
+ * output-overflow failure. Only execFileSync's stdout is available on exit 0,
+ * and it is enough: every listed match prints its `[path]` and `label` lines
+ * there unconditionally.
+ *
+ * Secret handling: the tool prints the secret of an unlocked match, and a
+ * failure after printing (timeout, overflow) leaves it on the thrown error's
+ * stdout. So stdout is tested for emptiness only, and on failure only
+ * {@link execFailureClass} is kept — no output and no error object is logged,
+ * stored, or returned.
  */
 function secretToolItemPresence(attributes: string[]): SecretToolItemPresence {
   try {
     const raw = execFileSync('secret-tool', ['search', ...attributes], keyringReadExecOptions);
-    const out = typeof raw === 'string' ? raw : raw.toString('utf-8');
-    return out.trim() === '' ? { state: 'absent' } : { state: 'present' };
+    const empty = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim() === '';
+    return empty ? { state: 'absent' } : { state: 'present' };
   } catch (err) {
-    return { state: 'failed', err };
+    return { state: 'failed', failureClass: execFailureClass(err) };
   }
 }
 
 /**
  * The failure to record for a thrown `secret-tool lookup`, or null when it was
- * a proven miss (a silent exit 1 whose confirming search lists nothing).
+ * a proven miss (a silent exit 1 whose confirming search lists nothing). For a
+ * search-derived failure this is a fixed message, never the search's error.
  */
 function secretToolLookupFailure(err: unknown, attributes: string[]): { err: unknown } | null {
   if (!isSecretToolSilentExit(err)) return { err };
   const presence = secretToolItemPresence(attributes);
   if (presence.state === 'absent') return null;
-  if (presence.state === 'failed') return { err: presence.err };
+  if (presence.state === 'failed') {
+    return { err: new Error(`secret-tool search failed (${presence.failureClass})`) };
+  }
   return {
     err: new Error('secret-tool lookup returned no value, but a matching item exists (locked or unreadable)'),
   };
@@ -816,14 +847,18 @@ export interface CredentialDeleteResult {
 
 /**
  * `security delete-generic-password` exits non-zero for BOTH "no such item" and
- * real failures, so absence cannot be inferred from the throw alone. Status 44
- * is errSecItemNotFound; the message check covers locale-stable wording.
+ * real failures, so absence cannot be inferred from the throw alone. A signal
+ * or an error `code` (spawn failure, timeout, overflow) is always a failure,
+ * even if the interrupted child already printed the not-found text. Otherwise
+ * status 44 is errSecItemNotFound, and the errSecItemNotFound wording covers an
+ * unhelpful exit status — but not a bare "could not be found", which exit 37
+ * also prints for a missing default keychain.
  */
 function isDarwinItemNotFound(err: unknown): boolean {
-  const status = (err as { status?: number } | null)?.status;
-  if (status === 44) return true;
-  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
-  return /could not be found|SecKeychainSearchCopyNext/i.test(stderr);
+  const e = err as { status?: number | null; signal?: string | null; code?: string; stderr?: Buffer | string } | null;
+  if (e?.signal || e?.code) return false;
+  if (e?.status === 44) return true;
+  return /specified item could not be found/i.test(String(e?.stderr ?? ''));
 }
 
 /**
@@ -913,9 +948,14 @@ export function deleteCredential(
       if (isSecretToolSilentExit(err)) {
         const presence = secretToolItemPresence(['service', service]);
         if (presence.state === 'absent') return { deleted: false, backend, reason: 'absent' };
-        if (presence.state === 'present') {
-          return { deleted: false, backend, reason: 'backend_failed', errorCode: 'KEYRING_LOCKED' };
-        }
+        // Fixed codes only: nothing from the search's output or error reaches
+        // the result.
+        return {
+          deleted: false,
+          backend,
+          reason: 'backend_failed',
+          errorCode: presence.state === 'present' ? 'KEYRING_LOCKED' : 'KEYRING_WRITE_FAILED',
+        };
       }
       return {
         deleted: false,
