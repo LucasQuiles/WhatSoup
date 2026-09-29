@@ -1,7 +1,8 @@
 /**
  * Host adapter for `release:activate`: every effect that reaches outside the
  * filesystem (launchctl, ps, plutil, renderer scripts, process liveness,
- * clocks, and the loopback health probe) goes through this seam so tests can
+ * clocks, the loopback health probe, and the BOT ERRORS alert helper) goes
+ * through this seam so tests can
  * drive the whole activation against a real temporary HOME with fakes here.
  *
  * Filesystem effects use node:fs directly against paths derived from `HOME`
@@ -11,14 +12,32 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { configRoot } from '../../../src/fleet/paths.ts';
+import { SIGNAL } from '../../../src/lib/signals.ts';
 import { isRecord } from '../../../src/lib/type-guards.ts';
+import { emitReleaseAlert, type ReleaseAlertEmitPayload } from '../live-release-alert.ts';
+import { type HealthInvariantsReading, readHealthInvariants } from './invariants.ts';
+import { resolveToolCommit, type ToolCommitExec } from './tool-commit.ts';
 
 export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Set when the child was killed because `timeoutMs` expired (not a failed exit). */
+  timedOut?: true;
+}
+
+export interface ExecOptions {
+  input?: string;
+  /** Kill the child with SIGKILL when this expires. */
+  timeoutMs?: number;
+  /**
+   * An explicit child environment: these variables plus the tool's `PATH`
+   * only. Without it the child inherits the tool's environment, as before.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface HealthResponse {
@@ -29,26 +48,67 @@ export interface HealthResponse {
 export interface ActivationHost {
   platform: NodeJS.Platform;
   uid: number;
-  /** Run a program with argv (never a shell string). Non-zero exit is a result, not a throw. */
-  exec(file: string, args: readonly string[], options?: { input?: string }): Promise<ExecResult>;
+  /**
+   * Run a program with argv (never a shell string). Non-zero exit is a result,
+   * not a throw. `timeoutMs` kills the child with SIGKILL when it expires; only
+   * the #2481 binding sample passes it (and `env`), after the activation
+   * outcome is final, and every other caller runs unbounded as before.
+   */
+  exec(file: string, args: readonly string[], options?: ExecOptions): Promise<ExecResult>;
   isProcessAlive(pid: number): boolean;
   sleep(ms: number): Promise<void>;
   now(): number;
   /** GET http://127.0.0.1:<port>/health with the bearer token. */
   fetchHealth(port: number, token: string): Promise<HealthResponse>;
+  /**
+   * Send one BOT ERRORS event (an alert or its clear) through
+   * `emitReleaseAlert` (the release observers' path). Returns the helper's
+   * exit status; a spawn that fails outright may throw.
+   */
+  emitReleaseAlert(request: ReleaseAlertRequest): Promise<{ status: number | null }>;
+  /**
+   * Commit of the tree this tool runs from (the tree that supplies the
+   * invariant floor), or null when it cannot be resolved within
+   * `TOOL_COMMIT_TIMEOUT_MS` (see tool-commit.ts).
+   */
+  toolCommit(): Promise<string | null>;
+}
+
+export interface ReleaseAlertRequest {
+  instance: string;
+  source: string;
+  /** `alert` raises the source's event; `clear` resolves it (`bot-errors-emit.py --clear`). */
+  eventType: 'alert' | 'clear';
+  payload: ReleaseAlertEmitPayload;
+  /** Variables set for this helper call only (see `ReleaseAlertEmitOptions.env`). */
+  env?: Readonly<Record<string, string>>;
 }
 
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
 const HEALTH_TIMEOUT_MS = 10_000;
-const HEALTH_MAX_BYTES = 65_536;
+/** Body cap of the loopback health read; the same cap as health_reader.py (`read(65537)` / `> 65536`). */
+export const HEALTH_MAX_BYTES = 65_536;
+/** The activating tool's own tree, which owns the alert helper (not `--release`). */
+const TOOL_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-function defaultExec(file: string, args: readonly string[], options: { input?: string } = {}): Promise<ExecResult> {
+function defaultExec(
+  file: string,
+  args: readonly string[],
+  options: ExecOptions = {},
+): Promise<ExecResult> {
+  const bound = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: SIGNAL.KILL };
+  const env = options.env === undefined
+    ? {}
+    : { env: { ...(process.env['PATH'] === undefined ? {} : { PATH: process.env['PATH'] }), ...options.env } };
   return new Promise((resolve) => {
-    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' }, (error, stdout, stderr) => {
+    const child = execFile(file, [...args], { maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8', ...bound, ...env }, (error, stdout, stderr) => {
       const code = error === null
         ? 0
         : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+      // execFile reports its own timeout as a kill with the configured signal.
+      const timedOut = error !== null && options.timeoutMs !== undefined
+        && (error as { killed?: unknown }).killed === true && (error as { signal?: unknown }).signal === SIGNAL.KILL;
+      resolve({ code, stdout: String(stdout), stderr: String(stderr), ...(timedOut ? { timedOut: true as const } : {}) });
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
     else child.stdin?.end();
@@ -94,6 +154,17 @@ function defaultFetchHealth(port: number, token: string): Promise<HealthResponse
   });
 }
 
+/** The tool-commit git child: its own timeout, killed outright when it expires. */
+const toolCommitExec: ToolCommitExec = (file, args, { env, timeoutMs }) => new Promise((resolve) => {
+  execFile(file, [...args], { env, timeout: timeoutMs, killSignal: SIGNAL.KILL, maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' },
+    (error, stdout) => {
+      const code = error === null
+        ? 0
+        : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
+      resolve({ code, stdout: String(stdout) });
+    });
+});
+
 export function createDefaultActivationHost(): ActivationHost {
   return {
     platform: process.platform,
@@ -103,6 +174,18 @@ export function createDefaultActivationHost(): ActivationHost {
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     fetchHealth: defaultFetchHealth,
+    emitReleaseAlert: async ({ instance, source, eventType, payload, env }) => {
+      const result = emitReleaseAlert({
+        repoRoot: TOOL_REPO_ROOT,
+        instance,
+        source,
+        emitHelper: path.join(TOOL_REPO_ROOT, 'deploy/scripts/bot-errors-emit.py'),
+        python: 'python3',
+        ...(env ? { env } : {}),
+      }, payload, eventType);
+      return { status: result.status };
+    },
+    toolCommit: () => resolveToolCommit({ root: TOOL_REPO_ROOT, exec: toolCommitExec }),
   };
 }
 
@@ -147,7 +230,17 @@ export interface HealthObservation {
   httpStatus: number | null;
   commit: string | null;
   connected: boolean | null;
+  /**
+   * `instance.pid` the body reports (a positive integer), else null.
+   * Transient: used only to bind the verdict, never recorded (see RecordedHealth).
+   */
+  responderPid: number | null;
+  /** The #2481 `health_invariants` reading; null unless the body is diagnostic. */
+  invariants: HealthInvariantsReading | null;
 }
+
+/** A health observation as the receipt and stdout record it: without the producer-reported pid. */
+export type RecordedHealth = Omit<HealthObservation, 'responderPid'>;
 
 const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
 
@@ -156,7 +249,7 @@ const PUBLIC_HEALTH_SCHEMA_PREFIX = 'health.public.';
  * a request that carried a token: only a body with a `whatsapp` object and no
  * public schema is `diagnostic`; a public envelope means the token was
  * rejected, and anything else is unobserved. Only a diagnostic body yields
- * commit and connection fields.
+ * commit, connection, and invariant fields.
  */
 export function classifyAuthenticatedHealth(status: number | null, body: string): HealthObservation {
   let payload: unknown = null;
@@ -165,7 +258,9 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
   } catch {
     payload = null;
   }
-  const unobserved: HealthObservation = { projection: 'unobserved', httpStatus: status, commit: null, connected: null };
+  const unobserved: HealthObservation = {
+    projection: 'unobserved', httpStatus: status, commit: null, connected: null, responderPid: null, invariants: null,
+  };
   if (!isRecord(payload)) return unobserved;
   const schema = payload['schema_version'];
   if (typeof schema === 'string' && schema.startsWith(PUBLIC_HEALTH_SCHEMA_PREFIX)) return unobserved;
@@ -177,5 +272,7 @@ export function classifyAuthenticatedHealth(status: number | null, body: string)
     httpStatus: status,
     commit: typeof instance['commit'] === 'string' ? instance['commit'] : null,
     connected: typeof whatsapp['connected'] === 'boolean' ? whatsapp['connected'] : null,
+    responderPid: Number.isSafeInteger(instance['pid']) && (instance['pid'] as number) > 0 ? instance['pid'] as number : null,
+    invariants: readHealthInvariants(payload),
   };
 }
