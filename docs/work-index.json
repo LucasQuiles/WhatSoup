@@ -1317,7 +1317,7 @@
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
       "last_modified": "2026-07-17",
-      "size_bytes": 6160
+      "size_bytes": 7307
     },
     {
       "path": "docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md",

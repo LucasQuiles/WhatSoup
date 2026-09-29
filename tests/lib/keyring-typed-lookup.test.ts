@@ -157,12 +157,14 @@ describe('lookupCredentialTyped', () => {
 
   describe('known service — value not found (not_found)', () => {
     it('returns null with reason not_found when no credential is available', () => {
-      // No env var set, no file store entry. The first execFileSync call still
-      // returns beforeEach's empty value; every later call throws a status-less
-      // Error. That throw is NOT a real absence shape — keyring-warn.test.ts
-      // pins the per-backend rules (macOS: only a clean exit 44 is absence;
-      // secret-tool: absence is not classified, a primary throw is a failure)
-      // — so any primary backend call it reaches counts as a read failure.
+      // No env var set, no file store entry. This file sets no platform, so it
+      // describes a macOS (darwin) host: there the first execFileSync call is
+      // the keychain read, which returns beforeEach's empty value — a miss.
+      // Every later call throws a status-less Error, which is NOT a real
+      // absence shape; keyring-warn.test.ts pins the per-backend rules (macOS:
+      // only a clean exit 44 is absence; secret-tool: absence is not
+      // classified, a primary throw is a failure). On a secret-tool host the
+      // empty value would be consumed by the backend probe instead.
       mockedExecFileSync.mockImplementation(() => {
         throw new Error('item not found');
       });
@@ -190,8 +192,9 @@ describe('lookupCredentialTyped', () => {
   describe('options pass-through', () => {
     it('passes skipEnv option through to lookupCredential', () => {
       // With skipEnv: true, even if the env var is set, the lookup should
-      // go to the keyring. As above, the status-less throw is a stand-in, not
-      // a real absence shape; only the empty first call is a miss.
+      // go to the keyring. As above (macOS host), the status-less throw is a
+      // stand-in, not a real absence shape; only the empty first call — the
+      // keychain read — is a miss.
       process.env.OPENAI_API_KEY = 'sk-test';
       mockedExecFileSync.mockImplementation(() => {
         throw new Error('item not found');

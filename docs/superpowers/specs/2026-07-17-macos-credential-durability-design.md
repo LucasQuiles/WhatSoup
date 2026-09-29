@@ -94,9 +94,10 @@ migration fallback — counts, and is recorded against the requested service; an
 absent item is not a failure, and only a clean exit 44 (errSecItemNotFound, no
 signal, no error code) is absence. The resolver emits at most one
 `keyring read failed` warning per service per process while still performing
-subsequent lookups and fallbacks, and every lookup still reports a recorded
-failure as `unreadable`. Backend-probe downgrade alarms retain their existing
-behavior.
+subsequent lookups and fallbacks. A typed lookup that ends with no value from
+any store (no successful fallback) reports a recorded failure as `unreadable`;
+if a later fallback returns a value, the lookup is `ok` despite the earlier
+failure. Backend-probe downgrade alarms retain their existing behavior.
 
 Accepted gap (owner decision): `security` can itself report errSecItemNotFound
 (exit 44) for some genuine Keychain search failures, because its

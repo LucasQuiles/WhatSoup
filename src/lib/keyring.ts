@@ -342,7 +342,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
         }
       }
     } catch {
-      // Account discovery failures preserve the terminal env/OpenCode fallback.
+      // intentional: account discovery failures preserve the terminal env/OpenCode fallback.
     }
     return lookupEnvAfterKeyringMiss();
   }
