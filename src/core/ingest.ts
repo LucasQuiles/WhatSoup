@@ -17,9 +17,10 @@ import RE2 from 're2';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
+import { isBotMentioned } from './access-predicates.ts';
 import { resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isLidJid, bareNumber } from './jid-constants.ts';
+import { isLidJid, bareNumber, isStatusBroadcastJid } from './jid-constants.ts';
 import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
@@ -485,8 +486,14 @@ export function createIngestHandler(
             'ingest: not dispatching',
           );
 
-          // 4. Send approval request for unknown senders
-          if (triggerResult.accessStatus === 'unknown') {
+          // 4. Send approval request for unknown senders. #3566: a group
+          // stranger (strict group mode) only asks when they @mentioned the
+          // bot; ordinary group chatter must not page the admin. The status
+          // broadcast is never a direct chat.
+          const approvalEligible = msg.isGroup
+            ? isBotMentioned(msg.mentionedJids, getBotJid(), getBotLid())
+            : !isStatusBroadcastJid(msg.chatJid);
+          if (triggerResult.accessStatus === 'unknown' && approvalEligible) {
             const approvalPhone = resolvePhoneFromJid(msg.senderJid, db);
             try {
               await sendApprovalRequest(db, messenger, approvalPhone, msg.senderName ?? '', msg.content ?? '', durability);

@@ -18,19 +18,19 @@
       "name": "claude",
       "kind": "native",
       "update": [
-        "claude",
+        "{previous_binary}",
         "install",
-        "latest"
+        "{target}"
       ],
       "rollback": [
-        "claude",
-        "install",
-        "{previous}"
+        "restore-launcher-link",
+        "{previous_binary}"
       ],
       "smoke": [
-        "claude",
+        "{launcher_target}",
         "--version"
-      ]
+      ],
+      "notes": "{previous_binary} is the verified file the launcher $HOME/.local/bin/claude resolved to before the install; {target} is the newest release past npm.cooldown_minutes, installed only when every service instance resolves that launcher and it is the native layout. Rollback swaps the launcher link back to {previous_binary} (compare-and-swap) and never reinstalls from the network; a missing or changed previous binary is rollback-failed (exit 3). The smoke is the postcheck: every instance re-resolves the launcher, it classifies as native at {target}, and a bounded --version reports {target}. The CLI can also update itself outside this job; the claude-update-path probe observes that and enforces nothing."
     },
     {
       "name": "codex",
@@ -88,25 +88,41 @@
         "nodes": [
           "24.13.0",
           "24.15.0"
-        ]
+        ],
+        "check_mode": "the pinned npm only; any other node version's npm is skipped"
+      },
+      {
+        "name": "claude-update-path",
+        "mode": "detect-only",
+        "surfaces": [
+          "launcher movement between runs and during this job's plugin and MCP listing (claude-launcher)",
+          "service environment per instance: DISABLE_UPDATES, DISABLE_AUTOUPDATER, CLAUDE_CONFIG_DIR as set/unset (claude-update-policy)",
+          "settings on disk per config directory: installMethod, autoUpdates, settings env flags from managed settings (file and managed-settings.d drop-ins) and settings.json (claude-update-policy)",
+          "this job's environment (claude-update-policy)",
+          "running CLI processes for this user, counts only (claude-processes)"
+        ],
+        "check_mode": "runs (read-only)"
       },
       {
         "name": "claude-plugins",
         "mode": "detect-only",
         "paths": [
           "$HOME/.claude/plugins"
-        ]
+        ],
+        "check_mode": "not run: starting the agent CLI can refresh MCP authentication"
       },
       {
         "name": "mcp-servers",
         "mode": "detect-only",
         "commands": [
           "claude mcp list"
-        ]
+        ],
+        "check_mode": "not run: starting the agent CLI can refresh MCP authentication"
       },
       {
         "name": "local-bin",
         "mode": "detect-only",
+        "check_mode": "path only, not executed",
         "binaries": [
           "pinecone-mcp",
           "google-workspace-mcp",
@@ -131,6 +147,7 @@
       {
         "name": "runtime",
         "mode": "detect-only",
+        "check_mode": "path only, not executed",
         "commands": [
           "node --version",
           "npm --version",
