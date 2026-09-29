@@ -269,9 +269,9 @@ describe('resolveBinding: one sample after the outcome, against the request seco
 
 describe('releaseInvariantsAlertSource: the incident names its floor', () => {
   it('is release-invariants: plus 8 hex, and the same for the same floor in any order', () => {
-    const source = releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['b.second', 'a.first']);
-    expect(source).toMatch(/^release-invariants:[0-9a-f]{8}$/);
-    expect(releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['a.first', 'b.second'])).toBe(source);
+    const alertSource = releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['b.second', 'a.first']);
+    expect(alertSource).toMatch(/^release-invariants:[0-9a-f]{8}$/);
+    expect(releaseInvariantsAlertSource(HEALTH_INVARIANTS_SCHEMA, ['a.first', 'b.second'])).toBe(alertSource);
   });
 
   it('two floors (or two schemas) give two sources, so a clear under one never closes the other', () => {
