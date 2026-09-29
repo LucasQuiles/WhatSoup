@@ -41,7 +41,9 @@ import { toConversationKey } from '../../../src/core/conversation-key.ts';
 
 // ─── Hoisted per-construction provider-boundary doubles ─────────────────────
 
-const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble, harnessRef } = vi.hoisted(() => {
+const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble, harnessRef, providerRef } = vi.hoisted(() => {
+  // The provider every session constructed from now on reports running (#3497).
+  const providerRef = { current: 'claude-cli' };
   // Set per test (beforeEach) so queue doubles can mint REAL durable outbound
   // ops: inbound completion legitimately requires echoed delivery evidence
   // (turn-finalizer.ts deriveDeliveryEvidence), so the double must write real
@@ -60,6 +62,7 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   };
 
   function makeSessionDouble(opts: SessionCtorOpts) {
+    const provider = providerRef.current;
     let active = false;
     let pendingResolve: (() => void) | null = null;
     let pendingPromise: Promise<void> = Promise.resolve();
@@ -118,7 +121,7 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
       getDbRowId: vi.fn((): number | null => 1),
       setDurability: vi.fn(),
       bindGenerationOwnership: vi.fn(),
-      getProviderId: vi.fn(() => 'claude-cli'),
+      getProviderId: vi.fn((): string => provider),
       getModelRef: vi.fn(() => undefined),
     };
     return double;
@@ -188,9 +191,10 @@ const { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueue
   function resetDoubles(): void {
     sessionDoubles.length = 0;
     queueDoubles.length = 0;
+    providerRef.current = 'claude-cli';
   }
 
-  return { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble, harnessRef };
+  return { sessionDoubles, queueDoubles, resetDoubles, makeSessionDouble, makeQueueDouble, harnessRef, providerRef };
 });
 
 const { mockConfig } = vi.hoisted(() => ({
@@ -345,7 +349,9 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '../../../src/core/observability/lifecycle-emission.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
-import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
+import { emitAlertChecked, emitObservationChecked } from '../../../src/lib/emit-alert.ts';
+import { createOperationTracker } from '../../../src/runtimes/agent/chat-transport.ts';
+import { ensureStandbyNoticeSchema, peekStandbyNotice, stashStandbyNotice } from '../../../src/runtimes/agent/standby-notice.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 // ─── Shared fixtures ────────────────────────────────────────────────────────
@@ -1306,6 +1312,400 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expect(phases[0]).toBe('admitted');
       expect(phases).toContain('terminal_result');
       expect(phases[phases.length - 1]).toBe('finalized');
+    });
+  });
+
+  // ─── #3497 shared fixtures ────────────────────────────────────────────────
+  const FINAL_TEXT_INSTRUCTION = 'Do not call send_message.';
+  const SEND_TOOL_INSTRUCTION = 'deliver it with send_message';
+  const AUTH_FAILURE_TEXT = 'Invalid API key · Please run /login';
+  const REAUTH_NOTICE = '_The agent needs re-authentication before it can reply here. An operator has been notified._';
+  const PENDING_HANDOFF = '_Switched to the backup model for your last message._';
+  const AUTO_SWITCH_TEXT = 'Switched to Model B due to high demand for Model A';
+
+  function reauthAlerts(): unknown[][] {
+    return (vi.mocked(emitAlertChecked).mock.calls as unknown[][])
+      .filter((call) => call[1] === 'provider_auth_required_no_fallback');
+  }
+
+  /**
+   * A scheduled reauth failure posts nothing but still alerts; a user turn that
+   * then fails the same way in the same chat gets its own notice and alert.
+   */
+  async function expectScheduledReauthLeavesUserNotice(): Promise<void> {
+    const scheduledSeq = dispatchScheduled('Run date and report it.');
+    const scheduled = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+    scheduled.emit({ type: 'result', text: AUTH_FAILURE_TEXT });
+    await vi.waitFor(() => expect(reauthAlerts()).toHaveLength(1), { timeout: 4_000 });
+    await vi.waitFor(() => expect(status(scheduledSeq)).not.toBe('processing'), { timeout: 4_000 });
+    expect(chatTexts()).toEqual([]);
+
+    const seq = engine.journalInbound('msg-user-reauth', toConversationKey(groupJid), groupJid, 'agent');
+    void runtime.handleMessage(makeMsg({ messageId: 'msg-user-reauth', inboundSeq: seq }));
+    const session = await waitForInFlightTurn((t) => t.includes('interactive question'));
+    session.emit({ type: 'result', text: AUTH_FAILURE_TEXT });
+
+    await vi.waitFor(() => expect(chatTexts()).toContain(REAUTH_NOTICE), { timeout: 4_000 });
+    expect(reauthAlerts()).toHaveLength(2);
+  }
+
+  function terminalRecord(seq: number): { attempt_kind: string; attempt_failure_class: string | null } {
+    return db.raw.prepare(
+      'SELECT attempt_kind, attempt_failure_class FROM turn_terminal_records WHERE inbound_seq = ?',
+    ).get(seq) as { attempt_kind: string; attempt_failure_class: string | null };
+  }
+
+  function terminalReason(seq: number): string | null {
+    return (db.raw.prepare('SELECT terminal_reason FROM inbound_events WHERE seq = ?').get(seq) as {
+      terminal_reason: string | null;
+    }).terminal_reason;
+  }
+
+  function scheduledTurnText(session: SessionDouble): string {
+    return session.turnsSent.map(turnText).find((t) => t.includes(SCHEDULED_PROMPT_MARK)) ?? '';
+  }
+
+  function allCalls(pick: (q: (typeof queueDoubles)[number]) => { mock: { calls: unknown[][] } }): unknown[][] {
+    return queueDoubles.flatMap((q) => pick(q).mock.calls);
+  }
+
+  /** Everything that reached a chat: queue text of any kind, plus direct messenger sends. */
+  function chatTexts(): string[] {
+    const queued = [
+      ...allCalls((q) => q.enqueueText),
+      ...allCalls((q) => q.enqueueStreamingText),
+      ...allCalls((q) => q.enqueueResultText),
+      ...allCalls((q) => q.enqueueProgressUpdate),
+    ].map((call) => (typeof call[0] === 'string' ? call[0] : `progress:${JSON.stringify(call[0])}`));
+    const direct = (vi.mocked(messenger.sendMessage).mock.calls as unknown[][]).map((call) => String(call[1]));
+    return [...queued, ...direct];
+  }
+
+  /** Progress text, a real tool round (bash, as in the issue canary), then the final text. */
+  function emitToolRoundThen(session: SessionDouble, finalText: string | null): void {
+    session.emit({ type: 'assistant_text', text: 'Running the date command now.' });
+    session.emit({ type: 'tool_use', toolName: 'bash', toolId: 'tool-bash-1', toolInput: {} });
+    session.emit({ type: 'tool_result', isError: false, toolId: 'tool-bash-1', toolName: 'bash', content: '2026-09-27T00:00:00Z' });
+    if (finalText !== null) session.emit({ type: 'assistant_text', text: finalText });
+    emitTerminal(session, null);
+  }
+
+  // #3497: OpenCode's config denies send_message to every session in its
+  // working directory, so a scheduled job on OpenCode reports through its
+  // final text. Claude-family scheduled jobs keep send_message as the owner.
+  describe('scheduled delivery owner by provider (#3497, per_chat non-sandbox)', () => {
+    beforeEach(() => {
+      makeRuntime({ sessionScope: 'per_chat' });
+    });
+
+    it('OpenCode: dispatches final-text instructions and delivers the final answer exactly once', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      const dispatched = scheduledTurnText(session);
+      expect(dispatched).toContain(FINAL_TEXT_INSTRUCTION);
+      expect(dispatched).not.toContain(SEND_TOOL_INSTRUCTION);
+
+      emitToolRoundThen(session, 'Scheduled OK 2026-09-27T00:00:00Z');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(terminalReason(seq)).toBe('response_echoed');
+      expect(allCalls((q) => q.enqueueResultText).map((call) => call[0]))
+        .toEqual(['Scheduled OK 2026-09-27T00:00:00Z']);
+      // Progress stays private: no streamed narration, no tool-progress update.
+      expect(allCalls((q) => q.enqueueStreamingText)).toEqual([]);
+      expect(allCalls((q) => q.enqueueToolUpdate)).toEqual([]);
+    });
+
+    it('OpenCode: a turn with only progress text fails as scheduled_answer_missing, not no_reply_policy', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      emitToolRoundThen(session, null);
+
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'), { timeout: 4_000 });
+      expect(terminalRecord(seq)).toEqual({ attempt_kind: 'failed', attempt_failure_class: 'scheduled_answer_missing' });
+      expect(failureClass(seq)).toBe('unknown');
+      expect(allCalls((q) => q.enqueueResultText)).toEqual([]);
+      expect(allCalls((q) => q.enqueueStreamingText)).toEqual([]);
+      expect(allCalls((q) => q.enqueueToolUpdate)).toEqual([]);
+    });
+
+    it('OpenCode: an explicit final NO_REPLY stays deliberate silence', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = dispatchScheduled('Report only if something changed.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      emitToolRoundThen(session, 'NO_REPLY');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(terminalReason(seq)).toBe('no_reply_policy');
+      expect(allCalls((q) => q.enqueueResultText)).toEqual([]);
+    });
+
+    it('Claude: keeps send_message instructions and silent plain text; only tool progress is newly suppressed', async () => {
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      const dispatched = scheduledTurnText(session);
+      expect(dispatched).toContain(SEND_TOOL_INSTRUCTION);
+      expect(dispatched).not.toContain(FINAL_TEXT_INSTRUCTION);
+
+      emitToolRoundThen(session, 'Scheduled OK 2026-09-27T00:00:00Z');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(terminalReason(seq)).toBe('no_reply_policy');
+      expect(allCalls((q) => q.enqueueResultText)).toEqual([]);
+      expect(allCalls((q) => q.enqueueStreamingText)).toEqual([]);
+      expect(allCalls((q) => q.enqueueToolUpdate)).toEqual([]);
+    });
+
+    it('a scheduled reauth failure on the suffixed lane leaves the chat\'s reauth notice and alert to the next user failure', async () => {
+      await expectScheduledReauthLeavesUserNotice();
+    });
+
+    it('a crashed scheduled continuation leaves a user\'s pending handoff notice in place', async () => {
+      const scheduledMapKey = `${groupJid}::scheduled-agent-job`;
+      ensureStandbyNoticeSchema(db);
+      dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      stashStandbyNotice(db, toConversationKey(groupJid), PENDING_HANDOFF, Date.now());
+      const inner = runtime as unknown as {
+        runtimeTurnCoordinator: { cancelRuntimeTurnContinuation: (...args: never[]) => boolean };
+        sessionManagerIds: Map<unknown, string>;
+        sessionOwnership: Map<string, { generation: number }>;
+      };
+      // The scheduled lane shares the chat's conversation key; model the crash of
+      // its fallback continuation, the only case that clears a pending notice.
+      const cancel = vi.spyOn(inner.runtimeTurnCoordinator, 'cancelRuntimeTurnContinuation').mockReturnValue(true);
+
+      session.ctorOpts.onCrash?.({
+        exitCode: 143,
+        signal: null,
+        sessionId: null,
+        dbRowId: 1,
+        generationIdentity: {
+          managerId: inner.sessionManagerIds.get(session),
+          generation: inner.sessionOwnership.get(scheduledMapKey)!.generation,
+        },
+      });
+
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalled(), { timeout: 4_000 });
+      expect(peekStandbyNotice(db, toConversationKey(groupJid))).toBe(PENDING_HANDOFF);
+    });
+
+    it('OpenCode interactive turn is unchanged: its text streams and tool progress is sent', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = engine.journalInbound('msg-oc-interactive', toConversationKey(groupJid), groupJid, 'agent');
+      void runtime.handleMessage(makeMsg({ messageId: 'msg-oc-interactive', inboundSeq: seq }));
+      const session = await waitForInFlightTurn((t) => t.includes('interactive question'));
+      expect(session.turnsSent.map(turnText).join('\n')).not.toContain(SCHEDULED_PROMPT_MARK);
+
+      session.emit({ type: 'tool_use', toolName: 'bash', toolId: 'tool-bash-2', toolInput: {} });
+      session.emit({ type: 'tool_result', isError: false, toolId: 'tool-bash-2', toolName: 'bash', content: 'ok' });
+      session.emit({ type: 'assistant_text', text: 'Here is the answer.' });
+      emitTerminal(session, 'Here is the answer.');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(allCalls((q) => q.enqueueStreamingText).map((call) => call[0])).toContain('Here is the answer.');
+      expect(allCalls((q) => q.enqueueToolUpdate)).toHaveLength(1);
+    });
+  });
+
+  // #3497 H1-H2: sandbox per_chat, shared and single have no suffixed lane, so
+  // the scheduled job is recognised by its declared purpose.
+  describe.each([
+    ['shared', { sessionScope: 'shared' }],
+    ['single', { sessionScope: 'single' }],
+    ['per_chat sandbox', { sessionScope: 'per_chat', sandboxPerChat: true }],
+  ] as Array<[string, AgentRuntimeOptions]>)('scheduled-job hygiene without a suffixed lane: %s (#3497)', (_mode, options) => {
+    beforeEach(() => {
+      makeRuntime({ ...options });
+    });
+
+    it('H1: a Claude scheduled turn leaks neither plain text nor tool progress', async () => {
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      expect(scheduledTurnText(session)).toContain(SEND_TOOL_INSTRUCTION);
+
+      emitToolRoundThen(session, 'Scheduled OK 2026-09-27T00:00:00Z');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(terminalReason(seq)).toBe('no_reply_policy');
+      expect(chatTexts()).toEqual([]);
+      expect(allCalls((q) => q.enqueueToolUpdate)).toEqual([]);
+    });
+
+    it('H1 + delivery: an OpenCode scheduled turn delivers only its final answer, once', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      expect(scheduledTurnText(session)).toContain(FINAL_TEXT_INSTRUCTION);
+
+      emitToolRoundThen(session, 'Scheduled OK 2026-09-27T00:00:00Z');
+
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+      expect(terminalReason(seq)).toBe('response_echoed');
+      expect(chatTexts()).toEqual(['Scheduled OK 2026-09-27T00:00:00Z']);
+      expect(allCalls((q) => q.enqueueToolUpdate)).toEqual([]);
+    });
+
+    it('H1 + delivery: an OpenCode scheduled turn with no final answer fails as scheduled_answer_missing', async () => {
+      providerRef.current = 'opencode-cli';
+      const seq = dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      emitToolRoundThen(session, null);
+
+      await vi.waitFor(() => expect(status(seq)).toBe('failed'), { timeout: 4_000 });
+      expect(terminalRecord(seq)).toEqual({ attempt_kind: 'failed', attempt_failure_class: 'scheduled_answer_missing' });
+      expect(chatTexts()).toEqual([]);
+    });
+
+    it('H2: a crash notice raised while a scheduled turn runs never reaches the chat', async () => {
+      dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      session.ctorOpts.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
+
+      expect(chatTexts()).toEqual([]);
+    });
+
+    it('control: after a scheduled turn, the same session\'s interactive turn keeps its text, progress and crash notice', async () => {
+      const scheduledSeq = dispatchScheduled('Run date and report it.');
+      const scheduled = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      emitToolRoundThen(scheduled, 'Scheduled OK 2026-09-27T00:00:00Z');
+      await vi.waitFor(() => expect(status(scheduledSeq)).toBe('complete'), { timeout: 4_000 });
+
+      const seq = engine.journalInbound('msg-after-scheduled', toConversationKey(groupJid), groupJid, 'agent');
+      void runtime.handleMessage(makeMsg({ messageId: 'msg-after-scheduled', inboundSeq: seq }));
+      const session = await waitForInFlightTurn((t) => t.includes('interactive question'));
+      const progressQueue = { enqueueProgressUpdate: vi.fn() };
+      const tracker = createOperationTracker(
+        { operationTrackerConfig: { enabled: true }, instanceName: 'test' } as never,
+        session as never,
+        () => progressQueue as never,
+      );
+      (tracker as unknown as { callbacks: { onProgress(e: unknown): void } }).callbacks
+        .onProgress({ type: 'thinking_long', gapMs: 60_000 });
+      session.emit({ type: 'assistant_text', text: 'Interactive answer.' });
+      session.ctorOpts.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
+
+      expect(chatTexts()).toEqual(expect.arrayContaining([
+        'Interactive answer.',
+        '_Agent provider ended before completing the turn. Send your message again to retry._',
+      ]));
+      expect(progressQueue.enqueueProgressUpdate).toHaveBeenCalledTimes(1);
+      emitTerminal(session, 'Interactive answer.');
+      await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+    });
+
+    it('B: operation-tracker progress raised during a scheduled turn posts nothing', async () => {
+      dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+      const progressQueue = { enqueueProgressUpdate: vi.fn() };
+      const tracker = createOperationTracker(
+        { operationTrackerConfig: { enabled: true }, instanceName: 'test' } as never,
+        session as never,
+        () => progressQueue as never,
+      );
+
+      for (const type of ['thinking_long', 'thinking_stalled']) {
+        (tracker as unknown as { callbacks: { onProgress(e: unknown): void } }).callbacks.onProgress({ type, gapMs: 60_000 });
+      }
+      (tracker as unknown as { callbacks: { onProgress(e: unknown): void } }).callbacks.onProgress({
+        type: 'operation_slow', toolId: 't1', toolName: 'bash', category: 'running', elapsedMs: 90_000, expectedMs: 30_000,
+      });
+
+      expect(progressQueue.enqueueProgressUpdate).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['context-overflow', { text: 'Error: prompt is too long for the context window' }, 'observation', 'provider_context_overflow'],
+      ['transient-network', { text: 'Error: socket hang up' }, 'alert', 'provider_transient_network'],
+      ['unknown-terminal', { text: 'unexpected provider fault 7f3a', isError: true }, 'alert', 'provider_unknown_terminal'],
+      ['rate-limit without fallback', { text: 'rate_limit_exceeded' }, 'shutdown', ''],
+    ] as Array<[string, { text: string; isError?: boolean }, 'alert' | 'observation' | 'shutdown', string]>)(
+      'A: a %s error result on a scheduled turn posts no chat text while its signal still fires',
+      async (_class, result, signal, source) => {
+        dispatchScheduled('Run date and report it.');
+        const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+        session.emit({ type: 'result', ...result });
+
+        await vi.waitFor(() => {
+          if (signal === 'alert') {
+            expect(vi.mocked(emitAlertChecked).mock.calls.some((call) => call[1] === source)).toBe(true);
+          } else if (signal === 'observation') {
+            expect(vi.mocked(emitObservationChecked).mock.calls.some((call) => call[1] === source)).toBe(true);
+          } else {
+            expect(session.shutdown).toHaveBeenCalled();
+          }
+        }, { timeout: 4_000 });
+        expect(chatTexts()).toEqual([]);
+      },
+    );
+
+    it('a scheduled reauth failure leaves the chat\'s reauth notice and alert to the next user failure', async () => {
+      await expectScheduledReauthLeavesUserNotice();
+    });
+
+    it('a scheduled answer neither consumes nor carries a user\'s pending handoff notice', async () => {
+      const handoffConfig = mockConfig as { oneMessageHandoff?: boolean };
+      handoffConfig.oneMessageHandoff = true;
+      try {
+        ensureStandbyNoticeSchema(db);
+        stashStandbyNotice(db, toConversationKey(groupJid), PENDING_HANDOFF, Date.now());
+        providerRef.current = 'opencode-cli';
+        const seq = dispatchScheduled('Run date and report it.');
+        const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+        emitToolRoundThen(session, 'Scheduled OK 2026-09-27T00:00:00Z');
+
+        await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+        expect(chatTexts()).toEqual(['Scheduled OK 2026-09-27T00:00:00Z']);
+        expect(peekStandbyNotice(db, toConversationKey(groupJid))).toBe(PENDING_HANDOFF);
+      } finally {
+        delete handoffConfig.oneMessageHandoff;
+      }
+    });
+
+    it.each([
+      ['streamed', { type: 'assistant_text', text: AUTO_SWITCH_TEXT }],
+      ['result', { type: 'result', text: AUTO_SWITCH_TEXT }],
+    ] as Array<[string, AgentEvent]>)('a %s provider auto-switch notice on a scheduled turn posts nothing', async (_mode, event) => {
+      const autoSwitch = vi.spyOn(runtime as unknown as { enqueueAutoSwitchNotice: (...args: unknown[]) => boolean }, 'enqueueAutoSwitchNotice');
+      dispatchScheduled('Run date and report it.');
+      const session = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
+
+      session.emit(event);
+
+      // Anchor: the notice was detected and handled, so an empty chat is not vacuous.
+      await vi.waitFor(() => expect(autoSwitch).toHaveReturnedWith(true), { timeout: 4_000 });
+      expect(chatTexts()).toEqual([]);
+    });
+  });
+
+  // #3497 H3: single scope awaits the provider turn inside the turn chain, so a
+  // dispatch failure reaches the chain's catch and its user-facing notice.
+  describe('scheduled-job failure notice (#3497 H3, single)', () => {
+    beforeEach(() => {
+      makeRuntime({ sessionScope: 'single' });
+    });
+
+    it('does not send the processing-failure notice to the report chat for a scheduled job', async () => {
+      await driveInteractiveToComplete();
+      const singleton = sessionDoubles[0]!;
+      singleton.sendTurn.mockImplementationOnce(() => Promise.reject(new Error('provider write failed')));
+      vi.mocked(messenger.sendMessage).mockClear();
+      for (const q of queueDoubles) q.enqueueText.mockClear();
+
+      dispatchScheduled('Run date and report it.');
+
+      await vi.waitFor(() => expect(singleton.sendTurn).toHaveBeenCalledTimes(2), { timeout: 4_000 });
+      // The chain's catch has run once the chain itself settles.
+      await (runtime as unknown as { turnChain: Promise<void> }).turnChain.catch(() => {});
+      expect(chatTexts()).not.toContain(PROCESSING_FAILURE_NOTICE);
     });
   });
 });
