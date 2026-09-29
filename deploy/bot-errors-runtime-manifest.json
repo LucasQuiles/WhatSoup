@@ -816,7 +816,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
+      "sha256": "a64179e47e9199038a086d4ce92b3d578721c04551eed2aaaea34b45428b520e",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"

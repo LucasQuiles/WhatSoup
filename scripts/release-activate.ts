@@ -24,15 +24,44 @@
  * the database schema migration level (or it could not be read) — the old
  * binary would refuse that database, so the new release is left in place and
  * stderr carries the manual database-restore steps.
+ *
+ * #2481, report-only: under --apply, the receipt also records the health
+ * invariant verdict of the activated (and any rollback) process against this
+ * tool's floor. All of that report work (the process sample behind the
+ * binding, the tool-commit lookup, the receipt, the event) runs only after the
+ * activation outcome and the exit code are final. The receipt is written
+ * before any event; then at most one BOT ERRORS event is sent for source
+ * `release-invariants:<floor digest>` (standard event fields, inline log tail
+ * off): a warning when any recorded verdict is not `satisfied`; a clear only
+ * when every verdict is satisfied and the outcome is `activated`;
+ * nothing otherwise. The receipt is then rewritten with the event status.
+ * Every receipt write is atomic; a failed one prints only the fixed code
+ * `receipt-write-failed <ERRNO>`, and a published receipt whose directory
+ * fsync failed prints `receipt-written-durability-unproven <ERRNO>`. The whole
+ * report phase sits inside one exception boundary: any throw prints only the
+ * fixed line `report-failed` and the exit code stands. The CLI's stdout and
+ * stderr each carry one 'error' listener, so an asynchronous stream error
+ * (EPIPE) cannot end the process either. The verdict never
+ * changes the outcome or the exit code. stdout stays one JSON
+ * document, printed after the event, so it can trail the activation by the
+ * bounded report work plus up to the helper's 60 s timeout.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { HEALTH_INVARIANTS_SCHEMA, RELEASE_INVARIANT_FLOOR } from '../src/core/health-invariants.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
+import { fsyncDirectoryRequired, writeAtomicPrivateFileSync } from '../src/lib/private-fs.ts';
 import { CliArgError, isHelpFlag, takeValue } from './lib/cli-args.ts';
-import { applyActivation, type ApplyOutcome } from './lib/release-activation/apply.ts';
+import { applyActivation, type ApplyOutcome, resolveOutcomeBindings } from './lib/release-activation/apply.ts';
 import { type ActivationHost, createDefaultActivationHost } from './lib/release-activation/host.ts';
+import {
+  releaseInvariantsAlertSource,
+  type ReleaseInvariantsVerdict,
+  releaseInvariantsVerdict,
+} from './lib/release-activation/invariants.ts';
+import { TOOL_COMMIT_TIMEOUT_MS } from './lib/release-activation/tool-commit.ts';
 import {
   type ActivationArgs,
   type ActivationContext,
@@ -181,6 +210,157 @@ export function planDocument(context: ActivationContext): Record<string, unknown
   };
 }
 
+/** The receipt's #2481 record: verdicts, the tool floor and its source, and the one event attempt. */
+export interface InvariantsRecord {
+  reportOnly: true;
+  /** `toolCommit`: commit of the tree that ran this tool and so supplied the floor; 'unknown' if unresolved. */
+  floor: { schema: string; ids: string[]; toolCommit: string };
+  activation: ReleaseInvariantsVerdict | null;
+  rollback: ReleaseInvariantsVerdict | null;
+  /**
+   * The one BOT ERRORS event: a `warning` when any verdict is not satisfied;
+   * a `clear` when all are satisfied and the outcome is `activated`; `kind`
+   * null when no event is due (a refusal, or satisfied verdicts after a
+   * rollback that stopped before touching the instance).
+   * `pending` while the event is in flight (the receipt is written before it is sent).
+   */
+  alert: { attempted: boolean; kind: 'warning' | 'clear' | null; status: number | null | 'pending' };
+}
+
+/**
+ * Operator decision for this alert: the standard BOT ERRORS event fields, like
+ * every other BOT ERRORS alert, but no inline log tail. Set for this call only.
+ */
+const INVARIANTS_ALERT_ENV = Object.freeze({ BOT_ERRORS_INLINE_LOG_TAIL: '0' });
+
+function describeVerdict(label: string, verdict: ReleaseInvariantsVerdict): string[] {
+  return [
+    `${label}=${verdict.outcome}${verdict.detail === null ? '' : `/${verdict.detail}`}`,
+    `${label}_schema=${verdict.schema ?? 'none'}`,
+    `${label}_undeclared=${verdict.undeclared.join(',') || 'none'}`,
+  ];
+}
+
+/**
+ * The tool commit, bounded here as well as in the default host
+ * (tool-commit.ts), so no host seam can hold the receipt. Started only after
+ * the activation returns, so none of its work runs inside the activation
+ * sequence; it can delay the first receipt write by at most the bound.
+ */
+function boundedToolCommit(host: ActivationHost): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), TOOL_COMMIT_TIMEOUT_MS); });
+  const lookup = Promise.resolve().then(() => host.toolCommit()).catch(() => null);
+  return Promise.race([lookup, expired]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The only outcome after which satisfied verdicts clear the incident. A
+ * `rolled-back` run could never have every verdict satisfied anyway (see
+ * `classifyForReceipt`), so listing only `activated` states the rule, not a
+ * behaviour change.
+ */
+const CLEAR_OUTCOMES: ReadonlySet<ApplyOutcome['outcome']> = new Set(['activated']);
+
+/**
+ * #2481, report-only: classify the activation and rollback observations
+ * against this tool's floor. Pure; it never changes the outcome or the exit
+ * code. The warn/clear rule, exactly:
+ * - a refusal changed nothing live: no verdict and no event;
+ * - any recorded verdict not satisfied: one warning;
+ * - a failed activation verification always warns: its observation did not
+ *   pass, is never sampled, and is recorded `unknown`/`unobserved`; so
+ *   `rolled-back` never clears;
+ * - after an auxiliary-label failure the activation observation passed, and
+ *   the result depends on whether the rollback touched the instance: a
+ *   restored or restarted instance reads `restarted` and warns; a rollback
+ *   that stopped before touching it (`rollback-blocked-migrated` at the schema
+ *   gate, or `rollback-unverified` from a failed bootout) can leave it `bound`,
+ *   and with every verdict satisfied no event is sent;
+ * - a clear is sent only for `activated` with every verdict satisfied.
+ */
+function classifyForReceipt(toolCommit: string | null, outcome: ApplyOutcome): InvariantsRecord {
+  const floor = [...RELEASE_INVARIANT_FLOOR];
+  const record: InvariantsRecord = {
+    reportOnly: true,
+    floor: { schema: HEALTH_INVARIANTS_SCHEMA, ids: floor, toolCommit: toolCommit ?? 'unknown' },
+    activation: null,
+    rollback: null,
+    alert: { attempted: false, kind: null, status: null },
+  };
+  if (outcome.outcome === 'refused') return record;
+  record.activation = releaseInvariantsVerdict(outcome.verification, floor);
+  // No rollback verdict unless a rollback process was actually observed; a
+  // rollback stopped before restart has no generation to classify.
+  const rollbackObservation = outcome.rollback?.observation ?? null;
+  record.rollback = rollbackObservation === null ? null : releaseInvariantsVerdict(rollbackObservation, floor);
+  const satisfied = verdictsOf(record).every(([, verdict]) => verdict.outcome === 'satisfied');
+  if (!satisfied) record.alert = { attempted: true, kind: 'warning', status: 'pending' };
+  else if (CLEAR_OUTCOMES.has(outcome.outcome)) record.alert = { attempted: true, kind: 'clear', status: 'pending' };
+  return record;
+}
+
+function verdictsOf(record: InvariantsRecord): Array<[string, ReleaseInvariantsVerdict]> {
+  const verdicts: Array<[string, ReleaseInvariantsVerdict]> = [];
+  if (record.activation !== null) verdicts.push(['activation', record.activation]);
+  if (record.rollback !== null) verdicts.push(['rollback', record.rollback]);
+  return verdicts;
+}
+
+/**
+ * Send the ONE event a pending record calls for (a warning, or the clear that
+ * resolves an earlier warning for the same instance and source, as the
+ * release observers do) and set its final status. The tool-supplied payload
+ * carries verdicts and ids only; the helper adds its standard event fields.
+ * A failed or throwing helper never changes the exit code.
+ */
+async function sendInvariantsEvent(
+  host: ActivationHost,
+  instance: string,
+  outcome: ApplyOutcome,
+  record: InvariantsRecord,
+  /** Whether a receipt was published (renamed into place), durable or not. */
+  receiptPublished: boolean,
+  stderr: (text: string) => void,
+): Promise<void> {
+  const { kind } = record.alert;
+  if (record.alert.status !== 'pending' || kind === null) return;
+  const verdicts = verdictsOf(record);
+  const verdictList = verdicts.map(([label, verdict]) => `${label} ${verdict.outcome}`).join(', ');
+  let status: number | null;
+  try {
+    const sent = await host.emitReleaseAlert({
+      instance,
+      source: releaseInvariantsAlertSource(record.floor.schema, record.floor.ids),
+      eventType: kind === 'clear' ? 'clear' : 'alert',
+      env: INVARIANTS_ALERT_ENV,
+      payload: {
+        summary: kind === 'clear'
+          ? `release:activate: release invariants satisfied (${verdictList})`
+          : `release:activate: release invariants not satisfied (${verdictList})`,
+        evidence: `report-only verdict against floor ${record.floor.schema} [${record.floor.ids.join(',')}]; activation outcome ${outcome.outcome}; exit code unchanged`,
+        diagnostics: verdicts.flatMap(([label, verdict]) => describeVerdict(label, verdict)),
+        severity: 'warning',
+      },
+    });
+    status = sent.status;
+  } catch {
+    status = null;
+  }
+  record.alert.status = status;
+  if (status !== 0) {
+    // Name the receipt whenever one was published, even one not proven durable.
+    const where = receiptPublished ? 'the verdict is in receipt.json' : 'the verdict was not recorded';
+    stderr(`release invariants alert (${kind}) was not sent (status ${status ?? 'none'}); ${where}\n`);
+  }
+}
+
+/** The errno name of a failed write (e.g. EACCES), never its message, which carries the path. */
+function errnoName(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) ? code : 'UNKNOWN';
+}
+
 function outcomeExit(outcome: ApplyOutcome['outcome']): number {
   switch (outcome) {
     case 'activated': return RELEASE_ACTIVATE_EXIT.ok;
@@ -241,6 +421,29 @@ export function blockedRollbackMessage(context: ActivationContext, outcome: Appl
   ].join('\n');
 }
 
+/**
+ * The CLI's output callbacks, with one 'error' listener on each stream,
+ * attached before any write. A write can return and the stream then emit an
+ * asynchronous 'error' (EPIPE once the reader has gone); unhandled, that ends
+ * the process with a failure whatever exit code was fixed. The listener prints
+ * nothing (the stream may be broken) and exits nothing; later writes to that
+ * stream are skipped.
+ */
+export function guardedCliIo(
+  streams: { stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream } = {
+    stdout: process.stdout,
+    stderr: process.stderr,
+  },
+): { stdout: (text: string) => void; stderr: (text: string) => void } {
+  const broken = { stdout: false, stderr: false };
+  streams.stdout.on('error', () => { broken.stdout = true; });
+  streams.stderr.on('error', () => { broken.stderr = true; });
+  return {
+    stdout: (text) => { if (!broken.stdout) streams.stdout.write(text); },
+    stderr: (text) => { if (!broken.stderr) streams.stderr.write(text); },
+  };
+}
+
 export async function runReleaseActivateCli(
   argv: readonly string[],
   host: ActivationHost = createDefaultActivationHost(),
@@ -272,27 +475,83 @@ export async function runReleaseActivateCli(
     io.stdout(`${JSON.stringify({ ...plan, outcome: 'refused' }, null, 2)}\n`);
     return RELEASE_ACTIVATE_EXIT.refused;
   }
-  const outcome = await applyActivation(host, context);
-  const receipt = `${JSON.stringify({
+  const applied = await applyActivation(host, context);
+  // The outcome and the exit code are final here. Everything below is report
+  // work inside one exception boundary: it can delay or lose the receipt, the
+  // event and stdout, never change the exit code.
+  const exitCode = outcomeExit(applied.outcome);
+  try {
+    await reportActivation(host, context, args, plan, applied, io);
+  } catch {
+    // One fixed line and nothing read from the error: its message, and even its class name, can carry text.
+    try { io.stderr('release:activate: report-failed\n'); } catch { /* the exit code stands */ }
+  }
+  if (applied.outcome === 'rollback-blocked-migrated') {
+    try { io.stderr(blockedRollbackMessage(context, applied)); } catch { /* the exit code stands */ }
+  }
+  return exitCode;
+}
+
+/**
+ * #2481, the report phase, run only after the exit code is fixed: bind the
+ * observations (one bounded sample), look up the tool commit (bounded), write
+ * the receipt, send at most one event, rewrite the receipt, print stdout.
+ */
+async function reportActivation(
+  host: ActivationHost,
+  context: ActivationContext,
+  args: ActivationArgs,
+  plan: ReturnType<typeof planDocument>,
+  applied: ApplyOutcome,
+  io: { stdout: (text: string) => void; stderr: (text: string) => void },
+): Promise<void> {
+  const outcome = await resolveOutcomeBindings(host, context, applied);
+  const invariants = classifyForReceipt(await boundedToolCommit(host), outcome);
+  const receipt = (): string => `${JSON.stringify({
     mode: 'apply',
     instance: args.instance,
     release: plan.release,
     expectCurrent: plan.expectCurrent,
     ...outcome,
+    invariants,
   }, null, 2)}\n`;
-  if (outcome.backupPath !== null) {
+  // Atomic (temporary file, fsync, rename): a write that fails before the
+  // rename leaves the previous receipt whole (`none`). Publication and
+  // durability are reported apart: once the rename succeeded the new receipt
+  // is published, and the one directory fsync that follows decides between
+  // `durable` and published but not proven durable (`unproven`). The exit code
+  // reports the live activation, which a lost receipt does not change, so a
+  // failure is a fixed stderr code with the errno name only; the error text
+  // would carry the backup path.
+  const writeReceipt = (): 'none' | 'unproven' | 'durable' => {
+    if (outcome.backupPath === null) return 'none';
     try {
-      writeFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt, { mode: 0o600 });
+      // 'none': the writer skips its own directory fsync, so the single one below is the only one.
+      writeAtomicPrivateFileSync(path.join(outcome.backupPath, 'receipt.json'), receipt(), 'receipt', 'none');
     } catch (error) {
-      io.stderr(`could not write receipt.json: ${error instanceof Error ? error.message : String(error)}\n`);
+      io.stderr(`release:activate: receipt-write-failed ${errnoName(error)}\n`);
+      return 'none';
     }
+    try {
+      fsyncDirectoryRequired(outcome.backupPath);
+      return 'durable';
+    } catch (error) {
+      io.stderr(`release:activate: receipt-written-durability-unproven ${errnoName(error)}\n`);
+      return 'unproven';
+    }
+  };
+  // The receipt, with the verdict and the event still pending, is published
+  // before the helper runs; an interrupt during the event cannot lose it.
+  const receiptWrite = writeReceipt();
+  if (invariants.alert.status === 'pending') {
+    await sendInvariantsEvent(host, args.instance, outcome, invariants, receiptWrite !== 'none', io.stderr);
+    writeReceipt();
   }
-  io.stdout(receipt);
-  if (outcome.outcome === 'rollback-blocked-migrated') io.stderr(blockedRollbackMessage(context, outcome));
-  return outcomeExit(outcome.outcome);
+  // One JSON document on stdout, after the event (see the header).
+  io.stdout(receipt());
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
 if (import.meta.url === invokedPath) {
-  process.exitCode = await runReleaseActivateCli(process.argv.slice(2));
+  process.exitCode = await runReleaseActivateCli(process.argv.slice(2), createDefaultActivationHost(), guardedCliIo());
 }
