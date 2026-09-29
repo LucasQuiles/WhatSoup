@@ -460,10 +460,14 @@ describe('keyring fail-loud logging', () => {
       );
     });
 
+    // The search's own error is never recorded: its stdout can hold an unlocked
+    // secret printed before the failure. The warning names only the failure
+    // class, derived from code / signal / status.
     it.each([
-      ['timeout', TIMEOUT, 'ETIMEDOUT'],
-      ['exit 1 with stderr', DBUS_FAILURE, 'Cannot autolaunch D-Bus'],
-      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' }), 'Command failed'],
+      ['timeout', TIMEOUT, 'secret-tool search failed (timeout)'],
+      ['exit 1 with stderr', DBUS_FAILURE, 'secret-tool search failed (exit status 1)'],
+      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' }), 'secret-tool search failed (signal SIGTERM)'],
+      ['spawn ENOENT', () => secretToolError(null, '', { code: 'ENOENT' }), 'secret-tool search failed (spawn error ENOENT)'],
     ])('reports unreadable when the confirming search fails (%s)', (_label, makeErr, errText) => {
       stubSecretTool({
         'lookup whatsoup_health': () => { throw NO_MATCH(); },
@@ -476,9 +480,69 @@ describe('keyring fail-loud logging', () => {
       expect(calls).toEqual(['lookup whatsoup_health', 'search whatsoup_health']);
       expect(logWarn).toHaveBeenCalledOnce();
       expect(logWarn).toHaveBeenCalledWith(
-        expect.objectContaining({ service: 'whatsoup_health', err: expect.stringContaining(errText) }),
+        expect.objectContaining({ service: 'whatsoup_health', err: errText }),
         expect.stringContaining('keyring read failed'),
       );
+    });
+
+    // Every string reachable from a value: Error message/stack and own props,
+    // Buffer contents as text, nested arrays/objects. JSON.stringify would miss
+    // an Error's message and render a Buffer as bytes.
+    function reachableText(value: unknown, seen = new Set<unknown>()): string {
+      if (typeof value === 'string') return value;
+      if (value === null || typeof value !== 'object') return String(value);
+      if (seen.has(value)) return '';
+      seen.add(value);
+      if (Buffer.isBuffer(value)) return value.toString('utf8');
+      const parts: string[] = [];
+      if (value instanceof Error) parts.push(value.message, value.stack ?? '');
+      for (const key of Object.keys(value)) {
+        parts.push(reachableText((value as Record<string, unknown>)[key], seen));
+      }
+      return parts.join('\n');
+    }
+    const CANARY = 'CANARY-7f3a9c-unlocked-secret';
+
+    it.each([
+      ['ENOBUFS after printing a match', () => Object.assign(
+        new Error(`spawnSync secret-tool ENOBUFS\nsecret = ${CANARY}`),
+        {
+          code: 'ENOBUFS', status: null, signal: 'SIGKILL',
+          stdout: Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`),
+          stderr: Buffer.from(`attribute.service = whatsoup_health ${CANARY}\n`),
+        },
+      )],
+      ['timeout after printing a match', () => Object.assign(
+        secretToolError(null, `attribute.service = whatsoup_health ${CANARY}\n`, { signal: 'SIGKILL', code: 'ETIMEDOUT' }),
+        { stdout: Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`) },
+      )],
+    ])('never lets search output reach a log, warning or result (%s)', (_label, makeErr) => {
+      stubSecretTool({
+        'lookup whatsoup_health': () => { throw NO_MATCH(); },
+        'search whatsoup_health': () => { throw makeErr(); },
+      });
+
+      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+      const plain = lookupCredential('whatsoup_health', { skipEnv: true });
+
+      expect(result.reason).toBe('unreadable');
+      expect(logWarn).toHaveBeenCalledOnce();
+      expect(reachableText([result, plain, logWarn.mock.calls, logError.mock.calls])).not.toContain(CANARY);
+    });
+
+    it('never lets a present match\'s printed secret reach a log, warning or result', () => {
+      stubSecretTool({
+        'lookup whatsoup_health': () => { throw NO_MATCH(); },
+        'search whatsoup_health': () => Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`),
+      });
+
+      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+      const plain = lookupCredential('whatsoup_health', { skipEnv: true });
+
+      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(plain).toBeNull();
+      expect(logWarn).toHaveBeenCalledOnce();
+      expect(reachableText([result, plain, logWarn.mock.calls, logError.mock.calls])).not.toContain(CANARY);
     });
 
     it('reports unreadable with one warning for exit 1 with stderr text, without searching', () => {

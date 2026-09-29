@@ -65,6 +65,37 @@ describe('deleteCredential classification — macos-keychain (#2292 L8)', () => 
     expect(deleteCredential('minimax').reason).toBe('absent');
   });
 
+  // An interrupted delete may already have printed the not-found text; the
+  // signal makes it a failure, not a clean errSecItemNotFound exit.
+  it('reports BACKEND_FAILED, not absent, when a signal-killed delete printed not-found text', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw Object.assign(new Error('Command failed: security delete-generic-password'), {
+        status: null, signal: 'SIGTERM',
+        stderr: 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.',
+      });
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
+  it('reports BACKEND_FAILED, not absent, when the delete times out', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync security ETIMEDOUT'), {
+        code: 'ETIMEDOUT', status: null, signal: 'SIGKILL',
+        stderr: 'The specified item could not be found in the keychain.',
+      });
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
+  // "could not be found" alone is not errSecItemNotFound: exit 37 reports a
+  // missing DEFAULT keychain, which is a failure to consult the store.
+  it('reports BACKEND_FAILED, not absent, when no default keychain could be found (exit 37)', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw execFailure(37, 'security: SecKeychainCopyDefault: A default keychain could not be found.');
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
   // The case the issue is actually about.
   it('reports BACKEND_FAILED, not absent, when the keychain is LOCKED (status 36)', () => {
     execFileSyncMock.mockImplementation(() => {
@@ -211,6 +242,35 @@ describe('deleteCredential classification — secret-tool', () => {
 
     expect(out.reason).toBe('backend_failed');
     expect(out.errorCode).toBe('KEYRING_WRITE_FAILED');
+  });
+
+  // The search's stdout can hold an unlocked secret printed before a failure,
+  // or listed for a match; nothing from it may reach the delete result.
+  const CANARY = 'CANARY-5d21e8-unlocked-secret';
+  it.each([
+    ['search ENOBUFS after printing a match', () => {
+      throw Object.assign(new Error(`spawnSync secret-tool ENOBUFS\nsecret = ${CANARY}`), {
+        code: 'ENOBUFS', status: null, signal: 'SIGKILL',
+        stdout: Buffer.from(`[1]\nsecret = ${CANARY}\n`), stderr: Buffer.from(`attribute.service = ${CANARY}\n`),
+      });
+    }, 'KEYRING_WRITE_FAILED'],
+    ['search timeout after printing a match', () => {
+      throw Object.assign(new Error('spawnSync secret-tool ETIMEDOUT'), {
+        code: 'ETIMEDOUT', status: null, signal: 'SIGKILL',
+        stdout: Buffer.from(`[1]\nsecret = ${CANARY}\n`), stderr: Buffer.from(''),
+      });
+    }, 'KEYRING_WRITE_FAILED'],
+    ['present match printing its secret', () => Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`), 'KEYRING_LOCKED'],
+  ])('never lets search output reach the delete result (%s)', (_label, search, errorCode) => {
+    stubSecretTool({
+      'clear service minimax': () => { throw SILENT_EXIT_1(); },
+      'search service minimax': search,
+    });
+
+    const out = deleteCredential('minimax');
+
+    expect(out).toEqual({ deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode });
+    expect(JSON.stringify(out)).not.toContain(CANARY);
   });
 
   it('reports BACKEND_FAILED without searching when clear fails with a diagnostic', () => {
