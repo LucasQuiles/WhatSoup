@@ -157,8 +157,12 @@ describe('lookupCredentialTyped', () => {
 
   describe('known service — value not found (not_found)', () => {
     it('returns null with reason not_found when no credential is available', () => {
-      // No env var set, no keyring entry (execFileSync returns empty → no value),
-      // no file store entry. secret-tool lookup throws (item not found).
+      // No env var set, no file store entry. The first execFileSync call still
+      // returns beforeEach's empty value; every later call throws a status-less
+      // Error. That throw is NOT a real absence shape — keyring-warn.test.ts
+      // pins those per backend (macOS exit 44; secret-tool silent exit 1 plus
+      // an empty non-unlocking search) — so any backend call it reaches counts
+      // as a read failure.
       mockedExecFileSync.mockImplementation(() => {
         throw new Error('item not found');
       });
@@ -186,7 +190,8 @@ describe('lookupCredentialTyped', () => {
   describe('options pass-through', () => {
     it('passes skipEnv option through to lookupCredential', () => {
       // With skipEnv: true, even if the env var is set, the lookup should
-      // go to the keyring (which throws → not found).
+      // go to the keyring. As above, the status-less throw is a stand-in, not
+      // a real absence shape; only the empty first call is a miss.
       process.env.OPENAI_API_KEY = 'sk-test';
       mockedExecFileSync.mockImplementation(() => {
         throw new Error('item not found');

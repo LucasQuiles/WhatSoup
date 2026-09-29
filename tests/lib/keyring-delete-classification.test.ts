@@ -128,3 +128,106 @@ describe('deleteCredential classification — macos-keychain (#2292 L8)', () => 
     expect(out.reason).toBe('backend_failed');
   });
 });
+
+// libsecret 0.21.7 `secret-tool clear` exits 1 with empty stderr whenever it
+// removed nothing, and it only removes UNLOCKED matches — so a silent exit 1 is
+// either no match or a locked one. A non-unlocking `secret-tool search` for the
+// same attributes decides; any other outcome stays a backend failure.
+describe('deleteCredential classification — secret-tool', () => {
+  let dir: string;
+  let calls: string[];
+  let unexpected: string[];
+
+  /** A non-zero exit as execFileSync throws it: status, signal, Buffer streams. */
+  function exitFailure(status: number, stderr: string): Error {
+    return Object.assign(new Error(`Command failed: secret-tool${stderr ? `\n${stderr}` : ''}`), {
+      status, signal: null, stdout: Buffer.from(''), stderr: Buffer.from(stderr),
+    });
+  }
+  const SILENT_EXIT_1 = () => exitFailure(1, '');
+
+  function stubSecretTool(outcomes: Record<string, () => Buffer>): void {
+    execFileSyncMock.mockImplementation((_file: string, args: string[]) => {
+      if (args[0] === '--help') return Buffer.from('');
+      const key = args.join(' ');
+      calls.push(key);
+      const outcome = outcomes[key];
+      if (!outcome) {
+        unexpected.push(key);
+        throw new Error(`unexpected secret-tool call: ${key}`);
+      }
+      return outcome();
+    });
+  }
+
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform: 'linux' } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+    calls = [];
+    unexpected = [];
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-del-class-st-'));
+    _setFileStoreDirForTests(dir);
+  });
+  afterEach(() => {
+    _setFileStoreDirForTests(null);
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    expect(unexpected).toEqual([]);
+  });
+
+  it('reports ABSENT when clear exits 1 silently and the search lists nothing', () => {
+    stubSecretTool({
+      'clear service minimax': () => { throw SILENT_EXIT_1(); },
+      'search service minimax': () => Buffer.from(''),
+    });
+
+    const out = deleteCredential('minimax');
+
+    expect(out).toEqual({ deleted: false, backend: 'secret-tool', reason: 'absent' });
+    expect(calls).toEqual(['clear service minimax', 'search service minimax']);
+  });
+
+  it('reports BACKEND_FAILED with KEYRING_LOCKED when the search lists a locked match', () => {
+    stubSecretTool({
+      'clear service minimax': () => { throw SILENT_EXIT_1(); },
+      'search service minimax': () => Buffer.from('[1]\nlabel = whatsoup minimax\n'),
+    });
+
+    const out = deleteCredential('minimax');
+
+    expect(out).toEqual({
+      deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode: 'KEYRING_LOCKED',
+    });
+  });
+
+  it('reports BACKEND_FAILED when the confirming search itself fails', () => {
+    stubSecretTool({
+      'clear service minimax': () => { throw SILENT_EXIT_1(); },
+      'search service minimax': () => { throw exitFailure(1, 'secret-tool: The name org.freedesktop.secrets was not provided\n'); },
+    });
+
+    const out = deleteCredential('minimax');
+
+    expect(out.reason).toBe('backend_failed');
+    expect(out.errorCode).toBe('KEYRING_WRITE_FAILED');
+  });
+
+  it('reports BACKEND_FAILED without searching when clear fails with a diagnostic', () => {
+    stubSecretTool({
+      'clear service minimax': () => { throw exitFailure(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n'); },
+    });
+
+    const out = deleteCredential('minimax');
+
+    expect(out.reason).toBe('backend_failed');
+    expect(calls).toEqual(['clear service minimax']);
+  });
+
+  it('reports DELETED when clear succeeds, without searching', () => {
+    stubSecretTool({ 'clear service minimax': () => Buffer.from('') });
+
+    expect(deleteCredential('minimax')).toEqual({ deleted: true, backend: 'secret-tool', reason: 'deleted' });
+    expect(calls).toEqual(['clear service minimax']);
+  });
+});
