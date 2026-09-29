@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { configRoot } from '../../../src/fleet/paths.ts';
+import { SIGNAL } from '../../../src/lib/signals.ts';
 import { isRecord } from '../../../src/lib/type-guards.ts';
 import { emitReleaseAlert, type ReleaseAlertEmitPayload } from '../live-release-alert.ts';
 import { type HealthInvariantsReading, readHealthInvariants } from './invariants.ts';
@@ -95,7 +96,7 @@ function defaultExec(
   args: readonly string[],
   options: ExecOptions = {},
 ): Promise<ExecResult> {
-  const bound = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: 'SIGKILL' as const };
+  const bound = options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs, killSignal: SIGNAL.KILL };
   const env = options.env === undefined
     ? {}
     : { env: { ...(process.env['PATH'] === undefined ? {} : { PATH: process.env['PATH'] }), ...options.env } };
@@ -106,7 +107,7 @@ function defaultExec(
         : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 127;
       // execFile reports its own timeout as a kill with the configured signal.
       const timedOut = error !== null && options.timeoutMs !== undefined
-        && (error as { killed?: unknown }).killed === true && (error as { signal?: unknown }).signal === 'SIGKILL';
+        && (error as { killed?: unknown }).killed === true && (error as { signal?: unknown }).signal === SIGNAL.KILL;
       resolve({ code, stdout: String(stdout), stderr: String(stderr), ...(timedOut ? { timedOut: true as const } : {}) });
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
@@ -155,7 +156,7 @@ function defaultFetchHealth(port: number, token: string): Promise<HealthResponse
 
 /** The tool-commit git child: its own timeout, killed outright when it expires. */
 const toolCommitExec: ToolCommitExec = (file, args, { env, timeoutMs }) => new Promise((resolve) => {
-  execFile(file, [...args], { env, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' },
+  execFile(file, [...args], { env, timeout: timeoutMs, killSignal: SIGNAL.KILL, maxBuffer: EXEC_MAX_BUFFER, encoding: 'utf8' },
     (error, stdout) => {
       const code = error === null
         ? 0
