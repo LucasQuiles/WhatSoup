@@ -253,6 +253,11 @@ rendered from `deploy/com.whatsoup.*.plist` templates:
 Both plists pin `RunAtLoad=false`, so installing or re-loading them never fires
 the job immediately. Logs land in `~/Library/Logs/whatsoup/`.
 
+What the harness-maintenance job changes, its exit codes, the side-effect
+boundary of `--check`, and the agent CLI update and self-update observation
+events are described in
+[docs/runbooks/host-maintenance.md](runbooks/host-maintenance.md).
+
 **Install / update** — `deploy/setup.sh` step 4 renders both plists into
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
 up first; an already-loaded label or a cron twin triggers a duplicate-timer
