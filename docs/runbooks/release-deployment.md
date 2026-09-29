@@ -165,7 +165,12 @@ npm --silent run release:activate -- \
      migration level (`schemaMigration.before` in the receipt), records
      `symlink.before`, and copies and stages every plist into a mode-0700
      `<backup-dir>/activation-<commit12>-<utc>/`;
-  2. switches the wrapper symlink and installs the staged plists;
+  2. switches the wrapper symlink and installs the staged plists. Each
+     installed plist keeps its current permission bits, capped at `0644`
+     because launchd refuses group- or world-writable job definitions. An
+     owner-only (`0600`) instance plist, for example one carrying credentials
+     in `EnvironmentVariables`, stays `0600` through the switch and through
+     the automatic rollback;
   3. reloads each label with the reload sequence below;
   4. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
