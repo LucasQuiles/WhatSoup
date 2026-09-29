@@ -121,11 +121,11 @@ const keyringExecOptions = {
 };
 // Credential reads return the value on stdout; bound it to the same 4 KiB the
 // pinned-Node keychain helper enforces (deploy/lib/read-keychain-secret.mjs).
-// Reads also set an explicit piped stdio: without a `stdio` option execFileSync
-// copies the child's stderr to ours before throwing, and absence classification
-// needs that stderr on the thrown error, not echoed. Detection, writes, and
-// deletes keep the base options — backend detection's `secret-tool --help`
-// banner can legitimately exceed 4 KiB, and writes feed the secret on stdin.
+// Reads also set an explicit piped stdio. Node attaches the captured stderr to
+// the thrown error either way; without a `stdio` option execFileSync also copies
+// it to our own stderr, so the explicit option only stops that echo. Detection,
+// writes, and deletes keep the base options — backend detection's `secret-tool
+// --help` banner can legitimately exceed 4 KiB, and writes feed the secret on stdin.
 const keyringReadExecOptions = {
   ...keyringExecOptions,
   maxBuffer: FILE_STORE_MAX_BYTES,
@@ -213,13 +213,13 @@ function isSecretToolUsageHelpExit(err: unknown): boolean {
 }
 
 /**
- * Read-path absence for `secret-tool lookup`. libsecret's tool exits 1 with no
- * output when nothing matches, but 1 is also its generic failure status, so the
- * status alone cannot decide: only a clean exit 1 — no signal, no timeout, empty
- * stderr — is absence. Any stderr text, any other status, a signal, a timeout,
- * or a spawn error (ENOENT/EACCES) is a real read failure.
+ * A silent `secret-tool` exit: status 1, no signal, no timeout, empty stderr.
+ * The tool prints every service error to stderr, so anything else — any stderr
+ * text, another status, a signal, a timeout, or a spawn error (ENOENT/EACCES) —
+ * is a real failure. A silent exit 1 is NOT absence by itself: see
+ * {@link secretToolItemPresence}.
  */
-function isSecretToolLookupNotFound(err: unknown): boolean {
+function isSecretToolSilentExit(err: unknown): boolean {
   const e = err as {
     status?: number | null; signal?: string | null; code?: string; stderr?: Buffer | string;
   } | null;
@@ -227,6 +227,61 @@ function isSecretToolLookupNotFound(err: unknown): boolean {
   if (e.signal || e.code === 'ETIMEDOUT') return false;
   const stderr = Buffer.isBuffer(e.stderr) ? e.stderr.toString('utf8') : (e.stderr ?? '');
   return stderr.trim() === '';
+}
+
+type SecretToolItemPresence =
+  | { state: 'absent' }
+  | { state: 'present' }
+  | { state: 'failed'; err: unknown };
+
+/**
+ * Decide what a silent exit 1 from `secret-tool lookup` or `clear` meant.
+ * libsecret 0.21.7 gives that same result in three cases:
+ *  1. no item matches the attributes;
+ *  2. `lookup` only: a match sits in a locked collection and its unlock was
+ *     dismissed or failed without an error (secret-methods.c
+ *     `on_lookup_unlocked` returns no value and no error);
+ *  3. `clear` only: no UNLOCKED item matched — clear never removes a locked
+ *     match (secret-methods.c `on_delete_searched` deletes only unlocked
+ *     paths; secret-tool.c clear action returns 1 without printing when
+ *     nothing was removed).
+ *
+ * `secret-tool search` without `--unlock` never asks the service to unlock,
+ * and returns locked and unlocked matches alike; every listed match prints item
+ * lines on stdout, and zero matches print nothing and exit 0 (secret-tool.c
+ * search action; secret-methods.c `secret_service_search`). Hence, fail-safe:
+ *  - `absent` only when that search exits 0 with empty stdout;
+ *  - `present` when it lists anything — the item exists but was not readable
+ *    or removable;
+ *  - `failed` on any throw: non-zero exit, signal, timeout, spawn error, or an
+ *    output overflow.
+ *
+ * `--all` is deliberately omitted: one listed match is enough, and the tool
+ * prints the secret of every unlocked match it lists. The output is tested for
+ * emptiness only — never logged, stored, or returned.
+ */
+function secretToolItemPresence(attributes: string[]): SecretToolItemPresence {
+  try {
+    const raw = execFileSync('secret-tool', ['search', ...attributes], keyringReadExecOptions);
+    const out = typeof raw === 'string' ? raw : raw.toString('utf-8');
+    return out.trim() === '' ? { state: 'absent' } : { state: 'present' };
+  } catch (err) {
+    return { state: 'failed', err };
+  }
+}
+
+/**
+ * The failure to record for a thrown `secret-tool lookup`, or null when it was
+ * a proven miss (a silent exit 1 whose confirming search lists nothing).
+ */
+function secretToolLookupFailure(err: unknown, attributes: string[]): { err: unknown } | null {
+  if (!isSecretToolSilentExit(err)) return { err };
+  const presence = secretToolItemPresence(attributes);
+  if (presence.state === 'absent') return null;
+  if (presence.state === 'failed') return { err: presence.err };
+  return {
+    err: new Error('secret-tool lookup returned no value, but a matching item exists (locked or unreadable)'),
+  };
 }
 
 /**
@@ -309,10 +364,10 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
     service,
     ...(options.skipMigrationFallbacks === true ? [] : (SERVICE_MIGRATION_FALLBACKS[service] ?? [])),
   ];
-  const secretToolArgs = (candidate: string): string[] => {
-    const args = ['lookup', 'service', candidate];
-    if (options.user !== undefined) args.push('user', options.user);
-    return args;
+  const secretToolAttributes = (candidate: string): string[] => {
+    const attributes = ['service', candidate];
+    if (options.user !== undefined) attributes.push('user', options.user);
+    return attributes;
   };
 
   if (backend === 'secret-tool') {
@@ -320,15 +375,17 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
       try {
         const raw = execFileSync(
           'secret-tool',
-          secretToolArgs(candidate),
+          ['lookup', ...secretToolAttributes(candidate)],
           keyringReadExecOptions,
         );
         const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
         if (val) return val;
       } catch (err) {
-        // A no-match exit on any candidate is a silent miss; every other failure is recorded.
-        if (!isSecretToolLookupNotFound(err)) {
-          warnKeyringReadFailure(service, backend, err);
+        // A miss on any candidate is silent only once a non-unlocking search
+        // proves it; every other failure is recorded against the requested service.
+        const failure = secretToolLookupFailure(err, secretToolAttributes(candidate));
+        if (failure !== null) {
+          warnKeyringReadFailure(service, backend, failure.err);
         }
       }
     }
@@ -771,16 +828,17 @@ function isDarwinItemNotFound(err: unknown): boolean {
 
 /**
  * Read-path absence for `security find-generic-password`. Stricter than
- * {@link isDarwinItemNotFound}: a numeric exit status is authoritative, so only
- * 44 is absence — other statuses whose stderr also says "could not be found"
- * (e.g. no default keychain) are real failures. Without a status, only the
- * errSecItemNotFound wording ("specified item could not be found") counts.
+ * {@link isDarwinItemNotFound}: only a clean exit with status 44
+ * (errSecItemNotFound) is absence — other statuses whose stderr also says
+ * "could not be found" (e.g. no default keychain) are real failures. There is
+ * no text fallback: execFileSync throws a null status only for a signal kill or
+ * a spawn/timeout error (which sets `code`), and neither is a clean miss even
+ * when the interrupted child already printed the not-found diagnostic.
  */
 function isDarwinReadItemNotFound(err: unknown): boolean {
-  const status = (err as { status?: number | null } | null)?.status;
-  if (typeof status === 'number') return status === 44;
-  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
-  return /specified item could not be found/i.test(stderr);
+  const e = err as { status?: number | null; signal?: string | null; code?: string } | null;
+  if (e?.signal || e?.code) return false;
+  return e?.status === 44;
 }
 
 /**
@@ -848,8 +906,17 @@ export function deleteCredential(
       });
       return { deleted: true, backend, reason: 'deleted' };
     } catch (err) {
-      // `secret-tool clear` exits 0 when nothing matched, so a throw here is a
-      // genuine backend failure, not absence.
+      // `secret-tool clear` exits 1 silently whenever it removed nothing, and it
+      // never removes a locked match, so a silent exit 1 is either absence or a
+      // locked item: a non-unlocking search decides. Anything else — including
+      // a failed search — is a genuine backend failure.
+      if (isSecretToolSilentExit(err)) {
+        const presence = secretToolItemPresence(['service', service]);
+        if (presence.state === 'absent') return { deleted: false, backend, reason: 'absent' };
+        if (presence.state === 'present') {
+          return { deleted: false, backend, reason: 'backend_failed', errorCode: 'KEYRING_LOCKED' };
+        }
+      }
       return {
         deleted: false,
         backend,

@@ -88,10 +88,16 @@ and remains Keychain-first.
 
 ## Warning Control
 
-The resolver records services whose primary Keychain read failure has already
-been logged. It emits at most one `keyring read failed` warning per service per
-process while still performing subsequent lookups and fallbacks. Backend-probe
-downgrade alarms retain their existing behavior.
+The resolver records services whose platform keyring read failure has already
+been logged. A failure on any candidate — the primary service or a migration
+fallback — counts, and is recorded against the requested service. A proven
+absent item is not a failure: on macOS only a clean exit 44
+(errSecItemNotFound); with `secret-tool`, only a silent exit 1 that a
+non-unlocking `secret-tool search` confirms by listing nothing. The resolver
+emits at most one `keyring read failed` warning per service per process while
+still performing subsequent lookups and fallbacks, and every lookup still
+reports a recorded failure as `unreadable`. Backend-probe downgrade alarms
+retain their existing behavior.
 
 This is noise control only: it does not suppress service health alarms,
 restart alarms, or credential lookup attempts.
