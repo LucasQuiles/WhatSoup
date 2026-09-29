@@ -160,9 +160,9 @@ describe('lookupCredentialTyped', () => {
       // No env var set, no file store entry. The first execFileSync call still
       // returns beforeEach's empty value; every later call throws a status-less
       // Error. That throw is NOT a real absence shape — keyring-warn.test.ts
-      // pins those per backend (macOS exit 44; secret-tool silent exit 1 plus
-      // an empty non-unlocking search) — so any backend call it reaches counts
-      // as a read failure.
+      // pins the per-backend rules (macOS: only a clean exit 44 is absence;
+      // secret-tool: absence is not classified, a primary throw is a failure)
+      // — so any primary backend call it reaches counts as a read failure.
       mockedExecFileSync.mockImplementation(() => {
         throw new Error('item not found');
       });

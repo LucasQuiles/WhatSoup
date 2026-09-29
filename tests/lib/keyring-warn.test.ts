@@ -1,9 +1,10 @@
 /**
  * Fail-loud logging for keyring.ts:
  *  - warns once when backend probe fails and caches 'env-only'
- *  - warns when a keyring read fails and falls back to env; a proven absent
- *    item (macOS exit 44, or a secret-tool miss that a non-unlocking search
- *    confirms) is a silent miss, not a failure
+ *  - warns when a keyring read fails and falls back to env; on macOS a clean
+ *    exit 44 (errSecItemNotFound) on any candidate is a silent miss, not a
+ *    failure; secret-tool absence is not classified (any primary throw is a
+ *    failure) and is tracked separately
  *  - errors (not just warns) when the probe ERRORS vs is genuinely absent
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -326,13 +327,12 @@ describe('keyring fail-loud logging', () => {
     });
   });
 
-  // `secret-tool lookup` exits 1 with empty stderr both when nothing matches
-  // and when a match stays locked (a dismissed unlock ends without an error),
-  // and 1 is also its generic failure status. A silent exit 1 is a miss only
-  // once a non-unlocking `secret-tool search` for the same attributes lists
-  // nothing; every other outcome is a read failure, on the primary AND on any
-  // migration candidate.
-  describe('secret-tool absent item vs read failure', () => {
+  // secret-tool gives no reliable way to tell a genuine miss from a failure:
+  // `lookup` exits 1 with no output both when nothing matches and when a match
+  // stayed locked. So this backend keeps the established classification — any
+  // throw from the PRIMARY candidate is a recorded failure, and a migration
+  // candidate's throw is not recorded. Linux absence is tracked separately.
+  describe('secret-tool read classification', () => {
     let storeDir: string;
     let openCodeDir: string;
     let calls: string[];
@@ -362,21 +362,14 @@ describe('keyring fail-loud logging', () => {
       if (extra.code) err.code = extra.code;
       return err;
     }
-    const NO_MATCH = () => secretToolError(1, '');
+    const SILENT_EXIT_1 = () => secretToolError(1, '');
     const DBUS_FAILURE = () => secretToolError(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n');
     const TIMEOUT = () => secretToolError(null, '', { signal: 'SIGKILL', code: 'ETIMEDOUT' });
-    // `secret-tool search` output: nothing at all for zero matches, and item
-    // lines on stdout for every match, even a locked one whose secret it
-    // cannot read (libsecret 0.21.7 tool/secret-tool.c on_retrieve_secret).
-    const NO_ITEMS = () => Buffer.from('');
-    const LOCKED_ITEM = () => Buffer.from(
-      '[1]\nlabel = whatsoup\ncreated = 2026-01-01 00:00:00\nmodified = 2026-01-01 00:00:00\n',
-    );
 
     // The probe succeeds; every other call is keyed "<verb> <service value>"
-    // and recorded in order. A call with no outcome is recorded as unexpected
-    // and asserted empty after each test, so it cannot pass as a credential
-    // failure through the production catch.
+    // and recorded in order. A call with no outcome (for example a `search`)
+    // is recorded as unexpected and asserted empty after each test, so it
+    // cannot pass as a credential failure through the production catch.
     function stubSecretTool(outcomes: Record<string, () => Buffer>): void {
       mockedExecFileSync.mockImplementation((_file, args) => {
         const argv = args as string[];
@@ -410,143 +403,15 @@ describe('keyring fail-loud logging', () => {
       expect(unexpected).toEqual([]);
     });
 
-    it('stays a silent not_found on repeat when every silent exit 1 is confirmed by an empty search', () => {
-      stubSecretTool({
-        'lookup google': () => { throw NO_MATCH(); },
-        'search google': NO_ITEMS,
-        'lookup gemini': () => { throw NO_MATCH(); },
-        'search gemini': NO_ITEMS,
-      });
-
-      const first = lookupCredentialTyped('google', { skipEnv: true });
-      const second = lookupCredentialTyped('google', { skipEnv: true });
-
-      expect(first).toEqual({ value: null, reason: 'not_found', service: 'google' });
-      expect(second).toEqual({ value: null, reason: 'not_found', service: 'google' });
-      expect(logWarn).not.toHaveBeenCalled();
-      const perLookup = ['lookup google', 'search google', 'lookup gemini', 'search gemini'];
-      expect(calls).toEqual([...perLookup, ...perLookup]);
-    });
-
-    it('searches with the same attributes as the lookup, without --unlock, on the read options', () => {
-      stubSecretTool({ 'lookup whatsoup_health': () => { throw NO_MATCH(); }, 'search whatsoup_health': NO_ITEMS });
-
-      const result = lookupCredentialTyped('whatsoup_health', { user: 'bot', skipEnv: true });
-
-      expect(result).toEqual({ value: null, reason: 'not_found', service: 'whatsoup_health' });
-      expect(logWarn).not.toHaveBeenCalled();
-      expect(calls).toEqual(['lookup whatsoup_health', 'search whatsoup_health']);
-      expect(mockedExecFileSync).toHaveBeenCalledWith(
-        'secret-tool',
-        ['search', 'service', 'whatsoup_health', 'user', 'bot'],
-        expect.objectContaining({ timeout: 3_000, killSignal: 'SIGKILL', stdio: 'pipe' }),
-      );
-    });
-
-    it('reports unreadable when a silent exit 1 hides a locked match (dismissed unlock)', () => {
-      stubSecretTool({ 'lookup whatsoup_health': () => { throw NO_MATCH(); }, 'search whatsoup_health': LOCKED_ITEM });
-
-      const first = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-      const second = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-
-      expect(first).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
-      expect(second).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
-      expect(logWarn).toHaveBeenCalledOnce();
-      expect(logWarn).toHaveBeenCalledWith(
-        expect.objectContaining({
-          service: 'whatsoup_health', backend: 'secret-tool', err: expect.stringContaining('matching item'),
-        }),
-        expect.stringContaining('keyring read failed'),
-      );
-    });
-
-    // The search's own error is never recorded: its stdout can hold an unlocked
-    // secret printed before the failure. The warning names only the failure
-    // class, derived from code / signal / status.
     it.each([
-      ['timeout', TIMEOUT, 'secret-tool search failed (timeout)'],
-      ['exit 1 with stderr', DBUS_FAILURE, 'secret-tool search failed (exit status 1)'],
-      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' }), 'secret-tool search failed (signal SIGTERM)'],
-      ['spawn ENOENT', () => secretToolError(null, '', { code: 'ENOENT' }), 'secret-tool search failed (spawn error ENOENT)'],
-    ])('reports unreadable when the confirming search fails (%s)', (_label, makeErr, errText) => {
-      stubSecretTool({
-        'lookup whatsoup_health': () => { throw NO_MATCH(); },
-        'search whatsoup_health': () => { throw makeErr(); },
-      });
-
-      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-
-      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
-      expect(calls).toEqual(['lookup whatsoup_health', 'search whatsoup_health']);
-      expect(logWarn).toHaveBeenCalledOnce();
-      expect(logWarn).toHaveBeenCalledWith(
-        expect.objectContaining({ service: 'whatsoup_health', err: errText }),
-        expect.stringContaining('keyring read failed'),
-      );
-    });
-
-    // Every string reachable from a value: Error message/stack and own props,
-    // Buffer contents as text, nested arrays/objects. JSON.stringify would miss
-    // an Error's message and render a Buffer as bytes.
-    function reachableText(value: unknown, seen = new Set<unknown>()): string {
-      if (typeof value === 'string') return value;
-      if (value === null || typeof value !== 'object') return String(value);
-      if (seen.has(value)) return '';
-      seen.add(value);
-      if (Buffer.isBuffer(value)) return value.toString('utf8');
-      const parts: string[] = [];
-      if (value instanceof Error) parts.push(value.message, value.stack ?? '');
-      for (const key of Object.keys(value)) {
-        parts.push(reachableText((value as Record<string, unknown>)[key], seen));
-      }
-      return parts.join('\n');
-    }
-    const CANARY = 'CANARY-7f3a9c-unlocked-secret';
-
-    it.each([
-      ['ENOBUFS after printing a match', () => Object.assign(
-        new Error(`spawnSync secret-tool ENOBUFS\nsecret = ${CANARY}`),
-        {
-          code: 'ENOBUFS', status: null, signal: 'SIGKILL',
-          stdout: Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`),
-          stderr: Buffer.from(`attribute.service = whatsoup_health ${CANARY}\n`),
-        },
-      )],
-      ['timeout after printing a match', () => Object.assign(
-        secretToolError(null, `attribute.service = whatsoup_health ${CANARY}\n`, { signal: 'SIGKILL', code: 'ETIMEDOUT' }),
-        { stdout: Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`) },
-      )],
-    ])('never lets search output reach a log, warning or result (%s)', (_label, makeErr) => {
-      stubSecretTool({
-        'lookup whatsoup_health': () => { throw NO_MATCH(); },
-        'search whatsoup_health': () => { throw makeErr(); },
-      });
-
-      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-      const plain = lookupCredential('whatsoup_health', { skipEnv: true });
-
-      expect(result.reason).toBe('unreadable');
-      expect(logWarn).toHaveBeenCalledOnce();
-      expect(reachableText([result, plain, logWarn.mock.calls, logError.mock.calls])).not.toContain(CANARY);
-    });
-
-    it('never lets a present match\'s printed secret reach a log, warning or result', () => {
-      stubSecretTool({
-        'lookup whatsoup_health': () => { throw NO_MATCH(); },
-        'search whatsoup_health': () => Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`),
-      });
-
-      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-      const plain = lookupCredential('whatsoup_health', { skipEnv: true });
-
-      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
-      expect(plain).toBeNull();
-      expect(logWarn).toHaveBeenCalledOnce();
-      expect(reachableText([result, plain, logWarn.mock.calls, logError.mock.calls])).not.toContain(CANARY);
-    });
-
-    it('reports unreadable with one warning for exit 1 with stderr text, without searching', () => {
-      stubSecretTool({ 'lookup whatsoup_health': () => { throw DBUS_FAILURE(); } });
+      ['silent exit 1', SILENT_EXIT_1],
+      ['exit 1 with stderr', DBUS_FAILURE],
+      ['timeout', TIMEOUT],
+      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' })],
+      ['spawn ENOENT', () => secretToolError(null, '', { code: 'ENOENT' })],
+      ['exit 2 with empty stderr', () => secretToolError(2, '')],
+    ])('records any primary throw as unreadable with one warning, without searching (%s)', (_label, makeErr) => {
+      stubSecretTool({ 'lookup whatsoup_health': () => { throw makeErr(); } });
 
       const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
 
@@ -559,28 +424,34 @@ describe('keyring fail-loud logging', () => {
       );
     });
 
-    it('reports unreadable when the primary is absent and the migration candidate times out', () => {
-      stubSecretTool({
-        'lookup google': () => { throw NO_MATCH(); },
-        'search google': NO_ITEMS,
-        'lookup gemini': () => { throw TIMEOUT(); },
-      });
+    it('keeps reporting unreadable on a repeated primary failure after the warning is deduped', () => {
+      stubSecretTool({ 'lookup whatsoup_health': () => { throw SILENT_EXIT_1(); } });
+
+      const first = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+      const second = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
+
+      expect(first).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(second).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
+      expect(calls).toEqual(['lookup whatsoup_health', 'lookup whatsoup_health']);
+      expect(logWarn).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['silent exit 1', SILENT_EXIT_1],
+      ['timeout', TIMEOUT],
+      ['exit 1 with stderr', DBUS_FAILURE],
+    ])('does not record a migration candidate throw after an empty primary (%s)', (_label, makeErr) => {
+      stubSecretTool({ 'lookup google': () => Buffer.from('  \n'), 'lookup gemini': () => { throw makeErr(); } });
 
       const result = lookupCredentialTyped('google', { skipEnv: true });
 
-      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'google' });
-      // The migration call happened, and the timeout is what was recorded —
-      // against the requested service, not the migration candidate.
-      expect(calls).toEqual(['lookup google', 'search google', 'lookup gemini']);
-      expect(logWarn).toHaveBeenCalledOnce();
-      expect(logWarn).toHaveBeenCalledWith(
-        expect.objectContaining({ service: 'google', backend: 'secret-tool', err: expect.stringContaining('ETIMEDOUT') }),
-        expect.stringContaining('keyring read failed'),
-      );
+      expect(result).toEqual({ value: null, reason: 'not_found', service: 'google' });
+      expect(calls).toEqual(['lookup google', 'lookup gemini']);
+      expect(logWarn).not.toHaveBeenCalled();
     });
 
-    it('reports unreadable when the primary is whitespace and the migration candidate fails', () => {
-      stubSecretTool({ 'lookup google': () => Buffer.from('  \n'), 'lookup gemini': () => { throw DBUS_FAILURE(); } });
+    it('records the primary failure, not the migration candidate\'s, when both throw', () => {
+      stubSecretTool({ 'lookup google': () => { throw DBUS_FAILURE(); }, 'lookup gemini': () => { throw TIMEOUT(); } });
 
       const result = lookupCredentialTyped('google', { skipEnv: true });
 
@@ -600,21 +471,6 @@ describe('keyring fail-loud logging', () => {
 
       expect(result).toEqual({ value: 'fallback-value', reason: 'ok', service: 'google' });
       expect(calls).toEqual(['lookup google', 'lookup gemini']);
-    });
-
-    it.each([
-      ['signal-killed', () => secretToolError(null, '', { signal: 'SIGTERM' })],
-      ['timeout', TIMEOUT],
-      ['spawn ENOENT', () => secretToolError(null, '', { code: 'ENOENT' })],
-      ['exit 2 with empty stderr', () => secretToolError(2, '')],
-    ])('reports unreadable for a non-absence failure without searching (%s)', (_label, makeErr) => {
-      stubSecretTool({ 'lookup whatsoup_health': () => { throw makeErr(); } });
-
-      const result = lookupCredentialTyped('whatsoup_health', { skipEnv: true });
-
-      expect(result).toEqual({ value: null, reason: 'unreadable', service: 'whatsoup_health' });
-      expect(calls).toEqual(['lookup whatsoup_health']);
-      expect(logWarn).toHaveBeenCalledOnce();
     });
   });
 

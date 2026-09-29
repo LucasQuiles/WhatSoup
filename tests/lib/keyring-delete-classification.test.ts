@@ -161,9 +161,9 @@ describe('deleteCredential classification — macos-keychain (#2292 L8)', () => 
 });
 
 // libsecret 0.21.7 `secret-tool clear` exits 1 with empty stderr whenever it
-// removed nothing, and it only removes UNLOCKED matches — so a silent exit 1 is
-// either no match or a locked one. A non-unlocking `secret-tool search` for the
-// same attributes decides; any other outcome stays a backend failure.
+// removed nothing — no match, or only locked matches, which it never removes.
+// A throw therefore cannot be told apart from absence, so every clear throw is
+// reported as backend_failed. Linux absence is tracked separately.
 describe('deleteCredential classification — secret-tool', () => {
   let dir: string;
   let calls: string[];
@@ -175,8 +175,9 @@ describe('deleteCredential classification — secret-tool', () => {
       status, signal: null, stdout: Buffer.from(''), stderr: Buffer.from(stderr),
     });
   }
-  const SILENT_EXIT_1 = () => exitFailure(1, '');
 
+  // Records every call; one with no outcome (for example a `search`) is kept
+  // as unexpected and fails the test after cleanup.
   function stubSecretTool(outcomes: Record<string, () => Buffer>): void {
     execFileSyncMock.mockImplementation((_file: string, args: string[]) => {
       if (args[0] === '--help') return Buffer.from('');
@@ -207,80 +208,20 @@ describe('deleteCredential classification — secret-tool', () => {
     expect(unexpected).toEqual([]);
   });
 
-  it('reports ABSENT when clear exits 1 silently and the search lists nothing', () => {
-    stubSecretTool({
-      'clear service minimax': () => { throw SILENT_EXIT_1(); },
-      'search service minimax': () => Buffer.from(''),
-    });
-
-    const out = deleteCredential('minimax');
-
-    expect(out).toEqual({ deleted: false, backend: 'secret-tool', reason: 'absent' });
-    expect(calls).toEqual(['clear service minimax', 'search service minimax']);
-  });
-
-  it('reports BACKEND_FAILED with KEYRING_LOCKED when the search lists a locked match', () => {
-    stubSecretTool({
-      'clear service minimax': () => { throw SILENT_EXIT_1(); },
-      'search service minimax': () => Buffer.from('[1]\nlabel = whatsoup minimax\n'),
-    });
+  it.each([
+    ['silent exit 1', () => exitFailure(1, '')],
+    ['exit 1 with a diagnostic', () => exitFailure(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n')],
+    ['timeout', () => Object.assign(new Error('spawnSync secret-tool ETIMEDOUT'), {
+      code: 'ETIMEDOUT', status: null, signal: 'SIGKILL', stdout: Buffer.from(''), stderr: Buffer.from(''),
+    })],
+  ])('reports BACKEND_FAILED for any clear throw, without searching (%s)', (_label, makeErr) => {
+    stubSecretTool({ 'clear service minimax': () => { throw makeErr(); } });
 
     const out = deleteCredential('minimax');
 
     expect(out).toEqual({
-      deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode: 'KEYRING_LOCKED',
+      deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
     });
-  });
-
-  it('reports BACKEND_FAILED when the confirming search itself fails', () => {
-    stubSecretTool({
-      'clear service minimax': () => { throw SILENT_EXIT_1(); },
-      'search service minimax': () => { throw exitFailure(1, 'secret-tool: The name org.freedesktop.secrets was not provided\n'); },
-    });
-
-    const out = deleteCredential('minimax');
-
-    expect(out.reason).toBe('backend_failed');
-    expect(out.errorCode).toBe('KEYRING_WRITE_FAILED');
-  });
-
-  // The search's stdout can hold an unlocked secret printed before a failure,
-  // or listed for a match; nothing from it may reach the delete result.
-  const CANARY = 'CANARY-5d21e8-unlocked-secret';
-  it.each([
-    ['search ENOBUFS after printing a match', () => {
-      throw Object.assign(new Error(`spawnSync secret-tool ENOBUFS\nsecret = ${CANARY}`), {
-        code: 'ENOBUFS', status: null, signal: 'SIGKILL',
-        stdout: Buffer.from(`[1]\nsecret = ${CANARY}\n`), stderr: Buffer.from(`attribute.service = ${CANARY}\n`),
-      });
-    }, 'KEYRING_WRITE_FAILED'],
-    ['search timeout after printing a match', () => {
-      throw Object.assign(new Error('spawnSync secret-tool ETIMEDOUT'), {
-        code: 'ETIMEDOUT', status: null, signal: 'SIGKILL',
-        stdout: Buffer.from(`[1]\nsecret = ${CANARY}\n`), stderr: Buffer.from(''),
-      });
-    }, 'KEYRING_WRITE_FAILED'],
-    ['present match printing its secret', () => Buffer.from(`[1]\nlabel = whatsoup\nsecret = ${CANARY}\n`), 'KEYRING_LOCKED'],
-  ])('never lets search output reach the delete result (%s)', (_label, search, errorCode) => {
-    stubSecretTool({
-      'clear service minimax': () => { throw SILENT_EXIT_1(); },
-      'search service minimax': search,
-    });
-
-    const out = deleteCredential('minimax');
-
-    expect(out).toEqual({ deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode });
-    expect(JSON.stringify(out)).not.toContain(CANARY);
-  });
-
-  it('reports BACKEND_FAILED without searching when clear fails with a diagnostic', () => {
-    stubSecretTool({
-      'clear service minimax': () => { throw exitFailure(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n'); },
-    });
-
-    const out = deleteCredential('minimax');
-
-    expect(out.reason).toBe('backend_failed');
     expect(calls).toEqual(['clear service minimax']);
   });
 
