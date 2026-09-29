@@ -178,7 +178,7 @@ describe('deleteCredential classification — secret-tool', () => {
 
   // Records every call; one with no outcome (for example a `search`) is kept
   // as unexpected and fails the test after cleanup.
-  function stubSecretTool(outcomes: Record<string, () => Buffer>): void {
+  function stubSecretTool(outcomes: Record<string, () => Buffer<ArrayBuffer>>): void {
     execFileSyncMock.mockImplementation((_file: string, args: string[]) => {
       if (args[0] === '--help') return Buffer.from('');
       const key = args.join(' ');

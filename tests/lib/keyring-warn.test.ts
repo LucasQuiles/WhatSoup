@@ -370,7 +370,7 @@ describe('keyring fail-loud logging', () => {
     // and recorded in order. A call with no outcome (for example a `search`)
     // is recorded as unexpected and asserted empty after each test, so it
     // cannot pass as a credential failure through the production catch.
-    function stubSecretTool(outcomes: Record<string, () => Buffer>): void {
+    function stubSecretTool(outcomes: Record<string, () => Buffer<ArrayBuffer>>): void {
       mockedExecFileSync.mockImplementation((_file, args) => {
         const argv = args as string[];
         if (argv[0] === '--help') return Buffer.from('');
