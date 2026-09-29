@@ -1523,7 +1523,7 @@ merge ensures that `opencode.json` contains a `whatsoup-headless` agent entry
 with `whatsoup_send_message: "deny"`, creating the entry when absent and
 preserving its other fields when present. The same deny is written at the
 global permission level, so both selected-agent and inherited permission
-resolution keep live-turn text as the only reply owner. These rules are
+resolution keep turn text as the only reply owner. These rules are
 dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
@@ -1590,7 +1590,30 @@ generated MCP block, the optional custom-endpoint block, and one exact
 `whatsoup_send_message: "deny"` permission. Live-turn assistant text is the
 single delivery owner for an OpenCode reply; denying that current-chat text
 tool prevents an auto-approved fallback from sending a second copy before the
-runtime echoes its normal answer. Other existing permission rules and unrelated
+runtime echoes its normal answer. The deny also covers scheduled agent jobs,
+which share the working directory. A scheduled job on OpenCode therefore
+reports through its final answer instead of `send_message` (#3497): its turn
+is told to write the one verified update after its last tool call, or exactly
+`NO_REPLY` when there is none. The runtime holds that text, drops text written
+before or between tool calls, and delivers the final answer once to the job's
+report chat. An explicit `NO_REPLY` finalizes as `no_reply_policy`. A completed
+job turn with neither fails with attempt class `scheduled_answer_missing`
+(inbound failure class `unknown`) and raises the reply-guarantee breach alert.
+Scheduled turns on every provider send the report chat no tool-progress
+updates, no operation-tracker progress (thinking or long-tool notices), no
+provider-failure, reauthentication, fallback, fallback-replay-failure or
+provider auto-switch notices, and no crash or processing-failure notices. It
+neither stashes a one-message handoff notice nor consumes one already pending
+for the chat, and it never records the chat's notice dedupe, so the next user
+turn in that chat still gets its own notices. The failure is still recorded,
+alerted, and acted on (session shutdown, fallback arming and replay); only the
+chat text is dropped. Its operator alerts (reauthentication, empty fallback
+turn) dedupe under a separate scheduled key. A scheduled turn is recognised by its declared purpose, so these rules
+hold in every session scope, including sandbox per_chat, shared and single,
+where it has no separate lane. A session counts as scheduled from the dispatch
+of a scheduled turn until its next user dispatch, so a crash notice raised in
+the window between a scheduled turn's result and the next dispatch is also
+suppressed. Other existing permission rules and unrelated
 `agent` entries are preserved. The merge creates the reserved
 `whatsoup-headless` entry when absent, or preserves its existing fields while
 enforcing the one delivery deny when present. A route with
