@@ -23,7 +23,9 @@
  * its `message` under `errorMessage`, and of its `code`, when that is a string
  * or a number, under `errorCode`. Its `cause` is kept too: an Error cause is
  * recursed into the same shape, and a string cause gets the same budget as a
- * message. Free text therefore reaches the sink. The masking above is
+ * message. An AggregateError also keeps its inner errors under `errors`, each
+ * in that same shape and budget, at most five, with `errorsTotal` when more
+ * were dropped. Free text therefore reaches the sink. The masking above is
  * pattern-based: it removes the shapes it knows and cannot remove an unshaped
  * secret or a sentence of private prose that happens to sit in an error
  * message.
@@ -56,7 +58,16 @@
  * absence guarantee WS-A06 asks for. If the ruling reverses the narrowing, the
  * retention below is what has to change.
  *
- * The sanitizer is recursive, cycle-safe (WeakSet), and never throws.
+ * The sanitizer is recursive, cycle-safe (WeakSet), and never throws. The
+ * WeakSet records every object already VISITED, not only ancestors: an Error
+ * that appears twice (twice in `errors`, or in `errors` and as a `cause`)
+ * reads `[circular]` the second time even though it is not a cycle.
+ *
+ * A value under the top-level `err`, `error` or `reason` key that is an object
+ * but not an Error keeps its enumerable fields and gains `nonError: true` and
+ * `errConstructor` (its constructor name, bounded, or null). Such a value
+ * would otherwise log as a bare `{}`: an Error created in another realm fails
+ * `instanceof Error` and has no enumerable fields.
  *
  * Design principle for the fields it drops: truncation limits retained length
  * but does not remove a sensitive value near the start of a preview, so those
@@ -444,6 +455,23 @@ function boundedErrorText(raw: unknown): string {
   }
 }
 
+const MAX_AGGREGATE_ERRORS = 5;
+
+/** Bounded view of AggregateError.errors: the inner errors name the step that failed. Never throws. */
+function aggregateErrorsField(
+  value: Error,
+  seen: WeakSet<object>,
+  depth: number,
+): { errors?: unknown[]; errorsTotal?: number } {
+  if (!(value instanceof AggregateError)) return {};
+  const raw = readErrorProperty(() => (value as AggregateError).errors);
+  if (!Array.isArray(raw)) return {};
+  const errors = raw.slice(0, MAX_AGGREGATE_ERRORS).map((entry: unknown) => (
+    typeof entry === 'string' ? boundedSanitizedText(entry) : sanitizeLogValue(entry, seen, depth + 1)
+  ));
+  return raw.length > MAX_AGGREGATE_ERRORS ? { errors, errorsTotal: raw.length } : { errors };
+}
+
 // ─── Recursive sanitizer ────────────────────────────────────────────────────
 
 const MAX_DEPTH = 10;
@@ -526,6 +554,7 @@ export function sanitizeLogValue(
                   : sanitizeLogValue(cause, seenSet, depth + 1),
             }
           : {}),
+        ...aggregateErrorsField(value, seenSet, depth),
       };
     }
 
@@ -555,6 +584,46 @@ export function sanitizeLogValue(
   }
 }
 
+/** The keys src/logger.ts registers the Error serializer under. */
+const ERROR_LIKE_KEYS = ['err', 'error', 'reason'] as const;
+
+/**
+ * Mark an object under an error-like key that is not an Error, so it can never
+ * log as a bare `{}`. Reads the ORIGINAL value: after sanitizing, a real Error
+ * is already a plain object. Never throws.
+ */
+function markNonErrorValues(original: unknown, sanitized: unknown): unknown {
+  try {
+    if (
+      typeof original !== 'object' || original === null
+      || original instanceof Error || Array.isArray(original)
+    ) return sanitized;
+    if (typeof sanitized !== 'object' || sanitized === null || Array.isArray(sanitized)) return sanitized;
+    const out = sanitized as Record<string, unknown>;
+    for (const key of ERROR_LIKE_KEYS) {
+      const value = readErrorProperty(() => (original as Record<string, unknown>)[key]);
+      if (
+        typeof value !== 'object' || value === null || Array.isArray(value)
+        || value instanceof Error || value instanceof Uint8Array || value instanceof ArrayBuffer
+      ) continue;
+      const kept = out[key];
+      const constructorName = readErrorProperty(
+        () => (value as { constructor?: { name?: unknown } }).constructor?.name,
+      );
+      out[key] = {
+        ...(typeof kept === 'object' && kept !== null && !Array.isArray(kept)
+          ? kept as Record<string, unknown>
+          : { value: kept }),
+        nonError: true,
+        errConstructor: typeof constructorName === 'string' ? boundedErrorText(constructorName) : null,
+      };
+    }
+    return out;
+  } catch {
+    return sanitized;
+  }
+}
+
 // ─── Pino hook integration ──────────────────────────────────────────────────
 
 /**
@@ -576,7 +645,8 @@ export function sanitizingLogHook(
   _level: number,
 ): void {
   if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null) {
-    args[0] = sanitizeLogValue(args[0]);
+    const original = args[0];
+    args[0] = markNonErrorValues(original, sanitizeLogValue(original));
   }
   return method.apply(this, args);
 }
