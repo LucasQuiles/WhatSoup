@@ -78,6 +78,8 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `inconclusive` without replaying or modifying durable rows. Historical failed
    terminals and continuity candidates are recovery debt with no runtime-health
    impact; only stale open inbound or recovery work is an operational breach.
+   A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
+   requested outcome, not debt, so its failed terminal is not counted.
    `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
    additional replay count; it exposes contradictory delivery evidence that
    must be reconciled before any targeted repair.
