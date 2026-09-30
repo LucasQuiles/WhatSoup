@@ -211,6 +211,7 @@ import {
   sessionProviderId,
   isScheduledTurnSession,
   noteScheduledTurnSession,
+  crashNoticeUnlessScheduled,
 } from './scheduled-agent-job-delivery.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -10107,7 +10108,7 @@ export class AgentRuntime implements Runtime {
         const currentMapKey = resolveSessionMapKey() ?? mapKey;
         this.handlePerChatCrash(currentMapKey, chatJid, info, session);
       },
-      notifyUser: (msg) => this.handleCrashNotify(msg, chatJid, session),
+      notifyUser: crashNoticeUnlessScheduled(() => session, chatJid, (msg) => this.handleCrashNotify(msg, chatJid)),
       // X1: name the exact manager; without a target, non-sandbox per_chat
       // falls through to the unset shared session and the refusal is silent.
       onResumeFailed: () => this.handleResumeFailed(chatJid, {
@@ -10165,7 +10166,7 @@ export class AgentRuntime implements Runtime {
           stderrPreview: info.stderrPreview ?? null,
         }, 'fallback singleton session crashed');
       },
-      notifyUser: (msg) => this.handleCrashNotify(msg, undefined, replacementSession),
+      notifyUser: crashNoticeUnlessScheduled(() => replacementSession, chatJid, (msg) => this.handleCrashNotify(msg)),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
       routeOverride,
     });

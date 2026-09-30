@@ -6,7 +6,10 @@
 // the turn's final plain text instead. The runtime holds that text until the
 // terminal result and delivers it once; text before or between tool calls is
 // progress and is never delivered.
+import { createChildLogger } from '../../logger.ts';
 import { isolateScheduledAgentJobPrompt } from './scheduled-agent-job-isolation.ts';
+
+const log = createChildLogger('agent-runtime');
 
 export const SCHEDULED_AGENT_JOB_NO_REPLY = 'NO_REPLY';
 
@@ -38,6 +41,26 @@ export function noteScheduledTurnSession(session: object, scheduled: boolean): v
 
 export function isScheduledTurnSession(session: object | null | undefined): boolean {
   return session !== null && session !== undefined && scheduledTurnSessions.has(session);
+}
+
+/**
+ * H2 for a notifyUser site: drop the crash notice while the session's latest
+ * user turn is scheduled; otherwise call `notify`, which keeps the site's own
+ * handleCrashNotify arguments. The session is read at call time because the
+ * site assigns it after building its options.
+ */
+export function crashNoticeUnlessScheduled(
+  session: () => object | null | undefined,
+  chatJid: string | undefined,
+  notify: (msg: string) => void,
+): (msg: string) => void {
+  return (msg) => {
+    if (!isScheduledTurnSession(session())) {
+      notify(msg);
+      return;
+    }
+    log.warn({ chatJid }, 'scheduled job crash notification suppressed');
+  };
 }
 
 /**
