@@ -1,6 +1,6 @@
 import { afterAll, beforeEach } from 'vitest';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { delimiter, isAbsolute, join, relative, sep } from 'node:path';
 import {
   chmodSync,
   lstatSync,
@@ -89,6 +89,45 @@ process.env['XDG_DATA_HOME'] = join(isolatedHome, '.local', 'share');
 process.env['XDG_STATE_HOME'] = join(isolatedHome, '.local', 'state');
 process.env['XDG_CACHE_HOME'] = join(isolatedHome, '.cache');
 delete process.env['CLAUDE_CONFIG_DIR'];
+// The synthetic secret-tool reports itself absent (exit 127), which keyring
+// classifies as an errored probe; an inherited REQUIRE_OS_KEYRING would then
+// make unmocked backend detection throw instead of using env-only.
+delete process.env['REQUIRE_OS_KEYRING'];
+
+// OS credential stores are not HOME-scoped. Inherited test commands see empty
+// synthetic reads and rejected writes; dedicated keyring tests retain their
+// explicit process mocks. Each shim must stay runnable: a missing interpreter
+// would make PATH lookup continue to the real binary.
+const credentialBin = join(isolatedHome, 'credential-bin');
+mkdirSync(credentialBin, { mode: 0o700 });
+const rejectMutation =
+  "  *) printf '%s\\n' 'synthetic credential backend rejects writes and unsupported operations' >&2; exit 1 ;;";
+const syntheticCredentialBackends: Record<string, string> = {
+  security: [
+    '#!/bin/sh',
+    'case "$1" in',
+    '  find-generic-password) exit 0 ;;',
+    "  --help) printf '%s\\n' 'Usage: synthetic credential backend'; exit 0 ;;",
+    rejectMutation,
+    'esac',
+    '',
+  ].join('\n'),
+  // Exit 127 on the backend probe: Linux runs select env-only, as on a host
+  // without libsecret.
+  'secret-tool': [
+    '#!/bin/sh',
+    'case "$1" in',
+    "  --help) printf '%s\\n' 'secret-tool: not found (synthetic credential backend)' >&2; exit 127 ;;",
+    '  lookup) exit 0 ;;',
+    rejectMutation,
+    'esac',
+    '',
+  ].join('\n'),
+};
+for (const [executable, body] of Object.entries(syntheticCredentialBackends)) {
+  writeFileSync(join(credentialBin, executable), body, { mode: 0o700 });
+}
+process.env['PATH'] = `${credentialBin}${delimiter}${process.env['PATH'] ?? ''}`;
 
 process.env['BOT_ERRORS_TEST_ISOLATED'] = '1';
 process.env['BOT_ERRORS_STATE_DIR'] = join(
