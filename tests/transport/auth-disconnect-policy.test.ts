@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { DisconnectReason } from '@whiskeysockets/baileys';
+import * as disconnectClassification from '../../src/lib/disconnect-classification.ts';
 import {
   buildDisconnectDecisionRecord,
   classifyDisconnectAction,
@@ -239,5 +242,33 @@ describe('buildDisconnectDecisionRecord', () => {
     expect(record.observedAt).toBeNull();
     expect(record.classification).toBe('other');
     expect(record.conflictInspected).toBe(false);
+  });
+});
+
+describe('#3722: one definition of the transient reconnect codes', () => {
+  it('the lib transient set equals the library members the transport reconnects on', () => {
+    // Namespace access, so a missing export fails by assertion, not at import.
+    expect(disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES).toBeDefined();
+    expect(new Set(disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES)).toEqual(new Set([
+      DisconnectReason.connectionClosed,
+      DisconnectReason.timedOut,
+      DisconnectReason.badSession,
+      DisconnectReason.unavailableService,
+    ]));
+  });
+
+  it('the transport policy builds its set from the lib export, not its own literal', () => {
+    const policySource = readFileSync(
+      fileURLToPath(new URL('../../src/transport/auth-disconnect-policy.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(policySource).toContain('TRANSIENT_RECONNECT_STATUS_CODES');
+    expect(policySource).not.toMatch(/DisconnectReason\.(?:timedOut|badSession|unavailableService)/);
+  });
+
+  it('the policy treats each lib code as a transient reconnect', () => {
+    for (const code of [428, 408, 500, 503]) {
+      expect(decideDisconnectAction(code)).toEqual({ type: 'reconnect', reason: 'transient', statusCode: code });
+    }
   });
 });
