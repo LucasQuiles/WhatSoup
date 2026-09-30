@@ -106,7 +106,10 @@ export interface ExecutingSessionContext {
    * TURN. The per-chat actor socket is the standing exception: its resolver
    * substitutes the SOCKET IDENTITY's conversation key whenever the executing turn
    * left one undefined (src/runtimes/agent/per-chat-mcp-socket-manager.ts
-   * `conversationKey: executing.conversationKey ?? toConversationKey(identity.value)`),
+   * `conversationKey: executing.conversationKey ?? toConversationKey(scheduledAgentJobBaseMapKey(identity.value))`
+   * — the scheduled isolation suffix is stripped first, so a scheduled socket
+   * falls back to its chat's key, never to the suffixed session key (#3497) — and
+   * likewise keeps the socket's own `purpose` when the turn left that undefined),
    * so every context leaving that surface carries a defined `conversationKey` and
    * classifies `'resolved'` whether or not a turn actually resolved — the
    * fail-closed UNRESOLVED branch is unreachable there by construction. That is

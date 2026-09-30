@@ -204,6 +204,15 @@ import {
   isScheduledAgentJobMapKey,
   resolveAgentTurnMapKey,
 } from './scheduled-agent-job-isolation.ts';
+import {
+  resolveScheduledFinalAnswer,
+  scheduledAgentJobDeliversFinalText,
+  scheduledAgentJobTurnForProvider,
+  sessionProviderId,
+  isScheduledTurnSession,
+  noteScheduledTurnSession,
+  crashNoticeUnlessScheduled,
+} from './scheduled-agent-job-delivery.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { contextMessagesForTurn } from './context-handoff.ts';
@@ -2277,6 +2286,10 @@ export class AgentRuntime implements Runtime {
   private perChatTurnContentType: Map<string, string> = new Map();
   private perChatTurnText: Map<string, string> = new Map();
   private perChatTurnSuppressedReplySatisfaction: Set<string> = new Set();
+  // #3497: a final-text scheduled turn's text since its last tool boundary, and
+  // the scheduled scopes whose completed turn held no deliverable answer.
+  private scheduledFinalTextCandidate: Map<string, string> = new Map();
+  private scheduledAnswerMissing: Set<string> = new Set();
   private perChatAssistantItemText: Map<string, Map<string, string>> = new Map();
   // R1 streaming marker scan: hold the FIRST line of a turn's assistant text
   // until it is resolvable (a newline arrived, or it can no longer be a
@@ -2403,6 +2416,8 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatTurnSuppressedReplySatisfaction.delete(mapKey);
+    this.scheduledFinalTextCandidate.delete(mapKey);
+    this.scheduledAnswerMissing.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
     this.perChatRouteMarkerHold.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
@@ -2606,9 +2621,20 @@ export class AgentRuntime implements Runtime {
     queue: IOutboundQueue,
     inboundSeq: number | undefined,
     mapKey?: string,
+    providerId?: string | null,
+    scheduledScope: string | undefined = mapKey !== undefined && isScheduledAgentJobMapKey(mapKey) ? mapKey : undefined,
   ): string | null {
-    if (mapKey !== undefined && isScheduledAgentJobMapKey(mapKey)) {
-      this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+    if (scheduledScope !== undefined) {
+      if (scheduledAgentJobDeliversFinalText(providerId)) {
+        // Held, not sent: only the text after the last tool boundary is the
+        // answer, and it is delivered once at the terminal result.
+        if (classifyAssistantTextEgress(text).action === 'allow') {
+          this.scheduledFinalTextCandidate.set(scheduledScope, (this.scheduledFinalTextCandidate.get(scheduledScope) ?? '') + text);
+        }
+        return null;
+      }
+      if (mapKey !== undefined) this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+      else this.turnHadSuppressedReplySatisfaction = true;
       log.info(
         {
           chatJid: queue.targetChatJid,
@@ -2674,6 +2700,52 @@ export class AgentRuntime implements Runtime {
       else this.turnHadSuppressedReplySatisfaction = true;
     }
     return null;
+  }
+
+  /**
+   * #3497: deliver a final-text scheduled turn's answer once, before the result
+   * handler finalizes it. An explicit NO_REPLY is policy silence; no answer at
+   * all is a failed turn, never no_reply_policy.
+   */
+  private settleScheduledFinalAnswer(
+    event: Extract<AgentEvent, { type: 'result' }>,
+    queue: IOutboundQueue,
+    mapKey: string,
+    isSystemResult: boolean,
+  ): void {
+    const held = this.scheduledFinalTextCandidate.get(mapKey);
+    this.scheduledFinalTextCandidate.delete(mapKey);
+    if (isSystemResult || event.isError === true) return;
+    const answer = resolveScheduledFinalAnswer(held);
+    const global = mapKey === GLOBAL_TOOL_SCOPE_KEY;
+    if (answer.kind === 'no_reply') {
+      if (global) this.turnHadSuppressedReplySatisfaction = true;
+      else this.perChatTurnSuppressedReplySatisfaction.add(mapKey);
+    } else if (answer.kind === 'missing') {
+      this.scheduledAnswerMissing.add(mapKey);
+      log.warn({ chatJid: queue.targetChatJid }, 'scheduled job ended without a final answer');
+    } else if (queue.enqueueResultText(answer.text) !== false) {
+      this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(global ? undefined : mapKey);
+      if (global) {
+        this.turnHadVisibleOutput = true;
+        this.currentTurnAssistantText += answer.text;
+      } else {
+        this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + answer.text);
+      }
+    }
+  }
+
+  private noteScheduledDispatch(session: SessionManager, mapKey: string | undefined, scheduled: boolean): void {
+    this.scheduledFinalTextCandidate.delete(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+    this.scheduledAnswerMissing.delete(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
+    noteScheduledTurnSession(session, scheduled);
+  }
+
+  /** #3497 H1: the scope whose current user turn is a scheduled job, by lane key or declared purpose. */
+  private scheduledTurnScope(mapKey: string | undefined): string | undefined {
+    const purpose = mapKey === undefined ? this.currentTurnReplayPurpose : this.pendingTurnPurpose.get(mapKey);
+    if (mapKey !== undefined && isScheduledAgentJobMapKey(mapKey)) return mapKey;
+    return purpose === 'scheduled-agent-job' ? mapKey ?? GLOBAL_TOOL_SCOPE_KEY : undefined;
   }
 
   /** Evidence check for send_verification suppression: fails closed when the
@@ -3277,6 +3349,7 @@ export class AgentRuntime implements Runtime {
       perChatTurnContentType: runtime.perChatTurnContentType,
       perChatTurnText: runtime.perChatTurnText,
       perChatTurnSuppressedReplySatisfaction: runtime.perChatTurnSuppressedReplySatisfaction,
+      scheduledAnswerMissing: runtime.scheduledAnswerMissing,
       perChatAssistantItemText: runtime.perChatAssistantItemText,
       perChatRouteMarkerHold: runtime.perChatRouteMarkerHold,
       currentTurnAssistantItemText: runtime.currentTurnAssistantItemText,
@@ -3355,14 +3428,14 @@ export class AgentRuntime implements Runtime {
         runtime.recordTurnCapabilitySuccess(isUserTurnResult, session),
       recordTurnCapabilityFailure: (isUserTurnResult, errorClass) =>
         runtime.recordTurnCapabilityFailure(isUserTurnResult, errorClass),
-      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError) =>
-        runtime.fallback.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError),
-      maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey) =>
-        runtime.fallback.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey),
-      maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText) =>
-        runtime.fallback.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText),
-      enqueueAutoSwitchNotice: (queue, text, logChatJid, mode) =>
-        runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode),
+      recordFallbackTurnOutcome: (queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError, scheduled) =>
+        runtime.fallback.recordFallbackTurnOutcome(queue, hadVisibleOutput, hadToolWork, session, wasUnclassifiedError, scheduled),
+      maybeArmFallbackAfterEmptyPrimaryTurn: (queue, session, turnHadToolWork, mapKey, scheduled) =>
+        runtime.fallback.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey, scheduled),
+      maybeArmFallbackAfterUnknownTerminal: (queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText, scheduled) =>
+        runtime.fallback.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, evidenceText, scheduled),
+      enqueueAutoSwitchNotice: (queue, text, logChatJid, mode, scheduled) =>
+        runtime.enqueueAutoSwitchNotice(queue, text, logChatJid, mode, scheduled),
       withHandoffPrefix: (chatJid, text) => runtime.withHandoffPrefix(chatJid, text),
       flushPendingHandoffNotice: (queue) => runtime.flushPendingHandoffNotice(queue),
       activateProviderFallback: (resetAt, reason, failedSession) =>
@@ -3372,7 +3445,7 @@ export class AgentRuntime implements Runtime {
       scheduleFallbackReplay: (args) => runtime.scheduleFallbackReplay(args),
       notifyProviderFallbackActivated: (queue, activation, replay) =>
         runtime.notifyProviderFallbackActivated(queue, activation, replay),
-      emitNoFallbackReauthNotice: (queue) => runtime.fallback.emitNoFallbackReauthNotice(queue),
+      emitNoFallbackReauthNotice: (queue, scheduled) => runtime.fallback.emitNoFallbackReauthNotice(queue, scheduled),
       usageLimitNotice: () => runtime.fallback.usageLimitNotice(),
       kickDiagnosticBundle: (workflow, providerText) => runtime.kickDiagnosticBundle(workflow, providerText),
     } satisfies RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
@@ -4392,7 +4465,7 @@ export class AgentRuntime implements Runtime {
               this.handlePerChatCrash(mapKey, chatJid, info, session);
             },
             notifyUser: (msg) => {
-              this.handleCrashNotify(msg, chatJid);
+              this.handleCrashNotify(msg, chatJid, session);
             },
             // #3570: the provider can refuse the resumed session after spawn
             // (exit 1, no init). Tell this chat and rebuild its context.
@@ -4601,7 +4674,7 @@ export class AgentRuntime implements Runtime {
             this.cleanupSharedCrashTurnState();
             this.emitCrashHealReport(resumeChatJid, info, turnWasInFlight);
           },
-          notifyUser: (msg) => this.handleCrashNotify(msg),
+          notifyUser: (msg) => this.handleCrashNotify(msg, undefined, resumedSession),
         });
         this.session = resumedSession;
 
@@ -5018,8 +5091,9 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(msg.inboundSeq);
           this.durability.markInboundFailed(msg.inboundSeq, classifyErrorForInbound(err));
         }
-        // Notify user of failure
-        if (!wedgedReclaim) {
+        // Notify user of failure. #3497 H3: a scheduled job's report chat did not
+        // send it; its failure stays with the durable terminal and the log above.
+        if (!wedgedReclaim && msg.isSyntheticJob !== true) {
           this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
         }
       });
@@ -5692,7 +5766,7 @@ export class AgentRuntime implements Runtime {
     session: SessionManager | null,
     mapKey?: string,
   ): void {
-    if (context && this.runtimeTurnCoordinator.cancelRuntimeTurnContinuation(context)) {
+    if (context && this.runtimeTurnCoordinator.cancelRuntimeTurnContinuation(context) && this.scheduledTurnScope(mapKey) === undefined) {
       try {
         clearStandbyNotice(this.db, toConversationKey(context.identity.deliveryJid));
       } catch (err) {
@@ -5803,9 +5877,13 @@ export class AgentRuntime implements Runtime {
         conversationKey: canonicalConversationKey(chatJid, this.db),
       });
       this.perChatExecActorQueue.set(GLOBAL_TOOL_SCOPE_KEY, sharedExecQ);
+      const scheduled = purpose === 'scheduled-agent-job';
+      this.noteScheduledDispatch(this.session!, undefined, scheduled);
       try {
         await this.session!.sendTurn(withProviderApplicationContext(
-          renderUserTurnForProvider(this.turnChronology, exactText, context, 'live'),
+          renderUserTurnForProvider(this.turnChronology, scheduled
+            ? scheduledAgentJobTurnForProvider(exactText, sessionProviderId(this.session))
+            : exactText, context, 'live'),
           participantContext,
         ));
       } catch (sendErr) {
@@ -6062,8 +6140,16 @@ export class AgentRuntime implements Runtime {
       }
     };
     try {
+      // #3497: the delivery instructions follow the provider this session runs,
+      // and a dispatch never inherits held text from an earlier scheduled turn.
+      const scheduledDispatch = purpose === 'scheduled-agent-job'
+        || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
+      if (systemTurnLease === undefined) this.noteScheduledDispatch(session, effectiveMapKey, scheduledDispatch);
+      const providerTurnText = scheduledDispatch
+        ? scheduledAgentJobTurnForProvider(text, sessionProviderId(session))
+        : text;
       const userTurnText = renderUserTurnForProvider(
-        this.turnChronology, text, runtimeContext ?? null, deliveryKind,
+        this.turnChronology, providerTurnText, runtimeContext ?? null, deliveryKind,
         sharedReplayApplicationContext(runtimeContext, this.db),
       );
       const turnInput = contextPreamble === null
@@ -7327,6 +7413,7 @@ export class AgentRuntime implements Runtime {
     systemTurnPurpose: SystemTurnPurpose | null = null,
   ): void {
     const tracker = this.getTracker(mapKey);
+    const scheduledScopeKey = mapKey !== undefined ? this.scheduledTurnScope(mapKey) : undefined;
     switch (event.type) {
       case 'init':
         log.debug({ sessionId: event.sessionId }, 'session init');
@@ -7364,7 +7451,7 @@ export class AgentRuntime implements Runtime {
             normalizedText = rawAssistantText;
           }
           if (!normalizedText) break;
-          if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming')) break;
+          if (this.enqueueAutoSwitchNotice(queue, normalizedText, queue.targetChatJid, 'streaming', scheduledScopeKey !== undefined)) break;
           // Two-tier provider-failure gate (QR-209). Fallback is armed on the
           // terminal 'result' event, never here (activating on streaming text would
           // race the usage-limit session kill/respawn). Only BANNER-confident text
@@ -7373,7 +7460,9 @@ export class AgentRuntime implements Runtime {
           // silent-reply defect. See suppressStreamedProviderFailure.
           const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, queue.targetChatJid);
           if (providerFailureCheck.suppress) break;
-          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, inboundSeq, mapKey);
+          const gatedText = this.gateAssistantTextForOutbound(
+            normalizedText, queue, inboundSeq, mapKey, sessionProviderId(session), scheduledScopeKey,
+          );
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
@@ -7441,12 +7530,14 @@ export class AgentRuntime implements Runtime {
         }
 
         queue.discardPreToolAssistantText?.();
+        if (scheduledScopeKey !== undefined) this.scheduledFinalTextCandidate.delete(scheduledScopeKey);
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
         this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
-          queue.enqueueToolUpdate(toolUpdate);
+          // The scheduled prompt forbids exposing tool progress (#3497).
+          if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }
         break;
@@ -7469,6 +7560,8 @@ export class AgentRuntime implements Runtime {
         session?.trackToolEnd(event.toolId);
         session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        // A failed or unnamed OpenCode tool emits no tool_use; its result is the boundary.
+        if (scheduledScopeKey !== undefined) this.scheduledFinalTextCandidate.delete(scheduledScopeKey);
 
         // Suppress the auto-resolved "Answer questions?" error for AskUserQuestion
         if (this.suppressedAskUserToolIds.has(event.toolId)) {
@@ -7496,7 +7589,7 @@ export class AgentRuntime implements Runtime {
           const errorPreview = event.content.length > 200 ? `${providerPreview(event.content, 200)}...` : providerPreview(event.content, event.content.length);
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
-          queue.enqueueToolUpdate(classification);
+          if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(classification);
           maybeEmitToolFailureAlert({
             chatJid: queue.targetChatJid,
             toolId: event.toolId,
@@ -7514,7 +7607,11 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'result':
+        if (scheduledScopeKey !== undefined && scheduledAgentJobDeliversFinalText(sessionProviderId(session))) {
+          this.settleScheduledFinalAnswer(event, queue, scheduledScopeKey, isSystemResult);
+        }
         handleScopedRuntimeResult(this.runtimeTurnHost, {
+          scheduledTurn: scheduledScopeKey !== undefined,
           event,
           queue,
           session,
@@ -9949,6 +10046,7 @@ export class AgentRuntime implements Runtime {
     text: string,
     logChatJid: string | null | undefined,
     mode: 'streaming' | 'result',
+    scheduled = false,
   ): boolean {
     const notice = detectAutoSwitchNotice(text);
     if (!notice) return false;
@@ -9958,7 +10056,9 @@ export class AgentRuntime implements Runtime {
       from: notice.from,
       to: notice.to,
       reason: notice.reason,
+      scheduled,
     }, 'surfaced provider auto-switch notice');
+    if (scheduled) return true;
     if (mode === 'streaming') queue.enqueueStreamingText(message);
     else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message));
     return true;
@@ -10008,7 +10108,7 @@ export class AgentRuntime implements Runtime {
         const currentMapKey = resolveSessionMapKey() ?? mapKey;
         this.handlePerChatCrash(currentMapKey, chatJid, info, session);
       },
-      notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
+      notifyUser: crashNoticeUnlessScheduled(() => session, chatJid, (msg) => this.handleCrashNotify(msg, chatJid)),
       // X1: name the exact manager; without a target, non-sandbox per_chat
       // falls through to the unset shared session and the refusal is silent.
       onResumeFailed: () => this.handleResumeFailed(chatJid, {
@@ -10066,7 +10166,7 @@ export class AgentRuntime implements Runtime {
           stderrPreview: info.stderrPreview ?? null,
         }, 'fallback singleton session crashed');
       },
-      notifyUser: (msg) => this.handleCrashNotify(msg),
+      notifyUser: crashNoticeUnlessScheduled(() => replacementSession, chatJid, (msg) => this.handleCrashNotify(msg)),
       onResumeFailed: () => this.handleResumeFailed(chatJid),
       routeOverride,
     });
@@ -10226,7 +10326,7 @@ export class AgentRuntime implements Runtime {
           // generic errors (e.g. spawn refusals) as pure silence plus a log
           // line (incident 2026-08-15).
           const queue = this.getQueueForChat(args.chatJid, args.mapKey);
-          if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid);
+          if (queue) this.notifyFailedFallbackReplay(queue, args.chatJid, args.mapKey);
           // errorMessage() explicitly: the log serializer reduces unknown Error
           // subclasses to {errorClass} and drops the message — the incident
           // journal recorded only {"errorClass":"Error"}, leaving the root
@@ -10299,7 +10399,8 @@ export class AgentRuntime implements Runtime {
     });
   }
 
-  private notifyFailedFallbackReplay(queue: IOutboundQueue, chatJid: string): void {
+  private notifyFailedFallbackReplay(queue: IOutboundQueue, chatJid: string, mapKey?: string): void {
+    if (this.scheduledTurnScope(mapKey) !== undefined) return;
     try {
       clearStandbyNotice(this.db, toConversationKey(chatJid));
     } catch (noticeError) {
@@ -10327,7 +10428,7 @@ export class AgentRuntime implements Runtime {
         'fallback continuation failed without an outbound queue');
       return;
     }
-    this.notifyFailedFallbackReplay(queue, args.chatJid);
+    this.notifyFailedFallbackReplay(queue, args.chatJid, args.mapKey);
     // errorMessage() explicitly: the log serializer reduces unknown Error
     // subclasses to {errorClass} and drops the message — the 2026-08-15
     // incident journal recorded only {"errorClass":"Error"} here, leaving the
@@ -10733,7 +10834,7 @@ export class AgentRuntime implements Runtime {
           onEvent: (event) => this.handleEventPerChat(session, event, toolScopeKey),
           onCrash: (info) => this.handlePerChatCrash(workspaceKey, chatJid, info, session),
           notifyUser: (msg) => {
-            this.handleCrashNotify(msg, chatJid);
+            this.handleCrashNotify(msg, chatJid, session);
           },
           onResumeFailed: () => this.handleResumeFailed(chatJid),
           eventToolScopeKey: toolScopeKey,
@@ -11084,7 +11185,7 @@ export class AgentRuntime implements Runtime {
             forceFresh: true,
             preDispatch: noticeDrained,
           });
-          noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+          if (this.scheduledTurnScope(currentMapKey) === undefined) noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
             fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
             toCard: modelCardLabel(
               processFailure.activation.fallbackProvider,
@@ -11111,7 +11212,7 @@ export class AgentRuntime implements Runtime {
           }, 'fallback process failure handled as managed handoff');
           return;
         }
-        noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
+        if (this.scheduledTurnScope(currentMapKey) === undefined) noticeQueue?.enqueueText(renderFallbackAdvanceNotice({
           fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
           toCard: null,
           replayScheduled: false,
@@ -11746,6 +11847,11 @@ export class AgentRuntime implements Runtime {
     // its user-facing copy sent by that path — drop the raw session-crash line
     // (and every same-episode echo of it; see managedCrashNotices).
     if (this.managedCrashNoticeActive(session)) return;
+    // #3497 H2: a scheduled job's crash is not the chat's to hear about.
+    if (isScheduledTurnSession(session)) {
+      log.warn({ chatJid: chatJid ?? this.activeChatJid }, 'scheduled job crash notification suppressed');
+      return;
+    }
     // In per_chat mode, chatJid MUST be passed — this.queue is not set.
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
@@ -12150,6 +12256,7 @@ export class AgentRuntime implements Runtime {
     }
 
     const tracker = this.operationTracker;
+    const scheduledScopeKey = resolved.owner.kind === 'logical_turn' ? this.scheduledTurnScope(undefined) : undefined;
 
     switch (event.type) {
       case 'init':
@@ -12187,7 +12294,7 @@ export class AgentRuntime implements Runtime {
             normalizedText = rawAssistantText;
           }
           if (!normalizedText) break;
-          if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming')) {
+          if (this.enqueueAutoSwitchNotice(queue, normalizedText, this.shared ? this.currentTurnChatJid : this.activeChatJid, 'streaming', scheduledScopeKey !== undefined)) {
             this.turnHadVisibleOutput = true;
             break;
           }
@@ -12199,7 +12306,9 @@ export class AgentRuntime implements Runtime {
           const sharedChatJid = this.shared ? this.currentTurnChatJid : this.activeChatJid;
           const providerFailureCheck = this.suppressStreamedProviderFailure(normalizedText, sharedChatJid);
           if (providerFailureCheck.suppress) break;
-          const gatedText = this.gateAssistantTextForOutbound(normalizedText, queue, this.currentInboundSeq);
+          const gatedText = this.gateAssistantTextForOutbound(
+            normalizedText, queue, this.currentInboundSeq, undefined, sessionProviderId(this.session), scheduledScopeKey,
+          );
           this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
@@ -12257,11 +12366,12 @@ export class AgentRuntime implements Runtime {
           log.info({ toolName: event.toolName }, 'AskUserQuestion poll bridge not supported in shared mode — falling through to normal handling');
         }
 
+        if (scheduledScopeKey !== undefined) this.scheduledFinalTextCandidate.delete(scheduledScopeKey);
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
         this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
-          queue.enqueueToolUpdate(toolUpdate);
+          if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
           tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
         }
         break;
@@ -12290,6 +12400,7 @@ export class AgentRuntime implements Runtime {
         this.session?.trackToolEnd(event.toolId);
         this.session?.tickWatchdog();
         tracker?.onToolEnd(event.toolId);
+        if (scheduledScopeKey !== undefined) this.scheduledFinalTextCandidate.delete(scheduledScopeKey);
 
         // Note: AskUserQuestion poll bridge is per_chat only. In shared mode,
         // tool_result flows normally (no suppression needed — interception is
@@ -12316,7 +12427,7 @@ export class AgentRuntime implements Runtime {
             error: errorPreview,
           }, 'tool error reported by agent');
           const classification = classifyToolError(toolName, event.content);
-          queue.enqueueToolUpdate(classification);
+          if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(classification);
           maybeEmitToolFailureAlert({
             chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
             toolId: event.toolId,
@@ -12333,7 +12444,11 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'result':
+        if (scheduledScopeKey !== undefined && scheduledAgentJobDeliversFinalText(sessionProviderId(this.session))) {
+          this.settleScheduledFinalAnswer(event, queue, scheduledScopeKey, consumedSystemTurn !== null);
+        }
         handleGlobalRuntimeResult(this.runtimeTurnHost, {
+          scheduledTurn: scheduledScopeKey !== undefined,
           event,
           queue,
           systemTurnPurpose: consumedSystemTurn?.purpose ?? null,

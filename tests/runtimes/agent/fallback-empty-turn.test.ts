@@ -548,6 +548,35 @@ describe('fallback_empty_turn alert — per-chat dedup', () => {
     expect(emptyAlerts).toHaveLength(2);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(2);
   });
+
+  // #3497: a scheduled turn's empty-turn alert dedupes under its own key and
+  // posts no notice, so a user's empty turn in the same chat still alerts.
+  it('a scheduled empty turn alerts under its own key without a notice; the same chat\'s user empty turn still alerts', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+    vi.mocked(emitAlert).mockClear();
+
+    const scheduledQueue = makeQ('chat-a@s.whatsapp.net');
+    const userQueue = makeQ('chat-a@s.whatsapp.net');
+    v(runtime).handleEventWithContext(
+      { type: 'result', text: null }, scheduledQueue, null, 'conv', 1, 'chat-a@s.whatsapp.net::scheduled-agent-job',
+    );
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, userQueue, null, 'conv', 2, 'chat-a@s.whatsapp.net');
+
+    const emptyAlerts = vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'fallback_empty_turn');
+    expect(emptyAlerts).toHaveLength(2);
+    const dedupeKeys = [...(runtime as unknown as { recentFallbackEmptyTurnAlerts: Map<string, number> })
+      .recentFallbackEmptyTurnAlerts.keys()];
+    expect(dedupeKeys).toEqual(expect.arrayContaining([
+      'chat-a@s.whatsapp.net:scheduled',
+      'chat-a@s.whatsapp.net',
+    ]));
+    expect(scheduledQueue.enqueueText).not.toHaveBeenCalled();
+    expect(userQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('no reply'));
+  });
 });
 
 // ─── chain advance past a structurally-empty fallback entry ──────────────────
