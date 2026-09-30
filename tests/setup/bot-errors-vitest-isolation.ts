@@ -100,8 +100,11 @@ delete process.env['REQUIRE_OS_KEYRING'];
 // would make PATH lookup continue to the real binary.
 const credentialBin = join(isolatedHome, 'credential-bin');
 mkdirSync(credentialBin, { mode: 0o700 });
+// Drain piped stdin before rejecting: `secret-tool store` reads the secret from
+// stdin, and a shim that exits first makes the caller's write fail with EPIPE.
+// A terminal stdin is left unread, so an interactive caller cannot block.
 const rejectMutation =
-  "  *) printf '%s\\n' 'synthetic credential backend rejects writes and unsupported operations' >&2; exit 1 ;;";
+  "  *) [ -t 0 ] || cat >/dev/null; printf '%s\\n' 'synthetic credential backend rejects writes and unsupported operations' >&2; exit 1 ;;";
 const syntheticCredentialBackends: Record<string, string> = {
   security: [
     '#!/bin/sh',
