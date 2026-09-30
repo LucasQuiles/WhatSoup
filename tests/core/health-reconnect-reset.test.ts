@@ -151,13 +151,15 @@ describe('GET /health — reconnect_reset (#3722)', () => {
 
   it('a null marker serializes as null with the key present', async () => {
     const { json } = await read(snapshot({ connected: false, state: 'reconnecting' }, null));
-    expect('reconnect_reset' in json.whatsapp.connection).toBe(true);
-    expect(json.whatsapp.connection.reconnect_reset).toBeNull();
+    expect(json.whatsapp.connection).toHaveProperty('reconnect_reset', null);
   });
 
   it('a connected transport hides the marker like the other disconnect metadata', async () => {
     const { json } = await read(snapshot({ connected: true, state: 'connected' }, MARKER));
-    expect(json.whatsapp.connection.reconnect_reset).toBeNull();
+    expect(json.whatsapp).toMatchObject({
+      connected: true,
+      connection: { state: 'connected', last_disconnect_reason: null, last_status_code: null, reconnect_reset: null },
+    });
   });
 
   it('a transport without the field omits the key', async () => {

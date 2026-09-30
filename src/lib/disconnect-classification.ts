@@ -141,3 +141,15 @@ export const TRANSIENT_RECONNECT_STATUS_CODES: ReadonlySet<number> = new Set([42
 export function isTransientReconnectStatusCode(code: unknown): boolean {
   return typeof code === 'number' && TRANSIENT_RECONNECT_STATUS_CODES.has(code);
 }
+
+/**
+ * #3722: the reason tokens the transport records when it resets its reconnect
+ * state (health `whatsapp.connection.reconnect_reset.reason`), keyed by the
+ * transport's cause. The fleet poller reads every value as a transient basis,
+ * so producer and consumer share this one definition.
+ */
+export const RECONNECT_RESET_REASONS = {
+  exhaustion_cycle_retry: 'exhaustion_cycle_retry',
+  keepalive_failed: 'graceful_reconnect_keepalive_failed',
+  connection_exhausted: 'graceful_reconnect_connection_exhausted',
+} as const;

@@ -29,6 +29,7 @@ import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
 import {
   AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
   NO_RESTART_UNCONFIRMED_401_CLASSES,
+  RECONNECT_RESET_REASONS,
   isTransientReconnectStatusCode,
   readHealthDisconnectDecision,
   type HealthDisconnectDecisionReading,
@@ -78,14 +79,10 @@ const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;
 export const WEAK_TRANSIENT_MAX_MS = 6 * 60_000;
 // #3722: weak signals that would confirm within this window of each other are
 // one shared event (a LAN or WAN outage), held for HOLD from each trip.
-export const WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS = 2 * 60_000;
-export const WEAK_LOGGED_OUT_CORRELATION_MIN = 3;
+const WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS = 2 * 60_000;
+const WEAK_LOGGED_OUT_CORRELATION_MIN = 3;
 export const WEAK_LOGGED_OUT_CORRELATION_HOLD_MS = 6 * 60_000;
-const WEAK_TRANSIENT_RESET_REASONS: ReadonlySet<string> = new Set([
-  'exhaustion_cycle_retry',
-  'graceful_reconnect_keepalive_failed',
-  'graceful_reconnect_connection_exhausted',
-]);
+const WEAK_TRANSIENT_RESET_REASONS: ReadonlySet<string> = new Set(Object.values(RECONNECT_RESET_REASONS));
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const INSTANCE_UNREACHABLE_ALERT_DWELL_MS = readNonNegativeEnvInt(
   'WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS',

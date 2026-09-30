@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HealthPoller, type InstanceHealth } from '../../src/fleet/health-poller.ts';
-import * as healthPoller from '../../src/fleet/health-poller.ts';
+import {
+  HealthPoller,
+  WEAK_LOGGED_OUT_CORRELATION_HOLD_MS,
+  WEAK_TRANSIENT_MAX_MS,
+  weakSignalTransientBasis,
+  type InstanceHealth,
+} from '../../src/fleet/health-poller.ts';
 import type { AlertEmissionResult } from '../../src/lib/emit-alert.ts';
 import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 
@@ -50,12 +55,7 @@ vi.mock('../../src/logger.ts', async () => {
 
 type AlertMockCall = [string, string, string, string, ...unknown[]];
 
-// Policy values from the fix, as literals: at base the exports do not exist,
-// and the RED must come from an assertion, not from NaN arithmetic.
 const INTERVAL_MS = 10_000;
-const WEAK_TRANSIENT_MAX_MS = 6 * 60_000;
-
-const WEAK_LOGGED_OUT_CORRELATION_HOLD_MS = 6 * 60_000;
 const T0 = Date.parse('2026-05-20T12:00:00.000Z');
 
 const PORTS: Record<string, number> = { 'remote-1': 9101, 'remote-2': 9102, 'remote-3': 9103 };
@@ -370,10 +370,9 @@ describe('weakSignalTransientBasis (#3722 U1)', () => {
   const classifiedOther = { kind: 'classified', classification: 'other' } as const;
 
   function basis(input: Record<string, unknown>): unknown {
-    // Namespace access, so a missing export fails by assertion, not at import.
-    expect(typeof (healthPoller as Record<string, unknown>)['weakSignalTransientBasis']).toBe('function');
-    const fn = (healthPoller as Record<string, unknown>)['weakSignalTransientBasis'] as (arg: unknown) => unknown;
-    return fn({ lastStatusCode: null, decisionReading: absent, decisionNode: null, reconnectReset: null, ...input });
+    return weakSignalTransientBasis({
+      lastStatusCode: null, decisionReading: absent, decisionNode: null, reconnectReset: null, ...input,
+    } as unknown as Parameters<typeof weakSignalTransientBasis>[0]);
   }
 
   it('names each reset reason, with the marker time in its identity', () => {
@@ -426,5 +425,14 @@ describe('weakSignalTransientBasis (#3722 U1)', () => {
       decisionNode: TRANSIENT_DECISION,
       lastStatusCode: 408,
     })).toEqual({ kind: 'decision', identity: 'decision:2026-05-20T11:59:00.000Z' });
+  });
+});
+
+describe('#3722 weak-signal policy bounds', () => {
+  it('bounds the transient downgrade and the shared-outage hold at the documented 6 minutes (one reconnect cycle; runbook and PR body)', () => {
+    expect({ WEAK_TRANSIENT_MAX_MS, WEAK_LOGGED_OUT_CORRELATION_HOLD_MS }).toEqual({
+      WEAK_TRANSIENT_MAX_MS: 6 * 60_000,
+      WEAK_LOGGED_OUT_CORRELATION_HOLD_MS: 6 * 60_000,
+    });
   });
 });

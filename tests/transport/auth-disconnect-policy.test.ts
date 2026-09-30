@@ -1,6 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { DisconnectReason } from '@whiskeysockets/baileys';
 import * as disconnectClassification from '../../src/lib/disconnect-classification.ts';
 import {
@@ -257,13 +255,14 @@ describe('#3722: one definition of the transient reconnect codes', () => {
     ]));
   });
 
-  it('the transport policy builds its set from the lib export, not its own literal', () => {
-    const policySource = readFileSync(
-      fileURLToPath(new URL('../../src/transport/auth-disconnect-policy.ts', import.meta.url)),
-      'utf8',
-    );
-    expect(policySource).toContain('TRANSIENT_RECONNECT_STATUS_CODES');
-    expect(policySource).not.toMatch(/DisconnectReason\.(?:timedOut|badSession|unavailableService)/);
+  it('the transport policy treats every code in the lib export as transient, and no other code', () => {
+    const codes = [...disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES];
+    expect(codes).toHaveLength(4);
+    for (const code of codes) {
+      expect(decideDisconnectAction(code)).toEqual({ type: 'reconnect', reason: 'transient', statusCode: code });
+    }
+    expect(decideDisconnectAction(DisconnectReason.loggedOut)).not.toMatchObject({ reason: 'transient' });
+    expect(decideDisconnectAction(499)).toEqual({ type: 'reconnect', reason: 'unknown', statusCode: 499 });
   });
 
   it('the policy treats each lib code as a transient reconnect', () => {

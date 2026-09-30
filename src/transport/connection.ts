@@ -18,6 +18,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
 import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
+import { RECONNECT_RESET_REASONS } from '../lib/disconnect-classification.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
   buildEffectiveClientReceipt,
@@ -3482,7 +3483,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
-    this.lastReconnectReset = { reason: 'exhaustion_cycle_retry', at: Date.now() };
+    this.lastReconnectReset = { reason: RECONNECT_RESET_REASONS.exhaustion_cycle_retry, at: Date.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState('exhaustion_cycle_retry');
 
@@ -3508,7 +3509,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
-    this.lastReconnectReset = { reason: `graceful_reconnect_${reason}`, at: Date.now() };
+    this.lastReconnectReset = { reason: RECONNECT_RESET_REASONS[reason], at: Date.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState(`graceful_reconnect_${reason}`);
 
