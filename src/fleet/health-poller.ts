@@ -41,6 +41,8 @@ import {
   LoopLagSampler,
   type LoopLagSnapshot,
 } from '../lib/loop-lag-sampler.ts';
+import type { RuntimeRecoveryBlockingReason } from '../runtimes/agent/runtime-recovery-health.ts';
+import type { HealthDegradationCause } from '../core/health.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -80,6 +82,69 @@ const HEALTH_BODY_DEGRADED_ALERT_DWELL_MS = readNonNegativeEnvInt(
   'WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS',
   10_000,
 );
+// #3694: the closed vocabulary a runtime may report in recoveryBlockingReasons.
+// A Record (not a list) so a reason added to the runtime type fails typecheck
+// here instead of rendering as `unrecognized`. Only these fixed codes reach the
+// evidence and the journal; any other value is counted, never echoed.
+const RECOVERY_BLOCKING_REASON_CODES: Readonly<Record<RuntimeRecoveryBlockingReason, true>> = {
+  turn_finalization_active: true,
+  turn_recovery_actionable: true,
+  turn_recovery_integrity: true,
+  turn_recovery_unclassified: true,
+  completed_delivery_identity_unclassified: true,
+};
+// #3694: the degradation-cause vocabulary, for the journal only (the journal is
+// a durable sink that #2386's evidence confinement does not cover). Same
+// Record-over-the-union totality as RECOVERY_BLOCKING_REASON_CODES: a cause
+// added in src/core/health.ts fails typecheck here until it is listed.
+const DEGRADATION_CAUSE_CODES: Readonly<Record<HealthDegradationCause, true>> = {
+  provider_fallback_active: true,
+  fallback_chain_exhausted: true,
+  fallback_entry_failures: true,
+  primary_model_unusable: true,
+  model_unusable: true,
+  turn_capability_error: true,
+  primary_model_evidence_stale: true,
+  turn_capability_evidence_stale: true,
+  auth_bond_degraded: true,
+  transport_disconnected: true,
+  enrichment_stale: true,
+  enrichment_runtime_degraded: true,
+  memory_readiness_degraded: true,
+  memory_context_degraded: true,
+  memory_consolidation_degraded: true,
+  connection_churn: true,
+  outbound_flood: true,
+  event_loop_starved: true,
+  durability_debt: true,
+  durability_evidence_unreadable: true,
+  database_retention_failed: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
+  recovery_debt_blocking: true,
+  schema_future: true,
+  schema_not_ready: true,
+  pending_polls_unreadable: true,
+  agent_recent_crashes: true,
+  agent_auto_compact_backoff: true,
+  agent_session_inactive: true,
+  turn_finalization_degraded: true,
+  turn_recovery_degraded: true,
+  delivery_identity_debt: true,
+  provider_execution_pressure: true,
+  agent_outbound_queue_poisoned: true,
+  credential_identity_mismatch: true,
+  credential_identity_unverifiable: true,
+  agent_respawn_failed_clear_pending: true,
+  per_chat_session_without_owner: true,
+  per_chat_respawn_abandoned: true,
+  agent_runtime_degraded_unclassified: true,
+  agent_runtime_unhealthy: true,
+  chat_runtime_degraded: true,
+  passive_runtime_degraded: true,
+  degradation_silence_unproven: true,
+  unclassified: true,
+};
 const HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD = 'health_probe_timeout_under_proxy_load';
 const HEALTH_SNAPSHOT_MAX_AGE_MS = 30_000;
 const HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
@@ -1049,6 +1114,8 @@ export class HealthPoller {
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedPolls: Map<string, number> = new Map();
+  /** #3694: last cause signature journaled per instance for the current degraded episode. */
+  private healthBodyDegradedCauseSignatures: Map<string, string> = new Map();
   private operationalFallbackReclassified: Set<string> = new Set();
   private reclassifiedHealthAlerts: Set<string> = new Set();
   private recoveryDebtFingerprints: Map<string, string> = new Map();
@@ -2065,7 +2132,103 @@ export class HealthPoller {
   private resetHealthBodyDegradedDebounce(name: string): void {
     this.healthBodyDegradedStartedAt.delete(name);
     this.healthBodyDegradedPolls.delete(name);
+    this.healthBodyDegradedCauseSignatures.delete(name);
     this.operationalFallbackReclassified.delete(name);
+  }
+
+  /**
+   * #3694: render the runtime's recovery-blocking reasons as fixed codes.
+   * `unreported` = the runtime published no reason list (older runtime or a
+   * malformed field); `none` = an empty list. Unknown values collapse to one
+   * `unrecognized` code so free text never reaches evidence or the journal.
+   */
+  private recoveryBlockingReasonsEvidence(value: unknown): string {
+    if (!Array.isArray(value)) return 'unreported';
+    if (value.length === 0) return 'none';
+    const codes: string[] = [];
+    let unrecognized = false;
+    for (const reason of value) {
+      if (typeof reason === 'string' && Object.hasOwn(RECOVERY_BLOCKING_REASON_CODES, reason)) {
+        if (!codes.includes(reason)) codes.push(reason);
+      } else {
+        unrecognized = true;
+      }
+    }
+    if (unrecognized) codes.push('unrecognized');
+    return codes.join(',');
+  }
+
+  /** #3694: journal form of the cause vector: known codes, else one `unrecognized`. */
+  private degradationCausesJournalCode(causes: readonly string[] | null): string {
+    if (causes === null) return 'unknown';
+    const codes: string[] = [];
+    let unrecognized = false;
+    for (const cause of causes) {
+      if (Object.hasOwn(DEGRADATION_CAUSE_CODES, cause)) {
+        if (!codes.includes(cause)) codes.push(cause);
+      } else {
+        unrecognized = true;
+      }
+    }
+    if (unrecognized) codes.push('unrecognized');
+    return codes.join(',');
+  }
+
+  /** #3694: a body flag as a fixed code; a present non-boolean is `invalid`, never echoed. */
+  private booleanCode(value: unknown): 'true' | 'false' | 'unknown' | 'invalid' {
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    return value === undefined || value === null ? 'unknown' : 'invalid';
+  }
+
+  /**
+   * #3694: the recovery-debt contract as fixed codes, so a degraded alert can
+   * be read as standing debt or as a live fault. Uses the same validating
+   * parser as the recovery_debt_attention alert; a missing or invalid block is
+   * named as such rather than read as "no debt".
+   */
+  private recoveryDebtEvidenceFields(health: Record<string, unknown>): {
+    recoveryDebt: string;
+    recoveryDebtAttention: string;
+    recoveryDebtServiceBlocking: string;
+    recoveryDebtReasons: string;
+    recoveryDebtGauge: string;
+  } {
+    const parsed = parseRecoveryDebtHealth(health);
+    if (parsed.kind !== 'valid') {
+      return {
+        recoveryDebt: parsed.kind,
+        recoveryDebtAttention: 'unknown',
+        recoveryDebtServiceBlocking: 'unknown',
+        recoveryDebtReasons: 'unknown',
+        recoveryDebtGauge: 'unknown',
+      };
+    }
+    const { summary } = parsed;
+    return {
+      recoveryDebt: 'valid',
+      recoveryDebtAttention: summary.attention,
+      recoveryDebtServiceBlocking: String(summary.serviceBlocking),
+      recoveryDebtReasons: summary.reasons.length > 0 ? summary.reasons.join(',') : 'none',
+      recoveryDebtGauge: recoveryDebtGaugeBucket(summary.gaugeTotal),
+    };
+  }
+
+  /**
+   * #3694: the alert evidence is confined to a digest before the durable
+   * outbox (#2386), so the cause vector would otherwise be unrecoverable once
+   * the instance recovers. Journal it once per degraded episode and again only
+   * when it changes. Fixed codes, boolean codes, bounded buckets and the three
+   * integrity counts only, never a raw body value; exact debt counts stay in
+   * the evidence so routine count churn does not re-log.
+   */
+  private journalHealthBodyDegradedCauses(
+    name: string,
+    fields: Readonly<Record<string, string>>,
+  ): void {
+    const signature = Object.values(fields).join('|');
+    if (this.healthBodyDegradedCauseSignatures.get(name) === signature) return;
+    this.healthBodyDegradedCauseSignatures.set(name, signature);
+    log.info({ name, ...fields }, 'health body degraded causes');
   }
 
   private clearReclassifiedHealthBodyAlert(name: string, evidence: string): void {
@@ -2129,6 +2292,12 @@ export class HealthPoller {
     const recoveryQuarantinedDelivery = this.readNumber(
       runtimeAgent?.['turnRecoveryQuarantinedDelivery'],
     );
+    const recoveryBlockingReasons = this.recoveryBlockingReasonsEvidence(
+      runtimeAgent?.['recoveryBlockingReasons'],
+    );
+    const recoveryCorruptLinks = this.readNumber(runtimeAgent?.['turnRecoveryCorruptLinks']);
+    const recoveryEchoConflicts = this.readNumber(runtimeAgent?.['turnRecoveryEchoConflicts']);
+    const recoveryOrphanTransfers = this.readNumber(runtimeAgent?.['turnRecoveryOrphanTransfers']);
     const controlPeerConfigured = controlPeer?.['configured'];
     const controlPeerSuppressedUnavailableAlerts = this.readNumber(
       controlPeer?.['suppressed_unavailable_alerts'],
@@ -2167,6 +2336,27 @@ export class HealthPoller {
     if (!operationalFallback) this.operationalFallbackReclassified.delete(name);
     const statusReasons = this.healthStatusReasons(health);
     const providerCapacity = this.isHealthyProviderFallbackCapacity(health);
+    // Every value is a fixed code, a boolean code, a bucket or an integrity
+    // count: this object is the journal record, and the journal is not confined.
+    const causeFields = {
+      degradationCauses: this.degradationCausesJournalCode(degradationCauses),
+      recoveryBlockingReasons,
+      turnRecoveryCorruptLinks: recoveryCorruptLinks === null ? 'unknown' : String(recoveryCorruptLinks),
+      turnRecoveryEchoConflicts: recoveryEchoConflicts === null ? 'unknown' : String(recoveryEchoConflicts),
+      turnRecoveryOrphanTransfers: recoveryOrphanTransfers === null ? 'unknown' : String(recoveryOrphanTransfers),
+      ...this.recoveryDebtEvidenceFields(health),
+      // Live-fault side of the debt-vs-fault reading: transport and model.
+      whatsappConnected: this.booleanCode(whatsapp?.['connected']),
+      modelUsable: this.booleanCode(turnCapability?.['model_usable']),
+    };
+    // Exact debt counts, evidence only (the journal carries the gauge bucket).
+    const recoveryDebtBlock = causeFields.recoveryDebt === 'valid'
+      ? this.readRecord(health['recovery_debt'])
+      : null;
+    const debtCount = (section: string, field: string): string => {
+      const value = this.readNumber(this.readRecord(recoveryDebtBlock?.[section])?.[field]);
+      return value === null ? 'unknown' : String(value);
+    };
     const evidence = [
       baseEvidence,
       `health_body_degraded_polls=${polls}`,
@@ -2196,6 +2386,19 @@ export class HealthPoller {
       `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
       `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
       `turn_recovery_quarantined_delivery=${recoveryQuarantinedDelivery === null ? 'unknown' : String(recoveryQuarantinedDelivery)}`,
+      `recovery_blocking_reasons=${causeFields.recoveryBlockingReasons}`,
+      `turn_recovery_corrupt_links=${causeFields.turnRecoveryCorruptLinks}`,
+      `turn_recovery_echo_conflicts=${causeFields.turnRecoveryEchoConflicts}`,
+      `turn_recovery_orphan_transfers=${causeFields.turnRecoveryOrphanTransfers}`,
+      `model_usable=${causeFields.modelUsable}`,
+      `recovery_debt=${causeFields.recoveryDebt}`,
+      `recovery_debt_attention=${causeFields.recoveryDebtAttention}`,
+      `recovery_debt_service_blocking=${causeFields.recoveryDebtServiceBlocking}`,
+      `recovery_debt_reasons=${causeFields.recoveryDebtReasons}`,
+      `recovery_debt_gauge=${causeFields.recoveryDebtGauge}`,
+      `recovery_debt_continuity_open=${debtCount('continuity', 'open')}`,
+      `recovery_debt_blocking_outstanding=${debtCount('turn_recovery', 'blocking_outstanding')}`,
+      `recovery_debt_retained_terminal=${debtCount('turn_recovery', 'retained_terminal')}`,
       `control_peer_configured=${String(controlPeerConfigured ?? 'unknown')}`,
       `control_peer_suppressed_unavailable_alerts=${controlPeerSuppressedUnavailableAlerts === null ? 'unknown' : String(controlPeerSuppressedUnavailableAlerts)}`,
       `status_reasons=${statusReasons.length > 0 ? statusReasons.join(',') : 'unknown'}`,
@@ -2215,8 +2418,12 @@ export class HealthPoller {
         requiredDwellMs: HEALTH_BODY_DEGRADED_ALERT_DWELL_MS,
       }, 'health body degraded; waiting for debounce before alert');
     }
+    // One decision for both the caller and the journal, so the journal names
+    // exactly the degradations that raise an alert.
+    const alerting = operationalFallback ? false : shouldAlert;
+    if (alerting) this.journalHealthBodyDegradedCauses(name, causeFields);
     return {
-      shouldAlert: operationalFallback ? false : shouldAlert,
+      shouldAlert: alerting,
       evidence,
       operationalFallback,
       providerCapacity,
