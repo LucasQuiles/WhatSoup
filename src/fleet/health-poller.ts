@@ -29,7 +29,10 @@ import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
 import {
   AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
   NO_RESTART_UNCONFIRMED_401_CLASSES,
+  RECONNECT_RESET_REASONS,
+  isTransientReconnectStatusCode,
   readHealthDisconnectDecision,
+  type HealthDisconnectDecisionReading,
 } from '../lib/disconnect-classification.ts';
 import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
@@ -69,6 +72,17 @@ const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
 ]);
 const WEAK_LOGGED_OUT_POLLS = 3;
 const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;
+// #3722: one transport reconnect cycle (10 attempts at up to 60 s, then the
+// 5-minute cooldown), rounded. A transient basis downgrades the weak signal
+// for at most this long, because its marker persists until the next open and a
+// logged-out line never opens.
+export const WEAK_TRANSIENT_MAX_MS = 6 * 60_000;
+// #3722: weak signals that would confirm within this window of each other are
+// one shared event (a LAN or WAN outage), held for HOLD from each trip.
+const WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS = 2 * 60_000;
+const WEAK_LOGGED_OUT_CORRELATION_MIN = 3;
+export const WEAK_LOGGED_OUT_CORRELATION_HOLD_MS = 6 * 60_000;
+const WEAK_TRANSIENT_RESET_REASONS: ReadonlySet<string> = new Set(Object.values(RECONNECT_RESET_REASONS));
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const INSTANCE_UNREACHABLE_ALERT_DWELL_MS = readNonNegativeEnvInt(
   'WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS',
@@ -553,6 +567,8 @@ export const LOGGED_OUT_CONFIRMATION_CONTRACT = Object.freeze({
     'weak_signal_inside_settle_grace',
     'weak_signal_waiting_for_persistence',
     'weak_signal_persisted',
+    'weak_signal_transient_disconnect',
+    'weak_signal_correlated_hold',
   ] as const),
   failureCodes: Object.freeze([
     'WA_AUTH_BOND_SERVER_REVOKED',
@@ -572,6 +588,47 @@ export interface LoggedOutConfirmation {
   failureCode: LoggedOutFailureCode;
   confidence: InstanceStatus['statusConfidence'];
   evidence: string;
+}
+
+/** #3722: why a weak logged-out signal reads as a reconnect, not a logout. */
+export interface WeakTransientBasis {
+  kind: 'reset' | 'decision' | 'status_code';
+  /** Names this marker; a new marker restarts the poller's bound, the same one does not. */
+  identity: string;
+}
+
+export interface WeakTransientBasisInput {
+  lastStatusCode: number | null;
+  decisionReading: HealthDisconnectDecisionReading;
+  decisionNode: Record<string, unknown> | null | undefined;
+  reconnectReset: Record<string, unknown> | null | undefined;
+}
+
+/**
+ * #3722: the weak signal is (backoff, 0 attempts), which the transport also
+ * shows on every fresh connect after an exhaustion cycle or a keepalive
+ * reconnect. Returns the most specific marker naming such a reconnect, or null.
+ * Precedence: reset, then decision, then status code.
+ */
+export function weakSignalTransientBasis(input: WeakTransientBasisInput): WeakTransientBasis | null {
+  const resetReason = input.reconnectReset?.['reason'];
+  if (typeof resetReason === 'string' && WEAK_TRANSIENT_RESET_REASONS.has(resetReason)) {
+    const resetAt = input.reconnectReset?.['at'];
+    return { kind: 'reset', identity: `reset:${resetReason}@${typeof resetAt === 'string' ? resetAt : 'unknown'}` };
+  }
+  if (
+    input.decisionReading.kind === 'classified'
+    && input.decisionReading.classification === 'other'
+    && input.decisionNode?.['action'] === 'reconnect'
+    && input.decisionNode?.['reason'] === 'transient'
+  ) {
+    const observedAt = input.decisionNode?.['observed_at'];
+    return { kind: 'decision', identity: `decision:${typeof observedAt === 'string' ? observedAt : 'unknown'}` };
+  }
+  if (isTransientReconnectStatusCode(input.lastStatusCode)) {
+    return { kind: 'status_code', identity: `code:${String(input.lastStatusCode)}` };
+  }
+  return null;
 }
 
 interface HealthSnapshotClassification {
@@ -1111,6 +1168,17 @@ export class HealthPoller {
   private persistedAlertThrottle: Map<string, string>;
   private alertThrottleLoadErrorCode: string | null;
   private weakLoggedOutPolls: Map<string, number> = new Map();
+  /** #3722: when each instance's current transient basis was first seen, by poller clock. */
+  private weakTransientFirstSeen: Map<string, { identity: string; at: number }> = new Map();
+  /**
+   * #3722: when each instance's weak signal would have confirmed. A recovered
+   * trip still counts as correlation evidence until it ages out; a live trip
+   * keeps its time until the instance recovers or leaves the watched set.
+   */
+  private weakLoggedOutTrips: Map<
+    string,
+    { at: number; recovered: boolean; confirmed: boolean; holdLogged: boolean }
+  > = new Map();
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedPolls: Map<string, number> = new Map();
@@ -1638,7 +1706,7 @@ export class HealthPoller {
         const existing = this.statuses.get(name);
         const prevStatus = existing?.status ?? 'online';
         this.trackTargetPid(name, health);
-        this.weakLoggedOutPolls.delete(name);
+        this.resetWeakLoggedOutState(name);
         this.failureStartedAt.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
         const observedAt = new Date().toISOString();
@@ -1685,6 +1753,10 @@ export class HealthPoller {
         this.latestPollRequestIdByInstance.delete(name);
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
+        // #3722: a departed instance's trip must never count as correlation.
+        this.weakLoggedOutPolls.delete(name);
+        this.weakLoggedOutTrips.delete(name);
+        this.weakTransientFirstSeen.delete(name);
       }
     }
     // #3057: on the first poll only, reconcile recovery-authority markers
@@ -1706,7 +1778,37 @@ export class HealthPoller {
     }
   }
 
+  /**
+   * #3722: the instance left the weak state (reconnected, confirmed explicitly,
+   * or restarted). Its trip is kept as correlation evidence for the others,
+   * marked recovered, and ages out; its next trip starts a fresh time.
+   */
+  private resetWeakLoggedOutState(name: string): void {
+    this.weakLoggedOutPolls.delete(name);
+    this.weakTransientFirstSeen.delete(name);
+    const trip = this.weakLoggedOutTrips.get(name);
+    if (trip) trip.recovered = true;
+  }
+
+  /**
+   * #3722: true while this instance's trip is one of at least
+   * WEAK_LOGGED_OUT_CORRELATION_MIN trips within WINDOW of each other.
+   * Measured between trip times, never against now, so a spread cluster holds
+   * as one for its whole hold.
+   */
+  private weakTripCorrelatedCount(tSelf: number): number {
+    const times = [...this.weakLoggedOutTrips.values()].map((trip) => trip.at);
+    let best = 0;
+    for (const tJ of times) {
+      if (Math.abs(tJ - tSelf) > WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS) continue;
+      const count = times.filter((tK) => Math.abs(tK - tJ) <= WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS).length;
+      if (count > best) best = count;
+    }
+    return best;
+  }
+
   private classifyLoggedOutSignal(name: string, health: Record<string, unknown>): LoggedOutConfirmation {
+    const now = this.clock.now();
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
     const connected = whatsapp?.['connected'] === true && connection?.['state'] === 'connected';
@@ -1732,7 +1834,7 @@ export class HealthPoller {
         lastReason.includes('device_removed')
       ));
     if (explicit) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       const unconfirmed401 = UNCONFIRMED_401_AUTH_FAILURE_CLASSES.has(authFailureClass);
       return {
         confirmed: true,
@@ -1759,7 +1861,7 @@ export class HealthPoller {
     }
 
     if (connected) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       return {
         confirmed: false,
         weak: false,
@@ -1772,7 +1874,7 @@ export class HealthPoller {
 
     const weak = reconnectPhase === 'backoff' && reconnectAttempts === 0;
     if (!weak) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       return {
         confirmed: false,
         weak: false,
@@ -1783,8 +1885,43 @@ export class HealthPoller {
       };
     }
 
+    // #3722: the transport shows (backoff, 0 attempts) on every fresh connect,
+    // after an exhaustion cycle and after a keepalive reconnect. Neither is a
+    // logout, so the weak signal is downgraded while the body names a transient
+    // close or a reconnect reset. Both persist until the next open, and a
+    // logged-out line never opens, so the downgrade is time-bound: after one
+    // reconnect cycle it falls through to the persistence logic below.
+    const transientBasis = weakSignalTransientBasis({
+      lastStatusCode,
+      decisionReading,
+      decisionNode: this.readRecord(connection?.['disconnect_decision']),
+      reconnectReset: this.readRecord(connection?.['reconnect_reset']),
+    });
+    let expiredBasis: WeakTransientBasis['kind'] | null = null;
+    if (transientBasis === null) {
+      this.weakTransientFirstSeen.delete(name);
+    } else {
+      const seen = this.weakTransientFirstSeen.get(name);
+      if (seen === undefined || seen.identity !== transientBasis.identity) {
+        this.weakTransientFirstSeen.set(name, { identity: transientBasis.identity, at: now });
+      }
+      const firstSeenAt = this.weakTransientFirstSeen.get(name)?.at ?? now;
+      if (now - firstSeenAt < WEAK_TRANSIENT_MAX_MS) {
+        this.weakLoggedOutPolls.delete(name);
+        return {
+          confirmed: false,
+          weak: true,
+          reason: 'weak_signal_transient_disconnect',
+          failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+          confidence: 'ambiguous',
+          evidence: '',
+        };
+      }
+      expiredBasis = transientBasis.kind;
+    }
+
     if (uptimeSeconds === null || uptimeSeconds < LOGGED_OUT_SETTLE_GRACE_SECONDS) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       log.info({ name, uptimeSeconds }, 'weak logged-out signal observed inside settle grace; waiting');
       return {
         confirmed: false,
@@ -1794,6 +1931,24 @@ export class HealthPoller {
         confidence: 'ambiguous',
         evidence: '',
       };
+    }
+
+    // #3722: record the trip at the FIRST counted weak observation, not at
+    // confirm. Instances are classified one after another within a cycle, so a
+    // trip recorded at confirm would let the first instances of a shared
+    // outage page before the others had recorded theirs. A live trip keeps its
+    // time until the instance recovers or departs; only recovered trips age out.
+    const trip = this.weakLoggedOutTrips.get(name);
+    if (trip === undefined || trip.recovered) {
+      this.weakLoggedOutTrips.set(name, { at: now, recovered: false, confirmed: false, holdLogged: false });
+    }
+    for (const [tripName, entry] of this.weakLoggedOutTrips) {
+      if (
+        entry.recovered
+        && now - entry.at >= WEAK_LOGGED_OUT_CORRELATION_HOLD_MS + WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS
+      ) {
+        this.weakLoggedOutTrips.delete(tripName);
+      }
     }
 
     const samples = (this.weakLoggedOutPolls.get(name) ?? 0) + 1;
@@ -1810,6 +1965,33 @@ export class HealthPoller {
       };
     }
 
+    // #3722: correlated-trip hold, checked at confirm. Correlation is measured
+    // between trip times, so a shared outage holds as one for HOLD from each trip.
+    // A trip that already confirmed is never held again: a later trip that
+    // correlates with it must not flip a paged instance back to degraded.
+    const selfTrip = this.weakLoggedOutTrips.get(name);
+    const tSelf = selfTrip?.at ?? now;
+    const correlated = this.weakTripCorrelatedCount(tSelf);
+    if (
+      selfTrip?.confirmed !== true
+      && correlated >= WEAK_LOGGED_OUT_CORRELATION_MIN
+      && now - tSelf < WEAK_LOGGED_OUT_CORRELATION_HOLD_MS
+    ) {
+      if (selfTrip && !selfTrip.holdLogged) {
+        selfTrip.holdLogged = true;
+        log.warn({ name, correlated }, `weak logged-out signal held: correlated with ${correlated} instances`);
+      }
+      return {
+        confirmed: false,
+        weak: true,
+        reason: 'weak_signal_correlated_hold',
+        failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'ambiguous',
+        evidence: '',
+      };
+    }
+
+    if (selfTrip) selfTrip.confirmed = true;
     return {
       confirmed: true,
       weak: true,
@@ -1824,6 +2006,7 @@ export class HealthPoller {
         `reconnect_attempts=0`,
         `uptime_seconds=${uptimeSeconds === null ? 'unknown' : String(uptimeSeconds)}`,
         `weak_signal_polls=${samples}`,
+        ...(expiredBasis === null ? [] : [`transient_basis_expired=${expiredBasis}`]),
       ]),
     };
   }

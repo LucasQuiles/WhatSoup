@@ -1069,6 +1069,22 @@ in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
 `conflict_inspected:`), whose title and `confidence` say whether removal was
 confirmed.
 
+**Reconnecting, not logged out (#3722).** Beside `disconnect_decision`, the same
+connection block carries `reconnect_reset`: `{ reason, at }` when the transport
+last reset its reconnect state, with `reason` one of the following:
+
+| `reconnect_reset.reason` | Written when |
+|---|---|
+| `exhaustion_cycle_retry` | The transport forced a fresh connect after an exhausted reconnect cycle. |
+| `graceful_reconnect_keepalive_failed` | A keepalive failure triggered a graceful reconnect. |
+| `graceful_reconnect_connection_exhausted` | Recognised by the poller, but no current transport path writes it: only the keepalive path calls the graceful reconnect. |
+
+It is `null` at process start, after every successful open, and while connected;
+the key is absent on transports that do not report it. With a reason set,
+`reconnect_phase: backoff` and zero `reconnect_attempts` mean a fresh reconnect,
+not a logout. The fleet poller holds its weak logged-out signal on that basis
+for at most one reconnect cycle (6 minutes), then pages as before.
+
 **If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
